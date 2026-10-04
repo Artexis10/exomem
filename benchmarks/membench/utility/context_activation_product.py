@@ -449,9 +449,22 @@ def removed(mechanism: str) -> Iterator[None]:
         def top_hit(hits):
             return (str(hits[0][0]), float(hits[0][1])) if hits else None
 
+        def recall_groups(vault_root, turn, **kwargs):
+            hits, state = recall_hits(vault_root, turn, **kwargs)
+            return ((hits,) if hits else ()), state
+
+        def top_domain(groups, *, exclude=frozenset()):
+            top = top_hit(groups[0]) if groups else None
+            return ((top,) if top else ()), ()
+
         with (
             mock.patch.object(working_set_runtime, "carry_candidates", recall_hits),
+            mock.patch.object(working_set_runtime, "carry_named_groups", recall_groups),
             mock.patch.object(working_set, "dominant_carry", top_hit),
+            mock.patch.object(working_set, "named_domains", top_domain),
+            # The gate's removal is the carry of a turn that resolved nothing;
+            # a resolved turn's pages named beside it stay off, as they were.
+            mock.patch.object(working_set, "_named_beside", lambda *_a, **kwargs: ((), (), (), kwargs["selected_roles"])),
         ):
             yield
         return

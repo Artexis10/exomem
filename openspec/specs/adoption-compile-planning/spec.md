@@ -1,7 +1,7 @@
 # adoption-compile-planning Specification
 
 ## Purpose
-TBD - created by archiving change complete-adoption-compile-selected. Update Purpose after archive.
+Plan compilation of selected legacy material from an existing vault without migrating or altering the originals, returning proposals instead of creating compiled notes. Adoption outputs carry stable `exomem://` context references alongside the existing path fields.
 ## Requirements
 ### Requirement: Compile-selected adoption plans selected material without migrating originals
 The system SHALL implement `adopt(mode="compile-selected")` as an explicit selected-path workflow that preserves every original file outside `Knowledge Base/`, copies importable legacy text files into governed Sources with provenance when needed, and returns compilation proposals without creating compiled notes.

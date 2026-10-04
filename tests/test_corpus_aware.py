@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -472,7 +473,9 @@ def counting_encoder(monkeypatch):
         return np.asarray(rows, dtype=np.float32).reshape(len(texts), embeddings.VECTOR_DIM)
 
     monkeypatch.setattr(embeddings, "embed_texts", fake)
-    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
     return encoded
 
 
@@ -781,3 +784,27 @@ def test_sweep_reused_counts_only_published_rows_and_recalled_the_hand_off(
         "reused": len(_REUSE_PARAGRAPHS),
         "recalled": 1,
     }
+
+
+def test_service_pack_pairwise_uses_exact_selected_rows_without_corpus_matrix(vault, monkeypatch):
+    """Large selected pages must not restore the matrix; stale text is uncovered."""
+    monkeypatch.delenv('EXOMEM_DISABLE_EMBEDDINGS', raising=False)
+    idx = embeddings.get_embedding_index(vault)
+    dim = embeddings.VECTOR_DIM
+    a = np.zeros((3, dim), np.float32)
+    a[:, 0] = 1
+    b = np.zeros((3, dim), np.float32)
+    b[:, 0] = .6
+    b[:, 1] = .8
+    idx.upsert_file('a.md', ['a0', 'a1', 'a2'], a, 1)
+    idx.upsert_file('b.md', ['b0', 'b1', 'b2'], b, 1)
+    idx.upsert_file('stale.md', ['stored'], a[:1], 1)
+    expected = corpus_aware.pairwise_best_cosine_from_sidecar(vault, [('a.md', ['a0', 'a1', 'a2']), ('b.md', ['b0', 'b1', 'b2']), ('stale.md', ['different'])])
+    idx.unload_cache()
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    monkeypatch.setattr(embeddings.EmbeddingIndex, 'PAIRWISE_BLOCK_ROWS', 2)
+    actual = corpus_aware.pairwise_best_cosine_from_sidecar(vault, [('a.md', ['a0', 'a1', 'a2']), ('b.md', ['b0', 'b1', 'b2']), ('stale.md', ['different'])])
+    assert actual[1] == expected[1] == {'a.md', 'b.md'}
+    assert actual[0] == pytest.approx(expected[0])
+    assert idx.cache_status()['loaded'] is False

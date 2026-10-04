@@ -106,7 +106,14 @@ def test_legacy_actors_follow_explicit_or_cloud_pause(
         assert deployments[name]["spec"]["replicas"] == (0 if effective_pause else configured_replicas), name
     assert set(cronjobs) == LEGACY_CRONJOBS
     for name, cronjob in cronjobs.items():
-        assert cronjob["spec"].get("suspend", False) is effective_pause, name
+        serves_cloud = name in {
+            "exomem-hosted-scheduler-exomem-reconcile",
+            "exomem-hosted-scheduler-exomem-access-delivery",
+        }
+        expected_suspend = effective_pause and not (
+            serves_cloud and (cellctl or cloud_gateway)
+        )
+        assert cronjob["spec"].get("suspend", False) is expected_suspend, name
 
     # Keep support workloads alive while the legacy actors are stopped.
     for name in ("exomem-cloudflared", "exomem-hosted-scheduler-collector", "exomem-hosted-scheduler-alerts"):

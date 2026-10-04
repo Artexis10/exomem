@@ -1,7 +1,7 @@
 # graph-traversal-profiles Specification
 
 ## Purpose
-TBD - created by archiving change add-governed-relation-registry. Update Purpose after archive.
+Provide deterministic, read-only traversal profiles over the epistemic graph: immutable built-in profiles, governed custom profiles that extend a built-in one, and runtime filters that only narrow the selected profile. Traversal never writes relations, infers edges or alters ranking.
 ## Requirements
 ### Requirement: Built-in deterministic traversal profiles
 The system SHALL provide immutable built-in `epistemic`, `provenance`, `causal`,

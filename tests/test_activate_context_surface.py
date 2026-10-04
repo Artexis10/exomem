@@ -393,5 +393,4 @@ def test_the_server_instructions_skip_a_turn_a_hook_already_activated() -> None:
     the agent does not repeat the hook's keyed call without its keys."""
     text = server.SERVER_INSTRUCTIONS
     assert "a turn whose Exomem working set a hook already injected" in text
-    assert "call again only to set `anchor`" in text
-
+    assert "retry only to set `anchor` or `conversation.focus`" in text

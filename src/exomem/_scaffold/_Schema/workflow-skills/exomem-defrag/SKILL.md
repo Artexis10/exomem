@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: fd8ac0e0937b4a28f0179a75137e6660a139280053db4dd9f5e4edf98e812907
+  skill_contract: 42b7c66c15a98f460933331498e2ba7f08f1db640bb7f99e22cbccf1ca609251
   version: "0.1.0"
 ---
 
@@ -17,6 +17,12 @@ Use when the user asks to defrag a topic, reconcile notes, resolve contradiction
 ## Portable operating rules
 
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+
+Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
+
+Use `configure_memory` set/clear only for an explicit user request to change saved engagement.
+Recall, capture, installation and missing hooks use the existing preference;
+none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,

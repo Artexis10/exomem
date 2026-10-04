@@ -146,7 +146,7 @@ Behavioural check for cut guidance: the hosted behaviour fixtures and `test_host
 ## Rulings
 
 1. Budget: at most 90,000 wire bytes, with per-tool ceilings, enforced by `tests/test_tool_schema_budget.py`.
-2. `ask_memory` output schema: the loose wrapped object that keeps the `result` wrap; union-arm assertions move to runtime-payload assertions. Sequenced after the `ask_memory` schema fix (#1448).
+2. `ask_memory` output schema: the loose wrapped object that keeps the `result` wrap; union-arm assertions move to runtime-payload assertions. The failure-envelope prerequisite from #1448 is already integrated by #1477 (7fd5429aa): current main's `RecallResult` includes `ToolFailureEnvelope`. Do not wait for or re-merge the historical #1448 branch; preserve the current runtime failure and frozen-profile contracts.
 3. Optional-null structure: dropped, on the condition that the server keeps accepting an explicit null for every optional parameter; a test sends null for every nullable optional parameter of every tool.
 4. `authorization_session_credential`: stays declared with a one-line description.
 5. `hosted-alpha-agent-v4-command-binding-v1` and every frozen v1 to v4 byte stay unchanged.

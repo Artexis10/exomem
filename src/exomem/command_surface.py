@@ -257,9 +257,15 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "configure_memory",
         "record_memory",
         "plan_memory",
+        "episode_memory",
+        "adoption_studio",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),
     }
 )
+
+# These operations fetch caller-supplied temporary HTTPS artifact handles.
+# A URL recorded only as source provenance does not make a tool open-world.
+OPEN_WORLD_OPS: frozenset[str] = frozenset({"capture_source", "preserve_artifacts"})
 
 
 def mcp_tool_annotations(
@@ -267,7 +273,11 @@ def mcp_tool_annotations(
 ) -> ToolAnnotations:
     """MCP behaviour hints for one tool — what cautious clients render as badges."""
     return ToolAnnotations(
-        title=name.replace("_", " ").title(),
+        title=(
+            "Adopt Existing Memory"
+            if name == "adoption_studio"
+            else name.replace("_", " ").title()
+        ),
         readOnlyHint=read_only,
         destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
         idempotentHint=idempotent,
@@ -311,6 +321,9 @@ class Command:
     mcp_meta: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: types.MappingProxyType({}), hash=False
     )
+    mcp_annotation_pin: Mapping[str, object] | None = field(
+        default=None, compare=False, hash=False
+    )
 
     @property
     def doc(self) -> str:
@@ -330,7 +343,11 @@ class Command:
     @property
     def mcp_annotations(self) -> ToolAnnotations:
         """MCP behaviour hints for this command's generated tool."""
-        return mcp_tool_annotations(self.name, read_only=self.read_only)
+        if self.mcp_annotation_pin is not None:
+            return ToolAnnotations(**dict(self.mcp_annotation_pin))
+        return mcp_tool_annotations(
+            self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS
+        )
 
 
 def bind_vault(
@@ -741,35 +758,41 @@ _SCHEMA_VALUE_KEYS = ("items", "additionalProperties", "not", "if", "then", "els
 _SCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
 
 
-def compact_input_schema(schema: object) -> object:
+def compact_input_schema(schema: object, *, optional_property: bool = False) -> object:
     """Drop schema keywords that restate JSON Schema defaults.
 
     Stops advertising "this optional parameter may be null".
 
     An optional parameter is already absent from `required`, so `"default":
-    null` and a `{"type": "null"}` arm restate it on every property of every
-    tool. This changes only the published JSON: argument validation is built
-    from the Python signature, so an explicit null is still accepted.
+    null` and a `{"type": "null"}` arm can be omitted from its published schema.
+    Required properties and other values retain nullability. Argument validation
+    is built from the Python signature, so an explicit null is still accepted.
     """
     if not isinstance(schema, dict):
         return schema
     out: dict = {}
     for key, value in schema.items():
         if key in _SCHEMA_MAPPING_KEYS and isinstance(value, dict):
-            out[key] = {name: compact_input_schema(item) for name, item in value.items()}
+            out[key] = {
+                name: compact_input_schema(
+                    item,
+                    optional_property=key == "properties" and name not in schema.get("required", []),
+                )
+                for name, item in value.items()
+            }
         elif key in _SCHEMA_VALUE_KEYS:
             out[key] = compact_input_schema(value)
         elif key in _SCHEMA_LIST_KEYS and isinstance(value, list):
             out[key] = [compact_input_schema(item) for item in value]
         else:
             out[key] = value
-    if "default" in out and out["default"] is None:
+    if optional_property and "default" in out and out["default"] is None:
         del out["default"]
     # `additionalProperties: true` is the JSON Schema default.
     if out.get("additionalProperties") is True:
         del out["additionalProperties"]
     arms = out.get("anyOf")
-    if isinstance(arms, list) and {"type": "null"} in arms:
+    if optional_property and isinstance(arms, list) and {"type": "null"} in arms:
         rest = [arm for arm in arms if arm != {"type": "null"}]
         if len(rest) == 1 and isinstance(rest[0], dict):
             del out["anyOf"]

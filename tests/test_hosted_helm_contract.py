@@ -2428,6 +2428,53 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     }
 
 
+@pytest.mark.parametrize(
+    ("cellctl_enabled", "cloud_gateway_enabled", "legacy_paused", "expected_reconcile"),
+    [
+        (True, False, False, False),
+        (False, True, False, False),
+        (True, True, True, False),
+        (False, False, True, True),
+        (False, False, False, False),
+    ],
+)
+def test_scheduler_suspension_follows_cloud_and_legacy_modes(
+    cellctl_enabled: bool,
+    cloud_gateway_enabled: bool,
+    legacy_paused: bool,
+    expected_reconcile: bool,
+) -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=(
+            "--set",
+            f"cellctl.enabled={str(cellctl_enabled).lower()}",
+            "--set",
+            f"cloudGateway.enabled={str(cloud_gateway_enabled).lower()}",
+            "--set",
+            f"legacyHosted.paused={str(legacy_paused).lower()}",
+        ),
+    )
+    suspension = {
+        document["metadata"]["labels"]["app.kubernetes.io/name"]: document["spec"][
+            "suspend"
+        ]
+        for document in documents
+        if document.get("kind") == "CronJob"
+        and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
+    }
+    legacy_suspended = cellctl_enabled or cloud_gateway_enabled or legacy_paused
+
+    assert suspension == {
+        "exomem-access-delivery": expected_reconcile,
+        "exomem-reconcile": expected_reconcile,
+        "exomem-export-gc": legacy_suspended,
+    }
+
+
 def test_platform_rejects_scheduler_contract_sha_drift() -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")

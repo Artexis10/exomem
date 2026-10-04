@@ -509,9 +509,9 @@ def render_tool_guidance(
             f"rich form is `{rich['heading_syntax']}` with a substantive body.",
             portable["short_selection_rule"] if whole_page else "",
             f"Role example: {portable['examples']['role']}" if whole_page else "",
-            f"`missing_semantic_unit`: {missing['compact_remediation']} "
-            f"{missing['rich_remediation']}",
-            'Core keys, aliases and the rich example: call bootstrap(profile="full").',
+            f"`missing_semantic_unit`: {missing['compact_remediation']}",
+            f"`empty_rich_unit`: {findings['empty_rich_unit']['remediation']}",
+            'Keys/examples: call bootstrap(profile="full").',
         )
         if part
     )

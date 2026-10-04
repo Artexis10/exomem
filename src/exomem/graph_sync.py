@@ -2658,6 +2658,41 @@ class GraphRebuildCoordinator:
         self._running = False
         self._builder: Callable[[GraphSyncCheckpoint], GraphBuildOutcome] | None = None
         self._waiter_count = 0
+        self._shutdown: threading.Event | None = None
+        self._workers: set[threading.Thread] = set()
+
+    def bind_shutdown(self, shutdown: threading.Event) -> None:
+        """Retain one service lifetime through its last graph callback."""
+        with self._condition:
+            if self._shutdown is shutdown:
+                return
+            if self._running or self._workers:
+                raise RuntimeError("graph rebuild workers still own the prior lifetime")
+            self._shutdown = shutdown
+
+    def start_worker(self, target: Callable[[threading.Event | None], None]) -> bool:
+        """Seal admission and capture the lifetime before launching a worker."""
+        with self._condition:
+            shutdown = self._shutdown
+            if shutdown is not None and shutdown.is_set():
+                return False
+
+            def run() -> None:
+                try:
+                    target(shutdown)
+                finally:
+                    with self._condition:
+                        self._workers.discard(threading.current_thread())
+                        self._condition.notify_all()
+
+            thread = threading.Thread(target=run, name=GRAPH_REBUILD_THREAD_NAME, daemon=True)
+            self._workers.add(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._workers.discard(thread)
+                raise
+            return True
 
     @property
     def writer_hold_count(self) -> int:
@@ -2687,6 +2722,11 @@ class GraphRebuildCoordinator:
                 return GraphRebuildStart(False)
             if self._required is None or checkpoint.generation > self._required.generation:
                 self._required = checkpoint
+            if self._shutdown is not None and self._shutdown.is_set():
+                if not self._running and self._error is None:
+                    self._error = GraphRebuildStopped(_RETRY_OR_RECONCILE)
+                self._condition.notify_all()
+                return GraphRebuildStart(False)
             if self._running:
                 self._condition.notify_all()
                 return GraphRebuildStart(False)
@@ -2697,11 +2737,11 @@ class GraphRebuildCoordinator:
             self._outcome = None
             self._builder = builder
             try:
-                threading.Thread(
-                    target=self._run,
-                    name="exomem-graph-rebuild",
-                    daemon=True,
-                ).start()
+                if not self.start_worker(self._run):
+                    self._running = False
+                    self._error = GraphRebuildStopped(_RETRY_OR_RECONCILE)
+                    self._condition.notify_all()
+                    return GraphRebuildStart(False)
             except RuntimeError:
                 self._running = False
                 self._error = GraphRebuildRegistrationError(
@@ -2783,7 +2823,7 @@ class GraphRebuildCoordinator:
         projection.__cause__ = error
         return projection
 
-    def _run(self) -> None:
+    def _run(self, shutdown: threading.Event | None = None) -> None:
         attempts = 0
         while attempts < MAX_GRAPH_REBUILD_ATTEMPTS:
             attempts += 1
@@ -2793,13 +2833,15 @@ class GraphRebuildCoordinator:
                 required = self._required
                 builder = self._builder
             try:
+                from . import foreground_priority
                 from .foreground_activity import background_scope
 
-                with background_scope(
-                    self.vault_root,
-                    waiter_bypass=lambda: self.waiter_count > 0,
-                ):
-                    outcome = builder(required)
+                with foreground_priority.cancellable(shutdown):
+                    with background_scope(
+                        self.vault_root,
+                        waiter_bypass=lambda: self.waiter_count > 0,
+                    ):
+                        outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(
@@ -2828,7 +2870,8 @@ class GraphRebuildCoordinator:
                         )
                     projection = GraphRebuildStopped(remediation)
                     projection.__cause__ = error
-                logger.exception(
+                report = logger.info if isinstance(error, foreground_priority.BulkCancelled) else logger.exception
+                report(
                     "graph rebuild stopped checkpoint_sha256=%s generation=%s",
                     required.checkpoint_sha256,
                     required.generation,
@@ -2844,6 +2887,9 @@ class GraphRebuildCoordinator:
                     self._condition.notify_all()
                     return
                 if self._required is not None and not outcome.covers(self._required):
+                    # Covered waiters retain this durable publication even if
+                    # newer demand requires another pass.
+                    self._outcome = outcome
                     continue
                 self._outcome = outcome
                 self._running = False
@@ -2866,6 +2912,12 @@ class GraphRebuildCoordinator:
             )
             if not ready:
                 raise TimeoutError("graph rebuild did not finish before the wait deadline")
+            if (
+                isinstance(self._error, GraphRebuildStopped)
+                and self._outcome is not None
+                and self._outcome.covers(checkpoint)
+            ):
+                return self._outcome
             if self._error is not None:
                 raise self._error
             assert self._outcome is not None
@@ -2880,6 +2932,15 @@ def _registration_key(vault_root: Path, state_root: Path | None) -> str:
     return _rebuild_lock_key(vault_root, _registration_runtime_root(state_root))
 
 
+def rebuild_coordinator(
+    vault_root: Path, *, state_root: Path | None = None
+) -> GraphRebuildCoordinator:
+    """Share flight and service-lifetime ownership at the exact state key."""
+    key = _registration_key(vault_root, state_root)
+    with _COORDINATORS_LOCK:
+        return _COORDINATORS.setdefault(key, GraphRebuildCoordinator(Path(vault_root)))
+
+
 def register_rebuild(
     vault_root: Path,
     checkpoint: GraphSyncCheckpoint,
@@ -2889,8 +2950,7 @@ def register_rebuild(
 ) -> GraphRebuildRegistration:
     """Capture exact rebuild work; callers start or join only after their guard exits."""
     key = _registration_key(vault_root, state_root)
-    with _COORDINATORS_LOCK:
-        coordinator = _COORDINATORS.setdefault(key, GraphRebuildCoordinator(Path(vault_root)))
+    coordinator = rebuild_coordinator(vault_root, state_root=state_root)
     registration = GraphRebuildRegistration(coordinator, checkpoint, builder)
     pending = dict(_PENDING_WAITERS.get() or {})
     pending[key] = (registration, checkpoint)
@@ -3231,6 +3291,8 @@ def repair_is_provisioned(
     each outcome asserts a *different* mechanism, and the check has to test the
     one that was claimed:
 
+    * `completed` claims acknowledgement covering this dispatch. No pending
+      registration or queue can stand in for completion.
     * `registered` claims an in-process rebuild flight for this exact
       checkpoint. Only a registration proves that.
     * `deferred` claims the durable queue owns the repair, which is what a write
@@ -3256,21 +3318,23 @@ def repair_is_provisioned(
     acknowledged = acknowledged_checkpoint(vault_root)
     if acknowledged is not None and acknowledged.covers(required):
         return True
-    if registered_checkpoint(vault_root, state_root=state_root) == required:
-        return True
-    if outcome == "registered":
-        # The claim was a flight, and there is none. Nothing else substitutes:
-        # the queue entry below is written by the batch itself and would say
-        # nothing about whether this branch did what it reported.
-        return False
-    from . import deferred_index
+    if outcome != "completed":
+        if registered_checkpoint(vault_root, state_root=state_root) == required:
+            return True
+        if outcome != "registered":
+            # A queue cannot excuse a claimed flight that never existed.
+            from . import deferred_index
 
-    if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
-        return True
-    queued = set(deferred_index.list_graph_paths(vault_root))
-    if not queued:
-        return False
-    return all(path in queued for path, _digest in required.paths)
+            if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+                return True
+            queued = set(deferred_index.list_graph_paths(vault_root))
+            if queued and all(path in queued for path, _digest in required.paths):
+                return True
+    # Repair publishes its acknowledgement before consuming the queue/flight.
+    # If it finished between our first read and the mechanism check, absence
+    # now means completion, not a missing handoff. Re-read the covering proof.
+    acknowledged = acknowledged_checkpoint(vault_root)
+    return acknowledged is not None and acknowledged.covers(required)
 
 
 def temporary_sidecar_path(live: Path, checkpoint: GraphSyncCheckpoint) -> Path:
@@ -3312,43 +3376,65 @@ def replace_sidecar(
     root = Path(vault_root)
     started = time.monotonic()
     attempts: list[str] = []
-    if _publish_sidecar_in_place(
+    if not _publish_sidecar_in_place(
         temporary,
         live,
         vault_root=root,
         attempts_out=attempts,
     ):
-        try:
-            epistemic_graph._remove_graph_rebuild_artifact(
-                root,
-                temporary,
-                missing_ok=True,
+        if attempts == ["temporary sidecar absent"]:
+            raise FileNotFoundError(temporary)
+        if attempts != ["live sidecar absent"]:
+            raise GraphSidecarReplaceUnavailable(
+                "live graph sidecar could not accept the proven rebuild "
+                f"(in-place {len(attempts)} attempt(s) over "
+                f"{time.monotonic() - started:.1f}s: "
+                f"{'; '.join(attempts) if attempts else 'none ran'})"
             )
-        except OSError:
-            # A retained temp is inert once the live file already carries the
-            # published bytes; the reaper collects it on a later pass.
-            pass
-        return
 
-    if attempts == ["temporary sidecar absent"]:
-        raise FileNotFoundError(temporary)
-    if attempts != ["live sidecar absent"]:
-        raise GraphSidecarReplaceUnavailable(
-            "live graph sidecar could not accept the proven rebuild "
-            f"(in-place {len(attempts)} attempt(s) over "
-            f"{time.monotonic() - started:.1f}s: "
-            f"{'; '.join(attempts) if attempts else 'none ran'})"
-        )
+        try:
+            epistemic_graph._move_graph_rebuild_into_store(root, temporary, live)
+        except FileExistsError as error:
+            # Another graph opener won the absence-to-move window. Publish
+            # into its retained SQLite/WAL family rather than replacing it.
+            # One bounded backup round handles this transition; if the live
+            # file disappears again, retain the candidate for later recovery.
+            attempts.clear()
+            if not _publish_sidecar_in_place(
+                temporary,
+                live,
+                vault_root=root,
+                attempts_out=attempts,
+            ):
+                if attempts == ["temporary sidecar absent"]:
+                    raise FileNotFoundError(temporary) from error
+                raise GraphSidecarReplaceUnavailable(
+                    "live sidecar appeared before the held move; "
+                    "in-place publication failed "
+                    f"({len(attempts)} attempt(s) over "
+                    f"{time.monotonic() - started:.1f}s: "
+                    f"{'; '.join(attempts) if attempts else 'none ran'})"
+                ) from error
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise GraphSidecarReplaceUnavailable(
+                "live sidecar absent; held graph publication failed "
+                f"({error.__class__.__name__}: {error})"
+            ) from error
+        else:
+            return
 
     try:
-        epistemic_graph._move_graph_rebuild_into_store(root, temporary, live)
-    except FileNotFoundError:
-        raise
-    except OSError as error:
-        raise GraphSidecarReplaceUnavailable(
-            "live sidecar absent; held graph publication failed "
-            f"({error.__class__.__name__}: {error})"
-        ) from error
+        epistemic_graph._remove_graph_rebuild_artifact(
+            root,
+            temporary,
+            missing_ok=True,
+        )
+    except OSError:
+        # A retained temp is inert once the live file already carries the
+        # published bytes; the reaper collects it on a later pass.
+        pass
 
 
 def _publish_sidecar_in_place(

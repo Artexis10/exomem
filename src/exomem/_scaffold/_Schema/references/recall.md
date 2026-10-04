@@ -112,8 +112,17 @@ typed edges: traversal follows authored relations only.
 
 ## Context activation packets (`activate_context`)
 
-Call once per substantive turn with the user's words verbatim. Read-only; it
-never guesses.
+Use for initial context when the live engagement policy from `bootstrap` warrants
+recall. Pass the current user's words verbatim, not a search query; skip if a hook
+already injected this turn's working set. For a known information gap, use
+`ask_memory`, then `read_memory` on selected refs. Activation is read-only and
+abstains rather than guessing.
+
+Only if needed to resolve the turn, pass relevant `conversation`: up to six
+recent excerpts and 2,400 characters total, `focus` up to 240 characters and
+`refs` up to twelve. Never send full history or unrelated personal data. If a
+hook missed the subject, retry with `conversation.focus`; on ambiguity, choose
+an `anchor`. See the engagement reference for entry bounds and attachment cues.
 
 **`recent_context`** leads every packet, abstained ones included. Up to eight
 pages recently worked on (edited, read, captured as a session, recorded as a

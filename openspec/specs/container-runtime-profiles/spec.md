@@ -1,7 +1,7 @@
 # container-runtime-profiles Specification
 
 ## Purpose
-TBD - created by archiving change add-cross-os-deployment-setup. Update Purpose after archive.
+Publish distinct container runtime families for lean lexical search, CPU hybrid search and NVIDIA CUDA hybrid search, with explicit Compose overrides to choose among them. CUDA capability does not imply idle CUDA residency, and Docker documentation states the OS tradeoffs for each host shape.
 ## Requirements
 ### Requirement: Published Container Runtime Families
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -170,7 +171,7 @@ def test_bootstrap_is_bounded_sorted_and_omits_route_when_schema_is_unavailable(
     )
 
     full = commands.op_bootstrap(tmp_path, profile="full")["workflow_contracts"]
-    compact = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    compact = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
     assert len(full["default"]) == 1
     assert full["default"][0]["key"] == "default"
     assert [item["key"] for item in full["scoped"]] == [f"scope-{number:02d}" for number in range(8)]
@@ -199,7 +200,7 @@ def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp
         surface="test", profile="reduced", tier2_enabled=False, product_commands=("bootstrap",)
     )
     with active_surface(descriptor):
-        empty = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+        empty = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
     assert empty["resolution_available"] is False
     assert empty["proactive_routing_available"] is False
     assert empty["status"] == "builtin_standalone"
@@ -211,7 +212,7 @@ def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp
     )
     egress.clear_decision_memo()
     with active_surface(descriptor):
-        unavailable = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+        unavailable = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
     assert unavailable["resolution_available"] is False
     assert unavailable["proactive_routing_available"] is False
     assert unavailable["resolution_required"] is True
@@ -230,7 +231,7 @@ def test_bootstrap_never_invents_a_total_after_an_incomplete_contract_scan(
         "not a workflow contract\n", encoding="utf-8"
     )
 
-    projection = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    projection = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
 
     assert projection["status"] == "workflow_resolution_unavailable"
     assert projection["findings"] == [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "detail": "scan bound exceeded"}]
@@ -387,7 +388,9 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     assert null_rest.json() == {"success": True, "data": null_expected}
     null_cli = subprocess.run(
         [
-            str(Path(__file__).resolve().parents[1] / ".venv" / "bin" / "kb"),
+            sys.executable,
+            "-m",
+            "exomem",
             "schema_memory",
             "--subject",
             "workflow-contracts",

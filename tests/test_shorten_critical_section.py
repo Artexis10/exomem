@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import metrics, mutation_lock, relation_review, semantic_writes, writer_lease
+from exomem import (
+    metrics,
+    mutation_lock,
+    relation_review,
+    reserved_paths,
+    semantic_writes,
+    writer_lease,
+)
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember, product_commands_for
@@ -119,6 +126,10 @@ def test_pre_boundary_validation_failure_never_acquires_the_boundary(
         op_remember(vault, **committing_kwargs)
     assert "SEMANTIC_CONTRACT_BLOCKED" in str(baseline.value)
 
+    # The pre-boundary warm takes its own brief identity-scope hold when cold; warm
+    # it now so the trap below watches only the write's mutation boundary.
+    reserved_paths.warm_identity_catalogue_before_boundary(vault)
+
     def unreachable_hold(self, **kwargs):
         raise AssertionError(
             "the mutation boundary must never be acquired for a pre-boundary validation failure"
@@ -167,6 +178,11 @@ def test_embedding_prewarm_observes_a_free_boundary(
 def test_mutation_busy_shape_is_unchanged_under_a_narrow_hold(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A capture write now waits out ordinary contention on the server
+    # (`test_capture_contention_absorbed.py`); the refusal it still raises for an
+    # overdue holder or an exhausted wait keeps this shape, so pin the shape
+    # with the wait switched off.
+    monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
     kwargs = _validated_kwargs(vault)
     state_dir = vault.parent / "state"
     manager = _standalone_manager(state_dir, mutation_timeout_seconds=0.2)

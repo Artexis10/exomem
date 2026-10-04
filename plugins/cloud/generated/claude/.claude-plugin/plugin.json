@@ -1,0 +1,24 @@
+{
+  "name": "exomem-cloud",
+  "displayName": "Exomem",
+  "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
+  "version": "0.104.0",
+  "author": {
+    "name": "Substrate Systems OÜ",
+    "url": "https://substratesystems.io"
+  },
+  "homepage": "https://substratesystems.io/exomem",
+  "repository": "https://github.com/Artexis10/exomem",
+  "privacyPolicyUrl": "https://substratesystems.io/exomem/privacy",
+  "supportUrl": "https://substratesystems.io/exomem/support",
+  "documentationUrl": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
+  "termsOfServiceUrl": "https://substratesystems.io/exomem/terms",
+  "icon": "./assets/icon.svg",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "memory",
+    "knowledge-base",
+    "mcp",
+    "notes"
+  ]
+}

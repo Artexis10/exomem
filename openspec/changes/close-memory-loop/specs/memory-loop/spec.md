@@ -680,7 +680,7 @@ produces served material.
 
 The carry SHALL run only when anchor resolution returned no resolved anchor and
 the request named no explicit anchor choice; an ambiguous turn, a turn that
-resolved any anchor and a referential turn SHALL be untouched. A hit SHALL be a candidate only where at least two
+resolved any anchor and a referential turn SHALL be untouched. On the strict phrase path, a hit SHALL be a candidate only where at least two
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
@@ -699,8 +699,13 @@ over character offsets. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
 punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
 number of distinctive stems occurring anywhere in the turn SHALL NOT by
-itself admit a page. A turn carrying fewer than two distinctive
-stems SHALL carry nothing and SHALL NOT run the ranking query. Where the indexed corpus holds fewer than a declared minimum
+itself admit a page. When the strict path names no page, the title fallback MAY
+instead admit a pair of two different words, at least one distinctive, only
+where both belong to a current page's title. It SHALL apply occurrence-local
+qualification as specified by context-activation's title qualification
+requirement. A turn without a distinctive stem SHALL carry nothing; an
+all-ordinary title, body-only neighbour or single word SHALL NOT qualify.
+Where the indexed corpus holds fewer than a declared minimum
 number of pages, the carry SHALL NOT run at all: rarity is only as sharp as
 the corpus it is measured against, and below that size there is no corpus to
 measure against. An absolute score threshold SHALL NOT be used to decide contact:
@@ -726,15 +731,18 @@ number of pages the rarity gate can admit at the current corpus size. Candidates
 result is limited, and raw-material and navigation pages SHALL be excluded
 inside the ranking query, before its row limit applies, so that the limit
 counts only rows that can be candidates. A page SHALL be carried only when it is the ONLY surviving
-candidate; where two or more survive, the turn SHALL abstain `unresolved`,
-SHALL NOT select between them by ranking score, and SHALL report them under
-`anchors[]` at a distinct status meaning "named, not carried" — never the
-carried status and never as resolution ambiguity. Those entries SHALL cross
+candidate of the phrase that named it. A turn that names several things by
+several phrases, each answered to by exactly one page, names several domains
+and SHALL carry each such page (at most three, by score). Where two or more
+pages survive for ONE phrase and no other phrase names a page, the turn SHALL
+abstain `unresolved`, SHALL NOT select between them by ranking score, and SHALL
+report them under `anchors[]` at a distinct status meaning "named, not carried"
+— never the carried status and never as resolution ambiguity. Those entries SHALL cross
 the release plane as anchors do. A candidate
 the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 
-A carried packet SHALL report that page as its one anchor entry, of kind `page`,
-at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
+A carried packet SHALL report each carried page as its own anchor entry, of kind
+`page`, at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
 mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
 that page through the existing bounded unit lanes. The continuity token minted
 from a carried packet SHALL name the carried page's path, so that a following
@@ -786,9 +794,9 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **AND** the same page IS a candidate for a turn that shares two distinctive
   stems with it, at any corpus size
 
-#### Scenario: A turn that names two pages carries neither
+#### Scenario: Two pages answer to the same phrase
 
-- **WHEN** a turn that resolves no anchor names two compiled pages, at any
+- **WHEN** one phrase of a turn that resolves no anchor names two compiled pages, at any
   ranking scores whatever
 - **THEN** the packet abstains `unresolved` with no units, exactly as it did
   before the carry existed

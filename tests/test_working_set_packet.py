@@ -162,7 +162,10 @@ def test_withheld_collection_claims_do_not_change_visible_claim_routing(
     assert populations[-1] == (visible_path,)
 
 
-def test_unit_text_is_capped() -> None:
+def test_a_unit_over_the_ceiling_is_a_pointer_not_a_cut_unit() -> None:
+    """Amended (standing precedent): a unit is never cut, because a cut can drop
+    a scope qualifier and leave a half-claim. Past `MAX_UNIT_HARD_CHARS` it is
+    reported as a pointer instead."""
     packet = working_set.build_packet(
         items=(_item("resources", text="y" * 1000),),
         anchors=(),
@@ -175,7 +178,8 @@ def test_unit_text_is_capped() -> None:
         status="resolved",
     )
 
-    assert len(packet["units"][0]["text"]) == working_set.MAX_UNIT_CHARS
+    assert packet["units"] == []
+    assert [p["reason"] for p in packet["pointers"]] == ["unit_too_long"]
 
 
 def test_packet_never_carries_the_due_state_carrier() -> None:
@@ -408,6 +412,30 @@ def test_budget_is_clamped_to_the_declared_range() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_records_lane_state_unit_carries_its_source_path(vault: Path) -> None:
+    from exomem import context_roles
+
+    anchor = "Knowledge Base/Products/Cargo Sled.md"
+    source = "Knowledge Base/Notes/sled-maintenance.md"
+    entry = {
+        "anchor": anchor,
+        "path": source,
+        "source": "note",
+        "as_of": "2026-08-01",
+        "statement": "latest active note: Sled maintenance",
+    }
+    registry = context_roles.load_roles(vault)
+    role = registry.roles["current_state"]
+    items = working_set._records_lane(role, current_state=(entry,))
+    packet = working_set.build_packet(
+        items=items, anchors=(), roles=(), current_state=(entry,), ambiguity=(),
+        missing=(), max_chars=4000, generation=_generation(), status="resolved",
+    )
+
+    assert packet["units"][0]["provenance"]["path"] == source
+    assert packet["units"][0]["provenance"]["anchor"] == anchor
+
+
 @pytest.fixture
 def stateful_vault(vault: Path) -> Path:
     from test_working_set_index import _seed_planning, _seed_structure
@@ -480,7 +508,8 @@ def test_current_state_comes_from_records_first(stateful_vault: Path) -> None:
     assert entry["source"] == "records"
     assert entry["as_of"] == "2026-09-10"
     assert "abroad" in entry["statement"]
-    assert set(entry) == {"anchor", "source", "as_of", "statement"}
+    assert set(entry) == {"anchor", "source", "path", "as_of", "statement"}
+    assert entry["path"] == collection.path
 
 
 def test_compile_abstains_on_a_turn_that_reaches_nothing(stateful_vault: Path) -> None:
@@ -612,7 +641,8 @@ def test_pointers_carry_a_why() -> None:
 
 
 def test_unit_text_is_never_cut_inside_a_wikilink() -> None:
-    """A half-written wikilink is both unreadable and unscannable.
+    """A half-written wikilink is both unreadable and unscannable. A unit is now
+    served whole or not at all, so a wikilink is never split either way.
 
     The egress guard finds a withheld page by matching `[[…]]`, so a cut that
     leaves `[[norther` hides the reference from the scan as well as from the
@@ -632,9 +662,8 @@ def test_unit_text_is_never_cut_inside_a_wikilink() -> None:
     )
 
     text = packet["units"][0]["text"]
-    assert len(text) <= working_set.MAX_UNIT_CHARS
+    assert text == f"{head}[[northern-corridor-hub]] tail"
     assert text.count("[[") == text.count("]]")
-    assert "[[norther" not in text or "]]" in text
 
 
 def test_a_closed_wikilink_inside_the_cap_survives() -> None:

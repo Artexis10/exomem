@@ -14,6 +14,7 @@ thing, or its rate limiting would silently key on nothing useful.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,18 +35,23 @@ EDGE_NAMESPACE = "exomem-edge"
 TRAEFIK = "platform-header-test-traefik"
 
 
-def _helm_template() -> list[dict[str, Any]]:
-    result = subprocess.run(
+def _helm_render(*extra_args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             HELM, "template", "platform-header-test", str(PLATFORM_CHART),
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
+            *extra_args,
         ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _helm_template(*extra_args: str) -> list[dict[str, Any]]:
+    result = _helm_render(*extra_args)
     assert result.returncode == 0, result.stderr
     return [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
 
@@ -84,6 +90,24 @@ def test_cloud_gateway_route_does_not_strip_x_real_ip() -> None:
                 f"Middleware {doc['metadata']['name']!r}, used by the Cloud gateway's route, "
                 "blanks X-Real-Ip"
             )
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_mode_keeps_lifecycle_and_sign_in_delivery_running() -> None:
+    documents = _helm_template()
+    suspension = {
+        doc["metadata"]["labels"]["app.kubernetes.io/name"]: doc["spec"]["suspend"]
+        for doc in documents
+        if doc.get("kind") == "CronJob"
+        and doc.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
+    }
+
+    assert suspension == {
+        "exomem-access-delivery": False,
+        "exomem-reconcile": False,
+        "exomem-export-gc": True,
+    }
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -584,6 +608,8 @@ GATEWAY_ENV = {
     "EXOMEM_CLOUD_MCP_URL",
     "EXOMEM_CLOUD_MCP_PATH",
     "EXOMEM_CLOUD_CELL_TOKEN_KEY",
+    "EXOMEM_CLOUD_ENABLED",
+    "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED",
     "DATABASE_URL",
     "EXOMEM_GATEWAY_PORT",
 }
@@ -616,6 +642,14 @@ def test_the_cloud_gateway_renders_exactly_the_substrate_gateway_env_contract() 
         "http://exomem-cloud-gateway.exomem-cloud.svc.cluster.local:8080"
     )
     assert env["EXOMEM_GATEWAY_PORT"]["value"] == "8080"
+    assert env["EXOMEM_CLOUD_ENABLED"] == {
+        "name": "EXOMEM_CLOUD_ENABLED", "value": "true",
+    }
+    # Ordinary Cloud accounts remain enabled; the separate reviewer authority
+    # requires an explicit opt-in after the matched service/schema rollout.
+    assert env["EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"] == {
+        "name": "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED", "value": "false",
+    }
     # Secrets come from Secrets. The cell token key is the same Secret entry
     # cellctl reads as its current key (64 hex characters).
     assert env["EXOMEM_CLOUD_CELL_TOKEN_KEY"]["valueFrom"]["secretKeyRef"] == {
@@ -630,6 +664,55 @@ def test_the_cloud_gateway_renders_exactly_the_substrate_gateway_env_contract() 
     )
     assert "secretKeyRef" in env["EXOMEM_CONTROL_PLANE_KEY"]["valueFrom"]
     assert "secretKeyRef" in env["DATABASE_URL"]["valueFrom"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def test_cloud_reviewer_access_requires_an_explicit_boolean_switch(enabled: str) -> None:
+    env = _gateway_env(_helm_template(
+        "--set", f"cloudGateway.marketplaceReviewerAccessEnabled={enabled}",
+    ))
+    assert set(env) == GATEWAY_ENV
+    assert env["EXOMEM_CLOUD_ENABLED"]["value"] == "true"
+    assert env["EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"]["value"] == enabled
+    baseline = _gateway_env(_helm_template())
+    assert {key: value for key, value in env.items() if key != "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"} == {
+        key: value for key, value in baseline.items() if key != "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"
+    }
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("value", ["false", "true", "1", ""])
+def test_cloud_reviewer_access_rejects_string_flags(value: str) -> None:
+    result = _helm_render(
+        "--set-string", f"cloudGateway.marketplaceReviewerAccessEnabled={value}",
+    )
+    assert result.returncode != 0
+    assert "marketplaceReviewerAccessEnabled" in result.stderr
+    assert "want boolean" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("value", ["0", "1", "null"])
+def test_cloud_reviewer_access_rejects_non_boolean_flags(value: str) -> None:
+    result = _helm_render(
+        "--set", f"cloudGateway.marketplaceReviewerAccessEnabled={value}",
+    )
+    assert result.returncode != 0
+    assert "marketplaceReviewerAccessEnabled" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_reviewer_opt_in_does_not_enable_a_disabled_cloud_gateway() -> None:
+    documents = _helm_template(
+        "--set", "cloudGateway.enabled=false",
+        "--set", "cloudGateway.marketplaceReviewerAccessEnabled=true",
+    )
+    assert not any(
+        doc.get("kind") == "Deployment"
+        and doc.get("metadata", {}).get("name") == "exomem-cloud-gateway"
+        for doc in documents
+    )
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -842,7 +925,14 @@ def test_the_everyday_operator_reads_status_events_and_logs_but_no_secret_or_con
         ("", "pods"), ("", "pods/log"), ("", "events"), ("", "namespaces"),
         ("", "persistentvolumeclaims"), ("", "services"), ("", "nodes"),
         ("apps", "deployments"), ("apps", "statefulsets"), ("batch", "jobs"),
+        ("discovery.k8s.io", "endpointslices"),
+        ("networking.k8s.io", "networkpolicies"),
+        ("admissionregistration.k8s.io", "validatingadmissionpolicies"),
+        ("admissionregistration.k8s.io", "validatingadmissionpolicybindings"),
+        ("metrics.k8s.io", "nodes"), ("metrics.k8s.io", "pods"),
     }
+    for resource in ("nodes", "pods"):
+        assert granted[("metrics.k8s.io", resource)] == {"get", "list"}
 
     (binding,) = _group_bindings(documents, OPERATOR_GROUP)
     assert binding["kind"] == "ClusterRoleBinding"
@@ -963,3 +1053,107 @@ def test_the_edge_api_server_address_is_required_and_a_single_host() -> None:
         result = _helm_template_result("--set-json", setting)
         assert result.returncode != 0, setting
         assert "apiServerCidrs" in result.stderr, (setting, result.stderr)
+
+
+ARTIFACT_BROKER_ARGS = (
+    "--set", "artifactBroker.enabled=true",
+    "--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
+    "--set-json", 'artifactBroker.cellIds=["aaaaaaaaaaaaaaaa"]',
+)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_artifact_broker_is_default_off_with_no_transport_env_or_workload() -> None:
+    documents = _helm_template()
+    assert not any(doc["metadata"]["name"] == "exomem-artifact-broker" for doc in documents)
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        pod = _find(documents, "Deployment", name)["spec"]["template"]["spec"]
+        assert not any("ARTIFACT" in e["name"] for e in pod["containers"][0]["env"])
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_artifact_broker_is_ephemeral_confined_and_activated_only_for_selected_cells() -> None:
+    documents = _helm_template(*ARTIFACT_BROKER_ARGS)
+    deployment = _find(documents, "Deployment", "exomem-artifact-broker")
+    assert deployment["metadata"]["namespace"] == "exomem-cloud"
+    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+    pod = deployment["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["volumes"] == [{"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}}]
+    container, = pod["containers"]
+    assert container["command"] == ["python", "-m", "exomem.artifact_broker"]
+    assert container["securityContext"]["runAsUser"] == 1000
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    public_key = next(e for e in container["env"] if e["name"] == "EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY")
+    assert public_key["valueFrom"]["secretKeyRef"] == {"name": "exomem-artifact-broker-public-key", "key": "public-key"}
+    assert {e["name"] for e in container["env"]} == {"EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY", "TMPDIR"}
+    service = _find(documents, "Service", "exomem-artifact-broker")["spec"]
+    assert service["type"] == "ClusterIP"
+    assert service["clusterIP"] == "10.43.0.25"
+    assert service["ports"] == [{"name": "http", "port": 8767, "targetPort": "http", "protocol": "TCP"}]
+    controller = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e.get("value") for e in controller["env"]}
+    assert env["CELLCTL_ARTIFACT_BROKER_URL"] == "http://10.43.0.25:8767"
+    assert env["CELLCTL_ARTIFACT_BROKER_CELL_IDS"] == '["aaaaaaaaaaaaaaaa"]'
+    policies = _find(documents, "NetworkPolicy", "exomem-artifact-broker")["spec"]
+    peer, = policies["ingress"][0]["from"]
+    assert policies["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8767}]
+    assert _selects(peer["namespaceSelector"], {"exomem.io/cloud-cell": "aaaaaaaaaaaaaaaa", "kubernetes.io/metadata.name": "exo-cell-aaaaaaaaaaaaaaaa"})
+    assert not _selects(peer["namespaceSelector"], {"exomem.io/cloud-cell": "bbbbbbbbbbbbbbbb", "kubernetes.io/metadata.name": "exo-cell-bbbbbbbbbbbbbbbb"})
+    assert _selects(peer["podSelector"], {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": "aaaaaaaaaaaaaaaa"})
+    assert not _selects(peer["podSelector"], {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": "aaaaaaaaaaaaaaaa", "exomem.io/cell-job": "backup"})
+    https, dns = policies["egress"]
+    assert https["ports"] == [{"protocol": "TCP", "port": 443}]
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())
+    assert https["to"] == [{"ipBlock": {"cidr": "0.0.0.0/0", "except": values["cells"]["jobEgressExcept"]}}]
+    assert dns["to"][0]["podSelector"]["matchLabels"] == {"k8s-app": "kube-dns"}
+    assert _find(documents, "NetworkPolicy", "exomem-cloud-gateway") == _find(_helm_template(), "NetworkPolicy", "exomem-cloud-gateway")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("setting", [
+    "artifactBroker.image=example:latest", "artifactBroker.endpoint=http://broker:8767",
+    "artifactBroker.endpoint=http://8.8.8.8:8767", "artifactBroker.endpoint=http://10.43.0.25:80",
+    "artifactBroker.endpoint=http://user@10.43.0.25:8767", "artifactBroker.endpoint=http://10.43.0.25:8767/path",
+    "artifactBroker.endpoint=http://10.43.0.25:8767?x=y", "artifactBroker.cellIds=[\"bad\"]",
+    "artifactBroker.cellIds=[\"aaaaaaaaaaaaaaaa\",\"aaaaaaaaaaaaaaaa\"]", "cells.jobEgressExcept=[]",
+])
+def test_artifact_broker_refuses_unconfined_chart_configuration(setting: str) -> None:
+    flag = "--set-json" if setting.endswith("]") else "--set-string"
+    result = _helm_template_result(*ARTIFACT_BROKER_ARGS, flag, setting)
+    assert result.returncode != 0, setting
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_artifact_signer_key_belongs_only_to_gateway_and_issuance_requires_broker() -> None:
+    documents = _helm_template(*ARTIFACT_BROKER_ARGS, "--set", "cloudGateway.artifactTransportEnabled=true")
+    gateway = _find(documents, "Deployment", "exomem-cloud-gateway")["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e for e in gateway["env"]}
+    assert env["EXOMEM_CLOUD_ARTIFACT_TRANSPORT_ENABLED"]["value"] == "true"
+    assert env["EXOMEM_CLOUD_ARTIFACT_CELL_IDS"]["value"] == '["aaaaaaaaaaaaaaaa"]'
+    signing_key = env["EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY"]["valueFrom"]["secretKeyRef"]
+    assert signing_key == {"name": "exomem-cloud-artifact-signing-key", "key": "signing-key"}
+    for doc in documents:
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"] != "exomem-cloud-gateway":
+            assert signing_key["name"] not in str(doc)
+    result = _helm_template_result("--set", "cloudGateway.artifactTransportEnabled=true")
+    assert result.returncode != 0
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_dedicated_selection_is_validated_and_delivered_to_cellctl() -> None:
+    cell_id = "aaaaaaaaaaaaaaaa"
+    documents = _helm_template("--set-json", f'cellctl.dedicatedCellIds=["{cell_id}"]')
+    deployment = _find(documents, "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value")
+           for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_DEDICATED_CELL_IDS"]) == [cell_id]
+    role = _find(documents, "ClusterRole", "cellctl")
+    assert [rule["verbs"] for rule in role["rules"] if "nodes" in rule["resources"]] == [["get", "list"]]
+    for selection in (["bad"], [cell_id, cell_id], [cell_id] * 1025, {"extra": cell_id}):
+        result = _helm_render("--set-json", "cellctl.dedicatedCellIds=" + json.dumps(selection))
+        assert result.returncode != 0 and "dedicatedCellIds" in result.stderr

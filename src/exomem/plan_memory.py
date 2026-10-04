@@ -188,14 +188,18 @@ def plan_memory(
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Work with human-owned intended future state (Planning).
+    """Plan intent; record_memory holds outcomes.
 
-    `inspect`, `validate`, `query` are read-only; `create`, `add`, `update`,
-    `triage`, `revise`, `rebaseline` write, guarded. Planning holds goals,
-    work items, horizons, commitments; observed events go to `record_memory`.
-    UUID identity is not the filename; human filenames arrive via
-    `maintain_memory(mode="structured-files")`. Never infer completion or
-    horizon changes from elapsed time.
+    Inspect/query before writes; reread if stale. No time-inferred completion.
+    Help: bootstrap(section="records_planning").
+
+    Args:
+        collection: browse_memory path/ref.
+        plan_id: row plan_id.
+        expected_container_hash: inspect/query snapshot.
+        expected_item_version: row item_version.
+        changes: Update fields.
+        transition: Triage fields.
     """
     values = locals().copy()
     values.pop("vault_root")

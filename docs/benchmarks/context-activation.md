@@ -247,6 +247,147 @@ fresh run. After a deliberate product or corpus change, re-record it:
 CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09-v4.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 ```
 
+### Round 4 on corpus v4 (2026-09-28): recall breadth, 9/18 raw, 10/18 under A8
+
+The recall-breadth round changes the product only: no fixture, threshold or
+scorer line. Its rules come from three incident shapes seen in live use, none of
+which the eighteen fixtures contain, so each is measured by a generalisation
+test with invented names rather than by a case:
+
+| Shape | Rule | Test |
+|-------|------|------|
+| A turn names two domains and one is dropped | Same-kind anchors the turn spelled apart (every member spelled, no shared token) are concurrent, not competing senses; a page a turn names by its own phrase is carried beside what it resolved; phrases naming different pages carry each (at most three) | `test_working_set_concurrent_contexts.py`, `test_working_set_named_domains.py` |
+| A follow-up about a page listed in this conversation's recent context abstains | The caller's own session tier is a candidate for a turn that resolved nothing, gated by name overlap; served `partial`, `carried_by: follow_up` | `test_working_set_thread_overlap.py` |
+| The entity resolves and its settled conclusions are not served | An entity anchor also reads the decision, insight and finding units of the pages linked to it (`precedents` defaults to entity anchors) | `test_working_set_entity_conclusions.py` |
+
+Two rules follow from reading the red cases:
+
+- **A carried page is read through the lenses its own units answer.** C8's note
+  filed its observation under a category the sixth-priority lens cut off, so the
+  carry read nothing. The lenses are now those that select what the page holds,
+  chosen from one indexed category read (`lexstore.unit_categories_of`, about a
+  millisecond; a unit-query probe cost 150-190 ms and was replaced).
+- **A page is named by its title when one distinctive word sits beside an
+  ordinary title word** (T8's "support rota"). Only when no two distinctive
+  words named a page, and only where a current page's own title carries both
+  words.
+
+Per-case result after each mechanism, raw (with gold pages reached) and, where
+it differs, amendment A8. Measured with the harness's own `activate` and scorer
+on both trees, and matched by the recorded v4 report re-recorded with the real
+o200k tokenizer (raw 9/18 and A8 10/18, beside the 9/18 base). Recall bought
+some precision: C1 serves one more page outside its gold (precision 1.00 to
+0.67, still red), and C8 and T8 serve their gold page as a carry, which raw
+precision does not count (0.00; A8 counts it):
+
+| Case | base (#1440) | +M1 same-kind | +M2-M4 named domains, thread, entity | +M5 lenses | +M6 title-named |
+|------|------|------|------|------|------|
+| C1 | red 1/3 | red 1/3 | red 2/3 | red 2/3 | red 2/3 |
+| T1 | red | red | red | red | red |
+| C2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 |
+| T2 | pass | pass | pass | pass | pass |
+| C3 | red 0/2 | red 0/2 | red 0/2 | red 0/2 | red 1/2 |
+| T3 | pass | pass | pass | pass | pass |
+| C4 | red 1/2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 |
+| T4 | pass | pass | pass | pass | pass |
+| C5 | pass | pass | pass | pass | pass |
+| T5 | pass | pass | pass | pass | pass |
+| C6 | pass | pass | pass | pass | pass |
+| T6 | red | red | red | red | red |
+| C7 | pass | pass | pass | pass | pass |
+| T7 | pass | pass | pass | pass | pass |
+| C8 | red 0/1 | red 0/1 | red 0/1 | red 1/1 (A8 pass) | red 1/1 (A8 pass) |
+| T8 | red 0/1 | red 0/1 | red 0/1 | red 0/1 | red 1/1 |
+| C9 | red 1/2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 |
+| T9 | pass | pass | pass | pass | pass |
+| **raw / A8** | 9 / 9 | 9 / 9 | 9 / 9 | 9 / 10 | 9 / 10 |
+
+No positive case flips raw: C8, C4, T8 and C1 are read as `unresolved` or fail
+precision on fragment refs, which is what amendment A8 (merged from the
+benchmark branch) addresses; C8 passes under it. C1 reaches two of its three
+gold pages (the weekly-limit note is carried beside the resolved collection);
+the capacity-ceilings note shares no word with the turn and no link with the
+collection. The negative controls C6, T2 and T9 pass and are still load-bearing:
+the naming-gate removal now targets the per-phrase seam.
+
+**Evaluated and not shipped: a subject-tag relation.** C1's missing relation
+from a collection to its notes is a shared tag (`subscriptions`). Relating a
+note to a resolved anchor because it carries a tag equal to a word of the
+anchor's name, when at most six pages carry that tag, was built and measured:
+
+- Applied to every anchor kind it regressed T3 and T7, whose poison notes carry
+  a tag equal to a shared title word ("roadmap", "search").
+- Restricted to collections it left T3 and T7 alone and brought C1's third gold
+  note, but the corpus's ordinary "subscription audit" note (a streaming
+  service) carries the same tag, so C1's precision under A8 fell to 0.67, below
+  the 0.8 floor, in the very case the rule targets.
+
+A tag is a filing habit, not a relation, so the rule cannot separate a note about
+the anchor from one that shares its word, and it is not in the product.
+
+Activation latency, three interleaved pairs (base is #1440), 18 fixtures times
+five rounds, cold caches per call, ceil-rank percentiles:
+
+| Pair | Base ws p50 / p95 (ms) | Head ws p50 / p95 (ms) | Base total p50 / p95 (ms) | Head total p50 / p95 (ms) |
+|------|------|------|------|------|
+| 1 | 104.5 / 167.6 | 111.8 / 175.7 | 127.6 / 1202.7 | 123.9 / 1252.7 |
+| 2 | 109.0 / 174.3 | 112.2 / 156.0 | 130.4 / 1147.3 | 120.1 / 1203.0 |
+| 3 | 106.5 / 152.4 | 110.3 / 169.9 | 123.6 / 1062.0 | 121.4 / 1124.9 |
+
+Working-set p95 moved by +4.8%, -10.5% and +11.5% (mean +1.5%), inside the 22 ms
+spread between the three base runs; total p95 moved by +4.2%, +4.9% and +5.9%
+(mean +5.0%), inside the +10% bound. Total p50 fell about 5%: a carried page is
+now read through the lenses it can answer instead of six that read nothing. A
+resolved turn pays one extra query (about 12-15 ms) to read what else it named;
+a carried turn pays an indexed category read of about a millisecond.
+
+### What a resolved entity's project already settled (standing precedent)
+
+Three rules from a field incident (a person entity resolved, yet the conclusion
+page about that person's panel and the project's standing methodology page were
+missing, and a scoped claim was cut before its qualifier). Tests use invented
+names (`test_working_set_standing_precedent.py`); each rule is a spec scenario
+in `close-memory-loop`.
+
+| Shape | Rule |
+|-------|------|
+| A person's own conclusion shares no word with the turn and sits past the entity's 40-link cap | Inbound wikilinks past the cap are kept under their own relation (never part of the neighbourhood), and up to six of the entity's linked pages that hold decision, insight or finding units are read under `precedents`, newest first |
+| The project's method page constrains any claim in the domain but is never named | A page declares itself standing with frontmatter `standing: true` and its own `project`; the packet serves it under `precedents` for a resolved anchor in that project, one page per project, two per packet, two units per page, ahead of the role's other units and outside its item cap |
+| "chronic X only" lost to a 360-character cut | A unit is served whole up to 900 characters; a longer unit is a `unit_too_long` pointer, never a half-claim |
+
+Real-compiler deltas: none. The recorded v4 report is unchanged (raw 9/18, A8
+10/18) because the corpus declares no standing page, no entity there has more
+inbound links than the cap keeps, and no served unit exceeded 360 characters.
+The negative controls (an unlinked conclusion, a linked page with no
+conclusion, another project's standing page, a second standing page in the
+same project, a turn resolving nothing in the project) stay out, each pinned
+in the new test module.
+
+Review round (independent review of this branch): a referent only recency
+supplied is skipped inside the precedent reach (and a recency-only project is
+not read for conclusions); the entity's conclusion pages are date-sorted before
+the cut; a standing unit is capped at `MAX_UNIT_CHARS` (a pointer past it, no
+900-character allowance); the resolved anchor's material ranks ahead of items
+carried beside it (`provenance.carried`, rendered as a `carried` line in the
+hook for three bytes). Injected size, the hook's rendered block, median / p95,
+base is `origin/main`:
+
+| set | base bytes | head bytes | base tokens | head tokens |
+|-----|------|------|------|------|
+| corpus (16 fixtures) | 729 / 1118 | 749 / 1118 | 187 / 280 | 202.5 / 280 |
+| continuity (4 cases) | 1046 / 1262 | 1046 / 1262 | 262 / 353 | 262.5 / 353 |
+| project with a standing page (2 turns) | 433.5 / 482 | 615.5 / 749 | 106.5 / 118 | 154.5 / 191 |
+
+The project fixture is the case the new rules add to: about 180 bytes and 48
+tokens more per turn that resolves the project, for the standing method unit and
+the entity's conclusion. The corpus grows by a carried page's line where a turn
+names a second page.
+
+Activation latency, three interleaved base/head pairs (base is the previous
+head), 16 fixtures times five rounds, cold caches per call, ceil-rank
+percentiles: working-set p95 moved by +6.5%, -3.5% and +0.5%; total p95 by
++1.9%, +0.3% and +1.2%, inside the +10% bound.
+
 ### Round 3 on corpus v4 (2026-09-28): red, 9/18
 
 The activation-quality round (close-memory-loop, context-activation ADDED

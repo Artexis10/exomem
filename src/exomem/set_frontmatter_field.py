@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,7 @@ def set_frontmatter_field(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    _validate_frontmatter: Callable[[str, str], None] | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
     if not field or not field.strip():
         raise SetFrontmatterError(
@@ -205,6 +207,8 @@ def set_frontmatter_field(
     new_text = render_frontmatter_document(
         fm_text, body, newline=document_newline(text)
     )
+    if _validate_frontmatter is not None:
+        _validate_frontmatter(text, new_text)
 
     project_plan = _plan_project_keys(vault_root, field, value)
     try:

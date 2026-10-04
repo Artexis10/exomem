@@ -1,7 +1,7 @@
 # portable-agent-contract Specification
 
 ## Purpose
-TBD - created by archiving change enforce-semantic-authoring-contract. Update Purpose after archive.
+Give every client the same semantic-authoring contract from one versioned runtime source, whether via MCP-only bootstrap or plugin and skill packages. Runtime and human projections cannot drift, and public authoring artifacts stay generic.
 
 ## Requirements
 

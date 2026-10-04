@@ -1,7 +1,7 @@
 # vault-overview Specification
 
 ## Purpose
-TBD - created by archiving change fix-excluded-tier-read-paths. Update Purpose after archive.
+Make `overview` and `browse_memory` prune `excluded`-tier subtrees from the reported folder tree and from every count and coverage figure.
 ## Requirements
 ### Requirement: Overview hides excluded subtrees
 

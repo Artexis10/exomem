@@ -30,6 +30,25 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
+For a Planning change, discover the collection with `browse_memory`, then
+`plan_memory(action="inspect", collection=...)` and a bounded `query` to
+identify exactly one item. `inspect` requires a collection. Use the returned
+`snapshot` as `expected_container_hash`, and that query row's `plan_id`
+and `item_version` as `plan_id` and `expected_item_version`. These are
+returned identities and versions, not filenames or values to invent.
+
+Pass `changes={"title": "..."}` to `update`; for an explicit intent change
+pass `transition` to `triage`, with the same guards and an audit `why`.
+For example, an inbox candidate can become planned with
+`transition={"status": "planned", "commitment": "considering", "horizon": "quarter"}`.
+Completion requires committed, non-inbox intent; committed work-items and
+initiatives also need their declared parent. Inspect the collection contract
+before choosing fields. A Records outcome alone never changes Planning.
+
+`STALE_PLAN_CONTAINER` or `STALE_PLAN_ITEM` refuses the write; inspect/query
+again, reconsider the intended change against the current state, and retry with
+the new returned guards. Never drop guards or blindly replay an obsolete intent.
+
 Speak to users in simple actions first. Call product commands by default; the
 canonical operations are implementation leaves underneath them. Do not ask the
 user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph sidecars, schema

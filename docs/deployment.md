@@ -369,6 +369,15 @@ kb --version
 On macOS/Linux, `bash scripts/upgrade.sh` provides the same behavior with
 `--cli-sync auto|always|never`.
 
+A second service on the same machine (its own unit, port and vault, such as a
+client cell beside a personal one) upgrades with `--unit-file <its unit>`. The
+script reads that service's vault from the unit's own environment, never from the
+checkout's `.env`, and refuses to continue when the unit names none: pass `--vault`
+then. For a unit that is not the default one, `--cli-sync auto` leaves the uv-tool
+CLI alone, and the managed-install manifest keeps naming the service it already
+names. A CLI sync keeps an operator-owned launcher (a regular file where uv would
+put its symlink) in uv's bin directory.
+
 ### Windows upgrade: legacy idempotency runtime DACL
 
 Exomem 0.47.0 began requiring a protected, principal-private DACL on Windows
@@ -832,11 +841,13 @@ replication product.
 
 ## Recall model and re-embedding
 
-A personal server encodes recall with `BAAI/bge-m3`, served from a pinned int8
-ONNX artefact on CPU, and activation shares that one instance (about 0.65 GB
-resident). The first load builds the artefact from the pinned export: a 2.2 GB
-download and a quantisation that peaks near 9 GB in a child process. A hosted or
-cloud cell keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
+A personal server and an Exomem Cloud cell encode recall with `BAAI/bge-m3`,
+served from a pinned int8 ONNX artefact on CPU, and activation shares that one
+instance (about 0.65 GB resident). The first load fetches the published
+artefact, or builds it from the pinned export: a 2.2 GB download and a
+quantisation that peaks near 9 GB in a child process. The cloud image carries
+the artefact, since a cell can fetch nothing. A hosted cell (the helm cell
+chart) keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
 explicitly.
 
 Every recall sidecar records the model, fingerprint and width of the vectors it
@@ -852,12 +863,19 @@ resident.
 
 - Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
   `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
-- `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving.
-- Both models are resident while the build runs, in every mode, quiet included:
-  warm-up loads the old model before writes are admitted so a write never
-  finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to keep one model.
+- `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving
+  on a personal server.
+- On a personal server both models are resident while the build runs, in every
+  mode, quiet included: warm-up loads the old model before writes are admitted
+  so a write never finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to
+  keep one model there.
 - Rolling back to `BAAI/bge-base-en-v1.5` after a later start has retired the
   old sidecar re-embeds the whole vault into the English space, the same way.
+- A cloud cell holds one model. It never loads the old one: the old sidecar is
+  refused, the vector lane reports `vector_space_mismatch` and the lexical
+  lanes answer until the cutover, and doctor warns that dense recall is off.
+  Writes meanwhile are built by the job's catch-up. With
+  `EXOMEM_RECALL_REEMBED=off` a cell's dense recall stays off.
 - `exomem index` maintains whichever sidecar is serving, with its own model.
 - The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
 

@@ -62,6 +62,13 @@ scheduler:
   contractSha256: 03ec8f7ae6f1a221ef8ac73e390be029b180df08e0b55806812496ea9fca7733
   secretName: exomem-hosted-scheduler
   secretKey: secret
+  jobs:
+    exomem-access-delivery:
+      servesCloud: true
+    exomem-reconcile:
+      servesCloud: true
+    exomem-export-gc:
+      servesCloud: false
 
 observability:
   contractSha256: 30671acff9bfc15fa825fbc72292f6435cf3ce994c0de04f4649ee46ee343f63
@@ -231,6 +238,8 @@ cloudDatabase:
 
 cellctl:
   enabled: false
+  # Operator-selected cells reserve agents carrying their own cell ID.
+  dedicatedCellIds: []
   # ghcr.io/artexis10/exomem-cellctl@sha256:<digest>, built from
   # infra/cellctl/Dockerfile and recorded in the release notes on each release
   # tag (release-please.yml). Always a digest, never a tag.
@@ -307,8 +316,27 @@ cells:
     - 100.64.0.0/10
     - 169.254.0.0/16
 
+# Stage the broker before activating explicit cells with its verified Service IP.
+artifactBroker:
+  enabled: false
+  image: ""
+  endpoint: ""
+  cellIds: []
+  publicKeySecretName: exomem-artifact-broker-public-key
+  publicKeySecretKey: public-key
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
 cloudGateway:
   enabled: false
+  artifactTransportEnabled: false
+  artifactSigningKeySecretName: exomem-cloud-artifact-signing-key
+  artifactSigningKeySecretKey: signing-key
+  # Enable only after the matched web/gateway release, reviewer schema/grants,
+  # and dedicated complimentary sample account are verified. Ordinary Cloud
+  # accounts do not require this separate reviewer authority.
+  marketplaceReviewerAccessEnabled: false
   # Supplied by the reviewed Substrate gateway image release; never a mutable tag.
   image: ""
   replicas: 1

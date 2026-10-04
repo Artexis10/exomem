@@ -96,8 +96,8 @@ def test_bootstrap_profiles_teach_full_core_without_vault_leak(tmp_path: Path) -
         note.parent.mkdir(parents=True)
         note.write_text(f"# {sentinel}\n", encoding="utf-8")
 
-    compact_left = commands.op_bootstrap(first, profile="compact")["semantic_authoring"]
-    compact_right = commands.op_bootstrap(second, profile="compact")["semantic_authoring"]
+    compact_left = commands.op_bootstrap(first, profile="compact", section="all")["semantic_authoring"]
+    compact_right = commands.op_bootstrap(second, profile="compact", section="all")["semantic_authoring"]
     full_left = commands.op_bootstrap(first, profile="full")["semantic_authoring"]
     full_right = commands.op_bootstrap(second, profile="full")["semantic_authoring"]
 

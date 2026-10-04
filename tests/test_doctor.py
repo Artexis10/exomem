@@ -984,6 +984,9 @@ def test_sidecar_probe_uses_the_onnx_lane_when_that_is_what_is_installed(
 
     # It must get past the stack gate. Whatever it reports next is about the
     # sidecar or the model cache — never "the stack isn't installed".
+    if check is None:
+        check = doctor_module._check_recall_reembed(vault)
+    assert check is not None
     assert "serving stack isn't installed" not in check.message
 
 
@@ -1119,6 +1122,7 @@ def test_sidecar_present_but_model_not_cached_skips_probe(
 ) -> None:
     """doctor never downloads: an uncached model → skip the live probe, not fetch."""
     _sidecar(vault)
+    monkeypatch.setenv("EXOMEM_RECALL_REEMBED", "off")  # Keep the legacy probe on an empty sidecar.
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
     monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: False)
@@ -1136,6 +1140,7 @@ def test_sidecar_present_but_probe_raises_fails(
     from exomem import embeddings as embeddings_module
 
     _sidecar(vault)
+    monkeypatch.setenv("EXOMEM_RECALL_REEMBED", "off")  # Keep the legacy probe on an empty sidecar.
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
     monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: True)

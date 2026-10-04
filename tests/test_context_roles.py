@@ -24,6 +24,7 @@ SHIPPED_VOCABULARY = (
     "current_state",
     "recent_change",
     "active_plans",
+    "material",
     "methods",
     "precedents",
     "people",
@@ -31,6 +32,7 @@ SHIPPED_VOCABULARY = (
     "baseline",
     "evidence",
     "open_questions",
+    "contact",
 )
 
 
@@ -55,7 +57,7 @@ def test_shipped_registry_loads_with_the_declared_vocabulary() -> None:
     assert registry.source == "shipped"
     assert registry.findings == ()
     assert tuple(registry.roles) == SHIPPED_VOCABULARY
-    assert len(registry.roles) == 14
+    assert len(registry.roles) == 16
     for role in registry.roles.values():
         assert role.description
         assert role.lane in context_roles.LANES
@@ -323,7 +325,9 @@ EVIDENCE_BEARING_ROLES = (
     "precedents",
     "open_questions",
 )
-NEITHER_FIELD_ROLES = ("identity", "resources", "people", "location", "baseline", "evidence")
+NEITHER_FIELD_ROLES = (
+    "identity", "resources", "people", "location", "baseline", "evidence", "contact",
+)
 
 
 def test_shipped_evidence_bearing_roles_carry_both_fields() -> None:
@@ -552,3 +556,42 @@ def test_selection_matches_evidence_cues_too(vault: Path) -> None:
     selected = context_roles.select_roles(registry, anchor_kinds=("hub",), analysis=analysis)
 
     assert any(item["id"] == "active_plans" and item["source"] == "turn_cue" for item in selected)
+
+
+def test_an_entity_reached_by_recency_alone_is_not_read_for_linked_conclusions() -> None:
+    """Conclusions linked to an entity answer a turn that names it, not a
+    referent that recency alone supplied ("where were we")."""
+    from exomem import working_set_resolve
+
+    registry = context_roles.load_roles()
+    analysis = working_set_resolve.analyze_turn("where were we")
+
+    named = context_roles.select_roles(registry, anchor_kinds=("entity",), analysis=analysis)
+    prior = context_roles.select_roles(
+        registry,
+        anchor_kinds=("entity",),
+        analysis=analysis,
+        prior_only_kinds=frozenset({"entity"}),
+    )
+
+    assert "precedents" in {item["id"] for item in named}
+    assert "precedents" not in {item["id"] for item in prior}
+    assert "identity" in {item["id"] for item in prior}
+
+
+def test_a_project_reached_by_recency_alone_is_not_read_for_conclusions() -> None:
+    from exomem import working_set_resolve
+
+    registry = context_roles.load_roles()
+    analysis = working_set_resolve.analyze_turn("where were we")
+
+    named = context_roles.select_roles(registry, anchor_kinds=("project",), analysis=analysis)
+    prior = context_roles.select_roles(
+        registry,
+        anchor_kinds=("project",),
+        analysis=analysis,
+        prior_only_kinds=frozenset({"project"}),
+    )
+
+    assert "precedents" in {item["id"] for item in named}
+    assert "precedents" not in {item["id"] for item in prior}

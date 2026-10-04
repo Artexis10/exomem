@@ -1,0 +1,247 @@
+# Frontmatter Spec
+
+Every file in `Knowledge Base/` (except `index.md` files; sources also carry
+frontmatter) carries YAML frontmatter at the top. The frontmatter is the metadata
+layer; without it, audit cannot do its job (and optional Obsidian tooling — Dataview, base
+files — can't scope). Frontmatter is required regardless of viewer; Dataview/bases are a nicety on top.
+
+## Common fields
+
+These appear on every page type:
+
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `exomem_id` | new pages | UUID | immutable identity assigned by Exomem; legacy pages gain one only through explicit ID backfill |
+| `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `experiment`, `production-log`, `entity` |
+| `title` | new pages | Unicode string | exact human-facing display title; independent of the filename slug |
+| `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |
+| `created` | yes | ISO instant or date | `YYYY-MM-DDTHH:MM:SSZ`, set on creation, never edited |
+| `updated` | yes | ISO instant or date | `YYYY-MM-DDTHH:MM:SSZ`, refreshed on every edit |
+| `tags` | yes | list | freeform, lowercase, dash-separated |
+
+`created` and `updated` are recorded at **second granularity in UTC**, so pages
+revised more than once in a day stay orderable. Pages written before this was
+introduced carry a bare `YYYY-MM-DD` and are never rewritten: a date-only value
+means the intra-day time was genuinely not captured, and restamping it as
+midnight would assert a precision that never existed. Both forms are therefore
+permanent, and readers must accept either. Comparing two values that share a day
+when at least one is date-only is undecidable rather than equal — tools report
+that rather than guessing an order.
+
+New writers also render `title` as the page's canonical H1. Readers remain
+backward-compatible with legacy pages and resolve display titles in this order:
+frontmatter `title`, first H1, then a humanized filename stem. Unicode is stored
+losslessly; the server never guesses a language, pronunciation, or translation.
+
+## Per-type fields
+
+### source
+
+| Field | Required | Notes |
+|---|---|---|
+| `source_type` | yes | what the artifact **is**, as a slug-shaped key registered in `_Schema/source-taxonomy.yaml`; unknown keys **auto-register on first use** (typo-guarded). An open set, not a closed enum — e.g. `article`, `session`, `book`, `paper`, `video`, `research-report`, `official-guidance`, `correspondence`, `invoice-receipt`, `dataset-export`, `other`. Also accepted as the argument name `source_kind` |
+| `domain` | optional | what the artifact is **about**, on an axis independent of `source_type`; same open, auto-registering vocabulary — e.g. `travel`, `health`, `finance`, `equipment`, `software` |
+| `projects` | optional | list of project keys this source serves; a source may serve several, and this never affects where it is filed |
+| `captured` | yes | ISO date — same as `created` for sources |
+| `url` | conditional | required for kinds whose registry entry sets `requires_url`, which ships true for `article`, `paper`, `video` |
+| `author` | optional | |
+| `ingested_into` | yes | list of wikilinks to compiled notes that cite this; starts as `[]` |
+
+`other` is a **low-confidence fallback**: use it when the kind genuinely cannot
+be determined, never because no listed label matches. Naming a kind Exomem has
+not seen before is normal and requires no setup.
+
+### research-note
+
+| Field | Required | Notes |
+|---|---|---|
+| `project` | yes | a slug-shaped project key registered in `_Schema/project-keys.yaml`; unknown keys **auto-register on first use** (typo-guarded). An open set, not a closed enum — e.g. `personal`, `project-alpha`, `project-beta`, `work` |
+| `sources` | yes | list of wikilinks to `Sources/` files this note draws from |
+| `supersedes` | optional | wikilink to the page this one replaces |
+| `superseded_by` | optional | wikilink to the page that replaced this one (set when status flips to `superseded`) |
+
+### insight, failure, pattern
+
+| Field | Required | Notes |
+|---|---|---|
+| `sources` | yes | list of wikilinks |
+| `projects` | optional | list of project keys this applies to |
+| `supersedes`, `superseded_by` | optional | as above |
+| `severity` | failure-only, optional | qualitative: `minor`, `moderate`, `serious`, `critical` |
+| `pattern_type` | pattern-only, optional | `architectural`, `workflow`, `prompting`, `governance`, `pedagogical`, etc. |
+
+### experiment
+
+| Field | Required | Notes |
+|---|---|---|
+| `domain` | yes | `workflow`, `research`, `ops`, etc. — matches the subfolder under `Notes/Experiments/` |
+| `started` | yes | ISO date the experiment actually began (may differ from `created` if planning preceded execution) |
+| `duration` | yes | freeform string: `"30 days"`, `"2 weeks"`, `"ongoing"` |
+| `concluded` | optional | ISO date the experiment ended; absent while ongoing |
+| `outcome` | optional | how it turned out: `confirmed`, `refuted`, `qualified`, `inconclusive`, `abandoned`. Categorical state, never a score — see below |
+| `n` | optional | sample size — default 1 if absent |
+| `hypothesis` | optional | one-line hypothesis (also restated in body); useful for find/audit |
+| `sources` | optional | wikilinks to any source material that informed the protocol |
+| `supersedes`, `superseded_by` | optional | as above |
+
+### production-log
+
+| Field | Required | Notes |
+|---|---|---|
+| `medium` | yes | `posts`, `articles`, `pdfs`, `episodes`, etc. — matches the subfolder under `Notes/Productions/` |
+| `status` | yes | one of: `planned`, `recorded`, `edited`, `published`, `reflected`, `dropped`, `archived`. Different from other page types — production-logs have lifecycle states. |
+| `recorded` | optional | ISO date primary capture happened |
+| `published` | optional | ISO date or `null` while still pre-publish |
+| `projects` | optional | list of project keys (typically one) |
+| `host` | optional | who's on camera / lead author |
+| `editor` | optional | who's editing / producing |
+| `sources` | optional | wikilinks to source material that informed the production |
+| `related` | optional | wikilinks to research-notes, patterns, failures, entities the production draws on or applies |
+| `supersedes`, `superseded_by` | optional | as above |
+
+### entity
+
+| Field | Required | Notes |
+|---|---|---|
+| `entity_type` | yes | Stable ID from the active entity registry; use bootstrap guidance rather than maintaining a separate validity list. |
+| Other | per type | see `page-types.md` for entity-type-specific fields |
+
+### cross-domain bridge (optional on compiled note types)
+
+| Field | Required | Notes |
+|---|---|---|
+| `bridge_of` | all-or-none | non-empty list of stable memory refs after normal authoring resolves supplied source paths |
+| `bridge_scope` | all-or-none | descriptive lowercase slug; it never grants access or changes scope membership |
+| `bridge_review` | all-or-none | ISO date for derived review-queue surfacing; it does not itself expire an otherwise exact release |
+
+Use the normal reviewed `remember` or `replace_memory` flow to author these
+fields. A bridge draft remains unreleased until a separate exact release grant
+is owner-reviewed and committed through governance.
+
+## Status semantics
+
+For most page types:
+
+- **draft** — page is being authored; lint may skip some checks
+- **active** — page is live and current
+- **superseded** — replaced by a newer page; `superseded_by` must point to it
+- **archived** — moved to `<location>/_archive/`; not deleted, just stepped down from active rotation
+
+For experiments specifically: `active` covers both planning and running. When
+the experiment finishes, set `status: concluded` and record `outcome:` — that
+says the result stands, which is a different claim from `archived`. Archive only
+when the experiment is no longer being referenced at all; a concluded experiment
+usually stays very much in rotation, because a settled result is exactly what
+later work cites.
+
+A refuted experiment is **not** superseded. Supersession means a page's whole
+current view was replaced; refuted means the question was answered and the
+answer was no. A refuted result keeps `status: concluded`, stays fully
+retrievable, and carries the evidence that refuted it — negative results are the
+most expensive knowledge a vault holds and are never quietly retired.
+
+For production-logs specifically: status reflects production lifecycle (`planned`
+→ `recorded` → `edited` → `published` → `reflected`), plus exit states
+(`dropped`, `archived`).
+
+A page never carries `status: deleted`. Deletion happens by archive, not by
+removal.
+
+## Explicit non-fields
+
+The following fields are deliberately **not** in the spec:
+
+- `confidence` — numeric scores misrepresent the underlying signal. Trust comes
+  from sources and link counts, both visible in frontmatter and via backlinks.
+  The categorical `outcome:` field, and a semantic unit's `verdict:` metadata,
+  are lifecycle *state* rather than a stored credence: they say what happened,
+  not how sure anyone feels. A number, percentage, or hedge is never a valid
+  value for either, and no alias of `confidence` is accepted.
+- `decay_at` / `expires_at` — knowledge does not expire on a schedule.
+  Supersession or archival is explicit.
+- `auto_*` anything — no field reflects an automated background process.
+  Operations on the KB are explicit.
+
+## Wikilink format in frontmatter
+
+YAML strings, double-quoted, using **full vault-rooted paths** without the `.md`
+extension. For KB material this is `Knowledge Base/<rest>`:
+
+```yaml
+sources:
+  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
+  - "[[Knowledge Base/Sources/Sessions/2026-05-04-architecture-debate]]"
+```
+
+This is plain-markdown wikilink syntax; it is also Obsidian-compatible and survives optional Dataview queries. The exomem
+writer normalizes any input form (bare names, KB-relative, with `.md`, with
+`[[ ]]` wrappers, with `|alias`, with `#anchor`) to this canonical form on every
+write. You can paste in any shape; the file on disk lands canonical.
+
+## Tags
+
+- Lowercase
+- Dash-separated multi-word: `agentic-rag`, not `agentic_rag` or `AgenticRAG`
+- No `#` prefix in frontmatter
+- Avoid generic catch-alls like `important` or `todo` — they don't help retrieval
+
+## Example: full frontmatter for a research note
+
+```yaml
+---
+exomem_id: 123e4567-e89b-42d3-a456-426614174000
+type: research-note
+project: project-alpha
+status: active
+created: 2026-05-09
+updated: 2026-05-12
+sources:
+  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
+  - "[[Knowledge Base/Sources/Sessions/2026-05-09-architecture-debate]]"
+supersedes: "[[Knowledge Base/Notes/Research/Project Alpha/old-rag-stub]]"
+tags: [retrieval, agentic-rag, knowledge-graph, governance]
+---
+```
+
+## Example: full frontmatter for an experiment
+
+```yaml
+---
+exomem_id: 123e4567-e89b-42d3-a456-426614174001
+type: experiment
+domain: workflow
+status: active
+created: 2026-05-01
+updated: 2026-05-09
+started: 2026-05-09
+duration: "30 days"
+n: 1
+hypothesis: "Batching code review into one daily slot cuts context-switching"
+sources:
+  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
+tags: [workflow, batching, focus]
+---
+```
+
+## Example: full frontmatter for a production-log
+
+```yaml
+---
+type: production-log
+medium: posts
+status: recorded
+created: 2026-05-09
+updated: 2026-05-09
+recorded: 2026-05-09
+published: null
+projects: [project-alpha]
+host: the host
+editor: a teammate
+sources:
+  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
+related:
+  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
+  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
+tags: [posts, launch, batch-01]
+---
+```

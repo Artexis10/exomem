@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import unicodedata
+from collections import ChainMap
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -2037,6 +2038,7 @@ class IdentityCatalogue:
     carried across a change of this process's role, and only while
     :func:`revalidate_identity_catalogue_generation` still agrees with it.
     """
+    _components: tuple[IdentityCatalogue, ...] = ()
 
     @classmethod
     def from_vault(cls, vault_root: Path) -> IdentityCatalogue:
@@ -2142,6 +2144,15 @@ class IdentityCatalogue:
         )
 
     def descriptor_for(self, identity: held_fs.StableIdentity) -> str | None:
+        if self._components:
+            descriptors = {
+                descriptor
+                for catalogue in self._components
+                if (descriptor := catalogue.descriptor_for(identity)) is not None
+            }
+            if len(descriptors) > 1:
+                raise RuntimeError("one private filesystem identity maps to multiple owners")
+            return next(iter(descriptors), None)
         key = _identity_key(identity)
         descriptor_id = self.identities.get(key)
         if descriptor_id is None or self.published_paths is None:
@@ -2188,6 +2199,10 @@ _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
 #: reconcile-class MCP tools have no bound budget and can wait up to this
 #: ceiling.
 _FLIGHT_WAIT_SECONDS = 120.0
+#: What a follower leaves of the caller's budget for the write that follows:
+#: the guard's own acquire timeout. The delivery reserve is subtracted as well,
+#: so a follower never hands the write a budget that is already spent.
+_FOLLOWER_GUARD_RESERVE_SECONDS = 5.0
 
 
 def _flight_wait_seconds() -> float:
@@ -2201,7 +2216,15 @@ def _flight_wait_seconds() -> float:
     budget = request_budget.current()
     if budget is None:
         return _FLIGHT_WAIT_SECONDS
-    return min(_FLIGHT_WAIT_SECONDS, budget.remaining())
+    return min(
+        _FLIGHT_WAIT_SECONDS,
+        max(
+            0.0,
+            budget.remaining()
+            - request_budget.DELIVERY_RESERVE_SECONDS
+            - _FOLLOWER_GUARD_RESERVE_SECONDS,
+        ),
+    )
 
 
 def _await_baseline_flight(
@@ -2330,6 +2353,29 @@ def identity_catalogue_refusal(vault_root: Path) -> str | None:
         if _BASELINE_IDENTITY_CATALOGUES.get(vault_key) is cached:
             del _BASELINE_IDENTITY_CATALOGUES[vault_key]
     return cause
+
+
+def warm_identity_catalogue_before_boundary(vault_root: Path) -> None:
+    """Build a cold inventory now, on the caller's thread, before it takes the
+    mutation boundary.
+
+    The walk is whole-vault ("tens of seconds on a mature vault"). A write that
+    met it cold inside its boundary built it inline and held every other writer
+    stopped for that long, so a capture write calls this first: single-flighted,
+    a no-op when warm, and never refusing a write on an ordinary error -- a
+    failure here only means the write pays for the walk where it always did.
+    """
+
+    if identity_catalogue_ready(vault_root) or _identity_coordination_active(vault_root):
+        return
+    try:
+        _baseline_identity_catalogue(vault_root)
+    except AssertionError:
+        raise
+    except Exception as error:  # noqa: BLE001 - a best-effort warm never refuses a write
+        log.warning(
+            "identity catalogue pre-boundary warm failed: %s", type(error).__name__
+        )
 
 
 def schedule_identity_catalogue_warm(vault_root: Path) -> None:
@@ -2633,24 +2679,38 @@ def _reachable_owner_publications(
 def _merge_identity_catalogues(
     *catalogues: IdentityCatalogue,
 ) -> IdentityCatalogue:
-    merged: dict[_IdentityKey, str] = {}
-    for catalogue in catalogues:
-        for key, descriptor_id in catalogue.identities.items():
-            if catalogue.published_paths is not None:
-                candidate = held_fs.StableIdentity(
-                    key[0], key[1], key[2], 1
-                )
-                current_descriptor = catalogue.descriptor_for(candidate)
-                if current_descriptor is None:
-                    continue
-                descriptor_id = current_descriptor
-            prior = merged.get(key)
-            if prior is not None and prior != descriptor_id:
-                raise RuntimeError(
-                    "one private filesystem identity maps to multiple owners"
-                )
-            merged[key] = descriptor_id
-    return IdentityCatalogue(MappingProxyType(merged))
+    """Retain name evidence; probe only encountered identities or owner conflicts.
+
+    A merge is working evidence, not a stamped inventory or cached authority.
+    Resolving every private name here makes each ordinary page read pay for the
+    whole private tree, and freezes departed names into unconditional claims.
+    """
+    components = tuple(
+        component
+        for catalogue in catalogues
+        for component in (catalogue._components or (catalogue,))
+    )
+
+    def claims(catalogue: IdentityCatalogue, key: _IdentityKey) -> set[str]:
+        if catalogue.published_paths is None:
+            return {catalogue.identities[key]}
+        return {descriptor for descriptor, _name in catalogue.published_paths.get(key, ())}
+
+    conflicts: set[_IdentityKey] = set()
+    for index, catalogue in enumerate(components):
+        for prior in components[:index]:
+            for key in catalogue.identities.keys() & prior.identities.keys():
+                if len(claims(catalogue, key) | claims(prior, key)) > 1:
+                    conflicts.add(key)
+    merged = IdentityCatalogue(
+        MappingProxyType(ChainMap(*(catalogue.identities for catalogue in components))),
+        _components=components,
+    )
+    # Keep global fail-closed collision checks, including a stale first claim
+    # whose still-reachable name now belongs to a different published owner.
+    for key in conflicts:
+        merged.descriptor_for(held_fs.StableIdentity(key[0], key[1], key[2], 1))
+    return merged
 
 
 def _needs_fresh_physical_catalogue(values: tuple[object, ...]) -> bool:

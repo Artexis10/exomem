@@ -1,8 +1,9 @@
 variable "nodes" {
   description = "K3s agent nodes keyed by a short DNS-label suffix; each entry is one server."
   type = map(object({
-    private_ip  = string
-    server_type = string
+    private_ip        = string
+    server_type       = string
+    dedicated_cell_id = optional(string, "")
   }))
   default = {}
 
@@ -14,14 +15,14 @@ variable "nodes" {
   }
 
   validation {
-    # Capacity is counted in volume attachments, not memory: 16 attachments
-    # minus the controller's headroom of 5 leaves 11 cell slots at a 1 GiB
-    # request each, so only x86 types with at least 16 GB are allowed. The
-    # k3s role pins the amd64 binary, which also rules out ARM (cax).
+    # General nodes retain the attachment-based 16 GiB allow-list. A CX33
+    # is restricted to one reserved cell and contributes no general slots.
     condition = alltrue([
-      for node in values(var.nodes) : contains(["cpx42", "ccx23", "ccx33", "ccx43"], node.server_type)
+      for node in values(var.nodes) :
+      contains(["cpx42", "ccx23", "ccx33", "ccx43"], node.server_type) ||
+      (node.server_type == "cx33" && node.dedicated_cell_id != "")
     ])
-    error_message = "Agent server_type must be one of cpx42, ccx23, ccx33 or ccx43 (x86, at least 16 GB)."
+    error_message = "General agents require cpx42, ccx23, ccx33 or ccx43; CX33 requires a dedicated cell reservation."
   }
 
   validation {
@@ -47,6 +48,15 @@ variable "nodes" {
     ])
     error_message = "An agent private_ip must not reuse the fleet server's or the control database's address."
   }
+  validation {
+    condition = alltrue([
+      for node in values(var.nodes) :
+      node.dedicated_cell_id == "" ||
+      (length(node.dedicated_cell_id) == 16 && can(regex("^[a-z2-7]{16}$", node.dedicated_cell_id)))
+    ])
+    error_message = "dedicated_cell_id must be empty or an exact sixteen-character lowercase base32 cell identifier."
+  }
+
 }
 
 variable "subnet_id" {

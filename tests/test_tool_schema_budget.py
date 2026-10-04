@@ -116,15 +116,23 @@ def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) 
         expected = 1 if wire["name"] in AUTHORING_TOOLS else 0
         assert in_description == expected, wire["name"]
         assert in_parameters == 0, f"{wire['name']} repeats the contract in a parameter"
+        if wire["name"] in AUTHORING_TOOLS:
+            from exomem.semantic_authoring import AUTHORING_CONTRACT
+
+            for code in AUTHORING_CONTRACT.findings:
+                assert code in wire["description"], (wire["name"], code)
 
 
 def test_published_schemas_do_not_advertise_optional_null(server) -> None:
     def walk(node, path):
         if isinstance(node, dict):
-            assert node.get("default", 0) is not None, f"default null at {path}"
-            arms = node.get("anyOf")
-            if isinstance(arms, list):
-                assert {"type": "null"} not in arms, f"null arm at {path}"
+            for name, prop in node.get("properties", {}).items():
+                if name in node.get("required", []):
+                    continue
+                assert prop.get("default", 0) is not None, f"default null at {path}/{name}"
+                assert {"type": "null"} not in prop.get("anyOf", []), (
+                    f"optional null arm at {path}/{name}"
+                )
             for key, value in node.items():
                 walk(value, f"{path}/{key}")
         elif isinstance(node, list):
@@ -133,6 +141,28 @@ def test_published_schemas_do_not_advertise_optional_null(server) -> None:
 
     for wire in _wires(server):
         walk(wire["inputSchema"], wire["name"])
+
+
+def test_compaction_preserves_required_and_array_item_nullability() -> None:
+    from jsonschema import validate
+
+    from exomem.command_surface import compact_input_schema
+
+    nullable = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None}
+    schema = {
+        "type": "object",
+        "required": ["selected"],
+        "properties": {
+            "selected": nullable,
+            "values": {"type": "array", "items": nullable},
+            "optional": nullable,
+        },
+    }
+    compact = compact_input_schema(schema)
+    validate({"selected": None, "values": [None, "value"]}, compact)
+    assert compact["properties"]["selected"] == nullable
+    assert compact["properties"]["values"]["items"] == nullable
+    assert compact["properties"]["optional"] == {"type": "string"}
 
 
 def test_every_nullable_optional_parameter_still_accepts_an_explicit_null(server) -> None:

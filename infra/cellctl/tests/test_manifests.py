@@ -383,3 +383,21 @@ def test_quota_memory_limit_has_headroom_for_a_job_pod_beside_the_serving_pod() 
     assert _mebibytes(quota["limits.memory"]) >= (
         _mebibytes(serving["resources"]["limits"]["memory"]) + job_limit
     )
+
+
+def test_dedicated_serving_and_maintenance_keep_the_same_pvc_and_exact_placement() -> None:
+    from cellctl.manifests import render_backup_job, render_restore_job
+
+    selected = _spec(dedicated_node=True, hold_started_at="2026-01-01T00:00:00+00:00")
+    ordinary = _spec(hold_started_at=selected.hold_started_at)
+    for render in (
+        render_statefulset,
+        lambda spec: render_backup_job(spec, bucket_name="bucket", endpoint="https://s3.example"),
+        lambda spec: render_restore_job(spec, bucket_name="bucket", endpoint="https://s3.example", snapshot_id="a" * 64),
+    ):
+        pod = render(selected)["spec"]["template"]["spec"]
+        baseline = render(ordinary)["spec"]["template"]["spec"]
+        assert pod.pop("nodeSelector", None) == {"exomem.io/dedicated-cell": selected.cell_id}
+        assert pod.pop("tolerations", None) == [{"key": "exomem.io/dedicated-cell", "operator": "Equal",
+                                                "value": selected.cell_id, "effect": "NoSchedule"}]
+        assert pod == baseline

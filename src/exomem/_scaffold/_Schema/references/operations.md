@@ -559,11 +559,13 @@ cannot be undone.
   pasted secret. Files must be
   **attached** (inline-pasted images never land on the sandbox disk), and the host
   must be in the sandbox's egress allowlist (Settings → network; one-time). If the
-  sandbox can't reach the host, fall back to handing the user the prefilled link
-  `https://<your-host>/upload?scope=<scope>&category=<category>`.
-- **Phone / curl / a shortcut:** `POST https://<your-host>/upload` multipart
+  sandbox can't reach the returned URL, report that transport limitation and use
+  a supported attachment channel. Never guess an upload endpoint or read a
+  credential from the user's environment or machine.
+- **Phone / curl / a shortcut:** multipart-POST to the exact `upload_url`
+  returned by `transfer_artifact(operation="upload")`
   (`file`, `scope`, `category`, optional `filename`, `description`, `text`) with
-  `Authorization: Bearer $EXOMEM_UPLOAD_TOKEN` (the token is **always** required).
+  `Authorization: Bearer <returned short-lived token>` (the token is **always** required).
   Lands straight in `Evidence/<scope>/<category>/`, zero token cost.
 - **Claude Code / desk-side:** the file is already on local disk — write it
   straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync).
@@ -918,7 +920,7 @@ this is how you query their values.
 
 ## episode_memory
 
-Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `activate_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
+Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `activate_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
 
 ### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
 - `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.

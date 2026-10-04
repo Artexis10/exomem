@@ -1,7 +1,7 @@
 # simple-command-surface Specification
 
 ## Purpose
-TBD - created by archiving change simplify-command-surface. Update Purpose after archive.
+Define a small set of simple product actions (`ask`, remember and capture, review, connect, adopt, maintain) that route common knowledge-base intents to canonical operations without duplicating command logic or weakening existing safety contracts.
 ## Requirements
 ### Requirement: Simple Product Actions
 The system SHALL define a small set of simple product actions that route common knowledge-base intents to canonical Exomem operations without duplicating command logic.

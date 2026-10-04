@@ -1,7 +1,7 @@
 # action-first-audit Specification
 
 ## Purpose
-TBD - created by archiving change clear-agent-facing-friction. Update Purpose after archive.
+Make audit output usable as a work queue: current actionable findings come first, legacy relation-disposition debt is grouped as backlog, and bounds are applied only after prioritization. It also defines the audit's semantic scope-divergence and recurring-unresolved-entity categories.
 
 ## Requirements
 

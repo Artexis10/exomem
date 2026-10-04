@@ -1,7 +1,7 @@
 # category-retrieval-reliability Specification
 
 ## Purpose
-TBD - created by archiving change restore-indexed-category-recall. Update Purpose after archive.
+Keep exact category and kind recall correct, observable and cost-proportional to the candidate set, independent of FTS availability. It defines a SQLite semantic catalog, candidate-first planning, explicit incomplete and warming outcomes, transient-failure recovery, and bounded foreground repair.
 ## Requirements
 ### Requirement: FTS-Independent Semantic Catalog
 

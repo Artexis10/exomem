@@ -7,15 +7,22 @@ native environment before optional model runtimes import.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import threading
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 CPU_THREADS_ENV = "EXOMEM_CPU_THREADS"
 SYNC_WORKERS_ENV = "EXOMEM_SYNC_WORKERS"
 ALLOW_NATIVE_OVERRIDES_ENV = "EXOMEM_ALLOW_NATIVE_THREAD_OVERRIDES"
+ONNX_SHARE_WEIGHTS_ENV = "EXOMEM_ONNX_SHARE_WEIGHTS"
 SYSTEMD_CPU_WEIGHT = 20
 _NATIVE_ENV = {
     "OMP_NUM_THREADS": None,
@@ -27,6 +34,15 @@ _NATIVE_ENV = {
     "TOKENIZERS_PARALLELISM": "false",
 }
 _background_priority_applied: bool | None = None
+_MODEL_WORK: ContextVar[tuple[str, threading.Event | None]] = ContextVar(
+    "exomem_model_work", default=("foreground", None)
+)
+SEMANTIC_PREPARATION_BYTES = 64 * 1024 * 1024
+SEMANTIC_SMALL_RESERVE_BYTES = 4 * 1024 * 1024
+SEMANTIC_SOURCE_MAX_BYTES = 16 * 1024 * 1024
+_preparation_lock = threading.Lock()
+_preparation_bytes = 0
+_preparation_peak = 0
 _RESOURCE_POLICY_ENV = (
     CPU_THREADS_ENV,
     SYNC_WORKERS_ENV,
@@ -59,6 +75,9 @@ def _positive_env(name: str, default: int, *, minimum: int) -> tuple[int, str]:
 
 def resolve_policy() -> ComputePolicy:
     """Read the compute envelope without importing model runtimes."""
+    from . import cloud_cell
+
+    cloud_cell.resource_policy()
     cpu_threads, cpu_source = _positive_env(CPU_THREADS_ENV, 1, minimum=1)
     sync_workers, sync_source = _positive_env(SYNC_WORKERS_ENV, 8, minimum=2)
     return ComputePolicy(
@@ -142,10 +161,45 @@ def configure_onnx_session_options(options: Any, *, default_threads: int | None 
     """
     policy = resolve_policy()
     threads = policy.cpu_threads
-    if default_threads is not None and policy.cpu_source == "default":
+    from . import cloud_cell
+
+    if default_threads is not None and policy.cpu_source == "default" and cloud_cell.resource_policy() != "service-v1":
         threads = max(1, min(default_threads, effective_online_cpus()))
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
+
+
+def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether served ONNX sessions should retain file-backed shared weights.
+
+    Cloud cells opt in by default because several isolated processes share one
+    node. A personal or hosted server keeps ONNX Runtime's prepacked fast path.
+    The explicit binary override wins when valid. Empty values are unset;
+    malformed values warn and fall back to the deployment-mode default.
+    """
+    values = os.environ if env is None else env
+    from . import cloud_cell
+
+    hosted = str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    default = cloud_cell.cloud_mode_enabled(values) and not hosted
+    raw = values.get(ONNX_SHARE_WEIGHTS_ENV)
+    if raw is None or not str(raw).strip():
+        return default
+    value = str(raw).strip()
+    if value not in {"0", "1"}:
+        log.warning(
+            "invalid %s=%r; using deployment default %s",
+            ONNX_SHARE_WEIGHTS_ENV,
+            raw,
+            default,
+        )
+        return default
+    return value == "1"
 
 
 class ModelBusyError(RuntimeError):
@@ -171,12 +225,20 @@ class ModelAdmissionGate:
     """
 
     def __init__(self, capacity: int) -> None:
+        from . import cloud_cell
+
+        self._fair = cloud_cell.resource_policy() == "service-v1"
         self._capacity = capacity
         self._admitted = threading.BoundedSemaphore(capacity)
         self._admission_lock = threading.Lock()
         self._admitted_count = 0
         self._execution = threading.RLock()
         self._local = threading.local()
+        self._turns = threading.Condition()
+        self._turn_owner: int | None = None
+        self._turn_depth = 0
+        self._waiters: list[tuple[object, str]] = []
+        self._foreground_turns = 0
 
     @contextlib.contextmanager
     def admission(self):
@@ -202,14 +264,77 @@ class ModelAdmissionGate:
                 self._admitted.release()
 
     @contextlib.contextmanager
-    def execution(self, *, wait: bool = True):
+    def execution(
+        self, *, wait: bool = True, work_class: str | None = None,
+        cancel_event: threading.Event | None = None,
+    ):
         with self.admission():
+            if self._fair:
+                selected, cancellation = _MODEL_WORK.get()
+                with self._fair_execution(
+                    wait=wait, work_class=work_class or selected,
+                    cancel_event=cancel_event if cancel_event is not None else cancellation,
+                ):
+                    yield
+                return
             if not self._execution.acquire(blocking=wait):
                 raise ModelBusyError("model compute is busy; retry shortly")
             try:
                 yield
             finally:
                 self._execution.release()
+
+    def _next_waiter(self) -> object | None:
+        foreground = next((token for token, kind in self._waiters if kind == "foreground"), None)
+        bulk = next((token for token, kind in self._waiters if kind == "bulk"), None)
+        if bulk is not None and (foreground is None or self._foreground_turns >= 8):
+            return bulk
+        return foreground
+
+    @contextlib.contextmanager
+    def _fair_execution(self, *, wait: bool, work_class: str, cancel_event: threading.Event | None):
+        if work_class not in {"foreground", "bulk"}:
+            raise ValueError("unknown model work class")
+        owner = threading.get_ident()
+        token = object()
+        with self._turns:
+            if self._turn_owner == owner:
+                self._turn_depth += 1
+            else:
+                self._waiters.append((token, work_class))
+                try:
+                    while True:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise ModelBusyError("model compute is stopping")
+                        if self._turn_owner is None and self._next_waiter() is token:
+                            self._waiters.remove((token, work_class))
+                            self._turn_owner, self._turn_depth = owner, 1
+                            self._foreground_turns = (
+                                self._foreground_turns + 1
+                                if work_class == "foreground" and any(kind == "bulk" for _, kind in self._waiters)
+                                else 0
+                            )
+                            break
+                        if not wait:
+                            raise ModelBusyError("model compute is busy; retry shortly")
+                        self._turns.wait(timeout=0.1 if cancel_event is not None else None)
+                finally:
+                    if (token, work_class) in self._waiters:
+                        self._waiters.remove((token, work_class))
+                        self._turns.notify_all()
+        try:
+            yield
+        finally:
+            with self._turns:
+                self._turn_depth -= 1
+                if self._turn_depth == 0:
+                    self._turn_owner = None
+                    self._turns.notify_all()
+
+    def waiting_counts(self) -> dict[str, int]:
+        """Content-free fair waiters; each already occupies model admission."""
+        with self._turns:
+            return {kind: sum(item == kind for _, item in self._waiters) for kind in ("foreground", "bulk")}
 
     def admitted_count(self) -> int:
         with self._admission_lock:
@@ -219,15 +344,20 @@ class ModelAdmissionGate:
 _gate_lock = threading.Lock()
 _gate: ModelAdmissionGate | None = None
 _gate_capacity: int | None = None
+_gate_profile: str | None = None
 
 
 def _process_gate() -> ModelAdmissionGate:
-    global _gate, _gate_capacity
+    global _gate, _gate_capacity, _gate_profile
+    from . import cloud_cell
+
     capacity = resolve_policy().model_admission
+    profile = cloud_cell.resource_policy()
     with _gate_lock:
-        if _gate is None or _gate_capacity != capacity:
+        if _gate is None or _gate_capacity != capacity or _gate_profile != profile:
             _gate = ModelAdmissionGate(capacity)
             _gate_capacity = capacity
+            _gate_profile = profile
         return _gate
 
 
@@ -239,6 +369,205 @@ def model_execution(*, wait: bool = True):
 def model_admission():
     """One process-wide admission held across a bulk encode's execution turns."""
     return _process_gate().admission()
+
+
+@contextlib.contextmanager
+def model_work(work_class: str, *, cancel_event: threading.Event | None = None):
+    """Classify one existing caller, without widening its admission budget."""
+    if work_class not in {"foreground", "bulk"}:
+        raise ValueError("unknown model work class")
+    token = _MODEL_WORK.set((work_class, cancel_event))
+    try:
+        yield
+    finally:
+        _MODEL_WORK.reset(token)
+
+
+class PreparationBudgetExceeded(RuntimeError):
+    """This parent cannot be prepared inside the deployment envelope."""
+
+
+class PreparationCapacityBusy(RuntimeError):
+    """Another admitted parent temporarily occupies preparation capacity."""
+
+
+def _source_line_bound(source: str) -> int:
+    # Match str.splitlines' separators without allocating its line list before
+    # the parser reservation. CRLF has already been normalized on input.
+    return 1 + sum(source.count(marker) for marker in (
+        "\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"
+    ))
+
+
+def _yaml_expanded_cost(text: str, *, maximum: int) -> int:
+    """Bound alias/merge expansion from parser events before construction.
+
+    libyaml constructors flatten repeated merges recursively. Byte size alone
+    cannot bound that work. Count expanded node/scalar weight, allowing ordinary
+    aliases while refusing cyclic or over-budget graphs without constructing
+    their objects. This is a budget check, not another YAML parser.
+    """
+    import yaml
+
+    from . import vault
+
+    anchors: dict[str, int] = {}
+    frames: list[tuple[str | None, int]] = []
+    total = 0
+    try:
+        for event in yaml.parse(text, Loader=vault._YAML_SAFE_LOADER):
+            anchor = getattr(event, "anchor", None)
+            if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
+                if anchor:
+                    anchors.pop(anchor, None)
+                frames.append((anchor, 512))
+                continue
+            if isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+                anchor, cost = frames.pop()
+            elif isinstance(event, yaml.ScalarEvent):
+                cost = 512 + 4 * len(event.value.encode("utf-8"))
+            elif isinstance(event, yaml.AliasEvent):
+                if anchor not in anchors:
+                    raise PreparationBudgetExceeded("semantic YAML expansion is unbounded")
+                cost = anchors[anchor]
+                anchor = None
+            else:
+                continue
+            if anchor:
+                anchors[anchor] = cost
+            if frames:
+                parent, weight = frames[-1]
+                frames[-1] = parent, weight + cost
+                used = weight + cost
+            else:
+                total += cost
+                used = total
+            if used > maximum:
+                raise PreparationBudgetExceeded("semantic YAML expansion budget exceeded")
+    except yaml.YAMLError:
+        # The existing safe parser owns malformed-YAML handling. Nothing was
+        # constructed here; its byte/line allowance remains reserved.
+        return 0
+    return total
+
+
+class SemanticPreparation:
+    """One checked parent reservation, including optional old-vector reuse.
+
+    This bounds transient preparation, not native inference or corpus caches;
+    those retain their existing controls and measured cgroup acceptance.
+    """
+
+    def __init__(self, source_bytes: int, *, bulk: bool) -> None:
+        self.limit = (
+            SEMANTIC_PREPARATION_BYTES - SEMANTIC_SMALL_RESERVE_BYTES
+            if bulk else SEMANTIC_SMALL_RESERVE_BYTES
+        )
+        self.reuse_allowance = (4 if bulk else 1) * 1024 * 1024
+        self.reserved = 0
+        self.source = ""
+        self.signature: Any = None
+        self.guard: Any = None
+        self.source_bytes = source_bytes
+        self.parser_bytes = 0
+
+    def reserve(self, amount: int) -> None:
+        global _preparation_bytes, _preparation_peak
+        with _preparation_lock:
+            extra = max(0, amount - self.reserved)
+            if amount > self.limit:
+                raise PreparationBudgetExceeded("semantic preparation budget exceeded")
+            if _preparation_bytes + extra > SEMANTIC_PREPARATION_BYTES:
+                raise PreparationCapacityBusy("semantic preparation capacity busy")
+            self.reserved += extra
+            _preparation_bytes += extra
+            _preparation_peak = max(_preparation_peak, _preparation_bytes)
+
+    def check_page(self, page: Any, *, vector_dim: int) -> None:
+        # Before the existing chunker/parser allocates: count an upper bound
+        # of paragraphs, hard-split pieces and one possible unit per line.
+        # Title duplication is charged at UTF-8 width; strings can use four
+        # bytes per codepoint. Eight vector copies cover retained encode parts,
+        # concatenation/reuse assembly, both projections and publication blobs.
+        lines = _source_line_bound(self.source)
+        body = page.body or ""
+        chunks = body.count("\n") + (len(body) + 249) // 250 + 1
+        text_bytes = len(body.encode("utf-8")) + chunks * len((page.title or "").encode("utf-8"))
+        self.reserve(
+            self.parser_bytes + 4 * text_bytes
+            + (chunks + lines) * (4096 + 8 * max(1, vector_dim) * 4)
+            + self.reuse_allowance
+        )
+
+    def check_projections(self, chunks: list[str], units: list[Any], *, vector_dim: int) -> None:
+        """Charge the bounded, actual shape before reuse, encoding or blobs."""
+        count = len(chunks) + len(units)
+        text_bytes = sum(len(text.encode("utf-8")) for text in chunks)
+        text_bytes += sum(len(unit.content.encode("utf-8")) for unit in units)
+        self.reserve(
+            self.parser_bytes + 4 * text_bytes
+            + count * (4096 + 8 * max(1, vector_dim) * 4)
+            + self.reuse_allowance
+        )
+
+    def release(self) -> None:
+        global _preparation_bytes
+        with _preparation_lock:
+            _preparation_bytes -= self.reserved
+            self.reserved = 0
+
+
+@contextlib.contextmanager
+def semantic_preparation(vault_root: Path, path: Path):
+    """Reserve before source/parse allocations; never wait for memory capacity."""
+    from . import find_corpus, freshness, vault
+
+    signature = freshness.stat_signature(path)
+    source_bytes = path.stat().st_size
+    bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
+    preparation = SemanticPreparation(source_bytes, bulk=bulk)
+    try:
+        if source_bytes > SEMANTIC_SOURCE_MAX_BYTES:
+            raise PreparationBudgetExceeded("semantic source budget exceeded")
+        preparation.reserve(8 * source_bytes + 65536)
+        source, preparation.guard = vault.read_bounded_guarded_bytes(
+            vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes
+        )
+        if len(source) != source_bytes or freshness.stat_signature(path) != signature:
+            raise OSError("semantic input changed during preparation")
+        preparation.source = source.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        preparation.signature = signature
+        # Dense inline YAML has many nodes even on one line. Charge before
+        # either existing page/unit parser constructs them. The conservative
+        # 512-byte-per-input-byte charge includes simultaneous parser copies;
+        # measured dense valid frontmatter needed over 120 bytes per byte for
+        # just one parse. Body parsing remains separately line-bounded.
+        frontmatter = find_corpus.FRONTMATTER_PATTERN.match(preparation.source)
+        yaml_bytes = len(frontmatter.group(1).encode("utf-8")) if frontmatter else 0
+        preparation.parser_bytes = (
+            8 * source_bytes + 4096 * _source_line_bound(preparation.source) + 512 * yaml_bytes
+        )
+        preparation.reserve(preparation.parser_bytes)
+        if frontmatter:
+            expanded = _yaml_expanded_cost(
+                frontmatter.group(1), maximum=(preparation.limit - preparation.parser_bytes) // 2
+            )
+            preparation.parser_bytes += 2 * expanded
+            preparation.reserve(preparation.parser_bytes)
+        yield preparation
+    finally:
+        preparation.release()
+
+
+def semantic_preparation_status() -> dict[str, int]:
+    with _preparation_lock:
+        return {
+            "budget_bytes": SEMANTIC_PREPARATION_BYTES,
+            "small_reserve_bytes": SEMANTIC_SMALL_RESERVE_BYTES,
+            "source_max_bytes": SEMANTIC_SOURCE_MAX_BYTES,
+            "reserved_bytes": _preparation_bytes,
+            "peak_reserved_bytes": _preparation_peak,
+        }
 
 
 def lifespan(inner=None):
@@ -301,6 +630,7 @@ def status() -> dict[str, object]:
     online_cpus = effective_online_cpus()
     return {
         **policy.__dict__,
+        "semantic_preparation": semantic_preparation_status(),
         "background_priority": {
             "requested": "media-child-best-effort-lowered",
             "current_process": (

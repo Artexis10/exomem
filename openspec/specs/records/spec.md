@@ -1,7 +1,7 @@
 # records Specification
 
 ## Purpose
-TBD - created by archiving change add-first-class-records. Update Purpose after archive.
+Represent observed state (events, measurements, transactions and state changes) as governed Records collections kept distinct from Sources, Evidence, Notes and Entities. It covers tracker and chronological-log compatibility, self-describing safely preflightable authoring, neutral queries and presentation, held and resumable refused writes, and coverage reporting.
 
 ## Requirements
 

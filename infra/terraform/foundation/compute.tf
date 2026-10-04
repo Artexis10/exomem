@@ -84,7 +84,7 @@ resource "hcloud_server" "alpha" {
 # IP, firewall, and DNS-only record so losing the fleet node never touches
 # tenant or cell rows.
 resource "hcloud_primary_ip" "control_db" {
-  name              = "exomem-control-db-ipv4"
+  name              = "${var.control_db_server_name}-ipv4"
   type              = "ipv4"
   location          = var.server_location
   auto_delete       = false

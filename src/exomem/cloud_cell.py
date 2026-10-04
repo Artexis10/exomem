@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 CLOUD_MODE_ENV = "EXOMEM_CLOUD_CELL"
 CLOUD_READ_ONLY_ENV = "EXOMEM_CLOUD_READ_ONLY"
+RESOURCE_POLICY_ENV = "EXOMEM_CLOUD_RESOURCE_POLICY"
 CLOUD_CELL_ISSUER = "exomem-cloud-cell"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -42,6 +43,48 @@ def cloud_read_only_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
     raw = str(values.get(CLOUD_READ_ONLY_ENV, "")).strip().lower()
     return raw in _TRUE
+
+
+def resource_policy(env: Mapping[str, str] | None = None) -> str:
+    """Validate the operator profile without loading models or vault state.
+
+    Authentication remains the server's existing credential validation; init
+    and backup jobs can resolve resource policy without a serving bearer.
+    """
+    values = os.environ if env is None else env
+    selected = str(values.get(RESOURCE_POLICY_ENV, "")).strip().lower() or "legacy"
+    if selected not in {"legacy", "service-v1"}:
+        raise CloudConfigError("CLOUD_RESOURCE_POLICY_INVALID", "unknown resource profile")
+    if selected == "legacy":
+        return selected
+    if not cloud_mode_enabled(values):
+        raise CloudConfigError("CLOUD_RESOURCE_POLICY_INVALID", "service profile requires Cloud mode")
+    if str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower() in _TRUE:
+        raise CloudConfigError("CLOUD_RESOURCE_POLICY_CONFLICT", "service profile cannot select Hosted mode")
+    for name in ("EXOMEM_PRELOAD_MODELS", "EXOMEM_RELEASE_GPU_WHEN_IDLE"):
+        if str(values.get(name, "")).strip():
+            raise CloudConfigError("CLOUD_RESOURCE_POLICY_CONFLICT", f"unsupported override: {name}")
+    if str(values.get("EXOMEM_ALLOW_NATIVE_THREAD_OVERRIDES", "")).strip() == "1":
+        raise CloudConfigError("CLOUD_RESOURCE_POLICY_CONFLICT", "unsafe native overrides are disabled")
+    for name, lower, upper in (
+        ("EXOMEM_EMBED_BATCH", 1, 8),
+        ("EXOMEM_CPU_THREADS", 1, 2),
+        ("EXOMEM_SYNC_WORKERS", 4, 8),
+    ):
+        raw = str(values.get(name, "")).strip()
+        if not raw:
+            continue
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = 0
+        if not lower <= parsed <= upper:
+            raise CloudConfigError("CLOUD_RESOURCE_BUDGET_INVALID", f"{name} must be within {lower}..{upper}")
+    for name in ("EXOMEM_DEVICE", "EXOMEM_TORCH_DEVICE", "EXOMEM_EMBED_DEVICE", "EXOMEM_CLIP_DEVICE", "EXOMEM_VOICE_DEVICE", "EXOMEM_ASR_DEVICE", "EXOMEM_DIARIZE_DEVICE"):
+        raw = str(values.get(name, "")).strip().lower()
+        if raw and raw != "cpu":
+            raise CloudConfigError("CLOUD_RESOURCE_POLICY_CONFLICT", f"CPU required for {name}")
+    return selected
 
 
 #: A C4 bearer is always 43 base64url characters, so this only ever fires on

@@ -20,6 +20,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from .writer_lease import (
+    COLLECTION_STORE_CAPABILITY,
+    CollectionStoreFenceState,
+    CollectionStoreHead,
+)
+
 
 class SQLiteLeaseStore:
     def __init__(self, path: Path, *, clock=time.time):
@@ -39,6 +45,11 @@ class SQLiteLeaseStore:
                 "CHECK(schema_version IN (3,4)), generation INTEGER NOT NULL "
                 "CHECK(generation>0))"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS lease_collection_store_fences ("
+                "vault_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, "
+                "generation INTEGER NOT NULL CHECK(generation>0), head_json TEXT)"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -46,7 +57,7 @@ class SQLiteLeaseStore:
         return conn
 
     @staticmethod
-    def _record(row, *, granted: bool = False, fence=None) -> dict:  # noqa: ANN001
+    def _record(row, *, granted: bool = False, fence=None, store_fence=None) -> dict:  # noqa: ANN001
         record = {
             "holder": row[0] if row else None,
             "expires_at": row[1] if row and row[0] else None,
@@ -58,6 +69,12 @@ class SQLiteLeaseStore:
                 required_schema_version=int(fence[0]),
                 schema_fence_generation=int(fence[1]),
                 governance_enrolled=True,
+            )
+        if store_fence is not None:
+            record.update(
+                required_collection_store_capability=COLLECTION_STORE_CAPABILITY,
+                collection_store_fence_generation=int(store_fence[1]),
+                collection_store_head=json.loads(store_fence[2]) if store_fence[2] else None,
             )
         return record
 
@@ -81,6 +98,42 @@ class SQLiteLeaseStore:
         ).fetchone()
 
     @staticmethod
+    def _store_fence_row(conn: sqlite3.Connection, vault_id: str):  # noqa: ANN205
+        return conn.execute(
+            "SELECT store_id, generation, head_json FROM lease_collection_store_fences WHERE vault_id=?",
+            (vault_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _store_fence_state(row) -> dict:  # noqa: ANN001
+        return CollectionStoreFenceState(
+            COLLECTION_STORE_CAPABILITY,
+            row is not None,
+            row[0] if row else None,
+            int(row[1]) if row else 0,
+        ).as_dict()
+
+    @staticmethod
+    def _reported_head(value: object, store_fence) -> CollectionStoreHead | None:  # noqa: ANN001
+        if value is None:
+            return None
+        head = CollectionStoreHead.from_json(value)
+        if store_fence is None or head.store_id != store_fence[0]:
+            raise ValueError("collection store head does not match the enrolled store")
+        return head
+
+    @staticmethod
+    def _persist_head(
+        conn: sqlite3.Connection,
+        vault_id: str,
+        head: CollectionStoreHead,
+    ) -> None:
+        conn.execute(
+            "UPDATE lease_collection_store_fences SET head_json=? WHERE vault_id=?",
+            (json.dumps(head.as_dict(), separators=(",", ":")), vault_id),
+        )
+
+    @staticmethod
     def _client_schema(value: object | None) -> int:
         # Released pre-v4 coordinators sent no schema field. Once a vault is
         # enrolled, that exact legacy wire shape means schema 3; it must never
@@ -96,31 +149,38 @@ class SQLiteLeaseStore:
         ttl_seconds: float,
         *,
         schema_version: object | None = None,
+        collection_store_capability: object | None = None,
     ) -> dict:
         now = self.clock()
         expires = now + ttl_seconds
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             fence = self._fence_row(conn, vault_id)
+            store_fence = self._store_fence_row(conn, vault_id)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
             ).fetchone()
-            if fence is not None and self._client_schema(schema_version) != int(fence[0]):
+            if (fence is not None and self._client_schema(schema_version) != int(fence[0])) or (
+                store_fence is not None
+                and collection_store_capability != COLLECTION_STORE_CAPABILITY
+            ):
                 conn.execute("COMMIT")
-                return self._record(row, fence=fence)
+                return self._record(row, fence=fence, store_fence=store_fence)
             if row is None:
                 conn.execute(
                     "INSERT INTO leases(vault_id, holder, expires_at, fencing_token) VALUES (?, ?, ?, 1)",
                     (vault_id, replica_id, expires),
                 )
                 conn.execute("COMMIT")
-                return self._record((replica_id, expires, 1), granted=True, fence=fence)
+                return self._record(
+                    (replica_id, expires, 1), granted=True, fence=fence, store_fence=store_fence
+                )
             holder, old_expiry, token = row
             active = holder is not None and old_expiry is not None and old_expiry > now
             if active and holder != replica_id:
                 conn.execute("COMMIT")
-                return self._record(row, fence=fence)
+                return self._record(row, fence=fence, store_fence=store_fence)
             new_token = token if active and holder == replica_id else token + 1
             conn.execute(
                 "UPDATE leases SET holder = ?, expires_at = ?, fencing_token = ? WHERE vault_id = ?",
@@ -128,7 +188,7 @@ class SQLiteLeaseStore:
             )
             conn.execute("COMMIT")
             return self._record(
-                (replica_id, expires, new_token), granted=True, fence=fence
+                (replica_id, expires, new_token), granted=True, fence=fence, store_fence=store_fence
             )
 
     def renew(
@@ -139,19 +199,26 @@ class SQLiteLeaseStore:
         ttl_seconds: float,
         *,
         schema_version: object | None = None,
+        collection_store_capability: object | None = None,
+        collection_store_head: object | None = None,
     ) -> dict:
-        now = self.clock()
-        expires = now + ttl_seconds
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self.clock()
+            expires = now + ttl_seconds
             fence = self._fence_row(conn, vault_id)
+            store_fence = self._store_fence_row(conn, vault_id)
+            head = self._reported_head(collection_store_head, store_fence)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
             ).fetchone()
-            if fence is not None and self._client_schema(schema_version) != int(fence[0]):
+            if (fence is not None and self._client_schema(schema_version) != int(fence[0])) or (
+                store_fence is not None
+                and collection_store_capability != COLLECTION_STORE_CAPABILITY
+            ):
                 conn.execute("COMMIT")
-                return self._record(row, fence=fence)
+                return self._record(row, fence=fence, store_fence=store_fence)
             valid = bool(
                 row
                 and row[0] == replica_id
@@ -164,31 +231,49 @@ class SQLiteLeaseStore:
                     "UPDATE leases SET expires_at = ? WHERE vault_id = ?", (expires, vault_id)
                 )
                 row = (replica_id, expires, fencing_token)
+                if head is not None:
+                    self._persist_head(conn, vault_id, head)
+                    store_fence = self._store_fence_row(conn, vault_id)
             conn.execute("COMMIT")
-            return self._record(row, granted=valid, fence=fence)
+            return self._record(row, granted=valid, fence=fence, store_fence=store_fence)
 
-    def release(self, vault_id: str, replica_id: str, fencing_token: int) -> dict:
+    def release(
+        self,
+        vault_id: str,
+        replica_id: str,
+        fencing_token: int,
+        *,
+        collection_store_head: object | None = None,
+    ) -> dict:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            store_fence = self._store_fence_row(conn, vault_id)
+            head = self._reported_head(collection_store_head, store_fence)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
             ).fetchone()
             valid = bool(row and row[0] == replica_id and row[2] == fencing_token)
+            if head is not None:
+                valid = bool(valid and row[1] is not None and row[1] > self.clock())
             if valid:
+                if head is not None:
+                    self._persist_head(conn, vault_id, head)
+                    store_fence = self._store_fence_row(conn, vault_id)
                 conn.execute(
                     "UPDATE leases SET holder = NULL, expires_at = NULL WHERE vault_id = ?",
                     (vault_id,),
                 )
                 row = (None, None, fencing_token)
             conn.execute("COMMIT")
-            return self._record(row, granted=valid)
+            return self._record(row, granted=valid, store_fence=store_fence)
 
     def status(self, vault_id: str) -> dict:
         now = self.clock()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             fence = self._fence_row(conn, vault_id)
+            store_fence = self._store_fence_row(conn, vault_id)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
@@ -200,7 +285,55 @@ class SQLiteLeaseStore:
                 )
                 row = (None, None, row[2])
             conn.execute("COMMIT")
-            return self._record(row, fence=fence)
+            return self._record(row, fence=fence, store_fence=store_fence)
+
+    def collection_store_fence(self, vault_id: str) -> dict:
+        with self._connect() as conn:
+            return self._store_fence_state(self._store_fence_row(conn, vault_id))
+
+    def transition_collection_store_fence(
+        self,
+        vault_id: str,
+        *,
+        expected_generation: object,
+        capability: object,
+        store_id: object,
+    ) -> tuple[dict, bool]:
+        expected = self._generation(expected_generation)
+        target = CollectionStoreFenceState(capability, True, store_id, 1)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._store_fence_row(conn, vault_id)
+            if current is not None:
+                if current[0] == target.store_id:
+                    accepted = expected in {current[1], current[1] - 1}
+                    conn.execute("COMMIT")
+                    return self._store_fence_state(current), accepted
+                if expected != current[1]:
+                    conn.execute("COMMIT")
+                    return self._store_fence_state(current), False
+                target = CollectionStoreFenceState(capability, True, store_id, current[1] + 1)
+                conn.execute(
+                    "UPDATE lease_collection_store_fences SET store_id=?, generation=?, "
+                    "head_json=NULL WHERE vault_id=?",
+                    (target.store_id, target.generation, vault_id),
+                )
+            else:
+                if expected != 0:
+                    conn.execute("COMMIT")
+                    return self._store_fence_state(None), False
+                conn.execute(
+                    "INSERT INTO lease_collection_store_fences(vault_id, store_id, generation) "
+                    "VALUES (?, ?, 1)",
+                    (vault_id, target.store_id),
+                )
+            conn.execute(
+                "UPDATE leases SET holder=NULL, expires_at=NULL, "
+                "fencing_token=fencing_token+1 WHERE vault_id=?",
+                (vault_id,),
+            )
+            conn.execute("COMMIT")
+        return target.as_dict(), True
 
     def schema_fence(self, vault_id: str) -> dict | None:
         with self._connect() as conn:
@@ -481,6 +614,7 @@ def create_app(
                     replica_id,
                     _ttl(body),
                     schema_version=body.get("schema_version"),
+                    collection_store_capability=body.get("collection_store_capability"),
                 )
             elif operation == "renew":
                 result = store.renew(
@@ -489,13 +623,42 @@ def create_app(
                     int(body["fencing_token"]),
                     _ttl(body),
                     schema_version=body.get("schema_version"),
+                    collection_store_capability=body.get("collection_store_capability"),
+                    collection_store_head=body.get("collection_store_head"),
                 )
             elif operation == "release":
-                result = store.release(vault_id, replica_id, int(body["fencing_token"]))
+                result = store.release(
+                    vault_id,
+                    replica_id,
+                    int(body["fencing_token"]),
+                    collection_store_head=body.get("collection_store_head"),
+                )
             else:
                 return JSONResponse({"error": "unknown operation"}, status_code=404)
         except (KeyError, TypeError, ValueError):
             return JSONResponse({"error": "invalid request"}, status_code=400)
+        return JSONResponse(result)
+
+    async def collection_store_fence(request: Request) -> JSONResponse:
+        if not operator_authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        vault_id = request.path_params["vault_id"]
+        if request.method == "GET":
+            return JSONResponse(store.collection_store_fence(vault_id))
+        try:
+            body = await request.json()
+            result, accepted = store.transition_collection_store_fence(
+                vault_id,
+                expected_generation=body["expected_generation"],
+                capability=body["capability"],
+                store_id=body["store_id"],
+            )
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"error": "invalid request"}, status_code=400)
+        if not accepted:
+            return JSONResponse(
+                {"error": "collection store fence conflict", "current": result}, status_code=409
+            )
         return JSONResponse(result)
 
     async def schema_fence(request: Request) -> JSONResponse:
@@ -592,6 +755,11 @@ def create_app(
         routes=[
             Route("/v1/vaults/{vault_id:str}/lease", lease, methods=["GET"]),
             Route("/v1/vaults/{vault_id:str}/lease/{operation:str}", lease, methods=["POST"]),
+            Route(
+                "/v1/vaults/{vault_id:str}/collection-store-fence",
+                collection_store_fence,
+                methods=["GET", "PUT"],
+            ),
             Route(
                 "/v1/vaults/{vault_id:str}/schema-fence",
                 schema_fence,

@@ -1,7 +1,7 @@
 # attachment-source-ingestion Specification
 
 ## Purpose
-TBD - created by archiving change ingest-attachments-as-sources. Update Purpose after archive.
+Let an attached file be captured losslessly into Sources without its bytes passing through the model. Every stored artifact gets exactly one addressable page, citations to an artifact or its page resolve to the same page, the lane is determined only by the command and explicit parameters, and Evidence semantics are unchanged.
 
 ## Requirements
 

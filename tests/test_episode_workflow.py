@@ -827,6 +827,11 @@ def _three_notes(vault: Path) -> None:
 def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
     vault: Path, owner, enabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from test_working_set_carry import seed_ordinary_notes
+
+    # Ordinary-note retrieval needs a corpus in which rarity is meaningful.
+    # Reuse its established prose control, not a fixture-specific product rule.
+    seed_ordinary_notes(vault)
     _record(vault)
     _three_notes(vault)
     inspected = _workflow(vault, action="candidates")
@@ -952,6 +957,22 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
     )
     assert again["executed"] == [] and again["reconciled"] == []
     assert alpha_path.read_bytes() == committed_bytes
+
+    # Recovery is useful only if another session can consume the committed
+    # result, not merely if the ledger retains its original receipt.
+    read = commands.op_read_memory(vault, path=alpha_path.relative_to(vault).as_posix())
+    assert "The alpha observation holds." in read["body"]
+    _fresh_session_index(vault)
+    with request_scope(owner_principal(surface="mcp")):
+        packet = commands.op_activate_context(
+            vault, turn="What did the Alpha Dye Note settle?"
+        )
+    assert packet["generation"]["continuity"] == "absent"
+    assert packet["abstained"] is False, json.dumps(packet, default=str)
+    units = [unit for unit in packet["units"] if unit["provenance"]["path"] == read["path"]]
+    assert units and any("The alpha observation holds." in unit["text"] for unit in units)
+    assert all(unit["ref"] for unit in units)
+    assert len(json.dumps(packet, default=str).encode()) < 64 * 1024
 
 
 def test_an_uncertain_leaf_is_never_retried_under_a_fresh_identity(

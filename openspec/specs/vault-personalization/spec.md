@@ -1,7 +1,7 @@
 # vault-personalization Specification
 
 ## Purpose
-TBD - created by archiving change self-personalizing-markdown-first-skill. Update Purpose after archive.
+Let a skill discover a vault's layout at runtime through `overview`, and let `exomem personalize` classify sibling folders by measured signals and write a non-destructive `Knowledge Base/_access.yaml` policy. Personalize runs no model, is human-gated, and soft-fails without writing when the vault is not initialized.
 ## Requirements
 ### Requirement: Skill discovers vault layout at runtime
 

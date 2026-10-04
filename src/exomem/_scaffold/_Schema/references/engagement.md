@@ -9,13 +9,15 @@ nudge re-arms that judgment each turn; on clients without hooks this text is the
 only prompt to check, so read it as standing instruction rather than advice.)
 
 **Prominence level.** How strongly the two behaviours below apply is tunable.
-`bootstrap()` reports the active level under `engagement`; the user changes it with
-`exomem prominence <level>`, or by editing the level block in their assistant's
-custom instructions. When `engagement` carries a `hook_cadence` block, this client
-runs nudge hooks that read only its own machine, so after setting a level tell the
-user that the nudge cadence changes separately, with `exomem prominence <level>` run
-on their machine. The section below describes **balanced**, the default where
-hooks exist. The other levels shift it:
+`bootstrap()` reports the effective level under `engagement` for every client.
+Use that live value; the table below describes levels, not a request to change one.
+Only an explicit user request to change the setting authorizes
+`configure_memory(action="set"|"clear")`; inspect first and use its revision.
+Ordinary recall, capture, bootstrap, installation, and missing hooks do not
+authorize a saved preference change. Hook cadence is separate: when `engagement`
+carries `hook_cadence`, `exomem prominence <level>` on that client changes its
+local reminders, not the saved preference. The section below describes
+**balanced**. The other levels shift it:
 
 | Level | Shift from the baseline below |
 |---|---|
@@ -23,11 +25,6 @@ hooks exist. The other levels shift it:
 | `light` | Retrieve only on an outright recall question or an unmistakably on-topic turn; capture only when asked; never narrate. |
 | `balanced` | As written below. |
 | `maximal` | Retrieve before **every** substantive turn, not only ones that reference prior work; treat the bar for "durable" as low and capture whenever torn; say what you recalled and what you saved. |
-
-`maximal` is the shipped default on clients without hooks — the hosted service,
-and assistants configured through a custom-instructions block — because there is
-nothing there to re-arm the check, and passive instructions decay over a long
-conversation.
 
 **Proactive retrieval (read) — quiet, surface only hits.** When a turn
 references something the KB plausibly holds — a project, a domain, a named
@@ -171,9 +168,10 @@ statements worth keeping. It is raw material about the conversation, not a
 compiled conclusion, and it is what the next session on any client sees first in
 `recent_context`. Reuse the `episode` key a hook named or an earlier record
 returned; an identical retry writes nothing. A Stop hook's episode check or an
-`episode_due` block in an activation packet asks for one; skip it when nothing
-durable happened. At `off`, record only when the user asks; at `light`, also
-when a hook's episode check asks.
+`episode_due` block in an activation packet is a reminder, not permission;
+skip it when nothing durable happened. Record only when the user asks or the
+live `proactive_capture` disposition permits it. At `off` and `light`, an
+unrequested hook reminder does not authorize capture.
 
 **Episode candidates, where the service runs them.** When
 `episode_memory(action="candidates")` reports `execution: enabled`, the same
@@ -190,6 +188,43 @@ its readback; read the input, compare, prepare anything omitted or misrouted,
 then attest with `resume` and `postcommit=true`. A committed note or a Saved
 marker is not coverage, and the server never claims your candidates exhaust
 the input.
+
+## Passing the conversation to activation
+
+In a longer conversation, or when the user's words lean on attachments, pass
+`conversation` to `activate_context` beside the verbatim `turn` (never
+rewrite the turn), only when live engagement warrants recall and that context
+is needed to resolve the current subject. Do not send full history or unrelated
+earlier turns. Every field is optional:
+
+- `focus`: one line, at most 240 characters, naming the subjects now in play,
+  including names or objects you read from the user's attachments.
+- `refs`: the pages you already read, at most 12.
+- `recent`: earlier turns, oldest first, as `{role, text}`: at most 6 entries,
+  user text cut at 600 characters, assistant text at 300, 2,400 in all.
+
+The server enforces every bound itself and never refuses over one:
+`generation.conversation` says `applied`, `truncated` or `absent`. A
+credential in the text is removed before anything is matched.
+
+Each anchor carries `origin`: `turn` (the user's words reached it), `focus` or
+`turn_and_focus` (your `focus` reached it, alone or with the user's words), or
+`conversation` (carried from an earlier user turn). A `focus` origin is your
+cue, not the user's words: it is matched by worded evidence only, never counts
+as your `anchor` choice, and cannot settle an ambiguity between anchors the
+user's own words reached. Earlier turns and refs never reach an anchor by
+themselves: they strengthen one the turn or your `focus` already reached, or
+break a tie when exactly one competitor was named before
+(`generation.disambiguated_by`). A turn that points back ("is it still on
+track?") and uses no word the earlier turns lack is carried from the newest
+earlier user turn that named one subject. A turn that brings in a new word
+("does it snow much in oslo?") is read as a new topic and is not carried, even
+when it also says "it"; pass `focus` when such a turn still means the earlier
+subject.
+
+Activation reads no attachment itself and runs no media model: only the names
+you put into `focus` count. Conversation text is used for that one call and
+never stored, and a request carrying one is never served from cache.
 
 ## Activation conventions and learning from corrections
 

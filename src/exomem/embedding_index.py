@@ -13,15 +13,20 @@ import logging
 import sqlite3
 import sys
 import threading
+import uuid
 from collections.abc import Callable, Iterator
 from collections.abc import Set as AbstractSet
+from itertools import chain
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import numpy as np
 
 from . import (
     call_spans,
+    cloud_cell,
+    foreground_priority,
     index_paths,
     recall_space,
     reserved_paths,
@@ -244,6 +249,7 @@ SEMANTIC_UNIT_READ_BATCH = 2_000
 #: a 2-CPU quota, 5.5 s at 17 MiB peak, against 4.5 s at 225 MiB for one product
 #: and 100 s for one `search` per chunk.
 SEARCH_MANY_BLOCK = 64
+_UNSPECIFIED_SPACE = object()
 
 
 def _top_admitted(
@@ -299,6 +305,9 @@ class EmbeddingIndex:
     path already hydrates metadata by rowid.
     """
 
+    DISK_BLOCK_ROWS = 2048
+    PAIRWISE_BLOCK_ROWS = 256
+
     def __init__(self, vault_root: Path, *, path: Path | None = None):
         self.vault_root = vault_root
         #: The sidecar this instance reads and writes: the serving one unless
@@ -308,6 +317,7 @@ class EmbeddingIndex:
         #: it holds no vectors and no record. Refreshed on every connection.
         self._identity: recall_space.SpaceIdentity | None = None
         self._identity_read = False
+        self._identity_token: tuple[int, int, int, int] | None = None
         self._cache: _EmbCache | None = None
         # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
         self._mask_cache: _MaskCache | None = None
@@ -403,7 +413,13 @@ class EmbeddingIndex:
                 )
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
         if target == self.path:
-            self._set_identity(recall_space.read_identity(conn, tables=_VECTOR_TABLES))
+            conn.execute("BEGIN")
+            try:
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                token = self._build_token(conn)
+            finally:
+                conn.rollback()
+            self._observe_identity(identity, token)
             self._identity_read = True
         if target == self.path:
             try:
@@ -451,6 +467,30 @@ class EmbeddingIndex:
             self._vec_ready = None
             self._vec_quant_synced = False
 
+    def _observe_identity(
+        self, identity: recall_space.SpaceIdentity | None, token: tuple[int, int, int, int]
+    ) -> bool:
+        """Remember a serving snapshot unless a newer observation already won."""
+        with self._lock:
+            observed = self._identity_token
+            if observed is not None and observed[2] == token[2] and (
+                observed[0], observed[1], observed[3]
+            ) > (token[0], token[1], token[3]):
+                return False
+            self._set_identity(identity)
+            self._identity_token = token
+            return True
+
+    def _complete_publication(
+        self, identity: recall_space.SpaceIdentity | None, token: tuple[int, int, int, int]
+    ) -> None:
+        """Fence identity and retained caches together after the SQL commit."""
+        with self._lock:
+            observed = self._identity_token
+            if observed is None or observed[2] == token[2]:
+                self._observe_identity(identity, token)
+            self._invalidate_before((self._identity_token or token)[:3])
+
     def _vec_prepare(self, conn: sqlite3.Connection) -> bool:
         """Whether vec0 may be synced now: only once the sidecar has a width.
 
@@ -465,7 +505,8 @@ class EmbeddingIndex:
         """Record or check the vector space before rows of width `dim` are written."""
         with conn:
             identity = recall_space.admit(conn, self._identity, dim)
-        self._set_identity(identity)
+            token = self._build_token(conn)
+        self._observe_identity(identity, token)
 
     @contextlib.contextmanager
     def encoding(self, *, load: bool = False) -> Iterator[None]:
@@ -569,6 +610,255 @@ class EmbeddingIndex:
         new_meta = [(rel_path, i) for i in range(len(chunks))]
         new_vecs = np.asarray(vectors, dtype=np.float32) if chunks else None
         self._patch_cache(rel_path, new_meta, new_vecs, own_epoch, own_gen, own_instance)
+
+    def _admit_producer(
+        self, conn: sqlite3.Connection, producer: recall_space.SpaceIdentity
+    ) -> recall_space.SpaceIdentity:
+        """Compare the actual producer with the serving space under the write lock."""
+        stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+        if stored is not None and (
+            stored.dim != producer.dim or not stored.accepts(producer.model, producer.fingerprint)
+        ):
+            raise recall_space.VectorSpaceMismatch(
+                f"vectors from {producer} cannot join the serving space {stored}"
+            )
+        identity = stored or producer
+        if stored is not None and stored.fingerprint is None and producer.fingerprint:
+            identity = producer
+        recall_space.write_identity(conn, identity)
+        return identity
+
+    def _publication_vec(
+        self, conn: sqlite3.Connection, identity: recall_space.SpaceIdentity | None
+    ) -> vecstore.SqliteVecStore | None:
+        """Prepare a local mirror without committing or publishing process state."""
+        if identity is None or self._vec_failed or vecstore.backend() == "numpy":
+            return None
+        mirror = vecstore.SqliteVecStore("chunks", "vector", identity.dim, "vec_chunks")
+        if not mirror.try_load(conn):
+            return None
+        mirror.ensure_synced_in_transaction(conn, quant=vecstore.quant_mode() == "binary")
+        return mirror
+
+    def _invalidate_before(self, token: tuple[int, int, int]) -> None:
+        """Release only caches older than this completed publication."""
+        epoch, generation, instance = token
+        with self._lock:
+            cached = self._cache
+            current = (
+                cached is not None
+                and cached.instance == instance
+                and (
+                    cached.epoch > epoch
+                    or (cached.epoch == epoch and cached.generation >= generation)
+                )
+            )
+            if not current:
+                self._cache = None
+            mask = self._mask_cache
+            if mask is not None and (not current or mask.metadata is not cached.metadata):
+                self._mask_cache = None
+
+    def upsert_batch(
+        self,
+        replacements: list[tuple[str, list[str], np.ndarray, float]],
+        unit_replacements: list[tuple[semantic_index.SemanticParentIndexState, np.ndarray, float]]
+        | None = None,
+        *,
+        identity: recall_space.SpaceIdentity,
+        validate: Callable[[], bool] | None = None,
+    ) -> tuple[int, int, int, int] | None:
+        """Publish one bounded group of prepared parents, then release old caches."""
+        unit_replacements = unit_replacements or []
+        if not replacements and not unit_replacements:
+            return
+        for path, chunks, vectors, _mtime in replacements:
+            if len(chunks) != len(vectors) or (
+                len(vectors) and np.asarray(vectors).shape != (len(chunks), identity.dim)
+            ):
+                raise ValueError(f"chunk/vector shape mismatch for {path}")
+        unit_rows = []
+        for state, vectors, mtime in unit_replacements:
+            if len(vectors) and np.asarray(vectors).shape[1] != identity.dim:
+                raise ValueError(f"semantic-unit vector width mismatch for {state.path}")
+            unit_rows.append((state.path, self._semantic_unit_rows(state, vectors, mtime)))
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if validate is not None and not validate():
+                    raise ValueError("embedding input drifted before publication")
+                stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                if any(chunks for _path, chunks, _vectors, _mtime in replacements) or any(
+                    rows for _path, rows in unit_rows
+                ):
+                    stored = self._admit_producer(conn, identity)
+                mirror = self._publication_vec(conn, stored)
+                for path, chunks, vectors, mtime in replacements:
+                    if mirror is not None:
+                        mirror.dual_delete(conn, "file_path = ?", (path,))
+                    conn.execute("DELETE FROM chunks WHERE file_path = ?", (path,))
+                    conn.executemany(
+                        "INSERT INTO chunks VALUES (?, ?, ?, ?, ?)",
+                        (
+                            (
+                                path,
+                                i,
+                                chunk,
+                                np.asarray(vectors[i], dtype=np.float32).tobytes(),
+                                mtime,
+                            )
+                            for i, chunk in enumerate(chunks)
+                        ),
+                    )
+                    if mirror is not None:
+                        mirror.dual_insert(conn, "file_path = ?", (path,))
+                for path, rows in unit_rows:
+                    conn.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (path,))
+                    conn.executemany(
+                        "INSERT INTO semantic_unit_vectors VALUES "
+                        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        rows,
+                    )
+                if replacements:
+                    sidecar_store.bump_generation_for_paths(
+                        conn, CHUNK_PATH_LOG, [path for path, *_rest in replacements]
+                    )
+                if unit_replacements:
+                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                if validate is not None and not validate():
+                    raise ValueError("embedding input drifted during publication")
+                own_token = self._build_token(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        finally:
+            conn.close()
+        self._complete_publication(stored, own_token)
+        return own_token
+
+    def parent_publication_current(
+        self,
+        rel_path: str,
+        *,
+        token: tuple[int, int, int, int],
+        identity: recall_space.SpaceIdentity,
+        chunk_count: int,
+        unit_count: int,
+        parent_generation: str,
+        parent_source_hash: str,
+    ) -> bool:
+        """Check a known exact publication without reading text or vector blobs.
+
+        The chunk owner's existing contiguous change log proves that this
+        parent's chunks have not moved since its transaction. Unit rows carry
+        their deterministic generation/source hash. An absent/gapped proof is
+        refused and replayed; unrelated publications do not invalidate it.
+        """
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return False
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            current = self._build_token(conn)
+            if current[0] != token[0] or current[2] != token[2] or current[1] < token[1]:
+                return False
+            stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if stored != identity and (chunk_count or unit_count or stored is not None):
+                return False
+            if current[1] != token[1]:
+                start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+                if start is None or start > token[1] or upto != current[1]:
+                    return False
+                changed = conn.execute(
+                    "SELECT generation FROM chunk_path_log WHERE file_path = ?",
+                    (rel_path,),
+                ).fetchone()
+                if changed is not None and int(changed[0]) > token[1]:
+                    return False
+            width = identity.dim * 4
+            chunks = conn.execute(
+                "SELECT COUNT(*), MIN(chunk_idx), MAX(chunk_idx), "
+                "SUM(length(vector) != ?) FROM chunks WHERE file_path = ?",
+                (width, rel_path),
+            ).fetchone()
+            if chunks[0] != chunk_count or (chunks[3] or 0) != 0:
+                return False
+            if chunk_count and (chunks[1], chunks[2]) != (0, chunk_count - 1):
+                return False
+            units = conn.execute(
+                "SELECT COUNT(*), SUM(parent_generation != ? OR parent_source_hash != ? "
+                "OR length(vector) != ?) FROM semantic_unit_vectors WHERE parent_path = ?",
+                (parent_generation, parent_source_hash, width, rel_path),
+            ).fetchone()
+            return units[0] == unit_count and (units[1] or 0) == 0
+        finally:
+            conn.close()
+
+    def parent_publication_from_source(
+        self, chunks: list[str], state: semantic_index.SemanticParentIndexState,
+        *, identity: recall_space.SpaceIdentity,
+    ) -> tuple[int, int, int, int] | None:
+        """Recover publication authority from exact rows in one read snapshot.
+
+        Read only this bounded parent's text and metadata, never vector blobs.
+        Counts and text sizes are checked before hydrating stored text, so a
+        corrupt/older large projection cannot defeat the preparation allowance.
+        """
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return None
+        units = {row[0]: row for row in self._semantic_unit_metadata_rows(state)}
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if stored != identity and (chunks or units or stored is not None):
+                return None
+            chunk_size = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0), "
+                "COALESCE(SUM(typeof(chunk_idx) != 'integer'), 0) "
+                "FROM chunks WHERE file_path = ?", (state.path,),
+            ).fetchone()
+            if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks), 0):
+                return None
+            width = identity.dim * 4
+            for number, row in enumerate(conn.execute(
+                "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
+                "WHERE file_path = ? ORDER BY chunk_idx", (state.path,),
+            )):
+                if row != (number, chunks[number], width):
+                    return None
+            columns = (
+                "unit_key", "record_type", "unit_ref", "parent_path", "parent_ref",
+                "parent_generation", "parent_source_hash", "parser_version", "form",
+                "category", "kind", "content", "unit_source_hash", "source_order",
+            )
+            text_size = " + ".join(
+                f"COALESCE(length(CAST({column} AS BLOB)), 0)"
+                for column in columns if column not in {"parser_version", "source_order"}
+            )
+            unit_size = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM({text_size}), 0), "
+                "COALESCE(SUM(typeof(parser_version) != 'integer' OR "
+                "typeof(source_order) != 'integer'), 0) "
+                "FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,),
+            ).fetchone()
+            expected_size = sum(
+                len(value.encode("utf-8")) for row in units.values()
+                for value in row if isinstance(value, str)
+            )
+            if unit_size != (len(units), expected_size, 0):
+                return None
+            for row in conn.execute(
+                f"SELECT {', '.join(columns)}, length(vector) "
+                "FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,),
+            ):
+                if units.get(row[0]) != row[:-1] or row[-1] != width:
+                    return None
+            return self._build_token(conn)
+        finally:
+            conn.close()
 
     def delete_file(self, rel_path: str) -> None:
         """Remove one parent's page and semantic-unit rows if the sidecar exists."""
@@ -722,21 +1012,10 @@ class EmbeddingIndex:
             conn.close()
 
     @staticmethod
-    def _semantic_unit_rows(
+    def _semantic_unit_metadata_rows(
         state: semantic_index.SemanticParentIndexState,
-        vectors: np.ndarray,
-        mtime: float,
     ) -> list[tuple]:
-        units = [
-            (source_order, unit)
-            for source_order, unit in enumerate(state.document.units)
-            if unit.unit_ref is not None
-        ]
-        if len(units) != len(vectors):
-            raise ValueError(
-                f"semantic-unit/vector length mismatch for {state.path}: "
-                f"{len(units)} vs {len(vectors)}"
-            )
+        """The shared exact metadata for publication and cold validation."""
         return [
             (
                 unit.unit_ref,
@@ -753,10 +1032,27 @@ class EmbeddingIndex:
                 unit.content,
                 unit.source_hash,
                 source_order,
-                vectors[vector_order].astype(np.float32).tobytes(),
-                mtime,
             )
-            for vector_order, (source_order, unit) in enumerate(units)
+            for source_order, unit in enumerate(state.document.units)
+            if unit.unit_ref is not None
+        ]
+
+    @classmethod
+    def _semantic_unit_rows(
+        cls,
+        state: semantic_index.SemanticParentIndexState,
+        vectors: np.ndarray,
+        mtime: float,
+    ) -> list[tuple]:
+        metadata = cls._semantic_unit_metadata_rows(state)
+        if len(metadata) != len(vectors):
+            raise ValueError(
+                f"semantic-unit/vector length mismatch for {state.path}: "
+                f"{len(metadata)} vs {len(vectors)}"
+            )
+        return [
+            (*row, vectors[number].astype(np.float32).tobytes(), mtime)
+            for number, row in enumerate(metadata)
         ]
 
     def _patch_cache(
@@ -842,6 +1138,12 @@ class EmbeddingIndex:
         """
         if not self.path.exists():
             return [], np.zeros((0, self.dim), dtype=np.float32)
+        if cloud_cell.resource_policy() == "service-v1":
+            # Explicit audit consumers may read all rows transiently, but they
+            # cannot turn subsequent ordinary writes into matrix replacements.
+            self.unload_cache()
+            loaded = self._load_all_rows()
+            return loaded.metadata, loaded.matrix
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         from . import recall_policy
@@ -1014,17 +1316,7 @@ class EmbeddingIndex:
         )
 
     def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
-        """Full reload from the sidecar → an `_EmbCache`.
-
-        Reads the meta token AND the rows inside ONE explicit `BEGIN` so they
-        are a single consistent snapshot — python sqlite3 in autocommit runs each
-        bare SELECT in its OWN snapshot, so a naive two-statement read could pair a
-        generation with rows from a different write. This is the O(vault) `SELECT`
-        + `np.stack` the incremental cache exists to avoid paying per find; kept a
-        named method so tests can count genuine full reloads. numpy-lite: chunk
-        text is neither SELECTed nor retained; file_path strings are interned so N
-        rows of one file share a single str object.
-        """
+        """Load one serving snapshot directly into its final float32 matrix."""
         if policy_identity is None:
             from . import recall_policy
 
@@ -1033,36 +1325,35 @@ class EmbeddingIndex:
         try:
             conn.execute("BEGIN")
             try:
-                epoch, gen, instance = sidecar_store.read_meta_token(conn)
-                rows = conn.execute(
+                snapshot_token = self._build_token(conn)
+                epoch, gen, instance = snapshot_token[:3]
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                width = identity.dim if identity is not None else recall_space.current_dim()
+                count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                matrix = np.empty((count, width), dtype=np.float32)
+                metadata: list[tuple[str, int]] = []
+                cursor = conn.execute(
                     "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
-                ).fetchall()
+                )
+                for row, (fp, idx, blob) in enumerate(cursor):
+                    if len(blob) != width * np.dtype(np.float32).itemsize:
+                        raise ValueError("embedding row width differs from stored space")
+                    if row >= count:
+                        raise ValueError("embedding row count differs from snapshot")
+                    matrix[row] = np.frombuffer(blob, dtype=np.float32)
+                    metadata.append((sys.intern(fp), idx))
+                if len(metadata) != count:
+                    raise ValueError("embedding row count differs from snapshot")
             finally:
-                conn.rollback()  # read-only txn — release the snapshot
+                conn.rollback()
         finally:
             conn.close()
+        self._observe_identity(identity, snapshot_token)
         try:
             mtime = self.path.stat().st_mtime
         except OSError:
             mtime = 0.0
-        if not rows:
-            return _EmbCache(
-                epoch,
-                gen,
-                instance,
-                mtime,
-                policy_identity,
-                [],
-                np.zeros((0, self.dim), dtype=np.float32),
-            )
-        metadata: list[tuple[str, int]] = []
-        vectors: list[np.ndarray] = []
-        for fp, idx, blob in rows:
-            metadata.append((sys.intern(fp), idx))
-            vectors.append(np.frombuffer(blob, dtype=np.float32))
-        return _EmbCache(
-            epoch, gen, instance, mtime, policy_identity, metadata, np.stack(vectors, axis=0)
-        )
+        return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
 
     def search(
         self,
@@ -1070,6 +1361,7 @@ class EmbeddingIndex:
         k: int,
         *,
         allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
@@ -1088,6 +1380,15 @@ class EmbeddingIndex:
         ineligible row scores `-inf` and `k_eff` is clamped to the eligible
         count, so `argpartition` provably cannot reach a masked row.
         """
+        if cloud_cell.resource_policy() == "service-v1":
+            # SQLite row fetches release the GIL; cooperative bulk graph work
+            # must yield during this read-only scan, which never waits on it.
+            # Leave background advisory search_many outside foreground scope.
+            with foreground_priority.foreground():
+                return self._disk_score(
+                    [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
+                    encoded_for=encoded_for, hydrate=True,
+                )[0]
         if allowed_paths is None:
             vec_hits = self._vec_search(query_vec, k)
             if vec_hits is not None:
@@ -1142,6 +1443,7 @@ class EmbeddingIndex:
         k: int,
         *,
         admits: Callable[[str], bool],
+        encoded_for: Any = _UNSPECIFIED_SPACE,
     ) -> list[list[tuple[str, int, float]]]:
         """Top-k eligible chunk rows for each query row: `(file_path, chunk_idx, score)`.
 
@@ -1164,6 +1466,11 @@ class EmbeddingIndex:
         the #951 note measured, and a non-finite score sorts last exactly as
         `search`'s guarded selection leaves it.
         """
+        if cloud_cell.resource_policy() == "service-v1":
+            return [
+                [(path, chunk, score) for path, chunk, _text, score in hits]
+                for hits in self._disk_score(query_vecs, k, admits=admits, encoded_for=encoded_for)
+            ]
         metadata, matrix = self.all_vectors()
         queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, matrix.shape[1])
         if not len(queries):
@@ -1191,6 +1498,133 @@ class EmbeddingIndex:
             # Released before the next product, so two blocks are never alive at once.
             del block
         return answers
+
+    def chunk_count(self) -> int:
+        """Count stored chunk rows without warming their vectors."""
+        if not self.path.exists():
+            return 0
+        conn = self._connect()
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        finally:
+            conn.close()
+
+    def _disk_score(
+        self, query_vecs, k: int, *, admits: Callable[[str], bool],
+        encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
+    ) -> list[list[tuple[str, int, str, float]]]:
+        """Exact eligible top-k with bounded vectors and one scoring snapshot."""
+        if not self.path.exists():
+            return [[] for _ in query_vecs]
+        self.unload_cache()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            token = self._build_token(conn)
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+            queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
+            if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
+                recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
+            self._observe_identity(identity, token)
+            answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
+            if k <= 0:
+                return [[] for _ in queries]
+            for start in range(0, len(queries), SEARCH_MANY_BLOCK):
+                cursor = conn.execute(
+                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                )
+                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
+                    matrix = np.empty((len(rows), width), dtype=np.float32)
+                    metadata = []
+                    for n, (path, chunk, blob) in enumerate(rows):
+                        if len(blob) != width * 4:
+                            raise ValueError("embedding row width differs from stored space")
+                        matrix[n] = np.frombuffer(blob, dtype=np.float32)
+                        metadata.append((path, chunk))
+                    block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
+                    # Only this block's candidate verdicts live across queries.
+                    verdicts: dict[str, bool] = {}
+                    def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
+                        path = metadata[row][0]
+                        if path not in verdicts:
+                            verdicts[path] = bool(admits(path))
+                        return verdicts[path]
+                    for n, scores in enumerate(block, start):
+                        winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
+                        merged = answers[n] + winners
+                        # Stable sort preserves the existing score/tie contract.
+                        merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
+                        answers[n] = merged[:k]
+                    del matrix, block, rows
+            result = []
+            for hits in answers:
+                hydrated = []
+                for path, chunk, score in hits:
+                    text = ""
+                    if hydrate:
+                        text = conn.execute(
+                            "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
+                            (path, chunk),
+                        ).fetchone()[0]
+                    hydrated.append((path, chunk, text, score))
+                result.append(hydrated)
+            return result
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def pairwise_current_chunks(
+        self, wanted: dict[str, list[str]],
+    ) -> tuple[dict[frozenset[str], float], set[str]]:
+        """Exact selected-parent coverage and blocked cosine maxima, no corpus cache."""
+        if not self.path.exists():
+            return {}, set()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+            covered: set[str] = set()
+            for path, chunks in wanted.items():
+                count = 0
+                exact = True
+                for chunk, text, size in conn.execute(
+                    "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
+                    "WHERE file_path=? ORDER BY chunk_idx", (path,),
+                ):
+                    if count >= len(chunks) or chunk != count or text != chunks[count] or size != width * 4:
+                        exact = False
+                        break
+                    count += 1
+                if exact and count == len(chunks) and count:
+                    covered.add(path)
+
+            def blocks(path: str):
+                cursor = conn.execute(
+                    "SELECT vector FROM chunks WHERE file_path=? ORDER BY chunk_idx", (path,),
+                )
+                while rows := cursor.fetchmany(self.PAIRWISE_BLOCK_ROWS):
+                    matrix = np.empty((len(rows), width), dtype=np.float32)
+                    for n, (blob,) in enumerate(rows):
+                        matrix[n] = np.frombuffer(blob, dtype=np.float32)
+                    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+                    matrix /= np.maximum(norms, 1e-12)
+                    yield matrix
+
+            best: dict[frozenset[str], float] = {}
+            names = sorted(covered)
+            for n, a in enumerate(names):
+                for b in names[n + 1:]:
+                    maximum = -np.inf
+                    for first in blocks(a):
+                        for second in blocks(b):
+                            maximum = np.maximum(maximum, (first @ second.T).max())
+                    best[frozenset((a, b))] = float(maximum)
+            return best, covered
+        finally:
+            conn.rollback()
+            conn.close()
 
     def _eligibility_mask(
         self, metadata: list[tuple[str, int]], allowed_paths: AbstractSet[str]
@@ -1437,10 +1871,17 @@ class EmbeddingIndex:
         return [str(text) for _idx, text, _mtime in rows], max(mtimes)
 
     def stored_text_vectors(
-        self, rel_path: str
+        self, rel_path: str, *, max_bytes: int | None = None
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """One page's published chunk and unit vectors keyed by exact text."""
+        chunks, units, _space = self.stored_text_vectors_with_space(rel_path, max_bytes=max_bytes)
+        return chunks, units
+
+    def stored_text_vectors_with_space(
+        self, rel_path: str, *, max_bytes: int | None = None
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], recall_space.SpaceIdentity | None]:
         """One page's published vectors keyed by the exact text each was encoded
-        from: `(chunk_text -> vector, unit content -> vector)`.
+        from, and their space identity, all from one read transaction.
 
         A write that changes one chunk of a long page takes the rest from here
         instead of encoding them again. A row is offered only when its blob is
@@ -1451,9 +1892,29 @@ class EmbeddingIndex:
         on one connection; never creates the sidecar.
         """
         if not self.path.exists():
-            return {}, {}
+            return {}, {}, None
         conn = self._connect()
         try:
+            conn.execute("BEGIN", ())
+            space = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if max_bytes is not None:
+                # Blob + copied array, decoded strings and per-row containers.
+                # Check both projections in the same snapshot before fetchall;
+                # a formerly huge parent can now be a tiny replacement.
+                reuse_bytes = conn.execute(
+                    "SELECT COALESCE(SUM(2 * length(vector) + "
+                    "4 * length(CAST(chunk_text AS BLOB)) + 512), 0) "
+                    "FROM chunks WHERE file_path = ?",
+                    (rel_path,),
+                ).fetchone()[0]
+                reuse_bytes += conn.execute(
+                    "SELECT COALESCE(SUM(2 * length(vector) + "
+                    "4 * length(CAST(content AS BLOB)) + 512), 0) "
+                    "FROM semantic_unit_vectors WHERE parent_path = ?",
+                    (rel_path,),
+                ).fetchone()[0]
+                if reuse_bytes > max_bytes:
+                    return {}, {}, space
             chunk_rows = conn.execute(
                 "SELECT chunk_text, vector FROM chunks WHERE file_path = ?",
                 (rel_path,),
@@ -1464,7 +1925,8 @@ class EmbeddingIndex:
             ).fetchall()
         finally:
             conn.close()
-        width = self.dim * np.dtype(np.float32).itemsize
+        dim = space.dim if space is not None else recall_space.current_dim()
+        width = dim * np.dtype(np.float32).itemsize
 
         def keyed(rows: list[tuple[Any, Any]]) -> dict[str, np.ndarray]:
             return {
@@ -1473,7 +1935,7 @@ class EmbeddingIndex:
                 if isinstance(blob, (bytes, memoryview)) and len(blob) == width
             }
 
-        return keyed(chunk_rows), keyed(unit_rows)
+        return keyed(chunk_rows), keyed(unit_rows), space
 
     def _vec_search(
         self, query_vec: np.ndarray, k: int
@@ -1653,179 +2115,230 @@ class EmbeddingIndex:
                 continue
         return recall_policy.recall_policy_identity(self.vault_root), tuple(sorted(rows))
 
-    def rebuild_all(self) -> int:
-        """Wipe + re-embed every compiled .md the index scope covers. Returns row count.
+    @staticmethod
+    def _build_token(conn: sqlite3.Connection) -> tuple[int, int, int, int]:
+        unit_generation = conn.execute(
+            "SELECT value FROM meta WHERE key = 'semantic_unit_generation'"
+        ).fetchone()
+        return (*sidecar_store.read_meta_token(conn), int(unit_generation[0]) if unit_generation else 0)
 
-        Scope is `index_scope()` (`EXOMEM_INDEX_SCOPE`): `"kb"` (default) walks
-        `Knowledge Base/` only — byte-identical to the historical behavior;
-        `"vault"` walks the whole vault (`vault.walk_vault_md`) so notes outside
-        `Knowledge Base/` become semantically searchable. Both honor
-        `access.is_indexable` and the shared `_is_embeddable_path` /
-        `_chunks_for_page` filtering, so only the walked file SET differs.
+    def rebuild_all(self, *, batch_size: int = 256) -> int:
+        """Stage bounded batches in this sidecar and atomically replace serving rows.
+
+        A serving publication or source/policy change during encoding refuses this
+        candidate. Staging is invisible to readers and cleanup touches this run only.
         """
         from . import access
         from . import embeddings as embeddings_module
         from . import find as find_module
 
         scope = index_paths.index_scope()
-        # KB scope with no Knowledge Base/ is a no-op that must NOT wipe (historical
-        # early return). Vault scope always proceeds — it indexes the wider tree.
         if scope == "kb" and not index_paths.kb_index_root(self.vault_root).is_dir():
             return 0
         source_snapshot = self._projected_source_snapshot()
+        limit = max(1, int(batch_size))
 
-        all_chunks: list[tuple[str, list[str], float]] = []
-        all_unit_states: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
-        for md in index_paths.iter_index_markdown(self.vault_root):
-            if not index_paths.is_embeddable_path(md):
-                continue
-            page = find_module._CACHE.get(md, self.vault_root)
-            if page is None:
-                continue
-            if not access.is_indexable(self.vault_root, page.rel_path):
-                continue  # excluded tree (_access.yaml) — keep it out of the index
-            chunks = embeddings_module._chunks_for_page(self.vault_root, page)
-            if chunks:
-                all_chunks.append((page.rel_path, chunks, page.mtime))
-            try:
-                state = semantic_index.build_parent_index_state(self.vault_root, md)
-            except (OSError, UnicodeError, ValueError):
-                continue
-            if any(unit.unit_ref is not None for unit in state.document.units):
-                all_unit_states.append((state, page.mtime))
+        def pages() -> Iterator[
+            tuple[Any, list[str], semantic_index.SemanticParentIndexState | None]
+        ]:
+            for md in index_paths.iter_index_markdown(self.vault_root):
+                if not index_paths.is_embeddable_path(md):
+                    continue
+                page = find_module._CACHE.get(md, self.vault_root)
+                if page is None or not access.is_indexable(self.vault_root, page.rel_path):
+                    continue
+                chunks = embeddings_module._chunks_for_page(self.vault_root, page) or []
+                try:
+                    state = semantic_index.build_parent_index_state(self.vault_root, md)
+                except (OSError, UnicodeError, ValueError):
+                    state = None
+                if chunks or (
+                    state is not None
+                    and any(unit.unit_ref is not None for unit in state.document.units)
+                ):
+                    yield page, chunks, state
 
-        if not all_chunks and not all_unit_states:
+        inputs = pages()
+        first = next(inputs, None)
+        if first is None:
             return 0
-
-        # Batch-embed across all files at once for GPU efficiency.
-        flat_texts: list[str] = []
-        for _, chunks, _ in all_chunks:
-            flat_texts.extend(chunks)
-        log.info(
-            "rebuild_embeddings: embedding %d chunks from %d files",
-            len(flat_texts),
-            len(all_chunks),
-        )
-        # A rebuild replaces every row, so it is written in the space of the
-        # encoder in use, whatever the sidecar held before.
-        width = recall_space.current_dim()
-        vectors = (
-            embeddings_module.embed_texts(flat_texts, is_query=False)
-            if flat_texts
-            else np.zeros((0, width), dtype=np.float32)
-        )
-        unit_texts = [
-            unit.content
-            for state, _mtime in all_unit_states
-            for unit in state.document.units
-            if unit.unit_ref is not None
-        ]
-        unit_vectors = (
-            embeddings_module.embed_texts(unit_texts, is_query=False)
-            if unit_texts
-            else np.zeros((0, width), dtype=np.float32)
-        )
-        width = int(vectors.shape[1] if len(vectors) else np.asarray(unit_vectors).shape[1])
-
-        # Bulk write in ONE transaction. Per-file upsert_file() calls would each
-        # open a connection, fsync, and splice the in-memory matrix — O(N²) copies
-        # plus N fsyncs. Build every row, wipe + executemany once, then leave the
-        # cache null (set at the top) so the next all_vectors() does ONE full load.
-        insert_rows: list[tuple[str, int, str, bytes, float]] = []
-        offset = 0
-        total = 0
-        for rel_path, chunks, mtime in all_chunks:
-            for i, ch in enumerate(chunks):
-                insert_rows.append(
-                    (rel_path, i, ch, vectors[offset + i].astype(np.float32).tobytes(), mtime)
-                )
-            offset += len(chunks)
-            total += len(chunks)
-        unit_insert_rows: list[tuple] = []
-        unit_offset = 0
-        for state, mtime in all_unit_states:
-            count = sum(unit.unit_ref is not None for unit in state.document.units)
-            unit_insert_rows.extend(
-                self._semantic_unit_rows(
-                    state,
-                    unit_vectors[unit_offset : unit_offset + count],
-                    mtime,
-                )
-            )
-            unit_offset += count
+        run_key = uuid.uuid4().hex
         conn = self._connect()
+        total = 0
+        producer: recall_space.SpaceIdentity | None = None
+        producer_model = recall_space.encoding_model()
         try:
-            # No initial wipe: retain the prior coherent sidecar until the staged
-            # projected corpus proves it still matches immediately before commit.
-            if self._projected_source_snapshot() != source_snapshot:
-                log.info("rebuild_embeddings: projected source changed; publication refused")
-                return 0
-            rebuilt = recall_space.current_identity(width)
-            prior = self._identity
-            # Another space's vec0 column has another width: this rebuild leaves
-            # it for the next sync to redeclare, instead of writing through it.
-            same_space = prior is None or (
-                prior.dim == rebuilt.dim and prior.accepts(rebuilt.model, rebuilt.fingerprint)
-            )
-            if prior is None:
-                # A sidecar with no vectors yet takes the rebuilt width now, so
-                # vec0 is declared at it before the rows below are mirrored.
-                self._set_identity(rebuilt)
-            vec_on = vec_gate(self, conn) if same_space else False
-            drop_vec = (
-                not same_space
-                and not self._vec_failed
-                and vecstore.backend() != "numpy"
-                and self._vec.try_load(conn)
-            )
+            conn.execute("BEGIN")
+            captured_token = self._build_token(conn)
+            conn.rollback()
             with conn:
-                if drop_vec:
-                    self._vec.drop(conn)
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS embedding_build_runs "
+                    "(run_key TEXT PRIMARY KEY, serving_token TEXT NOT NULL, space_identity TEXT)"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS embedding_build_chunks AS "
+                    "SELECT CAST(NULL AS TEXT) AS run_key, chunks.* FROM chunks WHERE 0"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS embedding_build_units AS "
+                    "SELECT CAST(NULL AS TEXT) AS run_key, semantic_unit_vectors.* "
+                    "FROM semantic_unit_vectors WHERE 0"
+                )
+                conn.execute(
+                    "INSERT INTO embedding_build_runs(run_key, serving_token) VALUES (?, ?)",
+                    (run_key, json.dumps(captured_token)),
+                )
+            pending_chunks: list[tuple[str, int, str, float]] = []
+            pending_units: list[tuple] = []
+
+            def flush(rows: list, *, units: bool = False) -> None:
+                nonlocal producer, total
+                if not rows:
+                    return
+                if recall_space.encoding_model() != producer_model:
+                    raise recall_space.VectorSpaceMismatch(
+                        "rebuild producer changed during staging"
+                    )
+                texts = [row[11] if units else row[2] for row in rows]
+                vectors, encoded = embeddings_module._encode_prepared(
+                    lambda: embeddings_module.embed_texts(texts, is_query=False)
+                )
+                if len(vectors) != len(rows):
+                    raise ValueError("rebuild encoder returned an invalid vector shape")
+                if recall_space.encoding_model() != producer_model or (
+                    producer is not None and encoded != producer
+                ):
+                    raise recall_space.VectorSpaceMismatch(
+                        "rebuild producer changed during staging"
+                    )
+                producer = encoded
+                with conn:
+                    conn.execute(
+                        "UPDATE embedding_build_runs SET space_identity = ? WHERE run_key = ?",
+                        (json.dumps([producer.model, producer.fingerprint, producer.dim]), run_key),
+                    )
+                    if units:
+                        conn.executemany(
+                            "INSERT INTO embedding_build_units VALUES "
+                            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                (run_key, *row[:14], vector.tobytes(), row[15])
+                                for row, vector in zip(rows, vectors, strict=True)
+                            ),
+                        )
+                    else:
+                        conn.executemany(
+                            "INSERT INTO embedding_build_chunks VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                (run_key, path, idx, text, vector.tobytes(), mtime)
+                                for (path, idx, text, mtime), vector in zip(
+                                    rows, vectors, strict=True
+                                )
+                            ),
+                        )
+                        total += len(rows)
+                rows.clear()
+
+            for page, chunks, state in chain((first,), inputs):
+                for idx, text in enumerate(chunks):
+                    pending_chunks.append((page.rel_path, idx, text, page.mtime))
+                    if len(pending_chunks) >= limit:
+                        flush(pending_chunks)
+                if state is None:
+                    continue
+                # Build row metadata without allocating placeholder vectors for a page.
+                for order, unit in enumerate(state.document.units):
+                    if unit.unit_ref is None:
+                        continue
+                    pending_units.append(
+                        (
+                            unit.unit_ref,
+                            "semantic_unit",
+                            unit.unit_ref,
+                            state.path,
+                            state.parent_ref,
+                            state.parent_generation,
+                            state.parent_source_hash,
+                            state.parser_version,
+                            unit.form,
+                            unit.category,
+                            unit.kind,
+                            unit.content,
+                            unit.source_hash,
+                            order,
+                            None,
+                            page.mtime,
+                        )
+                    )
+                    if len(pending_units) >= limit:
+                        flush(pending_units, units=True)
+            flush(pending_chunks)
+            flush(pending_units, units=True)
+            if producer is None:
+                return 0
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if (
+                    self._build_token(conn) != captured_token
+                    or self._projected_source_snapshot() != source_snapshot
+                ):
+                    conn.rollback()
+                    log.info(
+                        "rebuild_embeddings: serving or source snapshot changed; publication refused"
+                    )
+                    return 0
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM semantic_unit_vectors")
-                recall_space.clear_identity(conn)
-                identity = recall_space.admit(conn, None, width)
-                conn.executemany(
-                    "INSERT INTO chunks "
-                    "(file_path, chunk_idx, chunk_text, vector, file_mtime) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    insert_rows,
+                recall_space.write_identity(conn, producer)
+                conn.execute(
+                    "INSERT INTO chunks SELECT file_path, chunk_idx, chunk_text, vector, file_mtime "
+                    "FROM embedding_build_chunks WHERE run_key = ?",
+                    (run_key,),
                 )
-                conn.executemany(
-                    "INSERT INTO semantic_unit_vectors("
+                conn.execute(
+                    "INSERT INTO semantic_unit_vectors SELECT "
                     "unit_key, record_type, unit_ref, parent_path, parent_ref, "
-                    "parent_generation, parent_source_hash, parser_version, form, "
-                    "category, kind, content, unit_source_hash, source_order, vector, "
-                    "file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    unit_insert_rows,
+                    "parent_generation, parent_source_hash, parser_version, form, category, "
+                    "kind, content, unit_source_hash, source_order, vector, file_mtime "
+                    "FROM embedding_build_units WHERE run_key = ?",
+                    (run_key,),
                 )
-                if vec_on:
-                    # One whole-table INSERT..SELECT from the fresh blobs — the
-                    # bulk analog of the per-file dual-write.
-                    self._vec.wipe(conn)
-                    self._vec.repopulate_all(conn)
-                # Bump generation (monotonic write counter) AND epoch (re-embed
-                # marker) in the FINAL txn only — never the wipe txn above. A WARM
-                # reader whose cache still matches the PRE-bump token keeps serving
-                # its correct pre-rebuild snapshot through the wipe→final-txn gap
-                # (the whole point of gating patch-cache on contiguity, F1). A COLD
-                # reader (or any cache miss) racing that same gap instead loads the
-                # wipe's EMPTY table under that pre-bump token, and would keep
-                # serving empty until this commit moves the token — the same
-                # exposure a full reload always had racing a wipe/rebuild window,
-                # unchanged by this PR. epoch catches re-embeds that changed no
-                # file mtimes. The per-path change log cannot describe a
-                # whole-table rewrite, so it resets and a fresh logged run starts
-                # here — no cache may be caught up across this write.
+                mirror = self._publication_vec(conn, producer)
+                if mirror is not None:
+                    mirror.wipe(conn)
+                    mirror.repopulate_all(conn)
                 sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                if self._projected_source_snapshot() != source_snapshot:
+                    conn.rollback()
+                    return 0
+                own_token = self._build_token(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            self._complete_publication(producer, own_token)
+            return total
         finally:
-            conn.close()
-        self._set_identity(identity)
-        with self._lock:
-            self._cache = None
-        return total
+            conn.rollback()
+            try:
+                with conn:
+                    for table in (
+                        "embedding_build_chunks",
+                        "embedding_build_units",
+                        "embedding_build_runs",
+                    ):
+                        if (
+                            conn.execute(
+                                "SELECT 1 FROM sqlite_master WHERE name = ?", (table,)
+                            ).fetchone()
+                            is not None
+                        ):
+                            conn.execute(f"DELETE FROM {table} WHERE run_key = ?", (run_key,))
+            finally:
+                conn.close()
 
     @staticmethod
     def cache_token(vault_root: Path) -> tuple[int, int, int]:

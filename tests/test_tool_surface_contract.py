@@ -69,10 +69,13 @@ def _mcp_tools(mcp) -> dict[str, dict]:
 
 
 def _call_bootstrap(mcp) -> dict:
+    """The complete reference payload: compact is the core since `shrink-bootstrap`."""
     with principal_module.request_scope(
         principal_module.owner_principal(surface="mcp")
     ):
-        result = asyncio.run(mcp.call_tool("bootstrap", {}, run_middleware=False))
+        result = asyncio.run(
+            mcp.call_tool("bootstrap", {"section": "all"}, run_middleware=False)
+        )
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)
@@ -680,7 +683,9 @@ def test_the_server_tells_every_client_to_activate_context_first(
 
     assert "activate_context" in instructions
     assert "verbatim" in instructions
-    assert "before" in instructions.lower()
+    assert "bootstrap" in instructions and "first" in instructions
+    assert "All tools named here belong to this server" in instructions
+    assert "When recall is warranted" in instructions
     tools = asyncio.run(mcp.list_tools())
     assert "activate_context" in {tool.name for tool in tools}
     # Short enough that a client which truncates server instructions keeps it.

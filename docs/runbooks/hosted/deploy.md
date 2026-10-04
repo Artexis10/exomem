@@ -9,6 +9,14 @@ ciphertexts, and owner-only invitation gate must be green. Production mutation
 always uses a saved plan; a second plan is never computed during apply. The
 pair is committed at `infra/contracts/exomem-hosted-deployment-lock-pair-v2.json`.
 
+Use `infra/scripts/plan.sh` for plan preparation. It deletes its temporary raw
+JSON and emits a separate `<saved-plan>.review.json` containing resource addresses
+and actions only. Review configuration in the owning IaC source; this summary
+does not contain configuration values. Saved binary plans and raw `terraform
+show -json` output can contain plaintext credentials despite Terraform's
+`sensitive` display markers. Never print, search or pass them to an agent or
+reviewer; only the value-free summary is review material.
+
 Runtime releases use the governed expand/canary/contract workflow in
 [`runtime-upgrades.md`](runtime-upgrades.md). The deployment sections below are its
 effectors, not a release checklist; do not edit their release values by hand.

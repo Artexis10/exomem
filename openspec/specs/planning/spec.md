@@ -1,7 +1,7 @@
 # planning Specification
 
 ## Purpose
-TBD - created by archiving change add-multi-horizon-planning. Update Purpose after archive.
+Represent intended future state (goals, outcomes, ongoing areas, initiatives, priorities, commitments and horizons) as human-owned Planning collections with stable identity and a minimal typed core. Mutation is guarded and audited, queries are bounded, views carry provenance, and progress and motivating knowledge are reviewed without becoming relations or recall edges.
 
 ## Requirements
 

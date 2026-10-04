@@ -14,6 +14,8 @@ lands in the service log when it fires.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -64,6 +66,17 @@ class ProjectRegistry:
 
     def category_for(self, key: str) -> str:
         return self.project_to_category.get(key, "uncategorized")
+
+    @property
+    def content_hash(self) -> str:
+        """Identity of the effective keys, folders and categories, not YAML formatting."""
+        entries = [
+            (key, self.folder_for(key), self.category_for(key))
+            for key in sorted(self.keys)
+        ]
+        return hashlib.sha256(
+            json.dumps(entries, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
 
 @dataclass(frozen=True)

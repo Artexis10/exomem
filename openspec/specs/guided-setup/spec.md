@@ -1,7 +1,7 @@
 # guided-setup Specification
 
 ## Purpose
-TBD - created by archiving change add-setup-wizard. Update Purpose after archive.
+Provide one-command guided local setup through `exomem setup`: vault selection, a pre-init structure scan, hooks, Claude Code registration and a doctor check. It is safe to re-run, supports a non-interactive mode with a hard doctor gate, and teaches the cognition-layer model.
 ## Requirements
 ### Requirement: One-command guided local setup
 The system SHALL provide an `exomem setup` CLI subcommand that performs, in

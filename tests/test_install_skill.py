@@ -191,7 +191,10 @@ def test_clean_filesystem_install_is_self_sufficient_without_personal_skills(
     install_module.install_skill(target)
     concise = semantic_authoring.render_concise()
 
-    core = (target / "SKILL.md").read_text(encoding="utf-8")
+    # The core skill keeps the canonical contract in the reference beside SKILL.md.
+    core = (target / "SKILL.md").read_text(encoding="utf-8") + (
+        target / "references" / "semantic-authoring.md"
+    ).read_text(encoding="utf-8")
     assert concise in core
     assert (target / "references" / "page-types.md").is_file()
     for name in EXPECTED_WORKFLOW_SKILLS:

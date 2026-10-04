@@ -1564,12 +1564,18 @@ def tombstoned_paths(vault_root: Path) -> frozenset[str]:
     return _cached_tombstoned_paths(str(root), _tombstone_generation(root))
 
 
-def is_tombstoned(vault_root: Path, value: str) -> bool:
+def is_tombstoned_in(tombstones: frozenset[str], value: str) -> bool:
+    """Membership against a set the caller read once with `tombstoned_paths`."""
     normalized = _normalize_rel(value)
     if not normalized:
         return False
-    tombstones = tombstoned_paths(vault_root)
     return FAIL_CLOSED_TOMBSTONE in tombstones or normalized in tombstones
+
+
+def is_tombstoned(vault_root: Path, value: str) -> bool:
+    if not _normalize_rel(value):
+        return False
+    return is_tombstoned_in(tombstoned_paths(vault_root), value)
 
 
 def _records(vault_root: Path) -> list[dict[str, Any]]:

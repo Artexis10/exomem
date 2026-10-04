@@ -1,7 +1,7 @@
 # recall-read-path Specification
 
 ## Purpose
-TBD - created by archiving change bound-the-cold-recall-resolver. Update Purpose after archive.
+Keep the recall read path fast and correct on a managed server: idle reclamation retains the recall resolver, request threads never rebuild projections, and published catalogue admission survives strict readiness demotion. Optional graph expansion cannot veto admitted recall, and offline invocations keep a bounded source-of-truth fallback.
 
 ## Requirements
 

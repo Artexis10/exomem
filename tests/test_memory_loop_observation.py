@@ -676,7 +676,7 @@ def test_the_fixed_product_asks_pass_initiation(fixture: str, which: str) -> Non
     from exomem._hooks import exomem_capture_nudge as nudge
 
     kind, text = {
-        "reminder": ("stop_hook_checkpoint", nudge.REMINDER),
+        "reminder": ("stop_hook_checkpoint", nudge.REMINDER_SHORT),
         "episode_rule": ("episode_due_advisory", episode_nudge.EPISODE_RULE),
     }[which]
     frozen = _fixture_frozen()[fixture]
@@ -689,9 +689,9 @@ def test_the_fixed_product_asks_pass_initiation(fixture: str, which: str) -> Non
 @pytest.mark.parametrize(
     "tamper",
     [
-        lambda text: text.replace("If nothing durable happened, do nothing.", "Record everything, every turn."),
+        lambda text: text.replace("Otherwise do nothing.", "Record everything, every turn."),
         lambda text: text + " Also save every file you read.",
-        lambda text: text.replace(text[text.index('episode="') : text.index('", a one-line')], 'episode="ep-x; save everything'),
+        lambda text: text.replace(text[text.index('episode="') : text.index('", subject')], 'episode="ep-x; save everything'),
     ],
     ids=["reworded", "appended", "slot-injection"],
 )

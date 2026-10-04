@@ -535,7 +535,9 @@ def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, li
 #: 11: tokenizer v2 (`bm25.TOKENIZER_VERSION` 2) and the unicode61 declaration
 #: that keeps its Unicode tokens whole. A v10 catalogue reads not-current and is
 #: rebuilt by the existing background rebuild.
-SCHEMA_VERSION = 11
+#: 12: transactional frequency revisions and page/FTS-content mutation triggers.
+#: A v11 catalogue is rebuilt before revision-bound counts can be cached.
+SCHEMA_VERSION = 12
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -2100,10 +2102,20 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
+    _BM25_ERROR.error_class = None
     result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
     if repair:
         _admit_after_bounded_runtime_repair(vault_root, result)
     return result
+
+
+_BM25_ERROR = threading.local()
+
+
+def last_bm25_error_class() -> str | None:
+    """`classify_sqlite_error` of the SQLite error behind this thread's last
+    `search_bm25` returning None, or None when no error caused it."""
+    return getattr(_BM25_ERROR, "error_class", None)
 
 
 def search_bm25_result(
@@ -3276,9 +3288,11 @@ class LexicalStore:
         # adopted, awaiting the one heal that reconciles it (single use).
         self._adopted_rows: dict[str, tuple] | None = None
         self._lock = threading.Lock()
+        self._term_frequency_cache_lock = threading.Lock()
         # ((scope, catalogue generation), {stem: document frequency}, pages in
         # scope) for bounded queries; see `_catalogue_term_frequencies`.
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
+        self._filtered_term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -3890,6 +3904,7 @@ class LexicalStore:
             self._restore_quarantined_set(quarantined)
             return False
         self._term_frequency_cache = None
+        self._filtered_term_frequency_cache = None
         self._discard_quarantined_set(quarantined)
         return True
 
@@ -4091,6 +4106,11 @@ class LexicalStore:
         # attestation that lets a restart skip the exact verify.
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) "
+            "VALUES('frequency_revision', hex(randomblob(16)))"
+        )
+        self._create_frequency_revision_triggers(conn, "pages")
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
             " record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),"
             " unit_ref TEXT NOT NULL,"
@@ -4127,6 +4147,24 @@ class LexicalStore:
             " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
+
+    def _create_frequency_revision_triggers(
+        self, conn: sqlite3.Connection, table: str
+    ) -> None:
+        """Attest mutations from every connection in the writer's transaction.
+
+        Random revisions separate independently built/replaced catalogues too.
+        FTS5 forbids virtual-table triggers; its internal-content shadow table
+        carries every FTS row insert/update/delete instead. Posting-table
+        triggers would reenter FTS5's flush while another trigger is executing.
+        """
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS frequency_revision_{table}_{operation} "
+                f"AFTER {operation} ON {table} BEGIN "
+                "UPDATE meta SET value = hex(randomblob(16)) "
+                "WHERE key = 'frequency_revision'; END"
+            )
 
     def _create_catalog_indexes(self, conn: sqlite3.Connection) -> None:
         # Covering indexes so the per-corpus-change count/max reconcile stays
@@ -4210,6 +4248,7 @@ class LexicalStore:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
+            self._create_frequency_revision_triggers(conn, "fts_content")
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
@@ -4698,6 +4737,7 @@ class LexicalStore:
             )
         self._witnessed.clear()
         self._term_frequency_cache = None
+        self._filtered_term_frequency_cache = None
         # Never stamp a newer projection over bytes parsed from an older scan.
         # A concurrent projected event is reconciled from its current live map;
         # raw Records events leave these checkpoints unchanged and need no work.
@@ -6055,6 +6095,7 @@ class LexicalStore:
                 replace=True,
             )
         self._term_frequency_cache = None
+        self._filtered_term_frequency_cache = None
         # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal`.
         return True
 
@@ -6208,6 +6249,7 @@ class LexicalStore:
                 self._synced.clear()
                 self._witnessed.clear()
                 self._term_frequency_cache = None
+                self._filtered_term_frequency_cache = None
                 self._adopted_rows = dict(detached.rows)
         return published
 
@@ -6738,6 +6780,7 @@ class LexicalStore:
                 ),
             )
         except sqlite3.Error as e:
+            _BM25_ERROR.error_class = classify_sqlite_error(e)
             self._note_query_failure(
                 e,
                 "lexical sidecar failed (%s); this process serves the in-process lexical paths",
@@ -6799,7 +6842,7 @@ class LexicalStore:
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._document_frequency_query(
+            lambda conn: self._catalogue_term_frequencies(
                 conn,
                 stemmed_tokens,
                 scope,
@@ -6860,6 +6903,7 @@ class LexicalStore:
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
         exclude_statuses: tuple[str, ...] = (),
+        pages_in_scope: int | None = None,
     ) -> tuple[dict[str, int], int]:
         """`({stem: pages carrying it}, pages in scope)` — one indexed lookup
         per DISTINCT stem, over the same join `_bm25_query` ranks with."""
@@ -6869,10 +6913,12 @@ class LexicalStore:
         raw_clause, raw_params = _excluded_rows_clause(
             navigation=False, raw_material=exclude_raw_material
         )
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM pages p WHERE p.{col} = 1" + raw_clause,
-            raw_params,
-        ).fetchone()
+        if pages_in_scope is None:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM pages p WHERE p.{col} = 1" + raw_clause,
+                raw_params,
+            ).fetchone()
+            pages_in_scope = int(total[0]) if total else 0
         excluded_clause, excluded_params = _excluded_rows_clause(
             navigation=exclude_navigation,
             raw_material=exclude_raw_material,
@@ -6888,48 +6934,100 @@ class LexicalStore:
                 (f'"{token}"', *excluded_params),
             ).fetchone()
             frequencies[token] = int(row[0]) if row else 0
-        return frequencies, int(total[0]) if total else 0
+        return frequencies, pages_in_scope
 
     def _catalogue_term_frequencies(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str,
+        *,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
+        exclude_statuses: tuple[str, ...] = (),
     ) -> tuple[dict[str, int], int]:
-        """`({stem: pages in `scope` holding it}, pages in `scope`)`.
+        """Exact counts cached against the revision of the counts' SQL snapshot.
 
-        The informativeness a bounded query ranks its units by, counted by
-        `_document_frequency_query` over the same `fts`/`pages` join and scope
-        column the MATCH reads, so a word held only outside the scope is
-        absent from it rather than rare.
-
-        Cached per catalogue generation, keyed by the scope, the stored
-        checkpoints and the catalogue identity read on `conn`'s own snapshot,
-        so only stems this generation has not been asked about are counted.
-        Every path that replaces the live catalogue in this process clears the
-        cache as well, since a stale count is not harmless: a frequency decides
-        which units reach the MATCH, and a stale 0 drops the unit, so a page is
-        not reached through its words until the key moves.
+        Read connections are short-lived, so their PRAGMA data_version values
+        cannot identify revisions across requests. Mutation triggers persist
+        that identity instead. Never mix cached counts with a different snapshot.
         """
-        generation = (
-            scope,
-            *conn.execute(
-                "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
-                "OR key = 'catalog_identity' ORDER BY key"
-            ).fetchall(),
-        )
-        cached = self._term_frequency_cache
-        if cached is not None and cached[0] == generation:
-            known, pages = cached[1], cached[2]
-        else:
-            known, pages = MappingProxyType({}), None
-        missing = [token for token in dict.fromkeys(tokens) if token not in known]
-        if missing or pages is None:
-            found, pages = self._document_frequency_query(conn, missing, scope)
-            merged = {} if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX else dict(known)
-            merged.update((token, int(found.get(token, 0))) for token in missing)
-            # Replaced whole, never mutated: a concurrent reader keeps the
-            # mapping it already holds.
-            known = MappingProxyType(merged)
-            self._term_frequency_cache = (generation, known, pages)
-        return {token: int(known.get(token, 0)) for token in tokens}, pages
+        owns_snapshot = not conn.in_transaction
+        if owns_snapshot:
+            conn.execute("BEGIN")
+        try:
+            revision = self._frequency_revision(conn)
+            generation = (
+                scope,
+                exclude_navigation,
+                exclude_raw_material,
+                exclude_statuses,
+                revision,
+                *conn.execute(
+                    "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
+                    "OR key = 'catalog_identity' ORDER BY key"
+                ).fetchall(),
+            )
+            # Keep carry filters separate from ranking's unfiltered counts.
+            filtered = exclude_navigation or exclude_raw_material or bool(exclude_statuses)
+            cached = (
+                self._filtered_term_frequency_cache if filtered else self._term_frequency_cache
+            )
+            if cached is not None and cached[0] == generation:
+                known, pages = cached[1], cached[2]
+            else:
+                known, pages = MappingProxyType({}), None
+            missing = [token for token in dict.fromkeys(tokens) if token not in known]
+            if missing or pages is None:
+                found, pages = self._document_frequency_query(
+                    conn, missing, scope,
+                    exclude_navigation=exclude_navigation,
+                    exclude_raw_material=exclude_raw_material,
+                    exclude_statuses=exclude_statuses,
+                    pages_in_scope=pages,
+                )
+                # The full response survives eviction, even if the request alone
+                # is larger than the retention bound.
+                response = {
+                    token: int(known[token] if token in known else found[token])
+                    for token in tokens
+                }
+                if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX:
+                    retained = {
+                        token: response[token]
+                        for _, token in zip(range(_TERM_FREQUENCY_CACHE_MAX), response, strict=False)
+                    }
+                else:
+                    retained = dict(known)
+                    retained.update(found)
+                self._install_term_frequency_cache(
+                    (generation, MappingProxyType(retained), pages), filtered=filtered
+                )
+                return response, pages
+            return {token: int(known[token]) for token in tokens}, pages
+        finally:
+            if owns_snapshot:
+                conn.rollback()
+
+    @staticmethod
+    def _frequency_revision(conn: sqlite3.Connection) -> str:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'frequency_revision'").fetchone()
+        if row is None:
+            raise sqlite3.OperationalError("catalogue frequency revision is missing")
+        return str(row[0])
+
+    def _install_term_frequency_cache(
+        self, entry: tuple[tuple, Mapping[str, int], int], *, filtered: bool
+    ) -> None:
+        """Retain counts under their pinned snapshot's revision, without SQL.
+
+        Every lookup compares the full key with its own snapshot. A late old
+        installer can cause a recount, never stale served counts. Opening another
+        connection here can deadlock the held read snapshot with a pending commit
+        on the supported DELETE-journal catalogue.
+        """
+        with self._term_frequency_cache_lock:
+            if filtered:
+                self._filtered_term_frequency_cache = entry
+            else:
+                self._term_frequency_cache = entry
 
     def _bm25_query(
         self,
@@ -7329,6 +7427,42 @@ class LexicalStore:
         finally:
             conn.close()
 
+    def unit_categories_of(self, paths: Iterable[str]) -> dict[str, frozenset[str]] | None:
+        """The categories each page's own semantic units are filed under.
+
+        One indexed read of the maintained `semantic_units` table, bounded by
+        the caller's own path list and by nothing else: no hydration, no
+        eligibility check, no ranking. A caller uses it to choose WHICH lenses
+        to read a page through, never to serve anything from it. None when the
+        catalogue is absent or stale, so a caller keeps its unfiltered lenses.
+        """
+        wanted = sorted({str(path) for path in paths if str(path)})
+        if not wanted or self._failed or not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit-category probe declined (%s)")
+            return None
+        try:
+            if not self._schema_is_current(conn):
+                return None
+            rows = conn.execute(
+                "SELECT DISTINCT parent_path, category FROM semantic_units "
+                "WHERE parent_path IN (SELECT value FROM json_each(?))",
+                (json.dumps(wanted, ensure_ascii=False),),
+            ).fetchall()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit-category probe declined (%s)")
+            return None
+        finally:
+            conn.close()
+        out: dict[str, set[str]] = {}
+        for parent, category in rows:
+            if category:
+                out.setdefault(str(parent), set()).add(str(category))
+        return {path: frozenset(found) for path, found in out.items()}
+
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
 
@@ -7645,27 +7779,38 @@ class LexicalStore:
         recall_checkpoint: Any | None = None,
         allow_delta: bool = True,
         allowed_parent_paths: set[str] | None = None,
+        excluded_categories_by_parent: dict[str, list[str]] | None = None,
+        query_units: list | None = None,
+        term_budget: QueryTermBudget | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
-        """Typed exact category/kind unit query; never used for content-only lanes."""
-        if not (categories or kinds or clauses):
+        """Ready-catalogue unit query, optionally ranking bounded material terms."""
+        if not (categories or kinds or clauses or query_units):
             return CatalogQueryResult(
                 None, CatalogReadiness("unsupported", False, backend())
             )
+
+        def query(conn: sqlite3.Connection) -> list[SemanticUnitLexicalHit]:
+            tokens: list[str] = []
+            if query_units is not None and term_budget is not None:
+                measured = [stem for unit in query_units for stem in unit.stems]
+                frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
+                kept, _counted, _dropped = select_query_units(
+                    query_units, frequencies, pages, term_budget,
+                )
+                tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
+                if not tokens:
+                    return []
+            return self._semantic_unit_query(
+                conn, tokens, k, categories, kinds, scope, allowed_unit_refs,
+                literal_tokens, dnf_clauses=clauses,
+                allowed_parent_paths=allowed_parent_paths,
+                excluded_categories_by_parent=excluded_categories_by_parent,
+            )
+
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._semantic_unit_query(
-                conn,
-                [],
-                k,
-                categories,
-                kinds,
-                scope,
-                allowed_unit_refs,
-                literal_tokens,
-                dnf_clauses=clauses,
-                allowed_parent_paths=allowed_parent_paths,
-            ),
+            query,
             "lexical semantic-unit sidecar failed (%s); unit retrieval degrades",
             recall_checkpoint=recall_checkpoint,
             allow_delta=allow_delta,
@@ -7684,6 +7829,7 @@ class LexicalStore:
         dnf_clauses: tuple | None = None,
         *,
         allowed_parent_paths: set[str] | None = None,
+        excluded_categories_by_parent: dict[str, list[str]] | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses = [f"u.{col} = 1"]
@@ -7709,6 +7855,13 @@ class LexicalStore:
         if allowed_parent_paths is not None:
             clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
             params.append(json.dumps(sorted(allowed_parent_paths), ensure_ascii=False))
+        if excluded_categories_by_parent is not None:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM json_each(?) AS parent "
+                "JOIN json_each(parent.value) AS category "
+                "WHERE parent.key = u.parent_path AND category.value = u.category)"
+            )
+            params.append(json.dumps(excluded_categories_by_parent, ensure_ascii=False))
         columns = (
             "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
             "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import memory_refs, query_data, vault
+from . import memory_refs, query_data, record_item_cache, vault
 from . import structured_collections as collections
 from .collection_profiles import profile_for
 
@@ -470,7 +470,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             if not self._require_authorized(relative):
                 continue
             try:
-                data, file_guard = vault.read_bounded_guarded_bytes(
+                data, digest, file_guard = record_item_cache.read_item(
                     self.vault_root,
                     relative,
                     limit=_MAX_ITEM_BYTES,
@@ -480,7 +480,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "SOURCE_NOT_FOUND", "canonical item file could not be read"
                 ) from error
             rel = relative
-            digest = hashlib.sha256(data).hexdigest()
             path_guards.append(file_guard)
             total_bytes += len(data)
             if total_bytes > _MAX_COLLECTION_BYTES:
@@ -494,7 +493,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 continue
             text = _decode_item_bytes(data)
             try:
-                frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
+                frontmatter, body, marker = record_item_cache.parsed_frontmatter(digest, text)
             except vault.FrontmatterError as error:
                 raise collections.CollectionError(error.code, error.reason) from error
             profile = profile_for(self.manifest.semantic_profile)
@@ -549,8 +548,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
             )
         try:
-            for path_guard in path_guards:
-                path_guard.recheck(self.vault_root)
+            vault.recheck_path_guards(self.vault_root, path_guards)
             for directory_guard in directory_guards:
                 directory_guard.recheck(self.vault_root)
         except vault.PathGuardError as error:
@@ -1403,7 +1401,7 @@ def render_markdown_item_update(
     delete_fields: tuple[str, ...] = (),
     body: str | None = None,
 ) -> str:
-    """Replace complete top-level YAML nodes while retaining unrelated source bytes."""
+    """Splice YAML nodes, preserving source key order and appending new keys in changes order."""
     bom = "\ufeff" if source.startswith("\ufeff") else ""
     text = source[len(bom) :]
     newline = "\r\n" if "\r\n" in text else "\n"
@@ -1435,6 +1433,7 @@ def render_markdown_item_update(
     # matters for a frontmatter block that is not newline-terminated at all.
     trailing = _span_terminator(yaml_text, (0, len(yaml_text))) or newline
     replacements: list[tuple[int, int, str]] = []
+    appended: list[str] = []
     for name in delete_fields:
         span = spans.get(name)
         if span is None:
@@ -1465,7 +1464,7 @@ def render_markdown_item_update(
         )
         rendered = vault.serialize_frontmatter({name: value}).replace("\n", local)
         if span is None:
-            replacements.append((len(yaml_text), len(yaml_text), rendered + trailing))
+            appended.append(rendered + trailing)
         else:
             # Block-style original values (dict/list-with-nested-items, or a
             # literal/folded scalar) end their compose span *after* their own
@@ -1482,6 +1481,10 @@ def render_markdown_item_update(
             if consumed and not rendered.endswith(consumed):
                 rendered += consumed
             replacements.append((*span, rendered))
+    if appended:
+        # New fields share one insertion offset. Group them so tuple sorting
+        # cannot use their rendered YAML as a tie-breaker and reorder them.
+        replacements.append((len(yaml_text), len(yaml_text), "".join(appended)))
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
         updated_yaml = updated_yaml[:start] + rendered + updated_yaml[end:]
@@ -1697,17 +1700,20 @@ def inspect_collection(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    snapshot: AdapterSnapshot | None = None,
 ) -> CollectionInspection:
     """Inspect one authorized canonical representation without repairing it.
 
     The adapter is deliberately read once.  On parse failure the manifest version
     remains reportable, while the typed diagnostic preserves the canonical error.
+    A caller that already holds a snapshot read through the same authorizer passes it
+    as `snapshot`, so one inspection never reads the collection twice.
     """
     adapter = load_adapter(
         vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
     try:
-        parsed = adapter.read()
+        parsed = snapshot if snapshot is not None else adapter.read()
     except collections.CollectionError as error:
         versions = (manifest.manifest_version,)
         return CollectionInspection(

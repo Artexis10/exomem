@@ -79,6 +79,21 @@ def test_workflow_skill_index_lists_first_pass_skills() -> None:
         assert skill["triggers"]
 
 
+def test_engagement_reference_preserves_the_live_user_preference() -> None:
+    # Native recall silently escalated balanced to maximal after reading the
+    # obsolete hookless-client default. The shipped reference must not override
+    # live policy or turn an ordinary lookup into a saved configuration change.
+    reference = (
+        Path(__file__).resolve().parents[1]
+        / "src/exomem/_scaffold/_Schema/references/engagement.md"
+    ).read_text()
+    assert "`maximal` is the shipped default on clients without hooks" not in reference
+    assert "Only an explicit user request to change the setting" in reference
+    core = (workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md").read_text()
+    portable = core.split("## Portable operating rules\n", 1)[1].split("\n## ", 1)[0]
+    assert "explicit user request to change saved engagement" in portable
+
+
 def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> None:
     concise = semantic_authoring.render_concise()
     identity = semantic_authoring.contract_identity()
@@ -97,7 +112,9 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
         assert expected_fragment in concise
 
     core = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
-    core_text = core.read_text(encoding="utf-8")
+    core_text = core.read_text(encoding="utf-8") + (
+        core.parent / "references" / "semantic-authoring.md"
+    ).read_text(encoding="utf-8")
     assert core_text.count(concise) == 1
     workflow_skills.validate_contract_projection("exomem", core.parent, core=True)
     core_text = core.read_text(encoding="utf-8")

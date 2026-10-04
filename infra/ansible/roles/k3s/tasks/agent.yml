@@ -86,6 +86,52 @@
   register: k3s_agent_label
   changed_when: "'not labeled' not in k3s_agent_label.stdout"
 
+# Registration flags do not update existing Nodes. Own only this reservation
+# key; resourceVersion keeps a concurrent taint update from being overwritten.
+- name: Read the agent reservation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - node
+      - "{{ inventory_hostname }}"
+      - -o
+      - json
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_node_result
+  changed_when: false
+
+- name: Compute the agent reservation
+  ansible.builtin.set_fact:
+    k3s_agent_node: "{{ k3s_agent_node_result.stdout | from_json }}"
+    k3s_agent_reserved_taints: >-
+      {{ ((k3s_agent_node_result.stdout | from_json).spec.taints | default([])
+          | rejectattr('key', 'equalto', 'exomem.io/dedicated-cell') | list)
+         + ([{'key': 'exomem.io/dedicated-cell', 'value': k3s_agent_dedicated_cell,
+              'effect': 'NoSchedule'}] if k3s_agent_dedicated_cell else []) }}
+
+- name: Converge the agent reservation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - patch
+      - node
+      - "{{ inventory_hostname }}"
+      - --type=merge
+      - -p
+      - >-
+        {{ {'metadata': {'resourceVersion': k3s_agent_node.metadata.resourceVersion,
+                         'labels': {'exomem.io/dedicated-cell': k3s_agent_dedicated_cell or none}},
+            'spec': {'taints': k3s_agent_reserved_taints}} | to_json }}
+  delegate_to: "{{ k3s_server_host }}"
+  changed_when: true
+  when: >-
+    (k3s_agent_node.metadata.labels | default({})).get('exomem.io/dedicated-cell')
+      != (k3s_agent_dedicated_cell or none)
+    or (k3s_agent_node.spec.taints | default([])) != k3s_agent_reserved_taints
+
 # A --limit or partial run can leave a peer without this node's rules, which
 # would break the overlay silently while the node still reports Ready.
 - name: Read every other K3s node's inter-node rules

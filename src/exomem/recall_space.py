@@ -31,10 +31,11 @@ from dataclasses import dataclass
 from typing import Any
 
 #: The encoder every sidecar without a record was written by, and the one a
-#: hosted or cloud cell keeps until the node encoder serves them.
+#: hosted cell keeps.
 LEGACY_MODEL = "BAAI/bge-base-en-v1.5"
 LEGACY_DIM = 768
-#: The one multilingual encoder a personal server runs for recall and activation.
+#: The one multilingual encoder a personal server and a cloud cell run for
+#: recall and activation.
 PERSONAL_MODEL = "BAAI/bge-m3"
 #: Names the recall encoder explicitly, over the deployment's default. A
 #: sidecar of another model re-embeds into it as any model change does.
@@ -44,6 +45,7 @@ RECALL_MODEL_ENV = "EXOMEM_RECALL_MODEL"
 #: Mirror `hosted_runtime.HOSTED_MODE_ENV` and `cloud_cell.CLOUD_MODE_ENV`. Read
 #: directly: `embeddings` imports this module and must stay cheap to import.
 _CELL_FLAGS = ("EXOMEM_HOSTED_CELL", "EXOMEM_CLOUD_CELL")
+_HOSTED_FLAG = _CELL_FLAGS[0]
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 
 #: Widths of the models recall declares, so an empty store answers at the width
@@ -94,13 +96,15 @@ def cell_mode(env: Mapping[str, str] | None = None) -> bool:
 
 def configured_recall_model(env: Mapping[str, str] | None = None) -> str:
     """The recall encoder for this process: `EXOMEM_RECALL_MODEL` when set, else
-    the multilingual one on a personal server and the English one on a hosted or
-    cloud cell."""
+    the multilingual one on a personal server and a cloud cell, and the English
+    one on a hosted cell, whose runtime runs no re-embed and whose memory limit
+    was sized for it. A malformed hosted flag counts as a hosted cell."""
     values = os.environ if env is None else env
     explicit = str(values.get(RECALL_MODEL_ENV, "")).strip()
     if explicit:
         return explicit
-    return LEGACY_MODEL if cell_mode(values) else PERSONAL_MODEL
+    hosted = str(values.get(_HOSTED_FLAG, "")).strip().lower() not in _FALSE
+    return LEGACY_MODEL if hosted else PERSONAL_MODEL
 
 
 def serving_model(index: object) -> str:
@@ -388,11 +392,14 @@ def _in_flight() -> Iterator[None]:
             _PREVIOUS_INFLIGHT -= 1
 
 
-def encode_with_previous(model: str, texts: list[str], *, is_query: bool) -> Any:
+def encode_with_previous(
+    model: str, texts: list[str], *, is_query: bool, encoder: Any = None
+) -> Any:
     """Encode for a sidecar written by `model`, with its resident encoder."""
     from . import embeddings
 
-    encoder = previous_resident(model)
+    if encoder is None:
+        encoder = previous_resident(model)
     if encoder is None:
         raise ServingEncoderCold(f"{model} is not resident")
     query_prefix, passage_prefix = embeddings._prefixes(encoder, model)

@@ -1,0 +1,114 @@
+# Mutation results and recovery
+
+## Mutation results and safe retries
+
+Successful product mutations return a compact decisive terminal by default:
+`ok: true`, `status: committed`, `mutated: true`, `path` or `paths`,
+`request_id`, `receipt_id`, and `warnings_count` (plus a caller-supplied
+`idempotency_key` when the surface supports one). A null receipt means that the
+surface supplied no replay identity; it does not weaken the committed status.
+When the write warned, `warnings` carries the texts — at most 8 entries of at
+most 300 characters. `warnings_count` remains authoritative, so fewer entries
+than the count means the rest were trimmed; ask for `response_detail="full"` to
+see them all. An upload receipt reports its warnings as per-file rows under
+`files` instead, and a mutation recovered from a portable receipt reports the
+count alone because it retains no leaf content. A corpus write advisory includes
+its review ref and complete 24-character signal fingerprint in its warning text;
+triage binds to that exact fingerprint (dismiss requires a reason), and a stale
+fingerprint simply lets the advisory re-emit when the counterpart changes or the
+written page changes the detected signal class.
+A compiled-note write may also carry `structure_suggestion`: an advisory
+`kind`, a `strength` of `strong` or `moderate`, deterministic `reasons`, the
+number of durable units in the group, and up to six recurring `cluster_terms`.
+It is present only when the written page shows recurring durable material
+outside its own declared scope, it reports nothing about any other page, and it
+never affects `status`, `mutated`, or replay. Nothing is reorganised by the
+runtime; acting on it is the agent's decision with the user.
+Use `response_detail="full"` when existing leaf diagnostics are needed under
+`diagnostics`. Use `response_detail="legacy"` only for temporary compatibility
+with the former raw result. Response detail is presentation-only: changing it
+does not change mutation identity, execute the leaf again, or alter a replayed
+terminal.
+
+A selected media process/retry request can finish without changing canonical
+bytes: it returns `state: settled`, `status: settled`, `terminal: true`, and
+`mutated: false`, with request identity and bounded `media_results`. This means
+the request has completed, not that a new content commit or extraction has
+completed. Inspect each item's state and error/remediation, and use the same
+identity for exact replay. A failed-subset retry is a new request containing
+only those failed paths.
+
+Committed observation responses retain bounded `before_hash`, `after_hash`,
+`unit_ref` and `removed_unit_ref` when their producer supplies them. Existing-page
+edits retain the exact `after_hash` of their committed bytes. These are mutation
+identities, not a promise that nobody has edited the page since: use the hash as
+the next supported `expected_hash` and honor any stale-write refusal. Portable
+receipt recovery may omit these fields; it never invents a missing identity.
+Do not reread solely to confirm a successful commit. Use one bounded final
+verification of the whole requested outcome, and extra reads only when content,
+warnings or missing concurrency guards actually require them.
+
+`graph_sync=pending` and `derived_sync=pending` describe asynchronous work, not a
+failed canonical write. Continue independent work and ordinary recall; do not
+run maintenance merely to remove the pending label. A graph-dependent query can
+still require current edges and return an explicit freshness refusal.
+
+Artifact preservation reports one terminal `state` per file: `stored` for bytes
+this call committed, `already_stored` when the same SHA-256 already exists under
+the same `Evidence/<scope>/<category>/` destination — that outcome names the
+existing `path` and `ref`, writes nothing, and the batch summary counts it
+separately — and `failed` with a stable code and sanitized reason. `outcome`
+mirrors these for compatibility and reports `already_stored` as `stored` beside
+`duplicate_of`. A batch whose response was lost is recovered by repeating the
+identical call: the terminal is persisted before derived-state acknowledgement,
+so the same identity replays the same per-file paths, hashes, `request_id` and
+`receipt_id` without fetching or writing anything again. A retry under a new
+identity is a different mutation, and bytes already under that destination come
+back as `already_stored` rather than being stored a second time. `scope` and
+`category` are each one path segment: a separator, reserved character, control
+character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
+field, before any handle is fetched, and nothing is silently normalised.
+
+`MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
+terminals. Preserve the same mutation identity and unchanged payload when
+following their remediation: wait before retrying a warming or busy call; retry a pending
+call only with the same identity; do not submit a new identity after a
+committed-uncertain result—reconcile and retry only as instructed.
+
+## Relation disposition on compiled writes
+
+Once a vault holds any compiled page, a new compiled page must either carry a
+qualifying typed relation or record that relations were reviewed and none
+applied. The first page in an empty vault has nothing to relate to and commits
+without this; every later page is subject to it. A page that genuinely cites its
+counterpart — a provenance link, a supersession, any typed relation — satisfies
+the rule as written and needs no extra argument, so connected material passes
+for free and only disconnected material needs the explicit disposition.
+
+Validation reports the obligation before it can block a commit: a
+`validate_only=true` call returns `relation_review_hash` alongside the draft
+fields, and lists the finding under `blocking_findings`. Read that list on every
+validation rather than only on failure — it is the sole notice you get. To
+commit an unrelated page, re-issue the identical creation with the returned
+`draft_id`, `draft_hash` and `draft_token`, plus
+`relation_disposition="reviewed_none"`, the returned `relation_review_hash`, and
+a `relation_review_reason` naming why nothing qualified. Committing with the
+draft fields alone refuses with `SEMANTIC_CONTRACT_BLOCKED` and a
+`RELATION_DISPOSITION_MISSING` finding whose `remediation` restates this
+sequence. Prefer adding the real relation over asserting none exists; the
+disposition is for material that genuinely stands alone.
+
+A refused Record append or update is held rather than lost: the refusal names
+every failing field under `details.issues` and returns a `held` reference, so fix
+the named field and resume with `record_memory(action="append"|"update",
+held=...)`, or `discard` it — never loop, and never preserve diagnostic
+breadcrumbs as Evidence.
+
+On MCP these expected refusals arrive as normal tool content with top-level
+`success: false`; inspect the structured `error` rather than treating it as a
+transport failure. A `receipt_id` is diagnostic and is not a transferable
+cross-session replay key. `coordination_status` probes this vault's local OS
+mutation boundary: `verified: true` binds the safe holder fields to the current
+lock generation, while `verified: false` means the external holder is real but
+cannot be safely attributed. Never infer vault content or identity from status.

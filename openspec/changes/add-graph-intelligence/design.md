@@ -90,12 +90,20 @@ admitted. Placeholders are never admitted: the row is not a connection and count
 `unresolved_target_edges`. The graph generation is reported to every caller the census
 serves, the owner under a governed policy included.
 
-**For group 2.** The resolution channel is a whole-graph property of how the graph is
-built, not of how it is read. G2's admission kernel cannot solve it by filtering either:
-a restricted audience's multi-hop results need edges resolved as if withheld pages did
-not exist, or a proof that resolution did not depend on them. The kernel's rule that "a
-placeholder is admitted when the edge that names it is admitted" has the related
-missing-versus-withheld channel. G2 must solve both before serving restricted audiences.
+**For group 2.** Request-time execution belongs to `add-graph-traversal-queries`
+G1–G5 and the shared collection query IR/executor. A restricted audience's paths still
+need edges resolved as if withheld pages did not exist, or a proof that resolution did
+not depend on them; filtering a globally resolved edge set is insufficient. Preserve
+the existing visible-link resolution semantics and withheld-versus-missing tests in
+that engine. This does not widen the census's owner-only governed view.
+
+Evidence tracing and reverse impact are recipes over admitted traversal/patterns,
+not a second `graph_intel/` kernel. Existing activation already expands resolved
+anchors; sibling G5 carries ordered witness paths into context instead of adding a
+competing expansion lane. Upkeep uses existing link, hydration, alias and convention
+families; hubs/community analytics remain deferred. Graph usefulness measurements
+reuse sibling G6 and retain sparse-edge/unavailable controls. Transferred tasks remain
+open until their owning gates have implementation and delivery evidence.
 
 ### 4. Surfaces
 - `schema_memory(subject="relations", operation="census", detail="counts"|"keys")` with

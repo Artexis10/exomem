@@ -17,7 +17,7 @@ all:
               private_node_ip: 10.50.1.31
     control_nodes:
       hosts:
-        exomem-control-db:
+        substrate-control-01:
           ansible_host: 192.0.2.20
           ansible_user: root
           postgres_private_ip: 10.50.1.20

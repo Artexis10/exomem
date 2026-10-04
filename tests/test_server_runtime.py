@@ -395,6 +395,9 @@ def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
 def test_disable_warmup_preserves_unverified_lazy_runtime_admission(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Start before any warm-up; earlier tests in the same shard may leave
+    # process-global readiness from a different scenario behind.
+    readiness.reset()
     monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -504,6 +507,63 @@ def test_local_runtime_lifespan_waits_for_inflight_activation_before_teardown(
         if thread is not None:
             thread.join(timeout=1.0)
         readiness.reset()
+
+
+def test_local_runtime_lifespan_refuses_to_finish_with_live_semantic_worker(tmp_path, monkeypatch) -> None:
+    """Shutdown must not report completion while an uncancelled encode still runs."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, deferred=True)
+
+    def still_running():
+        raise RuntimeError("semantic drain is still running during shutdown")
+
+    activation.semantic_drain = SimpleNamespace(stop=still_running)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="semantic drain is still running"):
+            async with activation.lifespan()(SimpleNamespace()):
+                pass
+
+    asyncio.run(exercise())
+
+
+def test_local_runtime_shutdown_rechecks_a_worker_assigned_after_first_stop(tmp_path, monkeypatch) -> None:
+    """Joining activation is insufficient when its late worker cannot stop."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, deferred=True)
+    stopped = threading.Event()
+    release = threading.Event()
+    original_stop = activation._stop_background_workers
+
+    def stop():
+        original_stop()
+        stopped.set()
+
+    def late_start():
+        assert release.wait(timeout=2)
+        def live_stop():
+            raise RuntimeError("still encoding")
+        activation.semantic_drain = SimpleNamespace(stop=live_stop)
+
+    monkeypatch.setattr(activation, "_stop_background_workers", stop)
+
+    async def exercise():
+        lifetime = activation.lifespan()(SimpleNamespace())
+        await lifetime.__aenter__()
+        activation._thread = threading.Thread(target=late_start)
+        activation._thread.start()
+        exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+        assert await asyncio.to_thread(stopped.wait, 1)
+        release.set()
+        with pytest.raises(RuntimeError, match="semantic drain is still running"):
+            await asyncio.wait_for(exiting, 2)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        if activation._thread is not None:
+            activation._thread.join(timeout=2)
 
 
 def test_local_runtime_lifespan_interrupts_a_stuck_admission_wait(
@@ -959,6 +1019,39 @@ def test_shutdown_stops_the_dreamer(tmp_path, monkeypatch: pytest.MonkeyPatch) -
         readiness.reset()
 
 
+def test_shutdown_reports_a_live_owned_graph_producer(tmp_path, monkeypatch):
+    """Actual activation must not report cleanup while its producer still runs."""
+    from exomem import graph_drain
+
+    _quiet_starters(monkeypatch, [])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def work(_root):
+        entered.set()
+        release.wait(10)
+
+    monkeypatch.delenv("EXOMEM_DISABLE_GRAPH_DRAIN", raising=False)
+    monkeypatch.setattr(graph_drain, "_run", work)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", graph_drain.start)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, fallback_seconds=60)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="graph drain is still running"):
+            async with activation.lifespan()(SimpleNamespace()):
+                activation.start()
+                await asyncio.to_thread(activation._thread.join, 5)
+                assert entered.wait(1)
+                assert activation.graph_drain.is_alive()
+        assert activation.graph_cleanup_attempted
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        graph_drain.stop()
+
+
 def test_stopping_background_workers_joins_the_vocabulary_watcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -988,3 +1081,23 @@ def test_stopping_background_workers_joins_the_vocabulary_watcher(
         for thread in threading.enumerate()
         if thread.name == "exomem-vocabulary-recovery" and thread.is_alive()
     ]
+
+
+def test_shutdown_during_watcher_recovery_does_not_launch_matrix_warm(tmp_path, monkeypatch):
+    """Returning from cancelled recovery must end the activation chain."""
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+
+    def start(label, _starter):
+        if label == "file watcher recovery":
+            activation._shutdown.set()
+
+    monkeypatch.setattr(activation, "_start_component", start)
+    monkeypatch.setattr(activation, "_wait_for_recall_seed", lambda: None)
+    monkeypatch.setattr(activation, "_wait_for_required_admission", lambda: None)
+    monkeypatch.setattr(activation, "_downgrade_recall_runtime", lambda: None)
+    monkeypatch.setattr(activation, "_stop_background_workers", lambda: None)
+    monkeypatch.setattr(
+        server_runtime.threading, "Thread",
+        lambda **_kwargs: pytest.fail("shutdown launched fresh matrix warm work"),
+    )
+    activation._activate()

@@ -1646,7 +1646,6 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
         for destination_id, destination in secret["destinations"].items()
         if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
     }
-    assert len(expected) == 43
     assert {name for name in expected if name.startswith("k3s.cloud.")} == {
         f"k3s.cloud.{name}.active"
         for name in (

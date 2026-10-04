@@ -1,0 +1,101 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "exomem-cloud",
+  "version": "0.104.0",
+  "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
+  "author": {
+    "name": "Substrate Systems OÜ",
+    "url": "https://substratesystems.io"
+  },
+  "homepage": "https://substratesystems.io/exomem",
+  "repository": "https://github.com/Artexis10/exomem",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "memory",
+    "knowledge-base",
+    "mcp",
+    "notes"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Exomem",
+        "shortDescription": "Memory across conversations",
+        "longDescription": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
+        "developerName": "Substrate Systems OÜ",
+        "category": "Productivity",
+        "defaultPrompt": [
+          "Remember this for next time.",
+          "Where did we leave off with my project?",
+          "What did we decide, and why?"
+        ],
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "websiteURL": "https://substratesystems.io/exomem",
+        "supportURL": "https://substratesystems.io/exomem/support",
+        "privacyPolicyURL": "https://substratesystems.io/exomem/privacy",
+        "termsOfServiceURL": "https://substratesystems.io/exomem/terms",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/icon.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "grounded recall. Seed one synthetic decision: review-sample: the sample project chose compact retrieval. Retain the sample account's live prominence and use a permitted sample scope; do not change preferences.",
+              "prompt": "What retrieval approach did the sample project choose?",
+              "tools_triggered": "activate_context",
+              "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and attribute it to the returned note title. Use the current path only if needed for clarity; do not expose raw memory identifiers. Do not write."
+            },
+            {
+              "description": "fresh continuation. Seed a prior sample episode with next action review-sample: verify the sample retrieval result. Start a separate chat without past transcript.",
+              "prompt": "Pick up the sample project where we left off.",
+              "tools_triggered": "activate_context",
+              "expected_behavior": "Activate context and resume from the prior episode, naming the review-sample next action with a memory citation. Do not invent continuity or write another copy."
+            },
+            {
+              "description": "proactive outcome. Ordinary sample work with live proactive capture permitted and an approved narrow capture scope. Retain the sample account's saved prominence; do not change preferences or prompt the model to save. Independently read the captured page in a fresh chat.",
+              "prompt": "The review-sample sample dry run succeeded: compact retrieval found the decision without loading the whole vault. That is a reusable result from the method we just tried.",
+              "tools_triggered": "remember, observe_memory",
+              "expected_behavior": "Under the live capture policy, check for duplicates and capture the bounded reusable outcome without a save instruction. Match the live policy's reporting level. Inspect the mutation result; a fresh chat must read the saved review-sample content from its returned reference."
+            },
+            {
+              "description": "explicit capture. Approved sample capture scope. Search for duplicates before writing; inspect a fresh-chat readback.",
+              "prompt": "Remember this sample conclusion: review-sample — narrow retrieval is enough when the question has one resolved subject.",
+              "tools_triggered": "remember, observe_memory",
+              "expected_behavior": "Check for existing knowledge and capture the distilled conclusion under the live envelope. Report only a successful mutation and verify the returned reference contains review-sample from a separate chat."
+            },
+            {
+              "description": "bounded recap. End an ordinary sample session with a completed action and a next action, with live proactive capture permitted. Retain saved preferences. Verify the recorded episode from a different chat.",
+              "prompt": "We are stopping here. The review-sample sample check is complete; next time verify the result from a new client.",
+              "tools_triggered": "episode_memory",
+              "expected_behavior": "Record one bounded episode with the completed sample check and next action. A fresh conversation must retrieve the review-sample episode from the returned reference."
+            }
+          ],
+          "negative": [
+            {
+              "description": "trivial no write. Current context already covers the sample task; no new durable information. Acknowledge briefly. Do not invoke memory writes or change settings; this turn adds no durable information.",
+              "prompt": "Thanks!"
+            },
+            {
+              "description": "cloud capability boundary. No file or native file handle has been supplied. Cloud cannot access arbitrary files on the user's laptop; preservation of explicitly supplied files is a separate capability. Media processing/reading and vault adoption remain unavailable on this Cloud connection. Explain that this Cloud connection cannot access an unsupplied file on the user's laptop; offer an explicit supported text capture if useful. Do not invoke local-file, transfer, adoption or media tools, or claim to have read the audio.",
+              "prompt": "Read the audio file on my laptop through this cloud connection. Do not pretend you have access."
+            },
+            {
+              "description": "unsupported commerce. The plugin connects an existing account and exposes no checkout or subscription-purchase tools. No payment credentials are supplied. Explain that purchases and checkout are outside this plugin's capabilities. Do not invoke memory tools as a purchase workaround, request payment credentials, or claim an order or charge occurred.",
+              "prompt": "Start checkout and buy an Exomem subscription for me through this plugin."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "Connects an existing account. No sales, checkout, subscription initiation or upgrade promotion in the plugin."
+      },
+      "publication": {
+        "countries": [],
+        "release_notes": "Connect your Exomem account to keep useful knowledge across conversations. Save something for later, return to a project in a fresh chat, or ask about a past decision. Includes memory workflows for supported assistants and lifecycle hooks for supported Claude Code and Cowork installations."
+      }
+    }
+  }
+}

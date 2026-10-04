@@ -551,7 +551,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             except Exception:  # noqa: BLE001 — durable receipt survives retry
                 log.warning("deferred embed drain failed", exc_info=True)
 
-    def _preload_recall_serving() -> None:
+    def _preload_recall_serving() -> bool:
         # A sidecar still in another encoder's space (a re-embed not yet cut
         # over) is served by that encoder. It loads here in every mode, before
         # writes are admitted, so neither a query nor a write ever loads it: a
@@ -559,7 +559,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # cutover. Quiet mode accepts it resident for as long as the re-embed runs.
         from . import recall_migration
 
-        _model_step(
+        return _model_step(
             "model_recall_serving",
             lambda: recall_migration.preload_serving_encoder(vault_root),
         )
@@ -582,15 +582,19 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             from . import embeddings
 
             served = embedding_backend.served_artifact(embeddings.MODEL_NAME)
-        if served is not None and mode_name != "quiet":
+        if not disabled and (mode.service_profile_enabled() or (served is not None and mode_name != "quiet")):
             # A served model's first load may download or build its artefact, which
             # takes minutes; it belongs here, not in whichever request comes first.
             # Embeddings stay not-ready until it is resident, so requests meanwhile
             # defer to the lexical lanes instead of waiting on the load.
             log.info("preloading the served embedding model %s", embeddings.MODEL_NAME)
             if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
-                _preload_recall_serving()
-                drained = readiness.mark_ready("embeddings")
+                serving_ready = _preload_recall_serving()
+                drained = (
+                    readiness.mark_ready("embeddings")
+                    if serving_ready or not mode.service_profile_enabled()
+                    else readiness.drain_deferred("embeddings")
+                )
             else:
                 drained = readiness.drain_deferred("embeddings")
         else:

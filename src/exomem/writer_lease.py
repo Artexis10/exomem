@@ -33,12 +33,13 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from . import call_spans, request_budget
+from . import call_spans, mutation_lock, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
     VaultMutationCoordinator,
+    _mutation_busy,
     canonical_mutation_identity,
     last_mutation_timing,
     process_local_mutation_boundary,
@@ -1803,6 +1804,95 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+COLLECTION_STORE_CAPABILITY = "collections-store-v1"
+
+
+def _collection_store_uuid(value: object) -> str:
+    if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+        raise ValueError("collection store identity must be a canonical UUID")
+    return value
+
+
+@dataclass(frozen=True)
+class CollectionStoreHead:
+    store_id: str
+    instance_id: str
+    commit_seq: int
+    head_hash: str | None
+
+    def __post_init__(self) -> None:
+        _collection_store_uuid(self.store_id)
+        _collection_store_uuid(self.instance_id)
+        if type(self.commit_seq) is not int or not 0 <= self.commit_seq <= 2**63 - 1:
+            raise ValueError("collection store sequence must be a nonnegative SQLite integer")
+        if self.commit_seq == 0:
+            if self.head_hash is not None:
+                raise ValueError("collection store genesis hash must be null")
+        elif (
+            not isinstance(self.head_hash, str)
+            or re.fullmatch("[0-9a-f]{64}", self.head_hash) is None
+        ):
+            raise ValueError("collection store head hash must be lowercase 64-hex")
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CollectionStoreHead:
+        if not isinstance(data, Mapping) or set(data) != {
+            "store_id",
+            "instance_id",
+            "commit_seq",
+            "head_hash",
+        }:
+            raise ValueError("collection store head fields are invalid")
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "store_id": self.store_id,
+            "instance_id": self.instance_id,
+            "commit_seq": self.commit_seq,
+            "head_hash": self.head_hash,
+        }
+
+
+@dataclass(frozen=True)
+class CollectionStoreFenceState:
+    capability: str
+    enrolled: bool
+    store_id: str | None
+    generation: int
+
+    def __post_init__(self) -> None:
+        if self.capability != COLLECTION_STORE_CAPABILITY or type(self.enrolled) is not bool:
+            raise ValueError("collection store fence capability or enrollment is invalid")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("collection store fence generation is invalid")
+        if self.enrolled:
+            _collection_store_uuid(self.store_id)
+            if self.generation < 1:
+                raise ValueError("collection store fence generation is invalid")
+        elif self.store_id is not None or self.generation != 0:
+            raise ValueError("collection store fence metadata is inconsistent")
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CollectionStoreFenceState:
+        if not isinstance(data, Mapping) or set(data) != {
+            "capability",
+            "enrolled",
+            "store_id",
+            "generation",
+        }:
+            raise ValueError("collection store fence response fields are invalid")
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "enrolled": self.enrolled,
+            "store_id": self.store_id,
+            "generation": self.generation,
+        }
+
+
 @dataclass(frozen=True)
 class LeaseRecord:
     holder: str | None
@@ -1812,6 +1902,9 @@ class LeaseRecord:
     required_schema_version: int | None = None
     schema_fence_generation: int | None = None
     governance_enrolled: bool = False
+    required_collection_store_capability: str | None = None
+    collection_store_fence_generation: int | None = None
+    collection_store_head: CollectionStoreHead | None = None
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> LeaseRecord:
@@ -1845,6 +1938,24 @@ class LeaseRecord:
         has_fence = required_schema is not None and fence_generation is not None
         if enrolled != has_fence:
             raise ValueError("schema fence metadata is inconsistent")
+        store_fields = {
+            "required_collection_store_capability",
+            "collection_store_fence_generation",
+            "collection_store_head",
+        }
+        store_capability = data.get("required_collection_store_capability")
+        store_generation = data.get("collection_store_fence_generation")
+        store_head = data.get("collection_store_head")
+        if store_fields.intersection(data):
+            if (
+                not store_fields.issubset(data)
+                or store_capability != COLLECTION_STORE_CAPABILITY
+                or type(store_generation) is not int
+                or store_generation < 1
+            ):
+                raise ValueError("collection store fence metadata is inconsistent")
+            if store_head is not None:
+                store_head = CollectionStoreHead.from_json(store_head)
         return cls(
             holder,
             float(expires) if expires is not None else None,
@@ -1853,6 +1964,9 @@ class LeaseRecord:
             required_schema,
             fence_generation,
             enrolled,
+            store_capability,
+            store_generation,
+            store_head,
         )
 
 
@@ -2004,33 +2118,54 @@ class LeaseCoordinatorClient:
             raise ValueError("coordinator client requires enabled configuration")
         self.config = config
 
-    def acquire(self) -> LeaseRecord:
-        return self._request(
-            "POST",
-            "acquire",
-            {
-                "replica_id": self.config.replica_id,
-                "ttl_seconds": self.config.ttl_seconds,
-                "schema_version": self.config.schema_version,
-            },
-        )
+    def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
+        body = {
+            "replica_id": self.config.replica_id,
+            "ttl_seconds": self.config.ttl_seconds,
+            "schema_version": self.config.schema_version,
+        }
+        if collection_store_capability is not None:
+            body["collection_store_capability"] = collection_store_capability
+        return self._request("POST", "acquire", body)
 
-    def renew(self, fencing_token: int) -> LeaseRecord:
-        return self._request(
-            "POST",
-            "renew",
-            {
-                "replica_id": self.config.replica_id,
-                "fencing_token": fencing_token,
-                "ttl_seconds": self.config.ttl_seconds,
-                "schema_version": self.config.schema_version,
-            },
-        )
+    def renew(
+        self,
+        fencing_token: int,
+        *,
+        collection_store_capability: str | None = None,
+        collection_store_head: CollectionStoreHead | None = None,
+    ) -> LeaseRecord:
+        body = {
+            "replica_id": self.config.replica_id,
+            "fencing_token": fencing_token,
+            "ttl_seconds": self.config.ttl_seconds,
+            "schema_version": self.config.schema_version,
+        }
+        if collection_store_capability is not None:
+            body["collection_store_capability"] = collection_store_capability
+        if collection_store_head is not None:
+            body["collection_store_head"] = collection_store_head.as_dict()
+        return self._request("POST", "renew", body)
 
-    def release(self, fencing_token: int) -> LeaseRecord:
+    def release(
+        self,
+        fencing_token: int,
+        *,
+        collection_store_head: CollectionStoreHead | None = None,
+    ) -> LeaseRecord:
         replica_id = self.config.replica_id
         assert replica_id is not None
-        return self.release_holder(replica_id, fencing_token)
+        if collection_store_head is None:
+            return self.release_holder(replica_id, fencing_token)
+        return self._request(
+            "POST",
+            "release",
+            {
+                "replica_id": replica_id,
+                "fencing_token": fencing_token,
+                "collection_store_head": collection_store_head.as_dict(),
+            },
+        )
 
     def release_holder(self, holder_replica_id: str, fencing_token: int) -> LeaseRecord:
         """Release on behalf of ANY holder, not just this client's own
@@ -2047,6 +2182,51 @@ class LeaseCoordinatorClient:
 
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
+
+    def collection_store_fence(self) -> CollectionStoreFenceState:
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/collection-store-fence",
+            None,
+            contract_route="/v1/vaults/<id>/collection-store-fence",
+        )
+        try:
+            return CollectionStoreFenceState.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def transition_collection_store_fence(
+        self,
+        *,
+        expected_generation: int,
+        store_id: str,
+    ) -> CollectionStoreFenceState:
+        if type(expected_generation) is not int or expected_generation < 0:
+            raise ValueError("expected_generation must be a nonnegative integer")
+        _collection_store_uuid(store_id)
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "PUT",
+            f"/v1/vaults/{vault}/collection-store-fence",
+            {
+                "expected_generation": expected_generation,
+                "store_id": store_id,
+                "capability": COLLECTION_STORE_CAPABILITY,
+            },
+            contract_route="/v1/vaults/<id>/collection-store-fence",
+        )
+        try:
+            state = CollectionStoreFenceState.from_json(payload)
+            if (
+                not state.enrolled
+                or state.store_id != store_id
+                or state.generation not in {expected_generation, expected_generation + 1}
+            ):
+                raise ValueError("collection store fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
 
     def schema_admission(self, schema_version: int) -> SchemaAdmission:
         if isinstance(schema_version, bool) or schema_version not in {3, 4}:
@@ -3783,6 +3963,129 @@ def _is_receipt_vault_root(root: Path) -> bool:
     return (root / kb_dirname()).is_dir()
 
 
+# Idempotent capture writes: a busy boundary is the server's problem to wait
+# out, not the client's to retry. `record_memory` joins only for `append`; its
+# other actions are curated edits a caller may want refused promptly.
+_CAPTURE_ABSORBED_COMMANDS = frozenset({"observe_memory", "remember", "episode_memory"})
+_CAPTURE_WAIT_SECONDS = 40.0
+_CAPTURE_WAIT_CEILING_SECONDS = 600.0
+_CAPTURE_RETRY_FLOOR_SECONDS = 0.05
+_CAPTURE_WAITERS_FULL_REMEDIATION = (
+    "The write did not commit. Other captures are already waiting on the boundary and "
+    "the server keeps workers free for reads: retry with the same idempotency key "
+    "after retry_after_ms."
+)
+_CAPTURE_HOLDER_OVERDUE_REMEDIATION = (
+    "The write did not commit. The mutation boundary's holder has run past its "
+    "allowance and looks stuck: inspect coordination_status or cell health, then "
+    "retry with the same idempotency key once it clears."
+)
+_CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
+    "The write did not commit. The boundary stayed busy for the whole bounded wait: "
+    "retry with the same idempotency key after retry_after_ms."
+)
+
+
+def _capture_write_absorbs_contention(command_name: str, kwargs: Mapping[str, Any]) -> bool:
+    if os.environ.get("EXOMEM_CAPTURE_CONTENTION_ABSORB", "1").strip().lower() in {"0", "false"}:
+        return False
+    if command_name in _CAPTURE_ABSORBED_COMMANDS:
+        return True
+    return command_name == "record_memory" and kwargs.get("action") == "append"
+
+
+# A waiting capture parks one of the process's sync workers (anyio's limiter,
+# shared with search and activation). Only half may be parked, so a long
+# holder cannot turn every worker into a sleeping capture and starve reads.
+_CAPTURE_WAITERS_LOCK = threading.Lock()
+_capture_waiters = 0
+
+
+def _capture_waiter_cap() -> int:
+    from . import runtime_resources
+
+    return max(1, runtime_resources.resolve_policy().sync_workers // 2)
+
+
+def _take_capture_waiter_slot() -> bool:
+    global _capture_waiters
+    with _CAPTURE_WAITERS_LOCK:
+        if _capture_waiters >= _capture_waiter_cap():
+            return False
+        _capture_waiters += 1
+        return True
+
+
+def _release_capture_waiter_slot() -> None:
+    global _capture_waiters
+    with _CAPTURE_WAITERS_LOCK:
+        _capture_waiters = max(0, _capture_waiters - 1)
+
+
+def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
+    """The bounded server-side wait, capped by the caller's own deadline.
+
+    An MCP call that would outlive its request budget gets the typed refusal
+    while the client is still listening, never a wait that ends in a timeout.
+    The last attempt may start at the returned bound and still block for one
+    guard timeout, so the bound leaves room for the delivery reserve plus that.
+    """
+    try:
+        wait = float(os.environ.get("EXOMEM_CAPTURE_WAIT_SECONDS", _CAPTURE_WAIT_SECONDS))
+    except ValueError:
+        wait = _CAPTURE_WAIT_SECONDS
+    if not math.isfinite(wait):
+        wait = _CAPTURE_WAIT_SECONDS
+    wait = min(max(0.0, wait), _CAPTURE_WAIT_CEILING_SECONDS)
+    budget = request_budget.current()
+    if budget is not None:
+        wait = min(
+            wait,
+            max(0.0, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS - guard_seconds),
+        )
+    return wait
+
+
+class _FairCaptureQueue:
+    """First-come-first-served order, within one process, for capture writes
+    waiting on the boundary.
+
+    Only a write that has already met a busy boundary joins, and a write that
+    arrives while others wait joins behind them instead of racing for the lock,
+    so the waiter who has waited longest attempts next and none starves.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._line: list[object] = []
+
+    def waiting(self) -> bool:
+        with self._condition:
+            return bool(self._line)
+
+    def enter_line(self) -> object:
+        """Take a place at the back of the line; never blocks."""
+        ticket = object()
+        with self._condition:
+            self._line.append(ticket)
+        return ticket
+
+    def wait_turn(self, ticket: object, deadline: float) -> bool:
+        with self._condition:
+            while self._line[0] is not ticket:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
+    def leave(self, ticket: object) -> None:
+        with self._condition:
+            if ticket in self._line:
+                self._line.remove(ticket)
+            self._condition.notify_all()
+
+
 class LeaseManager:
     def __init__(
         self,
@@ -3812,6 +4115,7 @@ class LeaseManager:
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
+        self._capture_queue = _FairCaptureQueue()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._renewer: threading.Thread | None = None
@@ -4251,6 +4555,14 @@ class LeaseManager:
         receipt = _receipt_tag(key) if key else None
         vocabulary_binding = None
         vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
+        # The private-identity inventory is a whole-vault walk. Build it here,
+        # after the replay check (a durable terminal replays without paying for
+        # it) and before any boundary is taken, so a write that meets it cold
+        # does not hold every other writer stopped while it walks.
+        if receipt_vault_root is not None and vocabulary_replay_terminal is None:
+            from . import reserved_paths
+
+            reserved_paths.warm_identity_catalogue_before_boundary(receipt_vault_root)
         if kwargs.get("vocabulary_ref") is not None or kwargs.get("vocabulary_fingerprint") is not None:
             # These fields only correlate an explicit canonical writer call
             # with an already reviewed choice.  They never carry a receipt,
@@ -5088,9 +5400,16 @@ class LeaseManager:
             if post_terminal_housekeeping:
                 _drain_post_terminal_housekeeping(post_terminal_housekeeping)
             if post_terminal_fanout:
-                reports, drain_failed = _drain_post_terminal_fanout(
-                    post_terminal_fanout
-                )
+                # The leaf's manager context has ended, but these callbacks
+                # still belong to this invocation. Graph registrations must
+                # use the same state root as the finalizer below.
+                manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+                try:
+                    reports, drain_failed = _drain_post_terminal_fanout(
+                        post_terminal_fanout
+                    )
+                finally:
+                    _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 result = _with_post_terminal_fanout_acknowledgement(
                     result, reports, drain_failed=drain_failed
                 )
@@ -5099,46 +5418,56 @@ class LeaseManager:
             return finish_fast_ack_and_graph(result)
 
         try:
-            result = self.idempotency.run(
-                key,
-                digest,
-                invoke_leaf,
-                expires_after=expires_after,
-                on_replay=on_replay,
-                operation_guard=(
-                    (
-                        lambda: self.writer_authority_guard(
-                            vault_root=mutation_subject,
+            def run_idempotent() -> Any:
+                return self.idempotency.run(
+                    key,
+                    digest,
+                    invoke_leaf,
+                    expires_after=expires_after,
+                    on_replay=on_replay,
+                    operation_guard=(
+                        (
+                            lambda: self.writer_authority_guard(
+                                vault_root=mutation_subject,
+                                session_open_admission=session_open_admission,
+                            )
+                        )
+                        if narrow_boundary
+                        else lambda: self.mutation_guard(
+                            mutation_subject,
+                            request_id=request_id,
+                            operation=command.name,
+                            holder_kind="command",
                             session_open_admission=session_open_admission,
                         )
-                    )
-                    if narrow_boundary
-                    else lambda: self.mutation_guard(
-                        mutation_subject,
-                        request_id=request_id,
-                        operation=command.name,
-                        holder_kind="command",
-                        session_open_admission=session_open_admission,
-                    )
-                ),
-                commit_observed=lambda: commit_state["observed"],
-                after_canonical_persisted=persist_graph_sync_progress,
-                after_operation_guard=finish_before_terminal_persistence,
-                after_terminal_acknowledgement=finish_after_terminal_persistence,
-                # Whether derived work is *owed*, not whether a hook is bound
-                # and not whether a session exists: the session is built before
-                # the leaf runs, from a feature flag and a vault root, so it
-                # cannot know whether a batch will be registered. A commit that
-                # registers none owes no component and must not be stamped
-                # pending. Evaluated after the leaf, where the batches are known.
-                acknowledgement_expected=lambda: (
-                    bool(post_terminal_fanout)
-                    or fast_ack_session is not None
-                    and bool(fast_ack_session.batches)
-                ),
-                resume_canonically_committed=resume_graph_sync,
-                commit_evidence=exact_commit_evidence,
-                legacy_graph_pending_proof=legacy_graph_pending_proof,
+                    ),
+                    commit_observed=lambda: commit_state["observed"],
+                    after_canonical_persisted=persist_graph_sync_progress,
+                    after_operation_guard=finish_before_terminal_persistence,
+                    after_terminal_acknowledgement=finish_after_terminal_persistence,
+                    # Whether derived work is *owed*, not whether a hook is bound
+                    # and not whether a session exists: the session is built before
+                    # the leaf runs, from a feature flag and a vault root, so it
+                    # cannot know whether a batch will be registered. A commit that
+                    # registers none owes no component and must not be stamped
+                    # pending. Evaluated after the leaf, where the batches are known.
+                    acknowledgement_expected=lambda: (
+                        bool(post_terminal_fanout)
+                        or fast_ack_session is not None
+                        and bool(fast_ack_session.batches)
+                    ),
+                    resume_canonically_committed=resume_graph_sync,
+                    commit_evidence=exact_commit_evidence,
+                    legacy_graph_pending_proof=legacy_graph_pending_proof,
+                )
+
+            result = self._run_absorbing_capture_contention(
+                command,
+                kwargs,
+                run_idempotent,
+                key=key,
+                commit_state=commit_state,
+                request_id=request_id,
             )
             if (
                 vocabulary_replay_terminal is not None
@@ -5293,6 +5622,128 @@ class LeaseManager:
             )
         except Exception:  # noqa: BLE001 - the journal must never break a mutation
             pass
+
+    def _run_absorbing_capture_contention(
+        self,
+        command: Any,
+        kwargs: Mapping[str, Any],
+        run: Callable[[], Any],
+        *,
+        key: str | None,
+        commit_state: Mapping[str, bool],
+        request_id: str,
+    ) -> Any:
+        """Run one keyed capture write, waiting out an ordinary busy boundary.
+
+        Ordinary contention (a holder still inside its allowance) never reaches
+        the client: the same keyed write is attempted again, in arrival order,
+        until it commits or the bounded wait ends. Only a holder already past
+        its allowance, or a wait that ran out, is refused -- with a cause the
+        caller can act on. A retry is safe because a busy refusal is raised
+        before the write commits and releases its idempotency claim, so the
+        key commits exactly once; anything that observed a commit is never
+        re-run.
+        """
+        if key is None or not _capture_write_absorbs_contention(command.name, kwargs):
+            return run()
+        started = time.monotonic()
+        deadline = started + _capture_wait_seconds(self._mutation_timeout_seconds)
+        queue = self._capture_queue
+        ticket = None
+        absorbed = 0
+        holds_slot = False
+
+        def waited_ms() -> float:
+            return round((time.monotonic() - started) * 1000, 2)
+
+        def uncounted_busy() -> OpError:
+            with mutation_lock.absorbing_busy():
+                return _mutation_busy(None, wait_ms=waited_ms())
+
+        def refuse(error: OpError, cause: str, remediation: str) -> OpError:
+            # The one place a busy from this loop becomes client-visible.
+            mutation_lock.record_client_visible_busy()
+            error.details.update(cause=cause, waited_ms=waited_ms(), absorbed_attempts=absorbed)
+            error.remediation = remediation
+            _log_mutation_event(
+                "contention_refused",
+                level=logging.WARNING,
+                request_id=request_id,
+                command=command.name,
+                cause=cause,
+                waited_ms=error.details["waited_ms"],
+            )
+            return error
+
+        try:
+            if queue.waiting():
+                # Arriving behind others means parking this thread as they do.
+                if not _take_capture_waiter_slot():
+                    raise refuse(
+                        uncounted_busy(),
+                        "capture_waiters_full",
+                        _CAPTURE_WAITERS_FULL_REMEDIATION,
+                    )
+                holds_slot = True
+                ticket = queue.enter_line()
+            while True:
+                if ticket is not None and not queue.wait_turn(ticket, deadline):
+                    raise refuse(
+                        uncounted_busy(),
+                        "capture_wait_exhausted",
+                        _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
+                    )
+                try:
+                    with mutation_lock.absorbing_busy():
+                        result = run()
+                except OpError as error:
+                    if (
+                        error.code != "MUTATION_BUSY"
+                        or commit_state["observed"]
+                        or error.details.get("committed") is not False
+                    ):
+                        if error.code == "MUTATION_BUSY":
+                            mutation_lock.record_client_visible_busy()
+                        raise
+                    holder = error.details.get("holder")
+                    if isinstance(holder, Mapping) and holder.get("overdue") is True:
+                        raise refuse(
+                            error, "holder_overdue", _CAPTURE_HOLDER_OVERDUE_REMEDIATION
+                        ) from None
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise refuse(
+                            error,
+                            "capture_wait_exhausted",
+                            _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
+                        ) from None
+                    if not holds_slot:
+                        if not _take_capture_waiter_slot():
+                            raise refuse(
+                                error,
+                                "capture_waiters_full",
+                                _CAPTURE_WAITERS_FULL_REMEDIATION,
+                            ) from None
+                        holds_slot = True
+                    absorbed += 1
+                    if ticket is None:
+                        ticket = queue.enter_line()
+                    time.sleep(min(_CAPTURE_RETRY_FLOOR_SECONDS, remaining))
+                    continue
+                if absorbed:
+                    _log_mutation_event(
+                        "contention_absorbed",
+                        request_id=request_id,
+                        command=command.name,
+                        attempts=absorbed + 1,
+                        waited_ms=waited_ms(),
+                    )
+                return result
+        finally:
+            if holds_slot:
+                _release_capture_waiter_slot()
+            if ticket is not None:
+                queue.leave(ticket)
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
         if injected and isinstance(injected[0], os.PathLike):

@@ -1,0 +1,63 @@
+{
+  "sqlite_version": "3.45.1",
+  "pragmas": {
+    "journal_mode": "wal",
+    "synchronous": "full"
+  },
+  "seed_rows": 10000,
+  "seed_seconds": 0.433,
+  "live_rows_after": 10450,
+  "guarded_append_at_n": {
+    "n": 200,
+    "p50_ms": 0.416,
+    "p95_ms": 0.717,
+    "max_ms": 4.828
+  },
+  "idempotent_replay_ms": 0.053,
+  "bulk_upsert": {
+    "rows": 500,
+    "counts": {
+      "inserted": 250,
+      "updated": 250,
+      "unchanged": 0
+    },
+    "seconds": 0.0199,
+    "replay_counts": {
+      "inserted": 0,
+      "updated": 0,
+      "unchanged": 500
+    },
+    "replay_seconds": 0.0057
+  },
+  "governed_query_per_row": {
+    "n": 20,
+    "p50_ms": 38.161,
+    "p95_ms": 44.303,
+    "max_ms": 56.823,
+    "page": 45,
+    "total": 45,
+    "avg": 54.43026666666667,
+    "authorized": 9797
+  },
+  "governed_query_uniform_release": {
+    "n": 20,
+    "p50_ms": 0.14,
+    "p95_ms": 0.375,
+    "max_ms": 0.384,
+    "page": 50,
+    "total": 53,
+    "avg": 52.10156603773584
+  },
+  "snapshot": {
+    "seconds": 0.0766,
+    "integrity": "ok",
+    "rows": 10450,
+    "store_bytes": 15809968
+  },
+  "projection_render_publish": {
+    "n": 50,
+    "p50_ms": 0.438,
+    "p95_ms": 0.59,
+    "max_ms": 1.457
+  }
+}
