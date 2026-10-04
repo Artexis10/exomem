@@ -1609,13 +1609,24 @@ def op_bootstrap(
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
-                "Assistant-native memory is separate, host-managed storage for "
-                "preferences, working rules, routing, and working context. "
-                "Exomem neither reads nor configures it."
+                (
+                    "Use as short-term or behavioural memory for user preferences, working "
+                    "rules, routing instructions, and current working context."
+                )
+                if frozen_profile
+                else (
+                    "Assistant-native memory is separate, host-managed storage for "
+                    "preferences, working rules, routing, and working context. "
+                    "Exomem neither reads nor configures it."
+                )
             ),
             "exomem": (
-                "Exomem stores long-term durable governed knowledge: "
-                "sources, proof/evidence, history, decisions, records, review, and "
+                (
+                    "Use as long-term governed memory for durable governed knowledge: "
+                    if frozen_profile
+                    else "Exomem stores long-term durable governed knowledge: "
+                )
+                + "sources, proof/evidence, history, decisions, records, review, and "
                 "compiled conclusions."
             ),
         },
@@ -6318,7 +6329,7 @@ def op_activate_context(
     or send full conversation history. Optional earlier excerpts are only for
     resolving a reference the current message cannot identify on its own.
 
-    Retrieve initial context when the account's configured engagement calls for
+    Retrieve initial context when the account's live engagement policy calls for
     recall, including proactive recall without an explicit reference to prior work.
     `bootstrap` reports those settings when they are unknown or have changed;
     existing current settings can be reused. One call supplies the initial context
