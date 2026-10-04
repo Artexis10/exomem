@@ -25,6 +25,8 @@ None. Existing neighbourhood/recall/replay contracts remain binding. This capabi
 
 ## Impact
 
+The first graph delivery is a capability-versioned document evidence-chain/reverse-impact preview (GP), after S1 and proven G4 placement, with its own applicable G1–G3/G5 correctness, disclosure, currentness, absolute-bound and installed-agent gates. Full ontology authoring, patterns, arbitrary-type surfaces and comparative superiority have separate gates. The dependencies below apply to the corresponding full features, not indiscriminately to GP; no alternate engine or unproved placement is introduced.
+
 - Depends on `add-collection-query-engine` Q1 for typed IR/admission/limits and Q5 for integrated lifecycle/views; the first real-vault NEW Records summary slice S1 does not depend on this change; storage migration uses parent `move-structured-collections-to-sqlite` P1a and public declarations wait for P4/P5. Graph queries can remain dark until those interfaces ship.
 - Affects `epistemic_graph.py`, `graph_sync.py`, traversal/relation/entity registries, shared query compiler/store migrations, `connect_memory`, context working-set consumers, skill/bootstrap and graph/activation benchmarks. This lane creates planning artifacts only.
 - One live store per vault, pure substrate, no raw SQL/Cypher, no new tool names, no cross-vault traversal, no server database shipped here. Knowledge and vocabulary authoring sources stay governed Markdown/registries; graph/vocabulary rows are rebuildable projections.
