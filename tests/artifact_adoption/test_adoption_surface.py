@@ -225,10 +225,10 @@ def test_public_source_and_evidence_commands_forward_the_closed_adoption_envelop
         assert parameter.required is False
         assert parameter.type == "nullable_dict"
         assert parameter.schema is not None
-        [object_shape, null_shape] = parameter.schema["anyOf"]
+        object_shape = parameter.schema["anyOf"][0]
+        assert object_shape["type"] == "object"
         assert object_shape["additionalProperties"] is False
         assert set(object_shape["required"]) == {"key", "trigger", "selected_file_id"}
-        assert null_shape == {"type": "null"}
 
 
 def test_compact_projection_preserves_approved_bounded_adoption_outcomes() -> None:
@@ -403,6 +403,7 @@ def test_registry_mcp_rest_openapi_and_cli_share_closed_adoption_contract(
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "preserve_artifacts")
     registry_schema = next(item for item in command.params if item.name == "adoption").schema
     assert registry_schema is not None
+    registry_schema = registry_schema["anyOf"][0]
     tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
     mcp_schema = tools["preserve_artifacts"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
         "inputSchema"
@@ -414,8 +415,10 @@ def test_registry_mcp_rest_openapi_and_cli_share_closed_adoption_contract(
         "adoption"
     ]
     for projected in (mcp_schema, openapi_schema):
-        assert projected["anyOf"] == registry_schema["anyOf"]
-        assert projected["anyOf"][0]["additionalProperties"] is False
+        assert projected["type"] == registry_schema["type"] == "object"
+        assert projected["properties"] == registry_schema["properties"]
+        assert projected["required"] == registry_schema["required"]
+        assert projected["additionalProperties"] is False
 
     arguments = {
         "scope": "synthetic-case",
@@ -491,17 +494,18 @@ def test_delivery_registry_mcp_and_openapi_close_nested_platform_proof(
     document = TestClient(mcp.http_app()).get("/api/openapi.json").json()
     openapi_delivery = document["paths"]["/api/record_memory"]["post"]["requestBody"][
         "content"
-    ]["application/json"]["schema"]["properties"]["delivery"]["anyOf"][0]
+    ]["application/json"]["schema"]["properties"]["delivery"]
     tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
     mcp_delivery = tools["record_memory"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
         "inputSchema"
-    ]["properties"]["delivery"]["anyOf"][0]
+    ]["properties"]["delivery"]
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "record_memory")
     registry_delivery = next(item for item in command.params if item.name == "delivery").schema
     assert registry_delivery is not None
     registry_delivery = registry_delivery["anyOf"][0]
 
     for delivery in (registry_delivery, mcp_delivery, openapi_delivery):
+        assert delivery["type"] == "object"
         assert delivery["additionalProperties"] is False
         proof = delivery["properties"]["platform_proof"]
         assert proof["additionalProperties"] is False

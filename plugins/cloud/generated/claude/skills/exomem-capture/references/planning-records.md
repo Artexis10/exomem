@@ -30,6 +30,26 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
+For a Planning change, discover the collection with `browse_memory`, then
+`plan_memory(action="inspect", collection=...)` and a bounded `query` to
+identify exactly one item. `inspect` requires a collection. Use the returned
+`snapshot` as `expected_container_hash`, and that query row's `plan_id`
+and `item_version` as `plan_id` and `expected_item_version`. These are
+returned identities and versions, not filenames or values to invent.
+
+Pass `changes={"title": "..."}` to `update`; for an explicit intent change
+pass `transition` to `triage`, with the same guards and an audit `why`.
+For example, an inbox candidate can become planned with
+`transition={"status": "planned", "commitment": "considering", "horizon": "quarter"}`.
+For an explicitly completed outcome, use `transition={"status": "completed"}`.
+Completion requires committed, non-inbox intent; committed work-items and
+initiatives also need their declared parent. Inspect the collection contract
+before choosing fields. A Records outcome alone never changes Planning.
+
+`STALE_PLAN_CONTAINER` or `STALE_PLAN_ITEM` refuses the write; inspect/query
+again, reconsider the intended change against the current state, and retry with
+the new returned guards. Never drop guards or blindly replay an obsolete intent.
+
 Speak to users in simple actions first. Call product commands by default; the
 canonical operations are implementation leaves underneath them. Do not ask the
 user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph sidecars, schema
@@ -160,3 +180,8 @@ Examples:
   keep/edit/supersede/archive.
 - "This new strategy replaces the old one" -> use supersession so history stays
   visible.
+
+## Tool parameter notes
+
+- `plan_memory`: `inspect`, `validate` and `query` are read-only; `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes. A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `maintain_memory(mode="structured-files")` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
+- `record_memory`: `item_key` is the item's internal UUID (required for update; on append identity derives from the collection's declared natural key). `expected_container_hash` guards append, update, revise and rebaseline; `expected_manifest_hash` guards revise and rebaseline; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.

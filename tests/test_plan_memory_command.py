@@ -16,6 +16,83 @@ def test_plan_memory_is_registered_as_a_product_command() -> None:
     assert "plan_memory" in names
 
 
+def test_planning_write_selectors_and_guards_have_public_parameter_help() -> None:
+    """An unfamiliar caller must be able to identify the values a guarded write needs."""
+    from exomem.commands import product_commands_for
+
+    command = next(c for c in product_commands_for("mcp") if c.name == "plan_memory")
+    parameters = {parameter.name: parameter for parameter in command.params}
+    for name in (
+        "collection",
+        "plan_id",
+        "expected_container_hash",
+        "expected_item_version",
+        "changes",
+        "transition",
+    ):
+        assert parameters[name].help, name
+
+
+def test_public_planning_read_guards_support_update_triage_and_reject_stale(tmp_path) -> None:
+    """Use public read results, rather than mutation receipts or private adapters."""
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base/log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    plan_memory(
+        tmp_path,
+        "create",
+        manifest_path=collection,
+        manifest_text=_manifest(),
+        why="create planning collection",
+    )
+    plan_memory(
+        tmp_path,
+        "add",
+        collection=collection,
+        item={
+            "title": "Release",
+            "kind": "outcome",
+            "status": "active",
+            "commitment": "committed",
+            "horizon": "week",
+        },
+        why="save intent",
+    )
+    inspected = plan_memory(tmp_path, "inspect", collection=collection)
+    query = plan_memory(tmp_path, "query", collection=collection)
+    row = query["rows"][0]
+    guards = {
+        "collection": collection,
+        "plan_id": row["plan_id"],
+        "expected_container_hash": inspected["snapshot"],
+        "expected_item_version": row["item_version"],
+    }
+    plan_memory(
+        tmp_path, "update", **guards, changes={"title": "Ship release"}, why="clarify title"
+    )
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path, "triage", **guards, transition={"status": "completed"}, why="stale intent"
+        )
+    assert raised.value.code == "STALE_PLAN_CONTAINER"
+    query = plan_memory(tmp_path, "query", collection=collection)
+    assert query["rows"][0]["title"] == "Ship release"
+    assert query["rows"][0]["status"] == "active"
+    plan_memory(
+        tmp_path,
+        "triage",
+        collection=collection,
+        plan_id=row["plan_id"],
+        expected_container_hash=query["snapshot"],
+        expected_item_version=query["rows"][0]["item_version"],
+        transition={"status": "completed"},
+        why="explicit completion",
+    )
+    assert plan_memory(tmp_path, "query", collection=collection)["rows"][0]["status"] == "completed"
+
+
 def test_plan_memory_exposes_exactly_the_nine_planning_actions() -> None:
     from exomem.plan_memory import ACTIONS
 

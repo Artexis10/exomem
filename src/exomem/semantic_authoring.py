@@ -478,59 +478,62 @@ def render_tool_guidance(
     tool: str,
     contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
 ) -> str:
-    """Render concise tool-specific guidance from the canonical contract fields."""
+    """Render the bounded tool-specific rule from the canonical contract fields.
+
+    Every fact here comes from the contract, so a normative change moves this
+    text and the identity marker together. Prose that only elaborates a rule
+    (form preference, boundary and vocabulary notes, the empty-body finding)
+    lives in the full bootstrap projection, not in every authoring tool.
+    """
     compact = contract.compact
     rich = contract.rich
-    roles = contract.semantic_roles
     minimum = contract.minimum_semantic_unit
     routes = contract.routes
     findings = contract.findings
     portable = contract.portable_categories
     identity = contract_identity(contract)
-    portable_line = (
-        f"Portable categories: {portable['short_selection_rule']} {portable['open']} "
-        f"Role example: {portable['examples']['role']} For the complete core keys, "
-        'aliases, and rich example, call bootstrap(profile="full").'
-    )
-    compact_form = (
-        f"Under `{compact['canonical_section']}`, write "
-        f"`{compact['syntax']}` with an {compact['category']['vocabulary']}-vocabulary "
-        f"category: {compact['category']['role']}. Category: {roles['category']} "
-        f"Tag: {roles['tag']} Kind: {roles['kind']}"
-    )
-    rich_form = (
-        f"Rich form uses `{rich['heading_syntax']}`. {rich['body_rule']} "
-        f"{rich['heading_boundary_rule']}"
-    )
-    refusal = (
-        f"`missing_semantic_unit` means {findings['missing_semantic_unit']['when']}. "
-        f"Compact remediation: {findings['missing_semantic_unit']['compact_remediation']} "
-        f"Rich remediation: {findings['missing_semantic_unit']['rich_remediation']} "
-        f"`empty_rich_unit` means {findings['empty_rich_unit']['when']}. "
-        f"{findings['empty_rich_unit']['remediation']}"
-    )
-    common = " ".join(
-        (
+    missing = findings["missing_semantic_unit"]
+    # observe_memory takes the unit's fields separately and edit_memory takes
+    # operations, so neither needs the selection rule or the worked example
+    # that a whole-page writer does; both keep the minimum, the lifecycle and
+    # final-unit rules, and the refusal remediation.
+    whole_page = tool in {"remember", "replace_memory"}
+    guidance = " ".join(
+        part
+        for part in (
             minimum["rule"],
-            minimum["form_rule"],
             minimum["lifecycle_rule"],
             minimum["final_unit_rule"],
-            compact_form,
-            rich_form,
-            portable_line,
-            refusal,
+            f"Under `{compact['canonical_section']}`, write `{compact['syntax']}` with one "
+            f"primary {compact['category']['vocabulary']}-vocabulary category; "
+            f"rich form is `{rich['heading_syntax']}` with a substantive body.",
+            portable["short_selection_rule"] if whole_page else "",
+            f"Role example: {portable['examples']['role']}" if whole_page else "",
+            f"`missing_semantic_unit`: {missing['compact_remediation']}",
+            f"`empty_rich_unit`: {findings['empty_rich_unit']['remediation']}",
+            'Keys/examples: call bootstrap(profile="full").',
         )
+        if part
     )
-
     if tool in {"remember", "replace_memory", "observe_memory", "edit_memory"}:
-        guidance = common
+        pass
     elif tool == "manage_memory_file":
-        guidance = (
-            f"{routes['tier_2']} {common}"
-        )
+        guidance = f"{routes['tier_2']} {guidance}"
     else:
         raise ValueError(f"no semantic-authoring projection for tool {tool!r}")
     return f"Semantic authoring [{identity}]: {guidance}"
+
+
+#: The tools that carry the authoring contract, and the one-line pointer the CLI
+#: help and REST description show instead of repeating it. Neither surface is
+#: agent context, so the MCP wire never carries this line.
+AUTHORING_TOOLS = frozenset(
+    {"remember", "replace_memory", "edit_memory", "observe_memory", "manage_memory_file"}
+)
+CLI_REST_POINTER = (
+    'Semantic authoring rules: see bootstrap(profile="full") / '
+    "`exomem bootstrap --profile full`."
+)
 
 
 #: The write surface's own carrier for `write-time-identity-candidates`
@@ -560,13 +563,8 @@ def render_parameter_guidance(
             "fields. Do not include the Markdown row wrapper in `content`."
         )
     if (tool, parameter) in {("remember", "content"), ("replace_memory", "content")}:
-        return f"{render_tool_guidance(tool, contract)} {LINK_NAMED_IDENTITIES_GUIDANCE}"
-    if (tool, parameter) in {
-        ("edit_memory", "operation"),
-        ("manage_memory_file", "operation"),
-        ("manage_memory_file", "content"),
-    }:
-        return render_tool_guidance(tool, contract)
+        # The contract itself is carried once, on the tool description.
+        return LINK_NAMED_IDENTITIES_GUIDANCE
     return ""
 
 

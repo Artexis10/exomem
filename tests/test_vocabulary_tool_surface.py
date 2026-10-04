@@ -256,8 +256,12 @@ def test_entity_type_resolution_refuses_unrelated_schema_arguments(tmp_path: Pat
 
 def test_vocabulary_review_context_and_decision_reach_the_real_leaves(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     import hashlib
+
+    from jsonschema import validate
+    from test_mcp_schema_fidelity import _build_server, _live_schemas
 
     from exomem import commands, vocabulary_review
     from exomem.governance.principal import owner_principal, request_scope
@@ -306,6 +310,11 @@ def test_vocabulary_review_context_and_decision_reach_the_real_leaves(
 
     assert context["definitions"]["selected_relation"] is None
     assert result["state"] == "resolved_without_mutation"
+    schemas = _live_schemas(_build_server(monkeypatch, tmp_path / "public-schema"))
+    validate(
+        {"ref": item.ref, "action": "decide-vocabulary", "decision": decision},
+        schemas["triage_memory"]["inputSchema"],
+    )
 
 
 def test_public_vocabulary_contract_teaches_and_accepts_entity_instance_proposals(
@@ -437,8 +446,8 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
         if tool.name == "triage_memory"
     )
     decision_schema = triage_schema["properties"]["decision"]
-    assert decision_schema["anyOf"][0]["additionalProperties"] is False
-    assert set(decision_schema["anyOf"][0]["required"]) == {
+    assert decision_schema["additionalProperties"] is False
+    assert set(decision_schema["required"]) == {
         "item_ref",
         "fingerprint",
         "family",

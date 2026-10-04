@@ -144,3 +144,23 @@ is in **`audit-checks.md`**.
   assistant decides to act.)
 - Modify `Sources/` or `Evidence/` files after creation. Mistakes get superseded,
   not edited.
+
+## Maintenance modes (`maintain_memory`)
+
+Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontmatter, stable IDs) and dry-run by default. `reconcile` heals index-count and sidecar drift from out-of-band edits, is idempotent and non-destructive, and writes by default (`dry_run=true` previews). Remote callers may audit or preview; write modes are operator-only and return `MAINTENANCE_REQUIRES_CLI` before taking the mutation boundary.
+
+### structured-files
+
+Previews one Planning or Records collection's manifest-declared human filenames and managed readable bodies, including governed inbound-link rewrites. Preview is read-only; apply needs the exact `plan_id` and `source_snapshot` and `why`, and commits atomically. Durable identity and mutable state stay in frontmatter, not filenames.
+
+### curation
+
+The governed multi-step mode. The agent authors a closed typed plan from explicit context; Exomem validates and fingerprints it, records one exact-plan approval (`expected_plan_fingerprint`), and executes at most one content step per apply or resume. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal. Curation cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. `hydration_recheck` is a same-identity continuation ordinal (1 to 8); the eighth is closure-only and cannot bind another plan.
+
+### tag-variants
+
+Lists tags that differ only by case, separator or plural, grouped with visible page counts and the most-used written form as canonical (a tie is listed, never rewritten). Preview is read-only; `apply=true` with the preview's `plan_id` and a one-line `why` rewrites one bounded batch of minority variants to the canonical tag and logs a rollback record. Only the `tags` key changes; Sources, Evidence, Records, Planning and other owned trees are untouched. Preview again for the next batch. `exclude_groups` keeps named groups out of preview and apply alike.
+
+### Sidecar collapse (`fix`)
+
+`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.

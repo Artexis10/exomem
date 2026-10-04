@@ -152,6 +152,11 @@ def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
 
 def test_public_edit_guidance_explains_frontmatterless_policy() -> None:
     guidance = commands.op_edit_memory.__doc__ or ""
+    assert "references/writing.md" in guidance
+    guidance = " ".join((
+        Path(__file__).resolve().parents[1]
+        / "src/exomem/_scaffold/_Schema/references/writing.md"
+    ).read_text(encoding="utf-8").split())
 
     assert "ordinary Markdown" in guidance
     assert "without synthesizing YAML" in guidance

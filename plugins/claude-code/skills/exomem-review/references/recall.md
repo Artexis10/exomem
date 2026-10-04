@@ -109,3 +109,83 @@ Unit recall returns an exact `unit_ref` for `read_memory`. For authored graph
 context, pass that reference or category/kind filters to
 `connect_memory(operation="graph-context")`. Compact categories do not imply
 typed edges: traversal follows authored relations only.
+
+## Context activation packets (`activate_context`)
+
+Use for initial context when the live engagement policy from `bootstrap` warrants
+recall. Pass the current user's words verbatim, not a search query; skip if a hook
+already injected this turn's working set. For a known information gap, use
+`ask_memory`, then `read_memory` on selected refs. Activation is read-only and
+abstains rather than guessing.
+
+Only if needed to resolve the turn, pass relevant `conversation`: up to six
+recent excerpts and 2,400 characters total, `focus` up to 240 characters and
+`refs` up to twelve. Never send full history or unrelated personal data. If a
+hook missed the subject, retry with `conversation.focus`; on ambiguity, choose
+an `anchor`. See the engagement reference for entry bounds and attachment cues.
+
+**`recent_context`** leads every packet, abstained ones included. Up to eight
+pages recently worked on (edited, read, captured as a session, recorded as a
+conversation recap, or left open in Planning), each with title, why it is recent
+(`why`), the contact date (`as_of` dates the contact, not the event described)
+and the page's own `status` or `summary` line when present. It is chosen by
+recency, not by the turn, so it never queries a Records collection the turn did
+not name; `current_state[]` carries governed state for resolved anchors. A recap
+entry (`why: "episode"`) is the newest revision of one conversation's
+`episode_memory` record and carries its `episode` key; follow it with
+`read_memory`. With `session` or `workspace`, that conversation's pages come first.
+
+**Abstention.** `abstained: true` with a reason: `unresolved` (nothing resolved),
+`ambiguous` (two competing senses, listed under `ambiguity`, no role lane runs),
+`index_warming`, `disabled`. Resolve by calling again with `anchor` set to the ref
+you mean. `roles`, `units`, `pointers` and `current_state` are empty on an
+abstained packet; `anchors` (partial, `retrieval_named`, competing candidates),
+`ambiguity` and `missing` may still be filled.
+
+**How an anchor was reached** (`generation.carried_by`, anchor `status`):
+- `agent_choice`, `status: "resolved"`: you named it with `anchor`.
+- `recency`: a turn naming nothing ("continue", "where were we") resumes the
+  thread your `continuity` token names, else the last work (picked with `anchor`
+  or named by a recorded episode), in this conversation first, then its
+  workspace, then the vault. Reads rank below writes; a maintenance batch counts
+  as nobody's work. A single ordinary page is `kind: "page"`, `status: "resolved"`,
+  evidence `["recency"]`; a tie abstains `ambiguous`. Without `session`,
+  `workspace` or `continuity`, other conversations' work orders `recent_context`
+  but is never the referent.
+- `follow_up`: a short follow-up naming nothing new ("and the results?") with one
+  page clearly ahead in this conversation's thread is carried as one `partial`
+  anchor; if two are close, both go under `ambiguity`.
+- `retrieval`, `status: "retrieval_carried"`: no anchor was named but the turn's
+  distinctive words clearly reach one compiled page. Nothing was resolved; recall
+  alone put it there, and the continuity token now names it. A turn with nothing
+  distinctive abstains `unresolved`.
+- `retrieval_named`: several pages reached this way; nothing is carried, the
+  packet abstains `unresolved` and lists them under `anchors[]`. Unlike
+  `ambiguity` (two anchors that both resolved), nothing resolved. Pass one as
+  `anchor`.
+
+**`continuity`.** Every packet returns one token (abstentions too) identifying
+the conversation; only a salted hash is stored and it lapses after six idle
+hours. `generation.continuity` is `applied`, `stale` (another vault index or role
+registry) or `absent`; `generation.continuity_thread` is `applied`, `stale`
+(answered as a new conversation, never refused) or `absent`.
+`generation.hot_profile` reports the recent-work projection `state` (`current`,
+`partial`, `seeded`, `behind`, `empty`) and `session_start`. Only salted hashes of
+`session`/`workspace` are stored, locally.
+
+**`episode_due`** (MCP door): after several activations with no `episode_memory`
+record from this caller, asks for one at the next decision or stopping point.
+Advice, at most once per half hour, absent when proactive capture is off.
+
+**`upkeep`** (at session start): at most one item the background pass proposed,
+such as two notes that could be connected. It carries its own `route`, a
+`context_route` to read first and a `dispose` route (`triage_memory` dismiss or
+snooze). Consideration does not authorize mutation: act through the route under
+its own rules, or dispose of it.
+
+**`learning`** may ride on an `anchor` call whose turn never named the chosen
+page: an advisory naming the writer that would teach the vault the user's words
+(`edit_memory` adding to `learned_aliases`, or `schema_memory save-conventions`
+adding a referential cue) with the `expected_hash` it needs, plus `turn_terms`.
+It writes nothing; act only if those words should reach that page, else dismiss
+its `review` ref with `triage_memory`.

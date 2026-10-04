@@ -13,6 +13,8 @@ Cloud needs a service policy that delivers responsive search and prompt semantic
 - Expose effective policy, core-model readiness and oldest pending semantic work without loading resources. Canonical commit and semantic freshness remain distinct outcomes.
 - Gate fleet promotion, friend admission and runtime-change closure on the large owner vault: measured save-to-semantic visibility, query latency, restart recovery and simultaneous-cell capacity at the existing CPU/memory limits. A separately authorized reviewer-only canary may precede owner adoption on existing infrastructure, with its own verified resource and preservation outcomes; it does not satisfy the owner gates.
 
+- Complete shared-worker qualification and resource-aware admission through the existing controller, scheduler and node-policy seams. The optional dedicated reservation is an isolation mechanism, not the default production unit per tenant. Auction hardware and local-disk migration remain later, independently justified infrastructure work.
+
 The existing CPU ONNX recall encoder is a pure-substrate ranking model: this changes resource orchestration, not its weights, authority or generated output. Optional reranking, visual and media models remain lazy/default-off where currently optional, and soft-fail without blocking lexical retrieval or canonical writes.
 
 ## Capabilities
