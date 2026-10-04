@@ -971,9 +971,11 @@ def test_service_scoring_binds_producer_space_to_read_snapshot(tmp_path, monkeyp
         idx.search(_pad([1, 0]), 1, encoded_for=encoded_for)
 
 
-def test_service_recall_signals_foreground_without_promoting_advisory_scans(tmp_path, monkeypatch):
-    """Missing recall admission lets bulk graph work delay every SQLite fetch."""
-    from exomem import foreground_priority
+def test_service_scoring_prioritizes_inline_work_without_promoting_background(tmp_path, monkeypatch):
+    """An inline advisory must not wait behind bulk work or promote another worker."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import foreground_activity, foreground_priority
 
     idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
     idx.upsert_file('a.md', ['a'], _mat([1, 0]), 1.0)
@@ -992,6 +994,21 @@ def test_service_recall_signals_foreground_without_promoting_advisory_scans(tmp_
     assert foreground_priority.in_flight() == 0
     seen.clear()
     assert idx.search_many(_mat([1, 0]), 1, admits=lambda path: path in allowed)[0][0][:2] == ('a.md', 0)
+    assert seen and all(count == 0 for count in seen)
+    seen.clear()
+    with foreground_activity.foreground_scope(idx.vault_root):
+        assert idx.search_many(_mat([1, 0]), 1, admits=lambda path: path in allowed)[0][0][:2] == ('a.md', 0)
+        assert seen and all(count > 0 for count in seen)
+        assert foreground_priority.in_flight() == 0
+        seen.clear()
+        # Receipt-owned advisory remains background beside an active writer.
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            hits = workers.submit(idx.search_many, _mat([1, 0]), 1, admits=lambda path: path in allowed).result(timeout=10)
+        assert hits[0][0][:2] == ('a.md', 0)
+        assert seen and all(count == 0 for count in seen)
+    seen.clear()
+    with foreground_activity.foreground_scope(tmp_path / 'other-vault'):
+        idx.search_many(_mat([1, 0]), 1, admits=lambda path: path in allowed)
     assert seen and all(count == 0 for count in seen)
 
 
