@@ -1157,3 +1157,40 @@ def test_dedicated_selection_is_validated_and_delivered_to_cellctl() -> None:
     for selection in (["bad"], [cell_id, cell_id], [cell_id] * 1025, {"extra": cell_id}):
         result = _helm_render("--set-json", "cellctl.dedicatedCellIds=" + json.dumps(selection))
         assert result.returncode != 0 and "dedicatedCellIds" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_shared_policy_is_typed_delivered_and_confined_to_its_profile() -> None:
+    policy = {"mode": "selected", "cell_ids": ["aaaaaaaaaaaaaaaa"], "profile": "qualified-test",
+              "topology_key": "topology.kubernetes.io/zone", "topology_value": "test-zone", "occupancy": 2,
+              "resources": {"cpu_request": "1", "cpu_limit": "2", "memory_request": "2Gi", "memory_limit": "3Gi"},
+              "reserve_cpu": "0", "reserve_memory": "0"}
+    documents = _helm_template("--set-json", "cellctl.sharedWorker=" + json.dumps(policy))
+    deployment = _find(documents, "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_SHARED_WORKER"]) == policy
+    admission = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    placement = next(v["expression"] for v in admission["spec"]["validations"] if "exomem.io/dedicated-cell" in v["expression"])
+    assert "exomem.io/shared-profile" in placement and "qualified-test" in placement
+    assert "topology.kubernetes.io/zone" in placement and "test-zone" in placement
+    assert "nodeSelector.size() == 2" in placement and "tolerations.size() == 1" in placement
+    for bad in ({**policy, "cell_ids": ["invalid"]}, {**policy, "occupancy": 0}, {**policy, "resources": {}},
+                {**policy, "profile": "bad'cel"}):
+        assert _helm_render("--set-json", "cellctl.sharedWorker=" + json.dumps(bad)).returncode != 0
+    assert _helm_render("--set-json", "cellctl.sharedWorker=" + json.dumps(policy),
+                        "--set-json", 'cellctl.dedicatedCellIds=["aaaaaaaaaaaaaaaa"]').returncode != 0
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_csi_tolerates_existing_and_shared_worker_taints_with_shared_mode_off() -> None:
+    documents = _helm_template()
+    csi = next(doc for doc in documents if doc["kind"] == "DaemonSet" and "csi" in doc["metadata"]["name"])
+    tolerations = csi["spec"]["template"]["spec"]["tolerations"]
+    for key, value, effect in (("exomem.io/dedicated-cell", "aaaaaaaaaaaaaaaa", "NoSchedule"),
+                               ("exomem.io/shared-profile", "test", "NoSchedule"),
+                               ("node-role.kubernetes.io/control-plane", "", "NoSchedule"),
+                               ("maintenance", "reserved", "NoExecute")):
+        assert any((not item.get("key") or item["key"] == key)
+                   and (not item.get("effect") or item["effect"] == effect)
+                   and (item.get("operator") == "Exists" or item.get("value", "") == value)
+                   for item in tolerations), (key, effect)

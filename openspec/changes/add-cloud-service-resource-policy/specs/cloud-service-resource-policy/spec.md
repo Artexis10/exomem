@@ -89,6 +89,42 @@ Browser and OAuth admission SHALL count only capacity observations from the prec
 - **THEN** acceptance records actual resulting controls and requalifies that configuration
 - **AND** a selective canary preserves unselected resource/template inputs
 
+### Requirement: Shared admission uses one interchangeable qualified envelope
+
+Shared-worker selection SHALL default off and support selective qualification followed by explicit promotion for ordinary future admissions. Selective qualification SHALL preserve unselected resources, templates and render digests; dedicated placement SHALL remain independent. Serving, backup and restore SHALL use the same compatible worker profile and CSI attachability domain. Conflicting operator selections SHALL fail configuration before changing workloads.
+
+Selected qualification SHALL publish a complete zero-slot general-admission snapshot and retire incompatible positive rows before changing ordinary placement authority. This cutover SHALL serialize with the existing admission transaction lock, and the migration inventory SHALL be established after publication so an earlier redemption cannot commit outside it. Existing cells SHALL migrate through the established stop/change/start protocol, completing active holds and releasing volume users before changing resource or placement inputs. Selected migration SHALL finish before all-shared promotion. Promotion SHALL replace the advertised legacy domain atomically and publish qualified capacity only once a fresh ordinary cell ID can use the shared profile/domain. Rollback SHALL retire shared capacity and use the same stopped-cell protocol before restoring legacy placement/capacity. Capacity closure SHALL defer prospective admissions automatically, preserve unconsumed invitations and leave existing access unaffected; complete all-shared reconciliation SHALL reopen qualified admission without a manual unlock.
+
+Within the initial scalar admission contract, shared capacity SHALL represent one interchangeable qualified resource/topology envelope. Absolute capacity SHALL be the per-node minimum of qualified occupancy, CPU, memory and cell attachment capacity, summed only after per-node floors and minima. Scheduler requests SHALL cover the qualified footprint; platform reserves, Pending commitments and supported lifecycle overlap SHALL be charged without double-counting ordinary cells already charged by admission. Deletion-in-progress SHALL retain its commitment until physical lifecycle cleanup releases it. The complete capacity pass, including absent-node zeroing, SHALL publish atomically. Missing or incomplete observations MUST NOT acquire a fresh positive capacity timestamp.
+
+The initial cohort SHALL be bounded to one shared worker until the runtime, resources and intended occupancy pass the fixed outcome gates. Multiple workers SHALL require qualification of the occupancy Kubernetes can actually concentrate under their real requests and allocatable resources; a published slot ceiling or preferred spread SHALL NOT substitute for that proof. A second independent resource class or storage domain SHALL require a compatible admission extension before its slots are added.
+
+#### Scenario: Two node capacities change in one pass
+- **WHEN** capacity moves between workers during a controller pass
+- **THEN** admission observes either the previous complete pass or the new complete pass
+- **AND** it cannot combine increased new capacity with unreduced old capacity
+
+#### Scenario: Free attachments exceed resource capacity
+- **WHEN** a compatible worker has spare volume attachments but qualified CPU or memory supports fewer cells
+- **THEN** its absolute published slots use the lower resource capacity
+- **AND** running, stopped and Pending cell commitments still consume the admission count
+
+#### Scenario: An unrelated worker joins the cluster
+- **WHEN** a worker has a different resource profile or incompatible CSI topology
+- **THEN** it adds no slots to the qualified shared envelope
+- **AND** a later compatible observation recovers eligibility without a manual unlock or changes to existing tenant access
+
+#### Scenario: Pending work cannot use the shared worker
+- **WHEN** an unscheduled Pod's fixed placement constraints or taint tolerance prove it cannot run on the shared worker
+- **THEN** its requests and projected volume attachments do not reduce that worker's capacity
+- **AND** eligible or uncertain Pending work and all actually scheduled demand remain charged
+
+#### Scenario: A fresh ordinary ID arrives during promotion
+- **WHEN** shared placement is being qualified for selected existing cells
+- **THEN** ordinary admission sees zero slots rather than selected-only worker capacity or old positive legacy rows
+- **AND** after completed migration and all-shared promotion, a newly minted unlisted cell ID uses the same qualified resources and serving/maintenance placement
+- **AND** promotion does not change an active hold Job template or unexpectedly relocate an unmigrated existing cell
+
 ### Requirement: Safe service-policy rollback
 
 An operator SHALL be able to return a canary to a verified compatible legacy deployment while preserving post-upgrade canonical writes and outstanding durable index work. Rollback MUST NOT restore an older vault snapshot over newer committed data or relax tenant identity, authorization or publication fences.

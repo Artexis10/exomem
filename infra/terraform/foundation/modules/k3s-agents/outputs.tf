@@ -8,6 +8,7 @@ output "nodes" {
       private_ip        = var.nodes[key].private_ip
       server_type       = server.server_type
       dedicated_cell_id = var.nodes[key].dedicated_cell_id
+      shared_profile    = var.nodes[key].shared_profile
     }
   }
 }

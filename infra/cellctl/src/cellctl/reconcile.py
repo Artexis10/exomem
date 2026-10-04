@@ -23,7 +23,14 @@ import asyncpg
 from kubernetes.client.rest import ApiException
 
 from . import db
-from .capacity import CapacityConfig, compute_node_capacity
+from .capacity import (
+    CapacityConfig,
+    CapacityObservation,
+    NodeCapacity,
+    SharedWorkerPolicy,
+    compute_node_capacity,
+    compute_shared_capacity,
+)
 from .decide import (
     DEFAULT_RECONCILE_CONFIG,
     ReconcileConfig,
@@ -36,6 +43,7 @@ from .manifests import (
     CellManifestSpec,
     ResourceSettings,
     check_artifact_broker_url,
+    dedicated_placement,
     hold_job_name,
     namespace_name,
     render_backup_job,
@@ -277,6 +285,7 @@ class ClusterConfig:
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
     dedicated_cell_ids: tuple[str, ...] = ()
+    shared_worker: SharedWorkerPolicy | None = None
 
     def __post_init__(self) -> None:
         cell_ids = self.dedicated_cell_ids
@@ -287,6 +296,8 @@ class ClusterConfig:
             or len(set(cell_ids)) != len(cell_ids)
         ):
             raise ValueError("dedicated placement requires at most 1024 unique base32 cell IDs")
+        if self.shared_worker and set(self.dedicated_cell_ids) & set(self.shared_worker.cell_ids):
+            raise ValueError("dedicated and shared cell selections overlap")
         check_artifact_broker_url(self.artifact_broker_url)
         cell_ids = self.artifact_broker_cell_ids
         if (
@@ -297,6 +308,19 @@ class ClusterConfig:
             or (cell_ids and not self.artifact_broker_url)
         ):
             raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
+
+    def workload_for_cell(self, cell_id: str) -> tuple[ResourceSettings, dict]:
+        if cell_id in self.dedicated_cell_ids:
+            return self.resources, dedicated_placement(cell_id)
+        policy = self.shared_worker
+        if policy and policy.selects(cell_id):
+            return policy.resources, {
+                "nodeSelector": {"exomem.io/shared-profile": policy.profile,
+                                 policy.topology_key: policy.topology_value},
+                "tolerations": [{"key": "exomem.io/shared-profile", "operator": "Equal",
+                                 "value": policy.profile, "effect": "NoSchedule"}],
+            }
+        return self.resources, {}
 
     def artifact_broker_for_cell(self, cell_id: str) -> str:
         return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
@@ -318,8 +342,8 @@ class ClusterGateway:
     ) -> bool: ...  # pragma: no cover
     def list_cell_namespaces(self) -> dict[str, str]: ...  # pragma: no cover
     def capacity_inputs(
-        self, *, csi_driver: str
-    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]: ...  # pragma: no cover
+        self, *, csi_driver: str, shared_policy: SharedWorkerPolicy | None = None
+    ) -> CapacityObservation: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -641,9 +665,10 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
     itself. storage_gib bumps no generation, so it must be here: it renders
     into the PVC and the quota, and it is part of the refusal park key."""
 
+    resources, placement = cluster_config.workload_for_cell(row.cell_id)
     material = {
         "render_version": RENDER_VERSION,
-        "resources": asdict(cluster_config.resources),
+        "resources": asdict(resources),
         "model_env": cluster_config.model_env or {},
         "job_egress_except": sorted(cluster_config.job_egress_except),
         "cell_token_key_version": secrets_config.cell_token_key_version,
@@ -654,6 +679,8 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
     }
     if row.cell_id in cluster_config.dedicated_cell_ids:
         material["dedicated_node"] = True
+    elif placement:
+        material["placement"] = placement
     endpoint = cluster_config.artifact_broker_for_cell(row.cell_id)
     if endpoint:
         material["artifact_broker_url"] = endpoint
@@ -792,12 +819,19 @@ async def reconcile_once(
             )
             return
 
+    if cluster_config.shared_worker and cluster_config.shared_worker.mode == "selected":
+        # Close the old domain before inventory/workloads. An earlier redemption
+        # must commit before this barrier, so it is included in the inventory.
+        await db.write_capacity_snapshot(connection, capacities={}, observed_at=now)
     rows = await db.select_all_rows(connection)
+    committed = frozenset(row.cell_id for row in rows if not (
+        row.desired_state == "deleted" and row.observed_state == "deleted"
+        and row.observed_generation == row.generation))
     rollout = await db.read_rollout(connection)
     cell_image = await db.read_cell_image(connection)
     _log_orphan_namespaces(cluster, rows, now, memory)
-    # D4 API budget: a row observed as deleted is not observed again.
-    rows = [row for row in rows if not (row.desired_state == "deleted" and row.observed_state == "deleted")]
+    # D4 API budget: only cleanup observed at the current generation retires a row.
+    rows = [row for row in rows if row.cell_id in committed]
 
     # H4: one row's observe() must not take every other row down with it.
     observations: dict[str, ClusterObservation] = {}
@@ -902,30 +936,34 @@ async def reconcile_once(
     # the previous `exomem_cloud_capacity` rows in place, and must never turn
     # a pass whose rows all succeeded into a failed one.
     try:
-        allocatable, attachments_used, non_cell_attachments, reserved_nodes = cluster.capacity_inputs(
-            csi_driver=cluster_config.capacity.csi_driver
-        )
+        kwargs = {"csi_driver": cluster_config.capacity.csi_driver}
+        if cluster_config.shared_worker:
+            kwargs["shared_policy"] = cluster_config.shared_worker
+        observation = cluster.capacity_inputs(**kwargs)
     except Exception as error:  # noqa: BLE001 - capacity must not take the pass down
         logger.error("cellctl: capacity read failed; keeping the last published capacity: %s", _describe_error(error))
         return
-    present_nodes = sorted(set(allocatable) | set(attachments_used))
-    for node in present_nodes:
-        capacity = compute_node_capacity(
-            allocatable=allocatable.get(node),
-            attachments_used=attachments_used.get(node, 0),
-            non_cell_attachments=non_cell_attachments.get(node, 0),
-            config=cluster_config.capacity,
-        )
-        if not capacity.limit_known:
-            logger.warning("cellctl: node %s has no known attachments limit; publishing 0 cell_slots", node)
-        await db.write_capacity(
-            connection,
-            node=node,
-            cell_slots=0 if node in reserved_nodes else capacity.cell_slots,
-            attachments_used=capacity.attachments_used,
-            observed_at=now,
-        )
-    await db.zero_absent_capacity(connection, present_nodes=present_nodes, observed_at=now)
+    if cluster_config.shared_worker:
+        capacities = compute_shared_capacity(observation, policy=cluster_config.shared_worker,
+                                             config=cluster_config.capacity,
+                                             committed=committed - frozenset(cluster_config.dedicated_cell_ids))
+        if cluster_config.shared_worker.mode == "selected":
+            capacities = {node: NodeCapacity(0, value.attachments_used, value.limit_known)
+                          for node, value in capacities.items()}
+        elif not any(value.cell_slots for value in capacities.values()):
+            logger.warning("cellctl: shared capacity unavailable: require one Ready, schedulable, unpressured "
+                           "profile/CSI-compatible worker with complete resource and volume observations")
+    else:
+        capacities = {}
+        for node in sorted(set(observation.allocatable) | set(observation.attachments_used)):
+            value = compute_node_capacity(
+                allocatable=observation.allocatable.get(node), attachments_used=observation.attachments_used.get(node, 0),
+                non_cell_attachments=observation.non_cell_attachments.get(node, 0), config=cluster_config.capacity)
+            capacities[node] = (NodeCapacity(0, value.attachments_used, value.limit_known)
+                                if node in observation.reserved_nodes else value)
+            if not value.limit_known:
+                logger.warning("cellctl: node %s has no known attachments limit; publishing 0 cell_slots", node)
+    await db.write_capacity_snapshot(connection, capacities=capacities, observed_at=now)
 
 
 async def _publish_parked_canary(
@@ -1089,15 +1127,16 @@ async def _reconcile_row(
         else:
             retry_after = observation.statefulset_backup_retry_after
             retry_minutes = observation.statefulset_backup_retry_minutes
+        resources, placement = cluster_config.workload_for_cell(row.cell_id)
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
             replicas=decision.replicas,
             read_only=decision.read_only,
             storage_gib=row.storage_gib,
-            resources=cluster_config.resources,
+            resources=resources,
             model_env=cluster_config.model_env or {},
-            dedicated_node=row.cell_id in cluster_config.dedicated_cell_ids,
+            placement=placement,
             hold_kind=decision.hold_kind,
             hold_started_at=decision.hold_started_at.isoformat() if decision.hold_started_at else None,
             previous_image=decision.previous_image,

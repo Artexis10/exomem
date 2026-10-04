@@ -67,11 +67,18 @@ def _agent_hosts(document: dict[str, Any], user: str) -> dict[str, dict[str, str
             reservation and re.fullmatch(r"[a-z2-7]{16}", reservation) is None
         ):
             raise ValueError("dedicated_cell_id must be empty or an exact cell identifier")
+        profile = node.get("shared_profile", "")
+        if not isinstance(profile, str) or (profile and (
+            reservation or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", profile) is None
+        )):
+            raise ValueError("shared_profile must be a DNS label on a non-dedicated agent")
         hosts[name] = {
             "ansible_host": str(ipaddress.ip_address(str(node.get("ipv4")))),
             "ansible_user": user,
             "private_node_ip": str(ipaddress.ip_address(str(node.get("private_ip")))),
         }
+        if profile:
+            hosts[name]["k3s_agent_shared_profile"] = profile
         if reservation:
             hosts[name]["k3s_agent_dedicated_cell"] = reservation
     return hosts

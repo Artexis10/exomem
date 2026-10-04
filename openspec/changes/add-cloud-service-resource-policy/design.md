@@ -154,6 +154,33 @@ Both browser and OAuth admission count only observations within the preceding fi
 
 Use a finite invite cohort and manual IaC capacity additions first. Bounded public admission with visible pending capacity and alerts can precede a full autoscaler; future automation must have one node-lifecycle owner. Keep the control plane separate from worker sizing. Retain the supported CSI and B2 backup/restore path initially. Auction local mirrored SSD requires a separate storage migration and restore proof; it is not a drop-in Cloud-volume replacement or an invite prerequisite. Hardware selection uses measured occupancy and total costs, including operator/test workloads. These artifacts authorize no purchase or price.
 
+#### Initial shared capacity contract
+
+Retain the existing scalar capacity table, exclusive admission transaction and count of outstanding cell commitments. Start with one qualified shared-worker profile, one actual CSI attachability domain and one shared worker for the bounded initial cohort. The scalar count cannot represent independently constrained worker classes or storage domains; introducing another class/domain requires an explicit admission-contract extension rather than summing incompatible slots. A worker serves several isolated vault cells, not one tenant.
+
+The controller selection defaults off. A selected-cell mode applies the qualified serving resources and placement inputs only to named cells; an explicit all-shared promotion applies them to ordinary future admissions and existing non-dedicated cells. Dedicated own-cell isolation remains independent, conflicting selections fail operator configuration, and unselected resources/templates/digests remain unchanged during a selective canary. Serving, backup and restore resolve the same placement; maintenance processes retain their existing distinct requests and limits. Converge the shared profile label through the existing agent lifecycle and validate actual PV affinity and CSI topology. If unselected workloads could enter and invalidate the envelope, use only a fixed shared NoSchedule taint/toleration, admitted for selected namespaces, while preserving necessary platform DaemonSets. Preferred spreading is not a capacity guarantee.
+
+Selected qualification publishes a complete zero-slot general-admission snapshot, including retirement of old positive legacy rows. Serialize that cutover with the existing admission advisory transaction lock, then establish the migration inventory after publication so an earlier redemption cannot commit outside it. Confirm that snapshot before changing ordinary placement authority. It prevents a fresh random cell ID from consuming capacity it cannot use; its temporary wrong-firing cost is a prospective user waiting through qualification, while existing users remain served and unconsumed invites remain retryable. Subsequent all-shared reconciliation restores qualified capacity automatically; no manual admission unlock is introduced. Default-off deployments retain their existing capacity contract.
+
+Migrate each affected existing cell through the existing stop/change/start lifecycle: finish active holds, confirm volume-user release, change the selected resource/placement inputs, then resume and verify. Complete this selected migration before all-shared promotion, so promotion changes future-ID coverage without unexpectedly relocating remaining legacy cells or mutating live Job templates. Publish qualified capacity only once new ordinary IDs can use that same profile/domain, replacing the legacy advertised domain atomically rather than adding to it. Rollback uses the same stopped-cell protocol and retires shared capacity before restoring ordinary legacy placement/capacity.
+
+Publish an operator-qualified occupancy ceiling clamped by fresh Kubernetes allocatable CPU/memory, effective pod reservations, platform/headroom reserves and CSI attachments. The initial implementation needs no dynamic usage estimator, scheduler or reservation ledger. CPU and memory footprints are qualified deployment values aligned with actual scheduler requests. Charge non-cell reservations, Pending commitments, lifecycle overlap and cell demand outside those footprints; do not subtract ordinary committed cells a second time when the existing admission count already charges them. Unscheduled demand proven incompatible by fixed placement constraints or taint tolerance does not reserve that worker or its attachments; unknown compatibility remains charged, and actually scheduled demand is always charged. Deduct reserves only when Node Allocatable has not already done so. Deletion-in-progress continues to consume a commitment until physical lifecycle cleanup releases it.
+
+For each eligible worker, calculate absolute capacity, not remaining vacancies:
+
+```text
+memory_slots = floor((allocatable_memory - other_memory - reserve_memory
+                      - excess_cell_memory) / qualified_cell_memory)
+cpu_slots = floor((allocatable_cpu - other_cpu - reserve_cpu
+                   - excess_cell_cpu) / qualified_cell_cpu)
+cell_slots = max(0, min(qualified_occupancy, memory_slots, cpu_slots,
+                       available_cell_attachment_slots))
+```
+
+Take floors/minima per node before summing. Use the larger supported serving/maintenance footprint plus measured overlap, not an assumed extra permanent cell. Publish the complete pass, including zeroing absent nodes, in one database transaction: admission must not combine a node's new capacity with another node's old capacity. Incomplete observations never become a fresh positive snapshot. The existing bounded freshness rule and subsequent complete reconciliation recover admission automatically.
+
+An advertised occupancy ceiling does not constrain Kubernetes packing. Before adding a second shared worker, qualify the concentration that the scheduler can actually produce under real requests and allocatable resources; do not infer balanced packing from equal node counts. Initial single-worker qualification avoids that unsupported claim. Numeric requests, reserves, profile identity and occupancy remain unset until the unmodified signed runtime and intended configuration pass the existing workload gates, including operator/QA/reviewer costs. A request change requalifies its resulting MemoryQoS min/high and performance; historical 1 GiB requests or a diagnostic candidate cannot supply this proof.
+
 ## Migration Plan
 
 1. Critique this design, collect the legacy Cloud baseline on an isolated representative vault with real CPU ONNX, and settle any discovered architectural blockers before implementation. Desktop Quiet delay is motivation, not that baseline.

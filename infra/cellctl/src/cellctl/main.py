@@ -15,7 +15,7 @@ from datetime import timedelta
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from .capacity import CapacityConfig
+from .capacity import CapacityConfig, SharedWorkerPolicy
 from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig
 from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
@@ -93,6 +93,18 @@ def build_cluster_config() -> ClusterConfig:
     dedicated_cell_ids = json.loads(os.environ.get("CELLCTL_DEDICATED_CELL_IDS", "[]"))
     if not isinstance(dedicated_cell_ids, list):
         raise ValueError("dedicated cell IDs must be a JSON array")
+    shared_raw = json.loads(os.environ.get("CELLCTL_SHARED_WORKER", '{"mode":"off"}'))
+    if not isinstance(shared_raw, dict):
+        raise ValueError("shared worker policy must be a JSON object")
+    shared = None
+    if shared_raw.get("mode") != "off":
+        if not isinstance(shared_raw.get("cell_ids", []), list):
+            raise ValueError("shared worker cell IDs must be a JSON array")
+        shared_raw["resources"] = ResourceSettings(**shared_raw["resources"])
+        shared_raw["cell_ids"] = tuple(shared_raw.get("cell_ids", []))
+        shared = SharedWorkerPolicy(**shared_raw)
+    elif set(shared_raw) != {"mode"}:
+        raise ValueError("off shared worker policy accepts only mode")
     # A bad chart value fails cellctl at startup, not on every render.
     check_model_env(model_env)
     return ClusterConfig(
@@ -106,6 +118,7 @@ def build_cluster_config() -> ClusterConfig:
         ),
         model_env=model_env,
         dedicated_cell_ids=tuple(dedicated_cell_ids),
+        shared_worker=shared,
         artifact_broker_url=os.environ.get("CELLCTL_ARTIFACT_BROKER_URL", ""),
         artifact_broker_cell_ids=tuple(artifact_cell_ids),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),

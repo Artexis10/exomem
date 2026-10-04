@@ -4,8 +4,19 @@ variable "nodes" {
     private_ip        = string
     server_type       = string
     dedicated_cell_id = optional(string, "")
+    shared_profile    = optional(string, "")
   }))
   default = {}
+  validation {
+    condition = alltrue([
+      for node in values(var.nodes) :
+      node.shared_profile == "" ||
+      (node.dedicated_cell_id == "" && length(node.shared_profile) <= 63 &&
+      can(regex("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", node.shared_profile)))
+    ])
+    error_message = "shared_profile must be an empty value or a DNS label on a non-dedicated agent."
+  }
+
 
   validation {
     condition = alltrue([

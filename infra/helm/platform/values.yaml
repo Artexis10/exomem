@@ -240,6 +240,9 @@ cellctl:
   enabled: false
   # Operator-selected cells reserve agents carrying their own cell ID.
   dedicatedCellIds: []
+  # Qualified values are operator supplied only after shared-worker acceptance.
+  sharedWorker:
+    mode: "off"
   # ghcr.io/artexis10/exomem-cellctl@sha256:<digest>, built from
   # infra/cellctl/Dockerfile and recorded in the release notes on each release
   # tag (release-please.yml). Always a digest, never a tag.
