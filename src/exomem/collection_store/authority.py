@@ -14,6 +14,7 @@ from .. import structured_collections as collections
 from .connection import CollectionStoreError
 
 PENDING_CREATE = "pending_collection_create"
+MARKER_REQUIRED = "collection_store_marker_required"
 
 
 def marker_path(root):
@@ -128,9 +129,27 @@ def marker_status(writer, intent):
 
 def projection_eligible(writer, projection):
     intent = pending_create(writer.connection)
-    if intent is None or projection["collection_id"] != intent["collection_id"]:
-        return True
-    return marker_status(writer, intent) == "marker_admitted"
+    if intent is not None and projection["collection_id"] == intent["collection_id"]:
+        return marker_status(writer, intent) == "marker_admitted"
+    return collection_admitted(writer, projection["collection_id"])
+
+
+def collection_admitted(writer, collection_id):
+    try:
+        raw = read_marker(writer.root)
+        if raw is None:
+            return writer.connection.execute(
+                "SELECT 1 FROM store_meta WHERE key=?", (MARKER_REQUIRED,)
+            ).fetchone() is None
+        marker = parse_marker(writer.root, raw)
+        sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+        row = writer._collection_row(collection_id)
+        return marker["store_id"] == sid and {
+            "collection_id": collection_id, "manifest_path": row["manifest_path"],
+            "authority": "store", "store_id": sid,
+        } in marker["collections"]
+    except (held_fs.HeldFsError, OSError, CollectionStoreError):
+        return False
 
 
 def orphan_cleanup_eligible(writer, directory):
@@ -139,13 +158,15 @@ def orphan_cleanup_eligible(writer, directory):
     Pending creation delays only ambiguous orphan cleanup in its view subtree;
     identified neighboring projections can still recover and publish normally.
     """
-    intent = pending_create(writer.connection)
-    if intent is None or marker_status(writer, intent) == "marker_admitted":
-        return True
-    source = Path(intent["source_path"])
-    if writer._collection_row(intent["collection_id"])["layout"] == "markdown-log":
-        source = source.parent
     directory = collections._portable_path_key(directory.as_posix())
-    protected = (Path(intent["manifest_path"]).parent, source)
-    return not any(directory == (key := collections._portable_path_key(parent.as_posix()))
-                   or directory.startswith(key + "/") for parent in protected)
+    for cid, manifest, source, layout in writer.connection.execute(
+        "SELECT collection_id,manifest_path,source_path,layout FROM collections"
+    ):
+        if projection_eligible(writer, {"collection_id": cid}):
+            continue
+        source = Path(source)
+        protected = (Path(manifest).parent, source.parent if layout == "markdown-log" else source)
+        if any(directory == (key := collections._portable_path_key(parent.as_posix()))
+               or directory.startswith(key + "/") for parent in protected):
+            return False
+    return True

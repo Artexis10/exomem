@@ -113,7 +113,8 @@ def borrowed_writer(root, handle, manager):
 class CollectionStoreRuntime:
     """One cached operation writer and a fresh writer for quiescent publication."""
 
-    def __init__(self, vault_root: Path, manager, *, authority_check: Callable[[], bool]):
+    def __init__(self, vault_root: Path, manager, *, authority_check: Callable[[], bool],
+                 _bootstrap=False):
         self.root = Path(vault_root).resolve()
         self.path = connection.store_path(self.root).resolve()
         self.manager = manager
@@ -121,12 +122,27 @@ class CollectionStoreRuntime:
         self._handle = None
         self._writer_token = None
         self._identity = None
+        self._bootstrap = _bootstrap
+        self._acquisition = None
+        self._admitted_token = None
         initial = self.sample_head()
         self._identity = (initial.store_id, initial.instance_id)
         with manager._lock:
             if manager._collection_store is not None:
                 raise ValueError("the lease manager already owns a collection store runtime")
             manager._collection_store = self
+
+    def record_acquisition(self, record):
+        if self._acquisition is None or self._acquisition.fencing_token != record.fencing_token:
+            self._acquisition = record
+            self._admitted_token = None
+
+    def reporting_ready(self, token):
+        return ((not self._bootstrap or (self._admitted_token is not None and self._admitted_token == token))
+                and self._authority_check())
+
+    def report_head(self, token):
+        return self.sample_head() if self.reporting_ready(token) else None
 
     def sample_head(self):
         """Read identity and committed tail in one fresh calling-thread snapshot."""
@@ -159,7 +175,7 @@ class CollectionStoreRuntime:
     def _admit(self, token):
         if self.manager.config.enabled:
             self.manager.validate_fencing_token(token)
-        if not self._authority_check():
+        if not self.reporting_ready(token):
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_LEASE_REQUIRED", "trusted preview admission is unavailable"
             )
@@ -173,6 +189,10 @@ class CollectionStoreRuntime:
 
     @contextmanager
     def checkout(self):
+        if self._bootstrap and not self.reporting_ready(self.manager._fencing_token):
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_LEASE_REQUIRED", "isolated recovery has not admitted this token"
+            )
         with self.manager._collection_store_checkout():
             lease = self.manager.ensure_writer()
             self._admit(lease.fencing_token)

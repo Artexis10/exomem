@@ -28,6 +28,8 @@ Every phase also re-runs the existing Records and Planning test modules in file 
 
 ## P1a. Store core, built-in writer, query and governance (dark)
 
+October 4 private runtime/create foundation: independent review approves current-token replica publication, current-governance checks before recovery effects, and preserving valid admission after malformed create or redundant resume. The final admission/runtime scope passes 58 tests; the final affected store, Records, writer-lease, coordinator and state-migration scope passes 1,236 tests with five native-Windows skips. An independent nine-test recheck plus interrupted second-create/recovery probe confirms both usable completed stores and correctly fenced pending recovery. This supports the private foundation only: production compatibility support remains empty, public startup/adoption and S1 acceptance remain open, and no existing collection is migrated or phase/performance gate closed.
+
 - [x] P1a.1 Red: schema contract tests.
   - STRICT tables.
   - Append-only triggers abort UPDATE and DELETE on `txns`, `audit_effects`, `item_versions`, `item_sources`, `collection_manifests` and `collection_type_versions`.

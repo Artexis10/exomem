@@ -4237,6 +4237,8 @@ class LeaseManager:
             self._fencing_token = record.fencing_token
             self._expires_at = record.expires_at
             self._store_released = False
+            if self._collection_store is not None:
+                self._collection_store.record_acquisition(record)
             if cause == "mutation":
                 # Only a mutation-driven grant counts as write activity for the
                 # idle-release timer (it closes the window between this grant
@@ -5953,7 +5955,7 @@ class LeaseManager:
                         and time.monotonic() - self._last_renew_monotonic
                         < max(1.0, self.config.ttl_seconds / 3)):
                     return
-            head = self._collection_store.sample_head()
+            head = self._collection_store.report_head(token)
             record = self.client.renew(
                 token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
                 collection_store_head=head,
@@ -5972,6 +5974,8 @@ class LeaseManager:
 
     def _release_collection_store(self, token, *, deadline, cancelled=None, closing=False):
         runtime = self._collection_store
+        if not runtime.reporting_ready(token):
+            return False
         with self._lock:
             if self._store_closed:
                 return True

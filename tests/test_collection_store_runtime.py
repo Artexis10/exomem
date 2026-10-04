@@ -168,6 +168,18 @@ def test_fresh_head_sample_rejects_absent_or_inconsistent_enrolled_store(runtime
         runtime.sample_head()
 
 
+def test_unadmitted_runtime_renews_without_replacing_coordinator_evidence(runtime):
+    # Authority loss must leave the lease renewable without advertising an unadmitted head.
+    manager = runtime.manager
+    lease = manager.ensure_writer()
+    runtime._authority_check = lambda: False
+    manager._renew_collection_store(lease.fencing_token)
+    assert manager.client.heads == [None]
+    assert not manager._release_collection_store(
+        lease.fencing_token, deadline=time.monotonic() + 1,
+    )
+
+
 def test_cancelled_close_keeps_authority_and_can_retry(runtime):
     _create(runtime)
     with pytest.raises(OpError, match="FLUSH_PENDING"):

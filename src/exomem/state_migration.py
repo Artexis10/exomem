@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -242,6 +242,37 @@ def partition_state_descriptor_ids(
 def _require_supported_compatibility(optional: frozenset[str]) -> None:
     if optional - set(supported_state_compatibility_ids()):
         raise StateCompatibilityUnsupported()
+
+
+def _require_collection_store_recovery(session, token) -> None:
+    """The allocating dark owner can resume its own complete store state only."""
+    from .collection_store import authority, chain, connection
+    from .collection_store.admission import _IsolatedSession
+
+    if type(session) is not _IsolatedSession or not session.require(token):
+        raise StateMigrationOfflineRequired("isolated collection-store custody is absent")
+    state_dir = state_paths.vault_state_dir(session.root)
+    with _migration_lock(state_dir):
+        state_paths.validate_hosted_state_directory(state_dir)
+        manifest = _load_manifest(state_dir, vault_root=session.root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
+        physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
+        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1"}
+                or manifest.get("governance_rollback") is not None
+                or manifest.get("governance_adoption") is not None
+                or scan_vault_state(session.root)):
+            raise StateMigrationOfflineRequired("collection-store recovery requires ready families")
+        if optional:
+            with closing(connection.open_reader(session.path)) as reader:
+                chain.verify_store_chain(reader)
+                intent = authority.pending_create(reader)
+                raw = intent["target_marker"] if intent is not None else authority.read_marker(session.root)
+                marker = authority.parse_marker(session.root, raw)
+                sid = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+                if marker["store_id"] != sid:
+                    raise StateMigrationOfflineRequired("collection-store recovery identity differs")
+        session.require(token)
 
 
 def record_collection_store_compatibility(
