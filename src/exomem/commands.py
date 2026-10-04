@@ -5293,7 +5293,8 @@ def op_query_data(
 
     Returns:
         {path, format, total_rows, total_matched, returned, columns, rows,
-         aggregate, truncated, warnings}.
+         aggregate, truncated, warnings}, plus optional provenance identifying
+        the exact parsed bytes and zero-based source records, not output offsets.
 
     Errors: INVALID_PATH / NOT_FOUND (path); UNSUPPORTED_FORMAT; TOO_LARGE;
         BAD_JSON; BAD_RECORD_PATH; BAD_FILTER; BAD_OP; BAD_AGGREGATE.
@@ -11613,6 +11614,8 @@ def op_query_dataset(
     date_column: str | None = None,
 ) -> dict:
     """Query a vault CSV, TSV or JSON dataset.
+
+    Optional provenance: byte identity and zero-based source positions.
 
     Args:
         path: Dataset path.

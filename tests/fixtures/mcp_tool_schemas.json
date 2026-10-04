@@ -2563,7 +2563,7 @@
     }
   },
   "query_dataset": {
-    "description": "Query a vault CSV, TSV or JSON dataset.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md",
+    "description": "Query a vault CSV, TSV or JSON dataset.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nOptional provenance: byte identity and zero-based source positions.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
