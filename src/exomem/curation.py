@@ -56,10 +56,11 @@ STEP_KINDS: Final[tuple[str, ...]] = (
 #: (`propose(..., allow_records=True)`, alone in its plan), so no curation door
 #: can seal one. A plan the episode sealed is an ordinary curation run, which
 #: `maintain_memory` apply/resume can run through the same Records writer and
-#: checks `record_memory` append applies. It delegates to that writer, the leaf that
+#: checks `record_memory` applies. It delegates to that writer, the leaf that
 #: may touch the protected Records tree, and its witness holds only while that
 #: writer's own receipt -- its audit transition -- corroborates it.
 RECORDS_STEP_KIND: Final[str] = "append-record"
+RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
 MAX_STEPS: Final[int] = 64
 MAX_PLAN_BYTES: Final[int] = 256 * 1024
 MAX_TITLE_CHARS: Final[int] = 500
@@ -157,6 +158,9 @@ _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fi
 _APPEND_RECORD_FIELDS = frozenset(
     {"collection", "item", "item_key", "body", "why", "expected_container_hash"}
 )
+_UPDATE_RECORD_FIELDS = frozenset(
+    {"collection", "item_key", "changes", "why", "expected_container_hash", "expected_item_version"}
+)
 _EDIT_FIELDS = frozenset({"path", "why", "operation"})
 _SUPERSEDE_FIELDS = frozenset(
     {
@@ -218,6 +222,7 @@ _ARG_FIELDS = {
     "delete": _DELETE_FIELDS,
     "recover": _RECOVER_FIELDS,
     RECORDS_STEP_KIND: _APPEND_RECORD_FIELDS,
+    "update-record": _UPDATE_RECORD_FIELDS,
 }
 _REQUIRED_FIELDS = {
     "create-note": frozenset({"content", "title"}),
@@ -229,6 +234,7 @@ _REQUIRED_FIELDS = {
     "delete": frozenset({"path", "confirm"}),
     "recover": frozenset({"trash_path"}),
     RECORDS_STEP_KIND: frozenset({"collection", "item", "why", "expected_container_hash"}),
+    "update-record": _UPDATE_RECORD_FIELDS,
 }
 
 
@@ -435,11 +441,12 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         _require_string(
             args.get("title"), f"steps[{ordinal}].args.title", max_chars=MAX_TITLE_CHARS
         )
-    elif kind == RECORDS_STEP_KIND:
+    elif kind in RECORDS_STEP_KINDS:
         _require_string(args.get("collection"), f"steps[{ordinal}].args.collection", max_chars=2048)
-        if not isinstance(args.get("item"), Mapping):
-            raise _error("INVALID_CURATION_PLAN", "append-record item must be an object")
-        args["item"] = json.loads(canonical_json(args["item"]))
+        value_field = "item" if kind == RECORDS_STEP_KIND else "changes"
+        if not isinstance(args.get(value_field), Mapping):
+            raise _error("INVALID_CURATION_PLAN", f"{kind} {value_field} must be an object")
+        args[value_field] = json.loads(canonical_json(args[value_field]))
         if "item_key" in args:
             _require_string(args["item_key"], f"steps[{ordinal}].args.item_key", max_chars=512)
         if "body" in args and not isinstance(args["body"], str):
@@ -447,7 +454,13 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         _require_string(args.get("why"), f"steps[{ordinal}].args.why", max_chars=MAX_WHY_CHARS)
         if not _HEX64.fullmatch(str(args.get("expected_container_hash") or "")):
             raise _error(
-                "INVALID_CURATION_PLAN", "append-record requires the reviewed expected_container_hash"
+                "INVALID_CURATION_PLAN", f"{kind} requires the reviewed expected_container_hash"
+            )
+        if kind == "update-record" and not _HEX64.fullmatch(
+            str(args.get("expected_item_version") or "")
+        ):
+            raise _error(
+                "INVALID_CURATION_PLAN", "update-record requires the reviewed expected_item_version"
             )
     elif kind == "move":
         args["old_path"] = normalize_target_path(args.get("old_path"), field="old_path")
@@ -591,7 +604,7 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
 def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str, Any]:
     """A closed forward plan. `allow_records` admits the episode Records leaf;
     only the episode seal and already-sealed plans pass it."""
-    kinds = (*STEP_KINDS, RECORDS_STEP_KIND) if allow_records else STEP_KINDS
+    kinds = (*STEP_KINDS, *RECORDS_STEP_KINDS) if allow_records else STEP_KINDS
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
     value = dict(raw)
@@ -630,7 +643,7 @@ def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str,
             }
         )
     normalized = {"version": 1, "title": title, "steps": normalized_steps}
-    if any(step["kind"] == RECORDS_STEP_KIND for step in normalized_steps) and (
+    if any(step["kind"] in RECORDS_STEP_KINDS for step in normalized_steps) and (
         len(normalized_steps) != 1 or "entity_candidate" in value
     ):
         raise _error("CURATION_RECORDS_LEAF_ALONE", "a Records leaf is sealed alone in its plan")
@@ -1270,7 +1283,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             after_hash = None
             effect_before = [{"path": path, "content_hash": before_hash}]
             effect_after = [{"path": path, "exists": True}]
-        elif kind == RECORDS_STEP_KIND:
+        elif kind in RECORDS_STEP_KINDS:
             from . import record_governance
             from . import records as records_module
 
@@ -1279,45 +1292,60 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             manifest = record_governance.require_records_profile(
                 record_governance.resolve_collection_for_mutation(vault_root, args["collection"])
             )
-            appended = records_module.prepare_append(
-                vault_root,
-                manifest,
-                item=args["item"],
-                item_key=args.get("item_key"),
-                body=args.get("body"),
-                expected_container_hash=args["expected_container_hash"],
-                why=args["why"],
-            )
+            if kind == RECORDS_STEP_KIND:
+                appended = records_module.prepare_append(
+                    vault_root,
+                    manifest,
+                    item=args["item"],
+                    item_key=args.get("item_key"),
+                    body=args.get("body"),
+                    expected_container_hash=args["expected_container_hash"],
+                    why=args["why"],
+                )
+            else:
+                appended = records_module.prepare_update(
+                    vault_root,
+                    manifest,
+                    **{name: value for name, value in args.items() if name != "collection"},
+                )
             if appended["semantic_profile"] != "records":
-                raise _error("RECORDS_PROFILE_REQUIRED", "a Records leaf appends to Records only")
+                raise _error("RECORDS_PROFILE_REQUIRED", "a Records leaf writes to Records only")
             if appended["strategy"] != "markdown-items":
                 # One file per item: the witness must name the item alone.
                 raise _error(
                     "CURATION_RECORDS_STORAGE_UNSUPPORTED",
-                    "a Records leaf appends to a markdown-items collection",
+                    "a Records leaf writes to a markdown-items collection",
                 )
             path = normalize_target_path(appended["path"], field="destination", allow_records=True)
             manifest_path = normalize_target_path(
                 appended["manifest_path"], field="collection", allow_records=True
             )
-            _manifest_text, manifest_hash = _read_target(vault_root, manifest_path)
-            if not _guarded_absent(vault_root, path):
-                raise _error("CURATION_BINDING_STALE", f"record destination {path!r} exists")
-            expected_absent = True
             prepared = {
                 "destination": path,
                 "collection_id": appended["collection_id"],
                 "manifest_path": manifest_path,
                 "item_key": appended["item_key"],
-                "payload_hash": appended["payload_hash"],
             }
+            if kind == RECORDS_STEP_KIND:
+                _manifest_text, manifest_hash = _read_target(vault_root, manifest_path)
+                if not _guarded_absent(vault_root, path):
+                    raise _error("CURATION_BINDING_STALE", f"record destination {path!r} exists")
+                expected_absent = True
+                prepared["payload_hash"] = appended["payload_hash"]
+                effect_before = [{"path": path, "absent": True}]
+            else:
+                manifest_hash = appended["before_manifest_hash"]
+                before_hash = appended["before_item_hash"]
+                prepared.update(
+                    before_manifest_hash=manifest_hash,
+                    before_container_hash=appended["before_container_hash"],
+                    before_item_hash=before_hash,
+                )
+                effect_before = [{"path": path, "content_hash": before_hash}]
             after_hash = None
             # Every Records transition rewrites the manifest's audit head, so
             # its hash stands for the whole collection as reviewed.
-            effect_before = [
-                {"path": path, "absent": True},
-                {"path": manifest_path, "content_hash": manifest_hash},
-            ]
+            effect_before.append({"path": manifest_path, "content_hash": manifest_hash})
             effect_after = [{"path": path, "exists": True}]
         elif kind == "move":
             validation = move_module.move_file(vault_root, validate_only=True, **args)
@@ -1685,6 +1713,7 @@ def compensation_kind(kind: str) -> str:
         # Records history is corrected by a later Records transition, never
         # by removing the one that happened.
         RECORDS_STEP_KIND: "unavailable",
+        "update-record": "unavailable",
     }[kind]
 
 
@@ -1752,6 +1781,7 @@ def _witness_basis(
         "delete": "manage_memory_file:delete",
         "recover": "manage_memory_file:recover",
         RECORDS_STEP_KIND: "record_memory:append",
+        "update-record": "record_memory:update",
     }[step["kind"]]
     return {
         "version": 1,
@@ -1915,7 +1945,7 @@ def _validate_witness(
                 item.get("path"),
                 field="witness.after.path",
                 allow_trash=kind in {"delete", "recover"},
-                allow_records=kind == RECORDS_STEP_KIND,
+                allow_records=kind in RECORDS_STEP_KINDS,
             )
         except CurationError as error:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "curation postimage is invalid") from error
@@ -1966,28 +1996,42 @@ def _verify_records_receipt(
     vault_root: Path,
     binding: Mapping[str, Any],
     witness: Mapping[str, Any],
+    *,
+    kind: str = RECORDS_STEP_KIND,
 ) -> None:
     """A Records leaf's witness holds only while the Records receipt agrees.
 
-    The receipt is read back from the Records owner: the item still exists
-    under the sealed key with the sealed payload, and exactly one audit append
-    transition names that key, path and item hash. That item path and hash
-    must be the witness's own postimage.
+    The owner verifies the append payload or update preimages against one
+    audit transition. Its item identity and hash must match the sealed
+    destination and the witness's own postimage.
     """
     from . import records as records_module
 
     prepared = dict(binding.get("prepared") or {})
-    receipt = records_module.append_receipt(
-        vault_root,
-        str(prepared.get("manifest_path") or ""),
-        item_key=str(prepared.get("item_key") or ""),
-        payload_hash=str(prepared.get("payload_hash") or ""),
-    )
     after = list(witness["after"])
+    if len(after) != 1:
+        raise _error("CURATION_OUTCOME_UNCERTAIN", "the Records postimage is invalid")
+    if kind == "update-record":
+        receipt = records_module.update_receipt(
+            vault_root,
+            str(prepared.get("manifest_path") or ""),
+            item_key=str(prepared.get("item_key") or ""),
+            before_manifest_hash=str(prepared.get("before_manifest_hash") or ""),
+            before_container_hash=str(prepared.get("before_container_hash") or ""),
+            before_item_hash=str(prepared.get("before_item_hash") or ""),
+            after_item_hash=str(after[0].get("content_hash") or ""),
+        )
+    else:
+        receipt = records_module.append_receipt(
+            vault_root,
+            str(prepared.get("manifest_path") or ""),
+            item_key=str(prepared.get("item_key") or ""),
+            payload_hash=str(prepared.get("payload_hash") or ""),
+        )
     if (
         receipt is None
         or receipt["collection_id"] != prepared.get("collection_id")
-        or len(after) != 1
+        or receipt["canonical_path"] != prepared.get("destination")
         or [receipt["canonical_path"], receipt["after_item_hash"]]
         != [after[0].get("path"), after[0].get("content_hash")]
     ):
@@ -2001,10 +2045,10 @@ def _verify_live_postcondition(
     step: Mapping[str, Any] | None = None,
     binding: Mapping[str, Any] | None = None,
 ) -> None:
-    if step is not None and step.get("kind") == RECORDS_STEP_KIND:
+    if step is not None and step.get("kind") in RECORDS_STEP_KINDS:
         if binding is None:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "a Records witness needs its binding")
-        _verify_records_receipt(vault_root, binding, witness)
+        _verify_records_receipt(vault_root, binding, witness, kind=step["kind"])
     for item in witness["after"]:
         relative = str(item["path"])
         if item.get("absent") is True:
@@ -2094,7 +2138,7 @@ def _dispatch_step(
             draft_token=prepared["draft_token"],
             **relation,
         )
-    if kind == RECORDS_STEP_KIND:
+    if kind in RECORDS_STEP_KINDS:
         from . import record_governance
         from . import records as records_module
 
@@ -2106,16 +2150,24 @@ def _dispatch_step(
             prepared["manifest_path"],
         ):
             raise _error("CURATION_BINDING_STALE", "the Records collection changed identity")
-        result = records_module.append_record(
-            vault_root,
-            manifest,
-            item=args["item"],
-            item_key=prepared["item_key"],
-            expected_container_hash=args["expected_container_hash"],
-            why=args["why"],
-            body=args.get("body"),
-            hold=False,
-        )
+        if kind == RECORDS_STEP_KIND:
+            result = records_module.append_record(
+                vault_root,
+                manifest,
+                item=args["item"],
+                item_key=prepared["item_key"],
+                expected_container_hash=args["expected_container_hash"],
+                why=args["why"],
+                body=args.get("body"),
+                hold=False,
+            )
+        else:
+            result = records_module.update_record(
+                vault_root,
+                manifest,
+                **{name: value for name, value in args.items() if name != "collection"},
+                hold=False,
+            )
         return {**result, "path": prepared["destination"]}
     if kind == "move":
         return commands.op_manage_memory_file(vault_root, operation="move", **args)
@@ -3665,10 +3717,10 @@ def _compensation_args(
 ) -> tuple[str, dict[str, Any]]:
     kind = str(forward_step["kind"])
     inverse = compensation_kind(kind)
-    if kind == RECORDS_STEP_KIND:
+    if kind in RECORDS_STEP_KINDS:
         raise _error(
             "CURATION_COMPENSATION_UNAVAILABLE",
-            "a Records append is history; a later Records transition corrects it",
+            "a Records transition is history; a later Records transition corrects it",
         )
     effect = dict(receipt.get("effect") or {})
     if kind in {"create-note", "create-entity"}:

@@ -1388,7 +1388,7 @@
     }
   },
   "episode_memory": {
-    "description": "Save a recap for later sessions.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nRecord when requested or live proactive_capture permits; bootstrap reports\nunknown policy. At a durable stopping point, one-line\nitems, never a transcript. Stores a Source in Sources/Episodes/; newest\nrevision leads activate_context recent_context. Same episode adds a revision,\nretiring the previous one; identical retry writes nothing.\n\nChanges: prepare, disposition, resume routed leaves; episode_workflow_disabled\nrefuses unless enabled. Then coverage and resume+postcommit attestation.\nHelp: references/operations.md.",
+    "description": "Save a recap for later sessions.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nRecord when requested or live proactive_capture permits; bootstrap reports\nunknown policy. At a durable stop, one-line\nitems, never a transcript. Stores a Source in Sources/Episodes/; newest\nrevision leads activate_context recent_context. Same episode adds a revision,\nretiring the previous one; identical retry writes nothing.\n\nChanges: prepare, disposition, resume routed leaves; episode_workflow_disabled\nrefuses unless enabled. Then coverage and resume+postcommit attestation.\nHelp: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1535,7 +1535,8 @@
                       "accept-relation",
                       "edit",
                       "supersede",
-                      "append-record"
+                      "append-record",
+                      "update-record"
                     ]
                   },
                   "args": {

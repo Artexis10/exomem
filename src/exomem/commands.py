@@ -7765,6 +7765,7 @@ _EpisodeProposalArgument = Annotated[
                                             "edit",
                                             "supersede",
                                             "append-record",
+                                            "update-record",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7812,7 +7813,7 @@ def op_episode_memory(
     """Save a recap for later sessions.
 
     Record when requested or live proactive_capture permits; bootstrap reports
-    unknown policy. At a durable stopping point, one-line
+    unknown policy. At a durable stop, one-line
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads activate_context recent_context. Same episode adds a revision,
     retiring the previous one; identical retry writes nothing.
