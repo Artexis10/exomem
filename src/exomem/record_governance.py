@@ -24,6 +24,7 @@ from . import (
     vault,
 )
 from . import structured_collections as collections
+from .collection_store.preview import bound_writer, canonical_read
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -928,6 +929,12 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     loaded for itself.
     """
     root = Path(vault_root)
+    writer = bound_writer(root)
+    if writer is not None:
+        def canonical_allowed(relative: str) -> bool:
+            with writer.read_snapshot():
+                return writer._operation.allows_file(relative)
+        return canonical_allowed
     policy = egress.policy_module.load(root)
     tombstones = egress.lifecycle.tombstoned_paths(root)
 
@@ -987,6 +994,10 @@ def authorization_pass(vault_root: Path) -> Iterator[None]:
 def _authorize(
     root: Path, relative: str, *, receipt: bool = False, policy: Any | None = None
 ) -> bool:
+    writer = bound_writer(root)
+    if writer is not None:
+        with writer.read_snapshot():
+            return writer._operation.allows_file(relative)
     if _access_refused(root, relative):
         return False
     tombstones: frozenset[str] | None = None
@@ -1017,6 +1028,7 @@ class _LinkProjector:
     candidate_index_complete: bool | None
     verdicts: dict[str, bool]
     policy: Any | None
+    authorize_path: Callable[[str], bool] | None = None
 
     @classmethod
     def create(
@@ -1026,6 +1038,7 @@ class _LinkProjector:
         *,
         policy: Any | None = None,
         allow_cold_index: bool = True,
+        authorize_path: Callable[[str], bool] | None = None,
     ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
@@ -1039,7 +1052,8 @@ class _LinkProjector:
         # and `vault.walk_vault_md` is never called. Path-shaped links never
         # needed the index and keep resolving and being authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None if allow_cold_index else False, {}, policy)
+        return cls(root, manifest, empty, {}, {}, None if allow_cold_index else False, {}, policy,
+                   authorize_path)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -1068,7 +1082,8 @@ class _LinkProjector:
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = _authorize(self.root, relative, policy=self.policy)
+            allowed = (self.authorize_path(relative) if self.authorize_path is not None
+                       else _authorize(self.root, relative, policy=self.policy))
             admitted[relative] = allowed
             if not allowed:
                 continue
@@ -1205,7 +1220,8 @@ class _LinkProjector:
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
         return self._remember(
-            relative, _authorize(self.root, relative, receipt=True, policy=self.policy)
+            relative, (self.authorize_path(relative) if self.authorize_path is not None
+                       else _authorize(self.root, relative, receipt=True, policy=self.policy))
         )
 
     def _remember(self, target: str, allowed: bool) -> bool:
@@ -1243,6 +1259,7 @@ def require_records_profile(
     return manifest
 
 
+@canonical_read
 def resolve_collection(
     vault_root: Path, selector: str | Path | collections.CollectionManifest
 ) -> collections.CollectionManifest:
@@ -1298,9 +1315,24 @@ def query_collection(
     preconditions that must hold before that request is actually honoured.
     """
     root = Path(vault_root)
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(root)
+    if writer is not None and writer._operation is None:
+        with writer.read_collection(collection, facade_profile=semantic_profile) as manifest:
+            return query_collection(
+                root, manifest, semantic_profile=semantic_profile,
+                late_link_projection=late_link_projection, **kwargs,
+            )
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
-        policy = egress.policy_module.load(root)
-        manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
+        if writer is None:
+            policy = egress.policy_module.load(root)
+            manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
+            authorize_path = lambda path: _authorize(root, path, receipt=True, policy=policy)
+        else:
+            manifest = writer._collection(collection, facade_profile=semantic_profile)[1]
+            policy = writer._operation.policy
+            authorize_path = writer._operation.allows_file
         if manifest.semantic_profile != semantic_profile:
             error_code = (
                 "RECORDS_PROFILE_REQUIRED"
@@ -1311,10 +1343,11 @@ def query_collection(
                 error_code,
                 "collection profile is not available",
             )
-        if not _authorize(root, manifest.storage.source, receipt=True, policy=policy):
+        if writer is None and not authorize_path(manifest.storage.source):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         links = _LinkProjector.create(
-            root, manifest, policy=policy, allow_cold_index=not late_link_projection
+            root, manifest, policy=policy, allow_cold_index=not late_link_projection,
+            authorize_path=authorize_path,
         )
         view = kwargs.get("view")
         if view is not None:
@@ -1322,7 +1355,7 @@ def query_collection(
         result = record_formats.query_collection(
             root,
             manifest,
-            authorize_path=lambda path: _authorize(root, path, receipt=True, policy=policy),
+            authorize_path=authorize_path,
             project_values=links,
             project_child_value=links.project_presentation_value,
             late_link_projection=late_link_projection,
@@ -1683,6 +1716,16 @@ def _inventory_coverage(
     would claim one. Absent is not an option here because every row carries the
     same keys, so the hole is named rather than filled.
     """
+    from . import due_state
+
+    writer = bound_writer(root)
+    if writer is not None:
+        items, _, held = writer._operation.authorized_rows(manifest.collection_id)
+        observations = due_state.collection_observation_coverage(
+            root, str(manifest.path), authorize_path=authorize
+        )
+        return {"committed": len(items), "held": len(held),
+                "unreflected": len(observations["unreflected"])}
     try:
         snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
         committed: int | None = len(snapshot.records)
@@ -1724,6 +1767,7 @@ def _presentation_inspection(
     }
 
 
+@canonical_read
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1749,7 +1793,8 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         manifests = [
             manifest
             for manifest in discovered
-            if manifest.semantic_profile == semantic_profile and authorize(manifest.storage.source)
+            if manifest.semantic_profile == semantic_profile
+            and (bound_writer(root) is not None or authorize(manifest.storage.source))
         ]
         legacy: tuple[collections.LegacyCollection, ...] = ()
         legacy_truncated = False
@@ -1903,11 +1948,13 @@ def _inspection_saved_views(
 
 
 def _inspection_templates(
-    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]]
+    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]],
+    *, policy: Any | None = None, authorize_path: Callable[[str], bool] | None = None,
 ) -> None:
     """Check declared template availability only after its own L6 decision."""
     for template in manifest.templates[:32]:
-        unavailable = not _authorize(root, template.path, receipt=True)
+        unavailable = not (authorize_path(template.path) if authorize_path is not None
+                           else _authorize(root, template.path, receipt=True, policy=policy))
         if not unavailable:
             try:
                 vault.PathGuard.capture(root, template.path, leaf_policy="stable")

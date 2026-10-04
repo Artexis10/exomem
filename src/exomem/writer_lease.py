@@ -49,6 +49,7 @@ from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
     _DERIVED_COMPONENT_NAMES,
     ResponseDetail,
+    _CanonicalRequestReplay,
     committed_terminal,
     needs_review_terminal,
     project_terminal,
@@ -4137,6 +4138,14 @@ class LeaseManager:
         # outstanding fence anywhere in this process.
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
+        self._collection_store = None
+        self._store_bound = False
+        self._store_borrowers: dict[int, int] = {}
+        self._store_handoff = False
+        self._store_closed = False
+        self._store_released = False
+        self._store_condition = threading.Condition(self._lock)
+        self._report_lock = threading.Lock()
 
     def _record_coordinator_error(self, code: str) -> None:
         self._last_coordinator_error = (code, time.monotonic())
@@ -4175,12 +4184,28 @@ class LeaseManager:
             pass
 
     def ensure_writer(self, *, cause: str = "mutation") -> LeaseRecord:
+        with self._lock:
+            if self._store_closed or (
+                self._store_handoff and threading.get_ident() not in self._store_borrowers
+            ):
+                raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
         if not self.config.enabled:
             return LeaseRecord(self.config.replica_id, None, 0, True)
         assert self.client is not None
         with self._lock:
+            if self._store_handoff:
+                if threading.get_ident() not in self._store_borrowers:
+                    raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+                if self._fencing_token is None:
+                    self._raise_fenced(0)
+                return LeaseRecord(
+                    self.config.replica_id, self._expires_at, self._fencing_token, True
+                )
             try:
-                record = self.client.acquire()
+                record = self.client.acquire(**(
+                    {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
+                    if self._collection_store is not None else {}
+                ))
             except OpError as error:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("acquire", "error")
@@ -4211,6 +4236,9 @@ class LeaseManager:
             self._record_lease_op("acquire", "granted")
             self._fencing_token = record.fencing_token
             self._expires_at = record.expires_at
+            self._store_released = False
+            if self._collection_store is not None:
+                self._collection_store.record_acquisition(record)
             if cause == "mutation":
                 # Only a mutation-driven grant counts as write activity for the
                 # idle-release timer (it closes the window between this grant
@@ -4452,10 +4480,11 @@ class LeaseManager:
                     "the registered vault attachment is not serving mutations",
                     "Complete or recover the authenticated attachment transition before retrying.",
                 ) from None
-        if self.config.enabled:
-            lease = self.ensure_writer()
-            fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+        if self.config.enabled or self._collection_store is not None:
             with self._lock:
+                lease = self.ensure_writer()
+                if self.config.enabled:
+                    fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
                 self._active_mutations += 1
                 self._last_activity_monotonic = time.monotonic()
             counted = True
@@ -4468,6 +4497,7 @@ class LeaseManager:
                 with self._lock:
                     self._active_mutations -= 1
                     self._last_activity_monotonic = time.monotonic()
+                    self._store_condition.notify_all()
 
     def invoke(
         self,
@@ -4707,7 +4737,7 @@ class LeaseManager:
                             ),
                             gate_context,
                         )
-                    if (
+                    if isinstance(leaf_result, _CanonicalRequestReplay) or ((
                         command.name in {"record_memory", "plan_memory"}
                         and valid_collection_receipt(leaf_result)
                         or command.name == "maintain_memory"
@@ -4716,7 +4746,7 @@ class LeaseManager:
                         or command.name == "maintain_memory"
                         and kwargs.get("mode") == "curation"
                         and curation_module.valid_replay_result(leaf_result)
-                    ) and leaf_result.get("outcome") == "replayed":
+                    ) and leaf_result.get("outcome") == "replayed"):
                         return attach_evidence(
                             replayed_terminal(
                                 leaf_result,
@@ -5894,6 +5924,120 @@ class LeaseManager:
         )
         self._renewer.start()
 
+    @contextmanager
+    def _collection_store_checkout(self):
+        thread = threading.get_ident()
+        with self._lock:
+            if (self._store_closed or self._stop.is_set()
+                    or (self._store_handoff and thread not in self._store_borrowers)):
+                raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+            self._store_bound = True
+            self._store_borrowers[thread] = self._store_borrowers.get(thread, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                remaining = self._store_borrowers[thread] - 1
+                if remaining:
+                    self._store_borrowers[thread] = remaining
+                else:
+                    del self._store_borrowers[thread]
+                self._store_condition.notify_all()
+
+    def _renew_collection_store(self, token: int, *, due_only=False) -> None:
+        if not self.config.enabled:
+            return
+        with self._report_lock:
+            with self._lock:
+                if self._fencing_token != token:
+                    self._raise_fenced(token)
+                if (due_only and self._last_renew_monotonic is not None
+                        and time.monotonic() - self._last_renew_monotonic
+                        < max(1.0, self.config.ttl_seconds / 3)):
+                    return
+            head = self._collection_store.report_head(token)
+            record = self.client.renew(
+                token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
+                collection_store_head=head,
+            )
+            with self._lock:
+                if self._fencing_token != token:
+                    self._raise_fenced(token)
+                if (not record.granted or record.holder != self.config.replica_id
+                        or record.fencing_token != token):
+                    self._fencing_token = None
+                    self._expires_at = None
+                    self._raise_fenced(token)
+                self._expires_at = record.expires_at
+                self._last_renew_monotonic = time.monotonic()
+                self._record_lease_op("renew", "granted")
+
+    def _release_collection_store(self, token, *, deadline, cancelled=None, closing=False):
+        runtime = self._collection_store
+        if not runtime.reporting_ready(token):
+            return False
+        with self._lock:
+            if self._store_closed:
+                return True
+            if self._store_handoff:
+                return False
+            self._store_handoff = True
+        try:
+            # No boundary or manager lock is held while borrowers unwind.
+            self._renew_collection_store(token)
+            while True:
+                if (time.monotonic() >= deadline or (cancelled is not None and cancelled())):
+                    return False
+                with self._store_condition:
+                    if not self._store_borrowers and not self._active_mutations:
+                        break
+                    self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
+                self._renew_collection_store(token, due_only=True)
+            mutation = self._mutation_coordinator_for(runtime.root)
+            boundary_deadline = min(deadline, time.monotonic() + self._mutation_timeout_seconds)
+            with ExitStack() as boundary:
+                while True:
+                    if (time.monotonic() >= boundary_deadline
+                            or (cancelled is not None and cancelled())):
+                        return False
+                    self._renew_collection_store(token, due_only=True)
+                    try:
+                        boundary.enter_context(mutation.hold(
+                            timeout_seconds=max(0, min(0.25, boundary_deadline - time.monotonic())),
+                            operation="collection_store_release",
+                        ))
+                        break
+                    except OpError as error:
+                        if error.code != "MUTATION_BUSY":
+                            raise
+                if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                    return False
+                if self.config.enabled:
+                    self.validate_fencing_token(token)
+                head = runtime.flush(token, deadline=deadline, cancelled=cancelled)
+                with self._report_lock:
+                    if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                        return False
+                    if self.config.enabled:
+                        self.validate_fencing_token(token)
+                    if runtime.sample_head() != head:
+                        return False
+                    if self.config.enabled:
+                        record = self.client.release(token, collection_store_head=head)
+                        if record.holder is not None or record.fencing_token != token:
+                            return False
+                    with self._lock:
+                        self._fencing_token = None
+                        self._expires_at = None
+                        self._store_closed = closing
+                        self._store_released = True
+                self._record_lease_op("release", "ok")
+                return True
+        finally:
+            with self._store_condition:
+                self._store_handoff = False
+                self._store_condition.notify_all()
+
     def _attempt_preferred_reclaim(self) -> None:
         """Retry writer acquisition while this preferred replica is a follower.
 
@@ -5934,11 +6078,27 @@ class LeaseManager:
             return False
         assert self.client is not None
         with self._lock:
-            if self._fencing_token != token:
+            if self._fencing_token != token or self._store_handoff or self._store_closed:
                 return False
             if self._active_mutations != 0:
                 return False
             if time.monotonic() - self._last_activity_monotonic < idle_seconds:
+                return False
+            runtime = self._collection_store
+            if runtime is None and self._store_borrowers:
+                return False
+        if runtime is not None:
+            try:
+                return self._release_collection_store(
+                    token, deadline=time.monotonic() + self._mutation_timeout_seconds
+                )
+            except Exception:  # noqa: BLE001 - idle handoff defers; never claims a flush
+                logger.warning("collection store idle release remains pending", exc_info=True)
+                return False
+        with self._lock:
+            if (self._fencing_token != token or self._store_handoff or self._store_closed
+                    or self._active_mutations or self._store_borrowers
+                    or time.monotonic() - self._last_activity_monotonic < idle_seconds):
                 return False
             # Clear local state BEFORE (and during) the release RPC, still
             # holding the lock: an `ensure_writer` arriving concurrently
@@ -5971,6 +6131,9 @@ class LeaseManager:
             if self._maybe_idle_release(token):
                 continue
             try:
+                if self._collection_store is not None:
+                    self._renew_collection_store(token)
+                    continue
                 record = self.client.renew(token)
                 with self._lock:
                     if self._fencing_token != token:
@@ -5989,9 +6152,51 @@ class LeaseManager:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("renew", "error")
                 continue
+            except Exception:  # noqa: BLE001 - unavailable store samples must not kill renewal
+                if self._collection_store is None:
+                    raise
+                logger.warning("collection store head report unavailable", exc_info=True)
+                self._record_lease_op("renew", "error")
 
-    def close(self) -> None:
-        self._stop.set()
+    def close(self, *, deadline=None, cancelled=None) -> None:
+        if self._collection_store is not None:
+            with self._lock:
+                if self._store_closed:
+                    return
+                if self._store_released:
+                    self._store_closed = True
+                    self._stop.set()
+                    return
+                token = self._fencing_token if self.config.enabled else 0
+            if token is None or not self._release_collection_store(
+                token, deadline=(time.monotonic() + self._mutation_timeout_seconds
+                                 if deadline is None else deadline),
+                cancelled=cancelled, closing=True,
+            ):
+                raise OpError("COLLECTION_STORE_FLUSH_PENDING", "replica handoff remains pending")
+            self._stop.set()
+            return
+        with self._store_condition:
+            if self._store_bound:
+                if self._store_closed:
+                    return
+                if self._store_handoff or threading.get_ident() in self._store_borrowers:
+                    raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
+                self._store_handoff = True
+                try:
+                    deadline = (time.monotonic() + self._mutation_timeout_seconds
+                                if deadline is None else deadline)
+                    while True:
+                        if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                            raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
+                        if not self._store_borrowers:
+                            self._store_closed = True
+                            break
+                        self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
+                finally:
+                    self._store_handoff = False
+                    self._store_condition.notify_all()
+            self._stop.set()
         with self._lock:
             token = self._fencing_token
             self._fencing_token = None

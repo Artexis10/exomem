@@ -58,6 +58,18 @@ _HELD_PUBLICATION_RE = re.compile(
     rf"^{re.escape(held_fs.PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}$",
     re.ASCII,
 )
+_COLLECTION_PUBLICATION_RE = re.compile(
+    r"^\.exomem-collection-(?:stage-[0-9a-f]{32}|aside-[0-9a-f]{32}-[01])$",
+    re.ASCII,
+)
+_COLLECTION_SNAPSHOT_RE = re.compile(
+    r"^\.exomem-collection-snapshot-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$",
+    re.ASCII,
+)
+_COLLECTION_AUDIT_SPOOL_RE = re.compile(
+    r"^\.exomem-collection-audit-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$",
+    re.ASCII,
+)
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
 
@@ -74,6 +86,10 @@ class StatePlacement(StrEnum):
 
     VAULT_CANONICAL = "vault-canonical"
     EXTERNAL_STATE = "external-state"
+    #: Canonical data under the external state root (the live collection
+    #: store): placed like external state, but never rebuilt, reset, wiped or
+    #: moved by the machine-local state migration.
+    EXTERNAL_CANONICAL = "external-canonical"
     TARGET_ADJACENT = "target-adjacent"
 
 
@@ -519,6 +535,21 @@ _REGISTRY = (
         trees=(".authorization-projections",),
     ),
     InternalStateDescriptor(
+        "collection-store",
+        "collection_store",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The live structured-collection store. Canonical, so it is not in
+        # the machine-local migration set; its in-vault replica and mode
+        # marker are vault-canonical and are reserved by their own phase.
+        exact=_sqlite_family("collections.sqlite"),
+    ),
+    InternalStateDescriptor(
+        "collection-replica",
+        "collection_store.replica",
+        StatePlacement.VAULT_CANONICAL,
+        trees=("_collections",),
+    ),
+    InternalStateDescriptor(
         "batch-workspace",
         "vault.batch",
         StatePlacement.TARGET_ADJACENT,
@@ -535,6 +566,24 @@ _REGISTRY = (
         # parent of whatever is being published, so it follows state to the
         # external root automatically and follows content into the vault.
         leaf_patterns=(_HELD_PUBLICATION_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-publication",
+        "collection_store.views",
+        StatePlacement.TARGET_ADJACENT,
+        leaf_patterns=(_COLLECTION_PUBLICATION_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-snapshot",
+        "collection_store.replica",
+        StatePlacement.TARGET_ADJACENT,
+        leaf_patterns=(_COLLECTION_SNAPSHOT_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-audit-spool",
+        "collection_store.legacy",
+        StatePlacement.TARGET_ADJACENT,
+        leaf_patterns=(_COLLECTION_AUDIT_SPOOL_RE,),
     ),
 )
 
@@ -677,6 +726,21 @@ def external_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
         descriptor
         for descriptor in _REGISTRY
         if descriptor.placement is StatePlacement.EXTERNAL_STATE
+    )
+
+
+def external_canonical_descriptors() -> tuple[InternalStateDescriptor, ...]:
+    """Canonical families under the external state root.
+
+    They share the state root and its resolver seam with external state, but
+    nothing that rebuilds, resets, wipes or migrates machine-local state may
+    touch them.
+    """
+
+    return tuple(
+        descriptor
+        for descriptor in _REGISTRY
+        if descriptor.placement is StatePlacement.EXTERNAL_CANONICAL
     )
 
 
@@ -827,7 +891,10 @@ def _require_owner_placement(relative: Path, *, external: bool, operation: str) 
         raise RuntimeError(f"private {operation} target has no registered placement")
     if descriptor.placement is StatePlacement.TARGET_ADJACENT:
         return
-    expected_external = descriptor.placement is StatePlacement.EXTERNAL_STATE
+    expected_external = descriptor.placement in (
+        StatePlacement.EXTERNAL_STATE,
+        StatePlacement.EXTERNAL_CANONICAL,
+    )
     if external != expected_external:
         raise RuntimeError(
             f"private {operation} target violates descriptor placement "
@@ -2001,6 +2068,14 @@ def classify_logical(value: object) -> PathClassification:
     if isinstance(parts, PathClassification):
         return parts
     canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
+    replica = _DESCRIPTOR_BY_ID["collection-replica"]
+    if replica.matches(parts):
+        return PathClassification(
+            PathDisposition.RESERVED,
+            descriptor_id=replica.id,
+            canonical=canonical,
+            reason="path is reserved for an owning subsystem",
+        )
     matches = tuple(descriptor for descriptor in _REGISTRY if descriptor.matches(parts))
     if not matches:
         return PathClassification(PathDisposition.ORDINARY, canonical=canonical)

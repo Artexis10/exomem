@@ -251,6 +251,68 @@ def test_shared_inspection_reports_filename_drift_and_projected_collision(
     assert states.count("filename_drift") == 2
 
 
+def test_shared_inspection_rechecks_collision_suffix_after_sibling_is_withheld(
+    tmp_path: Path,
+) -> None:
+    manifest = _shared_collection(tmp_path, presentation=False, filename_fields="observed_on")
+    first = _append(tmp_path, manifest)
+    second_values = values()
+    second_values["subject"] = "Sample B"
+    second_key = "22222222-2222-4222-8222-222222222222"
+    second = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=second_values,
+        item_key=second_key,
+        expected_container_hash=first["after_container_hash"],
+        why="record a second observation on the same date",
+    )
+    loaded = collections.load_manifest(tmp_path, manifest.path)
+
+    assert record_formats.inspect_collection(tmp_path, loaded).presentation == ()
+    inspected = record_formats.inspect_collection(
+        tmp_path,
+        loaded,
+        authorize_path=lambda path: path != first["affected_paths"][0],
+    )
+
+    assert inspected.presentation == (
+        {
+            "item_key": second_key,
+            "path": second["affected_paths"][0],
+            "version": collections.source_version(tmp_path / second["affected_paths"][0]).hash,
+            "state": "filename_drift",
+            "remedy": "structured_files_preview",
+        },
+    )
+
+
+def test_shared_inspection_reports_an_unrenderable_authored_filename_value(
+    tmp_path: Path,
+) -> None:
+    manifest = _shared_collection(tmp_path, presentation=False, filename_fields="subject")
+    appended = _append(tmp_path, manifest)
+    item_path = tmp_path / appended["affected_paths"][0]
+    item_path.write_text(
+        item_path.read_text(encoding="utf-8").replace("subject: Sample <A>", "subject: CON"),
+        encoding="utf-8",
+    )
+
+    inspected = record_formats.inspect_collection(
+        tmp_path, collections.load_manifest(tmp_path, manifest.path)
+    )
+
+    assert inspected.presentation == (
+        {
+            "item_key": ITEM_KEY,
+            "path": appended["affected_paths"][0],
+            "version": collections.source_version(item_path).hash,
+            "state": "unrenderable",
+            "remedy": "guarded_value_update",
+        },
+    )
+
+
 def test_shared_inspection_finds_an_orphan_marker_without_an_active_recipe(
     tmp_path: Path,
 ) -> None:
