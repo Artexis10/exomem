@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.106.0](https://github.com/Artexis10/exomem/compare/v0.105.0...v0.106.0) (2026-10-04)
+
+
+### Features
+
+* **collections:** add SQLite storage foundation ([#1559](https://github.com/Artexis10/exomem/issues/1559)) ([641c71c](https://github.com/Artexis10/exomem/commit/641c71c68affeb1f0bf123943c97ee2f27467969))
+* **query:** add bounded SQLite admission and legacy execution ([#1563](https://github.com/Artexis10/exomem/issues/1563)) ([1a6133f](https://github.com/Artexis10/exomem/commit/1a6133f10c1611a83720b00652bda92a66150a77))
+
+
+### Bug Fixes
+
+* bound bulk progress turns by elapsed time ([#1565](https://github.com/Artexis10/exomem/issues/1565)) ([91ab871](https://github.com/Artexis10/exomem/commit/91ab87127167b6f1099587fa037ebf4f15a972ba))
+* charge the bulk progress grace wait once ([#1567](https://github.com/Artexis10/exomem/issues/1567)) ([05056f5](https://github.com/Artexis10/exomem/commit/05056f5562a573d038d12c90e1cd6c0019c04f45))
+* **compiler:** retain bounded multi-topic material evidence ([#1560](https://github.com/Artexis10/exomem/issues/1560)) ([c075543](https://github.com/Artexis10/exomem/commit/c075543be77154b9e320d436987fd03178f76417))
+* **mcp:** clarify bounded conversation in server instructions ([#1562](https://github.com/Artexis10/exomem/issues/1562)) ([1fa3b64](https://github.com/Artexis10/exomem/commit/1fa3b646ed3cd4731a7964cf38452307190185fd))
+* **store:** keep Python 3.11 paths outside borrowed resource wrappers ([#1564](https://github.com/Artexis10/exomem/issues/1564)) ([90b4a68](https://github.com/Artexis10/exomem/commit/90b4a68399f3c3b64bab128e7c78bb66f7a995cd))
+
 ## [0.105.0](https://github.com/Artexis10/exomem/compare/v0.104.0...v0.105.0) (2026-10-04)
 
 
