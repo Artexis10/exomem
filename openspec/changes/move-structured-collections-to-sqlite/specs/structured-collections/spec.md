@@ -165,9 +165,36 @@ An explicit operator transition to a different store identity SHALL use the curr
 
 Each live store SHALL carry an instance identity and lineage. Replica publication SHALL be check-then-swap against the last replica this instance published. Any foreign replica or foreign view stamp SHALL set the divergence state immediately. A service on a copied or moved vault with no local store SHALL adopt the replica as a new lineage entry and be writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Running more than one collection writer on one vault without the multi-host writer lease SHALL be explicitly unsupported, and `describe` and the doctor probe SHALL say so. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
 
+Before admission, a token-bound bootstrap state SHALL preserve the actual acquisition head and prevent ordinary checkout, head replacement and successful release until that evidence is reconciled with the validated local chain and initial publication is durable. Capability-bearing renewal MAY omit the head during this bounded recovery. A dark recovery producer SHALL validate the complete physical manifest and only its exact optional collection-store descriptor without advertising ordinary runtime support.
+
+Mixed-authority marker installation SHALL be durable and no-clobber when absent. Replacement SHALL require established custody of the marker namespace in addition to validating its exact preimage; ordinary atomic replacement alone SHALL NOT count as compare-and-swap against incoming synchronization. Replacement SHALL NOT expose a missing-marker file-authority window. Unsupported custody SHALL preserve the existing routing and pending create. After intent cleanup, projection effects SHALL still require current marker membership, and exact create replay SHALL recheck current governance and the immutable transaction's presence in the current chain without a new business transaction.
+
+#### Scenario: Bootstrap renewal preserves unreconciled acquisition evidence
+- **WHEN** a local create/recovery runtime is attached before its acquired head and durable publication have been reconciled
+- **THEN** lease renewal can continue without reporting a head, ordinary checkout remains unavailable and neither background renewal nor ordinary release replaces the retained coordinator evidence
+
+#### Scenario: Dark restart after descriptor enrollment
+- **WHEN** creation is interrupted after enrolling the optional descriptor and before marker cutover
+- **THEN** a fresh isolated producer validates the complete manifest and exact recovery binding and resumes the same intent without advertising global store support or allowing ordinary startup
+
+#### Scenario: Marker replacement without namespace custody
+- **WHEN** a later create cannot establish exclusive marker-namespace custody
+- **THEN** it leaves the existing marker and pending intent intact and reports pending creation rather than clobbering a concurrent mapping or exposing file authority
+
+#### Scenario: Create retry after intent cleanup retains governed admission
+- **WHEN** an exact create request is retried after its intent was cleared
+- **THEN** current authorization and marker membership guard return of its immutable receipt, no new business transaction is written, and later loss of membership still prevents projection effects
+
 #### Scenario: Backup of the vault is consistent
 - **WHEN** restic or a vault copy captures the vault while agents are writing
 - **THEN** the captured replica opens, passes `integrity_check`, and reflects a committed state
+
+#### Scenario: Interrupted replica publication is recoverable
+- **WHEN** publication is interrupted during staging or after displacement or installation before digest promotion
+- **THEN** one pending record identifies the staging or ready phase, its exclusively owned workspace identity is committed before the first scratch byte, and recovery reclaims only the exact owned scratch family or recognizes the pending snapshot and exact previous replica
+- **AND** unknown workspace contents or changed identity are retained without allocating another workspace; unexpected shared inputs are preserved and an actual foreign replica sets divergence
+- **AND** publication captures shared predecessors atomically into sync-excluded private custody before classification and never unlinks a shared publication name
+- **AND** a flush succeeds only after flushing the actual verified installed file and directory and reaching its requested committed head; matching bytes on a replacement inode do not inherit the original file's durability
 
 #### Scenario: Takeover adopts the newer replica
 - **WHEN** a second host acquires the writer lease, the coordinator holds the previous holder's head, and the vault replica has reached that head
@@ -235,15 +262,27 @@ A vault SHALL move from file-canonical collections to the store only through a d
 ### Requirement: Collection store writes meet a latency budget
 
 The independently gated first NEW owner-only Records summary collection (S1 in `add-collection-query-engine`) MAY be released before the 15 ms full-public-inspect, 20 ms guarded-append and supporting append-stage timing targets below are met. Those targets SHALL remain measured and reported optimisation goals for S1, with unmet results explicit; this exception SHALL NOT establish full phase/GA performance acceptance. Bulk/query/resource bounds and integrity, authorization, correctness, recovery, compatibility, portability and all other applicable S1 gates SHALL remain mandatory. Existing Records and Planning SHALL NOT be migrated by this exception.
-With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items, measured through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. A client guard refresh through `inspect` SHALL have p95 under 15 ms. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
+With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items, measured through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. File-only directory census ceilings SHALL NOT cap canonical store rows. A client guard refresh through full public `inspect` SHALL have p95 under 15 ms, retaining its counts, observed-value frequencies, presentation and coverage; measuring an internal guard-only lookup SHALL NOT satisfy this gate. Reusable metadata and base-policy results SHALL remain qualified by their current dependencies, while session authority, active grants and final grant-bearing decisions SHALL be refreshed for each operation. Cache deltas SHALL become reusable only after COMMIT succeeds. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
 
 #### Scenario: Append stays flat as the collection grows
-- **WHEN** guarded appends are measured at 1,000 and 10,000 items through the real dispatcher, including a collection where row-level policy withholds a tenth of the rows, on Linux and on Windows NTFS
-- **THEN** every p95 is under 20 ms, and no stage exceeds its budget
+- **WHEN** guarded appends are measured at 1,000 and 10,000 items through the real dispatcher on Linux and Windows NTFS, including a 10,000-row collection with a tenth of its rows withheld from one measured audience
+- **THEN** successful appends by a fully authorized audience and `COLLECTION_NOT_FOUND` refusals by the partial audience are measured separately, every applicable p95 is under 20 ms, and no stage exceeds its budget
 
 #### Scenario: Collection resolution does not read the manifest file
 - **WHEN** an append resolves its collection
 - **THEN** the contract comes from the store row and a cache keyed by manifest version, and no manifest file is read or parsed
+
+#### Scenario: Inspection reuse preserves full public semantics
+- **WHEN** the full public inspection uses cached row contributions after a committed item or release-set change
+- **THEN** counts, complete frequency keys and ranking, presentation findings and visible snapshot equal uncached inspection, affected filename groups include unchanged siblings, and current grants, coverage, templates, held candidates and projection progress are composed freshly
+
+#### Scenario: Inspection cache admission exceeds its byte budget
+- **WHEN** contribution state and its derived counters/indexes would exceed the finite retained-allocation budget shared by the writer handle
+- **THEN** inspection uses the exact uncached path without truncating frequency inputs, reducing the public response or relaxing existing Planning limits, and retained contribution state remains within its budget
+
+#### Scenario: Pure egress computation is reused within an invocation
+- **WHEN** inspection reuses canonical encodings or exact-string classification within its bounded operation-local computation
+- **THEN** receipt sorted-multiset digests, structural/prose credential handling, escalation identity and synchronous disclosure receipts remain unchanged, and no final authorization or issuance exception is borrowed from another operation
 
 #### Scenario: Bulk upsert of 500 rows
 - **WHEN** 500 valid rows are submitted in one bulk upsert against a 10,000-item collection
@@ -460,6 +499,11 @@ The substrate SHALL make exact append retries idempotent where a stable item ide
 #### Scenario: Re-stated append without identity replays
 - **WHEN** a client appends the same observation twice without supplying an item identity and the payloads are identical
 - **THEN** the second append returns the committed item as a replay and the collection holds one item
+
+#### Scenario: Store Planning corrects an exact explicit-identity retry
+- **WHEN** store-mode public Planning `add` repeats an explicit existing `plan_id` with an identical normalized payload and a proven original insert, with collection scaffolding either enabled or disabled
+- **THEN** it returns a valid Planning `replayed` receipt without adding an item, generation or transition
+- **AND** the compatibility golden preserves legacy file mode's measured `PLAN_ID_CONFLICT` as the narrow declared behavior difference, without changing file mode or relaxing changed-content conflicts
 
 #### Scenario: Reused identity with different content refuses
 - **WHEN** an append supplies an existing item identity with materially different content, or omits the identity and the derived identity already exists with different content

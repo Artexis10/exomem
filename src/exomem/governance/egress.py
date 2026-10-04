@@ -48,6 +48,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .. import find_corpus, memory_refs, reserved_paths, vault
+from ..collection_store.preview import bound_writer, canonical_read, projection_decision
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import (
@@ -64,6 +65,7 @@ from . import (
 from . import membership as membership_module
 from . import policy as policy_module
 from .decisions import Decision, decide
+from .decisions import _meet_decisions as _meet_decisions
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
 from .principal import OWNER_AUDIENCE, RequestPrincipal, current_principal, effective_principal
 
@@ -105,11 +107,23 @@ class DisclosureOutcome:
 
 
 @dataclass
+class _DisclosureBatch:
+    """One invocation's receipt dimensions and ordered canonical row hashes.
+
+    This is evidence for decisions already made, never an authorization cache.
+    Only canonical inspection produces batches; direct text releases stay scalar.
+    """
+
+    value: dict[str, Any]
+    content_hashes: list[str]
+
+
+@dataclass
 class DisclosureCollector:
     vault_root: Path
     boundary_id: str
     command_name: str
-    outcomes: list[DisclosureOutcome] = field(default_factory=list)
+    outcomes: list[DisclosureOutcome | _DisclosureBatch] = field(default_factory=list)
     path_outcomes: set[tuple[str, str, int | None]] = field(default_factory=set)
     credential_redactions: int = 0
     credential_principal: str | None = None
@@ -160,6 +174,16 @@ def _record_outcome(value: Mapping[str, Any]) -> None:
     if collector is None:
         return
     collector.outcomes.append(DisclosureOutcome(dict(value)))
+
+
+def _claim_path_outcome(
+    collector: DisclosureCollector, identity: str, outcome: str, level: int | None,
+) -> bool:
+    key = (identity, outcome, level)
+    if key in collector.path_outcomes:
+        return False
+    collector.path_outcomes.add(key)
+    return True
 
 
 def record_direct_text_release(
@@ -233,21 +257,17 @@ def _record_blocked_outcome(audience: str) -> None:
     _record_outcome(value)
 
 
-def _outcome_for_decision(
+def _decision_receipt_dimensions(
     vault_root: Path,
-    rel_path: str,
     *,
     decision: Decision | None,
     policy: Policy,
     audience: str,
     outcome: str,
     purpose: str | None = None,
-    content_hash: str | None = None,
-    size: int | None = None,
-    ref: str | None = None,
     purpose_is_bound: bool = False,
-) -> None:
-    """Project a decision into the receipt union without carrying a path/title."""
+) -> dict[str, Any]:
+    """Project current decision dimensions without carrying a path or title."""
     value: dict[str, Any] = {"decision": outcome}
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", audience):
         value["audience"] = audience
@@ -255,13 +275,14 @@ def _outcome_for_decision(
     collector = _collector()
     if collector is not None:
         value["command"] = collector.command_name
-    who = effective_principal()
-    declared_purpose = purpose if purpose_is_bound else _declared_purpose(vault_root, who, purpose)
+    declared_purpose = (
+        purpose if purpose_is_bound else _declared_purpose(vault_root, effective_principal(), purpose)
+    )
     if declared_purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", declared_purpose):
         value["purpose"] = declared_purpose
     if decision is not None:
         value["level"] = decision.level
-        if policy.fingerprint != "blocked":
+        if re.fullmatch(r"[0-9a-f]{64}", policy.fingerprint):
             value["policy_fingerprint"] = policy.fingerprint
         if decision.scope_ids:
             value["scope_ids"] = list(decision.scope_ids)
@@ -279,6 +300,28 @@ def _outcome_for_decision(
             value["release_grant_id"] = decision.release_grant_id
         if decision.release_dependency_digest is not None:
             value["release_dependency_digest"] = decision.release_dependency_digest
+    return value
+
+
+def _outcome_for_decision(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    decision: Decision | None,
+    policy: Policy,
+    audience: str,
+    outcome: str,
+    purpose: str | None = None,
+    content_hash: str | None = None,
+    size: int | None = None,
+    ref: str | None = None,
+    purpose_is_bound: bool = False,
+) -> None:
+    """Project a decision into the receipt union without carrying a path/title."""
+    value = _decision_receipt_dimensions(
+        vault_root, decision=decision, policy=policy, audience=audience,
+        outcome=outcome, purpose=purpose, purpose_is_bound=purpose_is_bound,
+    )
     if content_hash is not None:
         value["content_hash"] = content_hash
         if size is not None:
@@ -308,15 +351,10 @@ def _outcome_for_decision(
                     value["content_hash"] = hashlib.sha256(raw).hexdigest()
                     value["size"] = len(raw)
     collector = _collector()
-    outcome_key = (
-        rel_path,
-        outcome,
-        decision.level if decision is not None else None,
-    )
-    if collector is not None:
-        if outcome_key in collector.path_outcomes:
-            return
-        collector.path_outcomes.add(outcome_key)
+    if collector is not None and not _claim_path_outcome(
+        collector, rel_path, outcome, decision.level if decision is not None else None,
+    ):
+        return
     _record_outcome(value)
 
 
@@ -361,35 +399,109 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
         raise ReceiptUnavailableError() from exc
 
 
-def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, Any]]:
+def _bounded_outcomes(
+    outcomes: Sequence[DisclosureOutcome | _DisclosureBatch],
+) -> list[dict[str, Any]]:
     """Keep receipt schemas bounded without making a large reduction fail closed."""
-    values = [outcome.value for outcome in outcomes]
-    raw_size = len(
-        json.dumps(
-            {"outcomes": values},
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    )
-    if len(values) <= receipts.MAX_OUTCOMES and raw_size <= receipts.MAX_RECORD_BYTES // 2:
-        return values
+    count = sum(len(outcome.content_hashes) if isinstance(outcome, _DisclosureBatch) else 1
+                for outcome in outcomes)
+    if count <= receipts.MAX_OUTCOMES:
+        values = [value for outcome in outcomes for value in (
+            [{**outcome.value, "content_hash": value} for value in outcome.content_hashes]
+            if isinstance(outcome, _DisclosureBatch) else [outcome.value]
+        )]
+        raw_size = len(
+            json.dumps(
+                {"outcomes": values},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        if raw_size <= receipts.MAX_RECORD_BYTES // 2:
+            return values
 
     # At most 4 decisions x 7 disclosure levels (including a missing level).
     # Higher-cardinality typed identities become deterministic set/manifest
     # digests inside those audit-useful buckets instead of one row per
     # principal/scope/purpose, which could itself exceed MAX_OUTCOMES.
-    buckets: dict[str, list[dict[str, Any]]] = {}
-    for value in values:
-        typed = {key: value[key] for key in ("decision", "level") if key in value}
-        key = json.dumps(typed, sort_keys=True, separators=(",", ":"))
-        buckets.setdefault(key, []).append(value)
+    buckets: dict[str, list[DisclosureOutcome | _DisclosureBatch]] = {}
+    bucket_keys: dict[tuple[str, int | None], str] = {}
+    for outcome in outcomes:
+        if isinstance(outcome, _DisclosureBatch) and not outcome.content_hashes:
+            continue
+        value = outcome.value
+        decision, level = value.get("decision"), value.get("level")
+        scalar_bucket = type(decision) is str and (type(level) is int or "level" not in value)
+        lookup = (decision, level)
+        key = bucket_keys.get(lookup) if scalar_bucket else None
+        if key is None:
+            typed = {key: value[key] for key in ("decision", "level") if key in value}
+            key = json.dumps(typed, sort_keys=True, separators=(",", ":"))
+            # Only the bounded receipt bucket, never a content/grant decision.
+            # Other JSON types retain their exact canonical grouping semantics.
+            if scalar_bucket and len(bucket_keys) < 28:
+                bucket_keys[lookup] = key
+        buckets.setdefault(key, []).append(outcome)
 
-    def _digest(items: Iterable[Any], *, unique: bool = False) -> str:
-        encoded = [
-            json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            for item in items
-        ]
+    def _text_dimensions(item: Any) -> bool:
+        # Recognize only shallow receipt dimensions, not arbitrary JSON trees.
+        # Numbers do not share JSON identity under Python equality; deeply
+        # nested values retain the encoder's own acceptance and recursion limit.
+        if item is None or type(item) is str:
+            return True
+        if type(item) is dict:
+            if not all(type(key) is str for key in item):
+                return False
+            values = item.values()
+        elif type(item) is list:
+            values = item
+        else:
+            values = (item,)
+        return all(
+            value is None or type(value) is str or (
+                type(value) is list and all(part is None or type(part) is str for part in value)
+            ) for value in values
+        )
+
+    dimension_encoder = json.JSONEncoder(
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+
+    def _digest(
+        items: Sequence[Any], *, unique: bool = False, counts: Sequence[int] | None = None,
+    ) -> str:
+        if items and _text_dimensions(items[0]) and all(
+            _text_dimensions(item) and item == items[0] for item in items[1:]
+        ):
+            # Uniform audience/policy/scope dimensions are common in large
+            # inspections. Encode once, keeping the exact sorted multiset.
+            value = json.dumps(items[0], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            repetitions = 1 if unique else sum(counts) if counts is not None else len(items)
+            # The outer manifest contains JSON strings, with its existing ASCII
+            # escaping. Encode that string once rather than escaping every copy.
+            encoded = json.dumps(value, separators=(",", ":")).encode()
+            digest = hashlib.sha256(b"[")
+            if repetitions > 0:
+                digest.update(encoded)
+                if repetitions > 1:
+                    digest.update((b"," + encoded) * (repetitions - 1))
+            digest.update(b"]")
+            return digest.hexdigest()
+        encoded = []
+        seen_scalars: set[str | None] = set()
+        for index, item in enumerate(items):
+            # Exact strings/null have the same identity before and after JSON
+            # encoding. Other types still deduplicate by their encoded value.
+            if unique and (type(item) is str or item is None):
+                if item in seen_scalars:
+                    continue
+                seen_scalars.add(item)
+            value = dimension_encoder.encode(item)
+            if unique or counts is None:
+                encoded.append(value)
+            else:
+                encoded.extend([value] * counts[index])
         manifest = sorted(set(encoded) if unique else encoded)
         return hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
 
@@ -413,9 +525,13 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
         "confirmation_set_digest": "confirmation",
         "boundary_set_digest": "command",
     }
+    dimension_fields = {source: target for target, source in set_dimensions.items()}
     result: list[dict[str, Any]] = []
     optional_identity: list[tuple[int, str, Any]] = []
-    for key, members in sorted(buckets.items()):
+    for key, bucket in sorted(buckets.items()):
+        members = [outcome.value for outcome in bucket]
+        counts = [len(outcome.content_hashes) if isinstance(outcome, _DisclosureBatch) else 1
+                  for outcome in bucket]
         summary = json.loads(key)
         identities = [
             {identity_key: member.get(identity_key) for identity_key in identity_keys}
@@ -423,11 +539,14 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
         ]
         summary.update(
             {
-                "count": len(members),
+                "count": sum(counts),
                 "membership_digest": _digest(
-                    [member.get("content_hash") or member.get("ref") or "" for member in members]
+                    [value for outcome in bucket for value in (
+                        outcome.content_hashes if isinstance(outcome, _DisclosureBatch)
+                        else [outcome.value.get("content_hash") or outcome.value.get("ref") or ""]
+                    )]
                 ),
-                "identity_manifest_digest": _digest(identities),
+                "identity_manifest_digest": _digest(identities, counts=counts),
                 "scope_set_digest": _digest(
                     [
                         {
@@ -457,7 +576,10 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
             if (
                 present
                 and len(present) == len(members)
-                and _digest(present, unique=True) == _digest([present[0]], unique=True)
+                and (
+                    summary[dimension_fields[identity_key]]
+                    if identity_key in dimension_fields else _digest(present, unique=True)
+                ) == _digest([present[0]], unique=True)
             ):
                 optional_identity.append((result_index, identity_key, present[0]))
     if len(result) > receipts.MAX_OUTCOMES:  # defensive if decision schema expands
@@ -767,7 +889,7 @@ def direct_text_references_visible(
     root = Path(vault_root)
     policy = policy_module.load(root)
     who = principal if principal is not None else effective_principal()
-    if policy.empty:
+    if _file_policy_empty(root, policy):
         return True
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
@@ -1586,6 +1708,64 @@ def _active_grants_for_snapshot(
     return active_grants, session_identity
 
 
+def canonical_subject_notices(
+    vault_root: Path, entries: Iterable[tuple[str, Any, str, Decision]], *,
+    policy: Policy, principal: RequestPrincipal, purpose: str | None,
+    resolve_fingerprint: Callable[[Any], str] | None = None,
+) -> list[dict[str, Any]]:
+    """Finalize a committed canonical inspection after its read snapshots close."""
+    from ..collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    verified = isinstance(principal.verified_authorization_session,
+                          authorization_session_lifecycle.AuthorizationSessionContext)
+    collector = _collector()
+    # Pure receipt metadata is shared only inside this call. Unknown JSON types
+    # bypass the memo so Python equality cannot collapse distinct JSON identities.
+    profiles: dict[tuple[Any, ...], dict[str, Any]] = {}
+    notices = []
+    for identity, fingerprint, payload_hash, decision in entries:
+        outcome = "release_authorized" if decision.level >= LEVEL_FULL else "withheld"
+        if collector is not None:
+            if _claim_path_outcome(collector, identity, outcome, decision.level):
+                reusable = (type(decision.level) is int and type(decision.scope_ids) is tuple
+                            and all(type(value) is str for value in decision.scope_ids)
+                            and all(value is None or type(value) is str for value in
+                                    (decision.release_grant_id, decision.release_dependency_digest)))
+                key = (decision.level, decision.scope_ids, decision.release_grant_id,
+                       decision.release_dependency_digest) if reusable else None
+                template = profiles.get(key) if reusable else None
+                if template is None:
+                    template = _decision_receipt_dimensions(
+                        vault_root, decision=decision, policy=policy,
+                        audience=principal.audience_id, outcome=outcome,
+                        purpose=purpose, purpose_is_bound=True,
+                    )
+                    if reusable and len(profiles) < 128:
+                        profiles[key] = template
+                last = collector.outcomes[-1] if collector.outcomes else None
+                if isinstance(last, _DisclosureBatch) and last.value is template:
+                    last.content_hashes.append(payload_hash)
+                else:
+                    collector.outcomes.append(_DisclosureBatch(template, [payload_hash]))
+        if not 0 < decision.level < LEVEL_FULL:
+            continue
+        notice = _notice(decision.level, rule_ids=decision.rule_ids,
+                         scope_label=_scope_label(policy, decision), options=decision.options,
+                         bridge_abstraction=None)
+        if verified and writer is not None and not writer.connection.in_transaction:
+            token = _mint_escalation_quietly(
+                vault_root, rel_path=identity, who=principal, purpose=purpose, decision=decision,
+                requested_level=LEVEL_FULL, org_ceiling=_applicable_org_ceiling(policy, decision),
+                expected_content_hash=(resolve_fingerprint(fingerprint) if resolve_fingerprint is not None
+                                       else fingerprint() if callable(fingerprint) else fingerprint),
+            )
+            if token is not None:
+                notice["escalation_token"] = token
+        notices.append(notice)
+    return notices
+
+
 def _is_markdown_path(rel_path: str) -> bool:
     """The ONE markdown-suffix predicate, case-insensitive.
 
@@ -1597,6 +1777,11 @@ def _is_markdown_path(rel_path: str) -> bool:
     return rel_path.lower().endswith(".md")
 
 
+def _file_policy_empty(vault_root: Path, policy: Policy) -> bool:
+    return policy.empty and bound_writer(vault_root) is None
+
+
+@canonical_read
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -1609,6 +1794,7 @@ def _decide_path(
     authorization_context: authorization_session_lifecycle.AuthorizationSessionContext
     | None = None,
     expected_content_hash: str | None = None,
+    tombstones: frozenset[str] | None = None,
 ) -> Decision | None:
     """Decide one path, memoized per request identity AND page identity.
 
@@ -1632,7 +1818,8 @@ def _decide_path(
     probe, not an afterthought — and a stat failure fails closed with `None`
     rather than falling through to a decision.
     """
-    if lifecycle.is_tombstoned(vault_root, rel_path):
+    if (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
+            else lifecycle.is_tombstoned_in(tombstones, rel_path)):
         return None
     full_path = vault_root / rel_path
     try:
@@ -1650,6 +1837,12 @@ def _decide_path(
         live_content_hash = hashlib.sha256(raw).hexdigest()
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
+    canonical = projection_decision(
+        vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
+        authorization_context=authorization_context, content=raw if raw is not None else b"",
+    )
+    if canonical is not None:
+        return _resolve_l4_bridge(vault_root, canonical, policy=policy, audience=audience)
     mtime = st.st_mtime
     if not _is_markdown_path(rel_path):
         # NON-MARKDOWN. Never hand a binary to the markdown parser: it cannot
@@ -1825,7 +2018,7 @@ def _visible_candidates(
     )
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return candidates
     if policy.blocked or not who.resolved:
         return ()
@@ -2039,7 +2232,8 @@ def gate_state(vault_root: Path) -> tuple[Policy, bool]:
     empty-policy fast path genuinely fast.
     """
     policy = policy_module.load(Path(vault_root))
-    return policy, (not policy.empty or bool(lifecycle.tombstoned_paths(vault_root)))
+    return policy, (not _file_policy_empty(vault_root, policy)
+                    or bool(lifecycle.tombstoned_paths(vault_root)))
 
 
 def _hit_path(hit: Any) -> str:
@@ -2075,7 +2269,7 @@ def annotate_hits(
         hits = [hit for hit in hits if _hit_path(hit) not in tombstoned]
 
     # (1) Open fast path — no governance configured.
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return AnnotatedHits(
             hits=hits,
             withheld_paths=tombstoned,
@@ -2324,7 +2518,7 @@ def guard_graph_context(
     )
     if tombstoned:
         payload = guard_seed(payload, tombstoned)
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return payload
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
@@ -2450,7 +2644,7 @@ def guard_referents(
 
     withheld = set(release.withheld_paths) | tombstoned
     decisions: dict[str, Decision | None] = {}
-    if not policy.empty:
+    if not _file_policy_empty(vault_root, policy):
         grants_hash = _grants_hash(policy)
         declared_purpose = _declared_purpose(vault_root, who, purpose)
         candidate_paths = {
@@ -2468,6 +2662,7 @@ def guard_referents(
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
             )
             decisions[rel_path] = decision
             if decision is None or decision.level < RELEASE_FLOOR:
@@ -2564,7 +2759,7 @@ def quick_page_visible(
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return False
     policy, _release_gate_active = gate_state(vault_root)
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return True
     if policy.blocked:
         return False
@@ -2610,7 +2805,7 @@ def page_release_filter(
     policy, _release_gate_active = gate_state(root)
     who = principal if principal is not None else effective_principal()
     memo: dict[str, bool] = {}
-    if policy.empty:
+    if _file_policy_empty(root, policy):
         tombstones = lifecycle.tombstoned_paths(root)
         if not tombstones:
             return None
@@ -2710,7 +2905,7 @@ def guard_working_set(
     }
 
     decisions: dict[str, Decision | None] = {}
-    if not policy.empty:
+    if not _file_policy_empty(vault_root, policy):
         grants_hash = _grants_hash(policy)
         declared_purpose = _declared_purpose(vault_root, who, purpose)
         for rel_path in sorted(path for path in named_paths if path):
@@ -2782,7 +2977,7 @@ def guard_working_set(
     # unwraps to an empty string, which can never equal any canonical key,
     # including its own.
     invalid_refs: set[str] = set(unresolvable)
-    if not policy.empty:
+    if not _file_policy_empty(vault_root, policy):
         for candidate, readings in interpretations.items():
             existing_decisions: list[Decision | None] = []
             for reading in readings:
@@ -3809,6 +4004,7 @@ def _attach_raw_content(
     return out
 
 
+@canonical_read
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -3833,7 +4029,7 @@ def annotate_page(
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
 
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
@@ -3904,30 +4100,36 @@ def annotate_page(
         if "content" in page and page.get("content") != raw.decode("utf-8"):
             _record_blocked_outcome(who.audience_id)
             return None
-        try:
-            scope_ids = membership_module.evaluate_snapshot(
-                parsed, policy, content_hash=snapshot_hash
+        decision = projection_decision(
+            vault_root, rel_path, policy=policy, audience=who.audience_id,
+            purpose=declared_purpose, authorization_context=who.verified_authorization_session,
+            content=raw,
+        )
+        if decision is None:
+            try:
+                scope_ids = membership_module.evaluate_snapshot(
+                    parsed, policy, content_hash=snapshot_hash
+                )
+            except membership_module.MembershipUnresolved:
+                _record_blocked_outcome(who.audience_id)
+                return None
+            active_grants, _session_identity = _active_grants_for_snapshot(
+                vault_root,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                rel_path=rel_path,
+                content_hash=snapshot_hash,
+                scope_ids=scope_ids,
+                authorization_context=who.verified_authorization_session,
             )
-        except membership_module.MembershipUnresolved:
-            _record_blocked_outcome(who.audience_id)
-            return None
-        active_grants, _session_identity = _active_grants_for_snapshot(
-            vault_root,
-            policy=policy,
-            audience=who.audience_id,
-            purpose=declared_purpose,
-            rel_path=rel_path,
-            content_hash=snapshot_hash,
-            scope_ids=scope_ids,
-            authorization_context=who.verified_authorization_session,
-        )
-        decision = decide(
-            scope_ids,
-            audience=who.audience_id,
-            purpose=declared_purpose,
-            policy=policy,
-            active_grants=active_grants,
-        )
+            decision = decide(
+                scope_ids,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                policy=policy,
+                active_grants=active_grants,
+            )
         admission = bridges.admit(
             vault_root,
             rel_path,
@@ -4188,11 +4390,24 @@ def _strip_page_provenance(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _ArtifactScanDemand:
+    required: bool = False
+    complete: bool = False
+
+
+def _artifact_text_key(key: Any) -> bool:
+    return isinstance(key, str) and any(
+        marker in key.casefold() for marker in ("handoff", "prompt", "resource")
+    )
+
+
 def _withheld_cross_check(
     vault_root: Path,
     result: Any,
     *,
     principal: RequestPrincipal | None = None,
+    _artifact_scan_demand: _ArtifactScanDemand | None = None,
 ) -> Any:
     """Second, independent check that nothing sub-notice survived to the wire.
 
@@ -4209,7 +4424,8 @@ def _withheld_cross_check(
     `is_dir()`); `blocked` or an unresolved principal -> every path-bearing
     entry dropped; otherwise decide each named path.
     """
-    return filter_withheld_entries(vault_root, result, principal=principal)
+    return filter_withheld_entries(vault_root, result, principal=principal,
+                                   _artifact_scan_demand=_artifact_scan_demand)
 
 
 def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
@@ -4283,17 +4499,19 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
             _record_credential_block()
         return cleaned
     vault_root = Path(vault_root)
-    result = _withheld_cross_check(vault_root, result)
+    artifact_scan_demand = _ArtifactScanDemand()
+    result = _withheld_cross_check(vault_root, result, _artifact_scan_demand=artifact_scan_demand)
+    from ..collection_store import governance as canonical_governance
+
+    inspection_evidence = canonical_governance._inspection_evidence(result)
     # Free text and nested resource/prompt strings have no structural entry
     # for the cross-check to drop. Resolve those only after structural paths
     # have been removed; scanning an ordinary released page body would change
     # the content the page decision explicitly authorized.
-    result = gate_artifact_references(
-        vault_root,
-        result,
-        scan_all=command_name
-        in {"continue_adoption", "adoption_run", "adoption_runs", "adoption_studio"},
-    )
+    scan_all = command_name in {"continue_adoption", "adoption_run", "adoption_runs", "adoption_studio"}
+    if (scan_all or isinstance(result, str) or not artifact_scan_demand.complete
+            or artifact_scan_demand.required):
+        result = gate_artifact_references(vault_root, result, scan_all=scan_all)
     if hasattr(result, "content") and hasattr(result, "structured_content"):
         cleaned, blocked = _scrub_tool_result(result, vault_root)
         if blocked:
@@ -4302,7 +4520,8 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
-    return cleaned
+    return (canonical_governance._seal_inspection_projection(cleaned, inspection_evidence)
+            if inspection_evidence is not None else cleaned)
 
 
 #: An error's human-readable payload, wherever the codebase parks it —
@@ -5061,7 +5280,7 @@ def annotate_dataset(
     if rel_path and lifecycle.is_tombstoned(vault_root, rel_path):
         return None
     policy = policy_module.load(vault_root)
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return dict(payload)
     who = principal if principal is not None else effective_principal()
     rel_path = str(payload.get("path") or "")
@@ -5127,7 +5346,7 @@ def release_level_for(
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return None
     policy = policy_module.load(vault_root)
-    if policy.empty:
+    if _file_policy_empty(vault_root, policy):
         return DISCLOSURE_MAX
     who = principal if principal is not None else effective_principal()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
@@ -5206,7 +5425,7 @@ def unit_parent_withheld(
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
-    if policy.empty and not lifecycle.tombstoned_paths(vault_root):
+    if _file_policy_empty(vault_root, policy) and not lifecycle.tombstoned_paths(vault_root):
         return False
     who = principal if principal is not None else effective_principal()
     is_owner = who.resolved and who.audience_id == OWNER_AUDIENCE
@@ -5248,6 +5467,7 @@ def unit_parent_withheld(
     return False
 
 
+@canonical_read
 def release_level_for_path_only(
     vault_root: Path,
     rel_path: str,
@@ -5284,9 +5504,22 @@ def release_level_for_path_only(
         return DISCLOSURE_MIN
     if policy is None:
         policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    canonical = projection_decision(
+        vault_root, rel_path, policy=policy, audience=who.audience_id,
+        purpose=declared_purpose, authorization_context=who.verified_authorization_session,
+    )
+    if canonical is not None:
+        if receipt_decision is not None:
+            _outcome_for_decision(
+                vault_root, rel_path, decision=canonical, policy=policy,
+                audience=who.audience_id, purpose=declared_purpose,
+                outcome=receipt_decision if canonical.level >= LEVEL_FULL else "withheld",
+            )
+        return canonical.level
     if policy.empty:
         return DISCLOSURE_MAX
-    who = principal if principal is not None else effective_principal()
     if policy.blocked or not who.resolved:
         return DISCLOSURE_MIN
     try:
@@ -5423,7 +5656,14 @@ class _ArtifactReferenceGate:
         self.by_stem: dict[str, list[str]] = {}
         self.literal_aliases: set[str] = set()
         self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
-        if not self.policy.empty or self.tombstones:
+        self._indexed = False
+
+    def _ensure_index(self) -> None:
+        # Structured results need no artifact census unless they carry free text.
+        if self._indexed:
+            return
+        self._indexed = True
+        if not _file_policy_empty(self.vault_root, self.policy) or self.tombstones:
             self._index()
 
     def _add(self, table: dict[str, list[str]], alias: str, rel: str) -> None:
@@ -5487,6 +5727,7 @@ class _ArtifactReferenceGate:
         return token, wikilink
 
     def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...]:
+        self._ensure_index()
         token, wikilink = self._unwrap(value)
         if lifecycle.is_tombstoned(self.vault_root, token):
             return (token,)
@@ -5541,6 +5782,7 @@ class _ArtifactReferenceGate:
                 purpose=self.purpose,
                 grants_hash=self.grants_hash,
                 authorization_session=self.who.authorization_session_id,
+                authorization_context=self.who.verified_authorization_session,
             )
             allowed = decision is not None and decision.level >= RELEASE_FLOOR
             _outcome_for_decision(
@@ -5556,8 +5798,9 @@ class _ArtifactReferenceGate:
         return allowed
 
     def gate_text(self, text: str) -> str:
-        if not text or (self.policy.empty and not self.tombstones):
+        if not text or (_file_policy_empty(self.vault_root, self.policy) and not self.tombstones):
             return text
+        self._ensure_index()
 
         def _replace_token(match: re.Match[str]) -> str:
             token = match.group(0)
@@ -5603,9 +5846,7 @@ class _ArtifactReferenceGate:
                         # key. Omission is the same fail-closed shape used by
                         # the structural map-key filter.
                         continue
-                key_marks_free_text = isinstance(key, str) and any(
-                    marker in key.casefold() for marker in ("handoff", "prompt", "resource")
-                )
+                key_marks_free_text = _artifact_text_key(key)
                 gated[key] = self.gate_payload(
                     item, scan_strings=scan_strings or key_marks_free_text
                 )
@@ -5678,7 +5919,7 @@ def release_walk_filter(
     """
     policy = policy_module.load(Path(vault_root))
     tombstones = lifecycle.tombstoned_paths(vault_root)
-    if policy.empty and not tombstones:
+    if _file_policy_empty(vault_root, policy) and not tombstones:
         return None
 
     vault_root = Path(vault_root)
@@ -5729,14 +5970,16 @@ def restricted_release_filter(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
 ) -> Any:
-    """`release_walk_filter` for a bound caller other than the owner, else `None`.
+    """Filter bound projections, or a file-mode caller other than the owner.
 
     A derived structure (a relation proposal, a context pack, a timeline, a
     listing) decides its candidates before it counts, ranks or emits them, so
-    what it returns reads as if the withheld pages were absent. The owner
-    keeps exactly the answer and the cost it had: its reads still pass the
-    dispatcher's entry filter, as before, and nothing here decides for it.
+    what it returns reads as if the withheld pages were absent. In file mode,
+    the owner keeps the existing answer and cost. A bound preview decides its
+    projections for every caller before the walk.
     """
+    if bound_writer(vault_root) is not None:
+        return release_walk_filter(vault_root, principal=principal, purpose=purpose)
     who = principal if principal is not None else current_principal()
     if who is None:
         # A library call outside any request: no surface bound a caller, so
@@ -5754,6 +5997,7 @@ def restricted_release_filter(
 AUDIENCE_RESTRICTED = "audience_restricted"
 
 
+@canonical_read
 def owner_only_aggregate(
     vault_root: Path,
     *,
@@ -5767,17 +6011,38 @@ def owner_only_aggregate(
     served to the owner only, as the relation census is; every other bound
     audience receives `available: false` with `reason: "audience_restricted"`,
     decided from the principal and the policy before anything is read. Under
-    an empty policy, for the owner, and for a call no surface bound, this is
-    `None` and the aggregate is served as before.
+    an empty file-mode policy, for the owner, and for a call no surface bound,
+    this is `None` and the aggregate is served as before. A bound preview must
+    prove every owned artifact current and fully released before aggregating.
 
     What it prevents: counts, findings and denominators that move with pages
     the caller may not see. When it fires wrongly a restricted caller gets no
     aggregate; that caller pays, and the owner never does.
     """
     who = principal if principal is not None else current_principal()
+    writer = bound_writer(vault_root)
+    if writer is not None and (who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE)):
+        operation = writer._operation
+        try:
+            for entry in reserved_paths.list_generic_tree(vault_root, "."):
+                if entry.identity.kind != "file":
+                    continue
+                canonical = operation.projection_decision(entry.relative_path)
+                if canonical is None:
+                    continue
+                decision = _decide_path(
+                    vault_root, entry.relative_path, policy=operation.policy,
+                    audience=operation.who.audience_id, purpose=operation.purpose,
+                    grants_hash=_grants_hash(operation.policy),
+                    authorization_context=operation.context,
+                )
+                if decision is None or decision.level < LEVEL_FULL:
+                    return {"available": False, "reason": AUDIENCE_RESTRICTED}
+        except (OSError, reserved_paths.ReservedPathLeafError):
+            return {"available": False, "reason": AUDIENCE_RESTRICTED}
     if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
         return None
-    if policy_module.load(Path(vault_root)).empty:
+    if _file_policy_empty(vault_root, policy_module.load(Path(vault_root))):
         return None
     return {"available": False, "reason": AUDIENCE_RESTRICTED}
 
@@ -6218,12 +6483,14 @@ def _reconcile_attention_counts(payload: Any) -> Any:
     return out
 
 
+@canonical_read
 def filter_withheld_entries(
     vault_root: Path,
     payload: Any,
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    _artifact_scan_demand: _ArtifactScanDemand | None = None,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -6238,9 +6505,19 @@ def filter_withheld_entries(
     entry dropped; otherwise decide each named path.
     """
     vault_root = Path(vault_root)
-    policy = policy_module.load(vault_root)
-    tombstones = lifecycle.tombstoned_paths(vault_root)
-    if policy.empty and not tombstones:
+    writer = bound_writer(vault_root)
+    operation = writer._operation if writer is not None else None
+    from ..collection_store import governance as canonical_governance
+
+    inspection_evidence = canonical_governance._inspection_evidence(payload)
+    if inspection_evidence is not None:
+        if operation is None:
+            canonical_governance.OperationAuthorization.refuse()
+        inspection_evidence = operation.validate_inspection_projection(payload, writer.handle)
+    metadata_references = dict(inspection_evidence.references) if inspection_evidence is not None else {}
+    policy = operation.policy if operation is not None else policy_module.load(vault_root)
+    tombstones = operation.tombstones if operation is not None else lifecycle.tombstoned_paths(vault_root)
+    if _file_policy_empty(vault_root, policy) and not tombstones:
         return payload
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or not who.resolved
@@ -6250,6 +6527,11 @@ def filter_withheld_entries(
     verdicts: dict[str, bool] = {}
     decisions_by_path: dict[str, Decision | None] = {}
 
+    def _tombstoned(rel_path: str) -> bool:
+        if operation is not None:
+            return lifecycle.is_tombstoned_in(tombstones, rel_path)
+        return lifecycle.is_tombstoned(vault_root, rel_path)
+
     def _permitted(rel_path: str) -> bool:
         """True when this vault item may be named. Non-vault paths are NOT
         decided here — see `_is_vault_item`."""
@@ -6258,7 +6540,7 @@ def filter_withheld_entries(
         cached = verdicts.get(rel_path)
         if cached is not None:
             return cached
-        if lifecycle.is_tombstoned(vault_root, rel_path):
+        if _tombstoned(rel_path):
             verdicts[rel_path] = False
             return False
         if fail_closed:
@@ -6272,6 +6554,7 @@ def filter_withheld_entries(
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
+            tombstones=tombstones if operation is not None else None,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         decisions_by_path[rel_path] = decision
@@ -6360,7 +6643,7 @@ def filter_withheld_entries(
             return None
 
     def _resolve_uncached(rel_path: str) -> str | None:
-        if lifecycle.is_tombstoned(vault_root, rel_path):
+        if _tombstoned(rel_path):
             return _normalize_pathish(rel_path)
         if rel_path.startswith(("http://", "https://", "exomem://")):
             return None
@@ -6408,15 +6691,26 @@ def filter_withheld_entries(
             return resolved
         return None
 
-    def _keep(entry: Any, directory: str | None = None) -> bool:
-        candidates = _entry_candidate_paths(entry, directory)
+    def _candidate_paths(entry, directory, location):
+        # Only exact producer-bound metadata slots avoid physical-byte proof.
+        # A sibling body or another occurrence of the same path remains ordinary.
+        if metadata_references:
+            if isinstance(entry, Mapping):
+                entry = {key: value for key, value in entry.items()
+                         if metadata_references.get((*location, key)) != value}
+            elif metadata_references.get(location) == entry:
+                return []
+        return _entry_candidate_paths(entry, directory)
+
+    def _kept_paths(entry: Any, directory: str | None = None, location=()) -> list[str] | None:
+        candidates = _candidate_paths(entry, directory, location)
         if not candidates:
-            return True
+            return candidates
         review_audience = _bridge_review_audience(entry)
         for rel_path in candidates:
             if fail_closed:
                 _record_blocked_outcome(who.audience_id)
-                return False
+                return None
             # Decide the REAL path the reference resolves to, not the spelling
             # it happened to use — otherwise a `.MD` or percent-encoded variant
             # is decided against a path that does not exist.
@@ -6429,17 +6723,36 @@ def filter_withheld_entries(
                 # is stale; hiding it then would strand the required reapproval.
                 continue
             if not _permitted(resolved):
-                return False
-        return True
+                return None
+        return candidates
 
-    def _walk(node: Any, *, directory: str | None = None) -> Any:
+    def _is_admitted_source_versions(node: Any) -> bool:
+        fields = {"path", "hash"}
+        if type(node) is not list or any(_artifact_text_key(key) for key in fields):
+            return False
+        return all(
+            type(entry) is dict
+            and all(type(key) is str and type(value) is str for key, value in entry.items())
+            and entry.keys() == fields
+            and metadata_references.get(("source_versions", index, "path")) == entry["path"]
+            for index, entry in enumerate(node)
+        )
+
+    def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
+        if (location == ("source_versions",) and inspection_evidence is not None
+                and _is_admitted_source_versions(node)):
+            # Exact admitted metadata has no ordinary references or nested text.
+            # The always-on credential scrubber still visits every string later.
+            return node
         if isinstance(node, Mapping):
             node = _strip_bridge_review_audience(node)
             # A terminal surface may assemble a released bridge without using
             # the find/page serializers (review context and structure views do
             # this).  Anchor stripping to the bridge entry itself; never rely
             # on a restricted dependency also appearing in the result pool.
-            for candidate in _entry_candidate_paths(node, directory):
+            if candidates is None:
+                candidates = _candidate_paths(node, directory, location)
+            for candidate in candidates:
                 resolved = _resolve_vault_item(candidate)
                 if resolved is None or not _permitted(resolved):
                     continue
@@ -6455,25 +6768,36 @@ def filter_withheld_entries(
                 here = directory
             kept_pairs: dict[Any, Any] = {}
             for key, value in node.items():
+                child_location = (*location, key)
                 # A map keyed BY vault path (`outcomes[source] = {...}`) leaks
                 # through its KEYS, which no amount of value filtering reaches.
-                if _path_like(key) is not None and not _keep({"path": key}, here):
-                    continue
-                if _is_identifier_key(key) and not _keep(value, here):
+                if _path_like(key) is not None and _kept_paths({"path": key}, here) is None:
                     continue
                 # …and a map VALUE that is itself an entry gets the same
                 # predicate a list entry gets. Without this, the whole check
                 # was list-shaped: `{"outcomes": {src: {"target_path": X}}}`
                 # sailed through because nothing in it was a list.
-                if isinstance(value, Mapping) and not _keep(value, here):
-                    continue
-                kept_pairs[key] = _walk(value, directory=here)
+                child_candidates = None
+                if _is_identifier_key(key) or isinstance(value, Mapping):
+                    child_candidates = _kept_paths(value, here, child_location)
+                    if child_candidates is None:
+                        continue
+                if _artifact_scan_demand is not None and _artifact_text_key(key):
+                    _artifact_scan_demand.required = True
+                kept_pairs[key] = _walk(value, directory=here, location=child_location,
+                                        candidates=child_candidates)
             return kept_pairs
         # N5: tuples, sets and frozensets are ordinary JSON-shaped containers
         # here, and returning them by identity made every one of them an
         # unfiltered channel — `adopt` alone returns 18 tuple-valued fields.
         if isinstance(node, (list, tuple, set, frozenset)):
-            kept = [_walk(entry, directory=directory) for entry in node if _keep(entry, directory)]
+            kept = []
+            for index, entry in enumerate(node):
+                child_location = (*location, index)
+                child_candidates = _kept_paths(entry, directory, child_location)
+                if child_candidates is not None:
+                    kept.append(_walk(entry, directory=directory, location=child_location,
+                                      candidates=child_candidates))
             if isinstance(node, (set, frozenset)):
                 # Rebuilt from the filtered members; a set of dicts is not a
                 # real shape, so only hashable members survive this path.
@@ -6493,4 +6817,8 @@ def filter_withheld_entries(
         and len(filtered.get("items", ())) != len(payload["items"])
     ):
         return _reconcile_attention_counts(filtered)
+    if inspection_evidence is not None:
+        filtered = canonical_governance._seal_inspection_projection(filtered, inspection_evidence)
+    if _artifact_scan_demand is not None:
+        _artifact_scan_demand.complete = True
     return filtered

@@ -30,7 +30,7 @@ import hmac
 import math
 import re
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -497,6 +497,9 @@ def _active_alternatives(lowered: str) -> tuple[int, ...]:
     superset argument the whole-union prescan already rests on, applied at the
     granularity where it actually pays.
     """
+    # The same derived superset cheaply rejects clean short identifiers.
+    if len(lowered) <= 1024 and not any(anchor in lowered for anchor in _ANCHORS):
+        return ()
     seen: dict[str, bool] = {}
 
     def present(literal: str) -> bool:
@@ -657,10 +660,28 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
     `field_name` carries the key a string arrived under so the structural
     allowlist can suppress the entropy heuristic for identifier fields.
     """
+    classify = functools.lru_cache(maxsize=256)(_scrub_string)
+    try:
+        return _scrub_value(value, field_name=field_name, classify=classify)
+    finally:
+        classify.cache_clear()
+
+
+def _scrub_string(text: str, structural: bool) -> tuple[str, bool]:
+    return _scrub_structural(text) if structural else scrub_text(text)
+
+
+def _scrub_value(
+    value: Any,
+    *,
+    field_name: str | None,
+    classify: Callable[[str, bool], tuple[str, bool]],
+) -> tuple[Any, bool]:
     if isinstance(value, str):
-        if field_name is not None and _is_structural_field(field_name):
-            return _scrub_structural(value)
-        return scrub_text(value)
+        structural = field_name is not None and _is_structural_field(field_name)
+        # Bound per-invocation retention by both entries and text length.
+        scanner = classify if type(value) is str and len(value) <= 1024 else _scrub_string
+        return scanner(value, structural)
     if isinstance(value, Mapping):
         blocked = False
         entries: list[tuple[Any, Any, bool, Any, bool]] = []
@@ -668,11 +689,19 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
             cleaned_key = key
             key_hit = False
             if isinstance(key, str):
-                cleaned_key, key_hit = scrub_text(key)
+                scanner = classify if type(key) is str and len(key) <= 1024 else _scrub_string
+                cleaned_key, key_hit = scanner(key, False)
                 blocked = blocked or key_hit
-            cleaned, hit = scrub_value(item, field_name=str(key))
+            cleaned, hit = _scrub_value(item, field_name=str(key), classify=classify)
             entries.append((key, cleaned_key, key_hit, cleaned, hit))
             blocked = blocked or hit
+        if type(value) is dict and all(
+            type(key) is str and type(cleaned_key) is str and not key_hit and cleaned_key == key
+            for key, cleaned_key, key_hit, _, _ in entries
+        ):
+            out = {cleaned_key: cleaned for _, cleaned_key, _, cleaned, _ in entries}
+            if len(out) == len(entries):
+                return out, blocked
         allocated = _allocate_mapping_keys(
             [
                 (original_key, cleaned_key, key_hit)
@@ -685,10 +714,32 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
         }
         return out, blocked
     if isinstance(value, (list, tuple)):
+        if type(value) is list and value and all(
+            type(item) is dict and len(item) == 2 and all(
+                type(key) is str and key in ("path", "hash") and type(text) is str
+                for key, text in item.items()
+            )
+            for item in value
+        ):
+            # Exact source-version rows share field modes, but every string
+            # still goes through the same bounded classifier or long fallback.
+            modes = {key: _is_structural_field(key) for key in ("path", "hash")}
+            if all(classify(key, False) == (key, False) for key in modes):
+                blocked = False
+                items = []
+                for item in value:
+                    out = {}
+                    for key, text in item.items():
+                        scanner = classify if len(text) <= 1024 else _scrub_string
+                        cleaned, hit = scanner(text, modes[key])
+                        out[key] = cleaned
+                        blocked = blocked or hit
+                    items.append(out)
+                return items, blocked
         blocked = False
         items = []
         for item in value:
-            cleaned, hit = scrub_value(item, field_name=field_name)
+            cleaned, hit = _scrub_value(item, field_name=field_name, classify=classify)
             items.append(cleaned)
             blocked = blocked or hit
         if isinstance(value, tuple):

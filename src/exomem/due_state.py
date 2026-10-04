@@ -95,6 +95,7 @@ from typing import Any
 
 from . import call_spans
 from . import review_state as review_state_module
+from .collection_store.preview import bound_writer, canonical_read
 
 log = logging.getLogger(__name__)
 
@@ -724,11 +725,13 @@ def _survivors_only(
             return None
         matched = {str(term) for term in advisory.get("matched_terms") or ()}
         previous = {str(term) for term in component.get("matched_terms") or ()}
+        writer = bound_writer(vault_root)
         for record in component.get("reflecting_records") or ():
             if (
                 not isinstance(record, Mapping)
                 or type(record.get("path")) is not str
-                or not keep(record["path"])
+                or not (writer._allows_item(collection, str(record.get("key") or ""))
+                        if writer is not None else keep(record["path"]))
                 or not _page_exists(vault_root, record["path"])
             ):
                 continue
@@ -760,7 +763,12 @@ def _survivors_only(
     ]
     if not stored:
         return entry
-    survivors = [pair for pair in stored if keep(pair[0])]
+    writer = bound_writer(vault_root)
+    survivors = [pair for pair in stored if (
+        writer._allows_item(str(component.get("records_collection_id") or ""), pair[1])
+        if writer is not None and component.get("records_collection_id")
+        else keep(pair[0])
+    )]
     if len(survivors) == len(stored):
         return entry
     if not survivors:
@@ -839,6 +847,18 @@ def _page_exists(vault_root: Path, rel_path: str) -> bool:
     remove: patching `Path.exists` wholesale also breaks reading the projection,
     which would make the removal test pass for the wrong reason.
     """
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        with writer.read_snapshot():
+            if writer._projection_path_exists(rel_path):
+                return True
+            for manifest_path, source_path, layout in writer.connection.execute(
+                "SELECT manifest_path,source_path,layout FROM collections"
+            ):
+                if rel_path == manifest_path or rel_path == source_path or (
+                    layout == "markdown-items" and rel_path.startswith(source_path + "/")
+                ):
+                    return False
     return (Path(vault_root) / rel_path).exists()
 
 
@@ -994,6 +1014,7 @@ def _claim_projection_row(manifest: Any, snapshot: Any | None) -> dict[str, Any]
     }
 
 
+@canonical_read
 def _recompute_claims(
     vault_root: Path, *, authorize_path: Any = None
 ) -> dict[str, dict[str, Any]]:
@@ -1009,7 +1030,8 @@ def _recompute_claims(
         if (
             manifest.semantic_profile != "records"
             or (authorize_path is not None and not authorize_path(manifest.path))
-            or (authorize_path is not None and not authorize_path(manifest.storage.source))
+            or (bound_writer(vault_root) is None and authorize_path is not None
+                and not authorize_path(manifest.storage.source))
         ):
             continue
         try:
@@ -1061,6 +1083,7 @@ def _observed_claim_counts(
     return counts
 
 
+@canonical_read
 def routing_targets(
     vault_root: Path,
     *,
@@ -1075,14 +1098,16 @@ def routing_targets(
     from .governance import egress as egress_module
 
     root = Path(vault_root)
-    state = payload or load(root)
+    writer = bound_writer(root)
+    state = {"claims": _recompute_claims(root)} if writer is not None else payload or load(root)
     rows = (state or {}).get("claims")
     if not isinstance(rows, Mapping):
         return []
     try:
-        keep = authorize_path or egress_module.release_walk_filter(
-            root, principal=principal, purpose=purpose
-        )
+        keep = (writer._operation.allows_file if writer is not None else
+                authorize_path or egress_module.release_walk_filter(
+                    root, principal=principal, purpose=purpose
+                ))
     except Exception:  # noqa: BLE001 -- disclosure failure costs the advisory
         return []
     if keep is None:
@@ -1099,7 +1124,7 @@ def routing_targets(
         if (
             manifest.semantic_profile != "records"
             or manifest.manifest_version.hash != row.get("manifest_hash")
-            or not keep(manifest.storage.source)
+            or (writer is None and not keep(manifest.storage.source))
         ):
             continue
         stored_items = row.get("items")
@@ -1110,7 +1135,8 @@ def routing_targets(
             for item in stored_items
             if isinstance(item, Mapping)
             and type(item.get("path")) is str
-            and keep(str(item["path"]))
+            and (writer._allows_item(manifest.collection_id, str(item.get("key") or ""))
+                 if writer is not None else keep(str(item["path"])))
         ]
         claims = record_governance.effective_claims(
             manifest,
@@ -1141,6 +1167,7 @@ def routing_targets(
     return targets
 
 
+@canonical_read
 def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, Any]]:
     """One collection's projected items this audience may read. No collection read.
 
@@ -1151,6 +1178,8 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     from .governance import egress as egress_module
 
     root = Path(vault_root)
+    if bound_writer(root) is not None:
+        return _recompute_claims(root).get(manifest_path, {}).get("items", [])
     row = ((load(root) or {}).get("claims") or {}).get(manifest_path)
     if not isinstance(row, Mapping) or not isinstance(row.get("items"), list):
         return []
@@ -1847,6 +1876,9 @@ def _unfiltered_snapshot(vault_root: Path, manifest: Any) -> Any | None:
     from . import structured_collections as collections_module
 
     try:
+        writer = bound_writer(vault_root)
+        if writer is not None:
+            return writer._projection_snapshot(manifest)
         return record_formats.load_adapter(vault_root, manifest).read()
     except (collections_module.CollectionError, OSError, ValueError):
         return None
@@ -1858,6 +1890,16 @@ def _load_manifest(vault_root: Path, path: str) -> Any | None:
     try:
         return collections_module.load_manifest(vault_root, Path(vault_root) / path)
     except Exception:  # noqa: BLE001 -- a binding whose end vanished heals at reconcile
+        return None
+
+
+def _load_projection_manifest(vault_root: Path, path: str) -> Any | None:
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return _load_manifest(vault_root, path)
+    try:
+        return writer._projection_manifest(path)
+    except Exception:  # noqa: BLE001 -- stale internal bindings heal at reconcile
         return None
 
 
@@ -1944,6 +1986,7 @@ def _prune_missing_joined(
             pages.pop(item_path, None)
 
 
+@canonical_read
 def apply_record_write_delta(
     vault_root: Path,
     manifest: Any,
@@ -2046,7 +2089,7 @@ def apply_record_write_delta(
                             bucket.append(row)
         pages = dict(categories.get(_OUTCOME_FAMILY) or {})
         for row in rows:
-            planning = _load_manifest(Path(vault_root), str(row.get("planning") or ""))
+            planning = _load_projection_manifest(Path(vault_root), str(row.get("planning") or ""))
             if planning is None:
                 continue
             join = dict(row.get("join") or {})
@@ -2102,6 +2145,7 @@ def apply_record_write_delta(
         )
 
 
+@canonical_read
 def apply_plan_write_delta(
     vault_root: Path,
     manifest: Any,
@@ -2188,7 +2232,7 @@ def apply_plan_write_delta(
             _prune_missing_joined(Path(vault_root), pages, today)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
-        planning = _load_manifest(Path(vault_root), str(manifest.path)) or manifest
+        planning = _load_projection_manifest(Path(vault_root), str(manifest.path)) or manifest
         item = _SyntheticItem(str(path), str(key), dict(values))
         for row in rows:
             # One binding at a time, and each one writes only its own entry --
@@ -2196,7 +2240,7 @@ def apply_plan_write_delta(
             # source behind retracts that source's finding without touching the
             # other's.
             records_path = str(row.get("records") or "")
-            records = _load_manifest(Path(vault_root), records_path)
+            records = _load_projection_manifest(Path(vault_root), records_path)
             if records is None:
                 continue
             join = dict(row.get("join") or {})
@@ -2271,6 +2315,10 @@ def block_for_structured_write(
     carry the block, and recording delivery here would burn the session's one
     emission on a response that never showed it.
     """
+    # No projection means no advisory read. Check before the canonical delta
+    # opens its authorization snapshot; populated projections still use it.
+    if not state_path(vault_root).exists():
+        return None
     profile = str(getattr(manifest, "semantic_profile", "") or "")
     delta = apply_plan_write_delta if profile == "planning" else apply_record_write_delta
     if (
@@ -2445,6 +2493,7 @@ def in_batch_scope() -> bool:
 # --------------------------------------------------------------------------
 
 
+@canonical_read
 def served_entries(
     vault_root: Path,
     *,
@@ -2485,6 +2534,11 @@ def served_entries(
         now = now.astimezone(dt.UTC)
     effective_now = now or dt.datetime.now(dt.UTC)
     today = today or effective_now.date()
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        return _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
+        )[0]
     projection_token = _file_token(state_path(vault_root))
     if projection_token is None:
         rows, *_ = _served_entries_uncached(
@@ -2667,9 +2721,11 @@ def _served_entries_uncached(
 
     keep = None
     try:
-        keep = egress_module.release_walk_filter(
-            Path(vault_root), principal=principal, purpose=purpose
-        )
+        writer = bound_writer(vault_root)
+        keep = (writer._operation.allows_file if writer is not None else
+                egress_module.release_walk_filter(
+                    Path(vault_root), principal=principal, purpose=purpose
+                ))
     except Exception:  # noqa: BLE001
         # A release plane that cannot decide must not be read as "release
         # everything". Fail closed: serve nothing rather than count something

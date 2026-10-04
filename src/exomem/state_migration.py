@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -242,6 +242,37 @@ def partition_state_descriptor_ids(
 def _require_supported_compatibility(optional: frozenset[str]) -> None:
     if optional - set(supported_state_compatibility_ids()):
         raise StateCompatibilityUnsupported()
+
+
+def _require_collection_store_recovery(session, token) -> None:
+    """The allocating dark owner can resume its own complete store state only."""
+    from .collection_store import authority, chain, connection
+    from .collection_store.admission import _IsolatedSession
+
+    if type(session) is not _IsolatedSession or not session.require(token):
+        raise StateMigrationOfflineRequired("isolated collection-store custody is absent")
+    state_dir = state_paths.vault_state_dir(session.root)
+    with _migration_lock(state_dir):
+        state_paths.validate_hosted_state_directory(state_dir)
+        manifest = _load_manifest(state_dir, vault_root=session.root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
+        physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
+        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1"}
+                or manifest.get("governance_rollback") is not None
+                or manifest.get("governance_adoption") is not None
+                or scan_vault_state(session.root)):
+            raise StateMigrationOfflineRequired("collection-store recovery requires ready families")
+        if optional:
+            with closing(connection.open_reader(session.path)) as reader:
+                chain.verify_store_chain(reader)
+                intent = authority.pending_create(reader)
+                raw = intent["target_marker"] if intent is not None else authority.read_marker(session.root)
+                marker = authority.parse_marker(session.root, raw)
+                sid = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+                if marker["store_id"] != sid:
+                    raise StateMigrationOfflineRequired("collection-store recovery identity differs")
+        session.require(token)
 
 
 def record_collection_store_compatibility(
@@ -1521,7 +1552,17 @@ def _is_manifest_bookkeeping(name: str) -> bool:
     return name.startswith(f".{MANIFEST_NAME}.") and name.endswith(".tmp")
 
 
+def _is_external_canonical(name: str) -> bool:
+    from . import reserved_paths
+
+    classification = reserved_paths.classify_logical(name)
+    return classification.descriptor_id in {
+        descriptor.id for descriptor in reserved_paths.external_canonical_descriptors()
+    }
+
+
 def _external_state_present(state_dir: Path) -> bool:
+    """Whether the external root holds machine-local state (canonical data excluded)."""
     try:
         entries = os.scandir(state_dir)
     except FileNotFoundError:
@@ -1529,7 +1570,10 @@ def _external_state_present(state_dir: Path) -> bool:
     except OSError as error:
         raise OSError("external state root cannot be inspected") from error
     with entries:
-        return any(not _is_manifest_bookkeeping(entry.name) for entry in entries)
+        return any(
+            not _is_manifest_bookkeeping(entry.name) and not _is_external_canonical(entry.name)
+            for entry in entries
+        )
 
 
 @contextmanager
@@ -1658,7 +1702,9 @@ def _adopt_state_offline(vault_root: Path, keep: str) -> dict[str, Any]:
                 raise StateCompatibilityUnsupported()
             with os.scandir(state_dir) as entries:
                 for entry in entries:
-                    if entry.name == _LOCK_NAME:
+                    if entry.name == _LOCK_NAME or _is_external_canonical(entry.name):
+                        # Canonical data is never machine-local state: keeping
+                        # the vault's copy of state must not discard it.
                         continue
                     path = state_dir / entry.name
                     mode = path.lstat().st_mode

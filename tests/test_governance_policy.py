@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -178,6 +179,20 @@ def test_v3_without_archive_table_is_structurally_blocked(vault: Path) -> None:
         conn.close()
     policy._CACHE.clear()
     assert policy.load(vault).blocked
+
+
+def test_legacy_guard_query_fault_keeps_sidecar_refusal_classification(vault: Path) -> None:
+    connection = store.open_connection(vault)
+    try:
+        connection.execute("ALTER TABLE governance_operation_journals DROP COLUMN operation")
+        connection.commit()
+    finally:
+        connection.close()
+
+    loaded = policy.load(vault)
+
+    assert loaded.blocked
+    assert loaded.findings[0]["code"] == "governance_sidecar_blocked"
 
 
 def test_idle_dev_v3_without_purpose_staging_remains_readable(vault: Path) -> None:
@@ -633,6 +648,55 @@ def test_governed_last_good_is_still_served_through_the_guard(vault: Path) -> No
     assert guarded.rules == good.rules
     assert guarded.grants == good.grants
     assert guarded.release_grants == good.release_grants
+
+
+@pytest.mark.parametrize("replace_store", [False, True])
+def test_legacy_load_observes_cooperating_writer_during_compilation(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_store: bool
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    store.open_connection(vault).close()
+    load_unguarded = policy._load_unguarded
+    transitioned = False
+
+    def arm_pending_journal() -> None:
+        target = tmp_path / "replacement-vault" if replace_store else vault
+        connection = store.open_connection(target)
+        try:
+            connection.execute(
+                "INSERT INTO governance_operation_journals "
+                "(event_id, operation, causation_id, principal_id, phase, direction, "
+                "prior_digest, prepared_digest, final_digest, affected_ids, "
+                "required_child_intents, required_child_terminals, created_at, updated_at) "
+                "VALUES ('writer-event', 'commit', 'writer-cause', 'owner', 'pending', "
+                "'narrowing', 'prior', 'prepared', 'final', '[]', '[]', '[]', 1, 1)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        if replace_store:
+            with reserved_paths._subsystem_authority_scope("governance.store"):
+                with reserved_paths._identity_coordination_scope(
+                    vault, descriptor_ids=("governance-store",)
+                ):
+                    os.replace(store.sidecar_path(target), store.sidecar_path(vault))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def compile_while_writer_runs(root: Path) -> policy.Policy:
+            nonlocal transitioned
+            if not transitioned:
+                transitioned = True
+                executor.submit(arm_pending_journal).result(timeout=5)
+            return load_unguarded(root)
+
+        monkeypatch.setattr(policy, "_load_unguarded", compile_while_writer_runs)
+        loaded = policy.load(vault)
+
+    assert transitioned
+    assert loaded.blocked
+    assert any(
+        finding["code"] == "governance_mutation_pending" for finding in loaded.findings
+    )
 
 
 def test_ungoverned_vault_never_reaches_the_guarded_fallback(

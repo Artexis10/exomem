@@ -46,11 +46,32 @@ The keep-vault state-adoption remedy SHALL refuse an enrolled optional
 collection-store contract before deleting external state or its compatibility
 fence; that remedy SHALL not substitute for validated collection export.
 
+The store runtime SHALL retain its ordinary opening-thread-owned writer and
+bounded cache between operations. Every use, including read snapshots and
+standalone calls, SHALL be scoped to that runtime's handle checkout. Ordinary
+handoff SHALL stop new checkouts, drain borrowers and authority holders before
+acquiring the canonical mutation boundary, then retire the quiescent handle
+and publish through a lifecycle-thread-owned writer. Cross-thread quiescent
+retirement SHALL NOT permit cross-thread SQL, cache access or publication.
+The lease head provider SHALL read the exact store/instance identity and
+committed head through one fresh read-only SQLite snapshot on its calling
+thread; unavailable enrolled stores SHALL NOT be reported as absent heads.
+Renew/release reporting SHALL serialize fresh sampling and its exact-token RPC
+without holding the manager lock across boundary acquisition. Renewal SHALL
+remain available during a synchronous flush, including idle release on the
+renewer itself. Only a verified flushed head SHALL complete ordinary release;
+busy or unsuccessful idle publication SHALL defer handoff, and explicit
+shutdown SHALL expose unsuccessful or pending publication. File-only lifecycle
+behavior SHALL remain unchanged.
+
 Batch and held-publication intermediates SHALL be classified separately as
 `target-adjacent`: they SHALL remain beside the publication destination for
 same-volume atomic rename/link, SHALL exist only during an active publication
 or bounded crash recovery, and SHALL NOT be treated as migratable persistent
-state. After migration completes, no persistent machine-local state SHALL
+state. Collection replica staging and retirement SHALL use an exclusively
+owned child workspace under that destination parent, excluded from incoming
+and outgoing file replication before use. Shared replica names SHALL remain
+external inputs; cleanup SHALL NOT unlink them. After migration completes, no persistent machine-local state SHALL
 remain under a quiescent vault.
 
 #### Scenario: A synced quiescent vault carries no persistent machine-local state
@@ -97,6 +118,18 @@ remain under a quiescent vault.
 - **THEN** its target-adjacent intermediate is created under the destination parent on the same volume
 - **AND** it is cleaned after publication or surfaced through bounded crash recovery
 - **AND** it is never migrated to the external state root merely because it is reserved
+
+#### Scenario: Ordinary store operations preserve the warm handle until quiescent handoff
+
+- **WHEN** successive operations use one store and a read borrower is still active when handoff begins
+- **THEN** the operations reuse their normal writer cache and retirement waits for that borrower without holding the canonical mutation boundary
+- **AND** publication uses a new lifecycle-thread-owned writer only after the retired handle is no longer usable
+
+#### Scenario: A slow flush does not turn lease expiry into successful handoff
+
+- **WHEN** ordinary release publication spans a renewal interval or loses its exact writer token
+- **THEN** due renewal reports a freshly sampled committed head without borrowing the business writer or regressing concurrent reports
+- **AND** release completes only after a verified flush while that token remains valid; failed publication is reported as pending or unsuccessful
 
 #### Scenario: The state root resolves through one seam
 

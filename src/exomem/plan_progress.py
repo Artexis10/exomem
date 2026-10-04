@@ -31,6 +31,7 @@ from typing import Any
 
 from . import find_corpus, memory_refs, planning, record_governance
 from . import structured_collections as collections
+from .collection_store.preview import canonical_read
 from .structured_collections import CollectionError
 
 MODE = "plan-progress"
@@ -244,6 +245,7 @@ def order_items(items: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     )
 
 
+@canonical_read
 def review(
     vault_root: Path,
     *,

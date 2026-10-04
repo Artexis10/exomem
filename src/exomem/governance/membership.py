@@ -87,29 +87,14 @@ def _matches_paths(patterns: tuple[str, ...], rel_path: str) -> bool:
     return any(fnmatch.fnmatchcase(rel_path, p) or fnmatch.fnmatchcase(kb_rel, p) for p in patterns)
 
 
-def _matches_projects(values: tuple[str, ...], page: ParsedPage) -> bool:
-    page_projects = {p.lower() for p in find_corpus.all_projects(page.frontmatter)}
-    return any(v.lower() in page_projects for v in values)
-
-
-def _matches_tags(values: tuple[str, ...], page: ParsedPage) -> bool:
-    page_tags = set(page.tags)  # ParsedPage.tags is already lower-cased
-    return any(v.lower() in page_tags for v in values)
-
-
-def _matches_types(values: tuple[str, ...], page: ParsedPage) -> bool:
-    page_type = page.page_type
-    return page_type is not None and any(v.lower() == page_type.lower() for v in values)
-
-
-def _matches_classes(values: tuple[str, ...], page: ParsedPage) -> bool:
-    """Author-declared `classes:` frontmatter — no detector exists in this
-    kernel-only change; a later change can populate the same field."""
-    raw = page.frontmatter.get("classes") or []
-    if not isinstance(raw, list):
-        return False
-    page_classes = {str(c).lower() for c in raw}
-    return any(v.lower() in page_classes for v in values)
+@dataclass(frozen=True, slots=True)
+class MetadataSubject:
+    path: str
+    refs: tuple[str, ...] = ()
+    projects: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    types: tuple[str, ...] = ()
+    classes: tuple[str, ...] = ()
 
 
 def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
@@ -121,26 +106,37 @@ def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
     return rel_path in normalized or kb_rel in normalized
 
 
-def _scope_matches(scope: Scope, page: ParsedPage) -> bool:
+def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
+    def semantic(values, candidates):
+        return any(value.lower() in candidates for value in values)
+
+    def refs(values):
+        return _matches_refs(values, subject.path) or any(ref in values for ref in subject.refs)
+
     positive = (
-        (bool(scope.paths) and _matches_paths(scope.paths, page.rel_path))
-        or (bool(scope.projects) and _matches_projects(scope.projects, page))
-        or (bool(scope.tags) and _matches_tags(scope.tags, page))
-        or (bool(scope.types) and _matches_types(scope.types, page))
-        or (bool(scope.classes) and _matches_classes(scope.classes, page))
-        or (bool(scope.refs) and _matches_refs(scope.refs, page.rel_path))
+        _matches_paths(scope.paths, subject.path)
+        or semantic(scope.projects, subject.projects)
+        or semantic(scope.tags, subject.tags)
+        or semantic(scope.types, subject.types)
+        or semantic(scope.classes, subject.classes)
+        or refs(scope.refs)
     )
     if not positive:
         return False
     excluded = (
-        (bool(scope.exclude_paths) and _matches_paths(scope.exclude_paths, page.rel_path))
-        or (bool(scope.exclude_projects) and _matches_projects(scope.exclude_projects, page))
-        or (bool(scope.exclude_tags) and _matches_tags(scope.exclude_tags, page))
-        or (bool(scope.exclude_types) and _matches_types(scope.exclude_types, page))
-        or (bool(scope.exclude_classes) and _matches_classes(scope.exclude_classes, page))
-        or (bool(scope.exclude_refs) and _matches_refs(scope.exclude_refs, page.rel_path))
+        _matches_paths(scope.exclude_paths, subject.path)
+        or semantic(scope.exclude_projects, subject.projects)
+        or semantic(scope.exclude_tags, subject.tags)
+        or semantic(scope.exclude_types, subject.types)
+        or semantic(scope.exclude_classes, subject.classes)
+        or refs(scope.exclude_refs)
     )
     return not excluded
+
+
+def evaluate_metadata(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
+    """The shared selector kernel over already established identity metadata."""
+    return frozenset(key for key, scope in policy.scopes.items() if _scope_matches(scope, subject))
 
 
 def _path_ref_excludes(scope: Scope, rel_path: str) -> bool:
@@ -161,10 +157,16 @@ def _needs_frontmatter(scope: Scope) -> bool:
 
 def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
     if page.frontmatter_valid:
-        return frozenset(
-            scope_id
-            for scope_id, scope in policy.scopes.items()
-            if _scope_matches(scope, page)
+        classes = page.frontmatter.get("classes") or []
+        return evaluate_metadata(
+            MetadataSubject(
+                path=page.rel_path,
+                projects=tuple(p.lower() for p in find_corpus.all_projects(page.frontmatter)),
+                tags=tuple(page.tags),
+                types=(page.page_type.lower(),) if page.page_type is not None else (),
+                classes=tuple(str(value).lower() for value in classes) if isinstance(classes, list) else (),
+            ),
+            policy,
         )
 
     matched: set[str] = set()

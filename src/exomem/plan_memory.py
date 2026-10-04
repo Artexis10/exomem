@@ -207,6 +207,11 @@ def plan_memory(
     values.pop("action")
     _validate_arguments(action, values)
     try:
+        from .collection_store import preview
+
+        selected, result = preview.dispatch(vault_root, "planning", action, values)
+        if selected:
+            return result
         if action == "inspect":
             assert collection is not None
             return planning.inspect(vault_root, collection)

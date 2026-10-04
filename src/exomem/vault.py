@@ -6114,7 +6114,8 @@ def in_append_only_tree(rel_path: str) -> str | None:
 # speed (measured 609ms -> 89ms over 1,730 frontmatter blocks, 2026-07-04).
 # PyYAML wheels bundle libyaml on all supported platforms; fall back silently
 # on a custom build without it. Used by the HOT parse seams only (this module's
-# parse_frontmatter + find's page parser) — one-off config loads keep safe_load.
+# parse_frontmatter, scalar rendering + find's page parser) — one-off config
+# loads keep safe_load.
 _YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -6261,8 +6262,12 @@ def yaml_scalar(value: Any) -> str:
     """Render a scalar, quoting if it contains YAML-special chars."""
     s = str(value)
     try:
-        parsed = yaml.safe_load(s)
-    except yaml.YAMLError:
+        # libyaml accepts tabs in plain scalars that the Python parser rejects.
+        # Keep the existing quoting for those strings and reuse the hot loader
+        # everywhere else, without retaining any rendered text.
+        loader = yaml.SafeLoader if "\t" in s else _YAML_SAFE_LOADER
+        parsed = yaml.load(s, Loader=loader)  # noqa: S506 - safe schema only
+    except (yaml.YAMLError, UnicodeError):
         parsed = None
     needs_quote = (
         not isinstance(parsed, str)
