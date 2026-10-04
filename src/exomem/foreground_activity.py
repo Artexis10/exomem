@@ -149,6 +149,15 @@ def foreground_active(vault_root: os.PathLike[str] | str) -> bool:
         return bool(_FOREGROUND.get(canonical))
 
 
+def foreground_active_on_this_thread(vault_root: os.PathLike[str] | str) -> bool:
+    """Whether this caller owns a foreground invocation for this vault."""
+    canonical = _canonical(vault_root)
+    if canonical is None:
+        return False
+    with _LOCK:
+        return bool(_FOREGROUND.get(canonical, {}).get(threading.get_ident()))
+
+
 def idle_seconds(vault_root: os.PathLike[str] | str) -> float:
     """Seconds since the last foreground invocation on this vault ended.
 
