@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.103.0](https://github.com/Artexis10/exomem/compare/v0.102.6...v0.103.0) (2026-10-03)
+
+
+### Features
+
+* **cloud:** preserve client files through a confined artifact broker ([#1536](https://github.com/Artexis10/exomem/issues/1536)) ([182a550](https://github.com/Artexis10/exomem/commit/182a5505d371b5e31799805cecfd1620678a1cf8))
+
+
+### Bug Fixes
+
+* **activation:** guard persisted learned names against visible claims ([#1535](https://github.com/Artexis10/exomem/issues/1535)) ([b9454a9](https://github.com/Artexis10/exomem/commit/b9454a9904215fc3f0f7026945953126555f8bea))
+* **activation:** qualify compound names per mention ([#1538](https://github.com/Artexis10/exomem/issues/1538)) ([c003585](https://github.com/Artexis10/exomem/commit/c003585b5d07e8ef6a2dc5458b03e9312b6773cc))
+* **cloud:** reject excessively nested broker requests ([#1541](https://github.com/Artexis10/exomem/issues/1541)) ([235499f](https://github.com/Artexis10/exomem/commit/235499f03fd7b345183a6e7cda9ff7a70ea0f705))
+* **hooks:** ask for an episode only after the session lands work ([#1537](https://github.com/Artexis10/exomem/issues/1537)) ([4e162c6](https://github.com/Artexis10/exomem/commit/4e162c69981f5094180759d9bb41c50599f789a2))
+* **hooks:** keep every Stop-hook block to one short paragraph ([#1540](https://github.com/Artexis10/exomem/issues/1540)) ([028e129](https://github.com/Artexis10/exomem/commit/028e129731389cde31dedc192e49e2af1f167297))
+* **init:** keep packaged conventions out of vault overrides ([#1529](https://github.com/Artexis10/exomem/issues/1529)) ([1eb3089](https://github.com/Artexis10/exomem/commit/1eb308989f5d89cd72e2a8939591a687ba449f4a))
+
 ## [0.102.6](https://github.com/Artexis10/exomem/compare/v0.102.5...v0.102.6) (2026-10-03)
 
 
