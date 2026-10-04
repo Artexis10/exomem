@@ -439,6 +439,9 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
   `sources` list and updates back-references atomically. An unrelated edit may
   leave a legacy unresolved citation; list that debt with
   `review_memory(mode="audit", categories=["unresolved_source_citation"])`.
+- **Frontmatterless pages.** Body and section edits work on ordinary Markdown
+  without synthesizing YAML. Frontmatter and take-row operations still require
+  frontmatter.
 - **Suggestions.** `remember(suggestions=true)` adds a `suggestions` block of
   existing pages the note should probably link to (read it with
   `response_detail="full"`). It costs one retrieval pass over the corpus, so it

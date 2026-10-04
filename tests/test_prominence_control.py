@@ -50,7 +50,7 @@ def test_configuration_is_registered_with_read_and_write_classification():
 def test_configuration_guidance_does_not_invite_unsolicited_setting_changes():
     # A tools-only client must see the setting-intent boundary without loading
     # a skill reference; ordinary capture is not a request to change engagement.
-    assert "explicit user request to change saved engagement" in _command().description
+    assert "explicit user setting-change request" in _command().description
     assert "explicit user request" in prominence.configuration_route()
 
 
