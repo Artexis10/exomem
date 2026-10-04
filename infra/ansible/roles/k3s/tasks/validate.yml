@@ -1,4 +1,14 @@
 ---
+- name: Validate the dedicated agent reservation
+  ansible.builtin.assert:
+    that:
+      - k3s_agent_dedicated_cell is string
+      - >-
+        k3s_agent_dedicated_cell == '' or
+        (k3s_node_role == 'agent' and k3s_agent_dedicated_cell | length == 16
+         and k3s_agent_dedicated_cell is match('^[a-z2-7]{16}$'))
+    fail_msg: A dedicated reservation requires an agent and its exact 16-character base32 cell ID.
+
 - name: Resolve the one K3s server in the inventory
   ansible.builtin.set_fact:
     k3s_server_hosts: >-

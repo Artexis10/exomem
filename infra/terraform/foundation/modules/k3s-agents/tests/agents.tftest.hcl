@@ -328,3 +328,36 @@ run "rejects_a_global_admin_ssh_cidr" {
 
   expect_failures = [var.admin_ssh_cidrs]
 }
+
+run "dedicated_cx33_preserves_reservation_output" {
+  command = plan
+  variables {
+    nodes = {
+      "owner" = { private_ip = "10.50.1.31", server_type = "cx33", dedicated_cell_id = "aaaaaaaaaaaaaaaa" }
+    }
+  }
+  assert {
+    condition     = output.nodes["owner"].dedicated_cell_id == "aaaaaaaaaaaaaaaa"
+    error_message = "The dedicated reservation must survive module output."
+  }
+}
+
+run "rejects_unreserved_cx33" {
+  command = plan
+  variables {
+    nodes = {
+      "owner" = { private_ip = "10.50.1.31", server_type = "cx33" }
+    }
+  }
+  expect_failures = [var.nodes]
+}
+
+run "rejects_malformed_reservation" {
+  command = plan
+  variables {
+    nodes = {
+      "owner" = { private_ip = "10.50.1.31", server_type = "cpx42", dedicated_cell_id = "aaaaaaaaaaaaaaaa\n" }
+    }
+  }
+  expect_failures = [var.nodes]
+}

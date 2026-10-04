@@ -94,9 +94,10 @@ output "k3s_agent_nodes" {
   description = "Non-sensitive K3s agent coordinates (name, IPv4, private IP) consumed by the generated Ansible inventory."
   value = {
     for key, node in module.k3s_agents.nodes : key => {
-      name       = node.name
-      ipv4       = node.ipv4
-      private_ip = node.private_ip
+      name              = node.name
+      ipv4              = node.ipv4
+      private_ip        = node.private_ip
+      dedicated_cell_id = node.dedicated_cell_id
     }
   }
 }

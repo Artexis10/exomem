@@ -85,3 +85,27 @@ Service shutdown SHALL cancel synchronous startup, registered and query-triggere
 - **THEN** the service lifetime cancels unfinished private work and rejects a subsequent rebuild
 - **AND** any admitted replacement completes before its worker ends
 - **AND** server exit does not add a 300-second CLI drain after service cleanup
+
+
+### Requirement: Dedicated placement is operator selected and source managed
+
+Dedicated-cell selection SHALL default to empty and belong only to operator deployment configuration. A selected cell's serving StatefulSet and backup/restore Jobs SHALL receive only a fixed own-cell selector and matching NoSchedule toleration. Admission SHALL allow absent placement during transition or that exact pair for an operator-selected own-cell namespace; arbitrary scheduling fields SHALL remain forbidden. Unselected render templates and digests SHALL remain unchanged. The agent role SHALL register and converge the matching node reservation independently of its default-disabled memory policy.
+
+Reserved nodes SHALL publish zero general admission slots, preserve actual attachment-use reporting, and be excluded from node-removal capacity. Attachment slots SHALL NOT be reported as warmed memory capacity. Removing a reserved node SHALL require clearing its selected workloads and verifying volume relocation first.
+
+Relocation and rollback SHALL stop the selected cell through its ordinary desired-state lifecycle, wait for completed holds and released volume users, change placement and resume. They SHALL preserve the existing PVC, canonical writes and durable debt, without restoring older data.
+
+#### Scenario: Owner reservation does not move ordinary siblings
+- **WHEN** the operator selects one cell for a reserved node
+- **THEN** only its serving and maintenance workloads receive that reservation
+- **AND** unselected cells retain their templates and digests and cannot use the reserved node
+
+#### Scenario: Reserved attachment capacity cannot admit unrelated cells
+- **WHEN** a reserved agent has spare CSI attachment slots
+- **THEN** those slots do not increase general admission or removal capacity
+- **AND** its actual attached volume count remains observable
+
+#### Scenario: Placement changes preserve maintenance and newer data
+- **WHEN** the operator relocates a selected cell or rolls placement back
+- **THEN** stop/change/start sequencing completes current holds before changing Job placement
+- **AND** the same volume and post-upgrade writes are preserved

@@ -14,6 +14,7 @@ thing, or its rate limiting would silently key on nothing useful.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -1138,3 +1139,18 @@ def test_artifact_signer_key_belongs_only_to_gateway_and_issuance_requires_broke
             assert signing_key["name"] not in str(doc)
     result = _helm_template_result("--set", "cloudGateway.artifactTransportEnabled=true")
     assert result.returncode != 0
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_dedicated_selection_is_validated_and_delivered_to_cellctl() -> None:
+    cell_id = "aaaaaaaaaaaaaaaa"
+    documents = _helm_template("--set-json", f'cellctl.dedicatedCellIds=["{cell_id}"]')
+    deployment = _find(documents, "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value")
+           for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_DEDICATED_CELL_IDS"]) == [cell_id]
+    role = _find(documents, "ClusterRole", "cellctl")
+    assert [rule["verbs"] for rule in role["rules"] if "nodes" in rule["resources"]] == [["get", "list"]]
+    for selection in (["bad"], [cell_id, cell_id], [cell_id] * 1025, {"extra": cell_id}):
+        result = _helm_render("--set-json", "cellctl.dedicatedCellIds=" + json.dumps(selection))
+        assert result.returncode != 0 and "dedicatedCellIds" in result.stderr

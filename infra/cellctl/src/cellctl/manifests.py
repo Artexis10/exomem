@@ -121,6 +121,7 @@ class CellManifestSpec:
     storage_gib: int = 10
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     model_env: dict[str, str] = field(default_factory=dict)
+    dedicated_node: bool = False
 
     # Secret material (D7). cellctl renders these from the row and its master
     # keys on every pass; it never reads the Secret back.
@@ -527,6 +528,16 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     return env
 
 
+def _dedicated_placement(spec: CellManifestSpec) -> dict:
+    if not spec.dedicated_node:
+        return {}
+    return {
+        "nodeSelector": {"exomem.io/dedicated-cell": spec.cell_id},
+        "tolerations": [{"key": "exomem.io/dedicated-cell", "operator": "Equal",
+                         "value": spec.cell_id, "effect": "NoSchedule"}],
+    }
+
+
 def render_statefulset(spec: CellManifestSpec) -> dict:
     r = spec.resources
     annotations: dict[str, str] = {}
@@ -581,6 +592,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                     "annotations": {RENDER_DIGEST_ANNOTATION: spec.render_digest} if spec.render_digest else {},
                 },
                 "spec": {
+                    **_dedicated_placement(spec),
                     "automountServiceAccountToken": False,
                     "restartPolicy": "Always",
                     "terminationGracePeriodSeconds": 30,
@@ -793,6 +805,7 @@ def _job_pod_spec(
     spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str
 ) -> dict:
     return {
+        **_dedicated_placement(spec),
         "restartPolicy": "Never",
         "automountServiceAccountToken": False,
         "securityContext": _pod_security_context(),
