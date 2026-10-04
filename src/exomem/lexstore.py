@@ -1962,7 +1962,8 @@ class QueryTermBudget:
     `max_units` query units (a spaced word, or an unspaced run) are kept,
     rarest in the queried scope first, carrying `max_stems` stems in all; a
     kept run carries only its content bigrams. When more units than
-    `max_units` are held, a unit on more than `common_fraction` of the
+    `common_after_units` (or `max_units` when unset) are held, a unit on more
+    than `common_fraction` of the
     scope's pages is a near-stopword for this corpus and is dropped from the
     MATCH, once the scope holds at least `common_min_pages` pages and enough
     rarer units remain to corroborate; it still counts toward corroboration
@@ -1974,6 +1975,7 @@ class QueryTermBudget:
     max_stems: int
     common_fraction: float
     common_min_pages: int
+    common_after_units: int | None = None
 
 
 def select_query_units(
@@ -2000,7 +2002,8 @@ def select_query_units(
     nor corroborate a page. Digits play no part; a rare model number is kept
     because it is rare.
 
-    While every held unit fits in `max_units`, none is dropped for being
+    While every held unit fits in the common-word threshold, none is dropped
+    for being
     common: the kept units are then exactly those an unbounded query could
     match on. A longer turn drops the common ones, but only when at least
     `min_units` units survive that; otherwise the turn is all everyday words
@@ -2030,7 +2033,10 @@ def select_query_units(
         if present:
             ranked.append((min(present), position, bm25_module.TokenUnit(stems, unit.run)))
     common: list[tuple[int, int, object]] = []
-    if len(ranked) > budget.max_units and pages >= budget.common_min_pages:
+    common_threshold = (
+        budget.max_units if budget.common_after_units is None else budget.common_after_units
+    )
+    if len(ranked) > common_threshold and pages >= budget.common_min_pages:
         ceiling = budget.common_fraction * pages
         distinctive = [entry for entry in ranked if entry[0] <= ceiling]
         if len(distinctive) >= min_units:

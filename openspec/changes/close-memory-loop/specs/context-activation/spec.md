@@ -169,6 +169,13 @@ Material SHALL use maintained catalogues without foreground repair, corpus scann
 or model acquisition. Context and category predicates SHALL precede its read cap:
 200 unit candidates plus a sentinel, three pointer candidates plus a sentinel and
 three served items overall.
+Its unit and prose-page lookups SHALL share a finite material query-unit and stem
+budget independent of ordinary anchor resolution. This budget SHALL retain current
+turn evidence for concurrently admitted topics without changing context admission,
+categorical ownership, ranking or packet bounds. Exhaustion SHALL NOT trigger an
+unbounded retry, corpus walk, new model call or whole-lane refusal.
+Expanding the allowance SHALL NOT disable the existing corpus-common word filter
+on medium-length turns; its short-query threshold remains independently applicable.
 Existing packet budgets, currentness and egress rules SHALL apply. Empty, unavailable,
 truncated and budget-limited outcomes SHALL remain distinct, including carried pages.
 
@@ -176,6 +183,18 @@ truncated and budget-limited outcomes SHALL remain distinct, including carried p
 - **WHEN** material's catalogue is unavailable or its candidate window is exhausted
 - **THEN** the packet reports the applicable lane failure or truncation rather than
   claiming no material, and performs no fallback walk or model load
+
+#### Scenario: Earlier incidental discussion does not erase admitted topics
+- **WHEN** a bounded long turn includes incidental discussion and two independently
+  admitted topics with useful authored conclusions, in either topic order
+- **THEN** the material query can retain the evidence for both conclusions and serve
+  their provenance within the unchanged candidate and packet limits
+
+#### Scenario: Long and mixed-script queries retain finite work
+- **WHEN** a turn exceeds the material query-unit or stem allowance, including a
+  long unspaced run beside spaced words
+- **THEN** the existing selector stays within both finite bounds, ordinary resolution
+  retains its own budget, and no fallback broadens the admitted contexts or packet
 
 ### Requirement: Project configuration participates in activation freshness
 A project-registry-only edit SHALL be visible to ordinary writer validation and
