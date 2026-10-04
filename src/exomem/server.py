@@ -502,8 +502,8 @@ def _find_call_summary(message) -> str:
 #: Kept short, because some clients cut server instructions off.
 SERVER_INSTRUCTIONS = (
     "This server is the user's long-term governed memory. "
-    "All tools named here belong to this server. Get or reuse `bootstrap` live "
-    "engagement and capabilities; connection alone grants no recall or "
+    "All tools named here belong to this server. Get or reuse `bootstrap` first "
+    "for engagement and capabilities; connection alone grants no recall or "
     "save. Follow policy: `off` is explicit-only; `light` needs "
     "clear relevance. When recall is warranted, call `activate_context` once "
     "before answering, with the user's message verbatim, not a query. Echo `continuity` verbatim "
