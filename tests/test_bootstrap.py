@@ -89,6 +89,11 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["simple_actions"]["remember"]["route"]["tool"] == "remember"
     assert out["simple_actions"]["capture"]["evidence_route"]["tool"] == "preserve_evidence"
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
+    # The product comparison must not prescribe another system's memory policy.
+    built_in_memory = out["memory_model"]["built_in_ai_memory"]
+    assert "host-managed" in built_in_memory
+    assert "neither reads nor configures" in built_in_memory
+    assert not built_in_memory.startswith("Use ")
     assert [s["name"] for s in out["workflow_skills"]] == [
         "exomem-continue",
         "exomem-capture",

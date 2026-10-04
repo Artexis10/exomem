@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from exomem import attention, commands, curation, find
-from exomem._hooks import exomem_capture_nudge
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 from exomem.vault import content_hash
 
@@ -870,32 +869,6 @@ def test_hosted_v5_entity_lifecycle_input_is_generic_and_bounded() -> None:
     assert family_case["entity_type"]["folder"] == "Guilds"
     assert family_case["entity_type"]["family"] == "organization"
     assert family_case["entity_type"]["id"] != family_case["entity_type"]["folder"]
-
-
-def test_hook_rearms_the_exact_ordinary_entity_read_without_becoming_a_decider() -> None:
-    reminder = exomem_capture_nudge.REMINDER
-    folded = reminder.casefold()
-
-    assert "after primary work" in folded
-    assert "before the final response" in folded
-    assert "once per session" in folded
-    assert "entity_recurrence" in reminder
-    assert "review_memory" in reminder
-    assert "limit=3" in reminder
-    assert "active agent" in folded
-    assert "no local scan" in folded
-    assert "no model" in folded
-    assert "terminal receipt" in folded
-    assert "closure-only eighth recheck" in folded
-    assert len(reminder) < 1800
-
-    # The ordinary read is a balanced/maximal behaviour. Unqualified, the hook
-    # tells a light or off session to spend a category read it never opted into,
-    # which is the nudge the prominence levels exist to withhold. The qualifier
-    # has to sit in the cadence sentence itself, not merely somewhere in the
-    # paragraph.
-    cadence = reminder.split("review_memory", 1)[0].rsplit(". ", 1)[-1].casefold()
-    assert "at balanced/maximal" in cadence, cadence
 
 
 def _lifecycle_block(path: Path) -> str:

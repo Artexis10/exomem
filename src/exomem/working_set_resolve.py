@@ -24,9 +24,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
+from . import working_set_anaphora
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
-from . import working_set_anaphora
 from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
@@ -475,6 +475,12 @@ class CandidateFacts:
     #: spells this anchor's own name words (stopwords may sit inside it, never
     #: at its edges). `None` when no name word was reached. Never serialised.
     name_span: tuple[int, int] | None = None
+    #: Every qualifying name-word run, retaining clause boundaries. None only
+    #: for callers that supplied the older single-span facts. Never serialised.
+    name_spans: tuple[tuple[int, int], ...] | None = None
+    #: Span coordinates are local to this segment, not to concatenated text.
+    #: Focus-only candidates are partitioned by the conversation projection.
+    name_span_segment: str = "turn"
     entity_type: str = ""
     #: Did the turn capitalise a shared name word away from a sentence start
     #: (`TurnAnalysis.capitalised`)? Never serialised.
@@ -512,6 +518,8 @@ class ResolvedAnchor:
     #: `exact_alias_phrases`, never serialised.
     name_contact: frozenset[str] = frozenset()
     name_span: tuple[int, int] | None = None
+    name_spans: tuple[tuple[int, int], ...] | None = None
+    name_span_segment: str = "turn"
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
@@ -1503,6 +1511,18 @@ def candidates_for(
             evidence.add("category_match")
         if row.path and row.path in used_paths:
             evidence.add("usage_prior")
+        name_span, name_spans = (
+            _name_spans(
+                analysis.tokens,
+                stopwords,
+                name_terms_folded,
+                analysis.run_breaks,
+                token_folds,
+                _literal_separator_spans(analysis, row),
+            )
+            if name_contact and not name_contact & embedded_terms
+            else (None, ())
+        )
         out.append(
             CandidateFacts(
                 anchor_id=row.anchor_id,
@@ -1517,15 +1537,8 @@ def candidates_for(
                 evidence=frozenset(evidence),
                 exact_alias_phrases=matched_phrases,
                 name_contact=name_contact,
-                name_span=_name_span(
-                    analysis.tokens,
-                    stopwords,
-                    name_terms_folded,
-                    analysis.run_breaks,
-                    token_folds,
-                )
-                if name_contact and not name_contact & embedded_terms
-                else None,
+                name_span=name_span,
+                name_spans=name_spans,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
                 name_lower_case=bool(
@@ -1621,38 +1634,49 @@ def candidates_for_each(
     )
 
 def _token_folds(tokens: Sequence[str], stopwords: frozenset[str]) -> tuple[str | None, ...]:
-    """Each token's lexical fold, `None` for a stopword: what `_name_span`
+    """Each token's lexical fold, `None` for a stopword: what `_name_spans`
     compares against a name's terms, computed once per turn."""
     return tuple(None if token in stopwords else _fold_lexical_term(token) for token in tokens)
 
 
-def _name_span(
+def _name_spans(
     tokens: Sequence[str],
     stopwords: frozenset[str],
     name_terms: frozenset[str],
     breaks: frozenset[int] = frozenset(),
     folds: Sequence[str | None] | None = None,
-) -> tuple[int, int] | None:
-    """The longest contiguous run of `tokens` spelling `name_terms` words.
+    literal_spans: Sequence[tuple[int, int]] = (),
+) -> tuple[tuple[int, int] | None, tuple[tuple[int, int], ...]]:
+    """The longest name run and every comparably worded occurrence.
 
     Stopwords may sit inside a run ("bank of the north") but never start or
     end one, and any other word breaks it. So does clause punctuation
     (`breaks`: token indices with a boundary just before them) and a
     coordinator ("and", "or"): "the solar array, monitoring" and "the solar
-    array and monitoring" are two things, not one name. Ties go to the
+    array and monitoring" are two things, not one name. A separator inside
+    a complete admitted name spelled literally in the turn belongs to that
+    name, not to the surrounding clauses. Ties go to the
     earliest run, so the span is deterministic. `None` when no token is a
     name word. `folds` is each token's `_fold_lexical_term` (`None` for a
     stopword), computed once per turn by a caller that spans many names.
+    Where a run has two name words, an isolated generic word is not a second
+    name mention. Otherwise retain the one-word runs the existing rule uses.
     """
     if folds is None:
         folds = _token_folds(tokens, stopwords)
+    literal_interior = frozenset(
+        index for start, end in literal_spans for index in range(start + 1, end)
+    )
+    spans: list[tuple[int, int, int]] = []
     best: tuple[int, int] | None = None
     best_words = 0
     start: int | None = None
     last_name = -1
     words = 0
     for index, token in enumerate(tokens):
-        if index in breaks or token in _RUN_COORDINATORS:
+        if index not in literal_interior and (index in breaks or token in _RUN_COORDINATORS):
+            if start is not None:
+                spans.append((start, last_name + 1, words))
             start = None
             if token in _RUN_COORDINATORS:
                 continue
@@ -1667,8 +1691,37 @@ def _name_span(
         elif token in stopwords and start is not None:
             continue
         else:
+            if start is not None:
+                spans.append((start, last_name + 1, words))
             start = None
-    return best
+    if start is not None:
+        spans.append((start, last_name + 1, words))
+    return best, tuple((start, end) for start, end, count in spans if count >= min(2, best_words))
+
+
+def _literal_separator_spans(analysis: TurnAnalysis, row: AnchorFacts) -> tuple[tuple[int, int], ...]:
+    """Literal, token-aligned admitted names whose punctuation is part of the name.
+
+    Do not infer a name from its words across a clause boundary: the complete
+    title or indexed alias, including its separator, must occur in the turn.
+    Tokenising both sides as well rejects a name inside a longer word.
+    Indexed aliases do not retain authorship: an authored alias may equal a
+    derived one. Admission and audience filtering remain the index's rules.
+    """
+    spans: set[tuple[int, int]] = set()
+    for spelling in (row.title, *row.aliases):
+        name = normalize(spelling)
+        name_tokens = tokens_of(name)
+        if not name_tokens or not (
+            _RUN_COORDINATORS.intersection(name_tokens) or _CLAUSE_BREAK.search(name)
+        ):
+            continue
+        for offset in _occurrences(analysis.text, name):
+            before = tokens_of(analysis.text[:offset])
+            after = tokens_of(analysis.text[offset + len(name) :])
+            if (*before, *name_tokens, *after) == analysis.tokens:
+                spans.add((len(before), len(before) + len(name_tokens)))
+    return tuple(sorted(spans))
 
 
 def _derived_key(title: str) -> str:
@@ -2376,6 +2429,8 @@ def resolve(
                 exact_alias_phrases=candidate.exact_alias_phrases,
                 name_contact=candidate.name_contact,
                 name_span=candidate.name_span,
+                name_spans=candidate.name_spans,
+                name_span_segment=candidate.name_span_segment,
                 entity_type=candidate.entity_type,
                 name_capitalised=candidate.name_capitalised,
                 name_lower_case=candidate.name_lower_case,
@@ -2457,6 +2512,20 @@ def _span_inside(inner: tuple[int, int] | None, outer: tuple[int, int] | None) -
     return outer[0] <= inner[0] and inner[1] <= outer[1]
 
 
+def _all_name_spans_inside(inner: ResolvedAnchor, outer: ResolvedAnchor) -> bool:
+    if inner.name_span_segment != outer.name_span_segment:
+        return False
+    inner_spans = inner.name_spans
+    outer_spans = outer.name_spans
+    if inner_spans is None:
+        inner_spans = (inner.name_span,) if inner.name_span is not None else ()
+    if outer_spans is None:
+        outer_spans = (outer.name_span,) if outer.name_span is not None else ()
+    return bool(inner_spans) and all(
+        any(_span_inside(span, wider) for wider in outer_spans) for span in inner_spans
+    )
+
+
 def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedAnchor, ...]:
     """A qualifier narrows competing senses (close-memory-loop, activation
     quality).
@@ -2475,11 +2544,15 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
     A word of the wider name said ELSEWHERE in the turn ("I blew my grocery
     budget, and the kitchen renovation is stalled") leaves both runs the same
     and narrows nothing; nor does a turn that names each sense in its own
-    run. With no strict containment the turn is left as it was, and an
+    run. Every qualifying occurrence must be contained: an independent later
+    mention survives even if its earlier equal-length run is inside the name.
+    With no strict containment the turn is left as it was, and an
     ambiguous turn keeps every sense its words touched as the agent's menu. A
     sense the turn spelled by name (`exact_alias`, `agent_choice`) is never
     narrowed out: R1 already decides between spelled names. Cross-kind
-    anchors are complementary and never narrow one another.
+    anchors are complementary and never narrow one another. Span containment
+    stays within one turn/focus segment; equal local coordinates in different
+    segments do not make two mentions overlap.
     """
     resolved = [
         anchor
@@ -2494,7 +2567,7 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
         wider = [
             other
             for other in resolved
-            if other.kind == anchor.kind and _span_inside(anchor.name_span, other.name_span)
+            if other.kind == anchor.kind and _all_name_spans_inside(anchor, other)
         ]
         if wider:
             narrowed.setdefault(anchor.kind, set()).add(anchor.anchor_id)
@@ -2511,7 +2584,7 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
         return (
             anchor.status == "partial"
             and not set(anchor.evidence) & (CONTACT_KINDS - {"rare_term", "lexical_overlap"})
-            and any(_span_inside(anchor.name_span, wide.name_span) for wide in chosen[anchor.kind])
+            and any(_all_name_spans_inside(anchor, wide) for wide in chosen[anchor.kind])
         )
 
     return tuple(anchor for anchor in anchors if not dropped(anchor))

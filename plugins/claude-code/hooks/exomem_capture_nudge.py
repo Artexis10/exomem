@@ -38,11 +38,16 @@ names are still accepted for back-compat (aliased to the EXOMEM_* names at start
 
 Episode ask. Every K substantive turns (K and a cooldown by prominence,
 `_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
-override) the hook asks for one `episode_memory` record under a key derived from
+override), and only once work has LANDED since the last ask or record
+(`landed_since_ask`, set by the same `_successful_landing` the capture reminder
+uses), the hook asks for one `episode_memory` record under a key derived from
 the client and session id alone (`episode_key`), so the key survives compaction
-without the hook reading a transcript record. Only a SUCCESSFUL record resets the
-count: an unrelated write, a `Saved ->` marker or a failed record leaves the
-episode pending. When the ask is due it takes that Stop; on every other Stop the
+without the hook reading a transcript record. A session that never lands work is
+never asked, and an ask answered without a record is not repeated until the next
+landing: an autonomous run with no record would otherwise be blocked at every
+cooldown for as long as it ran. Only a SUCCESSFUL record resets the turn count:
+an unrelated write, a `Saved ->` marker or a failed record leaves the episode
+pending. When the ask is due it takes that Stop; on every other Stop the
 per-turn capture reminder behaves exactly as before. The hook never records
 anything itself — hooks trigger, agents author.
 
@@ -126,52 +131,22 @@ _KB_WRITE = re.compile(
     re.I,
 )
 
-REMINDER = (
-    "[Exomem capture check] Reuse evidence; skip transient code/test/CI. "
-    "Capture durable outcomes per live policy. "
-    "Decompose before routing; open notes have no priority. Keep hypotheses attributed/uncertain. "
-    "Check coverage once/episode. Stable preference/recurring routine/historical baseline/"
-    "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/decision value; "
-    "fleeting/one-off/incidental/trivial/tentative: quiet. At balanced/maximal, "
-    "after primary work, before the final response, "
-    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    "no local scan; no model. Active agent uses active entity registry/selected knowledge packs: "
-    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
-    "in context. Uniquely resolved Entity: narrow additive entity facet, else concise compiled "
-    "observation/proactive_capture; "
-    "affiliation relation/link_acceptance; compatible Records only. Hydrate: edit_memory first; else "
-    'connect_memory(operation="create-entity") only for identity stable, and central or recurring: '
-    "proactive_capture. Merge/substantial curation: confirmed "
-    "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
-    "Distil; no transcripts. replace_memory supersedes contradicted "
-    "conclusions, not corrections beside them. Stated intent -> "
-    "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
-    "ephemeral; selected is not write consent: proactive_capture keeps exact Source/Evidence bytes "
-    "by role, not MIME. No handle: non-committing handoff; delivery needs Evidence receipt/Record; "
-    "no remote byte inference. No schema: "
-    "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
-    "Knowledge Base: stop."
-)
-
-
-#: The short capture check, sent on every fire after a session's first (which carries
-#: the full `REMINDER`, once, and again after a compaction). The full doctrine is in
-#: the served core and in `REMINDER`; a fire that repeats it dozens of times in one
-#: session only spends context. Keeps the incident rules by name.
+#: The capture check, one short line on every fire. It names the rules that prevent known
+#: incidents and points at where the full capture rules live: the shipped engagement
+#: reference, which `read_memory` opens from the vault (`exomem init` deploys it there).
+#: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
-    "[Exomem capture check] Capture a durable decision, outcome or stable fact per live "
-    "policy: distil, no transcripts; replace_memory supersedes a contradicted conclusion; "
-    "stated intent -> Planning/plan_memory, observed outcome -> Records/record_memory; "
-    "transient code/test/CI stays out. Nothing durable: stop."
+    "[Exomem capture check] Per live policy: no transcripts; replace_memory supersedes a "
+    "contradicted conclusion; intent->Planning/plan_memory, outcome->Records/record_memory; "
+    "no transient code/test/CI; nothing durable: stop. "
+    "Rules: read_memory .exomem/schema/references/engagement.md"
 )
 
-#: The episode ask. Its own constant, so `REMINDER`'s bytes (and every pin on
-#: them) stay exactly as they were. `{key}` is the session's episode key.
+#: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] If the conversation reached a decision or a stopping point, "
-    'call episode_memory once: action="record", episode="{key}", a one-line subject and '
-    "summary, short worked_on, decided and open items; said only for a user statement worth "
-    "keeping verbatim. Distil; no transcript. Otherwise do nothing."
+    "[Exomem episode check] Decision or stopping point reached? episode_memory once: "
+    'action="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
+    "Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
@@ -769,6 +744,8 @@ _EPISODE_STATE_DEFAULT = {
     "substantive_since_record": 0,
     "last_ask_ts": 0.0,
     "last_seen_revisions": 0,
+    # A landing since the last episode ask or record. The ask needs one.
+    "landed_since_ask": False,
     # The candidate ledger, mirrored from the door (task 4.1): which episode
     # this session prepared candidates for, its next step (`unknown` until
     # read, and again once the session moves its workflow), what it attempted,
@@ -799,6 +776,7 @@ def _read_episode_state(path: Path) -> dict:
             "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
             "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
             "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
+            "landed_since_ask": data.get("landed_since_ask") is True,
             "workflow_episode": (
                 workflow
                 if isinstance(workflow, str) and _EPISODE_KEY_RE.fullmatch(workflow)
@@ -1018,7 +996,8 @@ def _episode_ask(
 
     Coverage is hook-local: covered through the last successful record,
     pending while substantive turns accrue after it. Asking never resets the
-    count — only a record does — so an ignored ask repeats after its cooldown.
+    count — only a record does — but it does spend the landing the ask needs
+    (`landed_since_ask`), so an ignored ask is not repeated until work lands again.
 
     Before an ask that is otherwise due actually fires, one bounded REST
     `inspect` call (`_episode_revision_count`) checks whether some other door
@@ -1035,15 +1014,20 @@ def _episode_ask(
     recorded = any(_successful_episode_record(tool) for tool in tools)
     if recorded:
         state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
-    elif substantive:
-        state["substantive_since_record"] += 1
+    else:
+        if substantive:
+            state["substantive_since_record"] += 1
+        if any(_successful_landing(tool) for tool in tools):
+            state["landed_since_ask"] = True
     _note_workflow(state, tools, recorded)
     now = time.time()
     client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
     key = episode_key(client, session_id)
     about_due = (
         turns > 0
+        and state["landed_since_ask"]
         and state["substantive_since_record"] >= turns
         and now - state["last_ask_ts"] >= cooldown
     )
@@ -1058,11 +1042,13 @@ def _episode_ask(
             baseline = state["last_seen_revisions"]
             if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
                 state["substantive_since_record"] = 0
+                state["landed_since_ask"] = False
                 about_due = False
             state["last_seen_revisions"] = revisions
     due = about_due
     if due:
         state["last_ask_ts"] = now
+        state["landed_since_ask"] = False
     coverage_ask = None if due else _coverage_ask(state, now, cooldown)
     _write_episode_state(path, state)
     if due:
@@ -1115,6 +1101,8 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     The ask blocks a Stop, and the agent answers it in the continuation that
     follows, which Stops again with `stop_hook_active`. That record is the
     coverage the ask asked for; dropping it would repeat the ask every cooldown.
+    A landing is not counted here: the continuation re-reads the whole turn, so
+    it would see the landing the ask already spent.
     """
     recorded = any(_successful_episode_record(tool) for tool in tools)
     if not session_id or not (recorded or _workflow_episode(tools)):
@@ -1123,6 +1111,7 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     state = _read_episode_state(path)
     if recorded:
         state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     _note_workflow(state, tools, recorded)
     _write_episode_state(path, state)
@@ -1202,12 +1191,7 @@ def _log(text: str) -> None:
 
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
-        return (
-            "Through the admitted Exomem native MCP, bootstrap if the live operating "
-            "contract is absent and check live capture capabilities first. "
-            "If not connected or capture is unavailable, skip this reminder; "
-            "do not assume writes are available.\n\n" + reason
-        )
+        return "Skip if Exomem is not connected or cannot capture; bootstrap first if no contract.\n" + reason
     return reason
 
 
@@ -1300,12 +1284,9 @@ def main(argv: list[str] | None = None) -> int:
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 
-    # The full doctrine once per session (the stamp is cleared on compaction, which
-    # rewrites the context it lived in); every later fire is the short check.
-    first_fire = not stamp.exists()
     _touch(stamp)
     _log(assistant_text)
-    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER if first_fire else REMINDER_SHORT)}))
+    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER_SHORT)}))
     return 0
 
 

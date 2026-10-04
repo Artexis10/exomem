@@ -953,7 +953,7 @@ def _fabricated_hook_stream(session_id: str = "s") -> str:
     a fixture is a live capture masquerading as a unit test.
     """
 
-    from exomem._hooks.exomem_capture_nudge import REMINDER
+    from exomem._hooks.exomem_capture_nudge import REMINDER_SHORT
 
     def pair(hook: str, output: str) -> list[str]:
         started = {
@@ -979,7 +979,7 @@ def _fabricated_hook_stream(session_id: str = "s") -> str:
         }
         return [json.dumps(started), json.dumps(response)]
 
-    blocked = json.dumps({"decision": "block", "reason": REMINDER})
+    blocked = json.dumps({"decision": "block", "reason": REMINDER_SHORT})
     lines = [
         json.dumps({"type": "system", "subtype": "init", "session_id": session_id}),
         *pair("UserPromptSubmit", ""),
@@ -1962,7 +1962,7 @@ def test_the_old_hook_event_subtype_counts_nothing() -> None:
 
 
 def test_hook_activity_counts_responses_and_the_capture_nudge_firing() -> None:
-    """M3. One hook event = one hook_response; a firing carries the REMINDER."""
+    """M3. One hook event = one hook_response; a firing carries the capture check."""
 
     from epistemic.journeys import f27_replay as journey
 

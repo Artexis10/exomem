@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "exomem-cloud",
-  "version": "0.102.6",
+  "version": "0.103.0",
   "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
   "author": {
     "name": "Substrate Systems OÜ",
@@ -80,7 +80,7 @@
               "prompt": "Thanks!"
             },
             {
-              "description": "cloud capability boundary. Cloud bootstrap excludes binary transfer, media processing/reading and vault adoption. No media has been uploaded. Explain that this Cloud connection cannot access a file on the user's laptop; offer an explicit supported text capture if useful. Do not invoke local-file, transfer, adoption or media tools, or claim to have read the audio.",
+              "description": "cloud capability boundary. No file or native file handle has been supplied. Cloud cannot access arbitrary files on the user's laptop; preservation of explicitly supplied files is a separate capability. Media processing/reading and vault adoption remain unavailable on this Cloud connection. Explain that this Cloud connection cannot access an unsupplied file on the user's laptop; offer an explicit supported text capture if useful. Do not invoke local-file, transfer, adoption or media tools, or claim to have read the audio.",
               "prompt": "Read the audio file on my laptop through this cloud connection. Do not pretend you have access."
             },
             {

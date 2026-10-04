@@ -66,6 +66,17 @@ spec:
             # default-off authority, not implied by enabling ordinary Cloud.
             - name: EXOMEM_CLOUD_ENABLED
               value: "true"
+            {{- if .Values.cloudGateway.artifactTransportEnabled }}
+            - name: EXOMEM_CLOUD_ARTIFACT_TRANSPORT_ENABLED
+              value: "true"
+            - name: EXOMEM_CLOUD_ARTIFACT_CELL_IDS
+              value: {{ .Values.artifactBroker.cellIds | toJson | quote }}
+            - name: EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.artifactSigningKeySecretName }}
+                  key: {{ .Values.cloudGateway.artifactSigningKeySecretKey }}
+            {{- end }}
             - name: EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED
               value: {{ .Values.cloudGateway.marketplaceReviewerAccessEnabled | toString | quote }}
             - name: DATABASE_URL

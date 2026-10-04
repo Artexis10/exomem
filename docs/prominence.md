@@ -87,7 +87,9 @@ yet expose `configure_memory`. Adding it there requires a new hosted profile.
 run a capture/retrieve nudge that re-arms the check, so moderate
 instructions are enough. Below `maximal` the capture reminder fires on turns that
 land work (a commit, push, merge, tag, or PR/release create or merge),
-not on reply length; `maximal` keeps the length gate.
+not on reply length; `maximal` keeps the length gate. The periodic episode check
+(every few substantive turns) also needs a landing since the last check or record, so a
+session that never lands work is not asked and an unanswered check waits for the next landing.
 
 **Assistants without hooks — claude.ai, ChatGPT, the hosted service — default to
 `maximal`.** There is nothing there to re-arm the check, and instruction text decays

@@ -924,6 +924,10 @@ def test_the_everyday_operator_reads_status_events_and_logs_but_no_secret_or_con
         ("", "pods"), ("", "pods/log"), ("", "events"), ("", "namespaces"),
         ("", "persistentvolumeclaims"), ("", "services"), ("", "nodes"),
         ("apps", "deployments"), ("apps", "statefulsets"), ("batch", "jobs"),
+        ("discovery.k8s.io", "endpointslices"),
+        ("networking.k8s.io", "networkpolicies"),
+        ("admissionregistration.k8s.io", "validatingadmissionpolicies"),
+        ("admissionregistration.k8s.io", "validatingadmissionpolicybindings"),
     }
 
     (binding,) = _group_bindings(documents, OPERATOR_GROUP)
@@ -1045,3 +1049,92 @@ def test_the_edge_api_server_address_is_required_and_a_single_host() -> None:
         result = _helm_template_result("--set-json", setting)
         assert result.returncode != 0, setting
         assert "apiServerCidrs" in result.stderr, (setting, result.stderr)
+
+
+ARTIFACT_BROKER_ARGS = (
+    "--set", "artifactBroker.enabled=true",
+    "--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
+    "--set-json", 'artifactBroker.cellIds=["aaaaaaaaaaaaaaaa"]',
+)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_artifact_broker_is_default_off_with_no_transport_env_or_workload() -> None:
+    documents = _helm_template()
+    assert not any(doc["metadata"]["name"] == "exomem-artifact-broker" for doc in documents)
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        pod = _find(documents, "Deployment", name)["spec"]["template"]["spec"]
+        assert not any("ARTIFACT" in e["name"] for e in pod["containers"][0]["env"])
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_artifact_broker_is_ephemeral_confined_and_activated_only_for_selected_cells() -> None:
+    documents = _helm_template(*ARTIFACT_BROKER_ARGS)
+    deployment = _find(documents, "Deployment", "exomem-artifact-broker")
+    assert deployment["metadata"]["namespace"] == "exomem-cloud"
+    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+    pod = deployment["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["volumes"] == [{"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}}]
+    container, = pod["containers"]
+    assert container["command"] == ["python", "-m", "exomem.artifact_broker"]
+    assert container["securityContext"]["runAsUser"] == 1000
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    public_key = next(e for e in container["env"] if e["name"] == "EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY")
+    assert public_key["valueFrom"]["secretKeyRef"] == {"name": "exomem-artifact-broker-public-key", "key": "public-key"}
+    assert {e["name"] for e in container["env"]} == {"EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY", "TMPDIR"}
+    service = _find(documents, "Service", "exomem-artifact-broker")["spec"]
+    assert service["type"] == "ClusterIP"
+    assert service["clusterIP"] == "10.43.0.25"
+    assert service["ports"] == [{"name": "http", "port": 8767, "targetPort": "http", "protocol": "TCP"}]
+    controller = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e.get("value") for e in controller["env"]}
+    assert env["CELLCTL_ARTIFACT_BROKER_URL"] == "http://10.43.0.25:8767"
+    assert env["CELLCTL_ARTIFACT_BROKER_CELL_IDS"] == '["aaaaaaaaaaaaaaaa"]'
+    policies = _find(documents, "NetworkPolicy", "exomem-artifact-broker")["spec"]
+    peer, = policies["ingress"][0]["from"]
+    assert policies["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8767}]
+    assert _selects(peer["namespaceSelector"], {"exomem.io/cloud-cell": "aaaaaaaaaaaaaaaa", "kubernetes.io/metadata.name": "exo-cell-aaaaaaaaaaaaaaaa"})
+    assert not _selects(peer["namespaceSelector"], {"exomem.io/cloud-cell": "bbbbbbbbbbbbbbbb", "kubernetes.io/metadata.name": "exo-cell-bbbbbbbbbbbbbbbb"})
+    assert _selects(peer["podSelector"], {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": "aaaaaaaaaaaaaaaa"})
+    assert not _selects(peer["podSelector"], {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": "aaaaaaaaaaaaaaaa", "exomem.io/cell-job": "backup"})
+    https, dns = policies["egress"]
+    assert https["ports"] == [{"protocol": "TCP", "port": 443}]
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())
+    assert https["to"] == [{"ipBlock": {"cidr": "0.0.0.0/0", "except": values["cells"]["jobEgressExcept"]}}]
+    assert dns["to"][0]["podSelector"]["matchLabels"] == {"k8s-app": "kube-dns"}
+    assert _find(documents, "NetworkPolicy", "exomem-cloud-gateway") == _find(_helm_template(), "NetworkPolicy", "exomem-cloud-gateway")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("setting", [
+    "artifactBroker.image=example:latest", "artifactBroker.endpoint=http://broker:8767",
+    "artifactBroker.endpoint=http://8.8.8.8:8767", "artifactBroker.endpoint=http://10.43.0.25:80",
+    "artifactBroker.endpoint=http://user@10.43.0.25:8767", "artifactBroker.endpoint=http://10.43.0.25:8767/path",
+    "artifactBroker.endpoint=http://10.43.0.25:8767?x=y", "artifactBroker.cellIds=[\"bad\"]",
+    "artifactBroker.cellIds=[\"aaaaaaaaaaaaaaaa\",\"aaaaaaaaaaaaaaaa\"]", "cells.jobEgressExcept=[]",
+])
+def test_artifact_broker_refuses_unconfined_chart_configuration(setting: str) -> None:
+    flag = "--set-json" if setting.endswith("]") else "--set-string"
+    result = _helm_template_result(*ARTIFACT_BROKER_ARGS, flag, setting)
+    assert result.returncode != 0, setting
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_artifact_signer_key_belongs_only_to_gateway_and_issuance_requires_broker() -> None:
+    documents = _helm_template(*ARTIFACT_BROKER_ARGS, "--set", "cloudGateway.artifactTransportEnabled=true")
+    gateway = _find(documents, "Deployment", "exomem-cloud-gateway")["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e for e in gateway["env"]}
+    assert env["EXOMEM_CLOUD_ARTIFACT_TRANSPORT_ENABLED"]["value"] == "true"
+    assert env["EXOMEM_CLOUD_ARTIFACT_CELL_IDS"]["value"] == '["aaaaaaaaaaaaaaaa"]'
+    signing_key = env["EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY"]["valueFrom"]["secretKeyRef"]
+    assert signing_key == {"name": "exomem-cloud-artifact-signing-key", "key": "signing-key"}
+    for doc in documents:
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"] != "exomem-cloud-gateway":
+            assert signing_key["name"] not in str(doc)
+    result = _helm_template_result("--set", "cloudGateway.artifactTransportEnabled=true")
+    assert result.returncode != 0

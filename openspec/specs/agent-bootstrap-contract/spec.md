@@ -915,8 +915,8 @@ parsed command words, not substrings of prose, SHALL recognise the Claude and
 Codex transcript shapes, and SHALL NOT count a command that reports an explicit non-zero exit code or an error result. A command with no reported exit code, such as a Codex call that returned while the command was still running, counts. A dry run, a merge `--abort` or `--quit`, a push that deletes a remote ref, and a `git tag` that only lists, verifies or deletes are not landings.
 The most aggressive level SHALL keep the reply-length gate. At every level the
 reminder SHALL stay silent for a turn that already wrote to the knowledge base,
-SHALL respect `stop_hook_active` and the cooldown, and the episode ask SHALL be
-unaffected.
+SHALL respect `stop_hook_active` and the cooldown, and the episode ask SHALL
+follow its own landing rule.
 
 #### Scenario: A long reply without a landing is not nudged
 
@@ -937,3 +937,54 @@ unaffected.
 
 - **WHEN** a turn at `maximal` has a long reply and no landing
 - **THEN** the capture nudge fires
+
+### Requirement: The client episode ask needs a landing since the last ask or record
+
+Where a client hook asks for an episode record, it SHALL ask only when work has
+landed (by the same detector as the capture nudge) since the last episode ask
+or, if newer, the last successful `episode_memory` record, in addition to its
+turn-count and cooldown cadence. A landing seen before the cadence is due SHALL
+be remembered until it is. A session that never lands work SHALL NOT be asked,
+and an ask answered without a record SHALL NOT be repeated until a new landing.
+The `stop_hook_active` self-disarm, the revision re-base against the service,
+candidate-coverage asks, `prominence=off` and the cadence overrides SHALL be
+unaffected.
+
+#### Scenario: A session that never lands work is not asked
+
+- **WHEN** a session at `balanced` completes many substantive turns whose commands never commit, push, merge, tag or create a pull request or release
+- **THEN** the episode ask does not fire
+
+#### Scenario: A landing makes a due ask fire
+
+- **WHEN** the turn count and cooldown are satisfied and a turn then runs `git push` successfully, in a Claude or a Codex transcript
+- **THEN** the episode ask fires on that Stop
+
+#### Scenario: An unanswered ask waits for a new landing
+
+- **WHEN** an episode ask fired and the agent made no record, and later turns satisfy the cooldown without a landing
+- **THEN** the ask does not repeat until a turn lands work
+
+#### Scenario: A record resets the pending landing
+
+- **WHEN** a successful `episode_memory` record is made after a landing
+- **THEN** the ask needs both a fresh landing and a fresh turn count
+
+### Requirement: Stop-hook blocks are one short paragraph
+
+Where a client Stop hook blocks to ask for a capture or an episode record, the reason SHALL be one short paragraph, asserted by a byte ceiling per block. The capture check SHALL be the same short text on every fire, with no first-fire or post-compaction full text, and SHALL NOT carry the capture doctrine. It SHALL name the rules that prevent known incidents (the live-policy pointer, no transcripts, `replace_memory` supersedes a contradicted conclusion, stated intent to Planning and observed outcome to Records, transient code, test and CI output stays out, and nothing durable means stop) and SHALL end with a pointer to the shipped engagement reference by a vault path that `read_memory` opens (`.exomem/schema/references/engagement.md`), where the full capture rules live. The episode ask SHALL keep the `episode_memory` record call, the episode key and its do-nothing escape. When the hook runs against the native MCP connection, its preamble SHALL be one clause of at most 90 bytes that says to skip when Exomem is not connected or cannot capture and to bootstrap first if the contract is absent. Shortening a block SHALL NOT change when it fires.
+
+#### Scenario: Every capture fire is the short check
+
+- **WHEN** the capture check fires three times in one session, or fires after a compaction
+- **THEN** each fire carries the same short check
+
+#### Scenario: A block is short in MCP mode
+
+- **WHEN** the capture check or the episode ask fires against the native MCP connection
+- **THEN** the whole reason, preamble included, is within its byte ceiling and the preamble is at most 90 bytes
+
+#### Scenario: The pointer reaches the rules
+
+- **WHEN** an agent with only the MCP connection follows the capture check's pointer
+- **THEN** `read_memory` returns the shipped engagement reference from the vault

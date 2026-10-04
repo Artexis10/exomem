@@ -24,10 +24,10 @@ embedding, no model.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-import re
 from typing import Any
 
 FOCUS_MAX_CHARS = 240
@@ -390,7 +390,9 @@ def apply(
                 continue
             existing = merged.get(item.anchor_id)
             if existing is None:
-                merged[item.anchor_id] = replace(item, evidence=frozenset(worded))
+                merged[item.anchor_id] = replace(
+                    item, evidence=frozenset(worded), name_span_segment=ORIGIN_FOCUS
+                )
                 origins[item.anchor_id] = ORIGIN_FOCUS
             else:
                 merged[item.anchor_id] = replace(
@@ -450,7 +452,6 @@ def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
     if not analysis.content_words:
         return True
     from . import working_set_anaphora
-
     from .working_set_index import normalize, tokens_of
 
     licensed = working_set_anaphora._TASK_FORMS | frozenset(
