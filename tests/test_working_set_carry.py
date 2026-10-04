@@ -1180,8 +1180,9 @@ def test_a_carried_page_with_no_readable_units_abstains(
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unresolved"}
     assert packet["units"] == []
-    assert packet["anchors"] == []
-    assert "carried_by" not in packet["generation"]
+    assert [a["path"] for a in packet["anchors"]] == [CARRY_PAGE]
+    assert {"role": "x", "reason": "no_material"} in packet["missing"]
+    assert packet["generation"]["carried_by"] == "retrieval"
 
 
 def test_a_carried_page_serves_each_of_its_units_once(
@@ -2551,18 +2552,38 @@ def test_a_band_resolution_on_a_name_is_not_vetoed_by_a_phrase_hit(
     assert asked == []
 
 
+@pytest.mark.parametrize("failed", [False, True])
 def test_the_band_does_not_yield_to_a_page_the_carry_cannot_serve(
-    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch, failed: bool,
 ) -> None:
     """The carry names the note but its lanes read nothing off it. Yielding
     would lose the band's page and serve nothing, so the band's resolution
     stands."""
     turn = "What did we decide about the quillon vantry window for the sled?"
+    _write(carry_vault / CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Quillon vantry window\n\n"
+        "- [contact] Quillon vantry window phone details are private. ^contact\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
     _band_on_the_sled(monkeypatch)
-    monkeypatch.setattr(working_set, "_carried_packet", lambda *_a, **_k: None)
+    if failed:
+        real = lexstore.LexicalStore.search_semantic_units_result
+
+        def unavailable_material(self, *args, **kwargs):
+            if kwargs.get("excluded_categories_by_parent") is not None:
+                return lexstore.CatalogQueryResult(
+                    None, lexstore.CatalogReadiness("unavailable", False, "sqlite"),
+                )
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(lexstore.LexicalStore, "search_semantic_units_result", unavailable_material)
 
     packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert "carried_by" not in packet["generation"]
     assert _statuses(packet).get(SLED_ANCHOR) == "resolved"
+    assert any("400 kg" in unit["text"] for unit in packet["units"])
+    assert {"role": "material", "reason": "lane_failed" if failed else "no_material"} in packet["missing"]
+    assert not any(unit["provenance"]["path"] == CARRY_PAGE for unit in packet["units"])

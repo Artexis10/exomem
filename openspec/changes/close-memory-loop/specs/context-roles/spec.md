@@ -1,4 +1,51 @@
+## MODIFIED Requirements
+
+### Requirement: Deterministic role selection
+Roles for a turn SHALL be selected as the union of the defaults for each resolved
+anchor's kind and the roles whose cue patterns match the turn, evaluated with the same
+normalisation the anchor resolver uses, with no model call and no randomness; the
+selected set SHALL be bounded (at most 6 roles) in the registry's priority order, and
+the packet SHALL list the selected roles and, for each, whether it came from an anchor
+default or a turn cue. A pathless project SHALL NOT select an effective entity lane
+by default, since that lane requires an anchor page. Its declared default SHALL remain
+available when an owner override chooses a different lane; cues and defaults from
+other anchor kinds SHALL remain unchanged.
+
+#### Scenario: Planning verbs add plan and method roles
+- **WHEN** a turn contains a planning cue ("I'm planning to", "how should I") and a
+  resource anchor resolves
+- **THEN** the selected roles include `resources`, `current_state`, `constraints`
+  (anchor defaults) and `active_plans`, `methods` (cues), in registry order
+
+#### Scenario: Same turn, same roles
+- **WHEN** the same turn is activated twice against the same index generation and
+  registry hash
+- **THEN** the selected roles and their attributions are identical
+
+#### Scenario: Project material replaces only an empty default
+- **WHEN** an uncued pathless project resolves with shipped roles
+- **THEN** its six selected roles include preferences, constraints, recent change,
+  active plans, material and precedents, without a page-reading identity lane
+
+#### Scenario: An owner's useful project identity lens survives
+- **WHEN** an owner override gives identity a units lane and retains its project default
+- **THEN** project resolution still selects identity in the declared priority order
+
 ## ADDED Requirements
+
+### Requirement: Explicit material lens for otherwise unowned knowledge
+The shipped registry SHALL add `material` after active plans and before methods,
+defaulting for project, hub and transient carried-page contexts, with no shipped cues.
+It SHALL share the six-role ceiling and existing owner-override rules. A recency-only
+context SHALL NOT select it. Existing categorical lanes SHALL remain unchanged.
+
+#### Scenario: Owner narrowing remains effective
+- **WHEN** an owner narrows material defaults to an empty set
+- **THEN** neither resolved nor carried contexts select material by default
+
+#### Scenario: A full role schedule stays bounded
+- **WHEN** six higher-priority roles already qualify
+- **THEN** material does not become a seventh lane, and its role-limit omission is visible
 
 ### Requirement: Contact units are served only when the turn asks to reach the person
 
