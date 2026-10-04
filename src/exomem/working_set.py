@@ -1247,7 +1247,7 @@ def _material_lane(
             for category in owners
         })
     store = lexstore.get_store(vault_root)
-    term_budget = working_set_runtime.lexical_term_budget()
+    term_budget = working_set_runtime.material_term_budget()
     result = store.search_semantic_units_result(
         [], UNIT_LANE_LIMIT + 1, (), (), "kb", fresh,
         allowed_parent_paths=set(neighbourhood), excluded_categories_by_parent=excluded,

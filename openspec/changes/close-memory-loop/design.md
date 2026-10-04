@@ -227,7 +227,7 @@ Declare material after `active_plans` and before `methods`, with defaults for pr
 
 Exclude categories owned by any effective non-material role, selected or not, so an unselected contact or owner-defined role cannot be bypassed. Compare effective category identities in each candidate parent's attached-project/page-type registry view, including accepted aliases in that scope and literal identity for unregistered labels. The maintained catalogue already stores resolved unit categories and parent eligibility metadata; do not infer semantic equivalence from a label or construct a global project-alias expansion.
 
-Material searches only already admitted, caller-visible neighbourhoods or explicitly carried pages. It never supplies resolution evidence or runs on a recency-only context. Reuse existing lexical tokenisation, query-term bounds and internal ranking; require content evidence beyond the resolved name. Apply parent and category predicates before the bounded candidate limit and retain relevance order through assembly. Do not pass a nonempty query to the ordinary semantic-find branch: that branch does not preserve this lane's read ceiling, parent restriction and repair prohibition. Extend the existing ready-catalogue query seam instead, with no new sidecar, model acquisition or foreground walk.
+Material searches only already admitted, caller-visible neighbourhoods or explicitly carried pages. It never supplies resolution evidence or runs on a recency-only context. Reuse existing lexical tokenisation and internal ranking, with its own finite query-unit and stem policy for both unit and prose-page lookup; require content evidence beyond the resolved name. Ordinary anchor resolution retains its separate smaller query budget. Apply parent and category predicates before the bounded candidate limit and retain relevance order through assembly. Do not pass a nonempty query to the ordinary semantic-find branch: that branch does not preserve this lane's read ceiling, parent restriction and repair prohibition. Extend the existing ready-catalogue query seam instead, with no new sidecar, model acquisition or foreground walk.
 
 Relevant authored prose lacking semantic coverage is a page pointer requiring a read, not a fabricated semantic unit or an arbitrary excerpt presented as compiled knowledge. Prose-only and mixed pages remain eligible for this bounded pointer path. Reuse the 200-unit candidate ceiling with its sentinel, at most three served material items, the shared character budget and request deadline; bound pointer candidates separately to three pages plus one sentinel for detecting truncation. Check coverage only on the selected current page bodies, using exact spans from the existing semantic parser on that same input, not approximate line removal or a parser inside a pre-limit SQL predicate. Covered-only candidates can exhaust the bounded window; preserve its truncation rather than retrying across the corpus. Preserve no-material, unavailable/failed, truncated and budget outcomes, including carried-page attempts. Existing lifecycle, source-currentness and final egress checks remain mandatory. A filtering correction is not proof of the original client incident or full-corpus quality; the existing benchmark, negative controls and ordinary later-response journey remain acceptance.
 
@@ -241,6 +241,49 @@ for production. Project representation and word coverage are not substitutes for
 downstream usefulness. A fresh active agent can inspect named candidates through
 the existing governed read path; one successful recovery of useful context does
 not establish automatic first-packet quality or close the multi-topic gate.
+
+The current-source retained-input diagnostic distinguishes two query losses:
+earlier words win equal-frequency ties, and relevant vocabulary shared across
+pages loses to rarer incidental vocabulary even when its topic is moved first.
+Both useful authored units are valid and eligible, so relabelling categories or
+adding more units is not a repair for their absence from candidates. A private
+material-only trial increasing the unit allowance from twelve to forty while
+retaining forty stems recovers one conclusion but still omits the other in the
+unchanged turn and block-order controls. It is not a selected correction or a
+latency acceptance result. Separately, units-first truncation in both the lane
+and packet assembly can starve an eligible, highly ranked uncovered-prose
+pointer; deleting just the lane slice cannot repair that allocation.
+
+A wider private material-only query recovers both retained useful conclusions
+across block permutations and a larger distribution copy, using the existing
+ranker and unchanged contexts. This supports separating query policies, not an
+unbounded full-turn query or a chosen production constant. The finite policy
+must pass generic multi-topic and mixed-script/exhaustion controls, unchanged
+quality scoring, and matched warm latency including a large admitted scope.
+Returned top-k alone does not bound FTS work. Measure long/common queries as well
+as ordinary turns; keep all candidate, served-item, character and request limits.
+The cap prevents excessive query work but can omit useful context, costing the
+user recovery calls or correction. Do not hide that trade-off behind a corpus
+coverage claim or a new refusal. The original-client incident and separate
+units-versus-prose allocation remain open.
+
+Separate the allowance from the existing short-query threshold for corpus-common
+word suppression. Raising the allowance must not silently admit common background
+vocabulary that the earlier selector would drop: a medium-length turn can otherwise
+serve incidental units instead of both relevant conclusions. Other callers retain
+their existing coupled default; material keeps the original common-word threshold,
+fraction and minimum-corpus policy while retaining more distinctive evidence.
+
+Reusing the current activation vector is a foundation dependency, not an
+accepted alternative selector. Its forty-model-token input is only the opening
+of a long turn and can exclude the very needs material must recover. Any changed
+representation needs its own quality and resource evidence, without hidden
+extra encoding or mandatory model acquisition. The existing unit-vector search
+also lacks scoped effective-category exclusion before ranking, reads all scoped
+vectors despite its returned top-k, and can reconcile schema on connect. A
+material reuse path must instead prove ready-only access, producing-space
+compatibility, eligibility before the window, bounded work/deadline behavior
+and honest fallback. No new ontology, endpoint or model is selected here.
 
 Project keys are live vault configuration: normal writers load them freshly, but a YAML-only edit is absent from Markdown freshness and can leave a warm activation catalogue unchanged. Include the effective project-registry state in activation invalidation through the existing index refresh path, not a second watcher or a synchronous corpus rebuild. The request never acquires an encoder; background refresh retains the existing resource/model policy rather than introducing a stronger prohibition. A managed request may report the existing stale/warming state while background refresh runs; it must not label the old catalogue current. Tool-description key lists remain non-exhaustive snapshots, not validation authority.
 
