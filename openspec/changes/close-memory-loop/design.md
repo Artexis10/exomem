@@ -242,6 +242,29 @@ downstream usefulness. A fresh active agent can inspect named candidates through
 the existing governed read path; one successful recovery of useful context does
 not establish automatic first-packet quality or close the multi-topic gate.
 
+The current-source retained-input diagnostic distinguishes two query losses:
+earlier words win equal-frequency ties, and relevant vocabulary shared across
+pages loses to rarer incidental vocabulary even when its topic is moved first.
+Both useful authored units are valid and eligible, so relabelling categories or
+adding more units is not a repair for their absence from candidates. A private
+material-only trial increasing the unit allowance from twelve to forty while
+retaining forty stems recovers one conclusion but still omits the other in the
+unchanged turn and block-order controls. It is not a selected correction or a
+latency acceptance result. Separately, units-first truncation in both the lane
+and packet assembly can starve an eligible, highly ranked uncovered-prose
+pointer; deleting just the lane slice cannot repair that allocation.
+
+Reusing the current activation vector is a foundation dependency, not an
+accepted alternative selector. Its forty-model-token input is only the opening
+of a long turn and can exclude the very needs material must recover. Any changed
+representation needs its own quality and resource evidence, without hidden
+extra encoding or mandatory model acquisition. The existing unit-vector search
+also lacks scoped effective-category exclusion before ranking, reads all scoped
+vectors despite its returned top-k, and can reconcile schema on connect. A
+material reuse path must instead prove ready-only access, producing-space
+compatibility, eligibility before the window, bounded work/deadline behavior
+and honest fallback. No new ontology, endpoint or model is selected here.
+
 Project keys are live vault configuration: normal writers load them freshly, but a YAML-only edit is absent from Markdown freshness and can leave a warm activation catalogue unchanged. Include the effective project-registry state in activation invalidation through the existing index refresh path, not a second watcher or a synchronous corpus rebuild. The request never acquires an encoder; background refresh retains the existing resource/model policy rather than introducing a stronger prohibition. A managed request may report the existing stale/warming state while background refresh runs; it must not label the old catalogue current. Tool-description key lists remain non-exhaustive snapshots, not validation authority.
 
 Working continuity must reconnect an interrupted topic with its relevant recent changes, unresolved episode work and older dependencies without requiring the user to identify the earlier conversation. Reuse the existing continuity, `recent_change`, `current_state`, active Planning and pending-episode carriers. The carrier for that reconnection is the always-on `recent_context` packet block: bounded, provenance-bearing, first in the packet and present whether the turn resolved an anchor or abstained, so a turn that names nothing still arrives with what was recently worked on. The block reads the hot profile's signals the way the profile does (§8): an edit inside a write burst, or older than the latest burst, is not offered as recent work (a captured session is, since it records what was spoken about rather than an edit), and only the latest burst is looked for, newest first, so no turn sorts the whole registry; a page offered for its reads is ranked by its reads rather than its last edit, and the most-read one keeps a slot the way the newest open Planning item does; and a retired or superseded page is never offered, checked against the offered pages only through the request's page cache. An entry's statement is the page's authored `summary` before its `status`, and never a lifecycle word: "status: active" says where a page is in its life, not what it says. This requirement does not depend on the later cross-client live-activity feed, and does not infer a commitment from conversation alone.
