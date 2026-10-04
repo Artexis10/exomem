@@ -573,15 +573,21 @@ class _OnnxEncoder:
         return np.vstack(out)
 
     def texts_fit(self, texts: list[str]) -> bool:
+        if self.profile.collapse_whitespace:
+            texts = [" ".join(text.split()) for text in texts]
+        # Shipped encoders add special tokens, so truncation retains overflow
+        # evidence. Reuse their read-only tokenizer instead of rebuilding its
+        # full vocabulary on every advisory (which also holds the Python GIL).
+        if self._tokenizer.num_special_tokens_to_add(False) > 0:
+            return all(not row.overflowing for row in self._tokenizer.encode_batch(texts))
+
         from tokenizers import Tokenizer
 
-        # A private copy avoids changing truncation/padding while another ONNX
-        # thread is encoding. It retains this tokenizer's normalizer and specials.
+        # With no specials, tokenizers' early truncation may discard overflow
+        # evidence. Keep the exact check without mutating concurrent inference.
         tokenizer = Tokenizer.from_str(self._tokenizer.to_str())
         tokenizer.no_truncation()
         tokenizer.no_padding()
-        if self.profile.collapse_whitespace:
-            texts = [" ".join(text.split()) for text in texts]
         return all(len(row.ids) <= self.profile.max_seq for row in tokenizer.encode_batch(texts))
 
     def _encode_batch(self, batch: list[str], normalize: bool, max_tokens: int | None = None) -> np.ndarray:

@@ -67,6 +67,28 @@ The unchanged tenant CPU/memory limits SHALL bound acceptance. Cgroup peak memor
 - **THEN** further friend admission and fleet promotion remain blocked
 - **AND** the outcome reports insufficient resource capacity without altering tenant limits
 
+### Requirement: Shared-worker qualification matches scheduler placement
+
+Shared-worker acceptance SHALL exercise competing real cells at the intended scheduler requests and effective node policy. Results SHALL claim only measured occupancy and workload. Serving and maintenance replacement SHALL retain any node capability on which acceptance depends. New-admission resource capacity SHALL account for eligible worker state, pending commitments, platform/maintenance reservations, CPU competition, memory and volume topology. Attachment slots alone SHALL NOT establish resource capacity. A transient capacity observation failure SHALL defer new provisioning with an observable reason and automatic reconciliation, without stopping existing cells or revoking entitlements.
+
+Browser and OAuth admission SHALL count only capacity observations from the preceding five minutes, measured at database statement time after the existing serializing lock, with the existing non-deleted commitment count. Missing or future-dated observations SHALL be ineligible. An expired observation SHALL NOT consume an invite or OAuth transaction. A current observation SHALL restore eligibility automatically without changing existing tenant access.
+
+#### Scenario: Capacity observation expires and recovers
+- **WHEN** published worker capacity is older than five minutes
+- **THEN** browser and OAuth admission defer without consuming the invitation or creating a cell
+- **AND** a controller refresh permits the same invitation to be admitted under the ordinary capacity check
+
+#### Scenario: Cells compete and recover
+- **WHEN** a shared-worker envelope is qualified
+- **THEN** separate cells alternate import and ordinary save/query workloads, including restart under peer load
+- **AND** measured cells meet the existing freshness, query, memory and recovery gates at the intended scheduler requests
+- **AND** the result does not claim larger unmeasured occupancy
+
+#### Scenario: Scheduling inputs change
+- **WHEN** an operator changes a qualified memory request or required node capability
+- **THEN** acceptance records actual resulting controls and requalifies that configuration
+- **AND** a selective canary preserves unselected resource/template inputs
+
 ### Requirement: Safe service-policy rollback
 
 An operator SHALL be able to return a canary to a verified compatible legacy deployment while preserving post-upgrade canonical writes and outstanding durable index work. Rollback MUST NOT restore an older vault snapshot over newer committed data or relax tenant identity, authorization or publication fences.
