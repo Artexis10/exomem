@@ -1,0 +1,65 @@
+# Built-in collection type: Planning (intended state).
+# Package data; changes only with a release. Only built-in types carry `wire`.
+name: planning
+version: 1
+title: Planning
+item_type: plan
+kind: intended
+placement: Planning
+description: >-
+  Intended future state: areas, outcomes, initiatives and work items, with
+  their typed hierarchy checked by a named validator.
+extensible: true
+fields:
+  title: {type: string, required: true}
+  kind: {type: string}
+  status: {type: string}
+  lifecycle: {type: string}
+  priority: {type: string}
+  commitment: {type: string}
+  horizon: {type: string}
+  health: {type: string}
+default_audience: policy
+validators: [planning.hierarchy.v1]
+views:
+  - name: inbox
+    filters:
+      - {column: lifecycle, op: eq, value: active}
+      - {column: horizon, op: eq, value: inbox}
+  - name: week
+    filters:
+      - {column: lifecycle, op: eq, value: active}
+      - {column: horizon, op: eq, value: week}
+  - name: month
+    filters:
+      - {column: lifecycle, op: eq, value: active}
+      - {column: horizon, op: eq, value: month}
+  - name: quarter
+    filters:
+      - {column: lifecycle, op: eq, value: active}
+      - {column: horizon, op: eq, value: quarter}
+  - name: year
+    filters:
+      - {column: lifecycle, op: eq, value: active}
+      - {column: horizon, op: eq, value: year}
+  - name: multi-year
+    filters:
+      - {column: lifecycle, op: eq, value: active}
+      - {column: horizon, op: eq, value: multi-year}
+wire:
+  item_id_property: plan_id
+  reference_namespace: plan
+  manifest_audit_property: plan_audit
+  item_audit_marker: exomem-plan-audit
+  activity_prefix: "Planning audit-v1 "
+  receipt_property: _plan_receipt
+  receipt_marker: exomem.planning-mutation
+  error_codes:
+    RECORD_NOT_FOUND: PLAN_NOT_FOUND
+    AMBIGUOUS_RECORD: AMBIGUOUS_PLAN
+    RECORD_ID_CONFLICT: PLAN_ID_CONFLICT
+    STALE_RECORD.item: STALE_PLAN_ITEM
+    STALE_RECORD.container: STALE_PLAN_CONTAINER
+    INVALID_RECORD_CONTINUATION: INVALID_PLAN_CONTINUATION
+    STALE_RECORD_SNAPSHOT: STALE_PLAN_SNAPSHOT
+    RECORD_RESPONSE_TOO_LARGE: PLAN_RESPONSE_TOO_LARGE

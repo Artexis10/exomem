@@ -1242,28 +1242,31 @@ class WorkerRuntime:
     def migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
         """Whether the staged target declares a state migration for this vault.
 
-        Derived entirely from the state manifest the running system already
-        maintains: a manifest that is not complete needs one, and so does a
-        target whose descriptor set differs from the one the manifest was
-        published with. Nothing here runs the migrator to find out
-        (`seamless-managed-worker-handoff` D8).
+        The existing vault marker and recorded optional formats must first be
+        supported by the verified target. A manifest that is not complete
+        needs a migration, and so does a target whose descriptor set differs
+        from the one the manifest was published with. Nothing here runs the
+        migrator to find out (`seamless-managed-worker-handoff` D8).
         """
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         if not vault or not Path(vault).is_absolute():
             return True, "vault binding unavailable"
         from . import state_migration
+        from .collection_store.authority import required_state_compatibility_ids
 
+        required = required_state_compatibility_ids(Path(vault))
         recorded = state_migration.recorded_descriptor_ids(Path(vault))
-        if recorded is None:
-            return True, "state manifest records no descriptor set"
-        physical, optional = state_migration.partition_state_descriptor_ids(recorded)
+        physical, optional = state_migration.partition_state_descriptor_ids(recorded or ())
+        required |= optional
         verified = self._verified_state_compatibility
         key = (
             target.get("python"), target.get("version"), tuple(target.get("state_descriptors") or ())
         )
         supported = verified[1] if verified is not None and verified[0] == key else frozenset()
-        if optional - supported:
-            raise ValueError("candidate does not support recorded state compatibility")
+        if required - supported:
+            raise ValueError("candidate does not support required state compatibility")
+        if recorded is None:
+            return True, "state manifest records no descriptor set"
         declared = target.get("state_descriptors")
         if not declared:
             return True, "target declares no descriptor set"

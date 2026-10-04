@@ -108,3 +108,84 @@ def test_linux_parent_opens_require_no_cross_mount_resolution() -> None:
     assert posix._OPENAT2_RESOLVE & posix.RESOLVE_NO_SYMLINKS
     assert posix._OPENAT2_RESOLVE & posix.RESOLVE_NO_MAGICLINKS
     assert posix._OPENAT2_RESOLVE & posix.RESOLVE_NO_XDEV
+
+
+def test_streaming_names_yield_before_reading_the_remaining_census(tmp_path, monkeypatch):
+    # A name iterator implemented by materializing children defeats disk spooling.
+    held_fs = _held_fs()
+    posix = importlib.import_module("exomem._held_fs_posix")
+    for name in ("a", "b", "c"):
+        (tmp_path / name).write_text(name)
+    visited = []
+    original = posix._scandir
+
+    class Scan:
+        def __init__(self, descriptor):
+            self.scan = original(descriptor)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.scan.close()
+
+        def __iter__(self):
+            for entry in self.scan:
+                visited.append(entry.name)
+                yield entry
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        monkeypatch.setattr(posix, "_scandir", Scan)
+        with filesystem.parent(".").require() as parent:
+            names = filesystem.iter_names(parent)
+            try:
+                assert next(names) in {"a", "b", "c"}
+                assert len(visited) == 1
+            finally:
+                names.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "copy"])
+def test_no_replace_publication_preserves_a_destination_despite_stale_absence(
+    tmp_path, monkeypatch, kind
+):
+    # An absence check can be stale by the time rename reaches the kernel.
+    # Existing no-clobber tests do not exercise that competing-file window.
+    held_fs = _held_fs()
+    posix = importlib.import_module("exomem._held_fs_posix")
+    source_path = tmp_path / "source"
+    destination_path = tmp_path / "destination"
+    if kind != "directory":
+        source_path.write_bytes(b"source")
+        destination_path.write_bytes(b"foreign")
+    else:
+        source_path.mkdir()
+        (source_path / "payload").write_bytes(b"source")
+        destination_path.mkdir()
+    destination_identity = destination_path.stat().st_ino
+    original_stat = posix._stat
+
+    def stale_absence(name, *args, **kwargs):
+        if name == "destination":
+            raise FileNotFoundError(name)
+        return original_stat(name, *args, **kwargs)
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent(".").require() as parent:
+            monkeypatch.setattr(posix, "_stat", stale_absence)
+            if kind != "directory":
+                with filesystem.file(parent, "source", access="mutate").require() as source:
+                    if kind == "copy":
+                        result = filesystem.copy(source, parent, "destination")
+                    else:
+                        result = filesystem.rename(source, parent, "destination", replace=False)
+            else:
+                with filesystem.parent("source", access="mutate").require() as source:
+                    result = filesystem.rename_directory(source, parent, "destination")
+
+    assert result.error is not None
+    assert result.error.code == "DESTINATION_EXISTS"
+    assert destination_path.stat().st_ino == destination_identity
+    assert (source_path / "payload" if kind == "directory" else source_path).read_bytes() == b"source"
+    if kind != "directory":
+        assert destination_path.read_bytes() == b"foreign"

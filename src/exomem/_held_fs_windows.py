@@ -10,6 +10,7 @@ import ctypes
 import errno
 import os
 import secrets
+from collections.abc import Iterator
 from ctypes import (
     POINTER,
     Structure,
@@ -1037,7 +1038,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
         try:
             checked = self._check_directory(parent)
             records: list[SagaRecord] = []
-            for name in self._entries(checked):
+            for name in sorted(self._entries(checked)):
                 try:
                     handle = _open_relative(
                         _native(checked.descriptor),
@@ -1059,12 +1060,18 @@ class WindowsHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def _entries(self, parent: WindowsHeldDirectory) -> list[str]:
+    def iter_names(self, parent: HeldDirectory) -> Iterator[str]:
+        try:
+            checked = self._check_directory(parent)
+            yield from self._entries(checked)
+        except OSError as error:
+            raise _error(error) from error
+
+    def _entries(self, parent: WindowsHeldDirectory) -> Iterator[str]:
         assert NtQueryDirectoryFile is not None
         buffer = create_string_buffer(65536)
         status = IO_STATUS_BLOCK()
         restart = True
-        names: list[str] = []
         while True:
             result = NtQueryDirectoryFile(
                 _native(parent.descriptor),
@@ -1081,7 +1088,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
             )
             restart = False
             if (int(result) & 0xFFFFFFFF) == STATUS_NO_MORE_FILES:
-                return sorted(names)
+                return
             if not _nt_success(result):
                 _raise_nt(result, "directory enumeration was refused")
             offset = 0
@@ -1090,7 +1097,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 name_length = int.from_bytes(buffer.raw[offset + 60 : offset + 64], "little")
                 name = buffer.raw[offset + 94 : offset + 94 + name_length].decode("utf-16-le")
                 if name not in {".", ".."}:
-                    names.append(name)
+                    yield name
                 if next_offset == 0:
                     break
                 offset += next_offset
@@ -1098,7 +1105,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
     def _enumerate(
         self, parent: WindowsHeldDirectory, prefix: str, records: list[SagaRecord]
     ) -> None:
-        for name in self._entries(parent):
+        for name in sorted(self._entries(parent)):
             handle = _open_relative(
                 _native(parent.descriptor),
                 name,

@@ -384,6 +384,49 @@ def test_target_inspection_is_read_only_and_checks_worker_protocol(tmp_path, mon
     asyncio.run(scenario())
 
 
+def _mixed_marker(vault):
+    from exomem.collection_store import authority
+
+    sid = "123e4567-e89b-42d3-a456-426614174000"
+    marker = authority.marker_path(vault)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": "123e4567-e89b-42d3-a456-426614174001",
+                         "manifest_path": "Knowledge Base/Records/Work/_collection.md",
+                         "authority": "store", "store_id": sid}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+
+
+def test_unsupported_interpreter_on_copied_vault_keeps_serving_worker_admitted(
+    tmp_path, monkeypatch,
+):
+    from exomem import state_migration, state_paths
+
+    vault = tmp_path / "copied-vault"
+    _mixed_marker(vault)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+
+    async def scenario():
+        from importlib.metadata import version
+
+        manager, ingress, runtime, _ = _supervisor(tmp_path)
+        candidate = _manager().WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        runtime.inspect = candidate.inspect
+        runtime.migration_required = candidate.migration_required
+        result = await manager.upgrade({"python": sys.executable, "version": version("exomem")})
+        assert not result["ok"]
+        assert runtime.pid == 100
+        assert runtime.events == ingress.events == []
+        assert manager.records.pending() is None
+        assert not state_paths.vault_state_dir(vault).exists()
+        assert state_migration.recorded_descriptor_ids(vault) is None
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("enroll_at_cutover", [False, True])
 def test_unsupported_optional_state_never_stops_the_serving_worker(
     tmp_path, monkeypatch, enroll_at_cutover,
@@ -478,15 +521,14 @@ def test_optional_support_cannot_outlive_its_verified_candidate(
     from exomem import state_migration
 
     vault = tmp_path / "vault"
-    vault.mkdir()
+    _mixed_marker(vault)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
-    state_migration.require_vault_state_ready(vault)
-    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    assert state_migration.recorded_descriptor_ids(vault) is None
 
     async def scenario():
         runtime, actual = candidate_runtime
         target = await runtime.inspect({"python": sys.executable, "version": "1.2.3"})
-        assert runtime.migration_required(target) == (False, "declared_none")
+        assert runtime.migration_required(target) == (True, "state manifest records no descriptor set")
         if invalidate == "changed-target":
             target["state_descriptors"].append("another-family")
         else:

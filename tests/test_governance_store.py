@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from exomem import reserved_paths
 from exomem.governance import compile as governance_compile
 from exomem.governance import policy, schema_v4, store, tokens
 
@@ -95,6 +97,40 @@ def test_open_connection_is_idempotent(vault: Path) -> None:
         assert second.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_USER_VERSION
     finally:
         second.close()
+
+
+def test_active_reader_closes_connection_when_owner_scope_exit_refuses(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = store.open_connection(vault)
+    connection.execute("PRAGMA user_version=4")
+    connection.close()
+    connections: list[sqlite3.Connection] = []
+    connect = sqlite3.connect
+    target_scope = reserved_paths._sqlite_owner_target_scope
+
+    def observe_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    @contextmanager
+    def refuse_on_exit(*args, **kwargs):
+        with target_scope(*args, **kwargs) as retained_path:
+            yield retained_path
+        raise RuntimeError("retained target changed during open")
+
+    monkeypatch.setattr(sqlite3, "connect", observe_connect)
+    monkeypatch.setattr(reserved_paths, "_sqlite_owner_target_scope", refuse_on_exit)
+
+    with pytest.raises(RuntimeError, match="retained target changed"):
+        store.open_active_governance_read_connection(vault)
+
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[0].execute("SELECT 1")
+    assert not reserved_paths.owner_authorized("governance-store")
+    assert not reserved_paths._identity_coordination_active(vault)
 
 
 def test_v3_session_grant_rows_are_non_authoritative(vault: Path) -> None:

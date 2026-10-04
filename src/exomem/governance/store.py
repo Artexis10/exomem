@@ -17,6 +17,7 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -187,51 +188,91 @@ def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connecti
     can retain the current v3 reader until the external schema fence is active.
     """
 
-    with reserved_paths._subsystem_authority_scope("governance.store"):
-        with reserved_paths._identity_coordination_scope(
-            vault_root,
-            descriptor_ids=("governance-store",),
-            identity_may_change=False,
-        ):
-            path = sidecar_path(vault_root)
-            try:
-                target = reserved_paths._sqlite_owner_target_scope(
+    try:
+        initial = _acquire_policy_read(vault_root, observe_legacy=False)
+    except FileNotFoundError as exc:
+        raise UnsupportedGovernanceSchema("active governance store is absent") from exc
+    assert initial.connection is not None
+    return initial.connection
+
+
+@dataclass(frozen=True)
+class _InitialPolicyRead:
+    connection: sqlite3.Connection | None = None
+    observation: dict[str, object] | None = None
+
+
+def _initial_policy_read(vault_root: Path) -> _InitialPolicyRead:
+    """Discriminate v4, legacy, or absence in one non-creating acquisition."""
+    if not sidecar_path(vault_root).exists():
+        return _InitialPolicyRead()
+    return _acquire_policy_read(vault_root, observe_legacy=True)
+
+
+def _acquire_policy_read(
+    vault_root: Path, *, observe_legacy: bool
+) -> _InitialPolicyRead:
+    connection: sqlite3.Connection | None = None
+    observation = None
+    version: int | None = None
+    # Scope exit can refuse the opened target, so cleanup encloses every scope.
+    try:
+        with reserved_paths._subsystem_authority_scope("governance.store"):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("governance-store",),
+                identity_may_change=False,
+            ):
+                path = sidecar_path(vault_root)
+                with reserved_paths._sqlite_owner_target_scope(
                     vault_root,
                     path,
                     "governance-store",
                     create=False,
-                )
-                with target as retained_path:
+                ) as retained_path:
                     connection = sqlite3.connect(
                         f"{retained_path.as_uri()}?mode=ro",
                         uri=True,
                     )
-                    try:
-                        from . import schema_v4
+                    from . import schema_v4
 
-                        version = int(
-                            connection.execute("PRAGMA user_version").fetchone()[0]
+                    version = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    )
+                    if version != schema_v4.SCHEMA_USER_VERSION and not observe_legacy:
+                        raise UnsupportedGovernanceSchema(
+                            "active governance requires an existing exact-v4 store"
                         )
-                        if version != schema_v4.SCHEMA_USER_VERSION:
-                            raise UnsupportedGovernanceSchema(
-                                "active governance requires an existing exact-v4 store"
-                            )
-                        connection.execute("PRAGMA query_only=ON")
-                        connection.execute("PRAGMA busy_timeout=50")
-                        reserved_paths._publish_sqlite_owner_family(
-                            vault_root,
-                            path,
-                            "governance-store",
-                            connection,
-                        )
-                        return connection
-                    except BaseException:
+                    connection.execute("PRAGMA query_only=ON")
+                    connection.execute("PRAGMA busy_timeout=50")
+                    reserved_paths._publish_sqlite_owner_family(
+                        vault_root,
+                        path,
+                        "governance-store",
+                        connection,
+                    )
+                    if version != schema_v4.SCHEMA_USER_VERSION:
+                        observation = _guard_generation_observation(connection, version)
                         connection.close()
-                        raise
-            except FileNotFoundError as exc:
-                raise UnsupportedGovernanceSchema(
-                    "active governance store is absent"
-                ) from exc
+                        connection = None
+        return _InitialPolicyRead(connection, observation)
+    except BaseException as exc:
+        if connection is not None:
+            connection.close()
+        if (
+            observe_legacy
+            and version is not None
+            and version != 4
+            and isinstance(exc, (RuntimeError, sqlite3.Error, OSError))
+        ):
+            return _InitialPolicyRead(
+                observation={
+                    "state": "blocked",
+                    "generation": f"unreadable:{type(exc).__name__}",
+                    "event_ids": (),
+                }
+            )
+        raise
 
 
 def authorization_session_schema_version(vault_root: Path) -> int | None:
@@ -1194,79 +1235,85 @@ def _guard_generation_probe_retained(
         )
         conn.execute("PRAGMA query_only=ON")
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version < SCHEMA_USER_VERSION:
-            return {
-                "state": "clear",
-                "generation": f"legacy:{version}",
-                "event_ids": (),
-            }
-        if version not in {SCHEMA_USER_VERSION, 4}:
-            return {
-                "state": "blocked",
-                "generation": f"unsupported:{version}",
-                "event_ids": (),
-            }
-        tables = {
-            str(row[0])
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        required_tables = (
-            _V4_GUARD_TABLES
-            if version == 4
-            else _V3_GUARD_TABLES - {"governance_session_purpose_staging"}
-        )
-        if not required_tables <= tables:
-            return {
-                "state": "blocked",
-                "generation": "structurally-unknown",
-                "event_ids": (),
-            }
-        pending = [
-            tuple(row)
-            for row in conn.execute(
-                "SELECT event_id, operation, prior_digest, prepared_digest, final_digest, "
-                "affected_ids, required_child_intents, required_child_terminals, "
-                "marker_required, updated_at FROM governance_operation_journals "
-                "WHERE phase='pending' ORDER BY event_id"
-            )
-        ]
-        if (
-            version == SCHEMA_USER_VERSION
-            and "governance_session_purpose_staging" not in tables
-            and pending
-        ):
-            return {
-                "state": "blocked",
-                "generation": "legacy-open-protocol",
-                "event_ids": tuple(str(row[0]) for row in pending),
-            }
-        schema_generation = int(conn.execute("PRAGMA schema_version").fetchone()[0])
-        active = (
-            conn.execute(
-                "SELECT policy_generation_id, policy_fingerprint, "
-                "projector_schema_version, catalog_generation "
-                "FROM active_governance_tuple WHERE singleton=1"
-            ).fetchone()
-            if version == 4
-            else None
-        )
-        activation = (
-            conn.execute(
-                "SELECT activation_store_id, logical_vault_id, activation_epoch, "
-                "activation_state_digest FROM governance_activation_store "
-                "WHERE singleton=1"
-            ).fetchone()
-            if version == 4
-            else None
-        )
-        if version == 4 and (active is None or activation is None):
-            return {
-                "state": "blocked",
-                "generation": "activation-incomplete",
-                "event_ids": tuple(str(row[0]) for row in pending),
-            }
+        return _guard_generation_observation(conn, version)
     finally:
         conn.close()
+
+
+def _guard_generation_observation(
+    conn: sqlite3.Connection, version: int
+) -> dict[str, object]:
+    if version < SCHEMA_USER_VERSION:
+        return {
+            "state": "clear",
+            "generation": f"legacy:{version}",
+            "event_ids": (),
+        }
+    if version not in {SCHEMA_USER_VERSION, 4}:
+        return {
+            "state": "blocked",
+            "generation": f"unsupported:{version}",
+            "event_ids": (),
+        }
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    required_tables = (
+        _V4_GUARD_TABLES
+        if version == 4
+        else _V3_GUARD_TABLES - {"governance_session_purpose_staging"}
+    )
+    if not required_tables <= tables:
+        return {
+            "state": "blocked",
+            "generation": "structurally-unknown",
+            "event_ids": (),
+        }
+    pending = [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT event_id, operation, prior_digest, prepared_digest, final_digest, "
+            "affected_ids, required_child_intents, required_child_terminals, "
+            "marker_required, updated_at FROM governance_operation_journals "
+            "WHERE phase='pending' ORDER BY event_id"
+        )
+    ]
+    if (
+        version == SCHEMA_USER_VERSION
+        and "governance_session_purpose_staging" not in tables
+        and pending
+    ):
+        return {
+            "state": "blocked",
+            "generation": "legacy-open-protocol",
+            "event_ids": tuple(str(row[0]) for row in pending),
+        }
+    schema_generation = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    active = (
+        conn.execute(
+            "SELECT policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        if version == 4
+        else None
+    )
+    activation = (
+        conn.execute(
+            "SELECT activation_store_id, logical_vault_id, activation_epoch, "
+            "activation_state_digest FROM governance_activation_store "
+            "WHERE singleton=1"
+        ).fetchone()
+        if version == 4
+        else None
+    )
+    if version == 4 and (active is None or activation is None):
+        return {
+            "state": "blocked",
+            "generation": "activation-incomplete",
+            "event_ids": tuple(str(row[0]) for row in pending),
+        }
     generation = hashlib.sha256(
         json.dumps(
             [version, schema_generation, pending, active, activation],

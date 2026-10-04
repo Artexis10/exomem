@@ -21,6 +21,7 @@ from pathlib import Path
 from datetime import date
 from typing import Any
 
+from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer
 from .working_set_index import normalize, terms_of
 
 log = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ def _from_canonical_page(
     return entry
 
 
+@canonical_read
 def current_state_for(
     vault_root: Path,
     *,
@@ -284,7 +286,7 @@ def _records_manifests(
     to; the collection's governance is read fresh in `_governing_manifest`
     before a single record is queried.
     """
-    if index_generation is not None:
+    if index_generation is not None and bound_writer(vault_root) is None:
         from . import working_set_index
 
         try:
@@ -462,15 +464,13 @@ def _statement_from(
 def _from_profile(
     vault_root: Path, anchor: Any, *, state_fields: Sequence[str] = _STATE_FIELDS
 ) -> dict[str, Any] | None:
-    from . import find_corpus
-
     rel = str(getattr(anchor, "path", "") or "")
     if not rel or not rel.endswith(".md"):
         return None
-    page = find_corpus.CACHE.get(vault_root / rel, vault_root)
-    if page is None:
+    profile = _profile_data(vault_root, rel)
+    if profile is None:
         return None
-    frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    frontmatter, _ = profile
     for name in state_fields:
         value = frontmatter.get(name)
         if isinstance(value, (str, int, float)) and str(value).strip():
@@ -487,20 +487,18 @@ def _from_profile(
 def _from_neighbourhood(
     vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
 ) -> dict[str, Any] | None:
-    from . import find_corpus
-
     best: tuple[str, str, str] | None = None
     for rel in sorted(getattr(anchor, "neighbourhood", ()) or ()):
         if not rel.endswith(".md") or (visible is not None and not visible(rel)):
             continue
-        page = find_corpus.CACHE.get(vault_root / rel, vault_root)
-        if page is None:
+        profile = _profile_data(vault_root, rel)
+        if profile is None:
             continue
-        frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+        frontmatter, page_title = profile
         if normalize(frontmatter.get("status") or "active") != "active":
             continue
         updated = str(frontmatter.get("updated") or "")
-        title = str(frontmatter.get("title") or page.title or "").strip()
+        title = str(frontmatter.get("title") or page_title or "").strip()
         if not title:
             continue
         if best is None or updated > best[0]:
@@ -514,6 +512,36 @@ def _from_neighbourhood(
         "as_of": best[0],
         "statement": best[1][:STATEMENT_MAX_CHARS],
     }
+
+
+def _profile_data(vault_root: Path, rel: str) -> tuple[Mapping[str, Any], str] | None:
+    """Read collection-owned profiles canonically; ordinary knowledge stays Markdown."""
+    from . import find_corpus, recall_policy
+
+    writer = selected_projection_writer(vault_root, rel)
+    if writer is not None and recall_policy.is_structured_only_path(vault_root, rel):
+        from . import record_formats, structured_collections
+
+        with writer.read_snapshot():
+            identity = writer.connection.execute(
+                "SELECT collection_id,item_key FROM items WHERE view_path=?", (rel,),
+            ).fetchone()
+            if identity is None:
+                return None
+            try:
+                manifest = structured_collections.load_manifest(vault_root, identity[0])
+                snapshot = record_formats.load_adapter(vault_root, manifest).read()
+            except structured_collections.CollectionError:
+                return None
+            record = next((record for record in snapshot.records
+                           if record.identity.key == identity[1]), None)
+            if record is None:
+                return None
+            return record.values, str(record.values.get("title") or "")
+    page = find_corpus.CACHE.get(vault_root / rel, vault_root)
+    if page is None:
+        return None
+    return page.frontmatter if isinstance(page.frontmatter, dict) else {}, page.title
 
 
 def _anchor_ref(anchor: Any) -> str:

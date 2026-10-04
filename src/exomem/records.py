@@ -49,6 +49,11 @@ _LOG_AUDIT_MARKER = re.compile(rb"<!--\s*exomem-record-audit:\s*([0-9a-f]{24})\s
 _ITEM_AUDIT_MARKER = re.compile(rb"#\s*exomem-record-audit:\s*([0-9a-f]{24})\s*")
 _MAX_AUDIT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIT_MARKERS = 10_000
+_MAX_AUDIT_ARCHIVE_ENTRIES = 128
+_MAX_AUDIT_SEGMENT_BYTES = 2_000_000
+_MAX_AUDIT_HISTORY_BYTES = 8_000_000
+_MAX_AUDIT_EVENTS = 10_000
+_AUDIT_ARCHIVE_NAME = re.compile(r"log-[0-9a-f]{20}\.md", re.ASCII)
 _MAX_AGENT_AUDIT_HISTORY = 50
 _LIFECYCLE_EVENT_VERSION = 2
 _LIFECYCLE_RECEIPT_VERSION = 2
@@ -950,6 +955,13 @@ def bulk_upsert_records(
     still reports every row's would-be outcome; `skip` commits the accepted rows.
     """
     root = Path(vault_root)
+    from .collection_store.preview import selected_writer
+
+    writer = selected_writer(root, collection)
+    if writer is not None:
+        return writer.bulk_upsert_records(collection, rows=rows, why=why,
+                                          expected_container_hash=expected_container_hash,
+                                          source=source, on_reject=on_reject)
     _validate_why(why)
     if on_reject not in {"abort", "skip"}:
         raise collections.CollectionError(
@@ -2619,6 +2631,11 @@ def inspect_audit_gap(
         snapshot=snapshot,
         snapshot_denied=snapshot_denied,
     )
+    return _audit_inspection_payload(chain)
+
+
+def _audit_inspection_payload(chain: _AuditChain) -> dict[str, Any]:
+    """Format both live and captured assessments through one public contract."""
     payload: dict[str, Any] = {"status": chain.status, "gaps": list(chain.gaps)}
     if chain.discontinuity is not None:
         payload["discontinuity"] = dict(chain.discontinuity)
@@ -2671,7 +2688,7 @@ def _inspect_audit_chain(
 
     try:
         history_guard = vault.DirectoryCensusGuard.capture(
-            root, f"{vault.kb_prefix()}_archive/logs", max_entries=128
+            root, f"{vault.kb_prefix()}_archive/logs", max_entries=_MAX_AUDIT_ARCHIVE_ENTRIES
         )
     except vault.PathGuardError:
         return _incomplete_audit_chain()
@@ -2787,6 +2804,30 @@ def _reconstruct_audit_chain(
         history_guard=history_guard,
         authorize_path=authorize_path,
     )
+    return _reconstruct_captured_audit_chain(
+        manifest,
+        history=history,
+        head=head,
+        current_hash=current_hash,
+        markers=markers,
+        authorize_path=authorize_path,
+    )
+
+
+def _reconstruct_captured_audit_chain(
+    manifest: collections.CollectionManifest,
+    *,
+    history: _AuditEvents,
+    head: str | None,
+    current_hash: str,
+    markers: tuple[_AuditMarker, ...],
+    authorize_path: Callable[[str], bool] | None = None,
+) -> _AuditChain:
+    """Assess captured bounded history without rereading its source files.
+
+    The caller owns capture and the existing bounded reader's limits. This
+    preserves file-mode reconstruction; uncapped migration proof is separate.
+    """
     events = history.events
     relevant = [event for event in events if event["collection_id"] == manifest.collection_id]
     influencing = _audit_influencing_events(
@@ -3179,16 +3220,16 @@ def _audit_events(
     archive_guard: vault.DirectoryCensusGuard | None = None
     try:
         archive_guard = history_guard or vault.DirectoryCensusGuard.capture(
-            root, archive, max_entries=128
+            root, archive, max_entries=_MAX_AUDIT_ARCHIVE_ENTRIES
         )
         if archive_guard.directory_identity is not None:
             entries = archive_guard.entries
-            if len(entries) > 128:
+            if len(entries) > _MAX_AUDIT_ARCHIVE_ENTRIES:
                 return _AuditEvents((), False)
             candidates.extend(
                 entry.relative_path
                 for entry in entries
-                if re.fullmatch(r"log-[0-9a-f]{20}\.md", Path(entry.relative_path).name)
+                if _AUDIT_ARCHIVE_NAME.fullmatch(Path(entry.relative_path).name)
             )
     except vault.PathGuardError:
         return _AuditEvents((), False)
@@ -3199,13 +3240,15 @@ def _audit_events(
         if authorize_path is not None and not authorize_path(relative):
             return _AuditEvents((), False)
         try:
-            data, file_guard = vault.read_bounded_guarded_bytes(root, relative, limit=2_000_000)
+            data, file_guard = vault.read_bounded_guarded_bytes(
+                root, relative, limit=_MAX_AUDIT_SEGMENT_BYTES
+            )
             text = data.decode("utf-8")
         except (vault.PathGuardError, UnicodeDecodeError):
             return _AuditEvents((), False)
         total += len(data)
         file_guards.append(file_guard)
-        if total > 8_000_000:
+        if total > _MAX_AUDIT_HISTORY_BYTES:
             return _AuditEvents((), False)
         prefix = profile_for(semantic_profile).activity_prefix
         for line in text.splitlines():
@@ -3218,7 +3261,7 @@ def _audit_events(
             if not _valid_audit_event(event, semantic_profile):
                 return _AuditEvents((), False)
             events.append(event)
-            if len(events) > 10_000:
+            if len(events) > _MAX_AUDIT_EVENTS:
                 return _AuditEvents((), False)
     try:
         if archive_guard is not None:
@@ -4229,9 +4272,20 @@ def _load_held_candidate(
     relative = f"{_held_directory(manifest)}/{held_id}.md"
     try:
         data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_HELD_BYTES)
+    except vault.PathGuardError as error:
+        raise _held_not_found() from error
+    return _parse_held_candidate_bytes(manifest, held_id, data)
+
+
+def _parse_held_candidate_bytes(
+    manifest: collections.CollectionManifest, held_id: str, data: bytes
+) -> HeldCandidate:
+    """Parse caller-captured held bytes through the existing candidate codec."""
+    relative = f"{_held_directory(manifest)}/{held_id}.md"
+    try:
         text = data.decode("utf-8")
         frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
-    except (vault.PathGuardError, vault.FrontmatterError, UnicodeDecodeError) as error:
+    except (vault.FrontmatterError, UnicodeDecodeError) as error:
         raise _held_not_found() from error
     if marker is None or frontmatter.get("type") != _HELD_TYPE:
         raise _held_not_found()

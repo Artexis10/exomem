@@ -775,8 +775,8 @@ def canonical_compiled_bytes(policy: Policy) -> bytes:
     ).encode("utf-8")
 
 
-def _load_v4_active_policy(vault_root: Path) -> Policy | None:
-    """Return v4 authority, ``None`` for a legacy store, or BLOCKED on fault."""
+def _load_v4_active_policy(vault_root: Path) -> Policy | store_module._InitialPolicyRead:
+    """Return v4 authority, the initial legacy observation, or BLOCKED on fault."""
 
     from . import authorization_custody, schema_v4
 
@@ -791,7 +791,7 @@ def _load_v4_active_policy(vault_root: Path) -> Policy | None:
         vault_root
     )
     if not custody_configured and not activation_state_present:
-        return None
+        return store_module._InitialPolicyRead()
     custody = None
     if custody_configured:
         try:
@@ -828,8 +828,19 @@ def _load_v4_active_policy(vault_root: Path) -> Policy | None:
             return EMPTY_POLICY
 
     try:
-        connection = store_module.open_active_governance_read_connection(vault_root)
-    except store_module.UnsupportedGovernanceSchema:
+        initial = store_module._initial_policy_read(vault_root)
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _blocked(
+            (
+                _finding(
+                    "active_governance_unavailable",
+                    ".governance.sqlite",
+                    "the enrolled active governance tuple is unavailable",
+                ),
+            )
+        )
+    connection = initial.connection
+    if connection is None:
         if unsafe_legacy_state or (
             custody is not None and custody.control.governance_enrolled
         ):
@@ -842,17 +853,7 @@ def _load_v4_active_policy(vault_root: Path) -> Policy | None:
                     ),
                 )
             )
-        return None
-    except (OSError, RuntimeError, sqlite3.Error):
-        return _blocked(
-            (
-                _finding(
-                    "active_governance_unavailable",
-                    ".governance.sqlite",
-                    "the enrolled active governance tuple is unavailable",
-                ),
-            )
-        )
+        return initial
     try:
         if custody is None:
             custody = authorization_custody.load_authorization_custody(
@@ -1292,12 +1293,14 @@ def _guarded_policy(vault_root: Path, code: str, detail: str) -> Policy:
 def load(vault_root: Path) -> Policy:
     """Load policy behind a non-creating seqlock-style authoring guard."""
     vault_root = Path(vault_root)
-    active = _load_v4_active_policy(vault_root)
-    if active is not None:
-        return active
     key = str(governance_root(vault_root))
     for _attempt in range(3):
-        before = store_module.guard_generation_probe(vault_root)
+        initial = _load_v4_active_policy(vault_root)
+        if isinstance(initial, Policy):
+            return initial
+        before = initial.observation or {
+            "state": "clear", "generation": "absent", "event_ids": ()
+        }
         marker_before, marker_present = _marker_generation(vault_root)
         if before["state"] == "blocked":
             return _blocked(

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find_corpus, sidecar_store
+from .collection_store.preview import bound_writer, canonical_read, selected_writer
 from .kbdir import kb_dirname
 from .state_paths import vault_state_dir
 
@@ -1230,6 +1231,7 @@ def _page_anchor_kind(
     return None
 
 
+@canonical_read
 def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Candidate]]:
     """Records manifests (+ their claims) and active Planning items.
 
@@ -1278,7 +1280,9 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
                     aliases=(),
                     terms=terms_of(" ".join((title, *fields, *claims))),
                     categories=("fact",),
-                    source_signature=_source_signature(absolute),
+                    source_signature=(manifest.manifest_version.hash
+                                      if selected_writer(vault_root, manifest) is not None
+                                      else _source_signature(absolute)),
                 )
             )
         elif profile == "planning":
@@ -1303,7 +1307,8 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
     if not isinstance(rows, list):
         return []
     item_pages = _planning_item_pages(vault_root, manifest)
-    signature = _source_signature(Path(vault_root) / rel)
+    writer = selected_writer(vault_root, manifest)
+    signature = manifest.manifest_version.hash if writer is not None else _source_signature(Path(vault_root) / rel)
     out: list[_Candidate] = []
     for row in rows:
         values = row.get("values") if isinstance(row, Mapping) else None
@@ -1333,7 +1338,8 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
                 aliases=(),
                 terms=terms_of(" ".join((title, kind_field, *tags))),
                 categories=("action",),
-                source_signature=f"{signature}:{normalize(title)}",
+                source_signature=(f"{signature}:{row.get('item_version', '')}" if writer is not None
+                                  else f"{signature}:{normalize(title)}"),
             )
         )
     return out
@@ -1723,6 +1729,10 @@ def collection_manifests(
     A discovery that fails raises, exactly as calling it directly would: the
     callers here already treat unavailable manifests as no evidence.
     """
+    if bound_writer(vault_root) is not None:
+        from . import structured_collections
+
+        return structured_collections.discover_collections(Path(vault_root))
     published = published_collection_manifests(vault_root, generation, token=token)
     if published is not None:
         return published

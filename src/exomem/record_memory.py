@@ -277,6 +277,11 @@ def record_memory(
     }
     _validate_arguments(action, values)
     try:
+        from .collection_store import preview
+
+        selected, result = preview.dispatch(vault_root, "records", action, values)
+        if selected:
+            return result
         if action == "describe":
             return parse_manifest_contract()
         if action == "validate":
@@ -457,9 +462,9 @@ def parse_manifest_contract() -> dict[str, Any]:
     return {**manifest_authoring_contract(), "bulk_upsert": _bulk_upsert_contract()}
 
 
-def _bulk_upsert_contract() -> dict[str, Any]:
+def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
     """The `bulk_upsert` action's contract, from the writer's own constants."""
-    return {
+    contract = {
         "why": (
             "load many already-normalised rows under ONE container-hash guard instead of "
             "one guarded append per row, whose changing hash forces serial writes"
@@ -562,6 +567,33 @@ def _bulk_upsert_contract() -> dict[str, Any]:
             ],
         },
     }
+    if store_mode:
+        from .collection_store.writer import BULK_UPSERT_MAX_ROWS
+
+        contract["arguments"]["rows"] = (
+            f"1 to {BULK_UPSERT_MAX_ROWS} objects of item, optional body and optional source per call; "
+            "chain larger imports from the previous response's after_container_hash"
+        )
+        contract["audit"] = (
+            "one transaction and one transition with an effect per written row; first_transition "
+            "equals last_transition, and every changed row carries that transition_id. "
+            "Events and the receipt never carry row values"
+        )
+        contract["provenance"] = (
+            "every row must resolve to a preserved Sources or Evidence page the caller may "
+            "read; missing, non-preserved and withheld pages reject identically (SOURCE_NOT_FOUND). "
+            "The verified reference is preserved with the item version and a declared array-of-link "
+            "sources field receives it using the same replacement semantics as file mode"
+        )
+        limits = contract["limits"]
+        limits["max_rows"] = BULK_UPSERT_MAX_ROWS
+        limits["max_rows_why"] = "the store commits all accepted rows in one SQLite transaction"
+        limits["target_rows_note"] = "the store's current per-call cap"
+        limits.pop("audit_chain_depth_budget")
+        limits.pop("depth_rule")
+        limits["refusals"].remove("BULK_UPSERT_AUDIT_DEPTH")
+        limits["refusals"].remove("COLLECTION_ITEM_LIMIT")
+    return contract
 
 
 def _json_safe_details(value: object) -> dict[str, Any] | None:

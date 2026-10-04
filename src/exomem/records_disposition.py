@@ -47,6 +47,8 @@ from typing import Any
 
 from filelock import FileLock, Timeout
 
+from .collection_store.preview import canonical_read, selected_writer
+
 log = logging.getLogger(__name__)
 
 #: Folded type/category values that make an observation failure-shaped.
@@ -289,6 +291,7 @@ def _still_open(vault_root: Path, entry: Mapping[str, Any]) -> bool:
     return effective == "open"
 
 
+@canonical_read
 def _occurrence_call(
     vault_root: Path, manifest: Any, collection: str, key: str, observation_ref: str, why: str
 ) -> dict[str, Any] | None:
@@ -325,6 +328,12 @@ def _occurrence_call(
         if manifest.storage.strategy == "markdown-log"
         else snapshot.snapshot
     )
+    writer = selected_writer(vault_root, manifest)
+    if writer is not None:
+        row = writer._collection(manifest)[0]
+        catalog = writer._operation.catalog(manifest.collection_id)
+        if len(snapshot.records) == sum(isinstance(subject.row_id, int) for subject in catalog):
+            container = writer._container(row)
     return {
         "action": "update",
         "collection": collection,
@@ -343,6 +352,7 @@ def _fits(candidate: Mapping[str, Any], collection: str) -> bool:
     return mutation_terminal._routing_disposition_projection(candidate, collection) is not None
 
 
+@canonical_read
 def disposition(
     vault_root: Path,
     routing: Mapping[str, Any],
