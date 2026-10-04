@@ -1,7 +1,7 @@
 {
   "version": "0.105.0",
   "skill_contract": "2217ceb2ba966d84a83e3d4083daf2277d2eab0ed70a3f91d829c26fde9721bc",
-  "corpus_digest": "06c11143f77e7f110a5c776134c30818332bb1a3f7922ab181b5d075b6efdb83",
+  "corpus_digest": "bd7b74e65d1b5173edf4ead2e166260d876083e4e527acfba726d3d56a0393e7",
   "profile": "product-cloud",
   "resource": "https://exomem.substratesystems.io/mcp",
   "files": {
@@ -191,7 +191,7 @@
     "openai/assets/icon.png": "2b7283995ef5bb2e65ba11a20c4c0872cf970a93d5e430be28b71607d2b9b820",
     "openai/assets/icon.svg": "9eef30cfe92ee021218bc9076f0a107e8adf84664c70eb61f7b9790d4afc27bb",
     "openai/mcp.json": "cc1cee8db3dbc22e90a1acc860a35b8f9d1a3a6e24046a1052f49dc544abdb8b",
-    "openai/plugin.json": "5b4974cc7b7c9853e5c40c6275fe90516d838629d188615e3331987efed9c4b2",
+    "openai/plugin.json": "13fdcc2d33a87691e75a5b021f2494365ec75a8d87908f357b18ccaa20797a54",
     "openai/skills/exomem/SKILL.md": "ceb2d000b4cacff027de2781ef541925107dbea3e481bf4d0cd9d3cb93b358b7",
     "openai/skills/exomem/project-keys.yaml": "fcec970087d5f431fd22c20fc2024dcff49b6ce1281f1fceb27b61ee79127841",
     "openai/skills/exomem/references/audit-checks.md": "43b3b4105ae6ad71d280ce62d21c11cdcd8d178117615680e0456137c855eef2",
@@ -363,6 +363,6 @@
     "openai/skills/exomem-review/references/vault-care.md": "fa73266775e23a3c3bfc03e9b1ebeb1940f22f5cf90026adedfce857d00e2f7b",
     "openai/skills/exomem-review/references/write-scope.md": "b207999efb7afccf0c355bb322b41f3b8ec33a4f77efd69949d2c49a0d960a8d",
     "openai/skills/exomem-review/references/writing.md": "004f8aa39e13170d32332e5d8af165c3a44a593447fc06a03a2ef9ec9753840e",
-    "openai.zip": "f109b569d3cad26f7dbff904e44ff7647c7094ad4c6a04fc786b573a780c78df"
+    "openai.zip": "358d82ee275d322d45d0c3e1f389ece78e2418f1fc81339a079db72822642749"
   }
 }
