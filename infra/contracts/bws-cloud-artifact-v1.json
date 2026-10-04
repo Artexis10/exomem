@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "product": "exomem-cloud-artifact-transport",
+  "environment": "production",
+  "bindings": {
+    "signing-key": {
+      "project_id": "69843186-5161-40a2-951f-b487011122ce",
+      "secret_id": "2fc12d8b-9d1a-4f11-aa10-b4d900051d73",
+      "expected_key": "EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY",
+      "env": "EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY",
+      "format": "opaque"
+    },
+    "public-key": {
+      "project_id": "69843186-5161-40a2-951f-b487011122ce",
+      "secret_id": "ced0264b-b9d9-47a0-ae95-b4d900052182",
+      "expected_key": "EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY",
+      "env": "EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY",
+      "format": "opaque"
+    }
+  }
+}
