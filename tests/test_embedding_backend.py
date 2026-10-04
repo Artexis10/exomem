@@ -133,6 +133,42 @@ def test_providers_always_end_in_cpu() -> None:
         assert embedding_backend._providers(device)[-1] == "CPUExecutionProvider"
 
 
+@pytest.mark.parametrize("specials", [False, True])
+def test_onnx_fit_guard_rejects_truncated_text_without_changing_inference(specials: bool) -> None:
+    """Oversized advisory text must not reuse a vector of its truncated prefix."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from tokenizers.processors import TemplateProcessing
+
+    tokenizer = Tokenizer(WordLevel(
+        vocab={"[UNK]": 0, "a": 1, "[PAD]": 2, "[CLS]": 3, "[SEP]": 4},
+        unk_token="[UNK]",
+    ))
+    tokenizer.pre_tokenizer = Whitespace()
+    if specials:
+        tokenizer.post_processor = TemplateProcessing(
+            single="[CLS] $A [SEP]", special_tokens=[("[CLS]", 3), ("[SEP]", 4)],
+        )
+    tokenizer.enable_truncation(max_length=8)
+    tokenizer.enable_padding(pad_id=2, pad_token="[PAD]")
+    encoder = object.__new__(embedding_backend._OnnxEncoder)
+    encoder._tokenizer = tokenizer
+    encoder.profile = embedding_backend.EncoderProfile(
+        model="model", pooling="mean", query_prefix="", passage_prefix="",
+        max_seq=8, pad_token="[PAD]", collapse_whitespace=True,
+    )
+    boundary = " ".join(["a"] * (6 if specials else 8))
+    oversized = boundary + " a"
+    assert encoder.texts_fit([])
+    assert encoder.texts_fit(["", "a\x1ca", boundary])
+    assert not encoder.texts_fit(["a", oversized])
+    # The guard must leave concurrent inference's padding and cap in place.
+    rows = tokenizer.encode_batch(["a", oversized])
+    assert [len(row.ids) for row in rows] == [8, 8]
+    assert sum(rows[0].attention_mask) == (3 if specials else 1)
+
+
 def _fake_onnx_encoder(
     monkeypatch: pytest.MonkeyPatch, *, served: bool, device: str = "cpu"
 ) -> tuple[embedding_backend._OnnxEncoder, object, dict[str, str]]:
