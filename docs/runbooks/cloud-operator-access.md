@@ -617,8 +617,20 @@ and readiness: existing containers may retain old settings. Do not restart or
 recreate QA/reviewer workloads outside their coordinated windows. A legacy
 image rollback alone does not undo node memory policy.
 
-Canary the owner vault first with verified identity, current backup and preserved
-source/preferences. Hold fleet and friends on a latency, freshness, memory or
+A separately authorized reviewer-only canary may precede owner adoption through
+the existing per-cell image pin. Preserve its PVC, placement, requests and limits;
+keep shared-node MemoryQoS and owner/QA images unchanged. Verify reviewer identity
+and backup, compare source/preferences, and measure bounded save, hash-checked
+fresh read, semantic publication, hybrid query and durable recovery. Record the
+actual lifetime peak and fresh warmed sibling/platform usage and reservations;
+the existing 80% cell-memory and 20% node-headroom gates still apply. A small smoke
+proves only the sampled outcome. Preserve an applicable preference incident and
+roll back a failed canary to its compatible legacy image without restoring an
+older vault over new writes. This evaluation requires neither owner OAuth nor a
+new paid node, and does not close owner acceptance or authorize fleet/friends.
+
+For fleet promotion and runtime-change closure, canary the owner vault with
+verified identity, current backup and preserved source/preferences. Hold fleet and friends on a latency, freshness, memory or
 preference miss. Roll back through the existing image-pin procedure to a verified
 legacy Cloud image; additive queue metadata remains compatible and custody stays
 on disk. Do not delete derived state or drain beside the running service. A

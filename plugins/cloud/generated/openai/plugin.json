@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "exomem-cloud",
-  "version": "0.103.0",
+  "version": "0.104.0",
   "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
   "author": {
     "name": "Substrate Systems OÜ",
@@ -44,7 +44,7 @@
         "test_cases": {
           "positive": [
             {
-              "description": "grounded recall. Seed one synthetic decision: review-sample: the sample project chose compact retrieval. Balanced prominence, permitted sample scope.",
+              "description": "grounded recall. Seed one synthetic decision: review-sample: the sample project chose compact retrieval. Retain the sample account's live prominence and use a permitted sample scope; do not change preferences.",
               "prompt": "What retrieval approach did the sample project choose?",
               "tools_triggered": "activate_context",
               "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and attribute it to the returned note title. Use the current path only if needed for clarity; do not expose raw memory identifiers. Do not write."
@@ -56,10 +56,10 @@
               "expected_behavior": "Activate context and resume from the prior episode, naming the review-sample next action with a memory citation. Do not invent continuity or write another copy."
             },
             {
-              "description": "proactive outcome. Ordinary sample work; balanced prominence and approved narrow capture scope. Do not prompt the model to save. Independently read the captured page in a fresh chat.",
+              "description": "proactive outcome. Ordinary sample work with live proactive capture permitted and an approved narrow capture scope. Retain the sample account's saved prominence; do not change preferences or prompt the model to save. Independently read the captured page in a fresh chat.",
               "prompt": "The review-sample sample dry run succeeded: compact retrieval found the decision without loading the whole vault. That is a reusable result from the method we just tried.",
               "tools_triggered": "remember, observe_memory",
-              "expected_behavior": "Under the live balanced policy, check for duplicates and quietly capture the bounded reusable outcome without a save instruction. Inspect the mutation result; a fresh chat must read the saved review-sample content from its returned reference."
+              "expected_behavior": "Under the live capture policy, check for duplicates and capture the bounded reusable outcome without a save instruction. Match the live policy's reporting level. Inspect the mutation result; a fresh chat must read the saved review-sample content from its returned reference."
             },
             {
               "description": "explicit capture. Approved sample capture scope. Search for duplicates before writing; inspect a fresh-chat readback.",
@@ -68,7 +68,7 @@
               "expected_behavior": "Check for existing knowledge and capture the distilled conclusion under the live envelope. Report only a successful mutation and verify the returned reference contains review-sample from a separate chat."
             },
             {
-              "description": "bounded recap. End an ordinary sample session with a completed action and a next action, balanced prominence. Verify the recorded episode from a different chat.",
+              "description": "bounded recap. End an ordinary sample session with a completed action and a next action, with live proactive capture permitted. Retain saved preferences. Verify the recorded episode from a different chat.",
               "prompt": "We are stopping here. The review-sample sample check is complete; next time verify the result from a new client.",
               "tools_triggered": "episode_memory",
               "expected_behavior": "Record one bounded episode with the completed sample check and next action. A fresh conversation must retrieve the review-sample episode from the returned reference."
