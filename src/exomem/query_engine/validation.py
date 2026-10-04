@@ -11,7 +11,6 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..structured_collections import CollectionError, FieldSpec, validate_field_value
-from .scalars import ScalarValueError, parse_instant
 from .ir import (
     Aggregate,
     Field,
@@ -30,6 +29,7 @@ from .ir import (
     Source,
     Traverse,
 )
+from .scalars import ScalarValueError, parse_instant
 
 _KEYS = frozenset(
     {

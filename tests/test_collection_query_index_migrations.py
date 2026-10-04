@@ -4,8 +4,8 @@ import importlib
 import json
 
 import pytest
-
-from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text, store as store
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_collection_store_writer import store as store
 
 
 def indexed_text():
