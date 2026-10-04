@@ -795,6 +795,7 @@ def run_lanes(
     visible: Callable[[str], bool] | None = None,
     reached: dict[str, set[str]] | None = None,
     analysis: Any = None,
+    admit: Callable[[str, Any], bool] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
@@ -860,6 +861,7 @@ def run_lanes(
                     freshness_snapshot=freshness_snapshot,
                     analysis=analysis,
                     registry=registry,
+                    admit=admit,
                 )
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
@@ -1062,6 +1064,7 @@ def _lane(
     freshness_snapshot: Any = None,
     analysis: Any = None,
     registry: context_roles.RoleRegistry | None = None,
+    admit: Callable[[str, Any], bool] | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1075,12 +1078,14 @@ def _lane(
     """
     if role.lane == "units":
         return _units_lane(
-            vault_root, role, neighbourhood=neighbourhood, freshness_snapshot=freshness_snapshot
+            vault_root, role, neighbourhood=neighbourhood, freshness_snapshot=freshness_snapshot,
+            admit=admit,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
             vault_root, role, anchors=anchors, neighbourhood=neighbourhood,
             registry=registry, analysis=analysis, freshness_snapshot=freshness_snapshot,
+            admit=admit,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1101,6 +1106,7 @@ def _units_lane(
     *,
     neighbourhood: frozenset[str],
     freshness_snapshot: Any = None,
+    admit: Callable[[str, Any], bool] | None = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1140,6 +1146,8 @@ def _units_lane(
     )
     truncated = len(hits) > UNIT_LANE_LIMIT or bool(capped)
     hits = hits[:UNIT_LANE_LIMIT]
+    if admit is not None:
+        hits = [hit for hit in hits if admit(hit.parent_path, hit)]
     return LaneResult(_unit_items(role, hits), truncated)
 
 
@@ -1187,6 +1195,7 @@ def _material_lane(
     registry: context_roles.RoleRegistry,
     analysis: Any,
     freshness_snapshot: Any = None,
+    admit: Callable[[str, Any], bool] | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     from . import (
@@ -1262,6 +1271,8 @@ def _material_lane(
         if candidate.unit_ref in records
         for page, unit, _order in (records[candidate.unit_ref],)
     ]
+    if admit is not None:
+        hits = [hit for hit in hits if admit(hit.parent_path, hit)]
     items = [replace(item, relevance_order=rank) for rank, item in enumerate(_unit_items(role, hits))]
     pages = store.search_bm25_result(
         [], MAX_ITEMS_PER_ROLE + 1, "kb", fresh, set(neighbourhood),
@@ -1276,6 +1287,8 @@ def _material_lane(
     relations = relation_registry.load_registry(vault_root)
     wanted = {stem for unit in query_units for stem in unit.stems}
     for rank, (path, _score) in enumerate(pointers[:MAX_ITEMS_PER_ROLE]):
+        if admit is not None and not admit(path, None):
+            continue
         page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
         if page is None or pointer_hashes.get(path) != page.snapshot_hash:
             raise RuntimeError("material page unavailable")
@@ -1916,6 +1929,7 @@ def _carry_groups_by_retrieval(
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
     skip_terms: str = "",
+    contacts: dict[str, set[tuple[int, int]]] | None = None,
 ) -> tuple[tuple[tuple[str, float], ...], ...]:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
@@ -1945,6 +1959,7 @@ def _carry_groups_by_retrieval(
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
             skip_terms=skip_terms,
+            contacts=contacts,
         )
     if state != "available":
         return ()
@@ -2190,6 +2205,8 @@ def _carried_packet(
     carried_by: str = "retrieval",
     pages: Sequence[tuple[str, float]] = (),
     visible: Callable[[str], bool] | None = None,
+    contacts: Mapping[str, set[tuple[int, int]]] | None = None,
+    unresolved_anchors: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """One packet compiled from a single dominant page, marked as carried.
 
@@ -2237,8 +2254,8 @@ def _carried_packet(
     would leave the packet claiming it resolved something after the page
     it was built from was removed. Several pages the turn named apart are each
     built from their own units, so one of them surviving another's removal is
-    honest. The cost is that a carried turn no longer
-    shows that menu; the material it shows instead is the trade.
+    honest. Only a carry rejected before producing any anchors or material
+    retains `unresolved_anchors`, the ordinary unresolved choice menu.
 
     `recent_context` is passed straight through to `build_packet`, so a
     carried packet leads with working continuity exactly as a resolved or an
@@ -2261,8 +2278,10 @@ def _carried_packet(
         status=status,
         evidence=evidence,
         visible=visible,
+        contacts=contacts,
     )
-    generation = {**generation, "carried_by": carried_by}
+    if carried_anchors:
+        generation = {**generation, "carried_by": carried_by}
     if budget_exhausted("working_set.budget"):
         raise BudgetExhausted("working_set.budget")
     with _span(timings, "working_set.budget"):
@@ -2275,7 +2294,9 @@ def _carried_packet(
         # an agent-picked page) and in `generation.carried_by`.
         return build_packet(
             items=items,
-            anchors=tuple(anchor.as_dict() for anchor in carried_anchors),
+            anchors=tuple(anchor.as_dict() for anchor in carried_anchors) or (
+                tuple(unresolved_anchors) if not items else ()
+            ),
             roles=roles,
             current_state=current_state,
             ambiguity=(),
@@ -2285,6 +2306,93 @@ def _carried_packet(
             status="resolved" if items else "unresolved",
             recent_context=recent_context,
         )
+
+
+def _carry_admission(
+    vault_root: Path, paths: Sequence[str], analysis: Any,
+    *, index: working_set_index.WorkingSetIndex | None,
+    contacts: Mapping[str, set[tuple[int, int]]] | None,
+    visible: Callable[[str], bool] | None,
+) -> Callable[[str, Any], bool] | None:
+    """Admission for pages whose only contact is a possessive property clause.
+
+    A rich unit proves subject-associated context, never ownership of every
+    sentence. Uncovered prose has no such association and cannot be a bypass.
+    """
+    from . import find, semantic_language_registry, vault
+
+    scopes = working_set_resolve.possessive_scopes(analysis)
+    if not scopes:
+        return None
+    pages = {path: find._CACHE.get(Path(vault_root) / path, Path(vault_root))
+        for path in paths if visible is None or visible(path)}
+    rows = tuple(row for row in (index.anchors() if index is not None else ())
+        if working_set_resolve.anchor_visible(row, visible or (lambda _path: True)))
+
+    def spans(names):
+        return tuple((start, end) for name in names
+            for start, end in working_set_resolve._phrase_spans(
+                analysis.tokens, working_set_index.tokens_of(working_set_index.normalize(name)))
+            if not any(start < boundary < end for boundary in analysis.run_breaks))
+
+    subjects = {}
+    for start, after, end in scopes:
+        matches = {row.path for row in rows if row.path
+            and any(stop == after for _start, stop in spans((row.title, *row.aliases)))}
+        for path, page in pages.items():
+            if page is not None and any(stop == after for _start, stop in spans((page.title,))):
+                matches.add(path)
+        subjects[start, after, end] = frozenset(
+            name for path in matches for name in working_set_currency._page_names(path)
+            if "/" in name
+        ) if len(matches) == 1 else frozenset()
+    restricted = {}
+    registries = {}
+    language = semantic_language_registry.load_registry(vault_root)
+    for path, page in pages.items():
+        if page is None:
+            restricted[path] = ()
+            continue
+        aliases = page.frontmatter.get("aliases") or ()
+        if isinstance(aliases, str):
+            aliases = (aliases,)
+        if spans((page.title, *aliases)):
+            continue
+        occurrences = (contacts or {}).get(path, ())
+        if not occurrences:
+            restricted[path] = ()
+            continue
+        local = [scope for scope in scopes if any(
+            scope[0] <= right and left < scope[2] for left, right in occurrences)]
+        if not local or any(not any(scope[0] <= right and left < scope[2] for scope in scopes)
+                            for left, right in occurrences):
+            continue
+        restricted[path] = tuple(local)
+        registries[path] = semantic_language_registry.for_attached_projects(
+            language, tuple(find._all_projects(page.frontmatter)))
+
+    def admit(path, hit):
+        if path not in restricted:
+            return True
+        if hit is None or getattr(hit, "form", "") != "rich":
+            return False
+        if not restricted[path]:
+            return False
+        # Subject relations must identify the canonical page. A short alias
+        # alone cannot prove identity, even when the turn used a unique name.
+        targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
+            .split("|", 1)[0].strip().casefold()
+            for relation in hit.relations if relation.get("kind") == "about_entity"}
+        category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
+        if category.status not in {"core", "extension", "alias", "unregistered"}:
+            return False
+        names = (category.resolved, *(getattr(category.definition, "aliases", ()) or ()))
+        category_spans = spans(tuple(name.replace("_", " ") for name in names))
+        return any(subjects[scope] & targets and any(
+            scope[1] <= start < end <= scope[2] for start, end in category_spans)
+            for scope in restricted[path])
+
+    return admit
 
 
 def _carried_material(
@@ -2301,6 +2409,7 @@ def _carried_material(
     status: str = working_set_resolve.RETRIEVAL_CARRIED_STATUS,
     evidence: tuple[str, ...] = ("retrieval",),
     visible: Callable[[str], bool] | None = None,
+    contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     selected_roles: Sequence[Mapping[str, str]] = (),
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
@@ -2324,6 +2433,8 @@ def _carried_material(
     states: list[Mapping[str, Any]] = []
     page_roles: dict[str, tuple[str, tuple[dict[str, str], ...]]] = {}
     candidates: dict[str, dict[str, str]] = {}
+    admit = _carry_admission(vault_root, paths, analysis, index=index,
+        contacts=contacts, visible=visible) if evidence == ("retrieval",) else None
     for path in paths:
         if visible is not None and not visible(path):
             continue
@@ -2391,6 +2502,7 @@ def _carried_material(
             neighbourhood=frozenset({path}),
             visible=visible,
             analysis=analysis,
+            admit=admit,
         )
         for item in got:
             if item.path == path:
@@ -2402,7 +2514,8 @@ def _carried_material(
                 # through here would report a draft page as active.
                 carried = replace(carried, title=item.title or carried.title or path)
                 break
-        anchors.append(carried)
+        if got or admit is None or admit(path, None):
+            anchors.append(carried)
         items.extend(got)
         states.extend(current_state)
         missing.extend(gap for gap in gaps if gap not in missing)
@@ -2882,6 +2995,7 @@ def _compile_packet(
                     segments.turn_tokens(analysis) if segments is not None else analysis.tokens
                 ),
                 referential=analysis.referential,
+                property_scopes=working_set_resolve.possessive_scopes(analysis),
             )
         if passed:
             # `applied` only when a ref qualified something: an anchor this
@@ -3177,12 +3291,14 @@ def _compile_packet(
             )
 
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
+        contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,
             turn=turn,
             timings=timings,
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
+            contacts=contacts,
         )
         domains, _contested = named_domains(groups)
         every: dict[str, float] = {}
@@ -3226,6 +3342,8 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                contacts=contacts,
+                unresolved_anchors=tuple(item.as_dict() for item in resolution.anchors),
             )
             if packet is not None:
                 return packet
@@ -3503,6 +3621,7 @@ def _named_beside(
         for path in (getattr(anchor, "path", ""), *(getattr(anchor, "neighbourhood", ()) or ())):
             if path:
                 exclude.add(str(path))
+    contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
     groups = _carry_groups_by_retrieval(
         vault_root,
         turn=turn,
@@ -3510,6 +3629,7 @@ def _named_beside(
         freshness_snapshot=freshness_snapshot,
         lexical_seconds=lexical_seconds,
         skip_terms=" ".join(sorted(consumed)),
+        contacts=contacts,
     )
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:
@@ -3527,6 +3647,7 @@ def _named_beside(
             index_token=index_token,
             freshness_snapshot=freshness_snapshot,
             visible=visible,
+            contacts=contacts,
         )
     except BudgetExhausted:
         return (), (), (), tuple(dict(role) for role in selected_roles)

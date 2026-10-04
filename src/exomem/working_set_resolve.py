@@ -2247,15 +2247,56 @@ def band_yieldable_paths(resolution: Resolution) -> frozenset[str]:
     resolved = resolution.resolved_anchors
     if resolution.status != "resolved" or not resolved:
         return frozenset()
-    for anchor in resolved:
-        evidence = frozenset(anchor.evidence)
-        if (
-            "vector_band" not in evidence
-            or _status_for_evidence(evidence - {"vector_band"}) == "resolved"
-            or not anchor.name_lower_case
-        ):
-            return frozenset()
+    if not all(_band_yieldable(anchor) for anchor in resolved):
+        return frozenset()
     return frozenset(anchor.path or anchor.anchor_id for anchor in resolved)
+
+
+def _band_yieldable(anchor: ResolvedAnchor) -> bool:
+    evidence = frozenset(anchor.evidence)
+    return (
+        "vector_band" in evidence
+        and _status_for_evidence(evidence - {"vector_band"}) != "resolved"
+        and anchor.name_lower_case
+    )
+
+
+def possessive_scopes(analysis: TurnAnalysis) -> tuple[tuple[int, int, int], ...]:
+    """(Clause start, property start, end) after a single possessive.
+
+    These are surface occurrences, not a grammar or a property ontology.
+    Nested possessives and possessive folds onto stopwords establish no scope.
+    """
+    boundaries = sorted({0, len(analysis.tokens), *analysis.run_breaks, *(
+        index for index, token in enumerate(analysis.tokens) if token in _RUN_COORDINATORS
+    )})
+    scopes = []
+    for start, end in zip(boundaries, boundaries[1:], strict=False):
+        possessives = [index for index in range(start, end)
+            if fold_possessive(analysis.tokens[index]) != analysis.tokens[index]
+            and fold_possessive(analysis.tokens[index]) not in _STOPWORDS]
+        if len(possessives) == 1:
+            after = possessives[0] + 1
+            if (after < end and analysis.tokens[after] not in _STOPWORDS
+                    and not analysis.tokens[after].endswith(("ing", "ed"))):
+                # A participle can follow an is/has contraction ("Dana's
+                # working"); that surface form does not establish possession.
+                scopes.append((start, after, end))
+    return tuple(scopes)
+
+
+def demote_scoped_bands(
+    anchors: Sequence[ResolvedAnchor], scopes: Sequence[tuple[int, int, int]],
+) -> tuple[ResolvedAnchor, ...]:
+    return tuple(
+        replace(anchor, status="partial")
+        if anchor.status == "resolved" and _band_yieldable(anchor)
+        and anchor.name_span_segment == "turn"
+        and (spans := anchor.name_spans or ((anchor.name_span,) if anchor.name_span else ()))
+        and all(any(start <= after - 1 < end for _, after, _ in scopes) for start, end in spans)
+        else anchor
+        for anchor in anchors
+    )
 
 
 def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
@@ -2383,6 +2424,7 @@ def resolve(
     *,
     turn_tokens: Sequence[str] = (),
     referential: bool = False,
+    property_scopes: Sequence[tuple[int, int, int]] = (),
 ) -> Resolution:
     """Derive anchor statuses and the turn's verdict from categorical evidence.
 
@@ -2399,6 +2441,9 @@ def resolve(
     and recency is back to reporting a fact about the vault and deciding
     nothing. Omitting it (every direct unit-test caller that has no opinion)
     leaves the clause shut.
+
+    `property_scopes` bounds possessive subject requests in the raw turn.
+    Affected ordinary-word bands are demoted before competing senses are decided.
     """
     for candidate in candidates:
         unknown = sorted(candidate.evidence - frozenset(EVIDENCE_KINDS))
@@ -2444,6 +2489,7 @@ def resolve(
         # other resolution is cut exactly as before.
         anchors.sort(key=lambda item: 0 if item.status == "resolved" else 1)
     anchors = anchors[:MAX_ANCHORS]
+    anchors = demote_scoped_bands(anchors, property_scopes)
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     anchors = _narrowed_by_qualifier(anchors)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]

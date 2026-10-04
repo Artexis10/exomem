@@ -1313,6 +1313,45 @@ def phrase_components(
     return tuple(tuple(sorted(set(members))) for _stems, members in groups)
 
 
+def carry_pair_occurrences(
+    turn: str, rare: Sequence[str],
+) -> tuple[tuple[int, int, tuple[str, str]], ...]:
+    """Keep carry pair occurrences in the resolver's raw token coordinates."""
+    sentences = _positioned_words(turn)
+    return _carry_occurrence_positions(turn, sentences, _pair_occurrences(sentences, rare))
+
+
+def _carry_occurrence_positions(turn, sentences, occurrences):
+    offsets = []
+    offset = 0
+    for sentence in _SENTENCE_BREAK.split(str(turn)):
+        offsets.append(offset)
+        offset += len(working_set_index.tokens_of(working_set_index.normalize(sentence)))
+    return tuple(
+        (offsets[sentence] + sentences[sentence][left][0],
+         offsets[sentence] + sentences[sentence][right][0], pair)
+        for sentence, left, right, pair in occurrences
+    )
+
+
+def _carry_components(
+    turn: str,
+    pairs: Sequence[tuple[str, str]],
+    occurrences: Sequence[tuple[int, int, tuple[str, str]]],
+):
+    analysis = working_set_resolve.analyze_turn(turn)
+    scopes = working_set_resolve.possessive_scopes(analysis)
+    if not scopes:
+        return phrase_components(pairs)
+    groups = {}
+    for left, right, pair in occurrences:
+        scope = next((scope for scope in scopes if scope[0] <= right and left < scope[2]), None)
+        groups.setdefault(scope, []).append(pair)
+    # Keep ordinary grouping outside the recognized request. Shared stems in
+    # another occurrence cannot merge that route back into the property.
+    return tuple(component for members in groups.values() for component in phrase_components(members))
+
+
 def carry_named_groups(
     vault_root: Path,
     turn: str,
@@ -1321,6 +1360,7 @@ def carry_named_groups(
     freshness=None,
     recall_checkpoint=None,
     skip_terms: str = "",
+    contacts: dict[str, set[tuple[int, int]]] | None = None,
 ) -> tuple[tuple[tuple[tuple[str, float], ...], ...], str]:
     """The pages this turn NAMED, one group per phrase that named them.
     Returns `(groups, readiness status)`.
@@ -1341,7 +1381,7 @@ def carry_named_groups(
     reported rather than repaired, raw material, navigation and retired
     pages dropped before anyone counts.
     """
-    from . import lexstore
+    from . import find, lexstore
 
     try:
         stems = pairable_stems(turn)
@@ -1366,7 +1406,8 @@ def carry_named_groups(
             if len(rare) >= working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS
             else ()
         )
-        components = phrase_components(pairs) if pairs else ()
+        occurrences = carry_pair_occurrences(turn, rare) if pairs else ()
+        components = _carry_components(turn, pairs, occurrences) if pairs else ()
         if len(components) > working_set.RETRIEVAL_CARRY_MAX_PHRASES:
             # A turn saying that many separate things names a list, not a
             # set of domains: one query over every pair, one group.
@@ -1399,6 +1440,15 @@ def carry_named_groups(
             )
             if hits:
                 groups.append(hits)
+                if contacts is not None:
+                    for path, _score in hits:
+                        page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
+                        if page is not None:
+                            found = frozenset(content_stems(page.title + " " + page.body))
+                            contacts.setdefault(path, set()).update(
+                                (left, right) for left, right, pair in occurrences
+                                if pair in component and set(pair) <= found
+                            )
         if not groups:
             groups = _carry_title_groups(
                 vault_root,
@@ -1410,6 +1460,7 @@ def carry_named_groups(
                 limit=limit,
                 freshness=freshness,
                 recall_checkpoint=recall_checkpoint,
+                contacts=contacts,
             )
         return tuple(groups), "available"
     except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
@@ -1428,6 +1479,7 @@ def _carry_title_groups(
     limit: int | None,
     freshness,
     recall_checkpoint,
+    contacts: dict[str, set[tuple[int, int]]] | None = None,
 ) -> list[tuple[tuple[str, float], ...]]:
     """Pages a turn names by TITLE when no two distinctive words name them.
 
@@ -1549,24 +1601,40 @@ def _carry_title_groups(
         tuple((path, score) for path, score, _stems, _words in candidates if path in supporting)
         for _spans, supporting in qualified
     ]
-    remaining = tuple(
-        sorted(
-            {
-                pair
-                for sentence_id, left, right, pair in occurrences
-                if not any(
-                    sentence == sentence_id and (start <= left < end or start <= right < end)
-                    for sentence, start, end in matches
-                )
-            }
+    remaining_occurrences = tuple(
+        occurrence for occurrence in occurrences
+        if not any(
+            sentence == occurrence[0] and (start <= occurrence[1] < end
+                                          or start <= occurrence[2] < end)
+            for sentence, start, end in matches
         )
     )
-    components = phrase_components(remaining)
+    remaining = tuple(sorted({pair for _sentence, _left, _right, pair in remaining_occurrences}))
+    components = _carry_components(
+        turn, remaining, _carry_occurrence_positions(turn, sentences, remaining_occurrences)
+    )
     by_component: list[list[tuple[str, float]]] = [[] for _ in components]
     for path, score, title_stems, _title_words in candidates:
         for index, component in enumerate(components):
             if any(set(pair) <= title_stems for pair in component):
                 by_component[index].append((path, score))
+    if contacts is not None:
+        for path, _score, title_stems, _title_words in candidates:
+            admitted = (
+                occurrence for occurrence in occurrences
+                if set(occurrence[3]) <= title_stems and (
+                    occurrence in remaining_occurrences or any(
+                        path in supporting and any(
+                            sentence == occurrence[0] and start <= occurrence[1] < occurrence[2] < end
+                            for sentence, start, end in spans
+                        ) for spans, supporting in qualified
+                    )
+                )
+            )
+            contacts.setdefault(path, set()).update(
+                (left, right) for left, right, _pair
+                in _carry_occurrence_positions(turn, sentences, admitted)
+            )
     return groups + [tuple(group) for group in by_component if group]
 
 

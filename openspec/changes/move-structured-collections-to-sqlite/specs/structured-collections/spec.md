@@ -233,6 +233,8 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
 
 ### Requirement: Collection store writes meet a latency budget
+
+The independently gated first NEW owner-only Records summary collection (S1 in `add-collection-query-engine`) MAY be released before the 15 ms full-public-inspect, 20 ms guarded-append and supporting append-stage timing targets below are met. Those targets SHALL remain measured and reported optimisation goals for S1, with unmet results explicit; this exception SHALL NOT establish full phase/GA performance acceptance. Bulk/query/resource bounds and integrity, authorization, correctness, recovery, compatibility, portability and all other applicable S1 gates SHALL remain mandatory. Existing Records and Planning SHALL NOT be migrated by this exception.
 With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items, measured through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. A client guard refresh through `inspect` SHALL have p95 under 15 ms. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
 
 #### Scenario: Append stays flat as the collection grows
@@ -250,6 +252,11 @@ With the store canonical, the release acceptance harness SHALL measure, and the 
 #### Scenario: Query parity
 - **WHEN** the parity corpus queries run against the file path and the store
 - **THEN** rows, order, totals, aggregates and rendered output are equal
+
+#### Scenario: Owner-only first collection misses the optimisation targets
+
+- **WHEN** S1's mandatory correctness, permissions, recovery, portability and remaining bounds pass but measured inspect or append exceeds 15 ms or 20 ms respectively
+- **THEN** that NEW owner-only collection may be enabled with actual latency reported, existing file collections unchanged and the parent performance gate still open
 
 ### Requirement: Declared storage strategies are view layouts over the collection store
 The substrate SHALL support three declared storage strategies. For `markdown-log` and `markdown-items` the strategy SHALL name the layout of the collection's Markdown views, one chronological log file of item blocks or one Markdown file per item, while the canonical data of both SHALL live in the collection store. The `dataset` strategy (CSV, TSV, or JSON) SHALL remain file-canonical and query-only. Any cache, index, export, summary, replica, or generated view SHALL be derived from the canonical source it represents.

@@ -16,6 +16,10 @@ acknowledged.
 
 ## What Changes
 
+The 4 October programme refinement makes Exomem-native whole-lifecycle evaluation primary: multimodal preservation → agent interpretation → governed projections → conversational correction → graph/state publication → fresh-session task utility. Extend the existing `membench` utility and memory-loop instruments, not a second framework. The eighteen-case compiler audit stays one frozen regression instrument, not the product definition. LongMemEval and other public suites remain periodic external calibration or evidence for specific comparative claims, never ordinary product-release prerequisites.
+
+Report a quality vector: downstream utility/negative transfer, capture and structuring accuracy, provenance/governance, currentness/context relevance, latency distributions, context and token overhead, monetary cost, calls/retries, background/storage/index work, and human correction burden. More accurate but slower, noisier or more expensive is a trade-off to expose, not automatic improvement. New lifecycle scenarios have separate versioned identities and do not overwrite existing benchmark outcomes or thresholds.
+
 The `close-memory-loop` programme makes product-shaped deterministic capture/index/compiler acceptance and observed ordinary-use evidence the required delivery path. Paid multi-arm comparisons remain available, explicitly deferred and separately opt-in. Passing scorer/oracle-packet tests alone does not establish real compiler acceptance; the corpus must use canonical entity, hub, Records and Planning shapes through normal writers and publication.
 
 Derived current-state references retain their own scoring identity and earn relevance
@@ -49,6 +53,8 @@ telemetry separately from metered API charges or optional price estimates.
   the A2/A4 arms before the compiler exists, so the compiler has a number to beat.
 
 ## Capabilities
+
+The next acceptance event prioritizes an observable fresh-session useful answer over further component-only claims. Retain actual public-interface calls, packets, follow-up retrieval and answers so interface mistakes and compiler mistakes can be repaired separately. Agent independence means no private harness instruction is required; it does not claim equal results from every model.
 
 ### New Capabilities
 - `context-activation-benchmark`: the deterministic activation audit instrument, its

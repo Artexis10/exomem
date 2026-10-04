@@ -298,6 +298,8 @@ The agent-task benchmark runs a pinned agent/model/skill over the real installed
 
 ## Migration Plan
 
+**S1 release refinement, owner 2026-10-04.** Require merged/independently verified parent writer, registry, row-governance and parity foundation, not completion of its full P1a performance phase. The first NEW owner-only summary collection may proceed with the 15 ms full-inspect, 20 ms guarded-append and supporting append-stage timing targets unmet and honestly measured; the parent §12 and structured-collections latency requirement own this narrow exception. Every applicable integrity, permission, recovery, compatibility, portability and other bound remains mandatory. No existing collection migration, GA claim or speed claim follows. Apply this distinction to the table's parent-P1a dependencies; all unrelated rich capabilities stay later.
+
 | Delivery boundary | Required dependencies and outcome |
 | --- | --- |
 | S1 owner slice, first | Merged parent P1a writer/registry/lease/parity; MODIFIED summary/numeric/history and per-collection routing/snapshot/adoption contracts; S1.2b implements the required P1b.5–7 snapshot/replica/head/lineage/portability subset and schema/state compatibility and separate store-capability fences before create/access. Row/field admission and owner-only raw preservation protection in S1.5b precede external access. Preserve raw Source/Evidence → owner-only preview real time/shape → create NEW extensible built-in Records summary C in the real vault beside file Records A/Planning B → typed streaming import → existing MCP governed query/daily rollup. No preview vault, no A/B migration, no P4/P5 requirement for collection-local fields. |

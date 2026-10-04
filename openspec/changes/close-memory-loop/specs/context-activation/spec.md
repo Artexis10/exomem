@@ -385,6 +385,57 @@ whatever the turn resolved.
 - **THEN** both pages are carried, bounded at three by score, and a phrase two pages
   answer to is not carried and is never guessed between
 
+### Requirement: Implicit carry respects an explicitly scoped subject request
+For bounded unambiguous possessive subject/property constructions, activation SHALL
+retain raw clause and naming occurrences and apply conservative subject-scoped
+admission to material reached only through body contact in that request. It SHALL
+NOT infer the construction merely from nearby object and topic words, and unsupported
+syntax SHALL retain existing behavior. Independent page title/alias occurrences and
+explicit agent anchors SHALL retain their existing context semantics. Another
+occurrence naming the same page SHALL remain an independent admission route.
+
+Property-clause-only body contact SHALL require actual hydrated rich-unit subject
+association through `about_entity` and matching authored category identity or an
+accepted alias in its existing registry scope before unit projection. This supplies
+context association, not certified property/value ownership. Kind headings, tags,
+page containment, generic links and nearby prose SHALL NOT supply that proof; several
+subject relations SHALL NOT assign all sentences to all subjects. The compiler SHALL
+NOT introduce a property-to-category ontology, infer a mapping or alter authored prose.
+
+The same admission predicate SHALL apply to categorical and material unit projection
+and uncovered-prose pointer creation. Rejected content SHALL NOT return as a pointer.
+Missing proof MAY omit otherwise useful compact legacy context or generic formulas
+on this route, but SHALL NOT claim the vault lacks a property. Withheld and absent
+subject evidence SHALL remain indistinguishable. Independently admitted standing
+personal context, other named domains and body-only carry outside the recognized
+request SHALL retain their existing behavior, permissions and bounds.
+
+#### Scenario: A conversion task does not carry unrelated equipment settings
+- **WHEN** a scoped request asks to convert one object's target temperature and an
+  unrelated page shares conversion words but has no admitted subject association
+- **THEN** its saved settings are omitted with semantic evidence both off and on,
+  and empty rejected material does not restore a weak ordinary-word band resolution
+
+#### Scenario: Another occurrence independently names the page
+- **WHEN** the same turn also explicitly names the conversion page in another
+  occurrence, even with words shared by the scoped request
+- **THEN** that independent page request retains its context and pointer semantics
+
+#### Scenario: A subject-scoped unit does not license its unrelated sibling
+- **WHEN** one rich unit has the admitted subject association and matching authored
+  category while a sibling has only another subject or lacks that association
+- **THEN** only the associated context is admitted by the property-body-contact route,
+  without labeling it as a certified property value
+
+#### Scenario: Uncovered prose cannot bypass the scope restriction
+- **WHEN** a rejected page repeats the same task words in uncovered prose
+- **THEN** matching that prose alone does not emit a pointer to the page
+
+#### Scenario: Existing independent context remains useful
+- **WHEN** a turn combines the scoped request with a separately named domain or
+  standing personal context, or another turn uses useful unconstrained body contact
+- **THEN** those independent routes retain their existing admission and limits
+
 ### Requirement: Title qualification is local to each named occurrence
 When the strict two-distinctive-word path names no page, the existing title
 fallback SHALL use a complete current title stated in one sentence to qualify
