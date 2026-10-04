@@ -421,6 +421,11 @@ class ClusterClient:
             node.metadata.name for node in self._core.list_node().items
             if "exomem.io/dedicated-cell" not in (node.metadata.labels or {})
             and not any(taint.key == "exomem.io/dedicated-cell" for taint in (node.spec.taints or []))
+            and not node.spec.unschedulable
+            and not any(taint.effect in {"NoSchedule", "NoExecute"} for taint in (node.spec.taints or []))
+            and node.status is not None
+            and any(condition.type == "Ready" and condition.status == "True"
+                    for condition in (node.status.conditions or []))
         }
 
         pv_namespace: dict[str, str] = {}

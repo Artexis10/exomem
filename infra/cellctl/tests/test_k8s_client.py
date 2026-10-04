@@ -254,7 +254,8 @@ def test_capacity_inputs_read_a_csinode_whose_drivers_are_null() -> None:
     client = ClusterClient.__new__(ClusterClient)
     client._core = _CoreWithoutVolumes()
     client._core.list_node = lambda: NS(items=[
-        NS(metadata=NS(name=name, labels={}), spec=NS(taints=[]))
+        NS(metadata=NS(name=name, labels={}), spec=NS(taints=[], unschedulable=False),
+           status=NS(conditions=[NS(type="Ready", status="True")]))
         for name in ("k3s-node", "hetzner-node")
     ])
     client._storage = _StorageWithNullDrivers(
@@ -500,3 +501,38 @@ def test_capacity_excludes_an_unobserved_attachment_only_node() -> None:
     inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
     assert inputs[1] == {"joining": 1}
     assert inputs[3] == {"joining"}
+
+
+@pytest.mark.parametrize("unavailable", ["not-ready", "cordoned", "tainted"])
+def test_capacity_defers_new_cells_until_the_worker_is_available(unavailable: str) -> None:
+    """Registered CSI slots must not admit users to an unavailable worker."""
+    node = NS(
+        metadata=NS(name="worker", labels={}),
+        spec=NS(unschedulable=False, taints=[]),
+        status=NS(conditions=[NS(type="Ready", status="True")]),
+    )
+    if unavailable == "not-ready":
+        node.status.conditions[0].status = "False"
+    elif unavailable == "cordoned":
+        node.spec.unschedulable = True
+    else:
+        node.spec.taints = [NS(key="maintenance", value="active", effect="NoSchedule")]
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = _CoreWithoutVolumes()
+    client._core.list_node = lambda: NS(items=[node])
+    client._storage = _StorageWithNullDrivers([
+        {"metadata": {"name": "worker"}, "spec": {"drivers": [
+            {"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}])
+    client._storage.list_volume_attachment = lambda: NS(items=[NS(
+        spec=NS(attacher="csi.hetzner.cloud", node_name="worker", source=NS(persistent_volume_name="pv")),
+        status=NS(attached=True))])
+
+    unavailable_inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    assert unavailable_inputs[:3] == ({"worker": 16}, {"worker": 1}, {"worker": 1})
+    assert unavailable_inputs[3] == {"worker"}
+
+    # The next ordinary observation restores admission; no human unlock is needed.
+    node.status.conditions[0].status = "True"
+    node.spec.unschedulable = False
+    node.spec.taints = []
+    assert client.capacity_inputs(csi_driver="csi.hetzner.cloud")[3] == set()
