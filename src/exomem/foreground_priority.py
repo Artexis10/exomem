@@ -105,8 +105,11 @@ class _PassBudget:
 
     def allowance(self, now: float) -> float:
         """Seconds this pass may still wait without breaking the floor."""
-        elapsed = now - self.started
-        return MAX_YIELD_SECONDS + MAX_WAIT_SHARE * elapsed - self.waited
+        work = max(0.0, now - self.started - self.waited)
+        # Charge the initial grace once. Counting previous waits as elapsed
+        # work would let those waits buy more waiting and double the grace.
+        wait_per_work = MAX_WAIT_SHARE / (1.0 - MAX_WAIT_SHARE)
+        return MAX_YIELD_SECONDS + wait_per_work * work - self.waited
 
     def after_capped_wait(self, now: float, waited: float) -> None:
         self.work_until = now + min(waited, MAX_BULK_WORK_SECONDS)
