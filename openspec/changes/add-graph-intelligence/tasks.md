@@ -34,30 +34,35 @@
 - [ ] 1.6 After deploy, in the owner's session: run the census on the live vault, record
       its counts and the census-level calibration block for the benchmark in this design.
 
-## 2. Admission kernel and request-time algorithms (lane G2)
+## 2. Request-time workflows — owned by sibling graph/query engine
 
-- [ ] 2.1 Red `tests/test_graph_admitted_kernel.py`: edges need their authoring page and
-      both endpoints admitted; placeholders follow their naming edge; the inverse view;
-      budgets count admitted elements only; the raw ceiling returns `budget_exhausted`
-      without a partial result; unavailable is typed; no direct `graph_edges` SQL in
-      `graph_intel/`.
-- [ ] 2.2 Red `tests/test_graph_egress_noninterference.py`: outputs are byte-identical
-      across vault pairs that differ only in withheld material.
-- [ ] 2.3 Connection paths, provenance trace and dependants, per-hit support and stale
-      basis, the activation `connection` block, and `graph-context` on the kernel, each red
-      first, then the `connect_memory` operations and contract regeneration.
+- [ ] 2.1 Transfer admission/execution to `add-graph-traversal-queries` G1/G2 and
+      collection Q1: author/endpoints/evidence, visible-link resolution, admitted-only
+      budgets and typed refusal. Verify those owning gates; do not build `graph_intel/`
+      or another evaluator/policy stack. Transfer is not task completion.
+- [ ] 2.2 Use sibling G2/G3 hidden/absent twins for request-time paths, counts,
+      explanations and continuation, including hidden-only replay debt. Preserve the
+      separate census whole-view restriction; no widened census contract is implied.
+- [ ] 2.3 Deliver connection paths, evidence chains and reverse-impact review candidates
+      through sibling G2/G3/G5 and shared `connect_memory(operation="query")`.
+      Carry witness paths into activation through G5/Q8; preserve existing graph-context
+      operations and verify the owning MCP/activation gates rather than new tool names.
 
 ## 3. The dreamer's graph families (lane G3)
 
-- [ ] 3.1 Page-contribution tables, hubs, communities, stored-vector link proposals,
-      `upkeep_connect`, evidence gaps and stale basis, and vocabulary upkeep, each red first.
+- [ ] 3.1 Reconcile evidence-gap/stale-basis/vocabulary and link proposals with existing
+      dreamer link, hydration, alias and convention families. Add only demonstrated
+      missing behaviour with its own outcome test; do not add a competing `upkeep_connect`.
+      Hubs, communities and structural-authority analytics remain deferred.
 - [ ] 3.2 Graph upkeep egress: whole under an empty policy, per item otherwise, and
       `audience_restricted` for the map and topics; coexistence probes; the vault map.
 
 ## 4. The benchmark (lane G4)
 
-- [ ] 4.1 The `graph_reasoning` membench family, the edge-quality renderer, the arms and
-      adapter capabilities, scorers per dimension with the egress-leak scorer, and the
-      recorded red baseline.
-- [ ] 4.2 The pre-registered acceptance amendment and the acceptance run after groups 2
-      and 3.
+- [ ] 4.1 Map `graph_reasoning` tasks and edge-quality calibration into sibling G6's
+      existing benchmark effort. Record a red baseline and independent answer/path
+      oracle, including sparse-edge, unavailable and disclosure negatives; do not
+      establish a second benchmark harness.
+- [ ] 4.2 Run that shared acceptance after the applicable sibling request-time gates
+      and upkeep outcomes. Preserve live census task 1.6 and report its pending status
+      separately; no transferred task is complete merely because it has a new owner.
