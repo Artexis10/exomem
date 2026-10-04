@@ -24,7 +24,7 @@ def marker_path(root):
 def read_marker(root):
     path = marker_path(root).relative_to(root)
     with held_fs.acquire(root).require() as fs:
-        parent = fs.parent(str(path.parent))
+        parent = fs.parent(path.parent.as_posix())
         if parent.error is not None and parent.error.code == "MISSING":
             return None
         with parent.require() as directory:

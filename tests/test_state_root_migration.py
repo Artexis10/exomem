@@ -30,7 +30,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -1945,7 +1945,7 @@ def test_fresh_deployment_admits_without_offline_migration(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("existing_state", [False, True])
 def test_mixed_marker_requires_support_before_bootstrap_or_cached_admission(
-    tmp_path: Path, existing_state: bool,
+    tmp_path: Path, existing_state: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from exomem import state_migration, state_paths
     from exomem.collection_store import authority
@@ -1966,6 +1966,12 @@ def test_mixed_marker_requires_support_before_bootstrap_or_cached_admission(
                          "authority": "store", "store_id": sid}],
         "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
     }))
+    class WindowsMarker(PureWindowsPath):
+        def relative_to(self, other):
+            return super().relative_to(PureWindowsPath(other))
+
+    # Windows spelling must cross the real portable held-path API on every host.
+    monkeypatch.setattr(authority, "marker_path", lambda root: WindowsMarker(marker))
     before = {path.name: path.read_bytes() for path in state_dir.iterdir()} if existing_state else {}
 
     with pytest.raises(state_migration.StateCompatibilityUnsupported):

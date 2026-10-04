@@ -46,11 +46,11 @@ class _IsolatedSession:
         (self.root / vault.kb_dirname()).mkdir()
         self.fs = stack.enter_context(held_fs.acquire(parent).require())
         self.directory = stack.enter_context(self.fs.parent(self.root.name).require())
-        self.kb_directory = stack.enter_context(self.fs.parent(str(
-            (self.root / vault.kb_dirname()).relative_to(parent),
-        )).require())
+        self.kb_directory = stack.enter_context(self.fs.parent(
+            (self.root / vault.kb_dirname()).relative_to(parent).as_posix(),
+        ).require())
         self.namespace = stack.enter_context(self.fs.parent(
-            str(authority.marker_path(self.root).parent.relative_to(parent)), create=True, access="mutate",
+            authority.marker_path(self.root).parent.relative_to(parent).as_posix(), create=True, access="mutate",
         ).require())
         self.alive = stack.enter_context(mmap.mmap(-1, 1))
         self.alive[0] = 1
