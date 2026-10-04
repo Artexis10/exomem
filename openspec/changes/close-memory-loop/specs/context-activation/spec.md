@@ -134,6 +134,62 @@ already appear in ordinary recall.
 
 ## ADDED Requirements
 
+### Requirement: Relevant open-category material stays reachable
+A selected material lane SHALL serve query-matched compiled knowledge only within
+already admitted caller-visible contexts, without creating resolution evidence.
+It SHALL exclude categories owned by any effective non-material role, selected or not,
+using each parent's scoped category identity and accepted aliases. Unknown labels
+SHALL retain their literal identity; the server SHALL NOT infer a category mapping.
+
+#### Scenario: A relevant open category is not lost behind newer unrelated units
+- **WHEN** an admitted project has an older relevant unit in an otherwise unowned category
+  and newer unrelated units
+- **THEN** material can carry the relevant unit with its authored category and provenance,
+  without ranking standing role lanes by the turn or serving out-of-context knowledge
+
+#### Scenario: A scoped owner mapping cannot be bypassed
+- **WHEN** an owner role uses an accepted category alias for one project, and another
+  project uses the same spelling with a different identity
+- **THEN** material respects the first mapping even when that role is unselected,
+  without applying its exclusion to the other project's distinct category
+
+### Requirement: Prose pointers do not pretend to be compiled units
+Material MAY offer a relevant compiled-page pointer when authored prose is not covered
+by semantic units, including on mixed-content pages. Its reason SHALL state that the
+page requires reading. The compiler SHALL NOT fabricate a unit or present an arbitrary
+prose excerpt as a semantic claim.
+
+#### Scenario: Relevant mixed prose remains inspectable
+- **WHEN** a relevant page's few semantic units do not contain the needed prose
+- **THEN** a source pointer can identify the page without claiming that the missing
+  prose was compiled into the packet
+
+### Requirement: Material lookup remains bounded and honestly partial
+Material SHALL use maintained catalogues without foreground repair, corpus scanning
+or model acquisition. Context and category predicates SHALL precede its read cap:
+200 unit candidates plus a sentinel, three pointer candidates plus a sentinel and
+three served items overall.
+Existing packet budgets, currentness and egress rules SHALL apply. Empty, unavailable,
+truncated and budget-limited outcomes SHALL remain distinct, including carried pages.
+
+#### Scenario: An unavailable or capped catalogue is not an empty project
+- **WHEN** material's catalogue is unavailable or its candidate window is exhausted
+- **THEN** the packet reports the applicable lane failure or truncation rather than
+  claiming no material, and performs no fallback walk or model load
+
+### Requirement: Project configuration participates in activation freshness
+A project-registry-only edit SHALL be visible to ordinary writer validation and
+invalidate affected warm activation state without a release or restart. Managed
+refresh SHALL use the existing background path and report stale or warming state
+until the current catalogue is usable, with no request-thread encoder acquisition.
+Existing background resource policy SHALL remain unchanged. A cached tool-description list SHALL NOT
+override the live registry.
+
+#### Scenario: A YAML-only project addition reaches the warm compiler
+- **WHEN** a project key is added while Markdown and the activation catalogue are unchanged
+- **THEN** writer validation sees it immediately, activation reports any refresh lag
+  honestly, and the refreshed catalogue can resolve the new key without a restart
+
 ### Requirement: Competing senses decided by the turn's own words
 Resolution SHALL let the turn's own words decide between same-kind senses in two cases
 beyond the resolved-anchor ambiguity rule. First, a bare shared name: when no anchor

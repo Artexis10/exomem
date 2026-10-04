@@ -219,7 +219,7 @@ def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
     )
     monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root: ([], []))
     monkeypatch.setattr(
-        working_set_index, "_project_candidates", lambda vault_root, member_paths: ([], {})
+        working_set_index, "_project_candidates", lambda vault_root, member_paths, **kwargs: ([], {})
     )
     monkeypatch.setattr(working_set_index, "MAX_ANCHORS", 2)
 
@@ -734,6 +734,34 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
     assert working_set_index.WorkingSetIndex(seeded).anchors() == ()
 
 
+def test_a_transient_lane_failure_recovers_without_a_vault_edit(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A temporary lookup outage must not poison a warm packet until the next write."""
+    from exomem import lexstore, working_set, working_set_runtime
+
+    lexstore.ensure_fresh(seeded)
+    working_set_runtime.reset_caches_for_tests()
+    request = {
+        "turn": "Cargo Sled constraints",
+        "max_chars": 2000,
+        "freshness_key": "unchanged-vault",
+        "anchor": "Knowledge Base/Products/Cargo Sled.md",
+    }
+
+    def unavailable_lane(*args, **kwargs):
+        raise OSError("temporary catalogue read failure")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(working_set, "_lane", unavailable_lane)
+        failed = working_set_runtime.serve(seeded, **request)
+    assert any(entry["reason"] == "lane_failed" for entry in failed["missing"])
+
+    recovered = working_set_runtime.serve(seeded, **request)
+    assert not any(entry["reason"] == "lane_failed" for entry in recovered["missing"])
+    assert recovered["generation"]["index_generation"] == failed["generation"]["index_generation"]
+
+
 def test_cold_activation_abstains_before_starting_retrieval(
     seeded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -845,6 +873,105 @@ def _join_scheduled_builds() -> None:
         if thread.name == "exomem-working-set-warm":
             thread.join(timeout=30)
             assert not thread.is_alive(), "the scheduled index build did not finish"
+
+
+def test_yaml_only_project_edit_reports_lag_then_refreshes_without_restart(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live writer can see a new key while a warm compiler falsely claims current."""
+    import threading
+
+    from exomem import project_keys, readiness, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild(freshness_stamp="unchanged-markdown")
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    real_schedule = working_set_runtime._schedule_build
+    scheduled: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        working_set_runtime,
+        "_schedule_build",
+        lambda root, *, freshness_stamp="": scheduled.append((root, freshness_stamp)),
+    )
+    before = working_set_runtime.serve(
+        seeded, turn="Maritime Route", max_chars=2000, freshness_key="unchanged-markdown"
+    )
+    assert "index_stale" not in before["generation"]
+    real_collect = working_set_index.WorkingSetIndex._collect
+
+    def background_only(self, *args, **kwargs):
+        assert threading.current_thread() is not threading.main_thread(), "foreground corpus walk"
+        return real_collect(self, *args, **kwargs)
+
+    monkeypatch.setattr(working_set_index.WorkingSetIndex, "_collect", background_only)
+    keys_path = seeded / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    keys_path.write_text(
+        keys_path.read_text(encoding="utf-8")
+        + "  maritime-route:\n    folder: Maritime Route\n    category: logistics\n",
+        encoding="utf-8",
+    )
+    assert "maritime-route" in project_keys.load_project_registry(seeded).keys
+
+    first = working_set_runtime.serve(
+        seeded, turn="Maritime Route", max_chars=2000, freshness_key="unchanged-markdown"
+    )
+    assert first["generation"].get("index_stale") is True
+    assert [stamp for _root, stamp in scheduled] == ["unchanged-markdown"]
+    real_schedule(scheduled[0][0], freshness_stamp=scheduled[0][1])
+    _join_scheduled_builds()
+
+    scheduled.clear()
+    second = working_set_runtime.serve(
+        seeded, turn="Maritime Route", max_chars=2000, freshness_key="unchanged-markdown"
+    )
+    assert "index_stale" not in second["generation"]
+    assert any(anchor["ref"] == "project:maritime-route" for anchor in second["anchors"])
+    assert scheduled == []
+
+
+def test_project_registry_refresh_tracks_meaning_not_yaml_formatting(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Renames/removals invalidate cached anchors; comments do not trigger a rebuild."""
+    from exomem import working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild(freshness_stamp="unchanged-markdown")
+    original_generation = index.generation()
+    keys_path = seeded / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    keys_path.write_text(
+        "# A formatting-only edit\n"
+        "projects:\n  northern-corridor: {category: logistics, folder: Northern Corridor}\n",
+        encoding="utf-8",
+    )
+    state, index, stale = working_set_runtime.ensure_index(
+        seeded, freshness_stamp="unchanged-markdown"
+    )
+    assert (state, stale) == (working_set_runtime.READY, False)
+    assert index is not None and index.generation() == original_generation
+
+    keys_path.write_text(
+        "projects:\n  eastern-route: {category: logistics, folder: Eastern Route}\n",
+        encoding="utf-8",
+    )
+    with monkeypatch.context() as failed_refresh:
+        failed_refresh.setattr(
+            working_set_index.WorkingSetIndex, "update", lambda self, **kwargs: {"unavailable": True}
+        )
+        state, index, stale = working_set_runtime.ensure_index(
+            seeded, freshness_stamp="unchanged-markdown"
+        )
+        assert (state, stale) == (working_set_runtime.READY, True)
+    state, index, stale = working_set_runtime.ensure_index(
+        seeded, freshness_stamp="unchanged-markdown"
+    )
+    assert (state, stale) == (working_set_runtime.READY, False)
+    assert index is not None
+    project_refs = {row.ref for row in index.anchors() if row.kind == "project"}
+    assert project_refs == {"project:eastern-route"}
+    assert index.generation() > original_generation
 
 
 def test_a_scheduled_build_records_the_stamp_so_the_next_request_stops_asking(

@@ -56,4 +56,4 @@ def test_the_lenses_are_the_ones_that_select_what_the_page_holds() -> None:
 
     chosen = working_set._carry_roles(registry, analysis, frozenset({"risk"}))
 
-    assert [role["id"] for role in chosen] == ["open_questions"]
+    assert [role["id"] for role in chosen] == ["material", "open_questions"]
