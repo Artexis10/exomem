@@ -78,13 +78,15 @@ def check_sqlite_version(version_info: tuple[int, ...] | None = None) -> None:
         )
 
 
-def _connect(database: str, *, uri: bool = False) -> sqlite3.Connection:
+def _connect(
+    database: str, *, uri: bool = False, busy_timeout_ms: int = BUSY_TIMEOUT_MS
+) -> sqlite3.Connection:
     return sqlite3.connect(
         database,
         isolation_level=None,
         factory=_CONNECTION_FACTORY,
         uri=uri,
-        timeout=BUSY_TIMEOUT_MS / 1000,
+        timeout=busy_timeout_ms / 1000,
         check_same_thread=False,
     )
 
@@ -139,6 +141,7 @@ class WriterConnection:
         self._owner_thread = threading.get_ident()
         self._closed = False
         self._release_cache = None
+        self._inspection_identity = object()
 
     @property
     def release_cache(self):
@@ -155,11 +158,31 @@ class WriterConnection:
                 "COLLECTION_STORE_WRITER_THREAD", "the opening thread owns the writer connection"
             )
 
+    def require_write_authority(self, *, allow_diverged: bool = False) -> None:
+        """Recheck authority before SQL or a publication filesystem effect.
+
+        The publisher may preserve a detected foreign file after recording
+        divergence. That trusted filesystem-only caller can opt out of the
+        divergence fence, never the opening-thread, open-handle or lease checks.
+        Transactions always retain the fence.
+        """
+        self.require_owner_thread()
+        if self._closed:
+            raise CollectionStoreError(
+                "COLLECTION_STORE_WRITER_CLOSED", "the writer connection is closed"
+            )
+        _require_lease(self._lease_check)
+        if not allow_diverged and self.connection.execute(
+            "SELECT 1 FROM store_meta WHERE key=?", (schema.META_REPLICA_DIVERGENCE,)
+        ).fetchone() is not None:
+            raise CollectionStoreError(
+                "COLLECTION_STORE_DIVERGED", "the replica requires owner reconciliation"
+            )
+
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
-        self.require_owner_thread()
-        _require_lease(self._lease_check)
+        self.require_write_authority()
         cache = self.release_cache
         cache.check()
         self.connection.execute("BEGIN IMMEDIATE")
@@ -231,16 +254,20 @@ def open_writer(
         raise
 
 
-def open_reader(path: Path) -> sqlite3.Connection:
+def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     """Open an existing store read-only at the current schema version."""
+    if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
+        raise ValueError("busy_timeout_ms must be a non-negative integer")
     check_sqlite_version()
     target = Path(path)
     if not target.is_file():
         raise CollectionStoreError("COLLECTION_STORE_ABSENT", "the collection store does not exist")
-    conn = _connect(f"{target.resolve().as_uri()}?mode=ro", uri=True)
+    conn = _connect(
+        f"{target.resolve().as_uri()}?mode=ro", uri=True, busy_timeout_ms=busy_timeout_ms
+    )
     try:
         conn.execute("PRAGMA recursive_triggers=ON")
-        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA foreign_keys=ON")
         found = schema.schema_version(conn)

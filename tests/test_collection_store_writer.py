@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import mutation_terminal, structured_collections as collections
+from exomem import mutation_terminal
+from exomem import structured_collections as collections
 from exomem.collection_store import chain, connection, tokens
 
 CID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
@@ -268,12 +269,18 @@ def test_one_immediate_transaction_txns_last_and_atomic_rollback(store, monkeypa
     assert store.connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_sources_and_pending_projection_commit_with_item_without_file_writes(store):
-    create(store)
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_acknowledged_item_is_readable_with_sources_and_exact_body(store, profile):
+    from exomem import get_page
+
+    create(store, profile)
     source = "Knowledge Base/Sources/sample.md"
     (store.root / source).parent.mkdir(parents=True)
     (store.root / source).write_text("---\ntype: source\n---\nSample\n")
-    result = store.append_record(CID, item={"title": "One"}, why="observe", sources=(source,))
+    body = "Authored body\nwith a second line.\n"
+    result = store.append_record(
+        CID, item={"title": "One"}, why="observe", sources=(source,), body=body
+    )
     assert store.connection.execute("SELECT source_ref FROM item_sources").fetchall() == [(source,)]
     path, version, digest, state = store.connection.execute(
         "SELECT path, pending_row_version, pending_sha256, state FROM projection_state WHERE kind = 'item'"
@@ -284,7 +291,15 @@ def test_sources_and_pending_projection_commit_with_item_without_file_writes(sto
         and len(digest) == 64
         and state == "pending"
     )
-    assert not (store.root / path).exists()
+    page = get_page.get_page(store.root, path=path)
+    assert page.frontmatter["title"] == "One"
+    assert page.body == body
+    assert page.content_hash == digest
+    identity = dict(store.connection.execute("SELECT key,value FROM store_meta").fetchall())
+    payload = store.connection.execute("SELECT payload_hash FROM items").fetchone()[0]
+    assert page.frontmatter["exomem_view"] == {
+        "s": identity["store_id"], "i": identity["instance_id"], "v": 1, "h": payload[:12],
+    }
     assert (store.root / "Knowledge Base/log.md").read_text() == "# Existing log\n"
     with closing(connection.open_reader(store.handle.path)) as reader:
         assert reader.execute("SELECT COUNT(*) FROM item_sources").fetchone()[0] == 1
@@ -392,8 +407,12 @@ def test_log_pending_hash_is_the_actual_rendered_container(store):
     receipt = store.append_record(CID, item=values, item_key=KEY, why="capture")
     manifest = collections.parse_manifest_bytes(store.root, manifest_path(), text.encode())
     from exomem import record_formats
+    from exomem.collection_store import views
 
-    expected = "## Entries\n" + record_formats.render_markdown_log_item(manifest, values, KEY, "\n")
+    version, payload = store.connection.execute("SELECT row_version,payload_hash FROM items").fetchone()
+    expected = "## Entries\n" + record_formats.render_markdown_log_item(
+        manifest, values, KEY, "\n", view_stamp=views.stamp(views.store_identity(store.connection), version, payload)
+    )
     digest = store.connection.execute(
         "SELECT pending_sha256 FROM projection_state WHERE kind = 'log'"
     ).fetchone()[0]

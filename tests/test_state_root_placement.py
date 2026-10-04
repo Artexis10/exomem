@@ -107,6 +107,9 @@ def _constructor_map():
 _FOLLOWS_ITS_TARGET = {
     "batch-workspace": "stages a note install; atomic rename requires the note's volume",
     "held-publication": "temp leaf under the retained parent of the published file",
+    "collection-publication": "staged and displaced view leaves under the retained target parent",
+    "collection-snapshot": "consistent store copy beside the caller's eventual target",
+    "collection-audit-spool": "disposable migration audit census in the caller's private directory",
 }
 
 
@@ -143,9 +146,13 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
 _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
     "batch-workspace",
     "held-publication",
+    "collection-publication",
+    "collection-snapshot",
+    "collection-audit-spool",
 }
 
 _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
+    "collection-replica",
     "consolidation-tree",
     "governance-tree",
 }

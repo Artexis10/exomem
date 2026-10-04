@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -360,14 +361,174 @@ def test_target_inspection_is_read_only_and_checks_worker_protocol(tmp_path, mon
         # descriptors it requires; the declaration is verified, never trusted.
         assert runtime.standby_capable is True
         assert inspected["state_descriptors"]
+        assert set(inspected) == {"python", "version", "state_descriptors"}
         assert await runtime.inspect(inspected) == inspected
         with pytest.raises(ValueError, match="declaration"):
             await runtime.inspect({**target, "state_descriptors": ["invented-descriptor"]})
+        with pytest.raises(ValueError, match="does not define"):
+            await runtime.inspect({**target, "supported_state_compatibility": ["collections-store-v1"]})
         with pytest.raises(ValueError):
             await runtime.inspect({**target, "version": "not-the-installed-version"})
         with pytest.raises(ValueError, match="does not define"):
             await runtime.inspect({**target, "unexpected": "field"})
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        result = await manager.upgrade({
+            **target, "supported_state_compatibility": ["collections-store-v1"],
+        })
+        assert not result["ok"]
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
         assert not state.exists()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("enroll_at_cutover", [False, True])
+def test_unsupported_optional_state_never_stops_the_serving_worker(
+    tmp_path, monkeypatch, enroll_at_cutover,
+):
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+
+    def enroll():
+        state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        target["state_descriptors"] = list(state_migration.declared_descriptor_ids())
+        inspected = _manager().WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        runtime.migration_required = inspected.migration_required
+        if enroll_at_cutover:
+            async def detach():
+                enroll()
+            ingress.detach_streams = detach
+        else:
+            enroll()
+        result = await manager.upgrade(target)
+        assert not result["ok"]
+        assert runtime.pid == 100
+        assert "stop" not in runtime.events
+        assert "migrate" not in runtime.events
+        assert "unavailable" not in ingress.events
+        assert manager.records.pending() is None
+        if enroll_at_cutover:
+            assert ingress.events[-1] == ("resume", None)
+        else:
+            assert ingress.events == []
+
+    asyncio.run(scenario())
+
+
+@pytest.fixture
+def candidate_runtime(tmp_path, monkeypatch):
+    from exomem import state_migration
+
+    module = _manager()
+    actual = {
+        "version": "1.2.3",
+        "protocol": module.WORKER_PROTOCOL,
+        "state_descriptors": list(state_migration.declared_descriptor_ids()),
+        "supported_state_compatibility": ["collections-store-v1"],
+    }
+
+    async def communicate():
+        return json.dumps(actual).encode(), None
+
+    async def probe(*args, **kwargs):
+        return SimpleNamespace(returncode=0, communicate=communicate)
+
+    monkeypatch.setattr(module.asyncio, "create_subprocess_exec", probe)
+    return module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1), actual
+
+
+def test_conditionally_supporting_candidate_skips_unchanged_physical_families(
+    tmp_path, monkeypatch, candidate_runtime,
+):
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        inspected, _ = candidate_runtime
+        runtime.inspect = inspected.inspect
+        runtime.migration_required = inspected.migration_required
+        result = await manager.upgrade(target)
+        assert result["ok"]
+        assert "migrate" not in runtime.events
+        assert result["handoff"]["migration"]["state"] == "skipped"
+        assert ingress.events[-1] == ("resume", "new-upstream")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("invalidate", ["changed-target", "failed-target", "failed-probe"])
+def test_optional_support_cannot_outlive_its_verified_candidate(
+    tmp_path, monkeypatch, candidate_runtime, invalidate,
+):
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+
+    async def scenario():
+        runtime, actual = candidate_runtime
+        target = await runtime.inspect({"python": sys.executable, "version": "1.2.3"})
+        assert runtime.migration_required(target) == (False, "declared_none")
+        if invalidate == "changed-target":
+            target["state_descriptors"].append("another-family")
+        else:
+            if invalidate == "failed-probe":
+                actual["supported_state_compatibility"] = [None]
+                invalid = target
+            else:
+                invalid = {**target, "unexpected": "field"}
+            with pytest.raises(ValueError):
+                await runtime.inspect(invalid)
+        with pytest.raises(ValueError, match="does not support"):
+            runtime.migration_required(target)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("compatibility", [[], ["collections-store-v1"]])
+def test_legacy_operator_target_survives_new_supervisor_resume(
+    tmp_path, monkeypatch, candidate_runtime, compatibility,
+):
+    from exomem import service_upgrade, state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+
+    async def scenario():
+        manager, _, runtime, target = _supervisor(tmp_path)
+        inspected, actual = candidate_runtime
+        actual["supported_state_compatibility"] = compatibility
+        target["state_descriptors"] = list(actual["state_descriptors"])
+        runtime.inspect = inspected.inspect
+        runtime.migration_required = inspected.migration_required
+        runtime.failure = "start"
+        assert not (await manager.upgrade(target))["ok"]
+        assert manager.records.pending()["target"] == target
+        runtime.failure = None
+        result = await manager.upgrade(None, resume=True)
+        assert result["ok"]
+        assert manager.status()["active"] == target
+        assert service_upgrade._wait_for_target(manager.records.directory, target, result) == result
 
     asyncio.run(scenario())
 
@@ -487,6 +648,61 @@ def _standby_supervisor(tmp_path, **kwargs):
         **kwargs,
     )
     return manager, ingress, runtime, target
+
+
+def test_rejected_candidate_cleanup_keeps_old_worker_admitted_past_cutover(tmp_path, monkeypatch):
+    import httpx
+
+    from exomem import state_migration
+    from exomem.service_ingress import IngressLimits, ServiceIngress
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+
+    async def scenario():
+        manager, _, runtime, target = _standby_supervisor(tmp_path, transition_timeout=0.03)
+        inspected = _manager().WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        runtime.migration_required = inspected.migration_required
+        target["state_descriptors"] = list(state_migration.declared_descriptor_ids())
+        ingress = ServiceIngress(IngressLimits(queue_timeout=0.01))
+        manager.ingress = ingress
+        cleanup_started, cleanup_finished = asyncio.Event(), asyncio.Event()
+
+        async def detach():
+            state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+
+        async def discard(timeout):
+            cleanup_started.set()
+            await asyncio.sleep(0.1)
+            cleanup_finished.set()
+
+        ingress.detach_streams = detach
+        runtime.discard_standby = discard
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"worker": "old"})),
+            base_url="http://worker",
+        ) as upstream, httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=ingress), base_url="http://service",
+        ) as client:
+            ingress.resume(upstream)
+            upgrade = asyncio.create_task(manager.upgrade(target))
+            await asyncio.wait_for(cleanup_started.wait(), 1)
+            response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            served_during_cleanup = not cleanup_finished.is_set()
+            result = await asyncio.wait_for(upgrade, 1)
+            assert not result["ok"]
+            assert runtime.pid == 100
+            assert "stop" not in runtime.events
+            assert served_during_cleanup
+            assert response.status_code == 200
+            assert response.json() == {"worker": "old"}
+            assert manager.phase == "ready"
+            assert manager.records.pending() is None
+            await ingress.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_standby_warms_before_ingress_pauses_and_is_promoted_after_the_stop(tmp_path):

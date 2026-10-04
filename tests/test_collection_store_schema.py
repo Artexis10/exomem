@@ -350,8 +350,8 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
-    assert meta["schema_version"] == "2"
-    assert schema.SCHEMA_VERSION == 2
+    assert meta["schema_version"] == "3"
+    assert schema.SCHEMA_VERSION == 3
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -406,12 +406,12 @@ def test_forward_migrations_run_in_order_from_the_recorded_version(
 
     applied: list[int] = []
 
-    def migrate_to_3(conn: sqlite3.Connection) -> None:
-        applied.append(3)
+    def migrate_to_4(conn: sqlite3.Connection) -> None:
+        applied.append(4)
         conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
 
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 3)
-    monkeypatch.setitem(schema.MIGRATIONS, 3, migrate_to_3)
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 4)
+    monkeypatch.setitem(schema.MIGRATIONS, 4, migrate_to_4)
     writer = connection.open_writer(target, lease_check=_allow)
     try:
         version = writer.connection.execute(
@@ -419,8 +419,8 @@ def test_forward_migrations_run_in_order_from_the_recorded_version(
         ).fetchone()[0]
     finally:
         writer.close()
-    assert applied == [3], "only the missing step runs; earlier versions are not re-applied"
-    assert version == "3"
+    assert applied == [4], "only the missing step runs; earlier versions are not re-applied"
+    assert version == "4"
 
 
 def test_writes_require_the_writer_lease(tmp_path: Path) -> None:
@@ -448,6 +448,31 @@ def test_a_failed_transaction_rolls_back_every_statement(
         raise RuntimeError("invented failure")
     assert store.connection.execute("SELECT count(*) FROM collections").fetchone()[0] == 0
     assert not store.connection.in_transaction
+
+
+def test_a_closed_writer_cannot_regain_write_authority(tmp_path: Path) -> None:
+    """A lease still held after close must not revive a publisher's writer."""
+    writer = connection.open_writer(
+        tmp_path / "state" / "collections.sqlite", lease_check=_allow
+    )
+    writer.close()
+    with pytest.raises(connection.CollectionStoreError) as refused, writer.transaction():
+        pass
+    assert refused.value.code == "COLLECTION_STORE_WRITER_CLOSED"
+
+
+def test_replica_divergence_stops_writes_but_keeps_reads(
+    store: connection.WriterConnection,
+) -> None:
+    with store.transaction() as tx:
+        tx.execute("INSERT INTO store_meta VALUES ('replica_divergence', 'foreign_replica')")
+    with pytest.raises(connection.CollectionStoreError) as refused, store.transaction():
+        pass
+    assert refused.value.code == "COLLECTION_STORE_DIVERGED"
+    with closing(connection.open_reader(store.path)) as reader:
+        assert reader.execute(
+            "SELECT value FROM store_meta WHERE key='replica_divergence'"
+        ).fetchone() == ("foreign_replica",)
 
 
 def test_readers_see_committed_rows_and_cannot_write(store: connection.WriterConnection) -> None:
@@ -900,16 +925,16 @@ def test_schema_deferred_commit_failure_rolls_back_and_connection_can_be_reused(
         conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
         conn.execute("INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')")
 
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 3)
-    monkeypatch.setitem(schema.MIGRATIONS, 3, failed_migration)
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 4)
+    monkeypatch.setitem(schema.MIGRATIONS, 4, failed_migration)
     with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
         schema.ensure_schema(store.connection)
     assert not store.connection.in_transaction
-    assert schema.schema_version(store.connection) == 2
+    assert schema.schema_version(store.connection) == 3
     assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
     assert store.connection.execute("SELECT name FROM sqlite_master WHERE name='migration_probe'").fetchone() is None
-    monkeypatch.setitem(schema.MIGRATIONS, 3, lambda conn: conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT"))
-    assert schema.ensure_schema(store.connection) == 3
+    monkeypatch.setitem(schema.MIGRATIONS, 4, lambda conn: conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT"))
+    assert schema.ensure_schema(store.connection) == 4
     with store.transaction() as tx:
         tx.execute("INSERT INTO migration_probe VALUES (1)")
     assert store.connection.execute("SELECT x FROM migration_probe").fetchone() == (1,)

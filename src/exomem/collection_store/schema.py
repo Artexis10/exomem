@@ -34,7 +34,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -44,6 +44,9 @@ META_FORKS = "forks"
 META_COMMIT_SEQ = "commit_seq"
 META_STORE_HEAD_HASH = "store_head_hash"
 META_LAST_PUBLISHED_REPLICA_SHA256 = "last_published_replica_sha256"
+META_PENDING_REPLICA_PUBLICATION = "pending_replica_publication"
+META_PUBLISHED_REPLICA_HEAD = "published_replica_head"
+META_REPLICA_DIVERGENCE = "replica_divergence"
 META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"
@@ -362,7 +365,8 @@ def _migrate_to_1(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_2(conn: sqlite3.Connection) -> None:
     """Persist canonical authorization metadata without changing the shipped V1 DDL."""
-    from .. import structured_collections as collections, vault
+    from .. import structured_collections as collections
+    from .. import vault
     from . import governance
 
     conn.execute("ALTER TABLE collection_manifests ADD COLUMN governance_json TEXT")
@@ -405,8 +409,15 @@ def _migrate_to_2(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_to_3(conn: sqlite3.Connection) -> None:
+    """Bind pending projections to their transaction-owned adjacent files."""
+    conn.execute("ALTER TABLE projection_state ADD COLUMN install_json TEXT")
+
+
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_to_1, 2: _migrate_to_2}
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3,
+}
 
 
 class SchemaVersionError(RuntimeError):

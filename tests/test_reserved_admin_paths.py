@@ -202,6 +202,10 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "claims-store",
         "clip-store",
         "collection-store",
+        "collection-replica",
+        "collection-publication",
+        "collection-snapshot",
+        "collection-audit-spool",
         "consolidation-tree",
         "deferred-index-store",
         "due-state",
@@ -4516,6 +4520,7 @@ def test_every_command_and_finite_selector_has_total_path_role_metadata() -> Non
 
 def test_every_generic_command_path_role_routes_every_private_family() -> None:
     representatives = {
+        "collection-replica": "Knowledge Base/_Collections/collections.sqlite",
         "governance-tree": "Knowledge Base/_Governance/rules/private.yaml",
         "consolidation-tree": "Knowledge Base/_Consolidation/runs/run.json",
         "governance-store": "Knowledge Base/.governance.sqlite-wal",
@@ -4561,6 +4566,15 @@ def test_every_generic_command_path_role_routes_every_private_family() -> None:
         ),
         "held-publication": (
             "Knowledge Base/Notes/.exomem-held-publish-" + "8" * 32
+        ),
+        "collection-publication": (
+            "Knowledge Base/Records/Example/.exomem-collection-aside-" + "9" * 32 + "-0"
+        ),
+        "collection-snapshot": (
+            "Knowledge Base/Records/Example/.exomem-collection-snapshot-" + "a" * 32 + ".sqlite"
+        ),
+        "collection-audit-spool": (
+            "Knowledge Base/Records/Example/.exomem-collection-audit-" + "b" * 32 + ".sqlite-journal"
         ),
     }
 

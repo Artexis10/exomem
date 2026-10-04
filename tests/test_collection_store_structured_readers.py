@@ -51,7 +51,7 @@ def test_current_state_uses_canonical_contract_when_manifest_view_is_stale(store
     store.append_record(CID, item={"title": "One", "status": "ready"},
                         item_key=KEY, why="capture")
     path = store.root / manifest_path()
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(manifest_text().replace("semantic_profile: records", "semantic_profile: planning"))
     routed = collections.parse_manifest_bytes(store.root, manifest_path(), text.encode())
     with preview_store(store.root, store.handle):
@@ -271,7 +271,7 @@ def test_current_plan_state_uses_the_committed_row_and_withholds_its_stale_view(
     from test_due_state_bulk_carriers import _command
 
     create(store, "planning")
-    with preview_store(store.root, store.handle):
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
         response = writer_lease.invoke_command(
             _command("plan_memory"), store.root, action="add", collection=CID,
             item={"title": "Ship", "kind": "outcome", "status": "planned",
@@ -288,7 +288,7 @@ def test_current_plan_state_uses_the_committed_row_and_withholds_its_stale_view(
                                                 manifest_text("planning").encode())
     anchor = replace(_anchor(manifest), path=item_path, ref=f"exomem://plan/{CID}/{KEY}",
                      kind="plan", title="Ship")
-    with preview_store(store.root, store.handle):
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
         response = writer_lease.invoke_command(
             _command("plan_memory"), store.root, action="triage", collection=CID, plan_id=KEY,
             transition={"status": "completed"}, why="finish",

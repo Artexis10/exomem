@@ -12,6 +12,7 @@ path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -2306,6 +2307,32 @@ def test_structure_filter_gates_governed_csv_and_resource_entries(vault: Path) -
     assert csv_path not in str(out)
 
 
+def test_nested_mixed_case_resource_text_still_filters_withheld_references(vault: Path) -> None:
+    """Retained authored text is eligible even when its resource key uses mixed case."""
+    _restricted_vault(vault)
+    payload = {"sections": [{"ReSoUrCe_text": {"description": f"Read [[{RESTRICTED_PATH}]] next."}}]}
+    with request_scope(_external()):
+        out = egress.postfilter("list_directory", payload, vault)
+    assert out == {"sections": [{"ReSoUrCe_text": {"description": f"Read {egress.WITHHELD_REFERENCE} next."}}]}
+
+
+def test_no_artifact_text_still_scrubs_credentials(vault: Path) -> None:
+    """Skipping an unnecessary artifact walk must not skip the credential scrubber."""
+    from test_governance_postfilter import AWS_KEY
+
+    from exomem.governance import scrubber
+
+    _restricted_vault(vault)
+    payload = {"hits": [{"path": OPEN_PATH, "excerpt": f"key={AWS_KEY}"}]}
+    with request_scope(_external()), egress.disclosure_boundary(vault, "find") as collector:
+        out = egress.postfilter("find", payload, vault)
+        assert collector.credential_redactions == 1
+        assert collector.outcomes
+    assert out["hits"][0]["path"] == OPEN_PATH
+    assert AWS_KEY not in str(out)
+    assert scrubber.NOTICE in str(out)
+
+
 def test_filter_withheld_entries_empty_policy_is_identity(vault: Path) -> None:
     payload = {"entries": [{"path": RESTRICTED_PATH}, {"path": OPEN_PATH}]}
     assert (
@@ -2669,6 +2696,109 @@ def test_bounded_outcomes_keep_different_levels_and_scopes_distinct() -> None:
         (6, ("b",), 70),
     }
     assert all("membership_digest" in item for item in reduced)
+
+
+@pytest.mark.parametrize("count", [3, 64, 140])
+def test_compressed_receipt_inputs_preserve_scalar_receipts(count: int) -> None:
+    # Compression must retain raw ordering below either bound, then the exact
+    # multiset counts/digests and optional-field presence above it.
+    template = {"decision": "release_authorized", "level": 6,
+                "audience": "reader", "principal": "reader", "purpose": "résumé",
+                "command": "inspect", "confirmation": "none",
+                "scope_ids": [f"scope-{index}-" + "x" * 220 for index in range(128)]
+                if count == 64 else ["scope-é"]}
+    hashes = [f"{index % 3:064x}" for index in range(count)]
+    scalar = [egress.DisclosureOutcome({"decision": "blocked"})]
+    scalar.extend(egress.DisclosureOutcome({**template, "content_hash": value})
+                  for value in hashes)
+    # Missing purpose remains distinct from explicit null for optional retention.
+    scalar.extend(egress.DisclosureOutcome(value) for value in (
+        {"decision": "release_authorized", "level": 6},
+        {"decision": "release_authorized", "level": 6, "purpose": None},
+    ))
+    compressed = [scalar[0], egress._DisclosureBatch(template, hashes), *scalar[-2:]]
+    assert egress._bounded_outcomes(compressed) == egress._bounded_outcomes(scalar)
+
+
+def test_canonical_receipt_batches_keep_boundary_deduplication_and_notices(vault: Path) -> None:
+    principal = _external("analysis-purpose")
+    write_scope(vault)
+    loaded = policy.load(vault)
+    decisions = [Decision(level=6, scope_ids=(SCOPE_ID,)),
+                 Decision(level=2, scope_ids=(SCOPE_ID,), rule_ids=("constraint",)),
+                 Decision(level=6, release_grant_id=GRANT_ID,
+                          release_dependency_digest="d" * 64)]
+    entries = [(f"row-{index}", "f" * 64, f"{index % 3:064x}", decisions[index % 3])
+               for index in range(140)]
+    entries.insert(5, entries[0])
+    with egress.disclosure_boundary(vault, "inspect") as collector:
+        notices = egress.canonical_subject_notices(
+            vault, entries, policy=loaded, principal=principal, purpose=principal.purpose)
+        actual = egress._bounded_outcomes(collector.outcomes)
+    with egress.disclosure_boundary(vault, "inspect") as collector:
+        for identity, _fingerprint, payload_hash, decision in entries:
+            egress._outcome_for_decision(
+                vault, identity, decision=decision, policy=loaded,
+                audience=principal.audience_id,
+                outcome="release_authorized" if decision.level >= 6 else "withheld",
+                purpose=principal.purpose, content_hash=payload_hash, purpose_is_bound=True)
+        expected = egress._bounded_outcomes(collector.outcomes)
+    assert actual == expected
+    assert len(notices) == sum(0 < entry[3].level < 6 for entry in entries)
+
+
+@pytest.mark.parametrize("purposes", [
+    [None, None],
+    ["résumé\n\"quoted\"", "another"],
+    [False, 0, -0.0, 0.0],
+])
+def test_repeated_receipt_identities_keep_exact_sorted_multiset_digests(purposes) -> None:
+    # Existing reduction checks bounds and identity separation, not the exact
+    # digest. Reusing encodings must preserve multiplicity, missing dimensions,
+    # Unicode escaping and JSON distinctions that Python equality collapses.
+    values = [
+        {"decision": "released", "level": 6, "principal": "reader",
+         "scope_ids": ["scope-é"], "content_hash": f"{index % 3:064x}",
+         **({"purpose": purposes[(index // 2) % len(purposes)]} if index % 2 else {})}
+        for index in range(140)
+    ]
+    keys = ("command", "principal", "audience", "purpose", "policy_fingerprint",
+            "confirmation", "scope_ids", "scope_label_digests", "release_grant_id",
+            "release_dependency_digest")
+
+    def digest(items, *, unique=False):
+        encoded = [json.dumps(item, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False) for item in items]
+        manifest = sorted(set(encoded) if unique else encoded)
+        return hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
+
+    reduced = egress._bounded_outcomes([egress.DisclosureOutcome(value) for value in values])
+    assert len(reduced) == 1
+    receipt = reduced[0]
+    assert receipt["count"] == len(values)
+    assert receipt["membership_digest"] == digest([value["content_hash"] for value in values])
+    assert receipt["identity_manifest_digest"] == digest([
+        {key: value.get(key) for key in keys} for value in values
+    ])
+    assert receipt["scope_set_digest"] == digest([
+        {"scope_ids": value.get("scope_ids"),
+         "scope_label_digests": value.get("scope_label_digests")} for value in values
+    ], unique=True)
+    assert receipt["purpose_set_digest"] == digest([value.get("purpose") for value in values],
+                                                   unique=True)
+
+
+def test_receipt_reduction_accepts_deep_identities_supported_by_json_encoder() -> None:
+    nested = "leaf"
+    for _ in range(500):
+        nested = [nested]
+    outcomes = [egress.DisclosureOutcome({
+        "decision": "released", "level": 6,
+        "purpose": "reader" if index % 2 else nested,
+    }) for index in range(140)]
+    reduced = egress._bounded_outcomes(outcomes)
+    receipts._validate_event("disclosure", "recorded", {"outcomes": reduced})
+    assert reduced[0]["count"] == len(outcomes)
 
 
 def test_bounded_outcomes_summarize_129_distinct_typed_identities(vault: Path) -> None:

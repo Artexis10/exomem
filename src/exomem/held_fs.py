@@ -11,7 +11,7 @@ import os
 import secrets
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -223,6 +223,14 @@ class HeldFilesystem:
     def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
         """Return stable immediate children, omitting unsafe alias objects."""
 
+        raise NotImplementedError
+
+    def iter_names(self, parent: HeldDirectory) -> Iterator[str]:
+        """Stream unsorted immediate names, including aliases for caller checking.
+
+        This read-only iterator raises HeldFsError on acquisition/iteration
+        failure. Close it before releasing its retained directory.
+        """
         raise NotImplementedError
 
     def enumerate(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:

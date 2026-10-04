@@ -48,6 +48,21 @@ def test_500_rows_share_one_transition_and_transaction_without_file_depth(store,
     assert error.value.details["maximum"] == 500
 
 
+def test_public_bulk_refuses_authored_view_stamp_without_changing_canonical_data(store):
+    # A custom schema must not let bulk persist an authored stamp hidden by the renderer.
+    text = manifest_text().replace("    count:", "    exomem_view: {type: string}\n    count:")
+    store.create_collection(manifest_path(), text, why="create")
+    _evidence(store.root)
+    before = tuple(store.connection.iterdump())
+    manifest = store.root / manifest_path()
+    published = manifest.read_bytes()
+    result = bulk(store, [{"item": {"title": "One", "exomem_view": "authored"}}])
+    assert result["committed"] is False and result["counts"]["rejected"] == 1
+    assert result["rows"][0]["code"] == "RESERVED_RECORD_FIELD"
+    assert tuple(store.connection.iterdump()) == before
+    assert manifest.read_bytes() == published
+
+
 def test_generated_identity_receipt_replays_after_reopen_without_another_write(store, monkeypatch):
     text = manifest_text().replace("natural_key: [title]", "natural_key: [count]")
     store.create_collection(manifest_path(), text, why="create")

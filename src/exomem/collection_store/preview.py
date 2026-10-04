@@ -28,15 +28,22 @@ _BOUND: ContextVar[tuple[Path, CollectionWriter] | None] = ContextVar(
 @contextmanager
 def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
     """Bind a dark writer for this call context; ownership remains with the caller."""
-    from .writer import CollectionWriter
+    from ..writer_lease import active_manager
+    from .runtime import CollectionStoreRuntime, borrowed_writer
 
     root = Path(vault_root).resolve()
-    writer = CollectionWriter(root, handle)
-    token = _BOUND.set((root, writer))
-    try:
-        yield writer
-    finally:
-        _BOUND.reset(token)
+    if isinstance(handle, CollectionStoreRuntime):
+        if root != handle.root:
+            raise CollectionStoreError("COLLECTION_STORE_VAULT_MISMATCH", "foreign preview runtime")
+        checkout = handle.checkout()
+    else:
+        checkout = borrowed_writer(root, handle, active_manager())
+    with checkout as writer:
+        token = _BOUND.set((root, writer))
+        try:
+            yield writer
+        finally:
+            _BOUND.reset(token)
 
 
 def bound_writer(vault_root: Path) -> CollectionWriter | None:
@@ -60,6 +67,26 @@ def canonical_read(function):
                 writer._operation.refuse()
             return function(vault_root, *args, **kwargs)
     return read
+
+
+def projection_decision(vault_root, path, *, policy, audience, purpose,
+                        authorization_context, content=None):
+    """Join the bound operation; None alone permits ordinary file authority."""
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return None
+    from ..governance.decisions import Decision
+
+    with writer.read_snapshot():
+        operation = writer._operation
+        if (audience != operation.who.audience_id or purpose != operation.purpose
+                or authorization_context != operation.context
+                or policy.fingerprint != operation.policy.fingerprint):
+            return Decision(0)
+        return operation.projection_decision(
+            path, content=content,
+            manifest_for=lambda cid: writer._collection_manifest(writer._collection_row(cid))[0],
+        )
 
 
 def _mutate(vault_root, method, *args, **kwargs):

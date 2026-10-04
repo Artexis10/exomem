@@ -47,9 +47,9 @@ from .mutation_lock import (
 from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
-    _CanonicalRequestReplay,
     _DERIVED_COMPONENT_NAMES,
     ResponseDetail,
+    _CanonicalRequestReplay,
     committed_terminal,
     needs_review_terminal,
     project_terminal,
@@ -1805,6 +1805,95 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+COLLECTION_STORE_CAPABILITY = "collections-store-v1"
+
+
+def _collection_store_uuid(value: object) -> str:
+    if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+        raise ValueError("collection store identity must be a canonical UUID")
+    return value
+
+
+@dataclass(frozen=True)
+class CollectionStoreHead:
+    store_id: str
+    instance_id: str
+    commit_seq: int
+    head_hash: str | None
+
+    def __post_init__(self) -> None:
+        _collection_store_uuid(self.store_id)
+        _collection_store_uuid(self.instance_id)
+        if type(self.commit_seq) is not int or not 0 <= self.commit_seq <= 2**63 - 1:
+            raise ValueError("collection store sequence must be a nonnegative SQLite integer")
+        if self.commit_seq == 0:
+            if self.head_hash is not None:
+                raise ValueError("collection store genesis hash must be null")
+        elif (
+            not isinstance(self.head_hash, str)
+            or re.fullmatch("[0-9a-f]{64}", self.head_hash) is None
+        ):
+            raise ValueError("collection store head hash must be lowercase 64-hex")
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CollectionStoreHead:
+        if not isinstance(data, Mapping) or set(data) != {
+            "store_id",
+            "instance_id",
+            "commit_seq",
+            "head_hash",
+        }:
+            raise ValueError("collection store head fields are invalid")
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "store_id": self.store_id,
+            "instance_id": self.instance_id,
+            "commit_seq": self.commit_seq,
+            "head_hash": self.head_hash,
+        }
+
+
+@dataclass(frozen=True)
+class CollectionStoreFenceState:
+    capability: str
+    enrolled: bool
+    store_id: str | None
+    generation: int
+
+    def __post_init__(self) -> None:
+        if self.capability != COLLECTION_STORE_CAPABILITY or type(self.enrolled) is not bool:
+            raise ValueError("collection store fence capability or enrollment is invalid")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("collection store fence generation is invalid")
+        if self.enrolled:
+            _collection_store_uuid(self.store_id)
+            if self.generation < 1:
+                raise ValueError("collection store fence generation is invalid")
+        elif self.store_id is not None or self.generation != 0:
+            raise ValueError("collection store fence metadata is inconsistent")
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CollectionStoreFenceState:
+        if not isinstance(data, Mapping) or set(data) != {
+            "capability",
+            "enrolled",
+            "store_id",
+            "generation",
+        }:
+            raise ValueError("collection store fence response fields are invalid")
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "enrolled": self.enrolled,
+            "store_id": self.store_id,
+            "generation": self.generation,
+        }
+
+
 @dataclass(frozen=True)
 class LeaseRecord:
     holder: str | None
@@ -1814,6 +1903,9 @@ class LeaseRecord:
     required_schema_version: int | None = None
     schema_fence_generation: int | None = None
     governance_enrolled: bool = False
+    required_collection_store_capability: str | None = None
+    collection_store_fence_generation: int | None = None
+    collection_store_head: CollectionStoreHead | None = None
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> LeaseRecord:
@@ -1847,6 +1939,24 @@ class LeaseRecord:
         has_fence = required_schema is not None and fence_generation is not None
         if enrolled != has_fence:
             raise ValueError("schema fence metadata is inconsistent")
+        store_fields = {
+            "required_collection_store_capability",
+            "collection_store_fence_generation",
+            "collection_store_head",
+        }
+        store_capability = data.get("required_collection_store_capability")
+        store_generation = data.get("collection_store_fence_generation")
+        store_head = data.get("collection_store_head")
+        if store_fields.intersection(data):
+            if (
+                not store_fields.issubset(data)
+                or store_capability != COLLECTION_STORE_CAPABILITY
+                or type(store_generation) is not int
+                or store_generation < 1
+            ):
+                raise ValueError("collection store fence metadata is inconsistent")
+            if store_head is not None:
+                store_head = CollectionStoreHead.from_json(store_head)
         return cls(
             holder,
             float(expires) if expires is not None else None,
@@ -1855,6 +1965,9 @@ class LeaseRecord:
             required_schema,
             fence_generation,
             enrolled,
+            store_capability,
+            store_generation,
+            store_head,
         )
 
 
@@ -2006,33 +2119,54 @@ class LeaseCoordinatorClient:
             raise ValueError("coordinator client requires enabled configuration")
         self.config = config
 
-    def acquire(self) -> LeaseRecord:
-        return self._request(
-            "POST",
-            "acquire",
-            {
-                "replica_id": self.config.replica_id,
-                "ttl_seconds": self.config.ttl_seconds,
-                "schema_version": self.config.schema_version,
-            },
-        )
+    def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
+        body = {
+            "replica_id": self.config.replica_id,
+            "ttl_seconds": self.config.ttl_seconds,
+            "schema_version": self.config.schema_version,
+        }
+        if collection_store_capability is not None:
+            body["collection_store_capability"] = collection_store_capability
+        return self._request("POST", "acquire", body)
 
-    def renew(self, fencing_token: int) -> LeaseRecord:
-        return self._request(
-            "POST",
-            "renew",
-            {
-                "replica_id": self.config.replica_id,
-                "fencing_token": fencing_token,
-                "ttl_seconds": self.config.ttl_seconds,
-                "schema_version": self.config.schema_version,
-            },
-        )
+    def renew(
+        self,
+        fencing_token: int,
+        *,
+        collection_store_capability: str | None = None,
+        collection_store_head: CollectionStoreHead | None = None,
+    ) -> LeaseRecord:
+        body = {
+            "replica_id": self.config.replica_id,
+            "fencing_token": fencing_token,
+            "ttl_seconds": self.config.ttl_seconds,
+            "schema_version": self.config.schema_version,
+        }
+        if collection_store_capability is not None:
+            body["collection_store_capability"] = collection_store_capability
+        if collection_store_head is not None:
+            body["collection_store_head"] = collection_store_head.as_dict()
+        return self._request("POST", "renew", body)
 
-    def release(self, fencing_token: int) -> LeaseRecord:
+    def release(
+        self,
+        fencing_token: int,
+        *,
+        collection_store_head: CollectionStoreHead | None = None,
+    ) -> LeaseRecord:
         replica_id = self.config.replica_id
         assert replica_id is not None
-        return self.release_holder(replica_id, fencing_token)
+        if collection_store_head is None:
+            return self.release_holder(replica_id, fencing_token)
+        return self._request(
+            "POST",
+            "release",
+            {
+                "replica_id": replica_id,
+                "fencing_token": fencing_token,
+                "collection_store_head": collection_store_head.as_dict(),
+            },
+        )
 
     def release_holder(self, holder_replica_id: str, fencing_token: int) -> LeaseRecord:
         """Release on behalf of ANY holder, not just this client's own
@@ -2049,6 +2183,51 @@ class LeaseCoordinatorClient:
 
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
+
+    def collection_store_fence(self) -> CollectionStoreFenceState:
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/collection-store-fence",
+            None,
+            contract_route="/v1/vaults/<id>/collection-store-fence",
+        )
+        try:
+            return CollectionStoreFenceState.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def transition_collection_store_fence(
+        self,
+        *,
+        expected_generation: int,
+        store_id: str,
+    ) -> CollectionStoreFenceState:
+        if type(expected_generation) is not int or expected_generation < 0:
+            raise ValueError("expected_generation must be a nonnegative integer")
+        _collection_store_uuid(store_id)
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "PUT",
+            f"/v1/vaults/{vault}/collection-store-fence",
+            {
+                "expected_generation": expected_generation,
+                "store_id": store_id,
+                "capability": COLLECTION_STORE_CAPABILITY,
+            },
+            contract_route="/v1/vaults/<id>/collection-store-fence",
+        )
+        try:
+            state = CollectionStoreFenceState.from_json(payload)
+            if (
+                not state.enrolled
+                or state.store_id != store_id
+                or state.generation not in {expected_generation, expected_generation + 1}
+            ):
+                raise ValueError("collection store fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
 
     def schema_admission(self, schema_version: int) -> SchemaAdmission:
         if isinstance(schema_version, bool) or schema_version not in {3, 4}:
@@ -3959,6 +4138,14 @@ class LeaseManager:
         # outstanding fence anywhere in this process.
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
+        self._collection_store = None
+        self._store_bound = False
+        self._store_borrowers: dict[int, int] = {}
+        self._store_handoff = False
+        self._store_closed = False
+        self._store_released = False
+        self._store_condition = threading.Condition(self._lock)
+        self._report_lock = threading.Lock()
 
     def _record_coordinator_error(self, code: str) -> None:
         self._last_coordinator_error = (code, time.monotonic())
@@ -3997,12 +4184,28 @@ class LeaseManager:
             pass
 
     def ensure_writer(self, *, cause: str = "mutation") -> LeaseRecord:
+        with self._lock:
+            if self._store_closed or (
+                self._store_handoff and threading.get_ident() not in self._store_borrowers
+            ):
+                raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
         if not self.config.enabled:
             return LeaseRecord(self.config.replica_id, None, 0, True)
         assert self.client is not None
         with self._lock:
+            if self._store_handoff:
+                if threading.get_ident() not in self._store_borrowers:
+                    raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+                if self._fencing_token is None:
+                    self._raise_fenced(0)
+                return LeaseRecord(
+                    self.config.replica_id, self._expires_at, self._fencing_token, True
+                )
             try:
-                record = self.client.acquire()
+                record = self.client.acquire(**(
+                    {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
+                    if self._collection_store is not None else {}
+                ))
             except OpError as error:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("acquire", "error")
@@ -4033,6 +4236,7 @@ class LeaseManager:
             self._record_lease_op("acquire", "granted")
             self._fencing_token = record.fencing_token
             self._expires_at = record.expires_at
+            self._store_released = False
             if cause == "mutation":
                 # Only a mutation-driven grant counts as write activity for the
                 # idle-release timer (it closes the window between this grant
@@ -4274,10 +4478,11 @@ class LeaseManager:
                     "the registered vault attachment is not serving mutations",
                     "Complete or recover the authenticated attachment transition before retrying.",
                 ) from None
-        if self.config.enabled:
-            lease = self.ensure_writer()
-            fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+        if self.config.enabled or self._collection_store is not None:
             with self._lock:
+                lease = self.ensure_writer()
+                if self.config.enabled:
+                    fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
                 self._active_mutations += 1
                 self._last_activity_monotonic = time.monotonic()
             counted = True
@@ -4290,6 +4495,7 @@ class LeaseManager:
                 with self._lock:
                     self._active_mutations -= 1
                     self._last_activity_monotonic = time.monotonic()
+                    self._store_condition.notify_all()
 
     def invoke(
         self,
@@ -5709,6 +5915,118 @@ class LeaseManager:
         )
         self._renewer.start()
 
+    @contextmanager
+    def _collection_store_checkout(self):
+        thread = threading.get_ident()
+        with self._lock:
+            if (self._store_closed or self._stop.is_set()
+                    or (self._store_handoff and thread not in self._store_borrowers)):
+                raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+            self._store_bound = True
+            self._store_borrowers[thread] = self._store_borrowers.get(thread, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                remaining = self._store_borrowers[thread] - 1
+                if remaining:
+                    self._store_borrowers[thread] = remaining
+                else:
+                    del self._store_borrowers[thread]
+                self._store_condition.notify_all()
+
+    def _renew_collection_store(self, token: int, *, due_only=False) -> None:
+        if not self.config.enabled:
+            return
+        with self._report_lock:
+            with self._lock:
+                if self._fencing_token != token:
+                    self._raise_fenced(token)
+                if (due_only and self._last_renew_monotonic is not None
+                        and time.monotonic() - self._last_renew_monotonic
+                        < max(1.0, self.config.ttl_seconds / 3)):
+                    return
+            head = self._collection_store.sample_head()
+            record = self.client.renew(
+                token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
+                collection_store_head=head,
+            )
+            with self._lock:
+                if self._fencing_token != token:
+                    self._raise_fenced(token)
+                if (not record.granted or record.holder != self.config.replica_id
+                        or record.fencing_token != token):
+                    self._fencing_token = None
+                    self._expires_at = None
+                    self._raise_fenced(token)
+                self._expires_at = record.expires_at
+                self._last_renew_monotonic = time.monotonic()
+                self._record_lease_op("renew", "granted")
+
+    def _release_collection_store(self, token, *, deadline, cancelled=None, closing=False):
+        runtime = self._collection_store
+        with self._lock:
+            if self._store_closed:
+                return True
+            if self._store_handoff:
+                return False
+            self._store_handoff = True
+        try:
+            # No boundary or manager lock is held while borrowers unwind.
+            self._renew_collection_store(token)
+            while True:
+                if (time.monotonic() >= deadline or (cancelled is not None and cancelled())):
+                    return False
+                with self._store_condition:
+                    if not self._store_borrowers and not self._active_mutations:
+                        break
+                    self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
+                self._renew_collection_store(token, due_only=True)
+            mutation = self._mutation_coordinator_for(runtime.root)
+            boundary_deadline = min(deadline, time.monotonic() + self._mutation_timeout_seconds)
+            with ExitStack() as boundary:
+                while True:
+                    if (time.monotonic() >= boundary_deadline
+                            or (cancelled is not None and cancelled())):
+                        return False
+                    self._renew_collection_store(token, due_only=True)
+                    try:
+                        boundary.enter_context(mutation.hold(
+                            timeout_seconds=max(0, min(0.25, boundary_deadline - time.monotonic())),
+                            operation="collection_store_release",
+                        ))
+                        break
+                    except OpError as error:
+                        if error.code != "MUTATION_BUSY":
+                            raise
+                if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                    return False
+                if self.config.enabled:
+                    self.validate_fencing_token(token)
+                head = runtime.flush(token, deadline=deadline, cancelled=cancelled)
+                with self._report_lock:
+                    if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                        return False
+                    if self.config.enabled:
+                        self.validate_fencing_token(token)
+                    if runtime.sample_head() != head:
+                        return False
+                    if self.config.enabled:
+                        record = self.client.release(token, collection_store_head=head)
+                        if record.holder is not None or record.fencing_token != token:
+                            return False
+                    with self._lock:
+                        self._fencing_token = None
+                        self._expires_at = None
+                        self._store_closed = closing
+                        self._store_released = True
+                self._record_lease_op("release", "ok")
+                return True
+        finally:
+            with self._store_condition:
+                self._store_handoff = False
+                self._store_condition.notify_all()
+
     def _attempt_preferred_reclaim(self) -> None:
         """Retry writer acquisition while this preferred replica is a follower.
 
@@ -5749,11 +6067,27 @@ class LeaseManager:
             return False
         assert self.client is not None
         with self._lock:
-            if self._fencing_token != token:
+            if self._fencing_token != token or self._store_handoff or self._store_closed:
                 return False
             if self._active_mutations != 0:
                 return False
             if time.monotonic() - self._last_activity_monotonic < idle_seconds:
+                return False
+            runtime = self._collection_store
+            if runtime is None and self._store_borrowers:
+                return False
+        if runtime is not None:
+            try:
+                return self._release_collection_store(
+                    token, deadline=time.monotonic() + self._mutation_timeout_seconds
+                )
+            except Exception:  # noqa: BLE001 - idle handoff defers; never claims a flush
+                logger.warning("collection store idle release remains pending", exc_info=True)
+                return False
+        with self._lock:
+            if (self._fencing_token != token or self._store_handoff or self._store_closed
+                    or self._active_mutations or self._store_borrowers
+                    or time.monotonic() - self._last_activity_monotonic < idle_seconds):
                 return False
             # Clear local state BEFORE (and during) the release RPC, still
             # holding the lock: an `ensure_writer` arriving concurrently
@@ -5786,6 +6120,9 @@ class LeaseManager:
             if self._maybe_idle_release(token):
                 continue
             try:
+                if self._collection_store is not None:
+                    self._renew_collection_store(token)
+                    continue
                 record = self.client.renew(token)
                 with self._lock:
                     if self._fencing_token != token:
@@ -5804,9 +6141,51 @@ class LeaseManager:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("renew", "error")
                 continue
+            except Exception:  # noqa: BLE001 - unavailable store samples must not kill renewal
+                if self._collection_store is None:
+                    raise
+                logger.warning("collection store head report unavailable", exc_info=True)
+                self._record_lease_op("renew", "error")
 
-    def close(self) -> None:
-        self._stop.set()
+    def close(self, *, deadline=None, cancelled=None) -> None:
+        if self._collection_store is not None:
+            with self._lock:
+                if self._store_closed:
+                    return
+                if self._store_released:
+                    self._store_closed = True
+                    self._stop.set()
+                    return
+                token = self._fencing_token if self.config.enabled else 0
+            if token is None or not self._release_collection_store(
+                token, deadline=(time.monotonic() + self._mutation_timeout_seconds
+                                 if deadline is None else deadline),
+                cancelled=cancelled, closing=True,
+            ):
+                raise OpError("COLLECTION_STORE_FLUSH_PENDING", "replica handoff remains pending")
+            self._stop.set()
+            return
+        with self._store_condition:
+            if self._store_bound:
+                if self._store_closed:
+                    return
+                if self._store_handoff or threading.get_ident() in self._store_borrowers:
+                    raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
+                self._store_handoff = True
+                try:
+                    deadline = (time.monotonic() + self._mutation_timeout_seconds
+                                if deadline is None else deadline)
+                    while True:
+                        if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                            raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
+                        if not self._store_borrowers:
+                            self._store_closed = True
+                            break
+                        self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
+                finally:
+                    self._store_handoff = False
+                    self._store_condition.notify_all()
+            self._stop.set()
         with self._lock:
             token = self._fencing_token
             self._fencing_token = None

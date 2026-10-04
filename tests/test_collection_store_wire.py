@@ -113,13 +113,16 @@ def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
 
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_public_query_reads_committed_store_rows_without_rendered_files(paired, profile):
-    invoke, roots, _ = paired
+    invoke, roots, handle = paired
     paired_create(paired, profile, scaffold=False)
     action = "append" if profile == "records" else "add"
     key_arg = "item_key" if profile == "records" else "plan_id"
     for mode in (0, 1):
         invoke(mode, profile, action, collection=manifest_path(profile),
                item={"title": "One"}, **{key_arg: KEY}, why="capture")
+    assert "exomem_view:" in (roots[1] / manifest_path(profile)).read_text()
+    for path, in handle.connection.execute("SELECT path FROM projection_state"):
+        (roots[1] / path).unlink()
     assert not (roots[1] / manifest_path(profile)).exists()
     results = [invoke(mode, profile, "query", collection=manifest_path(profile))
                for mode in (0, 1)]

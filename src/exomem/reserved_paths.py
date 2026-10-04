@@ -57,6 +57,18 @@ _HELD_PUBLICATION_RE = re.compile(
     rf"^{re.escape(held_fs.PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}$",
     re.ASCII,
 )
+_COLLECTION_PUBLICATION_RE = re.compile(
+    r"^\.exomem-collection-(?:stage-[0-9a-f]{32}|aside-[0-9a-f]{32}-[01])$",
+    re.ASCII,
+)
+_COLLECTION_SNAPSHOT_RE = re.compile(
+    r"^\.exomem-collection-snapshot-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$",
+    re.ASCII,
+)
+_COLLECTION_AUDIT_SPOOL_RE = re.compile(
+    r"^\.exomem-collection-audit-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$",
+    re.ASCII,
+)
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
 
@@ -531,6 +543,12 @@ _REGISTRY = (
         exact=_sqlite_family("collections.sqlite"),
     ),
     InternalStateDescriptor(
+        "collection-replica",
+        "collection_store.replica",
+        StatePlacement.VAULT_CANONICAL,
+        trees=("_collections",),
+    ),
+    InternalStateDescriptor(
         "batch-workspace",
         "vault.batch",
         StatePlacement.TARGET_ADJACENT,
@@ -547,6 +565,24 @@ _REGISTRY = (
         # parent of whatever is being published, so it follows state to the
         # external root automatically and follows content into the vault.
         leaf_patterns=(_HELD_PUBLICATION_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-publication",
+        "collection_store.views",
+        StatePlacement.TARGET_ADJACENT,
+        leaf_patterns=(_COLLECTION_PUBLICATION_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-snapshot",
+        "collection_store.replica",
+        StatePlacement.TARGET_ADJACENT,
+        leaf_patterns=(_COLLECTION_SNAPSHOT_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-audit-spool",
+        "collection_store.legacy",
+        StatePlacement.TARGET_ADJACENT,
+        leaf_patterns=(_COLLECTION_AUDIT_SPOOL_RE,),
     ),
 )
 
@@ -2031,6 +2067,14 @@ def classify_logical(value: object) -> PathClassification:
     if isinstance(parts, PathClassification):
         return parts
     canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
+    replica = _DESCRIPTOR_BY_ID["collection-replica"]
+    if replica.matches(parts):
+        return PathClassification(
+            PathDisposition.RESERVED,
+            descriptor_id=replica.id,
+            canonical=canonical,
+            reason="path is reserved for an owning subsystem",
+        )
     matches = tuple(descriptor for descriptor in _REGISTRY if descriptor.matches(parts))
     if not matches:
         return PathClassification(PathDisposition.ORDINARY, canonical=canonical)

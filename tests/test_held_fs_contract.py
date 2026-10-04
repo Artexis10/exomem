@@ -150,6 +150,30 @@ def test_repeated_enumeration_releases_its_scan_descriptors(tmp_path: Path) -> N
 
 
 @_requires_native_route
+def test_streaming_names_include_unsafe_aliases_and_leave_sources_untouched(tmp_path: Path) -> None:
+    # A census must see aliases so it can refuse them instead of proving a subset.
+    held_fs = _module()
+    (tmp_path / "z.txt").write_bytes(b"z")
+    (tmp_path / "a.txt").write_bytes(b"a")
+    try:
+        (tmp_path / "alias.txt").symlink_to(tmp_path / "z.txt")
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent(".").require() as parent:
+            names = filesystem.iter_names(parent)
+            try:
+                assert set(names) == {"a.txt", "z.txt", "alias.txt"}
+            finally:
+                names.close()
+            assert [entry.relative_path for entry in filesystem.children(parent).require()] == [
+                "a.txt", "z.txt"
+            ]
+    assert (tmp_path / "a.txt").read_bytes() == b"a"
+    assert (tmp_path / "z.txt").read_bytes() == b"z"
+
+
+@_requires_native_route
 def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
     held_fs = _module()
     with held_fs.acquire(tmp_path).require() as filesystem:

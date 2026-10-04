@@ -497,6 +497,9 @@ def _active_alternatives(lowered: str) -> tuple[int, ...]:
     superset argument the whole-union prescan already rests on, applied at the
     granularity where it actually pays.
     """
+    # The same derived superset cheaply rejects clean short identifiers.
+    if len(lowered) <= 1024 and not any(anchor in lowered for anchor in _ANCHORS):
+        return ()
     seen: dict[str, bool] = {}
 
     def present(literal: str) -> bool:
@@ -692,6 +695,13 @@ def _scrub_value(
             cleaned, hit = _scrub_value(item, field_name=str(key), classify=classify)
             entries.append((key, cleaned_key, key_hit, cleaned, hit))
             blocked = blocked or hit
+        if type(value) is dict and all(
+            type(key) is str and type(cleaned_key) is str and not key_hit and cleaned_key == key
+            for key, cleaned_key, key_hit, _, _ in entries
+        ):
+            out = {cleaned_key: cleaned for _, cleaned_key, _, cleaned, _ in entries}
+            if len(out) == len(entries):
+                return out, blocked
         allocated = _allocate_mapping_keys(
             [
                 (original_key, cleaned_key, key_hit)
@@ -704,6 +714,28 @@ def _scrub_value(
         }
         return out, blocked
     if isinstance(value, (list, tuple)):
+        if type(value) is list and value and all(
+            type(item) is dict and len(item) == 2 and all(
+                type(key) is str and key in ("path", "hash") and type(text) is str
+                for key, text in item.items()
+            )
+            for item in value
+        ):
+            # Exact source-version rows share field modes, but every string
+            # still goes through the same bounded classifier or long fallback.
+            modes = {key: _is_structural_field(key) for key in ("path", "hash")}
+            if all(classify(key, False) == (key, False) for key in modes):
+                blocked = False
+                items = []
+                for item in value:
+                    out = {}
+                    for key, text in item.items():
+                        scanner = classify if len(text) <= 1024 else _scrub_string
+                        cleaned, hit = scanner(text, modes[key])
+                        out[key] = cleaned
+                        blocked = blocked or hit
+                    items.append(out)
+                return items, blocked
         blocked = False
         items = []
         for item in value:

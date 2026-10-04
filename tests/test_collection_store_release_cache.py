@@ -167,15 +167,15 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypat
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + "tags: [secret]\n")
     write_rule(store.root, ceiling=0)
-    original = store._precommit
+    original = store._precommit if before_authorization else store.handle.release_cache.prepare
 
-    def interleave(manifest):
-        if not before_authorization:
-            original(manifest)
+    def interleave(manifest=None):
         store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
                                  ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
         if before_authorization:
             original(manifest)
+        else:
+            original()
 
     with request_scope(_external()), preview_store(store.root, store.handle):
         def query():
@@ -183,7 +183,10 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypat
                        action="query", collection=CID, response_detail="full")
         assert query()["total_matched"] == 2
         before = tuple(store.connection.iterdump())
-        monkeypatch.setattr(store, "_precommit", interleave)
+        if before_authorization:
+            monkeypatch.setattr(store, "_precommit", interleave)
+        else:
+            monkeypatch.setattr(store.handle.release_cache, "prepare", interleave)
         arguments = dict(changes={"count": 2}, item_key=KEY, why="correct",
                          expected_container_hash=second["after_container_hash"],
                          expected_item_version=first["after_item_hash"])
@@ -237,6 +240,42 @@ def test_warm_complete_release_rechecks_lifecycle_even_without_a_row_change(stor
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")
     assert tuple(store.connection.iterdump()) == before
+
+
+def test_warm_inspection_keeps_l0_and_policy_denial_receipts_distinct(store, monkeypatch):
+    """A cached L6 policy result cannot override a fresh tombstone's L0 receipt."""
+    from exomem.governance import egress, lifecycle
+
+    create(store)
+    for key in (KEY, OTHER, "33333333-3333-4333-8333-333333333333"):
+        store.append_record(CID, item={"title": key}, item_key=key, why="seed")
+    with pytest.raises(collections.CollectionError) as error:
+        store.append_record(CID, item={"title": "Held", "count": "invalid"}, why="seed")
+    write_scope(store.root, paths=error.value.details["held"]["path"])
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [{collections.record_ref(CID, OTHER)}]\n")
+    write_rule(store.root, ceiling=2)
+    who = _external()
+    with preview_store(store.root, store.handle), request_scope(who):
+        store.inspect_collection(CID)
+        monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({collections.record_ref(CID, KEY)}))
+        with egress.disclosure_boundary(store.root, "inspect") as collector:
+            result = store.inspect_collection(CID)
+            actual = egress._bounded_outcomes(collector.outcomes)
+        with store.read_snapshot(), store._authorization(mutation=False) as operation:
+            catalog = operation.canonical_subjects(CID)
+            decisions = tuple(operation.decision(subject) for subject in catalog)
+            with egress.disclosure_boundary(store.root, "inspect") as collector:
+                for subject, decision in zip(catalog, decisions, strict=True):
+                    egress._outcome_for_decision(
+                        store.root, subject.basis.identity, decision=decision, policy=operation.policy,
+                        audience=who.audience_id, outcome="release_authorized" if decision.level >= 6 else "withheld",
+                        content_hash=subject.basis.payload_hash, purpose=operation.purpose, purpose_is_bound=True)
+                expected = egress._bounded_outcomes(collector.outcomes)
+        assert sorted(decision.level for decision in decisions) == [0, 2, 2, 6, 6]
+        assert actual == expected
+        assert result["coverage"]["committed"] == 1
+        assert [notice["level"] for notice in result["governance"]["notices"]] == [2, 2]
 
 
 @pytest.mark.parametrize("changed", ["revoked", "expired", "authority-unavailable"])
@@ -296,8 +335,42 @@ def test_warm_inspection_refreshes_frequencies_and_unchanged_collision_siblings(
     sibling = [finding for finding in current["presentation"]["items"] if finding["item_key"] == OTHER]
     assert any(finding["state"] == "filename_drift" for finding in sibling)
     assert all(finding["version"] == latest["after_item_hash"] for finding in sibling)
+    mutated = store.inspect_collection(CID)
+    mutated["presentation"]["items"][0]["state"] = "Caller mutation"
+    assert store.inspect_collection(CID) == current
     store.handle.release_cache.clear()
     assert store.inspect_collection(CID) == current
+
+
+def test_warm_inspection_decrements_full_frequency_keys_and_removes_the_last_occurrence(store):
+    """Replacing a shared display prefix must preserve distinct full keys and their ranks."""
+    text = manifest_text().replace("natural_key: [title]", "natural_key: [title, count]")
+    store.create_collection(manifest_path(), text, why="create")
+    prefix = "a" * 120
+    receipts = [store.append_record(CID, item={"title": title, "count": index}, why="seed")
+                for index, title in enumerate((prefix + "A", prefix + "A", prefix + "B", "zeta"))]
+    before = store.inspect_collection(CID)
+    assert before["observed_values"]["title"]["values"] == [
+        {"value": prefix, "count": 2, "value_truncated": True},
+        {"value": prefix, "count": 1, "value_truncated": True},
+        {"value": "zeta", "count": 1, "value_truncated": False},
+    ]
+    latest = receipts[-1]
+    for index in (0, 1):
+        latest = store.update_record(
+            CID, item_key=receipts[index]["item_key"], changes={"title": prefix + "B"}, why="correct",
+            expected_container_hash=latest["after_container_hash"],
+            expected_item_version=receipts[index]["after_item_hash"],
+        )
+        current = store.inspect_collection(CID)
+        expected = [
+            {"value": prefix, "count": index + 2, "value_truncated": True},
+            *([{"value": prefix, "count": 1, "value_truncated": True}] if index == 0 else []),
+            {"value": "zeta", "count": 1, "value_truncated": False},
+        ]
+        assert current["observed_values"]["title"]["values"] == expected
+        store.handle.release_cache.clear()
+        assert store.inspect_collection(CID) == current
 
 
 def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
@@ -344,6 +417,9 @@ def test_grant_only_release_change_refreshes_a_warm_filename_group(store, monkey
         with request_scope(who):
             after = store.inspect_collection(CID)
         assert after["coverage"]["committed"] == 1
+        assert after["observed_values"]["title"]["values"] == [
+            {"value": "STRASSE", "count": 1, "value_truncated": False},
+        ]
         assert after["presentation"]["items"] == [{
             "item_key": OTHER, "path": sibling["affected_paths"][0], "version": sibling["after_item_hash"],
             "state": "filename_drift", "remedy": "structured_files_preview",

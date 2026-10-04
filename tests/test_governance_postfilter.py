@@ -275,6 +275,7 @@ def test_structural_identifiers_are_not_false_positives() -> None:
     cleaned, blocked = scrubber.scrub_value(payload)
     assert not blocked
     assert cleaned == payload
+    assert cleaned is not payload
 
 
 def test_identifier_shaped_fields_are_structural() -> None:
@@ -367,6 +368,30 @@ def test_repeated_string_classification_keeps_structural_and_prose_modes_distinc
         "notes": [scrubber.NOTICE, scrubber.NOTICE],
         "nested": {scrubber.NOTICE: "safe", "fingerprint": HIGH_ENTROPY},
     }
+
+
+def test_source_version_string_pairs_keep_credential_and_entropy_modes_distinct() -> None:
+    payload = {
+        "source_versions": [
+            {"hash": HIGH_ENTROPY, "path": HIGH_ENTROPY},
+            {"path": AWS_KEY, "hash": AWS_KEY},
+            {"path": "a.md", "hash": CONTENT_HASH},
+        ],
+    }
+
+    cleaned, blocked = scrubber.scrub_value(payload)
+
+    assert blocked
+    assert cleaned == {
+        "source_versions": [
+            {"hash": scrubber.NOTICE, "path": HIGH_ENTROPY},
+            {"path": scrubber.NOTICE, "hash": scrubber.NOTICE},
+            {"path": "a.md", "hash": CONTENT_HASH},
+        ],
+    }
+    assert [list(version) for version in cleaned["source_versions"]] == [
+        ["hash", "path"], ["path", "hash"], ["path", "hash"],
+    ]
 
 
 def test_vault_paths_are_never_scrubbed() -> None:
@@ -662,6 +687,39 @@ def test_mapping_key_scrubbing_is_collision_safe_and_order_independent(
         outputs.append(cleaned)
 
     assert outputs[0] == outputs[1]
+
+
+def test_mapping_subclass_duplicate_keys_keep_collision_allocation() -> None:
+    """A mapping adapter's items need not share built-in dict key uniqueness."""
+    class RepeatedEntries(dict):
+        def items(self):
+            return [("note", "safe"), ("note", AWS_KEY)]
+
+    cleaned, blocked = scrubber.scrub_value(RepeatedEntries())
+
+    assert blocked
+    assert cleaned == {"note": "safe", "note#1": scrubber.NOTICE}
+
+
+def test_nested_mapping_mutation_preserves_earlier_captured_entry() -> None:
+    outer = {}
+
+    class MutatingAdapter(dict):
+        def items(self):
+            outer.clear()
+            outer.update({"unvisited": "replacement", "warning": "later value", "tail": "tail"})
+            return [("detail", "original warning")]
+
+    outer.update({"warning": MutatingAdapter(), "middle": "middle", "tail": "tail"})
+
+    cleaned, blocked = scrubber.scrub_value(outer)
+
+    assert not blocked
+    assert cleaned == {
+        "warning": {"detail": "original warning"},
+        "warning#1": "later value",
+        "tail": "tail",
+    }
 
 
 def test_error_details_scrub_bearers_and_credential_mapping_keys(vault: Path) -> None:

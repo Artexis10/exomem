@@ -6,6 +6,7 @@ import base64
 import csv
 import datetime as dt
 import hashlib
+import heapq
 import html
 import json
 import math
@@ -739,6 +740,8 @@ def render_markdown_log_item(
     item_key: str,
     newline: str,
     audit_correlation: str | None = None,
+    *,
+    view_stamp: Mapping[str, str | int] | None = None,
 ) -> str:
     """Render one declared log block without reading or rewriting its container."""
     if newline not in {"\n", "\r\n"}:
@@ -824,6 +827,11 @@ def render_markdown_log_item(
         "#" * grammar.level + " " + title,
         f"<!-- exomem-record-id: {marker} -->",
         *(
+            ["<!-- exomem-view " + " ".join(f"{key}={view_stamp[key]}" for key in ("s", "i", "v", "h")) + " -->"]
+            if view_stamp is not None
+            else []
+        ),
+        *(
             [f"<!-- exomem-record-audit: {audit_correlation} -->"]
             if audit_correlation is not None
             else []
@@ -842,6 +850,7 @@ def render_markdown_item(
     audit_correlation: str | None = None,
     *,
     resolve_relationship: Callable[[str, str], tuple[str, str] | None] | None = None,
+    view_stamp: Mapping[str, str | int] | None = None,
 ) -> str:
     """Render a new ordinary record item from bounded structured values."""
     profile = profile_for(manifest.semantic_profile)
@@ -852,6 +861,8 @@ def render_markdown_item(
         "schema_version": manifest.schema.version,
     }
     frontmatter.update(values)
+    if view_stamp is not None:
+        frontmatter["exomem_view"] = dict(view_stamp)
     audit_line = (
         f"# {profile.item_audit_marker}: {audit_correlation}\n" if audit_correlation else ""
     )
@@ -1864,7 +1875,9 @@ def observed_values_from_counts(
     """
     summary: dict[str, dict[str, Any]] = {}
     for name, observed in counts.items():
-        ranked = sorted(observed.items(), key=lambda entry: (-entry[1], entry[0]))
+        ranked = heapq.nsmallest(
+            _MAX_OBSERVED_VALUES, observed.items(), key=lambda entry: (-entry[1], entry[0])
+        )
         summary[name] = {
             "values": [
                 {
@@ -1872,9 +1885,9 @@ def observed_values_from_counts(
                     "count": count,
                     "value_truncated": len(value) > _MAX_OBSERVED_VALUE_CHARS,
                 }
-                for value, count in ranked[:_MAX_OBSERVED_VALUES]
+                for value, count in ranked
             ],
-            "truncated": len(ranked) > _MAX_OBSERVED_VALUES,
+            "truncated": len(observed) > _MAX_OBSERVED_VALUES,
         }
     return summary
 

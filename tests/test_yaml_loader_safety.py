@@ -8,9 +8,30 @@ loader to one that constructs arbitrary Python objects from `!!python/*` tags.
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from exomem import vault
+
+
+@pytest.mark.parametrize("value", [
+    "ordinary text", "null", "true", "2026-10-02", "1.25", "a: b",
+    "text\twith tab", "line\nnext", "你好",
+    "!!python/object/apply:builtins.str [unsafe]",
+])
+def test_scalar_rendering_preserves_authored_string_with_either_safe_parser(value):
+    # Scalar-looking titles must stay strings; control characters must not make
+    # existing canonical views invalid or differ across optional YAML parsers.
+    rendered = vault.yaml_scalar(value)
+    assert yaml.load(rendered, Loader=yaml.SafeLoader) == value
+    if hasattr(yaml, "CSafeLoader"):
+        assert yaml.load(rendered, Loader=yaml.CSafeLoader) == value
+    if "\t" in value:
+        assert rendered.startswith('"')
+
+
+def test_scalar_rendering_keeps_uncodable_text_quoted():
+    assert vault.yaml_scalar("\ud800") == '"\ud800"'
 
 
 def test_hot_loader_is_a_safe_schema_loader() -> None:

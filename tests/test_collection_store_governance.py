@@ -72,7 +72,7 @@ def test_inspection_coverage_omits_withheld_observation_refs(store):
 
     create(store)
     manifest = store.root / manifest_path()
-    manifest.parent.mkdir(parents=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(manifest_text())
     source = "Knowledge Base/Notes/private.md"
     page = store.root / source
@@ -308,7 +308,7 @@ def test_literal_hash_paths_keep_template_and_collection_authority_separate(stor
     store.create_collection(path, text, why="create")
     appended = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     page = store.root / template
-    page.parent.mkdir(parents=True)
+    page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text("# Private template\n")
     policy_path = f"Knowledge Base/Records/{directory}/{source}"
     if layout == "markdown-items":
@@ -352,15 +352,15 @@ def test_literal_hash_paths_keep_template_and_collection_authority_separate(stor
 
 
 def test_discarded_held_saved_view_cannot_fall_back_to_stale_file_authority(store):
-    """Discarding a held candidate must revoke its link even while its old view survives."""
+    """Restoring a discarded candidate's old view cannot restore its canonical authority."""
     text = manifest_text().replace("    count:", "    related: {type: link}\n    count:")
     store.create_collection(manifest_path(), text, why="create")
     with pytest.raises(collections.CollectionError) as refused:
         store.append_record(CID, item={"title": "Candidate", "count": "bad"}, item_key=KEY, why="capture")
     held = refused.value.details["held"]
     page = store.root / held["path"]
-    page.parent.mkdir(parents=True)
-    page.write_bytes(store.connection.execute("SELECT held_bytes FROM held_candidates").fetchone()[0])
+    saved_view = page.read_bytes()
+    assert b"exomem_view:" in saved_view
     text = text.replace("\n---\n", "\nviews:\n  held-target:\n    query:\n"
                         "      filters:\n        - column: related\n          op: eq\n"
                         f'          value: "[[{held["path"].removeprefix("Knowledge Base/").removesuffix(".md")}]]"\n'
@@ -370,9 +370,11 @@ def test_discarded_held_saved_view_cannot_fall_back_to_stale_file_authority(stor
     with request_scope(_external()):
         assert [view["name"] for view in store.inspect_collection(CID)["saved_views"]] == ["held-target"]
     store.discard_held(CID, held=held["held_id"], why="discard")
-    assert page.exists()
+    assert not page.exists()
+    store.reconcile_views()
     assert store.connection.execute("SELECT held_id FROM held_candidates").fetchall() == []
     assert store.connection.execute("SELECT path FROM projection_state WHERE kind='held'").fetchall() == []
+    page.write_bytes(saved_view)
     with request_scope(_external()):
         result = store.inspect_collection(CID)
     assert result["saved_views"] == []
@@ -437,6 +439,9 @@ def test_real_issue_redeem_consume_without_projected_file(store, monkeypatch):
     create(store)
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     who = session(store, monkeypatch)
+    assert "exomem_view:" in (store.root / manifest_path()).read_text()
+    for path, in store.connection.execute("SELECT path FROM projection_state"):
+        (store.root / path).unlink()
     assert not (store.root / manifest_path()).exists()
     with preview_store(store.root, store.handle):
         token = inspection_token(store, who)
@@ -853,7 +858,7 @@ def test_v1_migration_backfills_canonical_metadata_and_restores_manifest_protect
             "projects": ["alpha"], "tags": ["secret"], "classes": ["private"]}
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             conn.execute("UPDATE collection_manifests SET governance_json='{}'")
-        assert schema.schema_version(conn) == 2
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
     finally:
         conn.close()
 
@@ -888,7 +893,7 @@ def test_manifest_grant_uses_its_own_basis_and_does_not_release_a_row(store, mon
         assert isinstance(token, str)
         redeem(store, who, token)
         projected = store.root / manifest_path()
-        projected.parent.mkdir(parents=True)
+        projected.parent.mkdir(parents=True, exist_ok=True)
         projected.write_text(manifest_text())
         due_state.save(store.root, {
             "version": due_state.SCHEMA_VERSION,

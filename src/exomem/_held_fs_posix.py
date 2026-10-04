@@ -9,7 +9,8 @@ import posix as _native
 import secrets
 import stat
 import sys
-from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint64
+from collections.abc import Iterator
+from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64
 from pathlib import Path
 
 from .held_fs import (
@@ -71,6 +72,16 @@ _WRITE_FLAGS = (
 )
 
 
+def _names(descriptor: int) -> Iterator[str]:
+    scan_descriptor = _dup(descriptor)
+    try:
+        with _scandir(scan_descriptor) as children:
+            for child in children:
+                yield child.name
+    finally:
+        _close(scan_descriptor)
+
+
 class _OpenHow(Structure):
     _fields_ = [("flags", c_uint64), ("mode", c_uint64), ("resolve", c_uint64)]
 
@@ -78,6 +89,27 @@ class _OpenHow(Structure):
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _LIBC.syscall.argtypes = None
 _LIBC.syscall.restype = c_long
+
+_RENAME_NOREPLACE = 1
+_RENAMEAT2 = getattr(_LIBC, "renameat2", None)
+if _RENAMEAT2 is not None:
+    _RENAMEAT2.argtypes = [c_int, c_char_p, c_int, c_char_p, c_uint]
+    _RENAMEAT2.restype = c_int
+
+
+def _rename_noreplace(
+    source: str, destination: str, *, src_dir_fd: int, dst_dir_fd: int
+) -> None:
+    # An absence check cannot prevent a destination arriving before rename.
+    # Unsupported kernels/filesystems are refused by the existing probe.
+    if _RENAMEAT2 is None:
+        raise OSError(errno.ENOSYS, "atomic no-replace rename is unavailable")
+    result = _RENAMEAT2(
+        src_dir_fd, os.fsencode(source), dst_dir_fd, os.fsencode(destination), _RENAME_NOREPLACE
+    )
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def _identity(info: os.stat_result) -> StableIdentity:
@@ -499,7 +531,7 @@ class PosixHeldFilesystem(HeldFilesystem):
                 destination_leaf,
                 replace=replace,
             )
-            operation = _replace if replace else _rename
+            operation = _replace if replace else _rename_noreplace
             operation(
                 checked.name,
                 destination_leaf,
@@ -543,7 +575,7 @@ class PosixHeldFilesystem(HeldFilesystem):
                 pass
             else:
                 raise OSError(errno.EEXIST, "destination exists")
-            _rename(
+            _rename_noreplace(
                 checked.name,
                 destination_leaf,
                 src_dir_fd=checked.parent_descriptor,
@@ -654,7 +686,7 @@ class PosixHeldFilesystem(HeldFilesystem):
             _fsync(temporary_descriptor)
             _close(temporary_descriptor)
             temporary_descriptor = None
-            _rename(
+            _rename_noreplace(
                 temporary,
                 destination_leaf,
                 src_dir_fd=destination.descriptor,
@@ -684,12 +716,7 @@ class PosixHeldFilesystem(HeldFilesystem):
     def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
         try:
             checked = self._check_directory(parent)
-            scan_descriptor = _dup(checked.descriptor)
-            try:
-                with _scandir(scan_descriptor) as children:
-                    names = sorted(child.name for child in children)
-            finally:
-                _close(scan_descriptor)
+            names = sorted(_names(checked.descriptor))
             records: list[SagaRecord] = []
             for name in names:
                 info = _stat(name, dir_fd=checked.descriptor, follow_symlinks=False)
@@ -709,13 +736,15 @@ class PosixHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def _enumerate(self, descriptor: int, prefix: str, records: list[SagaRecord]) -> None:
-        scan_descriptor = _dup(descriptor)
+    def iter_names(self, parent: HeldDirectory) -> Iterator[str]:
         try:
-            with _scandir(scan_descriptor) as children:
-                names = sorted(child.name for child in children)
-        finally:
-            _close(scan_descriptor)
+            checked = self._check_directory(parent)
+            yield from _names(checked.descriptor)
+        except OSError as error:
+            raise _error(error) from error
+
+    def _enumerate(self, descriptor: int, prefix: str, records: list[SagaRecord]) -> None:
+        names = sorted(_names(descriptor))
         for name in names:
             info = _stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode):
