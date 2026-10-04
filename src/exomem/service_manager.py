@@ -562,6 +562,7 @@ class Supervisor:
                 target = pending["target"]
             try:
                 target = await self.runtime.inspect(target)
+                self._migration_declared(target)
             except Exception:  # noqa: BLE001 - reject candidate failures before changing admission
                 return {
                     "ok": False,
@@ -604,12 +605,20 @@ class Supervisor:
                         "ok": False,
                         "error": "could not record the transition; current worker is still serving",
                     }
+            compatibility_refused = False
             try:
                 # The cutover budget bounds everything that happens while
                 # abandoning the upgrade is still cheap. Past the stop there is
                 # no worker to give admission back to, so it ends there.
                 async with asyncio.timeout(deadline.remaining(40)):
                     await self.ingress.detach_streams()
+                    # Enrollment may have changed during standby warming or
+                    # draining. Refuse before stopping the worker still serving.
+                    try:
+                        migrate, reason = self._migration_declared(target)
+                    except Exception:  # noqa: BLE001 - pre-stop refusal keeps the serving worker
+                        compatibility_refused = True
+                        raise
                     # Resume always repeats the stop proof, including a timed-out
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
@@ -618,7 +627,6 @@ class Supervisor:
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
                     # migration. A skipped step is recorded, never silent.
-                    migrate, reason = self._migration_declared(target)
                     handoff["migration"] = {
                         "state": "ran" if migrate else "skipped",
                         "reason": reason,
@@ -667,6 +675,21 @@ class Supervisor:
             # unavailable, discards the standby and stops the worker -- and
             # writing a `failed` record here would misreport a shutdown as one.
             except Exception:  # noqa: BLE001 - every post-stop failure must retain recovery state
+                if compatibility_refused:
+                    # Leave the cutover timeout before cleanup; a slow discard
+                    # must not turn a pre-stop refusal into worker downtime.
+                    if not resume:
+                        self.ingress.resume()
+                        self.phase = "ready"
+                        (self.records.directory / "transition.json").unlink(missing_ok=True)
+                        _sync_directory(self.records.directory)
+                    else:
+                        self.phase = "recovery-required"
+                    await self._discard_standby(standby)
+                    return {
+                        "ok": False,
+                        "error": "candidate state compatibility changed; refused before stop",
+                    }
                 self.phase = "recovery-required"
                 self.ingress.unavailable()
                 await self._discard_standby(standby)
@@ -883,6 +906,9 @@ class WorkerRuntime:
             f"{socket_path.stem}-standby{socket_path.suffix}"
         )
         self.standby_capable = False
+        self._verified_state_compatibility: tuple[
+            tuple[str, str, tuple[str, ...]], frozenset[str]
+        ] | None = None
         self.standby_waiting: str | None = None
         #: What the replacement last reported waiting on after the old worker
         #: stopped. Recorded for the handoff; it gates nothing.
@@ -986,6 +1012,9 @@ class WorkerRuntime:
         return values
 
     async def inspect(self, target: dict[str, Any]) -> dict[str, Any]:
+        self._verified_state_compatibility = None
+        from .service_upgrade import _STATE_DECLARATIONS_PROBE
+
         if not isinstance(target, dict) or not {"python", "version"} <= set(target):
             raise ValueError("target must identify an interpreter and exact release")
         if set(target) - {"python", "version", "state_descriptors"}:
@@ -1011,13 +1040,10 @@ class WorkerRuntime:
             "    standby = True\n"
             "except Exception:\n"
             "    standby = False\n"
-            "try:\n"
-            "    from exomem.state_migration import declared_descriptor_ids\n"
-            "    descriptors = list(declared_descriptor_ids())\n"
-            "except Exception:\n"
-            "    descriptors = []\n"
-            'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
-            '"standby":standby,"state_descriptors":descriptors}))'
+            + _STATE_DECLARATIONS_PROBE
+            + 'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
+            '"standby":standby,"state_descriptors":descriptors,'
+            '"supported_state_compatibility":compatibility}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -1050,7 +1076,15 @@ class WorkerRuntime:
         declared = target.get("state_descriptors")
         if declared is not None and list(declared) != descriptors:
             raise ValueError("staged state-migration declaration does not match the target")
+        compatibility = actual.get("supported_state_compatibility", [])
+        if not isinstance(compatibility, list) or not all(
+            isinstance(entry, str) and entry for entry in compatibility
+        ):
+            raise ValueError("target did not declare its state compatibility")
         self.standby_capable = actual.get("standby") is True
+        self._verified_state_compatibility = (
+            (interpreter, version, tuple(descriptors)), frozenset(compatibility)
+        )
         return {
             "python": interpreter,
             "version": version,
@@ -1217,21 +1251,29 @@ class WorkerRuntime:
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         if not vault or not Path(vault).is_absolute():
             return True, "vault binding unavailable"
-        declared = target.get("state_descriptors")
-        if not declared:
-            return True, "target declares no descriptor set"
         from . import state_migration
 
-        try:
-            status = state_migration.migration_status(Path(vault))
-        except Exception:  # noqa: BLE001 - an unreadable manifest is the migrator's problem
-            return True, "state manifest unreadable"
-        if status != "complete":
-            return True, f"state manifest {status}"
         recorded = state_migration.recorded_descriptor_ids(Path(vault))
         if recorded is None:
             return True, "state manifest records no descriptor set"
-        if tuple(declared) != tuple(recorded):
+        physical, optional = state_migration.partition_state_descriptor_ids(recorded)
+        verified = self._verified_state_compatibility
+        key = (
+            target.get("python"), target.get("version"), tuple(target.get("state_descriptors") or ())
+        )
+        supported = verified[1] if verified is not None and verified[0] == key else frozenset()
+        if optional - supported:
+            raise ValueError("candidate does not support recorded state compatibility")
+        declared = target.get("state_descriptors")
+        if not declared:
+            return True, "target declares no descriptor set"
+        try:
+            complete = state_migration.migration_completed(Path(vault))
+        except Exception:  # noqa: BLE001 - an unreadable manifest is the migrator's problem
+            return True, "state manifest unreadable"
+        if not complete:
+            return True, "state manifest in-progress"
+        if set(declared) != physical:
             return True, "descriptors_changed"
         return False, "declared_none"
 

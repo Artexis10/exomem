@@ -90,24 +90,31 @@ def control(runtime_dir: Path, command: dict[str, Any]) -> dict[str, Any]:
 # `declared_descriptor_ids`. Staging it must still work -- that is the rollback
 # path -- so the probe degrades to an empty set exactly as `WorkerRuntime.inspect`
 # does, and an empty declaration makes the supervisor run the migrator.
-_TARGET_PROBE = (
-    "import json; import importlib.metadata as m\n"
+_STATE_DECLARATIONS_PROBE = (
     "try:\n"
     "    from exomem.state_migration import declared_descriptor_ids\n"
     "    descriptors = list(declared_descriptor_ids())\n"
     "except Exception:\n"
     "    descriptors = []\n"
-    'print(json.dumps({"version": m.version("exomem"), "state_descriptors": descriptors}))'
+    "try:\n"
+    "    from exomem.state_migration import supported_state_compatibility_ids\n"
+    "except ImportError:\n"
+    "    compatibility = []\n"
+    "else:\n"
+    "    compatibility = list(supported_state_compatibility_ids())\n"
+)
+
+_TARGET_PROBE = (
+    "import json; import importlib.metadata as m\n"
+    + _STATE_DECLARATIONS_PROBE
+    + 'print(json.dumps({"version": m.version("exomem"), "state_descriptors": descriptors, '
+    '"supported_state_compatibility": compatibility}))'
 )
 
 _WHEEL_TARGET_PROBE = (
     "import base64; import csv; import hashlib; import importlib.metadata as m; import json\n"
-    "try:\n"
-    "    from exomem.state_migration import declared_descriptor_ids\n"
-    "    descriptors = list(declared_descriptor_ids())\n"
-    "except Exception:\n"
-    "    descriptors = []\n"
-    "try:\n"
+    + _STATE_DECLARATIONS_PROBE
+    + "try:\n"
     '    distribution = m.distribution("exomem")\n'
     '    name = distribution.metadata["Name"]\n'
     '    raw_direct_url = distribution.read_text("direct_url.json")\n'
@@ -128,7 +135,8 @@ _WHEEL_TARGET_PROBE = (
     "    direct_url = None\n"
     "    record_hashes = None\n"
     'print(json.dumps({"version": m.version("exomem"), "name": name, '
-    '"direct_url": direct_url, "record_hashes": record_hashes, "state_descriptors": descriptors}))'
+    '"direct_url": direct_url, "record_hashes": record_hashes, "state_descriptors": descriptors, '
+    '"supported_state_compatibility": compatibility}))'
 )
 
 
@@ -156,6 +164,11 @@ def _staged_identity(python: Path, *, wheel: bool = False) -> dict[str, object]:
         isinstance(entry, str) and entry for entry in descriptors
     ):
         raise RuntimeError("staged release did not declare its state descriptors")
+    compatibility = identity.get("supported_state_compatibility", [])
+    if not isinstance(compatibility, list) or not all(
+        isinstance(entry, str) and entry for entry in compatibility
+    ):
+        raise RuntimeError("staged release did not declare its state compatibility")
     # An empty list is a legitimate declaration from a release that predates the
     # descriptor probe; the supervisor treats it as "declares nothing" and runs
     # the offline migrator.
@@ -165,6 +178,7 @@ def _staged_identity(python: Path, *, wheel: bool = False) -> dict[str, object]:
         "direct_url": identity.get("direct_url"),
         "record_hashes": identity.get("record_hashes"),
         "state_descriptors": descriptors,
+        "supported_state_compatibility": compatibility,
     }
 
 

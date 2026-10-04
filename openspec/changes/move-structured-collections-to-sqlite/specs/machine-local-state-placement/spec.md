@@ -22,6 +22,30 @@ and SHALL NOT count as persistent machine-local state under the vault. The
 vault-side collection mode marker beside it SHALL likewise be `vault-canonical`,
 and SHALL be the only authority for whether a replica may be adopted.
 
+`collections-store-v1` SHALL be an optional compatibility descriptor, not a
+physical migratable state family. Complete manifests SHALL contain exactly
+the recorded physical families, each complete; readiness SHALL additionally
+require support for every recorded optional ID. Only a closed recognized
+catalog MAY be subtracted from the physical set, and unknown IDs SHALL refuse.
+Family migration and external adoption SHALL preserve optional IDs. Fresh
+file-only manifests SHALL not acquire them merely because a release recognizes
+them. Candidate probes SHALL verify optional runtime support separately from
+required families. Optional support SHALL remain privately bound to the exact
+verified candidate; managed target requests, replies and retained transition
+targets SHALL keep the legacy `{python, version, state_descriptors}` shape.
+Missing, mismatched or failed verification SHALL not supply optional support.
+An incompatible candidate SHALL refuse before stopping the
+serving worker, with fresh admission rechecked at quiesced cutover. Candidate
+rejection cleanup SHALL restore admission before awaiting cleanup outside the
+stop/migration timeout, without stopping the serving worker; compatible
+unchanged-family upgrades SHALL not run a needless migration. Parser recognition
+alone SHALL not claim mixed/store runtime support. A fixed-ID internal enrollment
+seam SHALL require the trusted create/adoption authority and durable publication
+before marker cutover, without itself migrating families or proving a stop window.
+The keep-vault state-adoption remedy SHALL refuse an enrolled optional
+collection-store contract before deleting external state or its compatibility
+fence; that remedy SHALL not substitute for validated collection export.
+
 Batch and held-publication intermediates SHALL be classified separately as
 `target-adjacent`: they SHALL remain beside the publication destination for
 same-volume atomic rename/link, SHALL exist only during an active publication
@@ -38,6 +62,34 @@ remain under a quiescent vault.
 
 - **WHEN** an operator rebuilds or resets derived indexes for a vault
 - **THEN** the `external-canonical` collection store is untouched
+
+#### Scenario: Optional compatibility survives a physical-family upgrade
+
+- **WHEN** a mixed/store vault gains a required physical state family
+- **THEN** the family migration retains its enrolled `collections-store-v1` descriptor without creating a physical family for it
+- **AND** a pre-store runtime still refuses the enrolled manifest
+
+#### Scenario: Compatible store upgrades retain the ordinary handoff
+
+- **WHEN** the installed candidate supports every enrolled optional ID and requires the existing physical families
+- **THEN** upgrade skips family migration and uses the ordinary handoff
+- **AND** a candidate lacking that support is refused before the serving worker stops
+
+#### Scenario: Mixed operator and supervisor versions retain file-only upgrades
+
+- **WHEN** a file-only vault upgrades through an older supervisor with a newer operator, or a newer supervisor with an older operator
+- **THEN** the target request and response retain exactly the legacy interpreter, version and required-family declarations
+- **AND** optional candidate support, whether empty or nonempty, remains verified internal metadata rather than an extra target field
+
+#### Scenario: A rejected candidate never makes its cleanup the serving worker's stop
+
+- **WHEN** fresh enrollment makes a candidate incompatible during draining and candidate cleanup outlasts the remaining cutover budget
+- **THEN** ordinary admission resumes before cleanup and the serving worker remains available
+
+#### Scenario: Optional support belongs only to a successfully inspected candidate
+
+- **WHEN** an enrolled vault checks a mismatched target or inspection fails after another candidate reported optional support
+- **THEN** the other candidate's support is not reused and admission refuses without stopping the serving worker
 
 #### Scenario: Atomic publication scratch follows its target
 

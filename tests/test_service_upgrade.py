@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ def _wheel(
     name: str = "exomem",
     hash_algorithm: str = "sha256",
     signature: bool = False,
+    compatibility: bool = False,
 ) -> Path:
     """Build the smallest installable local Exomem wheel for staging tests."""
     dist_info = f"exomem-{version}.dist-info"
@@ -37,6 +39,13 @@ def _wheel(
         f"{dist_info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n".encode(),
         f"{dist_info}/WHEEL": b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
     }
+    if compatibility:
+        # Conditional future adapter declaration, exercised from its installed wheel.
+        members["exomem/state_migration.py"] = (
+            b"def declared_descriptor_ids(): return ('claims-store',)\n"
+            b"def supported_state_compatibility_ids(): return ('collections-store-v1',)\n"
+        )
+        members["exomem/service_manager.py"] = b"WORKER_PROTOCOL = 1\n"
     record = "\n".join(
         f"{name},{hash_algorithm}={urlsafe_b64encode(hashlib.new(hash_algorithm, content).digest()).decode().rstrip('=')},{len(content)}"
         for name, content in members.items()
@@ -127,7 +136,10 @@ def _control(
                     request = json.loads(payload)
                     requests.append(request)
                     if request["command"] == "upgrade":
-                        response = {"ok": True, "phase": "ready", "active": request["target"]}
+                        if set(request["target"]) - {"python", "version", "state_descriptors"}:
+                            response = {"ok": False, "error": "target carries fields the managed protocol does not define"}
+                        else:
+                            response = {"ok": True, "phase": "ready", "active": request["target"]}
                     else:
                         response = {
                             "ok": True,
@@ -525,6 +537,7 @@ def test_a_release_without_the_descriptor_probe_still_stages(tmp_path: Path) -> 
 
     identity = service_upgrade._staged_identity(interpreter)
     assert identity["state_descriptors"] == []
+    assert identity["supported_state_compatibility"] == []
     assert identity["version"]
 
 
@@ -589,7 +602,7 @@ def test_wheel_staging_snapshots_provenance_before_handoff(
 ) -> None:
     from exomem import service_upgrade
 
-    wheel = _wheel(tmp_path / "wheel source" / "exomem-9.9.9-py3-none-any.whl")
+    wheel = _wheel(tmp_path / "wheel source" / "exomem-9.9.9-py3-none-any.whl", compatibility=True)
     original_mode = wheel.stat().st_mode
     revision = "a" * 40
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
@@ -604,6 +617,12 @@ def test_wheel_staging_snapshots_provenance_before_handoff(
     )
 
     staged_release = Path(target["python"]).parents[2]
+    assert set(target) == {"python", "version", "state_descriptors"}
+    assert service_upgrade._staged_identity(Path(target["python"]))["supported_state_compatibility"] == ["collections-store-v1"]
+    from exomem.service_manager import WorkerRuntime
+
+    runtime = WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
+    assert asyncio.run(runtime.inspect(target)) == target
     provenance = json.loads((staged_release / "provenance.json").read_text(encoding="utf-8"))
     assert provenance == {
         "artifact_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
@@ -615,6 +634,13 @@ def test_wheel_staging_snapshots_provenance_before_handoff(
     }
     assert stat.S_IMODE((staged_release / "provenance.json").stat().st_mode) == 0o600
     assert stat.S_IMODE(wheel.stat().st_mode) == stat.S_IMODE(original_mode)
+
+    installed = next(staged_release.glob("**/site-packages/exomem/state_migration.py"))
+    installed.write_text("def supported_state_compatibility_ids(): raise RuntimeError('broken probe')\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        service_upgrade._staged_identity(Path(target["python"]))
+    with pytest.raises(ValueError, match="cannot run"):
+        asyncio.run(runtime.inspect(target))
 
 
 def test_wheel_snapshot_mutation_after_install_refuses_provenance(
@@ -767,10 +793,11 @@ def test_wheel_record_signatures_do_not_break_content_proof(tmp_path: Path) -> N
     assert "exomem/__init__.py" in service_upgrade._wheel_record_hashes(wheel)
 
 
+@pytest.mark.parametrize("compatibility", [False, True])
 def test_local_wheel_operator_handoff_keeps_manager_target_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compatibility: bool,
 ) -> None:
-    wheel = _wheel(tmp_path / "wheel source" / "exomem-9.9.9-py3-none-any.whl")
+    wheel = _wheel(tmp_path / "wheel source" / "exomem-9.9.9-py3-none-any.whl", compatibility=compatibility)
     requests, thread = _control(tmp_path, launcher_python=sys.executable)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     result = _operator(
