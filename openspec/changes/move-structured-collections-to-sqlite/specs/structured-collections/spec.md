@@ -155,6 +155,18 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 - **THEN** `Knowledge Base/log.md` is not read or rewritten by it
 
 ### Requirement: Collection store snapshots are consistent and portable
+
+Older-reader/startup exclusion SHALL apply to supported Exomem launchers and
+candidate admission, including copied/restored vaults with fresh external state.
+Required compatibility SHALL be derived from the existing authority marker
+before bootstrap or activation, not solely from an external manifest.
+Replication custody SHALL be verified through a supported deployment adapter
+as specified in Persistent machine-local state lives outside the vault.
+Unknown custody SHALL leave store activation/publication unavailable while
+unrelated file collections and knowledge remain usable. These guarantees SHALL
+NOT claim control over arbitrary manually launched historical executables or
+unmanaged sync programs outside that boundary.
+
 The live store's files SHALL NEVER be copied by file-level backup or export. The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A replica SHALL be adopted only when the vault-side mode marker names store mode and the same store identity.
 
 Every transaction SHALL advance a store-wide sequence and chained head hash. The writer-lease holder SHALL report `(store_id, instance_id, commit_seq, head_hash)` to the coordinator on renew and release. A new holder facing a head recorded by another instance SHALL adopt the replica only once it reaches that head, and until then SHALL refuse collection writes with the retryable `COLLECTION_STORE_SYNC_PENDING`, naming both sequences and the remedy. A store for which no foreign head was ever recorded SHALL never wait. An owner-only, preview-first `adopt-local` operation SHALL let the holder continue from local state, recording the fork point, and the other side's later-arriving changes SHALL be reconciled as held corrections.

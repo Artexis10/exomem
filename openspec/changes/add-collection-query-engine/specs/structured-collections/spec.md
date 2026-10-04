@@ -1,6 +1,17 @@
 ## MODIFIED Requirements
 
 ### Requirement: One embedded collection store is the single source of truth
+
+Older-reader admission and replication custody SHALL use the supported-client
+boundary in Collection store snapshots are consistent and portable and
+Persistent machine-local state lives outside the vault. Supported launchers
+SHALL derive required compatibility from the existing authority marker before
+fresh bootstrap, candidate admission or copied/restored-vault activation.
+Unknown custody SHALL leave store activation/publication unavailable while
+file collections and knowledge remain usable. No guarantee SHALL be inferred
+for arbitrary manually launched historical executables or unmanaged sync
+programs outside that boundary.
+
 Each vault SHALL have exactly one embedded SQLite collection store that is the only canonical source for structured collections assigned store authority by Collection store migration is verifiable and reversible, of every collection type, built-in (Records, Planning) or declared: their type declarations, manifests, items, item versions, per-row provenance, held candidates, and audit transitions. Existing file-authoritative collections SHALL remain canonical in files until their declared migration; the new-collection slice SHALL NOT copy or redirect them into the store. The store SHALL enforce collection-scoped item identity and declared natural-key uniqueness with database constraints, SHALL commit every mutation, including every row of a bulk mutation, in one transaction under the existing single-writer lease, and SHALL make its transaction, audit-effect, item-version, provenance and manifest-history tables append-only. Canonical values MAY use json-v1 or migration-owned typed-v1 encoding; a stable append-only version_identity spine SHALL identify every (row_id,row_version,encoding,payload_hash,txn_id,schema_version), and per-version sources SHALL reference that spine. Typed history and new identity tables SHALL have BEFORE UPDATE and BEFORE DELETE abort triggers. The forward schema SHALL preserve existing immutable JSON history, source refs, hashes and audit, require exact logical parity before mapping publication and fence every older reader before access. Typed dense rows SHALL NOT keep a duplicate full canonical JSON payload. Knowledge notes, entities, sources, evidence and episodes SHALL remain Markdown and SHALL NOT be stored in it. The `dataset` storage strategy SHALL remain a file-canonical, query-only adapter and SHALL NOT be imported into the store. Records, Planning and declared types SHALL keep their distinct kinds, typed schemas, natural keys, provenance, audit and governance; only the storage engine changes. The store SHALL require SQLite 3.38 or newer and a local filesystem where WAL journaling takes effect, and readiness SHALL refuse store-authoritative collection writes, never falling back to file-canonical writes, when either fails.
 
 #### Scenario: Natural-key uniqueness is a constraint
@@ -273,7 +284,7 @@ Slice rollback SHALL pause imports and disable records-summary-v1 reads for C wh
 
 #### Scenario: Restart and restore preserve mixed authority
 - **WHEN** a mixed A/B/C vault restarts or its consistent marker/replica and file backup is copied/restored on a host with no local store
-- **THEN** A/B retain file reads/writes and original guards/audit, C is adopted from its identity/head-validated replica and accepts governed store reads/writes, mismatched/tombstoned snapshots refuse C access, and an older reader or store-blind coordinator refuses before access/lease acquisition
+- **THEN** A/B retain file reads/writes and original guards/audit, C is adopted from its identity/head-validated replica and accepts governed store reads/writes, mismatched/tombstoned snapshots refuse C access, and a supported launcher rejects an older reader before access even with fresh external state while a store-blind coordinator refuses lease acquisition
 
 #### Scenario: Slice rollback preserves mixed authority
 - **WHEN** records-summary-v1 is disabled after C has acknowledged imported rows

@@ -46,6 +46,16 @@ The keep-vault state-adoption remedy SHALL refuse an enrolled optional
 collection-store contract before deleting external state or its compatibility
 fence; that remedy SHALL not substitute for validated collection export.
 
+Supported Exomem launchers SHALL derive required store compatibility from the
+existing vault-side authority marker before fresh external-state bootstrap,
+candidate admission and copied/restored-vault activation, even when the
+external manifest is absent. They SHALL reuse the candidate-bound support
+probe and ordinary supervisor handoff; an unsupported candidate SHALL refuse
+before vault access or serving-worker retirement. This guarantee SHALL cover
+supported entrypoints, not arbitrary historical executables launched manually.
+No additional in-vault sentinel, physical state family or routing authority
+SHALL be introduced to stand in for that admission boundary.
+
 The store runtime SHALL retain its ordinary opening-thread-owned writer and
 bounded cache between operations. Every use, including read snapshots and
 standalone calls, SHALL be scoped to that runtime's handle checkout. Ordinary
@@ -73,6 +83,28 @@ owned child workspace under that destination parent, excluded from incoming
 and outgoing file replication before use. Shared replica names SHALL remain
 external inputs; cleanup SHALL NOT unlink them. After migration completes, no persistent machine-local state SHALL
 remain under a quiescent vault.
+
+Store activation SHALL require a verified supported deployment adapter. For a
+single-host/no-sync deployment, it SHALL automatically verify that configured
+supported sync roots do not overlap the vault. For a synced deployment, it SHALL
+verify effective incoming and outgoing private-workspace exclusion at every
+participating supported endpoint and establish actual marker-write exclusion
+or quiescence before replacement. Reading one ignore file, a caller boolean or
+pausing only the initiating publisher SHALL NOT establish custody. Unknown or
+lost custody SHALL preserve pending intent and conflicting bytes and leave
+store activation/publication unavailable without disabling unrelated file
+collections or knowledge access. Arbitrary unmanaged sync programs SHALL NOT
+be presented as covered by that supported deployment guarantee.
+
+#### Scenario: A copied store vault rejects an unsupported managed candidate
+
+- **WHEN** a mixed/store vault is copied or restored with a fresh external state root and a supported launcher is asked to start an actual interpreter without its required store capability
+- **THEN** the launcher derives that requirement from the authority marker and refuses before vault access or retiring the current serving worker, without relying on a previously enrolled external manifest
+
+#### Scenario: Unknown replication custody does not disable file knowledge
+
+- **WHEN** the supported deployment cannot establish incoming/outgoing scratch exclusion or marker-write custody
+- **THEN** store activation/publication remains unavailable, pending intent and conflicting bytes are preserved, and unrelated file collections and knowledge remain usable
 
 #### Scenario: A synced quiescent vault carries no persistent machine-local state
 

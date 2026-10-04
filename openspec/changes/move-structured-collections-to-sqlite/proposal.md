@@ -13,6 +13,8 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
 
 ## What Changes
 
+**Supported-client boundary (owner, 2026-10-04).** Store admission and older-reader exclusion apply to supported Exomem launchers, including copied/restored vaults with fresh external state. Replication custody requires a verified supported deployment adapter; unknown custody leaves store activation unavailable while file collections and knowledge remain usable. This does not promise to control arbitrary historical executables or unmanaged sync programs launched outside that boundary.
+
 **First-owner release ruling (2026-10-04).** The first NEW owner-only summary collection uses the S1 gate in `add-collection-query-engine`. Its measured 15 ms public-inspect, 20 ms guarded-append and supporting append-stage timing targets remain optimisation goals, not release blockers for that slice; missed targets stay visible and P1a performance acceptance stays open. Data integrity, permissions, recoverability, compatibility, portability, parity and the other applicable gates remain mandatory. This exception neither migrates existing Records/Planning nor authorizes general store rollout.
 
 - **One collection mechanism; types are data.** Records and Planning become two built-in *collection types* of one generic mechanism.
