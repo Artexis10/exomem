@@ -36,6 +36,10 @@ class _Scope:
         from .inspection import InspectionCache
         from .writer import CollectionWriter
 
+        # Python 3.11 paths implement a deprecated no-op context manager;
+        # they are ordinary values, not resources borrowed from this checkout.
+        if isinstance(value, Path):
+            return value
         if isinstance(value, (
             sqlite3.Connection, sqlite3.Cursor, connection.WriterConnection,
             CollectionWriter, OperationAuthorization, ReleaseCache, InspectionCache,
