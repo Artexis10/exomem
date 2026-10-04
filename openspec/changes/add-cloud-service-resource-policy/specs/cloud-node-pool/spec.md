@@ -44,3 +44,17 @@ The optional reservation SHALL default to empty, survive module and root outputs
 - **WHEN** an existing CX33 agent entry clears `dedicated_cell_id`
 - **THEN** planning fails sizing validation before the node can become general capacity
 
+### Requirement: A joined agent publishes capacity without a controller change
+
+When the Hetzner CSI driver is installed, the join SHALL complete only once the agent's CSINode publishes a volume-attachment limit for that driver, so that the reservation-aware controller counts an unreserved node's general cell slots from its own observation. A node with either the dedicated label or taint SHALL publish zero general slots while preserving observed attachment counts. Unknown nodes MUST NOT contribute positive slots through a configured fallback before they are positively observed unreserved. The reservation-aware controller and its node-read permissions MUST be deployed before any restricted dedicated node joins. When the driver is not yet installed, the join SHALL say so, and the node SHALL remain uncounted until the driver publishes its limit. No controller configuration or code change SHALL be needed to count a new node, or to stop counting a removed one.
+
+#### Scenario: Node added on a platform with the CSI driver
+
+- **WHEN** a new unreserved agent's join completes on a cluster running the Hetzner CSI driver
+- **THEN** its CSINode carries an allocatable attachment count, and the controller's next pass publishes cell slots for it
+
+#### Scenario: Node removed
+
+- **WHEN** an agent's Kubernetes node is deleted
+- **THEN** its CSINode is gone, and the controller publishes zero slots for it
+

@@ -57,6 +57,12 @@ infra/scripts/ansible_with_sops.sh \
 
 ## Reserve an agent for one selected cell
 
+Before any reserved agent joins, deploy the signed reservation-aware cellctl
+controller and its node-read permissions through the ordinary platform release,
+leaving `cellctl.dedicatedCellIds` empty. Verify reserved nodes publish zero
+general slots; an older controller counts CSI attachment slots without the
+reservation and must not observe a restricted 8 GiB node as general capacity.
+
 Dedicated placement is disabled by default. For an authorized relocation, set
 that agent's `k3s_agent_dedicated_cell` inventory variable to the cell's exact
 16-character base32 ID before its first join. The role registers and converges
