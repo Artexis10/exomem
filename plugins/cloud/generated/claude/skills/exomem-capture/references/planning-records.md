@@ -41,6 +41,7 @@ Pass `changes={"title": "..."}` to `update`; for an explicit intent change
 pass `transition` to `triage`, with the same guards and an audit `why`.
 For example, an inbox candidate can become planned with
 `transition={"status": "planned", "commitment": "considering", "horizon": "quarter"}`.
+For an explicitly completed outcome, use `transition={"status": "completed"}`.
 Completion requires committed, non-inbox intent; committed work-items and
 initiatives also need their declared parent. Inspect the collection contract
 before choosing fields. A Records outcome alone never changes Planning.

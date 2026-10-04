@@ -1,6 +1,8 @@
 ## Status
 
-Phase 2 candidate implemented, not delivered. Its earlier results below are historical. Reconciliation with current main, independent review and current installed-interface acceptance remain required; checked historical implementation work does not establish current readiness.
+Phase 2 is reconciled with current main, independently reviewed and verified through the installed public interface. Ordinary PR CI, source delivery and external adapter acceptance remain open. Earlier measurements below are historical; current acceptance is recorded in tasks.md.
+
+The reconciled October 4 candidate retains current API and governance contracts and has passed independent source review. Current complete wire is 194,872 → 88,345 bytes, under every original ceiling. Ordinary-agent CLI trials reached the expected outcomes across the eight task shapes, with a cold activation failure handled by targeted retrieval, a filter-shape retry, an exact-unit-reference retry and a completion-value retry. The completion example now appears in the public reference exposed by the existing bootstrap pointer. Provider refresh, native routing acceptance and production deployment remain separate release evidence.
 
 ## Agent-independent usability reconciliation (2026-10-04)
 

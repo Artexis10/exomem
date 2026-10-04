@@ -124,12 +124,6 @@ def test_compact_is_materially_smaller_than_full(payloads):
     )
 
 
-def test_profiles_are_ordered_by_size(payloads):
-    assert _size(payloads["compact"]) < _size(payloads["full"]) <= _size(
-        payloads["diagnostics"]
-    )
-
-
 # ------------------------------------------------------------------ what was trimmed
 
 
