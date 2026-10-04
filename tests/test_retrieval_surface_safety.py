@@ -79,12 +79,12 @@ def test_product_mcp_retrieval_schemas_are_safe(
 
     ask_schema = tools["ask_memory"]["outputSchema"]
     assert "explain" in tools["ask_memory"]["inputSchema"]["properties"]
-    ask_result = ask_schema["properties"]["result"]
-    encoded_ask_schema = json.dumps(ask_result, sort_keys=True)
-    assert "retrieval_profile" in encoded_ask_schema
-    assert "ranking_explanation" in encoded_ask_schema
-    assert "unit_ref" in encoded_ask_schema
-    assert "parent_path" in encoded_ask_schema
+    # The published schema names only the two shapes (hits or one envelope);
+    # the fields inside them are asserted on the runtime payload below and the
+    # typed model stays in the return annotation.
+    assert ask_schema["properties"]["result"] == {
+        "anyOf": [{"type": "array"}, {"type": "object"}]
+    }
 
     read_schema = tools["read_memory"]["outputSchema"]
     assert read_schema["type"] == "object"

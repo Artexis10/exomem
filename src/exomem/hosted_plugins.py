@@ -1899,7 +1899,9 @@ def oauth_discovery_overlay(contract: dict[str, Any]) -> dict[str, Any]:
 
 #: Released candidates whose ask_memory `outputSchema` is rendered from a pinned
 #: source file rather than the live tool. Exactly the candidates the v1-v4
-#: immutability manifest covers; v4-command-binding-v1 and v5 follow the live schema.
+#: immutability manifest covers. v4-command-binding-v1 reuses the v4 profile, whose
+#: gateway contract carries the legacy pin (`hosted_legacy_schemas`); v5 follows
+#: the live schema.
 ASK_MEMORY_PINNED_CANDIDATES: frozenset[str] = frozenset(
     {DEFAULT_CANDIDATE, LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE, PARITY_CANDIDATE}
 )
