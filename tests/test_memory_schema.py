@@ -68,16 +68,24 @@ def test_raw_page_does_not_change_remote_owner_schema_frequencies(tmp_path: Path
         "owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic",
     )
     with principal.request_scope(remote):
-        before = commands.op_schema_memory(root, operation="infer", name="atlas-insights", project="atlas")
+        before = commands.op_schema_memory(
+            root, operation="infer", name="atlas-insights", project="atlas",
+        )
         hidden = root / "Knowledge Base/Notes/__exomem_raw_v1__private.md"
-        hidden.write_text("---\ntype: insight\nproject: atlas\nprivate_locator: secret-place\n---\nRaw original\n", encoding="utf-8")
+        hidden.write_text(
+            "---\ntype: insight\nproject: atlas\nprivate_locator: secret-place\n---\n"
+            "Raw original\n",
+            encoding="utf-8",
+        )
         after = egress.postfilter("schema_memory", commands.op_schema_memory(
             root, operation="infer", name="atlas-insights", project="atlas",
         ), root)
     assert after["sample_size"] == before["sample_size"]
     assert "private_locator" not in str(after)
     with principal.request_scope(principal.owner_principal(surface="library")):
-        local = commands.op_schema_memory(root, operation="infer", name="atlas-insights", project="atlas")
+        local = commands.op_schema_memory(
+            root, operation="infer", name="atlas-insights", project="atlas",
+        )
     assert local["sample_size"] == before["sample_size"] + 1
     assert "private_locator" in str(local)
 
