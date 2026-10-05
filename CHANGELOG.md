@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.106.0](https://github.com/Artexis10/exomem/compare/v0.105.0...v0.106.0) (2026-10-04)
+## [0.106.0](https://github.com/Artexis10/exomem/compare/v0.105.0...v0.106.0) (2026-10-05)
 
 
 ### Features
@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * charge the bulk progress grace wait once ([#1567](https://github.com/Artexis10/exomem/issues/1567)) ([05056f5](https://github.com/Artexis10/exomem/commit/05056f5562a573d038d12c90e1cd6c0019c04f45))
 * **compiler:** retain bounded multi-topic material evidence ([#1560](https://github.com/Artexis10/exomem/issues/1560)) ([c075543](https://github.com/Artexis10/exomem/commit/c075543be77154b9e320d436987fd03178f76417))
 * **mcp:** clarify bounded conversation in server instructions ([#1562](https://github.com/Artexis10/exomem/issues/1562)) ([1fa3b64](https://github.com/Artexis10/exomem/commit/1fa3b646ed3cd4731a7964cf38452307190185fd))
+* reuse resolver vocabulary across conversation segments ([#1570](https://github.com/Artexis10/exomem/issues/1570)) ([751e12d](https://github.com/Artexis10/exomem/commit/751e12d76b39207edd9157309c5b7172d95c768f))
 * **store:** keep Python 3.11 paths outside borrowed resource wrappers ([#1564](https://github.com/Artexis10/exomem/issues/1564)) ([90b4a68](https://github.com/Artexis10/exomem/commit/90b4a68399f3c3b64bab128e7c78bb66f7a995cd))
 
 ## [0.105.0](https://github.com/Artexis10/exomem/compare/v0.104.0...v0.105.0) (2026-10-04)

@@ -1708,6 +1708,9 @@ def _literal_separator_spans(analysis: TurnAnalysis, row: AnchorFacts) -> tuple[
     Indexed aliases do not retain authorship: an authored alias may equal a
     derived one. Admission and audience filtering remain the index's rules.
     """
+    # A literal name only overrides a boundary that the turn actually has.
+    if not analysis.run_breaks and not _RUN_COORDINATORS.intersection(analysis.tokens):
+        return ()
     spans: set[tuple[int, int]] = set()
     for spelling in (row.title, *row.aliases):
         name = normalize(spelling)
