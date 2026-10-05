@@ -92,6 +92,7 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
   --values "${infra_dir}/helm/platform/values.validation.yaml" \
   --include-crds > "${render_dir}/platform.yaml"
 "${kubeconform_bin}" -strict -summary -ignore-missing-schemas "${render_dir}/platform.yaml"
+"${conftest_bin}" verify --policy "${infra_dir}/policy"
 "${conftest_bin}" test --policy "${infra_dir}/policy" "${render_dir}/platform.yaml"
 
 for values in values.validation.yaml values.initialize.yaml; do

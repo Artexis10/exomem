@@ -40,17 +40,36 @@ deny contains message if {
   message := sprintf("%s/%s uses an unexpected CSI hostPath", [input.kind, input.metadata.name])
 }
 
-deny contains message if {
-  workload
-  some container in array.concat(object.get(pod_spec, "initContainers", []), pod_spec.containers)
-  not contains(container.image, "@sha256:")
-  message := sprintf("%s/%s uses a mutable image", [input.kind, input.metadata.name])
+# Every container and init container. Charts render an absent list as `null`, which
+# array.concat rejects; an evaluation error there would silently skip the checks below.
+pod_containers contains container if {
+  some container in pod_spec.containers
+}
+
+pod_containers contains container if {
+  some container in pod_spec.initContainers
 }
 
 deny contains message if {
   workload
-  some container in array.concat(object.get(pod_spec, "initContainers", []), pod_spec.containers)
-  object.get(container.securityContext, "privileged", false)
+  some container in pod_containers
+  not contains(container.image, "@sha256:")
+  message := sprintf("%s/%s uses a mutable image", [input.kind, input.metadata.name])
+}
+
+# The hcloud CSI node plugin's driver container mounts volumes for kubelet and must be
+# privileged. No other container of that DaemonSet, and no other workload, is exempted.
+approved_hcloud_csi_privileged(container) if {
+  approved_hcloud_csi_node
+  container.name == "hcloud-csi-driver"
+  startswith(container.image, "docker.io/hetznercloud/hcloud-csi-driver:")
+}
+
+deny contains message if {
+  workload
+  some container in pod_containers
+  object.get(container, ["securityContext", "privileged"], false)
+  not approved_hcloud_csi_privileged(container)
   message := sprintf("%s/%s uses a privileged container", [input.kind, input.metadata.name])
 }
 
