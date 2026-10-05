@@ -336,6 +336,7 @@ def apply(
     *,
     rows: Sequence[Any],
     routing_targets: Sequence[Any] = (),
+    row_lexicons: Mapping[str, Any] | None = None,
     term_anchor_counts: Mapping[str, int] | None = None,
     stopwords: frozenset[str] | None = None,
     rare_term_max_anchors: int | None = None,
@@ -370,12 +371,11 @@ def apply(
     }
     origins: dict[str, str] = {}
     merged: dict[str, Any] = {item.anchor_id: item for item in candidates}
-    # Each row's names are derived once for the focus scan and the entries' scan.
-    lexicons = (
-        {row.anchor_id: resolve_module.row_lexicon(row) for row in rows}
-        if segments.focus is not None and segments.entries
-        else None
-    )
+    # Reuse the turn's request-local words when supplied. Direct callers
+    # still derive them once for the focus scan and the entries' scan.
+    lexicons = row_lexicons
+    if lexicons is None and segments.focus is not None and segments.entries:
+        lexicons = {row.anchor_id: resolve_module.row_lexicon(row) for row in rows}
     if segments.focus is not None:
         for item in resolve_module.candidates_for(
             segments.focus,
