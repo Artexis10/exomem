@@ -99,6 +99,7 @@ class ReadSession:
         self._failure = None
         self._authorization = None
         self._admitted = {}
+        self._queries = {}
         self._cursors = set()
         self._estimated_visits = 0
 
@@ -185,23 +186,7 @@ class ReadSession:
             return result
         operation = self._authorization
         try:
-            with closing(governance.iter_subjects(self.connection, collection_id,
-                         operation.logical_vault_id, include_held=False, query_order=True,
-                         batch_size=min(self.limits.fetch_size, 16))) as subjects:
-                subject = next(subjects)
-                operation._load_grants()
-                self.check()
-                if operation.decision(subject).level < 6:
-                    raise QueryError("COLLECTION_NOT_FOUND")
-                row = self.connection.execute(
-                    "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
-                    (collection_id, subject.basis.manifest_version),
-                ).fetchone()
-                manifest = collections.parse_manifest_bytes(
-                    self._root, subject.basis.subject.path, row[0].encode(),
-                )
-                if manifest.collection_id != collection_id or manifest.manifest_version.hash != subject.basis.manifest_hash:
-                    raise QueryError("COLLECTION_NOT_FOUND")
+            with self._manifest(collection_id) as (manifest, _, subjects, uniform):
                 fields = tuple(manifest.schema.fields)
                 grammar = record_formats.log_grammar_tokens(manifest)
                 if grammar is not None and grammar.note_field is not None and grammar.note_field not in fields:
@@ -210,12 +195,6 @@ class ReadSession:
                 if manifest.storage.strategy == "markdown-log":
                     direction = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
                     order = f"i.created_txn {direction}, i.row_id {direction}"
-                # The evaluated manifest has the same default audience as every
-                # row; with no row-varying inputs its decision proves uniformity.
-                uniform = (operation.policy.empty and not operation.policy.scopes
-                           and not operation.policy.rules and not operation.policy.grants
-                           and not operation.tombstones and not operation.access["excluded"]
-                           and operation.context is None and not operation.failed)
                 if uniform:
                     count = self.connection.execute(
                         "SELECT count(*) FROM (SELECT 1 FROM items WHERE collection_id=? LIMIT ?)",
@@ -242,6 +221,40 @@ class ReadSession:
                 return result
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
+
+    @contextmanager
+    def _manifest(self, collection_id):
+        operation = self._authorization
+        try:
+            with closing(governance.iter_subjects(self.connection, collection_id,
+                         operation.logical_vault_id, include_held=False, query_order=True,
+                         batch_size=min(self.limits.fetch_size, 16))) as subjects:
+                subject = next(subjects)
+                operation._load_grants()
+                self.check()
+                if operation.decision(subject).level < 6:
+                    raise QueryError("COLLECTION_NOT_FOUND")
+                row = self.connection.execute(
+                    "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                    (collection_id, subject.basis.manifest_version),
+                ).fetchone()
+                manifest = collections.parse_manifest_bytes(self._root, subject.basis.subject.path, row[0].encode())
+                if manifest.collection_id != collection_id or manifest.manifest_version.hash != subject.basis.manifest_hash:
+                    raise QueryError("COLLECTION_NOT_FOUND")
+                # An admitted manifest proves uniformity only without any
+                # row-varying policy, grant, exclusion or session context.
+                uniform = (operation.policy.empty and not operation.policy.scopes
+                           and not operation.policy.rules and not operation.policy.grants
+                           and not operation.tombstones and not operation.access["excluded"]
+                           and operation.context is None and not operation.failed)
+                yield manifest, subject.basis, subjects, uniform
+        except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
+            raise QueryError("COLLECTION_NOT_FOUND") from error
+
+    def admit_query(self, query, *, as_of: str):
+        from .typed_rows import admit_query
+
+        return admit_query(self, query, as_of=as_of)
 
 
 @contextmanager
@@ -291,6 +304,7 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
             if session is not None:
                 session._active = False
                 session._admitted.clear()
+                session._queries.clear()
                 for cursor in session._cursors:
                     cursor.close()
                 try:

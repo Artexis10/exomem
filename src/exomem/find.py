@@ -5579,7 +5579,8 @@ def _schedule_recall_resolver_rebuild(root: Path) -> None:
 
     def _run() -> None:
         try:
-            recall_resolver_snapshot(key)
+            with foreground_priority.bulk():
+                recall_resolver_snapshot(key)
         except Exception as error:  # noqa: BLE001 - a daemon must not escape
             log.warning("projected resolver background rebuild skipped (%s)", error)
         finally:

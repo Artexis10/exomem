@@ -33,6 +33,14 @@ Deliver generated native packages, one shared behavioural evaluator, native acce
 
 ## Risks / Trade-offs
 
+Cloud archives exclude the local service credential-reading module. Retrieval
+and capture retain their canonical shared scripts and load that dependency only
+on self-hosted transport paths; native-MCP activation never loads it. The local
+installer, health checks and self-hosted plugin deploy the dependency normally.
+This removes unused credential-reading code from public Cloud hooks without
+forking their workflow or changing the self-hosted transport contract. Static
+analysis may still require provider review for the shared Python hooks.
+
 ### Profile-aware canonical hook activation
 
 The local profile-parity repair shares this batch's canonical workflow; harness integration lives in its own repository. Extend the release-owned hook installer with explicit `--activation-mode working-set|mcp` and profile binding. Standalone retrieval/capture scripts accept `--client` and `--hook-home`; wrappers forward arguments. Continuation accepts the same home binding. Health checks reconstruct the same expected registrations. Legacy defaults remain unchanged. Working-set mode retains its bounded transport and uses a native-MCP activation instruction on failure; MCP mode requests bootstrap when needed and one verbatim-turn activation through the already admitted native MCP, with no external HTTP or local-vault CLI invocation. Do not read or import provider-managed OAuth credentials or infer personal-vault access. Native acceptance distinguishes a directly injected packet from native-MCP delegation and tests unprompted activation, profile-local state, current Codex capture parsing and supported lifecycle events. Hook-bearing provider adapters remain thin and generated from these release-owned scripts; unsupported surfaces rely on the same Skill operating contract rather than pretending they execute hooks.

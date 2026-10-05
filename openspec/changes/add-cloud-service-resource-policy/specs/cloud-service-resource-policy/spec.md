@@ -51,6 +51,16 @@ A healthy running `service-v1` cell SHALL keep its actual serving core recall en
 - **THEN** semantic readiness is degraded or unavailable and lexical retrieval remains available
 - **AND** successful canonical writes are not represented as semantically indexed unless their exact derived version has published
 
+#### Scenario: Disk-backed recall has no matrix to warm
+- **WHEN** service-v1 background activation completes its startup drain
+- **THEN** it skips the redundant matrix-warm vector scan while preserving core-encoder and request-path warm operations
+- **AND** local and legacy matrix-warm behavior remains unchanged
+
+#### Scenario: Resolver warming yields to active requests
+- **WHEN** a projected-resolver background warm overlaps an active foreground request
+- **THEN** shared fallback walks yield through the existing bounded bulk scheduling scope
+- **AND** the warm resumes with the same resolver contents when the request finishes, while direct callers retain their existing behavior
+
 ### Requirement: Cloud outcome and capacity gates
 
 Promotion of `service-v1` SHALL require measured ordinary-write and query outcomes on the maintained large-vault fixture both with and without sustained bulk work. Twenty ordinary-note samples in each workload, each no more than 1 KiB UTF-8 and three chunks plus three semantic units, SHALL publish the exact committed version into both projections within 5 seconds at p95 and 10 seconds for every sample after commit; request-to-publication SHALL be within 10 seconds at p95 and 20 seconds for every sample. Eligible warm hybrid queries over the maintained 25-query fixture SHALL retain core vector participation with p95 latency at most 3 seconds and no sample over 10 seconds or newly degraded/refused. Outcome checks SHALL distinguish canonical commit from derived publication and measure post-idle and durable restart recovery separately.

@@ -40,6 +40,7 @@ dependencies = [
     "httpx>=0.27",
     "httpx2>=2.12,<3",         # FastMCP provider clients use a distinct exception family
     "jsonschema>=4.23,<5",     # portable cloud package manifest validation
+    "ijson>=3.5.1,<4",        # bounded, lossless selection from stored JSON streams
     "pyyaml>=6.0",
     "python-slugify>=8.0",
     "python-dotenv>=1.0",

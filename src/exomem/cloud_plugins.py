@@ -97,6 +97,8 @@ def _claude_hooks(root: Path, target: Path) -> None:
         # are unused here and their computed paths block directory validation.
         filename = f"exomem_{stem.replace('-', '_')}.py"
         shutil.copyfile(root / "src/exomem/_hooks" / filename, hooks / filename)
+    # Local credential readers are a separate self-hosted dependency. Native-MCP
+    # hook paths never load it, so it has no place in the Cloud archive.
     events = (
         ("UserPromptSubmit", "retrieve-nudge", None),
         ("Stop", "capture-nudge", None),

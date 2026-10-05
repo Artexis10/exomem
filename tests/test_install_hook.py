@@ -494,10 +494,11 @@ def test_install_hook_check_rejects_unsupported_codex_session_end(tmp_path: Path
     assert check["status"] == "fail"
 
 
-def test_install_hook_check_flags_stale_deployed_copy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["exomem_retrieve_nudge.py", "exomem_local_credentials.py"])
+def test_install_hook_check_flags_stale_deployed_copy(tmp_path: Path, filename: str) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     hook_module.install_hook(hook_dir=hd, settings_path=sp)
-    (hd / "exomem_retrieve_nudge.py").write_text("# stale\n", encoding="utf-8")
+    (hd / filename).write_text("# stale\n", encoding="utf-8")
 
     report = hook_module.check_hooks(clients=("claude",), hook_dir=hd, settings_path=sp)
 

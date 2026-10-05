@@ -32,7 +32,8 @@ from .. import (
 )
 from .. import structured_collections as collections
 from ..governance.principal import effective_principal
-from . import chain, connection, governance, tokens, types, views
+from ..query_engine.indexes import IndexDeclarationError
+from . import chain, connection, governance, index_migrations, tokens, types, views
 
 BULK_UPSERT_MAX_ROWS = 500
 
@@ -983,11 +984,31 @@ class CollectionWriter:
                 self._precommit(manifest)
         return result
 
+    def backfill_query_indexes(self, collection, *, limit=128) -> bool:
+        """Resume one derived batch under the writer lease and current authority.
+
+        This is internal maintenance, not a public query or an automatic job.
+        Canonical items, generations and mutation audit remain unchanged.
+        """
+        with self._mutation():
+            _, manifest, _ = self._collection(collection)
+            complete = index_migrations.backfill_batch(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                manifest.collection_id, limit=limit,
+            )
+            self._precommit(manifest)
+        return complete
+
     def _manifest(
         self, manifest: collections.CollectionManifest, text: str, version: int, txn_id: int
     ):
         self._publication.capture_previous(manifest.path)
         data, _, _ = vault.parse_frontmatter(text, strict=True)
+        try:
+            index_migrations.prepare_manifest(index_migrations.AccountedWriter(self.connection, self._execute),
+                                               manifest, data, types.type_for_manifest(manifest))
+        except IndexDeclarationError as error:
+            raise collections.CollectionError(error.code, error.reason) from error
         self._execute(
             "INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
             "schema_json,natural_key_json,txn_id,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1344,6 +1365,9 @@ class CollectionWriter:
             "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
             (row_id, version, _json(values), body, payload, txn["txn_id"]),
         )
+        index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
+                                       manifest.collection_id, row_id, key, version, values,
+                                       previous=json.loads(before["values_json"]) if before else None)
         for source_ordinal, source in enumerate(sources):
             self._execute(
                 "INSERT INTO item_sources VALUES (?, ?, ?, ?)", (row_id, version, source_ordinal, source)
