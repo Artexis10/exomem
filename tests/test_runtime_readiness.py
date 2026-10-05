@@ -686,3 +686,49 @@ def test_runtime_readiness_publishes_the_live_cutover_block(monkeypatch) -> None
     finally:
         service_standby.reset_for_tests()
         readiness.reset()
+
+
+def _journal_ok(tmp_path: Path, monkeypatch, content: bytes | None) -> bool | None:
+    from exomem.runtime_readiness import _measure_observability
+
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path))
+    if content is not None:
+        (tmp_path / "mutations.jsonl").write_bytes(content)
+    return _measure_observability()["journal_ok"]
+
+
+_LONG = b'{"tool": "' + b"x" * 20000 + b'"}'  # one record longer than any read block
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (b"", True),
+        (b'{"a": 1}', True),
+        (b'{"a": 1}\n\n', True),
+        (b'{"a": 1}\n{"b": ', False),
+        (b'not json\n{"a": 1}\n', True),
+        (b'{"a": 1}\n' + _LONG + b"\n", True),
+    ],
+    ids=[
+        "empty", "one-record", "trailing-blank", "truncated-last",
+        "only-the-last-line-counts", "record-longer-than-a-block",
+    ],
+)
+def test_journal_ok_judges_the_last_record(tmp_path: Path, monkeypatch, content, expected) -> None:
+    assert _journal_ok(tmp_path, monkeypatch, content) is expected
+
+
+def test_journal_probe_does_not_depend_on_the_rest_of_a_large_journal(tmp_path: Path, monkeypatch) -> None:
+    """Readiness runs every few seconds; reading a rotation-sized journal each time was the idle cost."""
+    head = b"\xff" * (4 * 1024 * 1024)  # a whole-file read cannot even decode this
+    assert _journal_ok(tmp_path, monkeypatch, head + b'\n{"a": 1}\n') is True
+
+
+def test_journal_probe_refuses_an_unbounded_last_line_without_reading_it_all(tmp_path: Path, monkeypatch) -> None:
+    """A torn journal with no newline must not stall readiness (the probe was quadratic in the line)."""
+    import time
+
+    start = time.perf_counter()
+    assert _journal_ok(tmp_path, monkeypatch, b"x" * (8 * 1024 * 1024)) is False
+    assert time.perf_counter() - start < 1.0

@@ -3,12 +3,50 @@ kind: Policy
 omitStages:
   - RequestReceived
 rules:
+  # Control-plane components and nodes renew their leases every few seconds.
+  # Those renewals were a quarter of all events and record no operator access;
+  # any other identity's lease writes still fall through to Metadata below.
+  - level: None
+    users:
+      - system:k3s-supervisor
+      - system:kube-scheduler
+      - system:kube-controller-manager
+      - system:apiserver
+      - k3s-cloud-controller-manager
+    verbs:
+      - get
+      - update
+    resources:
+      - group: coordination.k8s.io
+        resources:
+          - leases
+  # A rule's users and userGroups must both match, so nodes get their own rule.
+  - level: None
+    userGroups:
+      - system:nodes
+    verbs:
+      - get
+      - update
+    resources:
+      - group: coordination.k8s.io
+        resources:
+          - leases
   - level: Metadata
     resources:
       - group: ""
         resources:
           - secrets
+  # Bodies are kept for changes only. cellctl reads these objects for every
+  # cell on every pass, and logging each read's full response cost the API
+  # server more than the reads themselves (2026-10-05: 1.6 GB of audit a day
+  # with three cells, mostly StatefulSet GET bodies).
   - level: RequestResponse
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
     resources:
       - group: ""
         resources:
