@@ -112,13 +112,18 @@ def _read_snapshot(
     return RetainedInput(canonical, unit_ref, page, guard)
 
 
-def _release_snapshot(vault_root: Path, snapshot: RetainedInput) -> RetainedInput:
-    """Release and select only this snapshot, retaining its nested decision context."""
+def _release_snapshot(
+    vault_root: Path, snapshot: RetainedInput, *, disclosure: bool = False
+) -> RetainedInput:
+    """Release and select only this snapshot, retaining its nested decision context.
+
+    A superseded input cannot support a new binding, but disclosing an existing
+    one depends only on release: supersession is accounting state.
+    """
     principal = _principal()
     page = snapshot.page
-    if (
-        snapshot.guard is None
-        or str(page.frontmatter.get("status") or "").casefold() == "superseded"
+    if snapshot.guard is None or (
+        not disclosure and str(page.frontmatter.get("status") or "").casefold() == "superseded"
     ):
         raise _unavailable()
     with egress.disclosure_boundary(vault_root, "episode-input-authorization") as collector:
@@ -171,11 +176,15 @@ def _release_snapshot(vault_root: Path, snapshot: RetainedInput) -> RetainedInpu
 
 
 def resolve_retained_input(
-    vault_root: Path, reference: object, *, committed_path: str | None = None
+    vault_root: Path,
+    reference: object,
+    *,
+    committed_path: str | None = None,
+    disclosure: bool = False,
 ) -> RetainedInput:
     """Resolve one currently released input; committed_path is trusted receipt plumbing."""
     snapshot = _read_snapshot(vault_root, reference, committed_path=committed_path)
-    return _release_snapshot(vault_root, snapshot)
+    return _release_snapshot(vault_root, snapshot, disclosure=disclosure)
 
 
 def exact_text_visible(vault_root: Path, value: str) -> bool:
@@ -192,11 +201,14 @@ def exact_text_visible(vault_root: Path, value: str) -> bool:
 
 
 def recheck_retained_inputs(
-    vault_root: Path, selections: tuple[tuple[RetainedInput, str], ...]
+    vault_root: Path,
+    selections: tuple[tuple[RetainedInput, str], ...],
+    *,
+    disclosure: bool = False,
 ) -> None:
     """Refresh a bounded set's release checks, not an atomic cross-system snapshot."""
     for snapshot, text in selections:
-        released = _release_snapshot(vault_root, snapshot)
+        released = _release_snapshot(vault_root, snapshot, disclosure=disclosure)
         if (
             released.released is None
             or released.released.get("frontmatter") != snapshot.page.frontmatter

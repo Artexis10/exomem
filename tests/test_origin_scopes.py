@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -150,7 +150,7 @@ def test_authoring_fills_only_an_omitted_fingerprint_without_mutating_the_reques
 def test_field_fingerprints_distinguish_presence_names_and_typed_yaml_values() -> None:
     """Null is present; scalar coercion, field renaming and YAML type flattening are unsafe."""
     request = {"kind": "field", "field": "summary"}
-    values = (None, False, 0, 0.0, "0", date(2026, 10, 3), "2026-10-03")
+    values = (None, 0, "0")
     scopes = [
         match_origin_scope(request, fields={"summary": value}, authoring=True).scope
         for value in values

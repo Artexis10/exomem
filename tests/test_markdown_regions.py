@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 
 def test_nested_image_labels_map_code_to_original_unicode_crlf_offsets() -> None:
     """Nested image-label parsing cannot reset offsets onto an earlier equal code span."""
@@ -35,32 +33,10 @@ def test_multiline_code_mask_preserves_both_original_line_ending_characters() ->
     )
 
 
-@pytest.mark.parametrize("owner", ["", "<script>", "<title>"])
-def test_malformed_inline_checkpoint_is_admitted_only_in_html_data(owner: str) -> None:
-    """An upstream-escaped unfinished opener stays removable only outside raw/RCDATA text."""
+def test_an_opener_inside_raw_html_is_still_a_removable_carrier() -> None:
+    """HTML context never hides a reserved opener: it must stay removable before disclosure."""
     from exomem.markdown_regions import scan_markdown
 
-    before = "prose " + owner
+    before = "prose <script>"
     text = before + "<!-- unfinished"
-    assert scan_markdown(text).comment_spans == (() if owner else ((len(before), len(text)),))
-
-
-def test_unfinished_inline_tag_cannot_invent_attribute_ownership() -> None:
-    """An unrecognized tag is escaped upstream; its independently consumed comment is real."""
-    from exomem.markdown_regions import scan_markdown
-
-    before = 'prose <div title="'
-    comment = "<!-- actual -->"
-    assert scan_markdown(before + comment).comment_spans == (
-        (len(before), len(before) + len(comment)),
-    )
-
-
-def test_rendered_entity_cr_preserves_original_container_comment_position() -> None:
-    """An entity-decoded CR before HTML must not shift the original Unicode/CRLF carrier."""
-    from exomem.markdown_regions import scan_markdown
-
-    before = '> Ω &#13;\r\n> <span title="same">'
-    comment = "<!-- actual -->"
-    text = before + comment + "</span>\r\n"
-    assert scan_markdown(text).comment_spans == ((len(before), len(before) + len(comment)),)
+    assert scan_markdown(text).comment_spans == ((len(before), len(text)),)

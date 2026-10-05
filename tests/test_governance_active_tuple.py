@@ -1396,19 +1396,8 @@ def test_owner_refresh_rebuilds_canonical_catalog_without_changing_authority(
             proposal_id=proposed["proposal_id"],
             now=now + 2,
         )
-        current = op_govern_memory(
-            vault,
-            operation="propose",
-            principal=owner_principal(),
-            intent="Check whether refresh is required",
-            documents={},
-            now=now + 3,
-        )
     assert committed["status"] == "committed"
     assert committed["mirror_status"] == "not_required"
-    assert current["status"] == "current"
-    assert current["refresh_required"] is False
-    assert current["projection_readiness"] == "ready"
     assert target.read_text() == source
     assert pending.read_bytes() == dict(_documents(ceiling=1))["rules/external.yaml"]
     with sqlite3.connect(store.sidecar_path(vault)) as connection:
@@ -1447,6 +1436,59 @@ def test_owner_refresh_rebuilds_canonical_catalog_without_changing_authority(
         "private attribution" not in json.dumps(dict(variant.search_fields))
         for variant in items[0].variants
     )
+
+
+def test_owner_runtime_refreshes_an_obsolete_projector_with_no_manual_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An upgrade that bumps the projector must not strand content writes on a manual step."""
+    from exomem import server_runtime
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    path = "Knowledge Base/Notes/visible.md"
+    source = "---\ntype: note\ntitle: Visible\n---\nUseful canonical prose.\n"
+    (vault / path).parent.mkdir(parents=True)
+    (vault / path).write_text(source)
+    migration = _migrate_with_projection_items(
+        vault, items=((path, source),), projector_version=1, now=now
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    begin = tool._begin_v4_policy_publication_receipt
+
+    def crash_after_reserving(*args, **kwargs):
+        begin(*args, **kwargs)
+        raise tool.GovernanceCrash("refresh interrupted")
+
+    monkeypatch.setattr(tool, "_begin_v4_policy_publication_receipt", crash_after_reserving)
+    with pytest.raises(tool.GovernanceCrash):
+        server_runtime.refresh_obsolete_projector(vault)
+    monkeypatch.setattr(tool, "_begin_v4_policy_publication_receipt", begin)
+
+    assert server_runtime.refresh_obsolete_projector(vault) == "refreshed"
+    assert server_runtime.refresh_obsolete_projector(vault) == "current"
+
+    assert tool._projection_runtime_readiness(vault) == "ready"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active = schema_v4.load_active_tuple_pointer(connection)
+        assert active.projector_schema_version == projections.PROJECTOR_SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        catalog_publication.prepare_markdown_upsert(
+            vault, path=path, source=source + "A new edit.\n",
+            expected_before_hash=hashlib.sha256(source.encode()).hexdigest(), now=now + 1,
+        )
 
 
 def test_owner_refresh_recovers_enrolled_empty_policy_without_republishing(

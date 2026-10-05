@@ -26,7 +26,6 @@ from urllib.parse import unquote
 from . import context_refs, memory_refs, semantic_units
 from . import find as find_module
 from . import get_page as get_page_module
-from .markdown_regions import MarkdownPositionError, scan_markdown
 from .vault import FrontmatterError, kb_root, parse_frontmatter
 
 if TYPE_CHECKING:
@@ -97,9 +96,49 @@ class OriginDocument:
 
     def without_metadata(self, content: str) -> str:
         """Remove this document's designated spans from the same source text."""
-        for start, end in reversed(self.spans):
-            content = content[:start] + content[end:]
-        return content
+        return remove_carriers(content, self.spans)
+
+
+def remove_carriers(content: str, spans: Iterable[tuple[int, int]]) -> str:
+    """Remove carrier spans; a carrier alone on its line takes the whole line.
+
+    The writer places metadata on its own line, so removing that line restores
+    the author's text exactly, leading blank lines included, and a carrier on
+    its own line inside a list item leaves no whitespace-only line behind. A
+    carrier written as its own paragraph, between blank lines, also takes one
+    of them, so the paragraphs around it keep a single separator. A carrier
+    sharing its line with prose removes only its own characters.
+    """
+    for start, end in sorted(spans, reverse=True):
+        line_start = max(content.rfind("\n", 0, start), content.rfind("\r", 0, start)) + 1
+        after = _blank_rest(content, end)
+        if not content[line_start:start].strip(" \t") and after is not None:
+            start, end = line_start, after
+            following = _blank_rest(content, end) if end < len(content) else None
+            if following is not None and _follows_blank_line(content, start):
+                end = following
+        content = content[:start] + content[end:]
+    return content
+
+
+def _blank_rest(content: str, index: int) -> int | None:
+    """The offset past this line's terminator when only blanks remain on it, else None."""
+    while index < len(content) and content[index] in " \t":
+        index += 1
+    if content.startswith("\r\n", index):
+        return index + 2
+    if index == len(content) or content[index] in "\r\n":
+        return min(index + 1, len(content))
+    return None
+
+
+def _follows_blank_line(content: str, line_start: int) -> bool:
+    """Whether the line before the one starting at `line_start` is blank."""
+    if not line_start:
+        return False
+    end = line_start - (2 if content.startswith("\r\n", line_start - 2) else 1)
+    begin = max(content.rfind("\n", 0, end), content.rfind("\r", 0, end)) + 1
+    return not content[begin:end].strip(" \t")
 
 
 @dataclass(frozen=True)
@@ -434,6 +473,8 @@ def parse_origin(
         return OriginDocument("absent")
     if "<!--" not in content or "exomem-origin" not in content.lower():
         return OriginDocument("absent")
+    from .markdown_regions import MarkdownPositionError, scan_markdown
+
     regions = scan_markdown(content)
     blocks = []
     for start, end in regions.comment_spans:
@@ -485,38 +526,6 @@ def origin_prose(content: str, *, owner_path: str) -> str:
     return parse_owned_origin(content, owner_path=owner_path).without_metadata(content)
 
 
-def summarize_origins(
-    assessments: Iterable[dict],
-    *,
-    input_roots: Mapping[str, str],
-    contributing_inputs: Iterable[str],
-) -> dict:
-    """Fold trusted resolved roots without inferring independence or composing sets."""
-    unassessed = {"status": "unassessed", "assessed_lower_bound": None, "basis": None}
-    if isinstance(contributing_inputs, str) or not isinstance(input_roots, Mapping):
-        return unassessed
-    try:
-        selected = list(contributing_inputs)
-        if not selected:
-            return {"status": "absent", "assessed_lower_bound": 0, "basis": None}
-        contributing = {_origin_text(input_roots[_origin_text(label)]) for label in selected}
-    except (OriginError, KeyError, TypeError):
-        return unassessed
-    lower_bound = 0
-    for raw in assessments:
-        try:
-            assessment = _origin_assessment(raw, input_roots)
-            roots = {_origin_text(input_roots[label]) for label in assessment["inputs"]}
-        except (OriginError, KeyError, TypeError):
-            continue
-        lower_bound = max(lower_bound, len(roots & contributing))
-    return (
-        {"status": "assessed", "assessed_lower_bound": lower_bound, "basis": "agent_assessment"}
-        if lower_bound
-        else unassessed
-    )
-
-
 # A key:value token inside a comment. Value runs to the next whitespace.
 _TAG_RE = re.compile(r"([A-Za-z][\w-]*)\s*:\s*([^\s]+)")
 
@@ -560,6 +569,8 @@ def _scan_body(
 ) -> list[ProvenanceFinding]:
     if "<!--" not in body:
         return []
+    from .markdown_regions import scan_markdown
+
     regions = scan_markdown(body)
     comments_by_line: dict[int, list[str]] = {}
     for start, end in regions.comment_spans:

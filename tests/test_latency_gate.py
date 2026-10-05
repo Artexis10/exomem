@@ -1148,3 +1148,31 @@ def test_a_rule_admitting_a_large_folder_is_reported_not_gated(
     )
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["generation"]["conventions_source"] == "vault"
+
+
+# Wikilink scanning masks code before matching, and it runs for every page in
+# `build_page_state`, the census, audit and entity recurrence. The regex masker
+# takes ~100ms over the 46 repository fixture pages repeated to 1,978 pages; a
+# full CommonMark parse per page (the origin-carrier masker applied to every
+# page instead of only pages carrying a reserved opener) took ~1.4-1.6s on the
+# same corpus. Measured 2026-10-05 on the laptop runner, model-free.
+CEIL_WIKILINK_SCAN_MS = 600.0
+
+
+def test_wikilink_scanning_keeps_the_line_masker_for_ordinary_pages() -> None:
+    """Pages without an origin carrier must not pay for a CommonMark parse."""
+    from exomem import vault
+
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    texts = [path.read_text(encoding="utf-8") for path in sorted(fixtures.rglob("*.md"))] * 43
+    samples = []
+    for _ in range(5):
+        started = time.perf_counter()
+        for text in texts:
+            vault.find_body_wikilinks(text)
+        samples.append((time.perf_counter() - started) * 1000)
+    median = statistics.median(samples)
+    assert median < CEIL_WIKILINK_SCAN_MS, (
+        f"wikilink scan median {median:.0f}ms over {len(texts)} pages >= ceiling "
+        f"{CEIL_WIKILINK_SCAN_MS:.0f}ms (line-masker baseline ~100ms)"
+    )

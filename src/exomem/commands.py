@@ -7100,9 +7100,16 @@ def op_read_memory(
             snapshot_content=page.content,
             stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
         )
+        withheld_spans: tuple[tuple[int, int], ...] = ()
+        if released is not None and released.get("body") != page.body:
+            # A full release whose only change is a removed origin carrier
+            # still serves every unit outside it.
+            carriers = provenance_module.parse_owned_origin(page.body, owner_path=page.path)
+            if released.get("body") == carriers.without_metadata(page.body):
+                withheld_spans = carriers.spans
         if (
             released is None
-            or released.get("body") != page.body
+            or (released.get("body") != page.body and not withheld_spans)
             or released.get("content_hash") != page.content_hash
         ):
             raise ValueError(
@@ -7120,6 +7127,7 @@ def op_read_memory(
             page=page,
             unit_ref=unit_ref,
             frontmatter=released.get("frontmatter"),
+            withheld_spans=withheld_spans,
         )
         out = unit.as_dict()
         if (

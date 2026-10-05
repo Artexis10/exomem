@@ -92,12 +92,15 @@ def read_semantic_unit(
     page: GetResult,
     unit_ref: str,
     frontmatter: Mapping[str, Any] | None = None,
+    withheld_spans: tuple[tuple[int, int], ...] = (),
 ) -> SemanticUnitReadResponse:
     """Resolve one current unit exactly; never substitute a nearby unit.
 
     `frontmatter`, when given, is the frontmatter released to the caller and
     is what the parent citation is built from, so a provenance field the
     release plane stripped does not come back through the citation.
+    `withheld_spans` are body ranges the release removed: a unit inside one is
+    missing, and the parent context stops short of them.
     """
     state = semantic_index.current_parent_index_state(
         vault_root,
@@ -111,6 +114,13 @@ def read_semantic_unit(
         state.document.parent_ref,
         frontmatter=dict(frontmatter) if frontmatter is not None else parsed_frontmatter,
     )
+    if resolution.unit is not None and any(
+        start < resolution.unit.span.end_offset and resolution.unit.span.start_offset < end
+        for start, end in withheld_spans
+    ):
+        resolution = semantic_units.SemanticUnitResolution(
+            status="missing", unit_ref=resolution.unit_ref
+        )
     if resolution.unit is None:
         return SemanticUnitReadResponse(
             status=resolution.status,
@@ -126,7 +136,7 @@ def read_semantic_unit(
         unit_ref=resolution.unit_ref,
         parent=parent,
         unit=resolution.unit,
-        parent_context=_bounded_parent_context(body, resolution.unit.span),
+        parent_context=_bounded_parent_context(body, resolution.unit.span, withheld_spans),
         expected_fingerprint=resolution.expected_fingerprint,
         actual_fingerprint=resolution.actual_fingerprint,
     )
@@ -153,23 +163,32 @@ def _parent_citation(
 def _bounded_parent_context(
     body: str,
     span: semantic_units.SourceSpan,
+    withheld_spans: tuple[tuple[int, int], ...] = (),
 ) -> SemanticUnitParentContext:
     length = len(body)
     unit_start = min(max(0, span.start_offset), length)
     unit_end = min(max(unit_start, span.end_offset), length)
+    # The window is chosen within the released stretch around the unit.
+    floor, ceiling = 0, length
+    for withheld_start, withheld_end in withheld_spans:
+        if withheld_end <= unit_start:
+            floor = max(floor, withheld_end)
+        elif withheld_start >= unit_end:
+            ceiling = min(ceiling, withheld_start)
+    available = ceiling - floor
     unit_length = unit_end - unit_start
 
-    if length <= PARENT_CONTEXT_MAX_CHARS:
-        start, end = 0, length
+    if available <= PARENT_CONTEXT_MAX_CHARS:
+        start, end = floor, ceiling
     elif unit_length >= PARENT_CONTEXT_MAX_CHARS:
         start = unit_start
-        end = min(length, start + PARENT_CONTEXT_MAX_CHARS)
+        end = min(ceiling, start + PARENT_CONTEXT_MAX_CHARS)
     else:
         remaining = PARENT_CONTEXT_MAX_CHARS - unit_length
-        start = max(0, unit_start - remaining // 2)
-        end = min(length, unit_end + (remaining - (unit_start - start)))
+        start = max(floor, unit_start - remaining // 2)
+        end = min(ceiling, unit_end + (remaining - (unit_start - start)))
         if end - start < PARENT_CONTEXT_MAX_CHARS:
-            start = max(0, end - PARENT_CONTEXT_MAX_CHARS)
+            start = max(floor, end - PARENT_CONTEXT_MAX_CHARS)
 
     markdown = body[start:end]
     start_line = body.count("\n", 0, start) + 1

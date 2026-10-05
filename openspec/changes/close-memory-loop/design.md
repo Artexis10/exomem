@@ -254,56 +254,30 @@ must prevent authored attribution or reasons from terminating the HTML comment.
 The existing eight-input, 32-binding and 16 KiB bounds apply without additional
 per-service state or an extra matrix of content-specific limits.
 
-Markdown context has one shared owner, `markdown_regions.py`, backed by the
-core-pinned `markdown-it-py==4.2.0` CommonMark parser. Delegate block/container,
-inline-code and escape recognition to its maintained rules; do not extend a
-second regex Markdown parser. A small offset adapter returns code and comment
-spans in the original Python string, preserving Unicode and CR/LF offsets.
-The vault code-mask compatibility wrapper and managed/legacy provenance
-selection consume that same owner. Origin JSON is decoded from original slices.
-Admit comment starts positively through actual non-silent Markdown rule
-consumption, rather than globally finding openers and accumulating exclusions.
-Use core-pinned `html5lib==1.1` for one document-wide ownership pass over the
-already-parsed Markdown tokens, rendered by the upstream renderer. Instrument
-its existing callbacks to register sparse rendered-to-original opener positions;
-do not parse Markdown twice or copy rendering/token traversal. The maintained
-HTML5 tree parser supplies namespace and raw/RCDATA transitions across inline,
-block and comment-tail boundaries. Delegate its tokenizer states through small
-per-instance hooks after reset, never copied rules or a global patch. Preserve
-Python >=3.11 and recheck the hooks when upgrading either dependency.
-Parser-owned attributes, link/image titles and destinations, raw/RCDATA text and
-foreign-content CDATA are not comments. A real comment within `pre` remains a
-comment. An unfinished inline tag not recognized by CommonMark does not invent
-attribute ownership or suppress a real inline comment. Standalone CommonMark
-CDATA data remains Markdown-owned through its terminator; a subsequent tail
-uses the same delegated HTML ownership stream. Escape the standalone CDATA
-carrier through its terminator with upstream escaping, preserving any real tail.
-Bogus-comment content does not itself admit an origin opener. A zero-output
-checkpoint from a failed non-silent inline comment visit preserves a malformed
-carrier only when the delegated tokenizer is in data state; never inject a fake
-HTML comment or discard an already-established raw owner. Image-label HTML is
-rendered as literal alt content, not independently admitted metadata; its nested
-code offsets remain exact. Normalize the completed rendered stream's CR/LF
-positions and shift sparse checkpoints before mapping tokenizer positions.
-Skip rendering and HTML parsing when no relevant opener exists. Ordinary
-comments take the direct cheap path only when the emitted stream demonstrably
-has no state-affecting HTML and their carriers have no literal angle brackets
-or non-whitespace tail. Uncertain cases use the same document-wide pass.
-Deduplicate admitted starts before carrier collection.
-Keep the existing first-comment-terminator/EOF carrier convention so malformed
-and unsupported reserved payloads remain locatable for disclosure. The scanner
-supplies locations, never input authority or assessed support.
+Markdown code context has one owner for origin carriers, `markdown_regions.py`,
+backed by the core-pinned `markdown-it-py==4.2.0` CommonMark parser. It owns
+fenced, indented and inline code at exact original offsets (Unicode and CR/LF
+preserved); the pin stays exact because the offset adapter subclasses the
+inline parser. Comment carriers are deliberately conservative and need no HTML
+parser: every `<!--` outside markdown-it code and not backslash-escaped opens a
+carrier that runs to its first `-->` or the end of the text. Reading over-hides
+a literal that HTML would not treat as a comment, which costs nothing; writing
+accepts exactly one designated block and refuses anything else (malformed,
+unterminated or more than one) with a typed `ORIGIN_METADATA_INVALID`. Origin
+JSON is decoded from original slices, and an unmappable offset fails the
+operation rather than returning absent metadata.
 
-An unmatched backtick cannot cross a block boundary to hide real prose or
-metadata; fences inside comment data cannot own later comments; list/quote
-fences and indented code remain examples; escaped openers are not comments.
-A standalone HTML-comment block between backticks on separate paragraphs is
-not an inline-code example. Preserve true multiline inline spans instead.
-Use cheap syntax-absence checks and reuse one scan where an operation needs
-both comments and code masking. Do not add a global document-content cache.
-An unmappable offset must fail the operation, not return absent metadata or
-fall back to regex approval. Measure the shared consumer overhead: parser
-correctness does not waive existing compiler latency and privacy gates.
+markdown-it is not yet the only Markdown owner. It owns comment and code masking
+for origin carriers, and the vault wikilink masker uses it only on a page that
+carries a reserved opener; every other page keeps the line-regex masker, so the
+ordinary hot path costs what it did. Seven regex fence parsers remain:
+`semantic_units.py` (`_FENCE_RE`), `semantic_blocks.py` (`_FENCE_RE`),
+`observe_memory.py` (`_FENCE_RE`), `context_pack.py` (`_FENCE_RE`),
+`markdown_relations.py` (`_FENCE_RE`), `record_formats.py` (`_FENCE_OPEN`) and
+`working_set_anaphora.py` (`_FENCE`). Blanking origin spans before unit parsing
+keeps them from diverging for this feature. A follow-up consolidates them onto
+the one owner; no change adds a third parser. `markdown_regions` is imported
+lazily, only once a reserved opener or code marker is present.
 
 Compute `evidence_version` once in the shared provenance code from the retained
 body and canonical parsed frontmatter, excluding only `ingested_into`. All other
@@ -351,6 +325,14 @@ projector version, and the same catalog generation when its descriptor is
 unchanged. An already-current representation reports that no refresh is needed,
 without a new proposal or generation. Ordinary policy proposals also prepare
 fresh fields under the running projector. No new mutation executor is added.
+
+Nothing about this refresh needs a person: the owner runtime runs it at startup
+or takeover (local activation and hosted active startup), under the writer lease
+as a background holder, through the same owner proposal and commit. An
+already-current tuple answers `current`. A refresh whose commit reserved its
+publication before a crash is committed from its own receipt first, as an owner
+retry would be; an unreserved proposal simply expires. Each outcome is logged,
+and a failure leaves serving up for the next owner start to retry.
 
 Representation-only refresh preserves grants through an explicit bound proposal
 mode, not by reinterpreting legacy missing grant-transition data. This is allowed

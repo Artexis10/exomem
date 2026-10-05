@@ -115,7 +115,7 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
     """Snippet anchored on the first body word whose stem matches the query."""
     from . import bm25 as bm25_module
 
-    body = provenance.origin_prose(page.body, owner_path=page.rel_path).strip()
+    body = page.body_stripped
     if not body:
         return ""
     anchor_idx = -1
@@ -175,13 +175,12 @@ def semantic_excerpt(
 
 def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
     """Return a short snippet anchored to the query, or None when no token matches."""
-    prose = provenance.origin_prose(page.body, owner_path=page.rel_path)
-    body = page.body_stripped if prose == page.body else prose.strip()
+    body = page.body_stripped
     if not query_norm:
         snippet = body[:EXCERPT_MAX_LEN]
         return collapse(snippet)
     title_norm = page.title_norm
-    body_norm = page.body_norm if prose == page.body else body.lower()
+    body_norm = page.body_norm
     tokens = query_norm.split()
     if not tokens:
         snippet = body[:EXCERPT_MAX_LEN]

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from exomem import origin_bindings, provenance, semantic_index, source_closure
+from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.vault import PlannedWrite, batch_atomic_write
 
@@ -593,17 +594,13 @@ def test_unrelated_crlf_append_preserves_existing_multiline_origin_metadata(vaul
     assert "Unrelated appendix." in stored
 
 
-@pytest.mark.parametrize("input_change", ["withheld", "stale", "unconfigured"])
-def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
-    vault: Path, input_change: str
-) -> None:
-    """A released claim must not disclose an unreadable input's assessment or raw carrier."""
+def _parent_with_origin(vault: Path, *, configured: bool) -> tuple[object, str]:
     from test_episode_recovery import _write_source_rule
 
-    from exomem import commands, note
+    from exomem import note
 
     binding = _write(vault, "Original evidence.\n")
-    if input_change != "unconfigured":
+    if configured:
         _write_source_rule(vault, ceiling=6)
     rationale = "Retained assessment rationale only for an authorized reader."
     block = provenance.encode_origin(
@@ -628,35 +625,104 @@ def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
             title="Released parent with private provenance",
             status="draft",
         )
-        parent = vault / created.path
-        canonical = parent.read_bytes()
-        original = commands.op_get(vault, path=created.path, include_raw=True)
-        assert rationale in original["body"] and rationale in original["content"]
-        if input_change == "withheld":
-            _write_source_rule(vault, ceiling=0)
-        else:
-            _write(vault, "Changed original evidence.\n")
+    return created, rationale
+
+
+@pytest.mark.parametrize("input_change", ["withheld", "deleted"])
+def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
+    vault: Path, input_change: str
+) -> None:
+    """An unreleased or unavailable input hides its whole carrier, never the released claim."""
+    from test_episode_recovery import _write_source_rule
+
+    from exomem import commands
+
+    created, rationale = _parent_with_origin(vault, configured=True)
+    parent = vault / created.path
+    canonical = parent.read_bytes()
+    if input_change == "withheld":
+        _write_source_rule(vault, ceiling=0)
+    else:
+        (vault / _PATH).unlink()
+    with request_scope(RequestPrincipal(audience_id="client-a")):
         projected = commands.op_get(vault, path=created.path, include_raw=True)
-        wire = json.dumps(projected, default=str)
-        assert rationale not in wire
-        assert "exomem-origin" not in wire
-        assert "fixture-agent" not in wire
-        assert "Public claim" in projected["body"]
-        assert "content" not in projected
         metadata_only = commands.op_get(
             vault, path=created.path, frontmatter_only=True, include_raw=True
         )
-        assert rationale not in json.dumps(metadata_only, default=str)
-        assert "content" not in metadata_only
-        with pytest.raises(ValueError, match="NOT_FOUND"):
-            commands.op_read_memory(vault, path=created.path, unit_ref=created.ref + "#claim")
+        unit = commands.op_read_memory(vault, path=created.path, unit_ref=created.ref + "#claim")
+    wire = json.dumps(projected, default=str)
+    assert rationale not in wire and "exomem-origin" not in wire and "fixture-agent" not in wire
+    assert "Public claim" in projected["body"]
+    assert "content" not in projected
+    assert rationale not in json.dumps(metadata_only, default=str)
+    assert "content" not in metadata_only
+    unit_wire = json.dumps(unit, default=str)
+    assert "Public claim" in unit_wire and rationale not in unit_wire
     assert parent.read_bytes() == canonical
+
+
+@pytest.mark.parametrize("input_change", ["stale", "unconfigured"])
+def test_stale_or_unconfigured_origin_stays_readable_as_written(
+    vault: Path, input_change: str
+) -> None:
+    """Staleness is accounting state; with no file policy, nothing is projected at all."""
+    from exomem import commands
+
+    created, rationale = _parent_with_origin(vault, configured=input_change == "stale")
+    _write(vault, "Changed original evidence.\n")
+    with request_scope(RequestPrincipal(audience_id="client-a")):
+        page = commands.op_get(vault, path=created.path, include_raw=True)
+        unit = commands.op_read_memory(vault, path=created.path, unit_ref=created.ref + "#claim")
+    assert rationale in page["body"] and rationale in page["content"]
+    assert "Public claim" in json.dumps(unit, default=str)
+
+
+def test_search_never_matches_text_that_lives_only_in_an_origin_carrier(vault: Path) -> None:
+    """A carrier is attribution, not prose: matching it would make search an oracle for it."""
+    from exomem import commands
+
+    created, _rationale = _parent_with_origin(vault, configured=True)
+    with request_scope(RequestPrincipal(audience_id="client-a")):
+        found = commands.op_find(vault, query="rationale authorized reader fixture-agent")
+        claim = commands.op_find(vault, query="Public claim")
+    assert created.path not in json.dumps(found, default=str)
+    assert created.path in json.dumps(claim, default=str)
+
+
+def test_an_excerpt_never_starts_with_released_origin_metadata(vault: Path) -> None:
+    """An excerpt-level reader gets prose, even when the carrier's inputs are released."""
+    from exomem import commands
+    from exomem.governance import membership, policy
+
+    created, rationale = _parent_with_origin(vault, configured=True)
+    root = vault / "Knowledge Base" / "_Governance"
+    parent = created.path.removeprefix("Knowledge Base/")
+    (root / "scopes" / "parent.yaml").write_text(
+        f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAC\nname: Parent\npaths: ["{parent}"]\n',
+        encoding="utf-8",
+    )
+    (root / "rules" / "parent-client-a.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAD\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAC"]\naudience: client-a\nceiling: 5\n',
+        encoding="utf-8",
+    )
+    egress.clear_decision_memo()
+    membership.clear_memo()
+    policy._CACHE.clear()
+    with request_scope(RequestPrincipal(audience_id="client-a")):
+        excerpt = commands.op_get(vault, path=created.path)
+    assert excerpt["release_level"] == egress.LEVEL_EXCERPT
+    assert "exomem-origin" not in excerpt["body"] and rationale not in excerpt["body"]
+    assert excerpt["body"].strip()
 
 
 def test_unassessed_parent_payload_is_hidden_but_raw_capture_is_uninterpreted(vault: Path) -> None:
     """Legacy unsupported attribution cannot leak; the same captured bytes remain evidence."""
+    from test_episode_recovery import _write_source_rule
+
     from exomem import commands
 
+    _write_source_rule(vault, ceiling=6)
     carrier = "<!-- exomem-origin:v2 unavailable attribution details -->"
     example = "Sample `<!-- exomem-origin:v2 example -->`."
     body = f"{carrier}\n\nPublic prose. <!-- ordinary comment --> {example}\n"
@@ -710,9 +776,11 @@ def test_public_origin_read_checks_earlier_inputs_after_later_resolution(
     resolve = origin_bindings.resolve_origin_input
     changed = False
 
-    def change_earlier_input(root: Path, binding: object) -> origin_bindings.OriginInputProof:
+    def change_earlier_input(
+        root: Path, binding: object, **kwargs: object
+    ) -> origin_bindings.OriginInputProof:
         nonlocal changed
-        proof = resolve(root, binding)
+        proof = resolve(root, binding, **kwargs)
         if proof.retained.canonical == second["reference"] and not changed:
             changed = True
             if change == "bytes":

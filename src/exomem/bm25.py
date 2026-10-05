@@ -445,7 +445,7 @@ class BM25Index:
         if cached is not None and cached[0] == page.mtime:
             self.last_reused += 1
             return cached[1]
-        tokens = _tokenize(page.title + " " + page.body)
+        tokens = _tokenize(page.title + " " + page.search_body)
         self._tokens[path] = (page.mtime, tokens)
         self.last_tokenized += 1
         return tokens

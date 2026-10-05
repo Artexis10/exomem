@@ -84,14 +84,18 @@ def _unavailable() -> provenance.OriginError:
     return provenance.OriginError("ORIGIN_INPUT_UNAVAILABLE", "retained input is unavailable")
 
 
-def resolve_origin_input(vault_root: Path, binding: object) -> OriginInputProof:
+def resolve_origin_input(
+    vault_root: Path, binding: object, *, disclosure: bool = False
+) -> OriginInputProof:
     """Validate one parsed binding against the current released page/unit/span."""
     # The envelope owner defines this grammar; do not create a second validator.
     spec = provenance._origin_payload(  # noqa: SLF001
         {"inputs": {"input": binding}, "assessments": [], "bindings": []}, authoring=False
     )["inputs"]["input"]
     try:
-        retained = retained_inputs.resolve_retained_input(vault_root, spec["reference"])
+        retained = retained_inputs.resolve_retained_input(
+            vault_root, spec["reference"], disclosure=disclosure
+        )
     except retained_inputs.RetainedInputError as error:
         raise _unavailable() from error
     page = retained.page
@@ -134,19 +138,29 @@ def resolve_origin_input(vault_root: Path, binding: object) -> OriginInputProof:
 
 
 def project_origin_text(vault_root: Path, text: str) -> str:
-    """Release a managed carrier whole or remove it, without changing canonical bytes."""
+    """Release a managed carrier whole or remove it, without changing canonical bytes.
+
+    Disclosure depends only on whether every bound input is still released and
+    available to the caller. A stale binding (its input changed since the
+    assessment) is accounting state: the carrier stays visible.
+    """
     metadata = provenance.parse_origin(text, managed=True)
     if metadata.status == "absent":
         return text
     if metadata.status == "valid":
         assert metadata.payload is not None
         try:
-            proofs = tuple(
-                resolve_origin_input(vault_root, binding)
-                for binding in metadata.payload["inputs"].values()
-            )
+            proofs = []
+            for binding in metadata.payload["inputs"].values():
+                try:
+                    proofs.append(resolve_origin_input(vault_root, binding, disclosure=True))
+                except provenance.OriginError as error:
+                    if error.code != "ORIGIN_INPUT_STALE":
+                        raise
             retained_inputs.recheck_retained_inputs(
-                vault_root, tuple((proof.retained, proof.text) for proof in proofs)
+                vault_root,
+                tuple((proof.retained, proof.text) for proof in proofs),
+                disclosure=True,
             )
             # Check earlier inputs again after all later releases, including
             # exact episode-journal evidence. Changes after this checkpoint
@@ -197,10 +211,11 @@ def place_authored_origin(source: str, *, before_source: str | None = None) -> s
         return source
     start, end = metadata.spans[0]
     carrier = source[start:end]
-    clean = source[:start] + source[end:]
+    clean = metadata.without_metadata(source)
     _fields, body, _ = parse_frontmatter(clean)
     prefix = clean[: len(clean) - len(body)]
-    return prefix + carrier + "\n\n" + body.lstrip("\r\n")
+    # One line of its own: removing that line restores the author's text.
+    return prefix + carrier + ("\r\n" if "\r\n" in source else "\n") + body
 
 
 def matches_retained_origin(source: str, retained: str) -> bool:

@@ -1,17 +1,22 @@
-"""CommonMark-owned code and comment locations in the original string."""
+"""CommonMark-owned code locations, and comment carriers outside them.
+
+markdown-it owns code: fenced and indented blocks and inline code spans, at
+exact original offsets. A comment carrier is deliberately conservative: every
+`<!--` outside code and not backslash-escaped opens one, which runs to its
+first `-->` (or the end of the text). On read, treating a literal that HTML
+would not parse as a comment as a carrier only over-hides it; on write, more
+than one designated carrier is refused by the origin grammar.
+"""
 
 from __future__ import annotations
 
 import re
-from bisect import bisect_left
+from bisect import bisect_right
 from dataclasses import dataclass
 
-from html5lib.html5parser import HTMLParser
 from markdown_it import MarkdownIt
-from markdown_it.common.utils import escapeHtml
 from markdown_it.parser_inline import ParserInline
-from markdown_it.renderer import RendererHTML
-from markdown_it.rules_inline import backtick, html_inline, image
+from markdown_it.rules_inline import backtick, image
 
 Span = tuple[int, int]
 
@@ -40,17 +45,9 @@ class _Locations:
             self.starts.append(ending.end())
         self.ends.append(len(text))
         self.code: list[Span] = []
-        self.comments: set[int] = set()
         self.offsets: tuple[Span, ...] | None = None
         self.inline_views = iter(())
         self.images: list[tuple[str, int, tuple[Span, ...] | None]] = []
-        self.html = []
-        self.has_candidates = False
-        self.has_checkpoints = False
-        self.render_depth = 0
-        self.rendered_length = 0
-        self.rendered_openers: dict[int, int] = {}
-        self.rendered_checkpoints: dict[int, int] = {}
 
     def content_offsets(self, content: str, lines: list[int]) -> tuple[Span, ...]:
         """Align pre-inline source within its own original physical lines only."""
@@ -93,134 +90,17 @@ class _Locations:
             raise MarkdownPositionError("inline region has no original position")
         return self.offsets[start][0], self.offsets[end - 1][1]
 
-    def opener(self, offsets: tuple[Span, ...] | None, start: int) -> int:
-        if offsets is None or not 0 <= start < start + 4 <= len(offsets):
-            raise MarkdownPositionError("comment opener has no original position")
-        begin, end = offsets[start][0], offsets[start + 3][1]
-        if self.text[begin:end] != "<!--":
-            raise MarkdownPositionError("comment opener has no exact original position")
-        return begin
 
-
-class _HTMLComments(HTMLParser):
-    def __init__(self, content: str, locations: _Locations) -> None:
-        super().__init__(strict=False, namespaceHTMLElements=True)
-        self.content = content
-        self.locations = locations
-        self.starts = [0] + [ending.end() for ending in re.finditer("\n", content)]
-
-    def reset(self) -> None:
-        super().reset()
-        # Pinned html5lib 1.1 hook: delegate states and retain tree-driven namespaces.
-        declaration = self.tokenizer.markupDeclarationOpenState
-
-        def record_comment():
-            matched = declaration()
-            if self.tokenizer.state == self.tokenizer.commentStartState:
-                start = self.position() - 4
-                if self.content[start : start + 4] != "<!--":
-                    raise MarkdownPositionError("HTML comment has no exact source opener")
-                try:
-                    self.locations.comments.add(self.locations.rendered_openers[start])
-                except KeyError as error:
-                    raise MarkdownPositionError("HTML comment has no original opener") from error
-            return matched
-
-        self.tokenizer.markupDeclarationOpenState = record_comment
-        data = self.tokenizer.dataState
-
-        def record_data():
-            start = self.position()
-            if start in self.locations.rendered_checkpoints:
-                if not self.content.startswith("&lt;!--", start):
-                    raise MarkdownPositionError("malformed comment has no escaped opener")
-                self.locations.comments.add(self.locations.rendered_checkpoints[start])
-            return data()
-
-        self.tokenizer.dataState = record_data
-        if self.tokenizer.state == data:
-            self.tokenizer.state = record_data
-
-    def position(self) -> int:
-        line, column = self.tokenizer.stream.position()
-        if not 1 <= line <= len(self.starts) or column < 0:
-            raise MarkdownPositionError("HTML tokenizer has no logical position")
-        return self.starts[line - 1] + column
-
-
-def _ordinary_comment(content: str) -> bool:
-    stripped = content.lstrip(" \t")
-    if not stripped.startswith("<!--"):
-        return False
-    closer = stripped.find("-->", 4)
-    body = stripped[4:] if closer < 0 else stripped[4:closer]
-    return (
-        "<" not in body and ">" not in body and (closer < 0 or not stripped[closer + 3 :].strip())
-    )
-
-
-def _record_render(rule):
-    def wrapped(tokens, index, options, env):
-        locations = env["locations"]
-        locations.render_depth += 1
-        try:
-            fragment = rule(tokens, index, options, env)
-        finally:
-            locations.render_depth -= 1
-        if locations.render_depth:
-            return fragment
-        token = tokens[index]
-        if token.type in {"html_inline", "html_block"}:
-            protected = token.meta.get("cdata_end", 0)
-            escaped = escapeHtml(fragment[:protected])
-            shift = len(escaped) - protected
-            fragment = escaped + fragment[protected:]
-            offsets = token.meta.get("source_offsets")
-            for opener in re.finditer("<!--", token.content[protected:]):
-                start = protected + opener.start()
-                original = locations.opener(offsets, start)
-                locations.rendered_openers[locations.rendered_length + start + shift] = original
-        elif token.type == "comment_checkpoint":
-            locations.rendered_checkpoints[locations.rendered_length] = token.meta["opener"]
-        locations.rendered_length += len(fragment)
-        return fragment
-
-    return wrapped
-
-
-class _RegionRenderer(RendererHTML):
-    def __init__(self, parser=None):
-        super().__init__(parser)
-        self.rules["comment_checkpoint"] = lambda tokens, index, options, env: ""
-        self.rules = {kind: _record_render(rule) for kind, rule in self.rules.items()}
-        self.renderToken = _record_render(self.renderToken)
-
-
-def _record_inline(rule, kind: str):
+def _record_code(rule):
     def wrapped(state, silent):
         start, count = state.pos, len(state.tokens)
         matched = rule(state, silent)
-        if not silent:
-            locations = state.env["locations"]
-            emitted = state.tokens[count:]
-            if matched and kind == "html":
-                for token in emitted:
-                    if token.type != "html_inline":
-                        continue
-                    if "<!--" in token.content:
-                        token.meta["source_offsets"] = locations.offsets[start : state.pos]
-                    if not locations.images:
-                        locations.html.append(token)
-                        locations.has_candidates |= "<!--" in token.content
-            elif kind == "html" and state.src.startswith("<!--", start):
-                token = state.push("comment_checkpoint", "", 0)
-                token.meta["opener"] = locations.opener(locations.offsets, start)
-                if not locations.images:
-                    locations.has_candidates = locations.has_checkpoints = True
-            elif (
-                matched and kind == "code" and any(token.type == "code_inline" for token in emitted)
-            ):
-                locations.code.append(locations.span(start, state.pos))
+        if (
+            matched
+            and not silent
+            and any(token.type == "code_inline" for token in state.tokens[count:])
+        ):
+            state.env["locations"].code.append(state.env["locations"].span(start, state.pos))
         return matched
 
     return wrapped
@@ -270,30 +150,19 @@ def _prepare_regions(state) -> None:
                 )
             )
         elif token.type == "inline":
-            if any(marker in token.content for marker in ("`", "<!--")):
+            if "`" in token.content:
                 if token.map is None:
                     raise MarkdownPositionError("inline content has no source lines")
                 views.append(locations.content_offsets(token.content, token.map))
             else:
                 views.append(None)
-        elif token.type == "html_block":
-            locations.html.append(token)
-            if token.content.lstrip(" \t").startswith("<![CDATA["):
-                terminator = token.content.find("]]>")
-                token.meta["cdata_end"] = len(token.content) if terminator < 0 else terminator + 3
-            if "<!--" in token.content:
-                if token.map is None:
-                    raise MarkdownPositionError("HTML block has no source lines")
-                token.meta["source_offsets"] = locations.content_offsets(token.content, token.map)
-                locations.has_candidates = True
     locations.inline_views = iter(views)
 
 
 def _parser() -> MarkdownIt:
-    parser = MarkdownIt("commonmark", {"html": True}, renderer_cls=_RegionRenderer)
+    parser = MarkdownIt("commonmark", {"html": True})
     parser.inline = _RegionInline()
-    parser.inline.ruler.at("backticks", _record_inline(backtick, "code"))
-    parser.inline.ruler.at("html_inline", _record_inline(html_inline, "html"))
+    parser.inline.ruler.at("backticks", _record_code(backtick))
     parser.inline.ruler.at("image", _record_image)
     parser.core.ruler.before("inline", "regions", _prepare_regions)
     parser.core.ruler.disable("text_join")
@@ -313,44 +182,38 @@ def _merge(spans: list[Span]) -> tuple[Span, ...]:
     return tuple(merged)
 
 
-def scan_markdown(text: str) -> MarkdownRegions:
-    """Locate code and rendered HTML ownership at exact original string offsets."""
-    if "<!--" not in text and not _may_have_code(text):
-        return MarkdownRegions()
-    locations = _Locations(text)
-    env = {"locations": locations}
-    tokens = _PARSER.parse(text, env)
-    code = _merge(locations.code)
-    if not locations.has_candidates:
-        return MarkdownRegions(code)
-    if not locations.has_checkpoints and all(
-        _ordinary_comment(token.content) for token in locations.html
-    ):
-        for token in locations.html:
-            start = token.content.index("<!--")
-            locations.comments.add(locations.opener(token.meta["source_offsets"], start))
-    else:
-        content = _PARSER.renderer.render(tokens, _PARSER.options, env)
-        collapsed = [ending.start() + 1 for ending in re.finditer("\r\n", content)]
-        locations.rendered_openers = {
-            start - bisect_left(collapsed, start): original
-            for start, original in locations.rendered_openers.items()
-        }
-        locations.rendered_checkpoints = {
-            start - bisect_left(collapsed, start): original
-            for start, original in locations.rendered_checkpoints.items()
-        }
-        content = content.replace("\r\n", "\n").replace("\r", "\n")
-        _HTMLComments(content, locations).parseFragment(content, scripting=False)
+def _escaped(text: str, index: int) -> bool:
+    slashes = 0
+    while index > slashes and text[index - slashes - 1] == "\\":
+        slashes += 1
+    return slashes % 2 == 1
+
+
+def _comments(text: str, code: tuple[Span, ...]) -> tuple[Span, ...]:
+    starts = [start for start, _end in code]
     comments: list[Span] = []
     cursor = 0
-    for start in sorted(locations.comments):
-        if start < cursor:
+    for opener in re.finditer("<!--", text):
+        start = opener.start()
+        owner = bisect_right(starts, start) - 1
+        if start < cursor or (owner >= 0 and start < code[owner][1]) or _escaped(text, start):
             continue
         closer = text.find("-->", start + 4)
         cursor = len(text) if closer < 0 else closer + 3
         comments.append((start, cursor))
-    return MarkdownRegions(code, tuple(comments))
+    return tuple(comments)
+
+
+def scan_markdown(text: str) -> MarkdownRegions:
+    """Locate code, then comment carriers outside it, at exact original offsets."""
+    code: tuple[Span, ...] = ()
+    if _may_have_code(text):
+        locations = _Locations(text)
+        _PARSER.parse(text, {"locations": locations})
+        code = _merge(locations.code)
+    if "<!--" not in text:
+        return MarkdownRegions(code)
+    return MarkdownRegions(code, _comments(text, code))
 
 
 def mask_code(text: str, regions: MarkdownRegions | None = None) -> str:

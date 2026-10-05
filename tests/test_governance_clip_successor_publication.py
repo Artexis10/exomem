@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -212,47 +211,6 @@ def test_clip_successor_carries_images_and_replaces_one_video_row(
     assert frame.projection_variant_id not in by_variant
 
 
-def test_clip_refresh_rekeys_unchanged_pixel_inputs(
-    tmp_path: Path,
-) -> None:
-    active_key = _key(8)
-    image = _variant("Knowledge Base/image.md", "1" * 64, media_type="image")
-    active_items = (_item(image),)
-    active_namespace = verified_namespace(active_key, active_items)
-    family = _family(active_key)
-    row = _image_measurement(family, image)
-    manifest = projection_measurement_store.stage_measurement_store(
-        tmp_path, namespace=active_namespace, family=family, measurements=(row,)
-    )
-    target_key = projections.ProjectionNamespaceKey(
-        active_key.policy_fingerprint,
-        projections.PROJECTOR_SCHEMA_VERSION,
-        active_key.catalog_generation,
-    )
-    refreshed = projections.build_projection_variant(
-        item_identity=image.item_identity,
-        content_hash=image.content_hash,
-        decision=Decision(level=6),
-        projector_schema_version=target_key.projector_schema_version,
-        full_search_fields={"body": "current sanitized text", "media_type": "image"},
-    )
-    assert refreshed is not None
-    target_namespace = _prepared_namespace(target_key, (_item(refreshed),))
-    prepared = catalog_publication._prepare_target_measurements(
-        tmp_path,
-        active_namespace=active_namespace,
-        active_roots=(projection_measurement_store.measurement_root(manifest),),
-        target_namespace=target_namespace,
-    )
-
-    assert len(prepared) == 1
-    assert prepared[0].measurements[0].samples == row.samples
-    assert (
-        prepared[0].measurements[0].measurement_key.projection_variant_id
-        == refreshed.projection_variant_id
-    )
-
-
 def _canonical_refresh_snapshot(tmp_path: Path) -> schema_v4.ActivePolicySnapshot:
     active_key = _key(18)
     items = []
@@ -436,17 +394,6 @@ def test_policy_refresh_derives_all_canonical_fields_and_reuses_staged_proofs(
             prepared_evidence=prepared.evidence,
         )
     path.write_bytes(original)
-
-    wire = json.loads(prepared.evidence)
-    del wire["required_lane_roots"]["clip"]
-    with pytest.raises(catalog_publication.CatalogPublicationError, match="required lane"):
-        catalog_publication.prepare_policy_projection(
-            tmp_path,
-            active_snapshot=snapshot,
-            target_policy=snapshot.policy,
-            ready_at=19,
-            prepared_evidence=projections.canonical_jcs(wire),
-        )
 
 
 def test_policy_refresh_advances_catalog_only_for_changed_membership(

@@ -4074,10 +4074,8 @@ def annotate_page(
     who = principal if principal is not None else effective_principal()
 
     if _file_policy_empty(vault_root, policy):
-        out, redacted = _project_page_origin(
-            vault_root, page, principal=who, purpose=purpose, snapshot_content=snapshot_content
-        )
-        return _attach_raw_content(out, snapshot_content) if include_raw and not redacted else out
+        # No configured audience: the owner reads origin metadata as written.
+        return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
         return None
@@ -4306,7 +4304,11 @@ def annotate_page(
 
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
     if level == LEVEL_EXCERPT:
-        body = str(page.get("body") or "")
+        body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        from .. import provenance
+
+        # An excerpt is prose: no origin carrier, released or not, starts it.
+        body = provenance.origin_prose(body, owner_path=rel_path)
         body = redact_withheld_references(
             vault_root,
             body,

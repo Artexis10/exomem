@@ -613,6 +613,97 @@ def test_record_origin_retry_replays_the_original_body_without_recertifying_inpu
             assert entry.read_bytes() == committed
 
 
+def _update_body(vault: Path, body: str, why: str) -> dict:
+    manifest = collections.load_manifest(vault, COLLECTION)
+    (record,) = record_formats.load_adapter(vault, manifest).read().records
+    return records.update_record(
+        vault, COLLECTION, item_key=record.identity.key, changes={},
+        expected_container_hash=_container(vault), expected_item_version=record.source.hash,
+        why=why, body=body,
+    )
+
+
+def test_an_update_resending_authored_origin_keeps_it_valid(vault: Path, owner) -> None:
+    """An update normalizes origin exactly like append, so a typo fix cannot degrade it."""
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    records.append_record(
+        vault, COLLECTION, item=READING, body=body,
+        expected_container_hash=_container(vault), why="Preserve the observed reading.",
+    )
+    (entry,) = _entries(vault)
+
+    _update_body(vault, body.replace("was retained", "was kept"), "Fix the wording.")
+
+    stored = entry.read_text(encoding="utf-8")
+    assert "was kept" in stored
+    assert provenance.parse_origin(stored, managed=True).status == "valid"
+
+
+@pytest.mark.parametrize(
+    "authored, plain",
+    [
+        ("\n\n\n  Indented start.\n\n{B}\n", "\n\n\n  Indented start.\n\n"),
+        ("- first\n  {B}\n- second\n", "- first\n- second\n"),
+        ("Intro.\n\n{B}\n\nTail.\n", "Intro.\n\nTail.\n"),
+    ],
+    ids=["leading-blank-lines", "inside-a-list-item", "own-paragraph"],
+)
+def test_attaching_origin_changes_no_authored_byte(
+    vault: Path, owner, authored: str, plain: str
+) -> None:
+    """Removing the carrier's line must give back exactly what the author wrote without it."""
+    from exomem.vault import parse_frontmatter
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    block = body[body.index("<!--"):].strip()
+    plain_item = {**READING, "vat": "south"}
+    for item, text in ((READING, authored.replace("{B}", block)), (plain_item, plain)):
+        records.append_record(
+            vault, COLLECTION, item=item, body=text,
+            expected_container_hash=_container(vault), why="Log the reading.",
+        )
+    bodies = {}
+    for entry in _entries(vault):
+        fields, stored, _ = parse_frontmatter(entry.read_text(encoding="utf-8"))
+        bodies[fields["vat"]] = stored
+    attached = provenance.parse_origin(bodies["north"], managed=True)
+    assert attached.status == "valid"
+    assert attached.without_metadata(bodies["north"]) == bodies["south"]
+
+
+@pytest.mark.parametrize("fault", ["malformed", "stale-input"])
+def test_an_update_refuses_the_origin_an_append_refuses(vault: Path, owner, fault: str) -> None:
+    """No update leaf may store origin metadata the append writer would refuse."""
+    from test_origin_bindings import _PATH
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    if fault == "malformed":
+        body = body + "\n" + body[body.index("<!--"):]
+    else:
+        source = vault / _PATH
+        source.write_text(source.read_text(encoding="utf-8") + "Edited.\n", encoding="utf-8")
+    with pytest.raises(collections.CollectionError) as appended:
+        records.append_record(
+            vault, COLLECTION, item=READING, body=body,
+            expected_container_hash=_container(vault), why="Log the reading.",
+        )
+    records.append_record(
+        vault, COLLECTION, item=READING, body="Plain body.\n",
+        expected_container_hash=_container(vault), why="Log the reading.",
+    )
+    (entry,) = _entries(vault)
+    before = entry.read_bytes()
+
+    with pytest.raises(collections.CollectionError) as updated:
+        _update_body(vault, body, "Attach the origin.")
+
+    assert updated.value.code == appended.value.code
+    assert entry.read_bytes() == before
+
+
 @pytest.mark.parametrize("commit_door", ["episode", "curation"])
 def test_original_record_origin_proposal_preserves_committed_leaf_when_adding_another(
     vault: Path, enabled, commit_door: str

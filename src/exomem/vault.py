@@ -33,7 +33,6 @@ from slugify import slugify as _slugify
 
 from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths
 from .kbdir import kb_dirname, kb_prefix
-from .markdown_regions import mask_code
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
@@ -7127,8 +7126,44 @@ def _mask_code_spans(text: str) -> str:
     Result is the same length as input; positions of non-code characters are
     unchanged. Used so wikilink scanners can ignore `[[X]]` inside code while
     still reporting accurate offsets into the original text.
+
+    Only a page carrying a reserved origin opener pays for the CommonMark
+    parse, whose code ownership the origin scanner shares; every other page
+    keeps the line-regex masker (see design: regex fence parsers remain).
     """
-    return mask_code(text)
+    if "<!--" in text and "exomem-origin" in text.lower():
+        from .markdown_regions import mask_code
+
+        return mask_code(text)
+    out = list(text)
+    # Fenced code blocks (``` or ~~~), allowing up to 3 leading spaces per CommonMark.
+    fence_open = re.compile(r"^( {0,3})(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
+    pos = 0
+    while True:
+        m = fence_open.search(text, pos)
+        if not m:
+            break
+        fence = m.group(2)
+        char = fence[0]
+        length = len(fence)
+        close_re = re.compile(
+            rf"^ {{0,3}}{re.escape(char)}{{{length},}}\s*$",
+            re.MULTILINE,
+        )
+        close_m = close_re.search(text, m.end())
+        end = close_m.end() if close_m else len(text)
+        for i in range(m.start(), end):
+            if text[i] != "\n":
+                out[i] = " "
+        pos = end
+    # Inline code: single-line backtick-delimited spans.
+    inline_re = re.compile(r"(`+)([^\n`]+?)\1")
+    masked_str = "".join(out)
+    for m in inline_re.finditer(masked_str):
+        for i in range(m.start(), m.end()):
+            if out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
 
 
 def find_body_wikilinks(text: str) -> list[re.Match[str]]:

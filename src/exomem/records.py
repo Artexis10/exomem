@@ -245,8 +245,6 @@ def append_record(
     | None = None,
 ) -> dict[str, Any]:
     """Append one structured item, or return a content-identical replay."""
-    from . import context_refs, origin_bindings, provenance, semantic_units
-
     root = Path(vault_root)
     _validate_why(why)
     hold = _validate_hold(hold)
@@ -355,41 +353,37 @@ def append_record(
         new_item = None
         if manifest.storage.strategy == "markdown-items":
             prior_body = existing[0].body if len(existing) == 1 else None
-            try:
-                if origin_bindings._authored_origin(body, prior_body) is not None:  # noqa: SLF001
-                    body = origin_bindings.place_authored_origin(body, before_source=prior_body)
-                    if existing:
-                        item_path = root / existing[0].source.path
-                    else:
-                        new_item = _new_item_path(root, manifest, key, values, snapshot)
-                        item_path = new_item[0]
-                    item_relative = item_path.relative_to(root).as_posix()
-                    rendered = record_formats.render_markdown_item(
-                        manifest,
-                        values,
-                        key,
-                        body,
-                        resolve_relationship=_presentation_relationship_resolver(
-                            root, manifest, snapshot
-                        ),
-                    )
-                    _fields, rendered_body, _ = vault.parse_frontmatter(rendered)
-                    body = origin_bindings.normalize_origin_scopes(
-                        body,
-                        document=semantic_units.parse_semantic_units(
-                            rendered_body,
-                            path=item_relative,
-                        ),
-                        fields=values,
-                        owner_ref=context_refs.vault_ref(item_relative),
-                        record_identity=(manifest.collection_id, key),
-                        before_source=prior_body,
-                    )
-                    _validate_body(body)
-                    if not existing:
-                        origin_inputs = origin_bindings.prepare_origin_inputs(root, body)
-            except provenance.OriginError as error:
-                raise collections.CollectionError(error.code, error.reason) from error
+
+            def item_path() -> Path:
+                nonlocal new_item
+                if existing:
+                    return root / existing[0].source.path
+                new_item = new_item or _new_item_path(root, manifest, key, values, snapshot)
+                return new_item[0]
+
+            def render(candidate: str) -> str:
+                return record_formats.render_markdown_item(
+                    manifest,
+                    values,
+                    key,
+                    candidate,
+                    resolve_relationship=_presentation_relationship_resolver(
+                        root, manifest, snapshot
+                    ),
+                )
+
+            body, origin_inputs = _normalize_item_origin(
+                root,
+                manifest,
+                key=key,
+                values=values,
+                body=body,
+                prior_body=prior_body,
+                item_path=item_path,
+                render=render,
+                # A replay carries its committed body; it never recertifies inputs.
+                prepare_inputs=not existing,
+            )
         payload_hash = _payload_hash(manifest, key, values, body)
         delivery_guard = (
             _validate_artifact_delivery(root, manifest, values, delivery)
@@ -520,37 +514,16 @@ def append_record(
             snapshot,
             planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
         )
-        origin_guards = ()
-        try:
-            if origin_inputs is not None:
-                origin_guards = origin_inputs.required_guards(root, writes)
-            vault.batch_atomic_write(
-                writes,
-                vault_root=root,
-                required_guards=(
-                    *directory_guards,
-                    *snapshot.path_guards,
-                    *((delivery_guard,) if delivery_guard is not None else ()),
-                    *origin_guards,
-                ),
-                _validate_prepared_bindings=(
-                    (lambda: origin_inputs.revalidate(root)) if origin_inputs is not None else None
-                ),
-            )
-        except vault.BatchWriteError:
-            raise
-        except provenance.OriginError as error:
-            raise collections.CollectionError(error.code, error.reason) from error
-        except vault.PathGuardError as error:
-            try:
-                vault.recheck_path_guards(root, origin_guards)
-            except vault.PathGuardError as origin_error:
-                raise collections.CollectionError(
-                    "ORIGIN_INPUT_STALE", "retained input changed during commit"
-                ) from origin_error
-            raise _publication_error(error) from error
-        except (vault.CreateOnlyConflict, OSError, ValueError) as error:
-            raise _publication_error(error) from error
+        _publish_with_origin(
+            root,
+            writes,
+            required_guards=(
+                *directory_guards,
+                *snapshot.path_guards,
+                *((delivery_guard,) if delivery_guard is not None else ()),
+            ),
+            origin_inputs=(origin_inputs,),
+        )
         committed_path = canonical_path.relative_to(root).as_posix()
         committed = _result(
             operation="append",
@@ -574,6 +547,93 @@ def append_record(
     sweep = _capture_sweep_carrier(root, after_manifest, key=key)
     committed = {"due_state": advisory, **committed} if advisory else committed
     return {"capture_sweep": sweep, **committed} if sweep else committed
+
+
+def _normalize_item_origin(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    key: str,
+    values: Mapping[str, Any],
+    body: str,
+    prior_body: str | None,
+    item_path: Callable[[], Path],
+    render: Callable[[str], str],
+    prepare_inputs: bool = True,
+) -> tuple[str, Any]:
+    """The one origin normalizer every Markdown-item writer runs.
+
+    Append, update and bulk upsert all pass a candidate body through here. A
+    carrier the row already holds byte-for-byte is kept verbatim; new or
+    changed metadata is placed outside the content it binds, its output
+    scopes are bound to the rendered item, and its inputs are resolved as the
+    writer (which proves the writer can read them). Returns the body to store
+    and the prepared inputs whose guards `_publish_with_origin` holds.
+    """
+    from . import context_refs, origin_bindings, provenance, semantic_units
+
+    try:
+        if origin_bindings._authored_origin(body, prior_body) is None:  # noqa: SLF001
+            return body, None
+        body = origin_bindings.place_authored_origin(body, before_source=prior_body)
+        relative = item_path().relative_to(root).as_posix()
+        _fields, rendered_body, _ = vault.parse_frontmatter(render(body))
+        body = origin_bindings.normalize_origin_scopes(
+            body,
+            document=semantic_units.parse_semantic_units(rendered_body, path=relative),
+            fields=values,
+            owner_ref=context_refs.vault_ref(relative),
+            record_identity=(manifest.collection_id, key),
+            before_source=prior_body,
+        )
+        _validate_body(body)
+        prepared = origin_bindings.prepare_origin_inputs(root, body) if prepare_inputs else None
+    except provenance.OriginError as error:
+        raise collections.CollectionError(error.code, error.reason) from error
+    return body, prepared
+
+
+def _publish_with_origin(
+    root: Path,
+    writes: list[vault.PlannedWrite],
+    *,
+    required_guards: tuple[Any, ...],
+    origin_inputs: tuple[Any, ...] = (),
+) -> None:
+    """Publish one atomic batch, holding every prepared origin input unchanged."""
+    from . import provenance
+
+    prepared = tuple(item for item in origin_inputs if item is not None)
+    origin_guards: tuple[vault.PathGuard, ...] = ()
+
+    def revalidate() -> None:
+        for item in prepared:
+            item.revalidate(root)
+
+    try:
+        origin_guards = tuple(
+            guard for item in prepared for guard in item.required_guards(root, writes)
+        )
+        vault.batch_atomic_write(
+            writes,
+            vault_root=root,
+            required_guards=(*required_guards, *origin_guards),
+            _validate_prepared_bindings=revalidate if prepared else None,
+        )
+    except vault.BatchWriteError:
+        raise
+    except provenance.OriginError as error:
+        raise collections.CollectionError(error.code, error.reason) from error
+    except vault.PathGuardError as error:
+        try:
+            vault.recheck_path_guards(root, origin_guards)
+        except vault.PathGuardError as origin_error:
+            raise collections.CollectionError(
+                "ORIGIN_INPUT_STALE", "retained input changed during commit"
+            ) from origin_error
+        raise _publication_error(error) from error
+    except (vault.CreateOnlyConflict, OSError, ValueError) as error:
+        raise _publication_error(error) from error
 
 
 class _AppendPrepared(Exception):
@@ -1392,6 +1452,7 @@ def bulk_upsert_records(
         reserved: set[str] = set()
         new_item_guards: dict[int, vault.DirectoryCensusGuard] = {}
         audit_bodies: list[str] = []
+        origin_inputs: list[Any] = []
         by_index = {row["index"]: row for row in outcomes}
 
         def _shift(pos: int, *, is_end: bool) -> int:
@@ -1430,14 +1491,28 @@ def bulk_upsert_records(
                         new_item_guards[id(guard)] = guard
                     canonical = target.relative_to(root).as_posix()
                     reserved.add(canonical)
-                    replacement = record_formats.render_markdown_item(
+
+                    def render_new(
+                        candidate: str, values: Mapping[str, Any] = plan.values,
+                        key: str = plan.key, transition: str = transition,
+                    ) -> str:
+                        return record_formats.render_markdown_item(
+                            manifest, values, key, candidate, transition,
+                            resolve_relationship=resolver,
+                        )
+
+                    body, prepared = _normalize_item_origin(
+                        root,
                         manifest,
-                        plan.values,
-                        plan.key,
-                        body,
-                        transition,
-                        resolve_relationship=resolver,
+                        key=plan.key,
+                        values=plan.values,
+                        body=body,
+                        prior_body=None,
+                        item_path=lambda target=target: target,
+                        render=render_new,
                     )
+                    origin_inputs.append(prepared)
+                    replacement = render_new(body)
                     item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
                     item_writes.append(
                         vault.PlannedWrite(
@@ -1482,20 +1557,42 @@ def bulk_upsert_records(
                     delete_fields = tuple(
                         name for name in record.values if name not in plan.values
                     )
-                    replacement = record_formats.render_markdown_item_update(
-                        item_bytes.decode("utf-8"),
-                        changes,
-                        transition,
-                        semantic_profile=manifest.semantic_profile,
-                        delete_fields=delete_fields,
-                        body=plan.body,
-                    )
-                    replacement = record_formats.splice_record_presentation(
-                        replacement, manifest, plan.values
-                    )
-                    replacement = record_formats.splice_item_presentation(
-                        replacement, manifest, plan.values, resolve_relationship=resolver
-                    )
+
+                    def render_update(
+                        candidate: str | None, source: str = item_bytes.decode("utf-8"),
+                        changes: Mapping[str, Any] = changes,
+                        delete_fields: tuple[str, ...] = delete_fields,
+                        values: Mapping[str, Any] = plan.values, transition: str = transition,
+                    ) -> str:
+                        rendered = record_formats.render_markdown_item_update(
+                            source,
+                            changes,
+                            transition,
+                            semantic_profile=manifest.semantic_profile,
+                            delete_fields=delete_fields,
+                            body=candidate,
+                        )
+                        rendered = record_formats.splice_record_presentation(
+                            rendered, manifest, values
+                        )
+                        return record_formats.splice_item_presentation(
+                            rendered, manifest, values, resolve_relationship=resolver
+                        )
+
+                    update_body = plan.body
+                    if update_body is not None:
+                        update_body, prepared = _normalize_item_origin(
+                            root,
+                            manifest,
+                            key=plan.key,
+                            values=plan.values,
+                            body=update_body,
+                            prior_body=record.body,
+                            item_path=lambda canonical=canonical: root / canonical,
+                            render=render_update,
+                        )
+                        origin_inputs.append(prepared)
+                    replacement = render_update(update_body)
                     item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
                     item_writes.append(
                         vault.PlannedWrite(root / canonical, replacement, guard=item_guard)
@@ -1560,24 +1657,16 @@ def bulk_upsert_records(
             snapshot,
             planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
         )
-        try:
-            vault.batch_atomic_write(
-                writes,
-                vault_root=root,
-                required_guards=(
-                    *directory_guards,
-                    *(
-                        guard
-                        for guard in snapshot.path_guards
-                        if guard.target not in updated_paths
-                    ),
-                    *source_guards.values(),
-                ),
-            )
-        except vault.BatchWriteError:
-            raise
-        except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
-            raise _publication_error(error) from error
+        _publish_with_origin(
+            root,
+            writes,
+            required_guards=(
+                *directory_guards,
+                *(guard for guard in snapshot.path_guards if guard.target not in updated_paths),
+                *source_guards.values(),
+            ),
+            origin_inputs=tuple(origin_inputs),
+        )
         return _report(
             committed=True,
             after_hash=prev_container,
@@ -1746,6 +1835,7 @@ def update_record(
                 raise collections.CollectionError(
                     "NOOP_RECORD_PRESENTATION", "managed presentation is already current"
                 )
+        origin_inputs = None
         audit_correlation = _transition_id()
         after_manifest_text = record_formats.render_manifest_audit_head(
             manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
@@ -1767,21 +1857,36 @@ def update_record(
             before_container_hash = current_hash
             after_container_hash = hashlib.sha256(after_text.encode("utf-8")).hexdigest()
         else:
-            replacement = record_formats.render_markdown_item_update(
-                source_text,
-                changes,
-                audit_correlation,
-                semantic_profile=manifest.semantic_profile,
-                delete_fields=delete_fields,
-                body=body,
-            )
-            replacement = record_formats.splice_record_presentation(replacement, manifest, values)
-            replacement = record_formats.splice_item_presentation(
-                replacement,
-                manifest,
-                values,
-                resolve_relationship=relationship_resolver,
-            )
+
+            def render(candidate: str | None) -> str:
+                rendered = record_formats.render_markdown_item_update(
+                    source_text,
+                    changes,
+                    audit_correlation,
+                    semantic_profile=manifest.semantic_profile,
+                    delete_fields=delete_fields,
+                    body=candidate,
+                )
+                rendered = record_formats.splice_record_presentation(rendered, manifest, values)
+                return record_formats.splice_item_presentation(
+                    rendered,
+                    manifest,
+                    values,
+                    resolve_relationship=relationship_resolver,
+                )
+
+            if body is not None:
+                body, origin_inputs = _normalize_item_origin(
+                    root,
+                    manifest,
+                    key=item_key,
+                    values=values,
+                    body=body,
+                    prior_body=record.body,
+                    item_path=lambda: source_path,
+                    render=render,
+                )
+            replacement = render(body)
             after_text = replacement
             canonical_path = source_path
             before_container_hash = snapshot.snapshot
@@ -1833,29 +1938,19 @@ def update_record(
                     "before_item_hash": record.source.hash,
                 }
             )
-        try:
-            vault.batch_atomic_write(
-                [
-                    vault.PlannedWrite(canonical_path, after_text, guard=source_guard),
-                    vault.PlannedWrite(
-                        root / manifest.path, after_manifest_text, guard=manifest_guard
-                    ),
-                    *log_plan.writes,
-                ],
-                vault_root=root,
-                required_guards=(
-                    *directory_guards,
-                    *(
-                        guard
-                        for guard in snapshot.path_guards
-                        if guard.target != record.source.path
-                    ),
-                ),
-            )
-        except vault.BatchWriteError:
-            raise
-        except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
-            raise _publication_error(error) from error
+        _publish_with_origin(
+            root,
+            [
+                vault.PlannedWrite(canonical_path, after_text, guard=source_guard),
+                vault.PlannedWrite(root / manifest.path, after_manifest_text, guard=manifest_guard),
+                *log_plan.writes,
+            ],
+            required_guards=(
+                *directory_guards,
+                *(guard for guard in snapshot.path_guards if guard.target != record.source.path),
+            ),
+            origin_inputs=(origin_inputs,),
+        )
         committed = _result(
             operation=operation,
             manifest=manifest,

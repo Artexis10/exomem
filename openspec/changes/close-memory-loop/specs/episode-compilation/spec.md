@@ -277,8 +277,13 @@ Managed origin metadata SHALL pass the existing disclosure boundary for every
 retained input before it is exposed in a permitted parent's body, raw content,
 unit context or projections. An unavailable or insufficiently released input
 SHALL withhold the whole payload, including attribution and free-text reasons.
-Redaction SHALL NOT rewrite canonical bytes or claim an exact raw representation.
-Existing drift guards and exact-read refusal rules SHALL remain unchanged.
+Disclosure SHALL depend only on release and availability: a stale input binding
+is accounting state and SHALL NOT hide the payload, and with no configured file
+policy no origin projection SHALL run. Redaction SHALL NOT rewrite canonical
+bytes or claim an exact raw representation. An exact semantic-unit read SHALL
+succeed when the removed payload intersects neither the unit nor its returned
+context, and SHALL NOT report an existing page as missing. Existing drift guards
+SHALL remain unchanged.
 
 Before returning a whole managed payload, the reader SHALL retain its bounded
 input proofs, perform a final fresh release/selected-text check of each snapshot,
@@ -395,15 +400,12 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 - **AND** removable spans retain exact original character offsets for Unicode and CRLF text
 - **AND** an offset-mapping failure refuses the operation rather than silently returning absent metadata or assessed support
 
-#### Scenario: Literal HTML and link values cannot supply origin metadata
+#### Scenario: Reserved openers outside code are carriers
 
-- **WHEN** provenance-looking text is consumed as a parser-owned quoted HTML attribute, a Markdown link/image title or destination, raw/RCDATA text, or foreign-content CDATA
-- **THEN** it supplies no origin comment or assessed support
-- **AND** actual comments, including comments inside `pre`, remain locatable at their original offsets
-- **AND** standalone CDATA follows CommonMark ownership while opaque HTML blocks follow HTML5 namespace semantics, without treating bogus-comment data as an origin opener
-- **AND** a real comment after standalone CDATA's terminator remains locatable even on the same physical line
-- **AND** consumed raw/RCDATA ownership persists across inline, block and comment-tail token boundaries until its actual HTML5 exit; malformed reserved starts in that content remain literal rather than attribution
-- **AND** nested image-label code positions remain exact without admitting provenance from rendered alt attributes
+- **WHEN** a reserved origin opener appears anywhere outside Markdown code and is not backslash-escaped, including inside HTML attributes, raw text or a link title
+- **THEN** reading treats it as a removable carrier running to its first terminator or the end of the text, so it is withheld rather than disclosed as prose
+- **AND** writing accepts only exactly one valid designated block and refuses every other reserved carrier with a typed `ORIGIN_METADATA_INVALID`
+- **AND** fenced, indented and inline code examples remain literal at their original offsets
 
 #### Scenario: Normalized Records provenance survives interrupted commitment
 
