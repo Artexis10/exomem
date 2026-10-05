@@ -347,6 +347,25 @@ Recorded 2026-09-30. The owner supplied O1–O3 and O5 below and O4 in the graph
 | CQ13 | Orchestrator: choose no future engine now; prove semantic seams, then benchmark concrete transactional/analytics/graph backends with partition/consistency/migration contracts before scale claims. |
 | CQ14 | Orchestrator: provisional targets, frozen realistic shape/skew/baselines and authorized real-export evidence. Owner O2 authorizes the separately gated real-vault new-collection slice; unrelated full-capability targets do not block it. |
 
+The CQ rulings map to these collection-delta requirements, with exact headings (reconciled 2026-10-05 for task 0.1; every requirement and scenario named in the round-four table also exists as a heading):
+
+| Ruling | Requirements |
+| --- | --- |
+| CQ1 | Declared indexes have migration-owned lifecycle and budgets; Index maintenance preserves canonical writes and write budgets; Declared full text is optional and governed |
+| CQ2 | Existing Python query semantics gate every push-down; Versioned filters distinguish typed values, nulls and dates; Typed numeric values and history are lossless |
+| CQ3 | Versioned filters distinguish typed values, nulls and dates, scenario "Source local day is never guessed" |
+| CQ4 | Joins follow only declared current-item relations |
+| CQ5 | Grouping supports multiple exact aggregates and HAVING |
+| CQ6 | Query admission and cancellation bound resource use; Large collections use compact typed storage and streaming ingest |
+| CQ7 | Declared full text is optional and governed |
+| CQ8 | Tools and saved views share one bounded query contract; Every capability is discoverable and agent-reachable; Existing tool routes preserve text queries and bounded discovery |
+| CQ9 | Unified query IR preserves governance across backends |
+| CQ10 | Large collections use compact typed storage and streaming ingest; Typed numeric values and history are lossless |
+| CQ11 | Incremental rollups preserve governed exactness |
+| CQ12 | Activation serves query-derived units within exact freshness budgets |
+| CQ13 | Unified query IR preserves governance across backends |
+| CQ14 | Physical plans and release benchmarks prove the targets; First owner slice has a narrow performance exception; First owner slice is a governed new summary collection in the real vault |
+
 ## Round-four coverage
 
 Requirement names are exact headings in the collection delta unless prefixed `SC` (MODIFIED structured-collections) or `GQ` (graph sibling). Tasks are future implementation obligations, not checked evidence.
