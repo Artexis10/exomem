@@ -1277,7 +1277,9 @@ def _consumed_embedded_words(analysis: TurnAnalysis, rows: Sequence[AnchorFacts]
     indexed name equals (`サクラ` inside `サクラもち本舗`) is consumed: the
     turn wrote the longer name, the same way containment consumes a name.
     """
-    embedded_only = frozenset(analysis.words) - frozenset(analysis.tokens) - frozenset(analysis.ngrams)
+    embedded_only = (
+        frozenset(analysis.words) - frozenset(analysis.tokens) - frozenset(analysis.ngrams)
+    )
     if not embedded_only:
         return frozenset()
     matched_words = {
@@ -1286,10 +1288,17 @@ def _consumed_embedded_words(analysis: TurnAnalysis, rows: Sequence[AnchorFacts]
         for word in ({normalize(row.title), *row.aliases} & frozenset(analysis.words))
     }
     return frozenset(
-        word
-        for word in embedded_only
-        if _inside_longer_words(word, matched_words, analysis.tokens)
+        word for word in embedded_only if _inside_longer_words(word, matched_words, analysis.tokens)
     )
+
+
+def _exact_alias_phrases(
+    lexicon: RowLexicon, phrases: frozenset[str], consumed: frozenset[str]
+) -> frozenset[str]:
+    """The turn phrases a row's own name equals, less consumed embedded words:
+    `exact_alias` when any. The one rule `candidates_for` and
+    `entry_named_anchors` both read."""
+    return (lexicon.names & phrases) - consumed
 
 
 def _min_lexical_terms(config: RankingConfig) -> int:
@@ -1409,9 +1418,8 @@ def candidates_for(
     covered_positions: set[int] = set()
     consumed_words = _consumed_embedded_words(analysis, rows)
     for row in rows:
-        names = lexicon_of(row).names
-        matched = (names & phrases) - consumed_words
-        row_exact_phrases[row.anchor_id] = frozenset(matched)
+        matched = _exact_alias_phrases(lexicon_of(row), phrases, consumed_words)
+        row_exact_phrases[row.anchor_id] = matched
         positions: set[int] = set()
         for phrase in matched:
             phrase_tokens = phrase.split(" ")
@@ -1628,6 +1636,23 @@ def _row_may_be_named(
     return runs and any(len(name) >= 2 and _continua_class(name) for name in lexicon.names)
 
 
+def _rows_maybe_named(
+    rows: Sequence[AnchorFacts],
+    known: Mapping[str, RowLexicon],
+    terms: frozenset[str],
+    phrases: frozenset[str],
+    runs: bool,
+) -> list[tuple[AnchorFacts, RowLexicon]]:
+    """Each row that passes `_row_may_be_named` for these words, with its
+    lexicon (from `known` when supplied), derived once per row."""
+    reachable: list[tuple[AnchorFacts, RowLexicon]] = []
+    for row in rows:
+        lexicon = known.get(row.anchor_id) or row_lexicon(row)
+        if _row_may_be_named(lexicon, terms, phrases, runs):
+            reachable.append((row, lexicon))
+    return reachable
+
+
 def candidates_for_each(
     analyses: Sequence[TurnAnalysis], rows: Sequence[AnchorFacts], **keywords: Any
 ) -> tuple[tuple[CandidateFacts, ...], ...]:
@@ -1646,28 +1671,16 @@ def candidates_for_each(
     if any(keywords.get(name) for name in _WORDLESS_CONTACT_ARGUMENTS):
         return tuple(candidates_for(analysis, rows, **keywords) for analysis in analyses)
     stopwords = keywords.get("stopwords", _STOPWORDS)
-    terms: set[str] = set()
-    phrases: set[str] = set()
-    runs = False
-    for analysis in analyses:
-        for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords:
-            folded = _fold_lexical_term(term)
-            if folded is not None:
-                terms.add(folded)
-        phrases.update(analysis.ngrams, analysis.tokens, analysis.words)
-        phrases.update(
-            folded for token in analysis.tokens if (folded := fold_possessive(token)) not in stopwords
-        )
-        runs = runs or any(_continua_runs(token) for token in analysis.tokens)
-    frozen_terms, frozen_phrases = frozenset(terms), frozenset(phrases)
-    known = keywords.pop("row_lexicons", None) or {}
-    lexicons: dict[str, RowLexicon] = {}
-    named: list[AnchorFacts] = []
-    for row in rows:
-        lexicon = known.get(row.anchor_id) or row_lexicon(row)
-        if _row_may_be_named(lexicon, frozen_terms, frozen_phrases, runs):
-            lexicons[row.anchor_id] = lexicon
-            named.append(row)
+    runs = any(_continua_runs(token) for analysis in analyses for token in analysis.tokens)
+    reachable = _rows_maybe_named(
+        rows,
+        keywords.pop("row_lexicons", None) or {},
+        frozenset().union(*(_turn_terms_folded(analysis, stopwords) for analysis in analyses)),
+        frozenset().union(*(_turn_phrases(analysis, stopwords) for analysis in analyses)),
+        runs,
+    )
+    named = [row for row, _lexicon in reachable]
+    lexicons = {row.anchor_id: lexicon for row, lexicon in reachable}
     return tuple(
         candidates_for(analysis, named, row_lexicons=lexicons, **keywords) for analysis in analyses
     )
@@ -1688,21 +1701,38 @@ def entry_named_anchors(
     this anchor?" over a whole candidate set reads this instead of
     `candidates_for_each`. Words only: no band, recall, routing or recency.
     """
-    config = config or DEFAULT_RANKING
-    min_terms = _min_lexical_terms(config)
-    lexicons = row_lexicons or {}
-    named: set[str] = set()
-    for analysis in analyses:
-        turn_terms = _turn_terms_folded(analysis, stopwords)
-        phrases = _turn_phrases(analysis, stopwords)
-        consumed = _consumed_embedded_words(analysis, rows)
-        for row in rows:
-            lexicon = lexicons.get(row.anchor_id) or row_lexicon(row)
-            if (lexicon.names & phrases) - consumed or _lexical_overlap(
-                turn_terms & lexicon.terms, turn_terms & lexicon.name_terms, min_terms
-            ):
-                named.add(row.anchor_id)
-    return frozenset(named)
+    if not analyses:
+        return frozenset()
+    min_terms = _min_lexical_terms(config or DEFAULT_RANKING)
+    worded = [
+        (_turn_terms_folded(analysis, stopwords), _turn_phrases(analysis, stopwords))
+        for analysis in analyses
+    ]
+    # Only a row whose own name shares a phrase or a term with SOME entry can
+    # be named (or name the longer embedded word that consumes another's), so
+    # narrow once, as `candidates_for_each` does. Containment runs only ever
+    # earn `rare_term`, never a name, so they do not widen this set.
+    reachable = _rows_maybe_named(
+        rows,
+        row_lexicons or {},
+        frozenset().union(*(terms for terms, _phrases in worded)),
+        frozenset().union(*(phrases for _terms, phrases in worded)),
+        runs=False,
+    )
+    reachable_rows = [row for row, _lexicon in reachable]
+    entries = [
+        (terms, phrases, _consumed_embedded_words(analysis, reachable_rows))
+        for analysis, (terms, phrases) in zip(analyses, worded, strict=True)
+    ]
+    return frozenset(
+        row.anchor_id
+        for row, lexicon in reachable
+        if any(
+            _exact_alias_phrases(lexicon, phrases, consumed)
+            or _lexical_overlap(terms & lexicon.terms, terms & lexicon.name_terms, min_terms)
+            for terms, phrases, consumed in entries
+        )
+    )
 
 
 def _token_folds(tokens: Sequence[str], stopwords: frozenset[str]) -> tuple[str | None, ...]:

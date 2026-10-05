@@ -2240,9 +2240,11 @@ def test_the_names_only_scan_names_exactly_the_anchors_the_full_scan_names() -> 
         "plenty of chat for one day",
     )
     analyses = [resolve_module.analyze_turn(text) for text in entries]
+    # "ottilie" names one anchor, so the full scan grants it `rare_term`.
+    counts = {"ottilie": 1}
 
     def full(analysis_list: list) -> frozenset[str]:
-        drawn = resolve_module.candidates_for_each(analysis_list, rows)
+        drawn = resolve_module.candidates_for_each(analysis_list, rows, term_anchor_counts=counts)
         return frozenset(
             item.anchor_id
             for batch in drawn
@@ -2252,6 +2254,9 @@ def test_the_names_only_scan_names_exactly_the_anchors_the_full_scan_names() -> 
 
     for chosen in (analyses, analyses[:2], analyses[2:3], analyses[3:4], analyses[4:]):
         assert resolve_module.entry_named_anchors(chosen, rows) == full(chosen)
-    # Not vacuous: an alias, an overlap and a consumed head are all exercised.
+    # Not vacuous: an alias, an overlap, a one-word `rare_term` and a consumed
+    # head are all exercised.
+    (ottilie,) = resolve_module.candidates_for(analyses[2], rows, term_anchor_counts=counts)
+    assert ottilie.anchor_id == "ottilie" and "rare_term" in ottilie.evidence
     named = resolve_module.entry_named_anchors(analyses, rows)
     assert named == {"kestrel", "marlow", "sakura-shop"}
