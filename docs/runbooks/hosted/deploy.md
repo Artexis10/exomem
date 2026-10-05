@@ -32,20 +32,20 @@ with `--admin-addresses`. Hosts it omits keep their public IPv4, which is
 closed. The base role refuses to run with no public SSH CIDR unless the host
 has `wt0` and UFW admits 22/tcp on it.
 
-Ansible uses plain OpenSSH, not `harness ssh`. Route it through the
-workstation's NetBird SOCKS listener (the workstation default is
-`127.0.0.1:21080`); setting `ANSIBLE_SSH_ARGS` replaces Ansible's defaults, so
-repeat them:
+Ansible uses plain OpenSSH, not `harness ssh`. Route only the NetBird
+addresses through the workstation's NetBird SOCKS listener (the workstation
+default is `127.0.0.1:21080`), with one `~/.ssh/config` block per host that also
+reuses the existing host pin, as the managed desktop aliases do:
 
-```bash
-export ANSIBLE_SSH_ARGS="-C -o ControlMaster=auto -o ControlPersist=60s -o ProxyCommand='nc -X 5 -x 127.0.0.1:21080 %h %p'"
+```
+Host <NetBird IP>
+  HostKeyAlias <public IPv4>
+  ProxyCommand nc -X 5 -x 127.0.0.1:21080 %h %p
 ```
 
-`ansible_ssh_common_args` in private group variables works the same way.
-`host_key_checking` stays on, so each NetBird IP needs a known host. Reuse the
-existing pin with a `~/.ssh/config` block per host,
-`Host <NetBird IP>` / `HostKeyAlias <public IPv4>`, as the managed desktop
-aliases do.
+Do not set the proxy globally (`ANSIBLE_SSH_ARGS` or group-level
+`ansible_ssh_common_args`): break-glass and new-agent runs connect to a public
+IPv4, which the SOCKS listener cannot reach. `host_key_checking` stays on.
 
 Break-glass is the Hetzner console or rescue system. A disposable host with
 public inbound closed at both the Hetzner firewall and UFW returned over
