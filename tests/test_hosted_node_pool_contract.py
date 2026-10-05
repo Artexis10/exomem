@@ -360,21 +360,11 @@ def test_join_playbook_skips_a_host_that_removal_marked() -> None:
     assert harden[1]["when"] == "k3s_removed_marker.stat.exists"
 
 
-def _kubelet_args(text: str) -> list[str]:
-    block = text.split("kubelet-arg:\n", 1)[1]
-    arguments = []
-    for line in block.splitlines():
-        if not line.startswith("  - "):
-            break
-        arguments.append(line[4:])
-    return arguments
-
-
-def test_agent_kubelet_limits_match_the_server_exactly() -> None:
-    server = _kubelet_args(_read(K3S_ROLE / "templates/config.yaml.j2"))
-    agent = _kubelet_args(_read(K3S_ROLE / "templates/agent-config.yaml.j2"))
-    assert "image-gc-high-threshold=75" in server
-    assert server == agent
+def test_server_and_agent_render_the_same_kubelet_limits() -> None:
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    assert "image-gc-high-threshold=75" in defaults["k3s_kubelet_args"]
+    for template in ("templates/config.yaml.j2", "templates/agent-config.yaml.j2"):
+        assert "{% for argument in k3s_kubelet_args %}" in _read(K3S_ROLE / template)
 
 
 def test_server_gains_a_distinct_agent_token_only_when_set() -> None:
@@ -692,6 +682,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
         "k3s_server_private_ip": "10.0.0.1", "k3s_agent_join_token": "test-token",
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
         "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
+        "k3s_kubelet_args": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_kubelet_args"],
     }, "tasks": [
         _yaml(K3S_ROLE / "tasks/validate.yml")[0],
         {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),

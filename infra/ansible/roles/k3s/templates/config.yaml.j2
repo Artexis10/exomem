@@ -27,10 +27,9 @@ kube-apiserver-arg:
   - audit-log-maxbackup=3
   - audit-log-maxsize=100
 kubelet-arg:
-  - image-gc-high-threshold=75
-  - image-gc-low-threshold=65
-  - container-log-max-size=10Mi
-  - container-log-max-files=3
+{% for argument in k3s_kubelet_args %}
+  - {{ argument | to_json }}
+{% endfor %}
 etcd-snapshot-schedule-cron: "*/30 * * * *"
 etcd-snapshot-retention: 6
 etcd-s3: true

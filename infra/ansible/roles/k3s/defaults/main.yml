@@ -11,6 +11,22 @@ k3s_etcd_s3_region: ""
 k3s_etcd_s3_bucket: ""
 k3s_etcd_s3_access_key: ""
 k3s_etcd_s3_secret_key: ""
+# Records of S3 etcd snapshots older than this name objects the bucket has
+# already deleted: its lifecycle hides a snapshot at 30 days and deletes it a day
+# later (infra/terraform/durability/storage.tf, b2_bucket.etcd_snapshot).
+k3s_etcd_s3_record_max_age_days: 31
+
+# Kubelet flags for every node; the server and agent templates both render this
+# one list. image-maximum-gc-age removes an image no container has used for a
+# week. Without it, GC waited for 75% disk while superseded 785 MB Exomem images
+# piled up (41 GB on the server node, 2026-10-05); a rollback to an older image
+# pulls it again.
+k3s_kubelet_args:
+  - image-gc-high-threshold=75
+  - image-gc-low-threshold=65
+  - image-maximum-gc-age=168h
+  - container-log-max-size=10Mi
+  - container-log-max-files=3
 
 # server: the one cluster-init server (hosted_nodes outside k3s_agents).
 # agent: a node in k3s_agents. Derived from group membership, so no play can
