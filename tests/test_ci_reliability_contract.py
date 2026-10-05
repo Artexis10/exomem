@@ -612,12 +612,11 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     assert "release-please" not in condition
 
     # The clause must not creep back into the expensive tier: its only
-    # permitted appearances in the whole workflow are the release-evidence
+    # permitted appearance in the whole workflow is the release-evidence
     # job's own guard (pinned exactly in
-    # test_release_evidence_is_enforced_on_the_release_pr) and the
-    # release-evidence-landed job's open-PR lookup — seconds-class API
-    # checks, not a stampede.
-    assert _workflow_text().count("release-please--branches--main") == 2
+    # test_release_evidence_is_enforced_on_the_release_pr) — a seconds-class
+    # API check, not a stampede.
+    assert _workflow_text().count("release-please--branches--main") == 1
 
     fast_jobs = set(jobs) - FULL_CI_JOBS - {"gate", "release-evidence", "release-evidence-landed"}
     assert fast_jobs
@@ -774,10 +773,10 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     intent of enabling auto-merge — never per push to main, which is the
     measured stampede test_expensive_ci_runs_nightly_and_manually_only pins),
     and re-running the release PR's failed checks when eligible evidence
-    lands on main. The re-run lives in ci.yml's full tier: a full run that
-    release-evidence-automation dispatches with GITHUB_TOKEN raises no
-    workflow_run event when it completes, so a workflow_run listener never
-    fires for it (observed twice on 2026-10-05).
+    lands on main. A full run that this workflow dispatches with GITHUB_TOKEN
+    raises no workflow_run event when it completes (observed twice on
+    2026-10-05), so the full run's last job dispatches the re-run instead,
+    and the re-run waits for that run's recorded green completion.
     """
     text = (ROOT / ".github/workflows/release-evidence-automation.yml").read_text(
         encoding="utf-8"
@@ -786,7 +785,8 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     triggers = _triggers(workflow)
 
     assert triggers["pull_request"] == {"types": ["auto_merge_enabled"]}
-    assert set(triggers) == {"pull_request"}
+    assert set(triggers) == {"pull_request", "workflow_dispatch"}
+    assert triggers["workflow_dispatch"]["inputs"]["evidence_run"]["required"] is True
 
     # Duplicate release intents (disable/re-enable auto-merge) must serialize
     # so only one evidence dispatch can win the eligibility check.
@@ -794,7 +794,7 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     assert "release-evidence-automation-" in workflow["concurrency"]["group"]
 
     jobs = workflow["jobs"]
-    assert set(jobs) == {"dispatch-evidence"}
+    assert set(jobs) == {"dispatch-evidence", "rerun-evidence-check"}
 
     # Bound the API result itself; post-filtering a truncated run list misses evidence.
     assert "head_sha=$BASE_SHA" in jobs["dispatch-evidence"]["steps"][0]["run"]
@@ -804,8 +804,17 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     assert "release-please--branches--main" in dispatch_if
     assert "github.event_name == 'pull_request'" in dispatch_if
 
-    # The full run re-runs the waiting release PR's failed checks itself, only
-    # after its own gate passed, only for full-tier evidence on main.
+    rerun_if = " ".join(str(jobs["rerun-evidence-check"]["if"]).split())
+    assert rerun_if == "${{ github.event_name == 'workflow_dispatch' }}"
+    rerun = jobs["rerun-evidence-check"]["steps"][0]["run"]
+    # Re-run only once the evidence run has a recorded green completion: the
+    # release evidence check counts completed successful runs and nothing else.
+    assert "= completed && break" in rerun
+    assert '"completed success main .github/workflows/ci.yml"' in rerun
+    assert "workflow_dispatch|schedule" in rerun
+
+    # The full run signals its own evidence, only after its gate passed, only
+    # for full-tier runs on main, and holds no permission beyond the dispatch.
     landed = _workflow()["jobs"]["release-evidence-landed"]
     assert landed["needs"] == "gate"
     landed_if = " ".join(str(landed["if"]).split())
@@ -814,14 +823,14 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     assert "github.ref == 'refs/heads/main'" in landed_if
     assert "pull_request" not in landed_if
     assert "always()" not in landed_if and "failure()" not in landed_if
-    assert landed["permissions"] == {"actions": "write", "pull-requests": "read"}
+    assert landed["permissions"] == {"actions": "write"}
 
     # The dispatch job must never fire from pushes: only the two declared
     # events exist, and neither is push/synchronize.
     assert "synchronize" not in text
     assert "push:" not in text
 
-    # Least privilege: actions write for the dispatch, nothing more.
+    # Least privilege: actions write (dispatch + rerun), nothing more.
     assert workflow["permissions"] == {
         "actions": "write",
         "contents": "read",
@@ -831,7 +840,11 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
 
 @pytest.mark.parametrize(
     ("workflow_file", "job_name"),
-    [("release-evidence-automation.yml", "dispatch-evidence"), ("ci.yml", "release-evidence-landed")],
+    [
+        ("release-evidence-automation.yml", "dispatch-evidence"),
+        ("release-evidence-automation.yml", "rerun-evidence-check"),
+        ("ci.yml", "release-evidence-landed"),
+    ],
 )
 @pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
 def test_release_evidence_commands_work_without_a_checkout(
@@ -853,6 +866,8 @@ def test_release_evidence_commands_work_without_a_checkout(
         "        print(json.dumps({'base': {'sha': 'tested-base'}, 'head': {'sha': 'release-head'}}))\n"
         "    elif 'event=pull_request' in endpoint:\n"
         "        print('123')\n"
+        "    elif endpoint.endswith('/actions/runs/456'):\n"
+        "        print(os.environ.get('FAKE_EVIDENCE_RUN', 'completed success workflow_dispatch main .github/workflows/ci.yml tested-base'))\n"
         "    else:\n"
         "        print('0')\n"
         "elif args[:2] in (['workflow', 'run'], ['run', 'rerun']):\n"
@@ -877,19 +892,29 @@ def test_release_evidence_commands_work_without_a_checkout(
     env.update({
         "PATH": str(tmp_path) + os.pathsep + env["PATH"],
         "BASE_SHA": "tested-base",
-        "EVIDENCE_SHA": "tested-base",
+        "EVIDENCE_RUN": "456",
     })
     result = subprocess.run(
         ["bash", "-e", "-c", render(step["run"])],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    expected = (
-        "workflow run ci.yml --ref main"
-        if job_name == "dispatch-evidence"
-        else "run rerun 123 --failed"
-    )
+    expected = {
+        "dispatch-evidence": "workflow run ci.yml --ref main",
+        "rerun-evidence-check": "run rerun 123 --failed",
+        "release-evidence-landed": "workflow run release-evidence-automation.yml --ref main -f evidence_run=456",
+    }[job_name]
     assert "submitted: " + expected in result.stdout
+
+    if job_name == "rerun-evidence-check":
+        # Evidence that completed red re-runs nothing.
+        env["FAKE_EVIDENCE_RUN"] = "completed failure workflow_dispatch main .github/workflows/ci.yml tested-base"
+        failed = subprocess.run(
+            ["bash", "-e", "-c", render(step["run"])],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+        )
+        assert failed.returncode == 0, failed.stdout + failed.stderr
+        assert "submitted:" not in failed.stdout
 
 
 #: The worst cross-platform session observed, in seconds. No longer censored:
