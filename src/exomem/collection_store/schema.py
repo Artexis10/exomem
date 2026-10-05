@@ -34,7 +34,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -64,6 +64,8 @@ TABLES = (
     "audit_effects",
     "held_candidates",
     "projection_state",
+    "query_projection_mappings",
+    "query_cursor_state",
 )
 APPEND_ONLY_TABLES = (
     "txns",
@@ -414,9 +416,37 @@ def _migrate_to_3(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE projection_state ADD COLUMN install_json TEXT")
 
 
+def _migrate_to_4(conn: sqlite3.Connection) -> None:
+    """Record disposable query projections and bound ordered backfill work."""
+    conn.execute("ALTER TABLE collections ADD COLUMN query_plan_hash TEXT")
+    conn.execute("""CREATE TABLE query_projection_mappings(
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      generation INTEGER NOT NULL CHECK(generation > 0),
+      state TEXT NOT NULL CHECK(state IN ('building','ready','failed')),
+      plan_json TEXT NOT NULL,
+      plan_hash TEXT NOT NULL,
+      last_row_id INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(collection_id,generation)
+    ) STRICT, WITHOUT ROWID""")
+    for state in ("ready", "building"):
+        conn.execute(f"CREATE UNIQUE INDEX query_projection_one_{state} "
+                     f"ON query_projection_mappings(collection_id) WHERE state='{state}'")
+    conn.execute("CREATE INDEX items_by_collection_row ON items(collection_id,row_id)")
+    conn.execute("""CREATE TABLE query_cursor_state(
+      collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
+      basis_id TEXT NOT NULL,
+      membership_revision INTEGER NOT NULL CHECK(membership_revision >= 0),
+      fields_json TEXT NOT NULL CHECK(json_valid(fields_json))
+    ) STRICT, WITHOUT ROWID""")
+    from cryptography.fernet import Fernet
+
+    conn.execute("INSERT INTO store_meta(key,value) VALUES('query_cursor_key',?)",
+                 (Fernet.generate_key().decode("ascii"),))
+
+
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
-    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3,
+    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4,
 }
 
 
