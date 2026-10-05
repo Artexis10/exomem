@@ -655,12 +655,23 @@ class Spike:
         kube.delete("pod", "writer", "--namespace", ns)
         kube.kubectl("patch", "pv", volume, "--type=merge", "-p", '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}')
         kube.delete("pvc", "adopt", "--namespace", ns)
-        # What an etcd restore leaves: the volume on the host, the objects gone. The finalizer is removed
-        # first, or deleting the LogicalVolume would remove the volume with it.
+        # What an etcd restore leaves: the volume on the host, the objects gone. A run that deleted the
+        # LogicalVolume with topolvm-node running lost the volume even with the finalizer removed, so the
+        # node plugin is paused while the objects go, as it would be absent from a restored etcd's history.
+        node_ds = f"{storage.TOPOLVM_RELEASE}-topolvm-node"
+        kube.kubectl("patch", "daemonset", node_ds, "--namespace", storage.TOPOLVM_NAMESPACE, "--type=merge",
+                     "-p", '{"spec":{"template":{"spec":{"nodeSelector":{"exomem.io/spike-paused":"true"}}}}}')
+        wait_for(lambda: not kube.json("get", "pods", "--namespace", storage.TOPOLVM_NAMESPACE, "-l",
+                                       "app.kubernetes.io/component=node")["items"],
+                 timeout=180, interval=3, description="topolvm-node to stop")
         kube.kubectl("patch", "logicalvolume", volume, "--type=merge", "-p", '{"metadata":{"finalizers":null}}')
         kube.delete("logicalvolume", volume)
+        kube.kubectl("patch", "pv", volume, "--type=merge", "-p", '{"metadata":{"finalizers":null}}')
         kube.delete("pv", volume)
         orphaned = host_lvs()
+        kube.kubectl("patch", "daemonset", node_ds, "--namespace", storage.TOPOLVM_NAMESPACE, "--type=json",
+                     "-p", '[{"op":"remove","path":"/spec/template/spec/nodeSelector/exomem.io~1spike-paused"}]')
+        kube.kubectl("rollout", "status", f"daemonset/{node_ds}", "--namespace", storage.TOPOLVM_NAMESPACE, "--timeout=180s")
 
         fresh = {"apiVersion": lv["apiVersion"], "kind": "LogicalVolume", "metadata": {"name": volume, "labels": lv["metadata"].get("labels", {})},
                  "spec": lv["spec"]}
@@ -691,7 +702,7 @@ class Spike:
             {
                 "recreating_object_and_pv_alone": {
                     "new_volume_id_equals_old": new_volume_id == old_name,
-                    "old_volume_still_on_host": old_name in naive, "new_empty_volume_created": new_volume_id in naive,
+                    "old_volume_survived_object_loss": old_name in orphaned, "old_volume_still_on_host": old_name in naive, "new_empty_volume_created": new_volume_id in naive,
                     "lv_name_is_object_uid": old_name == old_uid,
                 },
                 "old_uid": old_uid, "new_uid": new_uid, "old_volume_id": old_name, "new_volume_id": new_volume_id,
