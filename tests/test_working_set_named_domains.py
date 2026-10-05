@@ -49,11 +49,17 @@ def _paths(packet: dict, status: str) -> set[str]:
     return {a["path"] for a in packet["anchors"] if a["status"] == status}
 
 
+def _carried(packet: dict) -> set[str]:
+    """Pages the carry served, `resolved` when the turn named a page's own
+    title (the 2026-10-05 ruling) and `retrieval_carried` otherwise."""
+    return {a["path"] for a in packet["anchors"] if a["kind"] == "page"}
+
+
 def test_two_pages_named_apart_are_both_carried(domain_vault: Path) -> None:
     packet = working_set.compile_packet(domain_vault, turn=BOTH_TURN, max_chars=6000)
 
     assert packet["abstained"] is False, packet["anchors"]
-    assert _paths(packet, "retrieval_carried") == {GENUINE_PAGE, CARRY_PAGE}
+    assert _carried(packet) == {GENUINE_PAGE, CARRY_PAGE}
     assert {u["provenance"]["path"] for u in packet["units"]} >= {GENUINE_PAGE, CARRY_PAGE}
     assert packet["generation"]["carried_by"] == "retrieval"
 
@@ -65,7 +71,7 @@ def test_a_resolved_anchor_and_a_named_page_are_both_served(domain_vault: Path) 
 
     assert packet["abstained"] is False
     assert SLED in _paths(packet, "resolved")
-    assert _paths(packet, "retrieval_carried") == {GENUINE_PAGE}
+    assert _carried(packet) == {GENUINE_PAGE}
     assert GENUINE_PAGE in {u["provenance"]["path"] for u in packet["units"]}
 
 
@@ -74,14 +80,14 @@ def test_a_phrase_two_pages_answer_to_stays_a_question(domain_vault: Path) -> No
     turn = f"{TIE_TURN}, and {KELVANE_TURN}"
     packet = working_set.compile_packet(domain_vault, turn=turn, max_chars=6000)
 
-    assert _paths(packet, "retrieval_carried") == {GENUINE_PAGE}
+    assert _carried(packet) == {GENUINE_PAGE}
     assert not any("tarn-rollover" in u["provenance"]["path"] for u in packet["units"])
 
 
 def test_a_turn_naming_one_page_is_carried_exactly_as_before(domain_vault: Path) -> None:
     packet = working_set.compile_packet(domain_vault, turn=QUILLON_TURN, max_chars=6000)
 
-    assert _paths(packet, "retrieval_carried") == {CARRY_PAGE}
+    assert _carried(packet) == {CARRY_PAGE}
     assert len(packet["anchors"]) == 1
 
 
@@ -91,7 +97,7 @@ def test_a_resolved_turn_that_names_nothing_else_carries_nothing(domain_vault: P
     )
 
     assert SLED in _paths(packet, "resolved")
-    assert _paths(packet, "retrieval_carried") == set()
+    assert _carried(packet) == set()
     assert packet["generation"].get("carried_by") is None
 
 
@@ -115,7 +121,7 @@ def test_carried_pages_share_one_role_schedule(domain_vault: Path, cued: bool) -
 
     packet = working_set.compile_packet(domain_vault, turn=turn, max_chars=8000)
 
-    assert _paths(packet, "retrieval_carried") == {GENUINE_PAGE, CARRY_PAGE}
+    assert _carried(packet) == {GENUINE_PAGE, CARRY_PAGE}
     expected = ["preferences", "constraints", "resources", "material", "methods", "location"]
     if cued:
         expected = ["methods", *(role for role in expected if role != "methods")]

@@ -2591,9 +2591,27 @@ def _carried_material(
     slots = max(0, context_roles.MAX_SELECTED_ROLES - len(used_roles))
     used_roles.update((role["id"], role) for role in remaining[:slots])
     missing.extend({"role": role["id"], "reason": "role_limit"} for role in remaining[slots:])
+    # A retrieval-carried page the turn names by its own title has name
+    # contact, exactly as an anchor would (`title_names`): `lexical_overlap`
+    # beside `retrieval`, which the soundness rule resolves. Owner ruling of
+    # 2026-10-05: "no anchor was named" is false when the turn said the title.
+    stopwords = (
+        activation_conventions.load_conventions(vault_root).conventions.stopwords
+        if evidence == ("retrieval",)
+        else frozenset()
+    )
     for path, (title, candidates_for_page) in page_roles.items():
         role_ids = {role["id"] for role in candidates_for_page}
         roles = tuple(role for role in used_roles.values() if role["id"] in role_ids)
+        page_status, page_evidence = status, evidence
+        authored = _indexed_title(index, path) or _page_title(vault_root, path)
+        if (
+            evidence == ("retrieval",)
+            and authored
+            and working_set_resolve.title_names(analysis, authored, stopwords=stopwords)
+        ):
+            page_evidence = ("lexical_overlap", "retrieval")
+            page_status = working_set_resolve._status_for_evidence(frozenset(page_evidence))
         carried = working_set_resolve.ResolvedAnchor(
             anchor_id=path,
             path=path,
@@ -2601,8 +2619,8 @@ def _carried_material(
             title=title,
             kind="page",
             lifecycle=_page_lifecycle(vault_root, path),
-            status=status,
-            evidence=evidence,
+            status=page_status,
+            evidence=page_evidence,
             categories=(),
             neighbourhood=frozenset({path}),
         )

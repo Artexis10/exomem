@@ -1227,6 +1227,64 @@ class RowLexicon(NamedTuple):
     terms: frozenset[str]
 
 
+def folded_turn_terms(analysis: TurnAnalysis, stopwords: frozenset[str] = _STOPWORDS) -> frozenset[str]:
+    """The turn's lexical terms as `candidates_for` compares them.
+
+    R4 (fix/activation-competing-senses): possessive fold, applied on the
+    TURN side of the lexical comparison -- "gamma's" must contribute the
+    term "gamma" the same way a plural turn token already folds to its
+    singular. `_fold_lexical_term` (C1, correction round 1) is
+    `fold_plural(fold_possessive(term))` with one guard: a term whose
+    possessive fold alone lands on a STOPWORD ("it's" -> "it") is dropped
+    rather than folded, so an ordinary contraction of a common pronoun or
+    auxiliary verb can never manufacture a turn term that was never typed.
+    """
+    return frozenset(
+        folded
+        for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords
+        if (folded := _fold_lexical_term(term)) is not None
+    )
+
+
+def lexical_min_terms(config: RankingConfig | None = None) -> int:
+    """How many shared terms `lexical_overlap` needs, never fewer than two."""
+    return max(2, int((config or DEFAULT_RANKING).working_set_lexical_min_terms))
+
+
+def name_contact_terms(
+    turn_terms: frozenset[str], lexicon: RowLexicon, *, min_terms: int
+) -> frozenset[str]:
+    """The authored name terms that make name contact, or none.
+
+    Name contact is two or more shared name terms among at least `min_terms`
+    shared terms; one shared name term, however rare, is never name contact
+    (`candidates_for` explains why). `turn_terms` is `folded_turn_terms`.
+    """
+    shared_name = turn_terms & lexicon.name_terms
+    if len(turn_terms & lexicon.terms) >= min_terms and len(shared_name) >= 2:
+        return shared_name
+    return frozenset()
+
+
+def title_names(
+    analysis: TurnAnalysis, title: str, *, stopwords: frozenset[str] = _STOPWORDS
+) -> bool:
+    """Does the turn make name contact with a page by its own `title`?
+
+    The anchor rule (`name_contact_terms`) applied to a page that is not an
+    anchor: its title is its only authored name and its only vocabulary.
+    """
+    terms = frozenset(
+        folded for term in tokens_of(title) if (folded := _fold_lexical_term(term)) is not None
+    )
+    lexicon = RowLexicon(names=frozenset({normalize(title)} - {""}), name_terms=terms, terms=terms)
+    return bool(
+        name_contact_terms(
+            folded_turn_terms(analysis, stopwords), lexicon, min_terms=lexical_min_terms()
+        )
+    )
+
+
 def row_lexicon(row: AnchorFacts) -> RowLexicon:
     """`row`'s normalised names, the folded terms of its title and aliases,
     and the folded terms of its whole vocabulary."""
@@ -1301,18 +1359,7 @@ def candidates_for(
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
-    turn_terms = frozenset((*analysis.tokens, *analysis.words)) - stopwords
-    # R4 (fix/activation-competing-senses): possessive fold, applied on the
-    # TURN side of the lexical comparison -- "gamma's" must contribute the
-    # term "gamma" the same way a plural turn token already folds to its
-    # singular. `_fold_lexical_term` (C1, correction round 1) is
-    # `fold_plural(fold_possessive(term))` with one guard: a term whose
-    # possessive fold alone lands on a STOPWORD ("it's" -> "it") is dropped
-    # rather than folded, so an ordinary contraction of a common pronoun or
-    # auxiliary verb can never manufacture a turn term that was never typed.
-    turn_terms_folded = frozenset(
-        folded for term in turn_terms if (folded := _fold_lexical_term(term)) is not None
-    )
+    turn_terms_folded = folded_turn_terms(analysis, stopwords)
     # Terms only an embedded word supplies (`analysis.words`: a Latin word glued
     # to Japanese). They hold no position in `analysis.tokens`, so a name span
     # over the tokens cannot see them, and a contact that rests on one has no
@@ -1350,7 +1397,7 @@ def candidates_for(
     # the two-shared-terms minimum is part of the soundness argument, so it
     # lives in code, not in an operator-tunable file. The shipped default is
     # already 2, so this never changes shipped behaviour.
-    min_terms = max(2, int(config.working_set_lexical_min_terms))
+    min_terms = lexical_min_terms(config)
 
     # R2 (fix/activation-competing-senses), pass 1 of 2: each row's own
     # matched `exact_alias` phrases, and the turn TOKEN POSITIONS any
@@ -1464,14 +1511,10 @@ def candidates_for(
         # term "it" any more than a turn saying "it's" can -- one function,
         # both call sites, symmetric by construction.
         lexicon = lexicon_of(row)
-        row_terms_folded = lexicon.terms
-        name_terms_folded = lexicon.name_terms
-        shared_broad = turn_terms_folded & row_terms_folded
-        shared_name = turn_terms_folded & name_terms_folded
-        name_contact: frozenset[str] = frozenset()
-        if len(shared_broad) >= min_terms and len(shared_name) >= 2:
+        shared_name = turn_terms_folded & lexicon.name_terms
+        name_contact = name_contact_terms(turn_terms_folded, lexicon, min_terms=min_terms)
+        if name_contact:
             evidence.add("lexical_overlap")
-            name_contact = shared_name
         elif len(shared_name) == 1:
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
@@ -1542,7 +1585,7 @@ def candidates_for(
             _name_spans(
                 analysis.tokens,
                 stopwords,
-                name_terms_folded,
+                lexicon.name_terms,
                 analysis.run_breaks,
                 token_folds,
                 _literal_separator_spans(analysis, row),

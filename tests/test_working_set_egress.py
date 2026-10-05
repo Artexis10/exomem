@@ -3790,7 +3790,7 @@ def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["generation"]["carried_by"] == "retrieval"
     assert [item["path"] for item in packet["anchors"]] == [CARRY_DOMINANT]
-    assert packet["anchors"][0]["status"] == "retrieval_carried"
+    assert packet["anchors"][0]["status"] == "resolved"  # Named by its own title (the 2026-10-05 ruling).
     assert packet["units"], packet
 
 

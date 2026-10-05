@@ -907,7 +907,7 @@ def test_a_turn_naming_no_anchor_is_served_that_notes_units(
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["generation"]["carried_by"] == "retrieval"
     assert len(packet["anchors"]) == 1
-    assert packet["anchors"][0]["status"] == "retrieval_carried"
+    assert packet["anchors"][0]["status"] == "resolved"  # Named by its own title (the 2026-10-05 ruling).
     assert packet["anchors"][0]["kind"] == "page"
     assert packet["anchors"][0]["path"] == CARRY_PAGE
     assert packet["units"], packet
@@ -942,8 +942,10 @@ def test_a_named_anchor_still_wins_through_the_whole_door(
     assert first["status"] == "resolved"
     assert str(first.get("path") or first.get("ref")) != CARRY_PAGE
     assert first.get("evidence")
-    assert [a["status"] for a in anchors].count("resolved") == 1
+    # The page is named by its own title, so it resolves beside the anchor
+    # (the 2026-10-05 ruling); it is still a carried page, never in its place.
+    assert [a["status"] for a in anchors].count("resolved") == 2
     carried = [a for a in anchors if str(a.get("path") or "") == CARRY_PAGE]
-    assert [a["status"] for a in carried] == ["retrieval_carried"]
+    assert [(a["status"], a["kind"]) for a in carried] == [("resolved", "page")]
     assert packet["generation"]["also_carried"] == "retrieval"
     assert not packet.get("ambiguity")

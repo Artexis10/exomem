@@ -82,7 +82,8 @@ def test_a_person_the_carried_unit_names_is_listed_partial(linked_vault: Path) -
     packet = commands.op_activate_context(linked_vault, turn=TURN)
 
     anchors = _anchors(packet)
-    assert anchors.get(NOTE, ("",))[0] == "retrieval_carried", anchors
+    # The turn also names the note by its title, so the note itself resolves.
+    assert anchors.get(NOTE, ("",))[0] == "resolved", anchors
     assert anchors.get(memory_refs.memory_ref(TALIA_ID)) == ("partial", ["carried_link"]), anchors
     # Linked from the same note, but the served unit never names him.
     assert not any("Oren" in str(a) for a in packet["anchors"]), anchors
