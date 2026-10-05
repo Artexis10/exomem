@@ -646,6 +646,7 @@ class Spike:
         pv = kube.json("get", "pv", volume)
         lv = kube.json("get", "logicalvolume", volume)
         old_uid, old_handle = lv["metadata"]["uid"], pv["spec"]["csi"]["volumeHandle"]
+        old_name = lv["status"]["volumeID"]  # the host logical volume's name
 
         def host_lvs() -> list[str]:
             return storage.sudo("lvs", "--noheadings", "-o", "lv_name", storage.VG_NAME).stdout.split()
@@ -669,9 +670,9 @@ class Spike:
                                  interval=2, description="the new LogicalVolume to be created")
         naive = host_lvs()
 
-        # The operator step: the object's UID is the logical volume's name, so the old volume takes the new name.
-        storage.sudo("lvremove", "--yes", f"{storage.VG_NAME}/{new_uid}")
-        storage.sudo("lvrename", storage.VG_NAME, old_uid, new_uid)
+        # The operator step: the old volume takes the name the recreated object was given.
+        storage.sudo("lvremove", "--yes", f"{storage.VG_NAME}/{new_volume_id}")
+        storage.sudo("lvrename", storage.VG_NAME, old_name, new_volume_id)
         claim = pvc_doc("adopt", 1, CELL_CLASS, namespace=ns)
         claim["spec"]["volumeName"] = volume
         new_pv = {
@@ -687,17 +688,17 @@ class Spike:
             "readopt_lv", "an existing logical volume re-adopted by recreating its LogicalVolume object and PV",
             {
                 "recreating_object_and_pv_alone": {
-                    "new_volume_id_equals_old": new_volume_id == old_uid,
-                    "old_volume_still_on_host": old_uid in naive, "new_empty_volume_created": new_uid in naive,
-                    "reason": "TopoLVM names the logical volume by the LogicalVolume object's UID, which the API server assigns anew",
+                    "new_volume_id_equals_old": new_volume_id == old_name,
+                    "old_volume_still_on_host": old_name in naive, "new_empty_volume_created": new_volume_id in naive,
+                    "lv_name_is_object_uid": old_name == old_uid,
                 },
-                "old_uid": old_uid, "new_uid": new_uid,
+                "old_uid": old_uid, "new_uid": new_uid, "old_volume_id": old_name, "new_volume_id": new_volume_id,
                 "host_volumes": {"before": before, "after_losing_objects": orphaned, "after_recreating_object": naive},
                 "with_operator_lvrename": {"marker_read_back": read == marker, "marker": marker},
                 "csi_volume_handle": {"before_loss": old_handle, "after_readoption": new_volume_id, "unchanged": old_handle == new_volume_id},
             },
             "kubectl patch logicalvolume (finalizers null) + delete logicalvolume,pv; kubectl apply LogicalVolume (same spec); "
-            "sudo lvremove <new uid>; sudo lvrename cells <old uid> <new uid>; kubectl apply PV (same spec, new volumeHandle) + PVC + reader pod",
+            "sudo lvremove <new volumeID>; sudo lvrename cells <old volumeID> <new volumeID>; kubectl apply PV (same spec, new volumeHandle) + PVC + reader pod",
         )
 
     # --- report --------------------------------------------------------------------------------
