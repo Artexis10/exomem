@@ -1,0 +1,227 @@
+---
+- name: Validate the dedicated host inputs
+  ansible.builtin.assert:
+    that:
+      - dedicated_host_data_disks | length == 2
+      - dedicated_host_data_disks | unique | length == 2
+      - dedicated_host_wipe_disks | difference(dedicated_host_data_disks) | length == 0
+      - dedicated_host_tang_server | length > 0
+      - hostvars[dedicated_host_tang_server]['private_node_ip'] | default('') | length > 0
+    fail_msg: >-
+      A dedicated host needs exactly two distinct data disks, may wipe only those,
+      and needs one inventoried K3s server with a private address to run Tang.
+
+- name: Require the escrowed recovery passphrase and Tang keys
+  ansible.builtin.assert:
+    that:
+      - dedicated_host_recovery_passphrase | length >= 32
+      - dedicated_host_tang_keys | length > 0
+    fail_msg: >-
+      Pass this host's dedicated_host_recovery_passphrase_<host> (at least 32
+      characters) and dedicated_host_tang_keys from their SOPS files.
+  no_log: true
+
+- name: Pin the Tang server's escrowed signing key
+  ansible.builtin.set_fact:
+    dedicated_host_tang_thumbprint: "{{ dedicated_host_tang_keys | tang_signing_thumbprint }}"
+
+- name: Install the encrypted storage packages
+  ansible.builtin.apt:
+    name: "{{ dedicated_host_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Look for the cell storage array
+  ansible.builtin.stat:
+    path: "{{ dedicated_host_md_device }}"
+    get_checksum: false
+  register: dedicated_host_md
+
+- name: Build or assemble the array on the named data disks
+  ansible.builtin.include_tasks: array.yml
+  when: not dedicated_host_md.stat.exists
+
+- name: Read the array's identity
+  ansible.builtin.command:
+    argv: [/usr/sbin/mdadm, --detail, --export, "{{ dedicated_host_md_device }}"]
+  register: dedicated_host_md_detail
+  changed_when: false
+
+- name: Require the array to be this role's RAID1
+  ansible.builtin.assert:
+    that:
+      - "'MD_LEVEL=raid1' in dedicated_host_md_detail.stdout_lines"
+      - dedicated_host_md_detail.stdout is search('(?m)^MD_NAME=([^:]+:)?' ~ dedicated_host_md_name ~ '$')
+    fail_msg: "{{ dedicated_host_md_device }} is not this role's RAID1 array; nothing was changed."
+
+# A failed disk is an alert and a runbook step, not a convergence failure.
+- name: Report a degraded array
+  ansible.builtin.debug:
+    msg: >-
+      {{ dedicated_host_md_device }} is degraded; replace the failed disk as
+      docs/runbooks/hosted/dedicated-host.md describes.
+  when: dedicated_host_md_detail.stdout is search('(?m)^MD_DEGRADED=[1-9]')
+
+- name: Record the array's UUID
+  ansible.builtin.set_fact:
+    dedicated_host_md_uuid: >-
+      {{ dedicated_host_md_detail.stdout_lines | select('match', 'MD_UUID=') | first | regex_replace('^MD_UUID=', '') }}
+
+- name: Assemble the array under its name at boot
+  ansible.builtin.lineinfile:
+    path: /etc/mdadm/mdadm.conf
+    regexp: "^ARRAY .*UUID={{ dedicated_host_md_uuid }}"
+    line: "ARRAY {{ dedicated_host_md_device }} metadata=1.2 UUID={{ dedicated_host_md_uuid }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Update the initramfs
+
+- name: Probe the array for its encryption header
+  ansible.builtin.command:
+    argv: [/usr/sbin/blkid, --probe, --output, export, "{{ dedicated_host_md_device }}"]
+  register: dedicated_host_md_blkid
+  changed_when: false
+  failed_when: dedicated_host_md_blkid.rc not in [0, 2]
+
+- name: Classify what the array holds
+  ansible.builtin.set_fact:
+    dedicated_host_md_signatures: >-
+      {{ dedicated_host_md_blkid.stdout_lines | select('match', '^(PT)?TYPE=') | list }}
+
+- name: Refuse an array holding anything but this role's encryption
+  ansible.builtin.assert:
+    that: >-
+      dedicated_host_md_signatures | length == 0
+      or (dedicated_host_md_signatures == ['TYPE=crypto_LUKS']
+          and ('LABEL=' ~ dedicated_host_luks_label) in dedicated_host_md_blkid.stdout_lines)
+    fail_msg: "{{ dedicated_host_md_device }} holds {{ dedicated_host_md_signatures | join(', ') }}; nothing was changed."
+
+- name: Encrypt the array with the escrowed recovery passphrase as its first key
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/cryptsetup
+      - luksFormat
+      - --type=luks2
+      - --label={{ dedicated_host_luks_label }}
+      - --batch-mode
+      - --key-file=-
+      - "{{ dedicated_host_md_device }}"
+    stdin: "{{ dedicated_host_recovery_passphrase }}"
+    stdin_add_newline: false
+  when: dedicated_host_md_signatures | length == 0
+  changed_when: true
+  no_log: true
+
+# Every run proves the escrowed copy still opens the array, so a passphrase
+# that drifted from its escrow is found while Tang still works.
+- name: Test the escrowed recovery passphrase against the array
+  ansible.builtin.command:
+    argv: [/usr/sbin/cryptsetup, open, --test-passphrase, --key-file=-, "{{ dedicated_host_md_device }}"]
+    stdin: "{{ dedicated_host_recovery_passphrase }}"
+    stdin_add_newline: false
+  register: dedicated_host_passphrase_test
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Require the escrowed recovery passphrase to open the array
+  ansible.builtin.assert:
+    that: dedicated_host_passphrase_test.rc == 0
+    fail_msg: >-
+      The escrowed recovery passphrase does not open {{ dedicated_host_md_device }};
+      restore the right escrow version before anything else.
+
+- name: Look for the open storage mapping
+  ansible.builtin.stat:
+    path: /dev/mapper/{{ dedicated_host_luks_name }}
+    get_checksum: false
+  register: dedicated_host_mapping
+
+- name: Open the array with the recovery passphrase
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/cryptsetup
+      - open
+      - --key-file=-
+      - "{{ dedicated_host_md_device }}"
+      - "{{ dedicated_host_luks_name }}"
+    stdin: "{{ dedicated_host_recovery_passphrase }}"
+    stdin_add_newline: false
+  when: not dedicated_host_mapping.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Bind the array to Tang and prove it unlocks unattended
+  ansible.builtin.include_tasks: clevis.yml
+
+- name: Read the array's encryption UUID
+  ansible.builtin.command:
+    argv: [/usr/sbin/cryptsetup, luksUUID, "{{ dedicated_host_md_device }}"]
+  register: dedicated_host_luks_uuid
+  changed_when: false
+
+# _netdev orders the unlock after the network, where Tang is; nofail lets the
+# host boot to NetBird for a manual unlock when Tang cannot be reached.
+- name: Unlock the array at boot
+  ansible.builtin.lineinfile:
+    path: /etc/crypttab
+    regexp: "^{{ dedicated_host_luks_name }}\\s"
+    line: "{{ dedicated_host_luks_name }} UUID={{ dedicated_host_luks_uuid.stdout }} none luks,_netdev,nofail"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Let Clevis answer the boot-time unlock prompt from Tang
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+  loop:
+    - clevis-luks-askpass.path
+    - remote-cryptsetup.target
+
+- name: Start the Clevis unlock agent
+  ansible.builtin.systemd_service:
+    name: clevis-luks-askpass.path
+    state: started
+
+- name: Build the cell volume group and thin pool
+  ansible.builtin.include_tasks: volume_group.yml
+
+- name: Install the unit that waits for the unlocked cell storage
+  ansible.builtin.template:
+    src: exomem-cells-ready.service.j2
+    dest: /etc/systemd/system/{{ dedicated_host_ready_unit }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Create the K3s agent drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/k3s-agent.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Start the K3s agent only after the cell storage is ready
+  ansible.builtin.template:
+    src: k3s-agent-cells.conf.j2
+    dest: /etc/systemd/system/k3s-agent.service.d/10-exomem-cells.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply the boot configuration before reporting the storage ready
+  ansible.builtin.meta: flush_handlers
+
+- name: Mark the cell storage ready
+  ansible.builtin.systemd_service:
+    name: "{{ dedicated_host_ready_unit }}"
+    state: started

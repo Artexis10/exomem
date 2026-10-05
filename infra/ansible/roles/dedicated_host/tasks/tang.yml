@@ -1,0 +1,140 @@
+---
+# Tang on the K3s server (move-cloud-cells-to-local-storage 5.1). Its keys
+# come only from escrow, so a rebuilt server serves the same keys and every
+# agent's existing binding keeps unlocking.
+- name: Require the escrowed Tang keys
+  ansible.builtin.assert:
+    that: dedicated_host_tang_keys | length > 0
+    fail_msg: Pass dedicated_host_tang_keys from its SOPS file (docs/runbooks/hosted/dedicated-host.md).
+  no_log: true
+
+- name: Validate the escrowed Tang keys
+  ansible.builtin.set_fact:
+    dedicated_host_tang_files: "{{ dedicated_host_tang_keys | tang_key_files }}"
+  no_log: true
+
+# Before the package: its first start already listens where it should.
+- name: Create the Tang socket drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/tangd.socket.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Listen for Tang only on the server's private address
+  ansible.builtin.template:
+    src: tangd-socket.conf.j2
+    dest: /etc/systemd/system/tangd.socket.d/10-exomem.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the Tang socket
+
+- name: Install Tang
+  ansible.builtin.apt:
+    name: tang
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Read the Tang service definition
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, cat, tangd@.service]
+  register: dedicated_host_tangd_unit
+  changed_when: false
+
+- name: Find Tang's key directory
+  ansible.builtin.set_fact:
+    dedicated_host_tang_dir: >-
+      {{ dedicated_host_tangd_unit.stdout_lines | select('match', '^ExecStart=') | first
+         | split | last }}
+
+- name: Read the key directory's ownership
+  ansible.builtin.stat:
+    path: "{{ dedicated_host_tang_dir }}"
+    get_checksum: false
+  register: dedicated_host_tang_dir_stat
+  failed_when: not (dedicated_host_tang_dir_stat.stat.exists and dedicated_host_tang_dir_stat.stat.isdir)
+
+- name: Install the escrowed Tang keys
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ dedicated_host_tang_dir }}/{{ item.name }}"
+    owner: "{{ dedicated_host_tang_dir_stat.stat.pw_name }}"
+    group: "{{ dedicated_host_tang_dir_stat.stat.gr_name }}"
+    mode: "0440"
+  loop: "{{ dedicated_host_tang_files }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+- name: Find advertised Tang keys
+  ansible.builtin.find:
+    paths: "{{ dedicated_host_tang_dir }}"
+    patterns: "*.jwk"
+    hidden: false
+  register: dedicated_host_tang_found
+
+# Tang still recovers with a hidden key but no longer advertises it, so no new
+# binding can use a key that is not escrowed, and no existing one breaks.
+- name: Stop advertising Tang keys that are not escrowed
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/mv
+      - --no-clobber
+      - "{{ item }}"
+      - "{{ dedicated_host_tang_dir }}/.{{ item | basename }}"
+  loop: >-
+    {{ dedicated_host_tang_found.files | map(attribute='path')
+       | reject('in', dedicated_host_tang_files | map(attribute='name')
+                      | map('regex_replace', '^', dedicated_host_tang_dir ~ '/') | list)
+       | list }}
+  changed_when: true
+
+- name: Enable the Tang socket
+  ansible.builtin.systemd_service:
+    name: tangd.socket
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply the Tang socket address now
+  ansible.builtin.meta: flush_handlers
+
+# A TCP request needs the reply to reach it, so the source address is the
+# boundary here; Tang listens on the private address alone.
+- name: Read the Tang rules added earlier
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, show, added]
+  register: dedicated_host_tang_ufw
+  changed_when: false
+
+- name: Record the dedicated hosts' private addresses
+  ansible.builtin.set_fact:
+    dedicated_host_tang_clients: >-
+      {{ groups['dedicated_hosts'] | default([]) | map('extract', hostvars, 'private_node_ip') | list }}
+
+- name: Revoke Tang access for hosts no longer inventoried
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ dedicated_host_tang_port | string }}"
+    proto: tcp
+    comment: "{{ dedicated_host_tang_comment }}"
+    delete: true
+  loop: >-
+    {{ dedicated_host_tang_ufw.stdout_lines
+       | select('search', "comment '" ~ dedicated_host_tang_comment ~ "'$")
+       | map('regex_findall', ' from ([^ ]+) to any port ') | map('first')
+       | reject('in', dedicated_host_tang_clients) | list }}
+
+- name: Admit Tang from each dedicated host
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ dedicated_host_tang_port | string }}"
+    proto: tcp
+    comment: "{{ dedicated_host_tang_comment }}"
+  loop: "{{ dedicated_host_tang_clients }}"

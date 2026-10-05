@@ -1,0 +1,26 @@
+---
+# Disposable proof of the dedicated_host role on a GitHub runner
+# (.github/workflows/dedicated-host-bootstrap.yml). Loop devices stand in for
+# the two data disks, and the one runner is both the K3s server that runs
+# Tang and the dedicated agent. These are site.yml's Tang and storage plays,
+# without the hardening and K3s plays a runner cannot host.
+- name: Run the Tang key server for dedicated agents
+  hosts: hosted_nodes:!k3s_agents
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Run Tang with its escrowed keys
+      ansible.builtin.include_role:
+        name: dedicated_host
+        tasks_from: tang.yml
+
+- name: Encrypt the cell storage of agents Terraform does not create
+  hosts: dedicated_hosts
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  roles:
+    - dedicated_host

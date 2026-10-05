@@ -1,0 +1,164 @@
+name: Dedicated host bootstrap
+
+# Proves the dedicated_host role (openspec move-cloud-cells-to-local-storage
+# 5.1-5.3) on a disposable runner: RAID1 over two loop devices, LUKS2, Clevis
+# bound to a local Tang, the cells volume group and thin pool, a second run
+# that changes nothing, and unattended unlock. A runner cannot reboot, so the
+# boot path is proven by starting the crypttab unit with the mapping closed.
+on:
+  pull_request:
+    paths:
+      - "infra/ansible/roles/dedicated_host/**"
+      - "infra/ansible/ci-dedicated-host.yml"
+      - ".github/workflows/dedicated-host-bootstrap.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dedicated-host-bootstrap-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  loop-devices:
+    name: dedicated host role on loop devices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        # bash -eo pipefail, so a failed playbook behind tee fails the step.
+        shell: bash
+    env:
+      AGENT: exomem-agent-ci
+      ANSIBLE_FORCE_COLOR: "0"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install pinned Ansible
+        run: |
+          uv venv "$RUNNER_TEMP/ansible"
+          uv pip install --python "$RUNNER_TEMP/ansible/bin/python" "ansible-core==${ANSIBLE_CORE_VERSION}"
+          echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ansible/bin/ansible-galaxy" collection install -r infra/ansible/collections/requirements.yml
+      - name: Install the tools that stand in for the operator and the disks
+        timeout-minutes: 8
+        run: scripts/ci-apt-install.sh jose jq ufw e2fsprogs
+      - name: Create two blank data disks and one holding a filesystem
+        run: |
+          sudo install -d -m 0700 /var/tmp/w8-disks
+          for name in data0 data1 decoy; do sudo truncate -s 2G "/var/tmp/w8-disks/${name}.img"; done
+          data0=$(sudo losetup --find --show /var/tmp/w8-disks/data0.img)
+          data1=$(sudo losetup --find --show /var/tmp/w8-disks/data1.img)
+          decoy=$(sudo losetup --find --show /var/tmp/w8-disks/decoy.img)
+          sudo mkfs.ext4 -q -L w8-decoy "$decoy"
+          { echo "DATA0=$data0"; echo "DATA1=$data1"; echo "DECOY=$decoy"; } >> "$GITHUB_ENV"
+      # Test-only secrets, generated here and never printed: the passphrase
+      # and Tang keys a real host receives from SOPS.
+      - name: Generate the escrow stand-ins and the inventory
+        run: |
+          umask 077
+          keys=$( { jose jwk gen -i '{"alg":"ES512"}'; jose jwk gen -i '{"alg":"ECMR"}'; } | jq -cs '{keys: .}')
+          jq -n --arg passphrase "$(openssl rand -base64 48 | tr -d '\n')" --arg keys "$keys" \
+            '{"dedicated_host_recovery_passphrase_exomem_agent_ci": $passphrase, "dedicated_host_tang_keys": $keys}' \
+            > "$RUNNER_TEMP/escrow.json"
+          inventory() {
+            jq -n --arg d0 "$1" --arg d1 "$2" '{all: {
+              vars: {ansible_connection: "local", ansible_python_interpreter: "/usr/bin/python3"},
+              children: {hosted_nodes: {
+                hosts: {"exomem-alpha": {private_node_ip: "127.0.0.1"}},
+                children: {k3s_agents: {children: {dedicated_hosts: {hosts: {"exomem-agent-ci": {
+                  private_node_ip: "127.0.0.1", dedicated_host_data_disks: [$d0, $d1]}}}}}}}}}}'
+          }
+          inventory "$DECOY" "$DATA0" > "$RUNNER_TEMP/decoy-inventory.json"
+          inventory "$DATA0" "$DATA1" > "$RUNNER_TEMP/inventory.json"
+      - name: Refuse a named disk that holds a filesystem
+        timeout-minutes: 15
+        working-directory: infra/ansible
+        run: |
+          if ansible-playbook -i "$RUNNER_TEMP/decoy-inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+               ci-dedicated-host.yml > "$RUNNER_TEMP/decoy.log" 2>&1; then
+            cat "$RUNNER_TEMP/decoy.log"; echo "the role built an array over a filesystem"; exit 1
+          fi
+          grep -F "$DECOY holds ext4" "$RUNNER_TEMP/decoy.log"
+          sudo blkid --probe --output export "$DECOY" | grep -x 'TYPE=ext4'
+          sudo e2fsck -fn "$DECOY"
+          if sudo blkid --probe "$DATA0"; then echo "the blank disk beside the decoy was written"; exit 1; fi
+      - name: First run builds RAID1, LUKS, Clevis, the volume group and the pool
+        timeout-minutes: 15
+        working-directory: infra/ansible
+        run: ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" ci-dedicated-host.yml
+      - name: Show the storage stack
+        run: |
+          cat /proc/mdstat
+          sudo mdadm --detail /dev/md/exomem-cells | grep -E 'Raid Level|Active Devices|State :'
+          sudo mdadm --detail --export /dev/md/exomem-cells | grep -x 'MD_LEVEL=raid1'
+          sudo cryptsetup status exomem_cells | grep -E 'type:|cipher:|device:'
+          sudo cryptsetup luksDump /dev/md/exomem-cells | grep -E '^  [0-9]+: (luks2|clevis)$'
+          sudo clevis luks list -d /dev/md/exomem-cells | grep -F 'http://127.0.0.1:7500'
+          sudo vgs cells
+          sudo lvs -o lv_name,lv_attr,lv_size,data_percent,metadata_percent,chunk_size cells
+          sudo lvs --noheadings -o lv_attr cells/pool0 | grep -E '^ *t'
+          lsblk -o NAME,TYPE,SIZE,FSTYPE "$DATA0" "$DATA1"
+      - name: Second run changes nothing
+        working-directory: infra/ansible
+        run: |
+          ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+            ci-dedicated-host.yml | tee "$RUNNER_TEMP/second.log"
+          grep -E '^(exomem-alpha|exomem-agent-ci) +: ok=' "$RUNNER_TEMP/second.log"
+          if grep -E ' changed=[1-9]' "$RUNNER_TEMP/second.log"; then echo "the second run changed something"; exit 1; fi
+      - name: Clevis unlocks the closed array from Tang alone
+        run: |
+          sudo vgchange --activate n cells
+          sudo cryptsetup close exomem_cells
+          test ! -e /dev/mapper/exomem_cells
+          sudo clevis luks unlock -d /dev/md/exomem-cells -n exomem_cells
+          sudo vgchange --activate y cells
+          sudo lvs --noheadings -o lv_attr cells/pool0 | grep -E '^ *t.{3}a'
+      # The boot path short of a reboot: the closed array, the crypttab unit
+      # answered by clevis-luks-askpass, and a K3s agent (a stub with the real
+      # drop-in) that waits for exomem-cells-ready until the unlock lands.
+      - name: K3s waits for the crypttab unlock, which Tang answers unattended
+        run: |
+          printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' \
+            | sudo tee /etc/systemd/system/k3s-agent.service > /dev/null
+          sudo systemctl daemon-reload
+          sudo systemctl stop exomem-cells-ready.service
+          sudo vgchange --activate n cells
+          sudo cryptsetup close exomem_cells
+          sudo systemctl start --no-block k3s-agent.service
+          sleep 10
+          test "$(systemctl is-active exomem-cells-ready.service)" = activating
+          test "$(systemctl is-active k3s-agent.service)" != active
+          sudo timeout 120 systemctl start systemd-cryptsetup@exomem_cells.service
+          for _ in $(seq 60); do
+            [ "$(systemctl is-active k3s-agent.service)" = active ] && break
+            sleep 2
+          done
+          systemctl is-active exomem-cells-ready.service k3s-agent.service
+          test -b /dev/mapper/exomem_cells
+          sudo lvs --noheadings -o lv_attr cells/pool0 | grep -E '^ *t.{3}a'
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Dedicated host bootstrap on loop devices"
+            echo
+            echo "Proven on a disposable runner: the disk guard, RAID1, LUKS2, a Clevis Tang"
+            echo "binding pinned to the escrowed signing key, the cells volume group and thin"
+            echo "pool, an idempotent second run, and unattended unlock (clevis luks unlock, and"
+            echo "the crypttab unit with K3s waiting on it). Not proven: a reboot, which a runner"
+            echo "cannot do; that stays task 5.3's hardware evidence."
+            echo
+            echo '```'
+            lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS "$DATA0" "$DATA1" 2>/dev/null || true
+            grep -E '^(exomem-alpha|exomem-agent-ci) +: ok=' "$RUNNER_TEMP/second.log" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

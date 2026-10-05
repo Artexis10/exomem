@@ -27,6 +27,16 @@ def _parser() -> argparse.ArgumentParser:
             "name keep their public IPv4."
         ),
     )
+    parser.add_argument(
+        "--dedicated-hosts",
+        type=Path,
+        help=(
+            "Private JSON object of K3s agents Terraform does not create (dedicated or "
+            "auction servers, other providers), keyed by inventory name: ipv4, "
+            "admin_address, private_ip, link (wireguard or vswitch), data_disks and "
+            "optional wipe."
+        ),
+    )
     return parser
 
 
@@ -102,6 +112,82 @@ def _agent_hosts(document: dict[str, Any], user: str) -> dict[str, dict[str, str
     return hosts
 
 
+def _vswitch(document: dict[str, Any]) -> dict[str, Any] | None:
+    """The foundation's optional vSwitch subnet, or None when it is off."""
+    if "vswitch" not in document:
+        return None
+    item = document["vswitch"]
+    if not isinstance(item, dict) or item.get("sensitive") is not False:
+        raise ValueError("vswitch must be an explicit non-sensitive Terraform output")
+    value = item.get("value")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("vlan_id"), int):
+        raise ValueError("vswitch must carry a VLAN ID and its subnet")
+    return {
+        "vlan_id": value["vlan_id"],
+        "subnet": ipaddress.ip_network(str(value.get("subnet_cidr"))),
+        "gateway": str(ipaddress.ip_address(str(value.get("gateway")))),
+        "network": str(ipaddress.ip_network(str(value.get("network_cidr")))),
+    }
+
+
+def _dedicated_hosts(
+    path: Path, user: str, vswitch: dict[str, Any] | None
+) -> dict[str, dict[str, Any]]:
+    """Validated coordinates for K3s agents an operator installed by hand.
+
+    They join k3s_agents like a Terraform agent, and the dedicated_hosts group
+    that encrypts their data disks. Their administration address replaces the
+    public one, as for every other host administered over NetBird.
+    """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("dedicated hosts must be a JSON object keyed by host name")
+    hosts: dict[str, dict[str, Any]] = {}
+    for name, host in document.items():
+        if not isinstance(name, str) or not _AGENT_NAME.match(name):
+            raise ValueError("each dedicated host must be named exomem-agent-<key>")
+        if not isinstance(host, dict):
+            raise ValueError(f"{name} must be an object")
+        disks = host.get("data_disks")
+        if (
+            not isinstance(disks, list)
+            or len(disks) != 2
+            or len(set(disks)) != 2
+            or not all(isinstance(disk, str) and disk.startswith("/dev/") for disk in disks)
+        ):
+            raise ValueError(f"{name} needs exactly two distinct /dev/ data disks for RAID1")
+        wipe = host.get("wipe", [])
+        if not isinstance(wipe, list) or not set(wipe) <= set(disks):
+            raise ValueError(f"{name} may only wipe its own data disks")
+        private_ip = ipaddress.ip_address(str(host.get("private_ip")))
+        coordinates: dict[str, Any] = {
+            "ansible_host": str(ipaddress.ip_address(str(host.get("admin_address")))),
+            "ansible_user": user,
+            "private_node_ip": str(private_ip),
+            "public_ipv4": str(ipaddress.IPv4Address(str(host.get("ipv4")))),
+            "dedicated_host_data_disks": disks,
+        }
+        if wipe:
+            coordinates["dedicated_host_wipe_disks"] = wipe
+        link = host.get("link")
+        if link == "vswitch":
+            if vswitch is None or private_ip not in vswitch["subnet"]:
+                raise ValueError(f"{name} must sit in the foundation's vSwitch subnet")
+            coordinates["k3s_vswitch"] = {
+                "vlan_id": vswitch["vlan_id"],
+                "address": f"{private_ip}/{vswitch['subnet'].prefixlen}",
+                "gateway": vswitch["gateway"],
+                "network": vswitch["network"],
+            }
+        elif link != "wireguard":
+            raise ValueError(f"{name} link must be wireguard or vswitch")
+        coordinates["k3s_private_link"] = link
+        hosts[name] = coordinates
+    return hosts
+
+
 def main() -> int:
     args = _parser().parse_args()
     if args.terraform_output.stat().st_mode & 0o777 != 0o600:
@@ -123,6 +209,19 @@ def main() -> int:
         admin_addresses = (
             _admin_addresses(args.admin_addresses) if args.admin_addresses else {}
         )
+        dedicated = (
+            _dedicated_hosts(args.dedicated_hosts, args.user, _vswitch(document))
+            if args.dedicated_hosts
+            else {}
+        )
+        if set(dedicated) & ({"exomem-alpha", "substrate-control-01"} | set(agents)):
+            raise ValueError("a dedicated host reuses another node's name")
+        node_ips = [private_ip, control_private_ip] + [
+            host["private_node_ip"] for host in (*agents.values(), *dedicated.values())
+        ]
+        taken = [address for address in node_ips if address is not None]
+        if len(taken) != len(set(taken)):
+            raise ValueError("every node needs its own private address")
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
@@ -142,6 +241,15 @@ def main() -> int:
     # variables; site.yml's server play targets hosted_nodes:!k3s_agents.
     if agents:
         children["hosted_nodes"]["children"] = {"k3s_agents": {"hosts": agents}}
+
+    # Hosts Terraform does not create are agents too, in a child group the
+    # dedicated_host role targets. Their administration address comes with
+    # them, so the --admin-addresses map below never touches them.
+    if dedicated:
+        k3s_agents = children["hosted_nodes"].setdefault("children", {}).setdefault(
+            "k3s_agents", {}
+        )
+        k3s_agents["children"] = {"dedicated_hosts": {"hosts": dedicated}}
 
     # The control database server is optional here: not every Terraform
     # output set carries it yet (e.g. an apply that predates D12), so it is

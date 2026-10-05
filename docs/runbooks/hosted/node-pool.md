@@ -7,6 +7,9 @@ Add or remove an Exomem Cloud K3s agent node (openspec
 server. cellctl needs no change: it counts a node once the node's CSINode
 publishes a volume-attachment limit, and zeroes it once the Node is deleted.
 Reserved agents publish zero general cell slots, retaining actual attachment counts.
+For an agent Terraform does not create (a dedicated, auction or other-provider
+server with encrypted local cell storage), follow
+[dedicated-host.md](dedicated-host.md) instead.
 
 ## Preconditions
 

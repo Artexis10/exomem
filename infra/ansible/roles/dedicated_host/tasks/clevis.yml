@@ -1,0 +1,67 @@
+---
+# Unattended unlock is proven on every run: a binding that no longer decrypts
+# (Tang re-keyed without its escrow) would otherwise surface only at the next
+# reboot, as an agent that waits for an operator.
+- name: Read the array's Clevis bindings
+  ansible.builtin.command:
+    argv: [/usr/bin/clevis, luks, list, -d, "{{ dedicated_host_md_device }}"]
+  register: dedicated_host_clevis_list
+  changed_when: false
+  failed_when: false
+
+- name: Test each Tang binding against the live Tang server
+  ansible.builtin.shell: >-
+    /usr/bin/clevis luks pass -d {{ dedicated_host_md_device | quote }} -s {{ item | quote }} >/dev/null
+  loop: "{{ dedicated_host_clevis_list.stdout | clevis_tang_slots(dedicated_host_tang_url) }}"
+  register: dedicated_host_clevis_pass
+  changed_when: false
+  failed_when: false
+
+- name: Count the Tang bindings that unlock the array
+  ansible.builtin.set_fact:
+    dedicated_host_tang_working: >-
+      {{ dedicated_host_clevis_pass.results | default([]) | selectattr('rc', 'equalto', 0) | list | length }}
+
+- name: Bind the array to Tang, pinned to the escrowed signing key
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/clevis
+      - luks
+      - bind
+      - -y
+      - -d
+      - "{{ dedicated_host_md_device }}"
+      - -k
+      - "-"
+      - tang
+      - "{{ {'url': dedicated_host_tang_url, 'thp': dedicated_host_tang_thumbprint} | to_json }}"
+    stdin: "{{ dedicated_host_recovery_passphrase }}"
+    stdin_add_newline: false
+  when: dedicated_host_tang_working | int == 0
+  changed_when: true
+  no_log: true
+
+- name: Read the Clevis bindings after binding
+  ansible.builtin.command:
+    argv: [/usr/bin/clevis, luks, list, -d, "{{ dedicated_host_md_device }}"]
+  register: dedicated_host_clevis_rebound
+  changed_when: false
+  when: dedicated_host_tang_working | int == 0
+
+- name: Test the new Tang binding
+  ansible.builtin.shell: >-
+    /usr/bin/clevis luks pass -d {{ dedicated_host_md_device | quote }} -s {{ item | quote }} >/dev/null
+  loop: "{{ dedicated_host_clevis_rebound.stdout | default('') | clevis_tang_slots(dedicated_host_tang_url) }}"
+  register: dedicated_host_clevis_repass
+  changed_when: false
+  failed_when: false
+  when: dedicated_host_tang_working | int == 0
+
+- name: Require Tang to unlock the array without an operator
+  ansible.builtin.assert:
+    that: >-
+      dedicated_host_tang_working | int > 0
+      or dedicated_host_clevis_repass.results | default([]) | selectattr('rc', 'equalto', 0) | list | length > 0
+    fail_msg: >-
+      No Clevis binding to {{ dedicated_host_tang_url }} unlocks {{ dedicated_host_md_device }};
+      this agent would wait for a manual unlock after every reboot.

@@ -206,7 +206,10 @@ def test_site_playbook_provisions_control_database_server_separately() -> None:
     assert "- postgres" in site
     # Independent plays, so a control-database failure never touches the
     # fleet-node plays (harden, server, agents), and vice versa.
-    assert site.count("any_errors_fatal: true") == 4
+    import yaml
+    plays = yaml.safe_load(site)
+    assert [play["hosts"] for play in plays].count("control_nodes") == 1
+    assert all(play["any_errors_fatal"] is True for play in plays)
 
 
 def test_postgres_role_pins_version_and_separates_public_from_private_roles() -> None:

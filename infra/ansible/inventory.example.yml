@@ -15,6 +15,20 @@ all:
               ansible_host: 192.0.2.31
               ansible_user: root
               private_node_ip: 10.50.1.31
+          children:
+            # Agents Terraform does not create (generate_ansible_inventory.py
+            # --dedicated-hosts); see docs/runbooks/hosted/dedicated-host.md.
+            dedicated_hosts:
+              hosts:
+                exomem-agent-dx1:
+                  ansible_host: 100.64.0.40
+                  ansible_user: exomem-admin
+                  private_node_ip: 10.51.0.40
+                  public_ipv4: 203.0.113.40
+                  k3s_private_link: wireguard
+                  dedicated_host_data_disks:
+                    - /dev/disk/by-id/nvme-example-a-part4
+                    - /dev/disk/by-id/nvme-example-b-part4
     control_nodes:
       hosts:
         substrate-control-01:

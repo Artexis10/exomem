@@ -1,0 +1,43 @@
+---
+# A K3s agent on a machine Terraform does not create (move-cloud-cells-to-local-storage
+# D2): md RAID1 over its two data disks, LUKS2 on the array, Clevis bound to Tang
+# on the K3s server, and the volume group TopoLVM provisions cells from.
+
+# From the inventory (generate_ansible_inventory.py --dedicated-hosts).
+dedicated_host_data_disks: []
+# A data disk whose existing signature the operator has named for erasure.
+# Used only while the array does not exist yet; drop it from the input after.
+dedicated_host_wipe_disks: []
+
+dedicated_host_md_name: exomem-cells
+dedicated_host_md_device: /dev/md/exomem-cells
+dedicated_host_luks_label: exomem-cells
+dedicated_host_luks_name: exomem_cells
+# TopoLVM's thin device class names this volume group and pool.
+dedicated_host_volume_group: cells
+dedicated_host_thin_pool: pool0
+dedicated_host_ready_unit: exomem-cells-ready.service
+dedicated_host_packages:
+  - clevis
+  - clevis-luks
+  - clevis-systemd
+  - lvm2
+  - mdadm
+  - thin-provisioning-tools
+
+# Each host's recovery passphrase is its own SOPS Ansible variable, named
+# after the host, so one run can carry several hosts' without mixing them up.
+dedicated_host_recovery_passphrase: >-
+  {{ lookup('ansible.builtin.vars',
+            'dedicated_host_recovery_passphrase_' ~ (inventory_hostname | regex_replace('[^A-Za-z0-9]', '_')),
+            default='') }}
+
+# Tang runs on the one K3s server and listens only on its private address.
+# Its key set is escrowed; the agents pin its signing key's thumbprint.
+dedicated_host_tang_keys: ""
+dedicated_host_tang_port: 7500
+dedicated_host_tang_comment: Exomem Tang
+dedicated_host_tang_server: >-
+  {{ (groups['hosted_nodes'] | default([])) | difference(groups['k3s_agents'] | default([])) | first | default('') }}
+dedicated_host_tang_url: >-
+  http://{{ hostvars[dedicated_host_tang_server]['private_node_ip'] | default('') }}:{{ dedicated_host_tang_port }}
