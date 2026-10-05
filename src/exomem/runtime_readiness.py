@@ -451,25 +451,37 @@ def build_runtime_readiness(
 
 
 _TAIL_BLOCK_BYTES = 8192
+_TAIL_LINE_MAX_BYTES = 1024 * 1024
 
 
 def _last_line(path: Path) -> str:
     """The file's last line, read from the end so a probe costs one block, not
     the whole (up to rotation-size) journal. A single trailing newline ends the
-    last line rather than starting an empty one."""
+    last line rather than starting an empty one. A line over the cap raises
+    ValueError: a torn file must not stall the probe."""
     with path.open("rb") as handle:
-        position = handle.seek(0, os.SEEK_END)
-        tail = b""
-        while position > 0:
-            step = min(_TAIL_BLOCK_BYTES, position)
-            position -= step
-            handle.seek(position)
-            tail = handle.read(step) + tail
-            if b"\n" in tail[:-1]:
+        end = handle.seek(0, os.SEEK_END)
+        if end:
+            handle.seek(end - 1)
+            if handle.read(1) == b"\n":
+                end -= 1
+        parts: list[bytes] = []
+        length = 0
+        while end > 0:
+            step = min(_TAIL_BLOCK_BYTES, end)
+            end -= step
+            handle.seek(end)
+            block = handle.read(step)
+            newline = block.rfind(b"\n")
+            if newline >= 0:
+                block = block[newline + 1:]
+            parts.append(block)
+            length += len(block)
+            if length > _TAIL_LINE_MAX_BYTES:
+                raise ValueError("journal last line exceeds the probe cap")
+            if newline >= 0:
                 break
-    if tail.endswith(b"\n"):
-        tail = tail[:-1]
-    return tail.rsplit(b"\n", 1)[-1].decode("utf-8")
+    return b"".join(reversed(parts)).decode("utf-8")
 
 
 def _measure_observability() -> dict[str, Any]:

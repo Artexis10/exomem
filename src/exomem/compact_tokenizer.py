@@ -53,9 +53,10 @@ _WHITESPACE = (
 
 #: Text the build-time check encodes with both tokenizers. It covers what
 #: differs between Unigram implementations: scripts without spaces, ZWJ
-#: sequences, literal special tokens in the text, repeated characters (equal
-#: sums, so tie-breaking), control characters, a very long word and a text long
-#: enough to be truncated (appended in `_probes`).
+#: sequences, repeated characters (equal sums, so tie-breaking), control
+#: characters, a very long word and a text long enough to be truncated. Literal
+#: special tokens in the text are probed too, built from the tokenizer's own
+#: added tokens (see `_probes`).
 _PROBES = (
     "Café naïve résumé coöperate",
     "東京都の天気は晴れです。今日は良い日",
@@ -65,10 +66,6 @@ _PROBES = (
     "ภาษาไทยไม่มีช่องว่าง",
     "emoji 👩‍💻🏳️‍🌈 👍🏽 test",
     "ﬁ ligature ＦＵＬＬ ①②",
-    "<s> </s> <pad> <unk> <mask> literal specials",
-    "x<mask>y <s>z",
-    "a <mask> b",
-    "a\u001f<mask>\u001f b",
     "control\x01\x02\x7f chars",
     "^obs-ccc85a8aac24",
     "547-12fff863",
@@ -259,17 +256,15 @@ def from_hf(hf, *, max_length: int, pad_id: int) -> CompactUnigramTokenizer | No
     """
     try:
         compact = _build(hf, max_length, pad_id)
+        # Control: this prevents silent tokenization drift, which would make vectors
+        # inconsistent with the stored index, if a future `tokenizers` changes Unigram
+        # semantics. Fired wrongly it costs today's memory (HF is kept); the operator's
+        # capacity pays. The check is content-free in its log.
+        if compact is not None and not _agrees(hf, compact, max_length):
+            log_event(log, logging.WARNING, "compact_tokenizer_fallback", fields={"reason": "parity"})
+            return None
     except Exception:  # noqa: BLE001 - an optimisation must never fail a model load
         log_event(log, logging.WARNING, "compact_tokenizer_fallback", fields={"reason": "build_error"})
-        return None
-    if compact is None:
-        return None
-    # Control: this prevents silent tokenization drift, which would make vectors
-    # inconsistent with the stored index, if a future `tokenizers` changes Unigram
-    # semantics. Fired wrongly it costs today's memory (HF is kept); the operator's
-    # capacity pays. The check is content-free in its log.
-    if not _agrees(hf, compact, max_length):
-        log_event(log, logging.WARNING, "compact_tokenizer_fallback", fields={"reason": "parity"})
         return None
     return compact
 
@@ -278,6 +273,8 @@ def _build(hf, max_length: int, pad_id: int) -> CompactUnigramTokenizer | None:
     spec = json.loads(hf.to_str())
     model = spec.get("model") or {}
     if model.get("type") != "Unigram" or model.get("byte_fallback") or not isinstance(model.get("unk_id"), int):
+        return None
+    if not _metaspace_always(spec.get("pre_tokenizer")):
         return None
     added = spec.get("added_tokens") or []
     if not all(t["special"] and not t["normalized"] and not t["single_word"] for t in added):
@@ -310,6 +307,20 @@ def _build(hf, max_length: int, pad_id: int) -> CompactUnigramTokenizer | None:
     )
 
 
+def _metaspace_always(pre_tokenizer: dict | None) -> bool:
+    """Whether every Metaspace in the pre-tokenizer prepends its space to every piece.
+
+    Text is cut around added tokens and each piece pre-tokenized alone. That is
+    HF's result only when each piece gets the prefix; "first" and "never" depend
+    on position in the whole text.
+    """
+    if not pre_tokenizer:
+        return True
+    if pre_tokenizer.get("type") == "Metaspace" and pre_tokenizer.get("prepend_scheme") != "always":
+        return False
+    return all(_metaspace_always(child) for child in pre_tokenizer.get("pretokenizers") or [])
+
+
 def _single_template(processor: dict | None) -> tuple[list[int], list[int]] | None:
     """Ids of the special tokens before and after `$A` in a TemplateProcessing, if that is all it is."""
     if not processor or processor.get("type") != "TemplateProcessing":
@@ -334,12 +345,17 @@ def _single_template(processor: dict | None) -> tuple[list[int], list[int]] | No
     return (prefix, suffix) if seen_text and (prefix or suffix) else None
 
 
-def _probes(max_length: int) -> list[str]:
-    return [*_PROBES, "word " * (max_length + 8)]
+def _probes(compact: CompactUnigramTokenizer, max_length: int) -> list[str]:
+    specials = [
+        text
+        for token in compact._added
+        for text in (f"x{token}y {token}z{token}", f"a\u001f{token}\u001f b")
+    ]
+    return [*_PROBES, *specials, " ".join(compact._added), "word " * (max_length + 8)]
 
 
 def _agrees(hf, compact: CompactUnigramTokenizer, max_length: int) -> bool:
-    texts = _probes(max_length)
+    texts = _probes(compact, max_length)
     for batch in (texts, *([text] for text in texts)):
         expected = hf.encode_batch(batch)
         actual = compact.encode_batch(batch)

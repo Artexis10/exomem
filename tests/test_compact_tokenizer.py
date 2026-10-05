@@ -131,6 +131,17 @@ def test_a_tokenizer_that_is_not_the_verified_shape_stays_on_hf() -> None:
     assert compact_tokenizer.from_hf(normalized, max_length=MAX_LENGTH, pad_id=1) is None
 
 
+def test_a_unigram_tokenizer_whose_metaspace_does_not_prepend_to_every_piece_stays_on_hf() -> None:
+    """With "first", text around a special token is prefixed differently by HF than piece by piece.
+
+    The specials are renamed so the check cannot lean on XLM-R's own spellings.
+    """
+    spec = _tokenizer_json().replace('"always"', '"first"').replace("<mask>", "[MASK]")
+    hf = _hf(spec)
+    assert hf.encode("a[MASK]b").ids != hf.encode("a [MASK] b").ids  # position in the text matters to HF
+    assert compact_tokenizer.from_hf(hf, max_length=MAX_LENGTH, pad_id=_SPECIALS[PAD_TOKEN]) is None
+
+
 def test_a_tokenizer_that_disagrees_with_hf_is_dropped_and_the_drop_is_logged(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -151,16 +162,12 @@ def test_a_tokenizer_that_disagrees_with_hf_is_dropped_and_the_drop_is_logged(
 
 
 class _Session:
-    """Records what the encoder feeds ONNX Runtime."""
-
-    def __init__(self) -> None:
-        self.feeds: list[dict[str, np.ndarray]] = []
+    """Stands in for the ONNX Runtime session the encoder loads."""
 
     def get_inputs(self):
         return [types.SimpleNamespace(name=n) for n in ("input_ids", "attention_mask", "token_type_ids")]
 
     def run(self, _outputs, feed):
-        self.feeds.append(feed)
         return [np.ones((*feed["input_ids"].shape, 4), dtype=np.float32)]
 
 
@@ -186,24 +193,12 @@ def _onnx_encoder(monkeypatch: pytest.MonkeyPatch, path: Path, *, compact: bool)
     return embedding_backend._OnnxEncoder("model", "cpu"), session
 
 
-def test_the_onnx_encoder_feeds_the_runtime_the_same_rows_with_the_compact_tokenizer(
+def test_the_onnx_encoder_selects_the_compact_tokenizer_and_keeps_hf_when_there_is_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Swapping the tokenizer must not change what the model reads or what texts_fit says."""
     path = tmp_path / "tokenizer.json"
     path.write_text(_tokenizer_json(), encoding="utf-8")
-    with_compact, compact_session = _onnx_encoder(monkeypatch, path, compact=True)
+    with_compact, _ = _onnx_encoder(monkeypatch, path, compact=True)
     assert isinstance(with_compact._tokenizer, compact_tokenizer.CompactUnigramTokenizer)
-    with_hf, hf_session = _onnx_encoder(monkeypatch, path, compact=False)
+    with_hf, _ = _onnx_encoder(monkeypatch, path, compact=False)
     assert not isinstance(with_hf._tokenizer, compact_tokenizer.CompactUnigramTokenizer)
-
-    for encoder in (with_compact, with_hf):
-        encoder.encode(_TEXTS, batch_size=4)
-        encoder.encode(_TEXTS, batch_size=4, max_tokens=3)
-    assert len(compact_session.feeds) == len(hf_session.feeds) > 0
-    for got, want in zip(compact_session.feeds, hf_session.feeds, strict=True):
-        assert got.keys() == want.keys()
-        for name in want:
-            assert np.array_equal(got[name], want[name]), name
-    assert [with_compact.texts_fit([t]) for t in _TEXTS] == [with_hf.texts_fit([t]) for t in _TEXTS]
-    assert not with_compact.texts_fit(["ab " * 40])

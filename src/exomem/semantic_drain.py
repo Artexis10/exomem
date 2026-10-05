@@ -150,8 +150,6 @@ class SemanticDrain:
         self._hints: set[str] = set()
         self._scan_after = 0
         self._scan_through: int | None = None
-        # Earliest time-gated retry seen in the current sweep (epoch seconds).
-        self._sweep_retry_at: float | None = None
         self._proofs: OrderedDict[str, Any] = OrderedDict()
 
     def start(self) -> SemanticDrain:
@@ -228,7 +226,6 @@ class SemanticDrain:
         )
         if not page:
             self._scan_after = 0
-            self._sweep_retry_at = None
             self._scan_through = deferred_index.semantic_scan_ceiling(self.root)
             page = deferred_index.snapshot(
                 self.root, after_rowid=0, through_rowid=self._scan_through, limit=SCAN_LIMIT,
@@ -274,10 +271,6 @@ class SemanticDrain:
                 receipt, input_signature=signature, policy=policy, now=time.time()
             ):
                 overhead += time.monotonic() - began
-                if receipt.failure_code != "resource_budget_exceeded":
-                    retry_at = receipt.next_attempt_at
-                    if self._sweep_retry_at is None or retry_at < self._sweep_retry_at:
-                        self._sweep_retry_at = retry_at
                 continue
             small = _small_parent(self.root, path)
             overhead += time.monotonic() - began
@@ -294,8 +287,7 @@ class SemanticDrain:
             else:
                 with self._lock:
                     if self._bulk_path is not None:
-                        runnable_pending = True
-                        continue
+                        continue  # the bulk thread wakes the loop when it finishes
                     attempted += 1
                     self._bulk_path = receipt.rel_path
                     thread = threading.Thread(
@@ -311,16 +303,19 @@ class SemanticDrain:
             self._hints.update(sorted(hints - seen)[:max(0, SCAN_LIMIT - len(self._hints))])
         if progressed:
             return True, MIN_WAKE_SECONDS
-        if len(page) < SCAN_LIMIT and not runnable_pending:
+        if not page or page[-1].scan_rowid >= self._scan_through:
             # The sweep finished: only rows past its frozen tail (arrivals no
             # hint announced) are runnable debt for the next one.
-            runnable_pending = deferred_index.semantic_scan_ceiling(self.root) > self._scan_through
+            runnable_pending = runnable_pending or deferred_index.semantic_scan_ceiling(self.root) > self._scan_through
         else:
             runnable_pending = True
-        wait = RETRY_POLL_SECONDS if runnable_pending else IDLE_POLL_SECONDS
-        if self._sweep_retry_at is not None:
-            wait = min(wait, max(MIN_WAKE_SECONDS, self._sweep_retry_at - time.time()))
-        return False, wait
+        if runnable_pending:
+            return False, RETRY_POLL_SECONDS
+        now = time.time()
+        due = deferred_index.semantic_next_retry_at(self.root, after=now)
+        if due is None:
+            return False, IDLE_POLL_SECONDS
+        return False, min(IDLE_POLL_SECONDS, max(MIN_WAKE_SECONDS, due - now))
 
     def _bulk(self, receipt, signature: str, policy: str) -> None:
         try:
