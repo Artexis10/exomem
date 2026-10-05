@@ -472,9 +472,25 @@ CARRIED_GOLD = "carried_gold"
 AGENT_CHOICE = "agent_choice"
 #: A10: invalid twins (see :data:`INVALID_TWINS`).
 INVALID_TWIN = "invalid_twin"
+#: S1 (v5): see :data:`V5_AMENDMENTS`.
+UNIT_PAGE = "unit_page"
+#: T6 (v5): see :data:`V5_AMENDMENTS`.
+PARTIAL_ABSTAIN_HEDGE = "partial_abstain_hedge"
 AMENDMENTS: frozenset[str] = frozenset(
-    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD, AGENT_CHOICE, INVALID_TWIN}
+    {
+        UNIT_PARENT_RECALL,
+        HEDGED_POISON,
+        AMBIGUITY_PRECISION,
+        CARRIED_GOLD,
+        AGENT_CHOICE,
+        INVALID_TWIN,
+        UNIT_PAGE,
+        PARTIAL_ABSTAIN_HEDGE,
+    }
 )
+#: The v5 scorer: the two instrument corrections ruled on 2026-10-05, applied
+#: together and reported in their own column beside raw v4.
+V5_AMENDMENTS: tuple[str, ...] = (UNIT_PAGE, PARTIAL_ABSTAIN_HEDGE)
 
 #: Amendment A10, as pre-registered: negative twins whose turn a
 #: pre-registered fixture page genuinely answers. The twin's premise (empty
@@ -483,10 +499,6 @@ AMENDMENTS: frozenset[str] = frozenset(
 #: "invalid, excluded" rather than scored. Raw still scores it as-is, and the
 #: fixture page itself is frozen. twin -> (fixture page key, reason).
 INVALID_TWINS: dict[str, tuple[str, str]] = {
-    "T1": (
-        "t1_fitness_goal_note",
-        "the turn is about a step-count goal, and this pre-registered page (C1's poison) records one",
-    ),
     "T2": (
         "t2_camera_gear_note",
         "latent: the turn is about photographing a dish, and this pre-registered page (C2's poison) "
@@ -741,7 +753,7 @@ def score_case(
     unknown_amendments = sorted(applied - AMENDMENTS)
     if unknown_amendments:
         raise ValueError(f"unknown amendment(s) {unknown_amendments}")
-    for needs_parents in (UNIT_PARENT_RECALL, CARRIED_GOLD):
+    for needs_parents in (UNIT_PARENT_RECALL, CARRIED_GOLD, UNIT_PAGE):
         if needs_parents in applied and unit_parents is None:
             raise ValueError(f"{needs_parents} needs a frozen unit_parents map")
 
@@ -767,6 +779,24 @@ def score_case(
     false_activation_candidates = _false_activation_candidates(packet)
     credited = _credited_superseded_refs(packet) - set(all_bound_projections)
 
+    # S1 (v5): a `<page>#unit-` fragment of a bound page is that page in every
+    # channel. Only fragments of pages the frozen map names collapse. A credited
+    # superseded unit stays its own ref, as in raw: it is excluded, not mapped.
+    def page_of(ref: str) -> str:
+        if UNIT_PAGE not in applied or unit_parents is None or ref in credited:
+            return ref
+        parent, separator, fragment = ref.partition("#")
+        if separator and fragment.startswith("unit-") and parent in unit_parents:
+            return unit_parents[parent]
+        return ref
+
+    unit_pages = {unit.ref: page_of(unit.ref) for unit in packet.units}
+    fragment_pages = {
+        unit_pages[unit.ref]
+        for unit in packet.units
+        if unit_pages[unit.ref] != unit.ref and unit.ref not in credited
+    }
+
     gold_refs = tuple(ref_for(key) for key in fixture.gold)
     poison_refs = tuple(ref_for(key) for key in fixture.poison)
     if reference_binding is None:
@@ -781,7 +811,7 @@ def score_case(
         identity_mentions.update(valid_projections.values())
 
     # A2: recall only. The unit keeps its own ref in every other channel.
-    recall_mentions = set(identity_mentions)
+    recall_mentions = set(identity_mentions) | set(unit_pages.values())
     if UNIT_PARENT_RECALL in applied and unit_parents is not None:
         for unit in packet.units:
             parent, separator, fragment = unit.ref.partition("#")
@@ -823,9 +853,26 @@ def score_case(
                 )
             }
 
+    # T6 (v5, Hugo 2026-10-05, pre-registered by the spec's hedge scenario): an
+    # unresolved-expected twin that abstains with only `partial` anchors is the
+    # run's hedge. The listed candidates are the hedge itself, so
+    # they are not poison. Any unit, pointer, current-state entry or ambiguity
+    # candidate disqualifies it.
+    partial_only_hedge = (
+        PARTIAL_ABSTAIN_HEDGE in applied
+        and fixture.case_id.startswith("T")
+        and fixture.expected_status == "unresolved"
+        and packet.abstained
+        and bool(packet.anchors)
+        and all(anchor.status == "partial" for anchor in packet.anchors)
+        and not (packet.units or packet.pointers or packet.current_state or packet.ambiguity)
+    )
+
     def is_poison_hit(ref: str) -> bool:
-        if ref in hedged_poison:
+        if ref in hedged_poison or partial_only_hedge:
             return False
+        if ref in fragment_pages and ref not in credited:
+            return True
         return (ref in mentioned and ref not in credited) or any(
             projection_ref in mentioned and canonical_ref == ref
             for projection_ref, canonical_ref in all_bound_projections.items()
@@ -858,7 +905,7 @@ def score_case(
     twin_false_activation = bool(
         fixture.case_id.startswith("T")
         and any(
-            ref not in own_gold
+            page_of(ref) not in own_gold
             and not (ref in valid_projections and valid_projections[ref] in own_gold)
             for ref in false_activation_candidates
         )
@@ -875,7 +922,7 @@ def score_case(
     # activation"; a twin with its own narrow gold, e.g. T4, is scored on its
     # `ambiguous` expectation directly, never credited as "hedging").
     is_unresolved_expected_twin = fixture.case_id.startswith("T") and fixture.expected_status == "unresolved"
-    hedged = (
+    hedged = partial_only_hedge or (
         is_unresolved_expected_twin
         and observed_status == "partial"
         and not packet.units
@@ -898,7 +945,7 @@ def score_case(
     # padding, and must not be penalised as if it were.
     precision_denominator_refs = (
         resolved
-        | {gold_unit_parent.get(unit.ref, unit.ref) for unit in packet.units}
+        | {gold_unit_parent.get(unit.ref, unit_pages[unit.ref]) for unit in packet.units}
         | {p.ref for p in packet.pointers}
     )
     if AMBIGUITY_PRECISION in applied and not fixture.case_id.startswith("T"):

@@ -58,6 +58,8 @@ The corpus must be built through normal supported writers into actual canonical 
   tree padded with ~200 adjacent evidence/transcript pages (twin: C2's twin's own
   turn, on that same padded tree — an ordinary negative control again; padding
   robustness compares C9 against C2's own unpadded-tree score, round-two revision).
+  T1 is, since corpus v5, a daily-habit turn that shares C1's frame and names
+  nothing any page records (A10).
   The synthetic corpus mirrors
   these shapes with generated names; the private instrument uses the real pages.
 - **D4 — Scoring.** Deterministic layer: per case × anchor kind, recall/precision with
@@ -94,7 +96,11 @@ The corpus must be built through normal supported writers into actual canonical 
   acceptance. The Planning collection/item identity
   mismatch is a separate product-contract question, not a current-state projection
   or a reason to collapse arbitrary fragments. New scoring reports carry the binding
-  digest; prior reports are not rewritten.
+  digest; prior reports are not rewritten. Raw v4 keeps every fragment distinct. The
+  v5 scorer (Hugo, 2026-10-05) collapses one class: a `<page>#unit-` fragment whose
+  parent is in the frozen canonical parent map counts as that page in recall,
+  precision, poison and the twin rule, so a page served with several of its own
+  units counts once. Fragments of unbound pages stay distinct refs.
 - **D10 — Subscription telemetry.** Reuse existing token accounting where its
   semantics fit, but keep subscription runs outside the metered API billing ledger.
   Preserve CLI usage counters, model/effort/version identity, timings and failure
@@ -164,7 +170,8 @@ in its place, and the recorded report carries both columns.
   page's canonical identity, through a parent map frozen from canonical
   readback before activation. It adds nothing to precision, and nothing to
   poison accounting. Reported beside the raw D9 score, which keeps every
-  fragment distinct.
+  fragment distinct. The v5 scorer supersedes the recall-only limit (see D9):
+  the unit counts as its page in every channel.
 - **A3 — Planning identity is not amended (2026-09-28).** Serving the
   collection when the turn is about an item is a product defect: the item is
   what the agent needs. C3 and T3 stay red with that reason pinned; the
@@ -175,7 +182,15 @@ in its place, and the recorded report carries both columns.
   not poison. A poison anchor served `resolved`, through any other channel,
   or as a lone `partial` with no correct candidate beside it stays poison.
   Reported beside the raw score. A4 removes only the poison hit; it never
-  marks the case as hedging, so it cannot waive a status mismatch.
+  marks the case as hedging, so it cannot waive a status mismatch. Superseded
+  for twins by the v5 scorer (Hugo, 2026-10-05): a twin expected `unresolved`
+  that abstains with only `partial` anchors is the run's one allowed hedge, as the
+  spec pre-registered. A twin that does not abstain is not waived. The partial
+  candidates it lists are the hedge, not poison.
+  One hedge is allowed and two exceed the ceiling; any unit, pointer, current-state
+  entry or ambiguity candidate disqualifies it. The product's partial-only packet
+  abstains and reads `unresolved`, which the raw hedge branch (observed `partial`)
+  could never match.
 - **A5 — Product reds kept (2026-09-28).** T4 (a bare first name stays
   `partial`, so the turn abstains `unresolved` rather than `ambiguous`) and
   T7 (the scoped turn also resolves the market hub) are product defects,
@@ -200,7 +215,9 @@ in its place, and the recorded report carries both columns.
   bound gold page is credited to that page in precision as well as recall
   (extending A2, which amended recall only). The product labels carried
   context honestly, and what the user needs is the right page and fact.
-  Reported in its own column beside the raw, A2+A4 and A7 scores.
+  Reported in its own column beside the raw, A2+A4 and A7 scores. The v5 scorer
+  takes only A8's unit credit, generalised to every bound page and to twins (see
+  D9). It does not take A8's carried-counts-as-resolved status clause.
 - **A9 — Agent-choice scoring (2026-09-28).** Rationale: the primary agent
   reasons and chooses; the compiler's job is recall within budget with
   truthful labels. A positive case (not a twin, with a gold of its own)
@@ -226,7 +243,12 @@ in its place, and the recorded report carries both columns.
   the carry does not reach it today). Under A10 these twins are reported
   "invalid, excluded"; raw scores them as-is. Its digest
   (`invalid_twins_digest`) was pinned before its first run. Reported beside
-  the raw score and every other amendment.
+  the raw score and every other amendment. Superseded for T1 by corpus v5
+  (Hugo, 2026-10-05): T1 is re-authored as a valid negative twin (turn "I keep
+  hitting the snooze button again this week."), so it leaves the list. Before any
+  run, no corpus page answers the new turn, and the corpus leak checks pass. T2 and
+  T9 stay listed. The list's digest is re-pinned, and the v3 and v4 reports keep
+  their old fixture digest as history.
 - **R3 and R4 — Reds kept (2026-09-28).** C2 and C9 stay red: a shared tag is
   not corroboration on a real vault, and semantic corroboration is future
   sensed-model work. C3 stays red: it relies on workspace context a cold run
