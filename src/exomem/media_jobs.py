@@ -1584,15 +1584,6 @@ class MediaJobStore:
         out.update({str(row["state"]): int(row["n"]) for row in rows})
         return out
 
-    def has_pending(self) -> bool:
-        conn = self._connect()
-        try:
-            return conn.execute(
-                "SELECT 1 FROM jobs WHERE state = 'pending' LIMIT 1"
-            ).fetchone() is not None
-        finally:
-            conn.close()
-
     def worker_pid(self) -> int | None:
         conn = self._connect()
         try:

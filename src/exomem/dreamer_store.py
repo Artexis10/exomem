@@ -894,21 +894,6 @@ class DreamerStore:
         ]
 
     @staticmethod
-    def note_integrity(
-        conn: sqlite3.Connection,
-        category: str,
-        paths: Iterable[str],
-        now: float,
-        *,
-        fold_key: str = "",
-    ) -> None:
-        conn.execute(
-            "INSERT OR REPLACE INTO integrity(category, path_set, observed_at, fold_key) "
-            "VALUES (?, ?, ?, ?)",
-            (category, _dumps(sorted(set(paths))), now, fold_key),
-        )
-
-    @staticmethod
     def clear_integrity_key(conn: sqlite3.Connection, fold_key: str) -> None:
         """Drop what the global families recorded for one fold key."""
         conn.execute("DELETE FROM integrity WHERE fold_key=? AND fold_key<>''", (fold_key,))
@@ -920,13 +905,6 @@ class DreamerStore:
             "INSERT OR REPLACE INTO integrity(category, path_set, observed_at, fold_key) "
             "VALUES ('', '[]', ?, ?)",
             (now, fold_key),
-        )
-
-    @staticmethod
-    def clear_integrity_for(conn: sqlite3.Connection, category: str, paths: Iterable[str]) -> None:
-        conn.execute(
-            "DELETE FROM integrity WHERE category=? AND path_set=?",
-            (category, _dumps(sorted(set(paths)))),
         )
 
     # ------------------------------------------------------------------

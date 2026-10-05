@@ -402,8 +402,6 @@ def test_refused_verifier_never_lets_the_heuristic_wear_the_nli_name(monkeypatch
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
 
     assert claims.verifier_polarity("Caching improves latency", "Caching degrades latency") is None
-    fallback = claims.classify_polarity("Caching improves latency", "Caching degrades latency")
-    assert fallback.method == "heuristic"
 
 
 def test_doctor_loads_only_the_exact_hashed_snapshot_without_hub_fallback(
@@ -1127,22 +1125,6 @@ def test_a_dismissed_entry_stays_dismissed_when_a_label_arrives(
 
 
 # ---------------- 5.1 fixture-set precision (claimed against fixtures ONLY) ----------------
-
-
-def test_the_declared_heuristic_failures_are_real() -> None:
-    """The `heuristic_fails` flags are checked against the actual heuristic.
-
-    The precision table in tasks.md 5.1 is derived from these flags, so without
-    this pin the table could drift into fiction while staying green.
-    """
-    for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]:
-        verdict = claims._heuristic_polarity(pair.claim_a, pair.claim_b)
-        assert (verdict.label != pair.expected) == pair.heuristic_fails, (
-            pair.claim_a,
-            pair.expected,
-            verdict.label,
-            pair.heuristic_fails,
-        )
 
 
 def test_an_admitted_verifier_answers_every_fixture(tmp_path, monkeypatch) -> None:

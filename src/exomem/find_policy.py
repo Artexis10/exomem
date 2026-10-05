@@ -723,10 +723,6 @@ class LexicalVisibility(NamedTuple):
     #: Why the request crosses scripts (`CROSSING_*`), or None when it does not.
     crossing: str | None
 
-    @property
-    def crosses_language(self) -> bool:
-        return self.crossing is not None
-
 
 LEXICALLY_VISIBLE = LexicalVisibility(frozenset(), None)
 
