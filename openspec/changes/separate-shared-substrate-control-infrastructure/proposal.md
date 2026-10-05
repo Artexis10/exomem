@@ -22,7 +22,9 @@ The production PostgreSQL host serves Substrate authentication, billing and mult
 
 ### Modified Capabilities
 
-None. The existing private-alpha infrastructure change remains evidence for the deployment contracts inherited by this extraction; its unarchived requirements are not silently rewritten here.
+- `cloud-node-pool`: an agent node's firewall admits SSH only during a declared break-glass window; routine administration uses the company NetBird.
+
+The existing private-alpha infrastructure change remains evidence for the deployment contracts inherited by this extraction; its unarchived requirements are not silently rewritten here.
 
 ## Impact
 

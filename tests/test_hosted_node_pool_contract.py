@@ -103,9 +103,6 @@ def test_agent_module_is_keyed_disposable_and_exposes_only_443_and_admin_ssh() -
     firewall = _block(main, 'resource "hcloud_firewall" "agents"')
     ports = re.findall(r'port\s*=\s*"([^"]+)"', firewall)
     assert ports == ["22", "443"]
-    assert firewall.count("rule {") == 2
-    ssh = firewall.split('port        = "22"', 1)[1].split("}", 1)[0]
-    assert "source_ips  = var.admin_ssh_cidrs" in ssh
     for forbidden in ('"6443"', '"10250"', '"8472"', '"80"', '"5432"'):
         assert forbidden not in main
 

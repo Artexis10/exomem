@@ -5,7 +5,7 @@ Make server administration independent of changing home IP addresses through a s
 ## ADDED Requirements
 
 ### Requirement: Administration policy has one shared source
-Organisation-owned servers SHALL use a versioned shared administration policy and enrollment role. NetBird Cloud SHALL be the initial organisation administration provider; its selected account and plan SHALL be verified before enrollment. Product repositories SHALL consume that source without independently maintained copies. Adoption SHALL identify the exact account, server identity, peer-group ownership and authorised administrator devices before enrollment. An executing client being connected to a VPN MUST NOT establish the intended server enrollment identity. NetBird SHALL also become the owner-device VPN standard through staged migration of phone, workstation and Moshi connections. Existing Tailscale dependencies SHALL remain available until their replacement workflows pass. Administrator, server and personal-service groups SHALL retain separate explicit access rules; common VPN membership MUST NOT imply unrestricted access.
+Organisation-owned servers SHALL use a versioned shared administration policy and enrollment role. NetBird Cloud SHALL be the initial organisation administration provider; its selected account and plan SHALL be verified before enrollment. Product repositories SHALL consume that source without independently maintained copies. Adoption SHALL identify the exact account, server identity, peer-group ownership and authorised administrator devices before enrollment. An executing client being connected to a VPN MUST NOT establish the intended server enrollment identity. NetBird SHALL also become the owner-device VPN standard through staged migration of phone, workstation and Moshi connections. Existing Tailscale dependencies SHALL remain available until their replacement workflows pass. An owner device MAY keep Tailscale as an operator-chosen fallback after its replacement passes. Administrator, server and personal-service groups SHALL retain separate explicit access rules; common VPN membership MUST NOT imply unrestricted access.
 
 #### Scenario: Tailnet identity is unresolved
 - **WHEN** an operator cannot establish the intended tailnet and enrollment authority
@@ -43,11 +43,16 @@ The administration role MUST NOT advertise subnet or exit-node routes, accept un
 - **AND** an actual named phone connection proves acceptance before the old Tailscale entry is retired
 
 ### Requirement: Ingress restriction follows verified recovery
-Adoption SHALL preserve existing narrow SSH access until a second managed connection over the intended tailnet succeeds. Provider and guest firewall changes SHALL be made through their respective owning configuration only after allowed/denied connectivity checks and provider-console recovery are verified. Disposable-host acceptance SHALL demonstrate service recovery after reboot. A failed prerequisite MUST leave the existing route available and rollout incomplete. Recovery policy MUST NOT depend on a remembered home IP.
+Adoption SHALL preserve existing narrow SSH access until a second managed connection over the intended tailnet succeeds. Provider and guest firewall changes SHALL be made through their respective owning configuration only after allowed/denied connectivity checks and provider-console recovery are verified. Disposable-host acceptance SHALL demonstrate service recovery after reboot. A failed prerequisite MUST leave the existing route available and rollout incomplete. Recovery policy MUST NOT depend on a remembered home IP. After cutover, provider and guest firewalls SHALL admit no public SSH; break-glass SHALL use the provider console and rescue system, or a temporary operator CIDR applied and reverted through the owning configuration.
 
 #### Scenario: Tailnet connectivity fails before cutover
 - **WHEN** enrollment or managed VPN connectivity fails
 - **THEN** public SSH restrictions are not applied and the operator can continue through the existing narrow route
+
+#### Scenario: Public SSH is closed after cutover
+- **WHEN** a host's ingress restriction is applied after its recovery checks pass
+- **THEN** public SSH is refused at both the provider and guest firewalls
+- **AND** a fresh managed connection over the tailnet succeeds and the provider console remains available
 
 #### Scenario: An enrolled host restarts
 - **WHEN** a disposable acceptance host reboots with the selected configuration
