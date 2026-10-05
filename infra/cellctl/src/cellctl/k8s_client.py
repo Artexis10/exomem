@@ -28,6 +28,7 @@ from .manifests import (
     BACKUP_JOB_NAME,
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
+    CELL_ID_LABEL,
     HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
@@ -178,30 +179,86 @@ class ClusterClient:
     # -- observation (D4: pods/events/namespaces get+list only) --
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
+        """One cell, read object by object. A pass observes the whole fleet
+        through observe_cells(), which must report exactly what this does."""
+
         namespace_obj = self._get_namespace(namespace)
         if namespace_obj is None:
             return ClusterObservation()
+        pvc = self._get_pvc(namespace, "cell-data")
+        pv_name = pvc.spec.volume_name if pvc and pvc.spec else None
+        return self._observation(
+            namespace,
+            namespace_obj,
+            pvc,
+            self._get_pv(pv_name) if pv_name else None,
+            self._get_statefulset(namespace, "cell"),
+            self._list_cell_pods(namespace),
+        )
 
+    def observe_cells(self, cells: dict[str, str]) -> dict[str, ClusterObservation | Exception]:
+        """Every cell in `cells` (cell id -> namespace) from one list per kind,
+        so a pass costs the same few requests however many cells there are
+        (D4 API budget). Objects are matched to a cell by namespace and name,
+        exactly as observe() reads them; cellctl's ClusterRole already lists
+        each kind cluster-wide. A list that fails raises for the whole pass;
+        a cell whose own objects cannot be read is returned as its error."""
+
+        namespaces = {ns.metadata.name: ns for ns in self._core.list_namespace().items}
+        pvcs = {
+            pvc.metadata.namespace: pvc
+            for pvc in self._core.list_persistent_volume_claim_for_all_namespaces(
+                field_selector="metadata.name=cell-data"
+            ).items
+        }
+        pvs = {pv.metadata.name: pv for pv in self._core.list_persistent_volume().items}
+        statefulsets = {
+            sts.metadata.namespace: sts
+            for sts in self._apps.list_stateful_set_for_all_namespaces(field_selector="metadata.name=cell").items
+        }
+        # Every pod cellctl causes in a cell namespace carries the cell label
+        # (the StatefulSet's selector and the Jobs' templates both set it).
+        pods: dict[str, list] = {}
+        for pod in self._core.list_pod_for_all_namespaces(label_selector=f"{CELL_ID_LABEL},!{JOB_KIND_LABEL}").items:
+            pods.setdefault(pod.metadata.namespace, []).append(pod)
+
+        observations: dict[str, ClusterObservation | Exception] = {}
+        for cell_id, namespace in cells.items():
+            namespace_obj = namespaces.get(namespace)
+            if namespace_obj is None:
+                observations[cell_id] = ClusterObservation()
+                continue
+            pvc = pvcs.get(namespace)
+            pv_name = pvc.spec.volume_name if pvc and pvc.spec else None
+            try:
+                observations[cell_id] = self._observation(
+                    namespace,
+                    namespace_obj,
+                    pvc,
+                    pvs.get(pv_name) if pv_name else None,
+                    statefulsets.get(namespace),
+                    pods.get(namespace, []),
+                )
+            except Exception as error:  # noqa: BLE001 - H4: one cell's failure is that cell's alone
+                observations[cell_id] = error
+        return observations
+
+    def _observation(self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
 
-        pvc = self._get_pvc(namespace, "cell-data")
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
-        pv_name = pvc.spec.volume_name if pvc and pvc.spec else None
         pvc_volume_id = None  # the underlying Hetzner volume id (PV spec.csi.volumeHandle), not the PV's own K8s name
         pv_claim_ref_uid = None
         pv_storage_class = None
-        if pv_name:
-            pv = self._get_pv(pv_name)
-            if pv is not None:
-                if pv.spec and pv.spec.claim_ref:
-                    pv_claim_ref_uid = pv.spec.claim_ref.uid
-                if pv.spec:
-                    pv_storage_class = pv.spec.storage_class_name
-                if pv.spec and pv.spec.csi:
-                    pvc_volume_id = pv.spec.csi.volume_handle
+        if pv is not None:
+            if pv.spec and pv.spec.claim_ref:
+                pv_claim_ref_uid = pv.spec.claim_ref.uid
+            if pv.spec:
+                pv_storage_class = pv.spec.storage_class_name
+            if pv.spec and pv.spec.csi:
+                pvc_volume_id = pv.spec.csi.volume_handle
 
-        statefulset = self._get_statefulset(namespace, "cell")
         statefulset_exists = statefulset is not None
         statefulset_image = None
         statefulset_replicas = None
@@ -244,7 +301,6 @@ class ClusterClient:
         # its Job's pod exists (found live in 3.10: the hold got stuck
         # forever because a completed backup Job's pod is not garbage
         # collected on its own).
-        pods = self._list_cell_pods(namespace)
         pod_exists = len(pods) > 0
         live_pods = [pod for pod in pods if pod.metadata.deletion_timestamp is None]
         pod_terminating = len(live_pods) < len(pods)

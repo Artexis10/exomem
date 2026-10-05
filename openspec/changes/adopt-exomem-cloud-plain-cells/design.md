@@ -126,6 +126,8 @@ That is the desktop's own first-run path, so the cell keeps the one rule. There 
 
 cellctl is one Deployment in namespace `exomem-cloud`, with `replicas: 1` and `strategy: Recreate`. It holds no database, no fence generations, no leases and no checkpoints. Its loop runs every 5 seconds and on `LISTEN exomem_cloud_cells`. The LISTEN uses a direct Postgres session, not the transaction-mode pooler.
 
+**Amendment (2026-10-05): idle cadence and change-only writes.** A fixed 5-second pass made cellctl's idle cost grow with the number of cells: several Kubernetes reads and one `observed_at` write per cell per pass (about 45 millicores and 4 API requests a second with three cells). The loop now passes every 5 seconds only while something is in transition: a hold, a dirty row, a maintenance start, an observed change or an unobserved cell. Once the fleet has settled it passes every 30 seconds. A `NOTIFY`, or the loss of its database session, still wakes it at once. A cell settled in `failed` is observed at the idle cadence, so one broken tenant does not hold the fleet at the fast one. Each pass observes the fleet with one list per kind instead of reads per cell. `observed_at` now records the last observed change: it is written with another observed column and never alone, so a settled row is not written at all. Controller liveness is read from `exomem_cloud_capacity.observed_at`, which every completed pass still writes, well inside admission's five-minute freshness bound.
+
 **The loop survives its dependencies.**
 
 - **Single writer.** cellctl takes `pg_try_advisory_lock` on its direct session before its first pass, and acts only while it holds the lock. `Recreate` alone does not stop two pods overlapping during an eviction.

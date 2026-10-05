@@ -46,10 +46,13 @@ def test_apply_uses_the_cellctl_field_manager_for_server_side_apply() -> None:
     )
 
 
-def _matches(labels: dict[str, str], selector: str) -> bool:
-    for term in selector.split(","):
+def _matches(labels: dict[str, str], selector: str | None) -> bool:
+    for term in filter(None, (selector or "").split(",")):
         if term.startswith("!"):
             if term[1:] in labels:
+                return False
+        elif "=" not in term:
+            if term not in labels:
                 return False
         else:
             key, _, value = term.partition("=")
@@ -675,3 +678,140 @@ def test_shared_pending_reservations_respect_noexecute_taints(shared_capacity_cl
     observation = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
     assert bool(observation.pods) is tolerated
     assert bool(observation.attachments) is tolerated
+
+
+# --- D4 API budget: one LIST per kind per pass, not one GET per cell ---------
+
+
+def _named(objects: list, field_selector: str | None) -> list:
+    name = (field_selector or "").removeprefix("metadata.name=")
+    return [obj for obj in objects if not name or obj.metadata.name == name]
+
+
+class _FleetCore:
+    """Cell and non-cell objects, served both by name and by list."""
+
+    def __init__(self, namespaces: list, pvcs: list, pvs: list, pods: list, *, gets_allowed: bool = True) -> None:
+        self.namespaces, self.pvcs, self.pvs, self.pods = namespaces, pvcs, pvs, pods
+        self.gets_allowed = gets_allowed
+
+    def _get(self, objects: list, name: str, namespace: str | None = None):
+        assert self.gets_allowed, "the list path read one object by name"
+        for obj in objects:
+            if obj.metadata.name == name and getattr(obj.metadata, "namespace", None) == namespace:
+                return obj
+        raise ApiException(status=404)
+
+    def read_namespace(self, name):
+        return self._get(self.namespaces, name)
+
+    def read_namespaced_persistent_volume_claim(self, name, namespace):
+        return self._get(self.pvcs, name, namespace)
+
+    def read_persistent_volume(self, name):
+        return self._get(self.pvs, name)
+
+    def list_namespaced_pod(self, namespace, label_selector):
+        return NS(items=[p for p in self.pods if p.metadata.namespace == namespace and _matches(p.metadata.labels, label_selector)])
+
+    def list_namespace(self, label_selector=None):
+        return NS(items=[ns for ns in self.namespaces if _matches(ns.metadata.labels or {}, label_selector)])
+
+    def list_persistent_volume_claim_for_all_namespaces(self, field_selector=None):
+        return NS(items=_named(self.pvcs, field_selector))
+
+    def list_persistent_volume(self):
+        return NS(items=list(self.pvs))
+
+    def list_pod_for_all_namespaces(self, label_selector=None):
+        return NS(items=[p for p in self.pods if _matches(p.metadata.labels, label_selector)])
+
+
+class _FleetApps:
+    def __init__(self, statefulsets: list, *, gets_allowed: bool = True) -> None:
+        self.statefulsets, self.gets_allowed = statefulsets, gets_allowed
+
+    def read_namespaced_stateful_set(self, name, namespace):
+        assert self.gets_allowed, "the list path read one object by name"
+        for sts in self.statefulsets:
+            if (sts.metadata.name, sts.metadata.namespace) == (name, namespace):
+                return sts
+        raise ApiException(status=404)
+
+    def list_stateful_set_for_all_namespaces(self, field_selector=None):
+        return NS(items=_named(self.statefulsets, field_selector))
+
+
+def _fleet_objects():
+    """Three cells -- served, mid-provisioning, never created -- next to a
+    non-cell namespace that carries objects with the cells' own names."""
+
+    served, provisioning, absent = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
+    image = "registry.example/cell@sha256:" + "a" * 64
+
+    def namespace(name, labels):
+        return NS(metadata=NS(name=name, namespace=None, labels=labels))
+
+    def pod(namespace_name, cell_id, *, ready, revision="cell-rev-1", extra=None, deleting=False):
+        pod = _ready_cell_pod(revision) if ready else _cell_pod(init_state=NS(terminated=None, running=NS(started_at=None), waiting=None), revision=revision)
+        pod.metadata.namespace = namespace_name
+        pod.metadata.deletion_timestamp = "2026-01-01T00:00:00+00:00" if deleting else None
+        pod.metadata.labels = {**pod.metadata.labels, "app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": cell_id, **(extra or {})}
+        return pod
+
+    def statefulset(namespace_name, digest):
+        return NS(
+            metadata=NS(name="cell", namespace=namespace_name, generation=2,
+                        annotations={"exomem.io/render-digest": digest, "exomem.io/row-generation": "1"}),
+            spec=NS(replicas=1, template=NS(spec=NS(containers=[NS(image=image)]))),
+            status=NS(update_revision="cell-rev-1", observed_generation=2),
+        )
+
+    served_ns, provisioning_ns = f"exo-cell-{served}", f"exo-cell-{provisioning}"
+    namespaces = [
+        namespace(served_ns, {CELL_LABEL: served}),
+        namespace(provisioning_ns, {CELL_LABEL: provisioning}),
+        namespace("kube-system", {}),
+    ]
+    pvcs = [
+        NS(metadata=NS(name="cell-data", namespace=served_ns, uid="pvc-served"),
+           spec=NS(volume_name="pv-served"), status=NS(phase="Bound")),
+        NS(metadata=NS(name="cell-data", namespace="kube-system", uid="pvc-foreign"),
+           spec=NS(volume_name="pv-foreign"), status=NS(phase="Bound")),
+    ]
+    pvs = [
+        NS(metadata=NS(name="pv-served", namespace=None),
+           spec=NS(claim_ref=NS(uid="pvc-served", namespace=served_ns), storage_class_name="exomem-cloud-encrypted",
+                   csi=NS(volume_handle="hetzner-101"))),
+        NS(metadata=NS(name="pv-foreign", namespace=None),
+           spec=NS(claim_ref=NS(uid="pvc-foreign", namespace="kube-system"), storage_class_name="local", csi=None)),
+    ]
+    statefulsets = [statefulset(served_ns, "digest-served"), statefulset("kube-system", "digest-foreign")]
+    pods = [
+        pod(served_ns, served, ready=True),
+        pod(served_ns, served, ready=False, extra={JOB_KIND_LABEL: "backup"}),
+        pod(provisioning_ns, provisioning, ready=False),
+        # Terminating, so it would show on any cell it leaked into.
+        pod("kube-system", served, ready=True, deleting=True),
+    ]
+    cells = {cell: f"exo-cell-{cell}" for cell in (served, provisioning, absent)}
+    return cells, (namespaces, pvcs, pvs, pods), statefulsets
+
+
+def test_one_list_per_kind_observes_every_cell_exactly_as_its_own_reads_do() -> None:
+    # The list path groups every kind by namespace. A grouping or field
+    # mistake would hand one tenant's pod, volume or StatefulSet to another
+    # cell -- or to a non-cell namespace's object of the same name -- and
+    # silently diverge from what the per-cell reads report.
+    cells, core_objects, statefulsets = _fleet_objects()
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = _FleetCore(*core_objects)
+    client._apps = _FleetApps(statefulsets)
+    client._batch = _Batch({})
+    expected = {cell_id: client.observe(cell_id, namespace) for cell_id, namespace in cells.items()}
+    assert expected["aaaaaaaaaaaaaaaa"].pod_ready and expected["aaaaaaaaaaaaaaaa"].pvc_volume_id == "hetzner-101"
+    assert expected["cccccccccccccccc"].namespace_exists is False
+
+    client._core = _FleetCore(*core_objects, gets_allowed=False)
+    client._apps = _FleetApps(statefulsets, gets_allowed=False)
+    assert client.observe_cells(cells) == expected
