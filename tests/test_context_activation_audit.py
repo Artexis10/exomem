@@ -1950,8 +1950,10 @@ def test_v5_does_not_waive_a_partial_only_twin_that_did_not_abstain() -> None:
 
 
 def test_v5_a_positive_case_with_a_partial_only_packet_never_hedges() -> None:
-    scored = _v5(_abstained_partial("c2_cooking_method_insight"), "C2", {})
-    assert scored.hedged is False and not scored.passed
+    # The waiver is a twin's. C6 is the one positive case expecting
+    # `unresolved`, so only the twin gate keeps it from reading as the hedge.
+    scored = _v5(_abstained_partial("c2_cooking_method_insight"), "C6", {})
+    assert scored.hedged is False
 
 
 def test_v5_leaves_a_credited_superseded_unit_out_of_precision() -> None:
