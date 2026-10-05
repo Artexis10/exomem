@@ -396,6 +396,53 @@ def terms_of(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens_of(text)))
 
 
+#: What may sit just before a quoted reference: the start, whitespace, or an
+#: opening bracket, quote, backtick or `=`.
+_REFERENCE_OPENER = r"""(?<![^\s(\[{<"'`=])"""
+#: A character a reference never contains: whitespace, quotes, backticks,
+#: angle brackets and the brackets that wrap one in prose or markdown.
+_REFERENCE_CHAR = r"""[^\s"'`<>()\[\]{}]"""
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://" + _REFERENCE_CHAR + "*")
+#: A path from a root: a slash, a backslash, `~` and a slash, or a drive letter and colon.
+_ROOTED_PATH = re.compile(_REFERENCE_OPENER + r"(?:~|[A-Za-z]:)?[\\/]" + _REFERENCE_CHAR + "*")
+_RELATIVE_PATH = re.compile(
+    _REFERENCE_OPENER
+    + r"(?P<dirs>(?:[^\s\"'`<>()\[\]{}\\/]+[\\/])+)(?P<last>[^\s\"'`<>()\[\]{}\\/]*)"
+)
+_FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
+
+
+def subject_text(turn: str) -> str:
+    """The turn with each quoted path or URL removed from its words.
+
+    A path is a reference to a file, not a sentence: read as words,
+    `/home/<user>/handoffs/x.md` says `home`, and `home` named a project of
+    that name. A rooted path (`/`, `\\`, `~/`, a drive letter) and a URL are
+    removed whole. A relative path keeps its final segment, so a quoted
+    `Knowledge Base/Entities/People/<Name>.md` still names the page whose
+    title is its file name, exactly as it did when the path was read as
+    words; its directories are removed. A relative run counts as a path only
+    with a letter in it and two separators, or one and a file extension:
+    `and/or` and `10/05/2026` are prose.
+
+    Every removed span becomes one space. What the turn says besides the
+    path is unchanged, and text with no path in it is returned as is.
+    """
+    text = _URL.sub(" ", str(turn or ""))
+    text = _ROOTED_PATH.sub(" ", text)
+
+    def relative(match: re.Match[str]) -> str:
+        whole, last = match.group(0), match.group("last")
+        separators = whole.count("/") + whole.count("\\")
+        if not any(char.isalpha() for char in whole) or (
+            separators < 2 and not _FILE_EXTENSION.search(last)
+        ):
+            return whole
+        return " " + last
+
+    return _RELATIVE_PATH.sub(relative, text)
+
+
 #: A shared term this rare in the catalogue's title/alias vocabulary is a weak
 #: worded contact on its own account (`working_set_resolve.rare_term`), and a
 #: derived short name whose OWN terms are this rare is a genuine identifying

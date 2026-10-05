@@ -35,6 +35,7 @@ from .working_set_index import (
     fold_plural,
     fold_possessive,
     normalize,
+    subject_text,
     tokens_of,
 )
 
@@ -1006,6 +1007,12 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     """
     if vocabulary is None:
         vocabulary = shipped_vocabulary()
+    # A quoted path or URL is a reference, not words (`subject_text`): every
+    # field that feeds subject evidence reads the turn without it. Whether
+    # the turn only points back, or is a follow-up, still reads the turn as
+    # written: a turn that quotes a path has said what it is about.
+    written = turn
+    turn = subject_text(turn)
     # Calls the shared `normalize()` rather than restating its formula: a
     # hand-rolled copy here once skipped `normalize()`'s typographic-
     # apostrophe fold, so a turn spelled with a curly quote matched none of
@@ -1033,13 +1040,14 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
                 if phrase not in seen:
                     seen.add(phrase)
                     ngrams.append(phrase)
-    token_text = f" {' '.join(_spell_out_cues(tokens, vocabulary))} "
+    written_tokens = tokens if written == turn else tokens_of(normalize(written))
+    token_text = f" {' '.join(_spell_out_cues(written_tokens, vocabulary))} "
     # A declared cue, and nothing else said (close-memory-loop D2, as
     # narrowed twice): the turn has to say it points back, and must not also
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
-    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(turn)
+    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(written)
     anaphora_text = f" {' '.join(_spell_out_cues(anaphora_tokens, vocabulary))} "
     anaphora_cue = any(f" {phrase} " in anaphora_text for phrase in vocabulary.phrases)
     pointing = working_set_anaphora.points_back(
@@ -1054,7 +1062,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         referential_cue=referential_cue,
         acronyms=_acronyms_of(turn, vocabulary.filler),
         follow_up=is_follow_up(
-            tokens, referential_cue=referential_cue, filler=vocabulary.filler
+            written_tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
         words=embedded_words(tokens, _word_edges(vocabulary)),
         capitalised=_capitalised_terms(turn),
