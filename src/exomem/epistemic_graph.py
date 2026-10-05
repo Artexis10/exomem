@@ -10633,7 +10633,8 @@ def _relation_destination(
             page_key,
             {**metadata, "fragment_resolution": "unit"},
         )
-    return page_key, page_key, {**metadata, "fragment_resolution": _fragment_outcome(resolved, fragment)}
+    outcome = _fragment_outcome(resolved, fragment)
+    return page_key, page_key, {**metadata, "fragment_resolution": outcome}
 
 
 def _fragment_outcome(resolved: _PageUnit, fragment: str) -> str:
