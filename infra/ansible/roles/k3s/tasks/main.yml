@@ -11,13 +11,14 @@
 - name: Validate the K3s inputs for this node role
   ansible.builtin.import_tasks: validate.yml
 
+# 0700, as K3s creates its own agent directories.
 - name: Create the kubelet drop-in directory
   ansible.builtin.file:
     path: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0700"
 
 - name: Install the kubelet image age limit
   ansible.builtin.copy:
