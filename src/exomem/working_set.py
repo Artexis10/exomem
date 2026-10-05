@@ -309,6 +309,7 @@ class LaneItem:
     #: after the turn's own material and within a third of the budget.
     promoted: bool = False
     relevance_order: int = 0
+    request_anchors: frozenset[str] = frozenset()
 
 
 class LaneResult(NamedTuple):
@@ -510,7 +511,7 @@ def build_packet(
         else limit
     )
     listed_anchors = [dict(anchor) for anchor in anchors]
-    listed_ambiguity = [dict(entry) for entry in ambiguity]
+    listed_ambiguity = [dict(entry) for entry in ambiguity[:working_set_resolve.MAX_AMBIGUITY_CHOICES]]
     role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
     if conversation_inferred:
         used += working_set_conversation.budget_headers(
@@ -528,12 +529,17 @@ def build_packet(
     # material did not exist.
     starved: dict[str, None] = {}
     capped_material: dict[str, None] = {}
+    represented: set[str] = set()
+
+    def _material_capped(item: LaneItem) -> bool:
+        return item.role in material_roles and (
+            sum(per_role.get(role, 0) for role in material_roles) >= MAX_ITEMS_PER_ROLE
+            and not item.request_anchors - represented
+        )
 
     def _budget_pointer(item: LaneItem, reason: str) -> None:
         nonlocal used, promoted_used
-        if item.role in material_roles and (
-            sum(per_role.get(role, 0) for role in material_roles) >= MAX_ITEMS_PER_ROLE
-        ):
+        if _material_capped(item):
             capped_material.setdefault(item.role, None)
             return
         if len(pointers) >= MAX_POINTERS:
@@ -550,6 +556,7 @@ def build_packet(
         pointers.append(pointer)
         if item.role in material_roles:
             per_role[item.role] = per_role.get(item.role, 0) + 1
+            represented.update(item.request_anchors)
         used += cost
         if item.promoted:
             promoted_used += cost
@@ -628,9 +635,8 @@ def build_packet(
             )
             role_count = per_role.get(item.role, 0)
             # No class is exempt: a standing unit takes one of its role's slots.
-            if role_count >= MAX_ITEMS_PER_ROLE or (
-                item.role in material_roles
-                and sum(per_role.get(role, 0) for role in material_roles) >= MAX_ITEMS_PER_ROLE
+            if _material_capped(item) or (
+                item.role not in material_roles and role_count >= MAX_ITEMS_PER_ROLE
             ):
                 _defer(item, "role_cap")
                 continue
@@ -647,6 +653,8 @@ def build_packet(
             units.append(unit)
             used += cost
             per_role[item.role] = role_count + 1
+            if item.role in material_roles:
+                represented.update(item.request_anchors)
 
         for item, reason in deferred:
             _budget_pointer(item, reason)
@@ -661,6 +669,8 @@ def build_packet(
         "current_state": state_entries,
         "missing": [
             *(dict(entry) for entry in missing),
+            *(({"role": "ambiguity", "reason": "lane_truncated"},)
+                if len(ambiguity) > len(listed_ambiguity) else ()),
             *({"role": role, "reason": "budget"} for role in starved),
             *(
                 {"role": role, "reason": "lane_truncated"} for role in capped_material
@@ -712,8 +722,12 @@ def abstained_packet(
         "units": [],
         "pointers": [],
         "current_state": [],
-        "missing": [dict(entry) for entry in missing],
-        "ambiguity": [dict(entry) for entry in ambiguity],
+        "missing": [
+            *(dict(entry) for entry in missing),
+            *(({"role": "ambiguity", "reason": "lane_truncated"},)
+                if len(ambiguity) > working_set_resolve.MAX_AMBIGUITY_CHOICES else ()),
+        ],
+        "ambiguity": [dict(entry) for entry in ambiguity[:working_set_resolve.MAX_AMBIGUITY_CHOICES]],
         "budget": {"limit_chars": limit, "used_chars": used},
         "generation": dict(generation),
         "abstained": True,
@@ -1403,17 +1417,27 @@ def _material_lane(
         request for request, (scope, terms) in enumerate(requests.values())
         if item.path in scope and terms.intersection(stems)
     ) for item, stems in zip(items, content)]
+    request_refs = [anchor_ref for anchor_ref, _retained in requests]
+    anchor_coverage = [frozenset(request_refs[request] for request in covered) for covered in coverage]
     # Among equal coverage, compiled units keep their existing preference and
     # corpus rank. Spare slots use that same order without reserving a pointer.
     remaining = list(range(len(items)))
     represented: set[int] = set()
+    represented_anchors: set[str] = set()
     selected: list[LaneItem] = []
-    while remaining and len(selected) < MAX_ITEMS_PER_ROLE:
-        chosen = max(remaining, key=lambda index: len(coverage[index] - represented))
+    while remaining:
+        eligible = remaining if len(selected) < MAX_ITEMS_PER_ROLE else [
+            index for index in remaining if anchor_coverage[index] - represented_anchors
+        ]
+        if not eligible:
+            break
+        chosen = max(eligible, key=lambda index: len(coverage[index] - represented))
         remaining.remove(chosen)
         represented.update(coverage[chosen])
-        selected.append(replace(items[chosen], relevance_order=len(selected)))
-    truncated |= len(items) > MAX_ITEMS_PER_ROLE
+        represented_anchors.update(anchor_coverage[chosen])
+        selected.append(replace(items[chosen], relevance_order=len(selected),
+            request_anchors=anchor_coverage[chosen]))
+    truncated |= bool(remaining)
     return LaneResult(tuple(selected), truncated)
 
 
@@ -3565,6 +3589,7 @@ def _compile_packet(
             generation=generation,
             anchors=tuple(anchor.as_dict() for anchor in resolution.anchors),
             ambiguity=resolution.ambiguity,
+            missing=({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else (),
             recent_context=recent,
         )
 
@@ -3636,6 +3661,7 @@ def _compile_packet(
     )
     missing = (
         *missing,
+        *(({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else ()),
         *({"role": role, "reason": "role_limit"} for role in omitted),
         *(gap for gap in carry_missing if gap not in missing),
     )

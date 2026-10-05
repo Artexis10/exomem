@@ -20,6 +20,24 @@ The active agent decides meaning, importance, equivalence, candidate disposition
 
 ### 2. Decompose before selecting destinations
 
+#### Accepted substrate refinement (2026-10-05)
+
+The programme serves a domain-neutral epistemic substrate, not only conversational memory. Canonical means accepted governed state with an attributable basis, not certified truth. Preserve observations, reported interpretations, decisions and intentions without imposing one validation method on all of them. The compiler supplies task-relevant context; it is one part of the loop, not its historian, authority owner or semantic judge.
+
+**Recoverable correction without page proliferation.** A knowledge object keeps its stable identity through ordinary refinement. Retain consequential previous interpretation content, rationale, author/operation and evidence/version bindings as revisions through the owning guarded writer. Supersession remains an explicit semantic transition, not a storage trick for every edit. SQLite collection `item_versions` already supplies row content history; ordinary note-edit rationales and file Records audit hashes do not. Reuse existing version and receipt mechanisms where they provide the required evidence. For the remaining note/unit and file-mode seams, settle the smallest bounded revision representation in task 3.15 before implementing it; prefer per-object records and payload reuse, not whole-vault snapshots or a universal event store. Revision payloads are authoritative history, not disposable graph/index state. The supported backup/export/restore path must retain them. No legacy history is fabricated from a hash.
+
+Only semantic changes covered by the correction contract require such interpretation history; formatting and derived maintenance do not create new knowledge objects. Bounded history reads must not scan every prior revision or the whole vault. Retention, deletion and current disclosure govern historical payloads as well as current content; keep an explicit unavailable state if retained content is no longer accessible. Measure storage/write amplification and bounded history-read cost at realistic correction depth, including retention/restore, before claiming the representation scales. This does not make full history a prerequisite for ordinary current-state reads.
+
+**Explanations reuse authored relationships.** Refinement, specialization, derivation, decomposition and changed support can use existing governed relations and open vocabulary; these examples are not a closed transition ontology. `resolve-relation-fragment-targets` owns precise target resolution. The shared graph-query owner consumes that identity and retained revision evidence, labels page-level fallback, and assembles evidence chains or reverse-impact candidates. Projection freshness, changed supporting evidence and authored supersession are distinct. A changed premise invites reconsideration; deterministic dependency machinery does not decide that a conclusion is false. Preserve the agreed S1/G4 placement dependencies rather than adding a second traversal backend.
+
+**Compute is not epistemic authority.** Cheap workers can propose extractions, relationships or interpretations under the active agent; proposals remain attributable, source/version-bound candidates until an authorized writer accepts the agent's disposition. The principal reasoner is scoped to an operation, not a global single brain. Repeated workers over one source remain one evidential origin, and a delayed candidate cannot overwrite a later correction. Start by measuring agent-layer delegation against direct reasoning. A server placement, including generation, remains possible when its measured benefit justifies a separately specified output/effect contract, bounded data access and resources, cancellation/recovery and stale-input handling. Existing closed-label instruments and current runtime defaults remain unchanged; this is not permission to turn on an unreviewed worker.
+
+**Configurable friction with enforceable authority.** Users choose supported capture/review/confirmation posture in plain language through the existing configuration owners. Prominence, suggestion quieting and operation authority remain distinct. The current v1 ceilings and incomplete v2 activation are reported honestly; this plan does not silently grant standing delegation. Before an embedded consumer claims unattended consequential mutation, prove the relevant authorization at the writer boundary, not just in cooperative agent instructions. Reuse owner-approved scoped grants or operation-bound approval where the operation requires it. No additional modal is imposed on already permitted routine writes. Changes to supported delegation need their own versioned contract and replay/revocation checks, not an eternal product ban on configuration.
+
+**Reusable methods, not another executor.** A scoped scientific or project method is ordinary governed knowledge with identity, version, applicability and evidence; the agent can retrieve, select and adapt it to the current task. Existing workflow contracts continue to express structured ownership/capture/transition policy, not free-form executable instructions. A method's text cannot install code, authenticate a companion or widen authority. Planning owns durable intent and links to observed Records; a companion such as OpenSpec owns its implementation contract and execution truth. Resolve ambiguous methods explicitly, preserve user overrides, and distinguish a local adaptation from an authorized reusable revision. Task 7.6 proves this composition through existing public operations before adding any new contract-family fields.
+
+**Embedded proof and delivery.** Keep compiler delivery and first-owner SQLite admission independent and moving. Next prove one ordinary mixed-media journey that joins exact Records with compiled interpretation, correction and useful fresh-session context. The benchmark owner includes a generic creator-product case with an exact native observation, an interpretation, a later qualification and tenant isolation. A synthetic product-shaped trial is not a deployed consumer integration. A real consumer retains its domain UX, canonical business facts and execution ownership; it consumes stable Exomem interfaces rather than being hardcoded into the substrate. Marketplace acceptance never gates internal users or ordinary releases. See benchmark task 4.8 for distinct native, controlled and actual-consumer evidence.
+
 #### Multimodal compilation and conversational correction (2026-10-04)
 
 The product loop is `authorized source/artifact -> preserve -> active-agent interpretation -> candidate rows/claims/entities/relations/notes -> existing validation and permitted writes -> correction/publication -> later query/activation -> useful action`. Text, documents, images, audio, video, datasets and mixed episodes are inputs to this same loop, not a text-only memory product with media attachments on the side. The user need not pre-model a source. The active agent may propose a useful schema through the existing declared-type owner, but schema validation does not certify the interpretation as true or authorize a new type automatically.
@@ -1142,14 +1160,44 @@ later roles follow. Categorical portions retain their unit-first ordering, and
 packets without material retain the old ordering. This explicit boundary avoids
 the cycle between global unit-first ordering and mixed material ordering without
 letting material displace earlier identity or constraint context. Own/promoted
-tiers, current-state/Planning precedence and the shared material cap remain.
+tiers and current-state/Planning precedence remain.
 
-This adds no search, traversal, model call, context admission or packet capacity.
-The 200-unit/three-pointer candidate bounds and three served material items stay
-unchanged. Missing candidates and truncation remain visible; representation is
+The shared material allowance remains three items by default. Beyond that baseline,
+an item is eligible only when it covers another distinct resolved anchor with a
+current-turn request and matching evidence not represented by prior served material.
+Equivalent questions about the same anchor do not multiply allowance, and an item
+covering several anchors does not leave unused extra slots for unrelated content.
+Keep coverage on in-process lane items and enforce it across material roles, units
+and pointers at packet assembly; do not serialize it as new provenance. Categorical
+item caps, six roles, earlier-role priority and the existing prose budget remain.
+
+Sense adjudication operates on the complete caller-visible index-bounded match set
+before candidate/admission limits. The existing index caps all anchor kinds together
+at 2,000 identities; qualification from conversation/focus cannot multiply that set.
+After the existing narrowing and competing-sense rules, current-turn exact names
+and explicit agent choices can expand ordinary six-anchor admission to at most 24;
+resolved anchors precede partial anchors in stable existing rank order, so admission
+cannot discard every resolved anchor while retaining a resolved verdict. Extra
+explicit anchors consume the ordinary allowance first. Partial, focus-only,
+recency and implicit candidates retain their old allowance. Display choices remain
+bounded without changing the full-set verdict; section-level omission reasons name
+neither omitted alternatives nor hidden counts. This does not prove completeness
+beyond the maintained index.
+
+Full-set adjudication must remain cheap: deduplicate wider-anchor work by identity,
+reuse path/neighbour membership for graph corroboration where equivalent, and measure
+the 2,000-identity worst case. Finite work alone does not prove acceptable latency.
+The current continuation decoder's ref, role and 8,192-character bounds remain;
+mint a valid token or none, never silently trim alternatives to manufacture a unique
+follow-up. No new candidate-completeness registry or conservative kind-wide refusal
+is needed: existing exact sense rules adjudicate the available full set.
+
+This adds no search, traversal or model call. The 200-unit/three-pointer candidate
+bounds stay unchanged. Missing candidates and truncation remain visible; representation is
 not a claim of complete answers. Verify distinct-claim competition, reversed
 question order, bare-name and focus negatives, single-topic capacity, existing
-ownership/egress/continuity controls and matched latency before delivery. This
+ownership/egress/continuity controls, four/seven named-domain coverage, full-set
+ambiguity, matched latency and whole-packet bytes/reference tokens before delivery. This
 does not close the original client incident without its actual request and packet.
 
 ## Risks / Trade-offs

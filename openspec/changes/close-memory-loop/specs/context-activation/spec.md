@@ -87,6 +87,39 @@ otherwise equal candidates and SHALL never contribute to the two-kinds rule.
 `graph_corroboration` SHALL count a typed edge between two candidates even when both
 already appear in ordinary recall.
 
+Sense adjudication SHALL precede candidate/admission truncation and use the complete
+matched set from the caller-visible maintained anchor index, whose existing bound
+is 2,000 identities. Conversation/focus qualification SHALL NOT truncate that set
+before adjudication or infer a unique referent from truncated alternatives. This
+is completeness within the maintained index, not a complete-vault claim. After
+adjudication, admission SHALL retain resolved anchors before partial anchors,
+preserving rank within each group and the ordinary six-anchor allowance; additional
+resolved anchors explicitly named by current-turn `exact_alias` or selected through
+the existing agent-choice route MAY expand admission up to 24 anchors. Those extra
+anchors consume the ordinary allowance first. Partial, focus-only, recency and
+implicit contact SHALL NOT earn extra capacity. Displayed ambiguity SHALL be
+bounded independently without changing the full-set verdict. Capacity omission
+SHALL use section-level `missing` reasons without omitted names or hidden counts,
+derived only from the caller's released view.
+
+#### Scenario: A competitor beyond an old cut remains a competitor
+- **WHEN** a caller-visible indexed alternative beyond the former six-anchor or
+  24-candidate cut changes the existing sense adjudication
+- **THEN** the full matched-set verdict remains unresolved or ambiguous as applicable,
+  even when displayed choices are limited; admission never manufactures uniqueness
+
+#### Scenario: Seven distinct named contexts can be admitted
+- **WHEN** a current turn explicitly names seven independently resolved indexed
+  contexts and the existing rules find no competing senses
+- **THEN** admission can retain all seven within its 24-anchor ceiling, while
+  partial, focus-only and implicit candidates receive no extra allowance
+
+#### Scenario: Partial retrieval hits do not erase resolved contexts
+- **WHEN** six partial retrieval candidates rank ahead of two independently resolved
+  connected lexical candidates after full-set adjudication
+- **THEN** ordinary admission retains the resolved candidates and runs their eligible
+  lanes instead of returning a resolved packet containing only partial anchors
+
 #### Scenario: Two kinds resolve a resource anchor
 - **WHEN** a turn mentions a resource whose profile page title matches lexically and
   whose Records collection claims cover the turn's terms
@@ -167,8 +200,9 @@ prose excerpt as a semantic claim.
 ### Requirement: Material lookup remains bounded and honestly partial
 Material SHALL use maintained catalogues without foreground repair, corpus scanning
 or model acquisition. Context and category predicates SHALL precede its read cap:
-200 unit candidates plus a sentinel, three pointer candidates plus a sentinel and
-three served items overall.
+200 unit candidates plus a sentinel and three pointer candidates plus a sentinel.
+The shared material allowance SHALL remain three items by default and MAY expand
+only for additional explicit-request coverage under the following requirement.
 Its unit and prose-page lookups SHALL share a finite material query-unit and stem
 budget independent of ordinary anchor resolution. This budget SHALL retain current
 turn evidence for concurrently admitted topics without changing context admission,
@@ -210,13 +244,36 @@ Titles, covered unit text and later role reach SHALL NOT substitute for that
 evidence. Equivalent matches SHALL prefer compiled units; remaining capacity
 SHALL use existing material preference and rank. Packet assembly SHALL preserve
 the combined selected order of units and pointers within existing role priority,
-slot and character budgets. Earlier categorical roles, including their pages
+character budgets and the conditional shared material allowance. Earlier categorical roles, including their pages
 and downgraded pointers, SHALL spend before a material group at its declared
 registry position; later roles SHALL follow. Categorical portions SHALL retain
 unit-first ordering, and packets without material SHALL retain the old ordering.
 Own/promoted tiers and current-state/Planning precedence SHALL remain unchanged.
-It SHALL NOT add searches, traversals, model calls,
-context admission or capacity, or claim recovery beyond the candidate window.
+Beyond the default three items, each additional served material item SHALL represent
+at least one further distinct resolved anchor with an eligible current-turn request
+that prior served material has not represented. Multiple or repeated questions about
+one anchor SHALL NOT multiply its extra allowance. An item covering several anchors
+SHALL NOT create spare capacity for unrelated material. Shared enforcement SHALL
+span all selected material roles, compiled units and prose pointers; private
+request-coverage state SHALL NOT enter serialized provenance. A pointer represents
+an inspectable source, not a delivered claim. Categorical item caps, the six-role
+ceiling and the total prose budget SHALL remain unchanged.
+
+It SHALL NOT add searches, traversals or model calls, or claim recovery beyond the
+existing candidate windows. Complete serialized packet bytes and labelled reference
+token estimates SHALL be measured separately from prose characters; an unchanged
+prose budget SHALL NOT be presented as unchanged context overhead.
+
+#### Scenario: Additional explicit domains use existing eligible material
+- **WHEN** a turn has four or seven distinct admitted named requests, each with
+  matching compiled evidence already in the maintained candidate pool, in either order
+- **THEN** material can represent each within the total prose budget without reserving
+  slots for bare names, unsupported requests or unrelated content
+
+#### Scenario: Candidate-window loss does not become fabricated coverage
+- **WHEN** an admitted request's useful prose or units did not reach the capped pool
+- **THEN** extra served capacity does not invent a claim or pointer, candidate
+  truncation stays visible and no complete-answer or full-topic coverage is claimed
 
 #### Scenario: Distinct claims do not consume a second named question's slot
 - **WHEN** one admitted topic has three distinct matching units and a separately

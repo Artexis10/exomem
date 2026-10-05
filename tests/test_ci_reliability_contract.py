@@ -657,7 +657,7 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     assert "workflow_dispatch" in command
     assert "schedule" in command
     assert "status=success" in command
-    assert "head_sha" in command
+    assert "head_sha=$BASE_SHA" in command
     # Failure must tell the operator the exact remediation.
     assert "gh workflow run ci.yml --ref main" in command
 
@@ -797,6 +797,9 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
 
     jobs = workflow["jobs"]
     assert set(jobs) == {"dispatch-evidence", "rerun-evidence-check"}
+
+    # Bound the API result itself; post-filtering a truncated run list misses evidence.
+    assert "head_sha=$BASE_SHA" in jobs["dispatch-evidence"]["steps"][0]["run"]
 
     dispatch_if = " ".join(str(jobs["dispatch-evidence"]["if"]).split())
     assert "auto_merge_enabled" not in dispatch_if  # gated by the trigger, not the if

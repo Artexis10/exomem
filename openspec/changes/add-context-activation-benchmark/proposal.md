@@ -67,6 +67,8 @@ The next acceptance event prioritizes an observable fresh-session useful answer 
 
 ## Impact
 
+The accepted 2026-10-05 substrate refinement extends the existing lifecycle cohort, not the frozen eighteen-case audit: exact observation plus derived interpretation, recoverable correction history, a fresh-model/session answer, stale replay and local-scope negatives. Include a generic embedded creator-product case; synthetic interface trials and actual consumer integration remain separate claims. Reuse existing phase accounting for utility, epistemic correctness, latency, context/tokens, cost, calls, background work and correction burden.
+
 - New fixtures and scorer under `benchmarks/membench/utility/` (variants, oracle
   packets, gold/poison manifests) and a synthetic corpus generator beside
   `benchmarks/epistemic/corpora/`; CI test for the deterministic layer; a runbook under

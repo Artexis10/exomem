@@ -14,6 +14,20 @@ The system SHALL support pre-turn activation, active-agent reasoning, episode de
 - **THEN** the agent routes those changes to their canonical homes and the later activation supplies the relevant provenance-bearing facts without a save or recall reminder
 - **AND** the record distinguishes observed agent behaviour from forced-call infrastructure tests
 
+### Requirement: Task-scoped methods compose with workflow policy
+
+The active agent SHALL be able to use relevant governed method knowledge alongside the existing resolved workflow contract and Planning/Records evidence. Selected methods SHALL retain identity, version, applicability and attribution within existing context budgets. A user override or ambiguous selection SHALL remain explicit. A local adaptation SHALL NOT silently replace the reusable method. The existing workflow-family schema SHALL remain structured policy, not an executable instruction container; method content SHALL NOT grant permissions, authenticate companions or assert external completion.
+
+#### Scenario: A science method is adapted locally
+
+- **WHEN** a scoped research method is relevant but the user requests a different approach for this experiment
+- **THEN** the agent can use the requested approach while retaining the selected method's provenance and leaving its reusable version unchanged unless separately authorized
+
+#### Scenario: Software intent and implementation have different owners
+
+- **WHEN** a workflow links a Planning initiative to an accepted companion implementation contract
+- **THEN** Exomem supplies durable intent, relevant method context and observed progress evidence without mirroring the companion's task queue or treating a declaration as proof of completion
+
 ### Requirement: Working continuity preserves temporal meaning
 
 Activation and episode recovery SHALL reconnect a resumed topic with relevant recent changes, supported current state, unresolved work and older dependencies within existing context budgets. They SHALL use the existing continuity and canonical evidence carriers without depending on the later live-activity feed. An unfinished episode SHALL NOT itself establish an unexpressed Planning commitment.

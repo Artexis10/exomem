@@ -4,9 +4,13 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 
 ## What Changes
 
+- Reconcile the accepted epistemic-substrate direction (2026-10-05) within this programme: stable knowledge identities with recoverable interpretation revisions, exact explanatory relationships, scoped reusable methods and an embedded-product acceptance case. Keep the current compiler and first-owner SQLite delivery sequence; none of these refinements activates live authority or adds a parallel storage/execution system.
 - Establish one programme spanning pre-turn context activation, agent-led episode decomposition, canonical writes, entity hydration and typed relations, derived publication, and subsequent activation.
+- Make working-set capacity follow evidence-qualified explicit current-turn contexts rather than a fixed material count: adjudicate indexed senses before admission cuts, preserve bounded implicit/categorical behavior, and measure whole-packet overhead alongside useful context. This is a correction within the existing compiler, not a new semantic task splitter or retrieval framework.
 - Make multimodal unstructured-to-governed knowledge a first-class workflow: preserve authorized originals, interpret and project into appropriate knowledge/collection destinations, correct conversationally, then prove later query/context use. Reuse the current preservation, episode and writer boundaries; do not replace raw evidence with extractions or curated reasoning with rows.
 - Distinguish a correction to one fact/projection from a proposed reusable alias, schema or routing convention. Reconcile affected derived state under existing authority, preserve source/history, and measure correction burden and repeat-error behaviour rather than treating a successful edit as a closed feedback loop.
+- Retain consequential prior interpretations through each storage owner's version mechanism, not a new visible page per edit. Hashes and rationale summaries alone do not establish recoverable history; make unavailable historical content explicit.
+- Compose task-relevant authored methods with existing workflow contracts and Planning evidence. Method content remains knowledge for the active agent, not executable contract fields, new permissions or a scheduler; companion implementation contracts remain with their own system.
 - Prove temporal working continuity: resumed topics recover relevant recent developments, older dependencies and supported unfinished state; event time, knowledge acquisition and claim validity remain distinct, and a fresh edit does not renew old or superseded information.
 - Add a bounded episode contract that partitions independently reusable objects by retrieval question, subject/domain, temporal episode and epistemic role before selecting destinations; preserves attributed uncertainty and independent provenance through multi-page fan-out; and resumes partial work without duplicate writes. A successful write is not an episode-completion signal.
 - Require active-agent destination review before committing: similarity supplies candidates, while title/scope, artifact role and independent future use determine the canonical home. Prove separately named synthesis and minor-refinement cases without rewarding needless fragmentation.
@@ -39,6 +43,8 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 - `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
 
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.
+
+`resolve-relation-fragment-targets` owns exact authored target resolution; `add-graph-traversal-queries` consumes it for explanatory paths. Existing dynamic entity/relation registries and open categories remain the vocabulary foundation, not a fixed list of knowledge-transition types. Server-side model placement remains an evidence-led design option under explicit output/effect admission, not a permanent product prohibition; this planning refinement admits no new runtime model.
 
 ## Impact
 

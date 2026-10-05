@@ -1,20 +1,22 @@
 schema: spec-driven
 
 context: |
-  exomem — a Model Context Protocol server over an Obsidian/markdown vault. It turns the
-  vault you already own into a multimodal, hybrid-search knowledge base for Claude.
+  exomem — a domain-neutral governed knowledge substrate exposed through MCP,
+  CLI and REST. Original Sources/Evidence, readable compiled knowledge, dynamic
+  entities/relations and exact Records/Planning have distinct authority roles;
+  retrieval and graph projections are derived. The active OpenSpec changes state
+  which SQLite, query and multimodal lifecycle capabilities are not yet delivered.
 
-  Tech stack: Python 3.11+, FastMCP, sqlite (embeddings sidecar). Hybrid retrieval =
-  BM25 + bge-base-en-v1.5 (768d, GPU) + wikilink graph + bge-reranker, fused via RRF.
-  Multimodal extraction is server-side: Tesseract OCR, faster-whisper ASR, CLIP visual
-  search, MarkItDown for office docs. Optional extras: embeddings, media, diarization,
-  vision. NSSM-managed Windows service; GitHub OAuth proxy; cloudflared tunnel.
+  Tech stack: Python 3.11+, FastMCP and SQLite; lexical/vector/graph retrieval,
+  bounded context compilation and optional media extraction. Runtime model,
+  embedding backend and service-manager facts come from current source and live
+  bindings, not a fixed model or client assumption in this planning context.
 
   THE CORE CONSTRAINT — "pure substrate", restated as the authority-and-effects
   matrix (ratified 2026-08-30, per the 2026-08 no-nudge architecture review): the
-  server MEASURES, the brain (Claude/Max) REASONS. What a server-side model may do
-  is bounded by what its output is allowed to touch, in addition to the class bans
-  below, which stand unchanged. Retrieval scorers (embeddings, rerankers) may RANK.
+  server validates governed effects, the active agent REASONS. What a server-side
+  model may do is bounded by the current admitted output/effect roles below.
+  Retrieval scorers (embeddings, rerankers) may RANK.
   Frozen, deterministic content transducers (ASR, OCR, CLIP, pinned-weight frozen
   captioners, voice-embedding speaker-ID) may TRANSCRIBE across modalities —
   default-off wherever they emit prose, and an unpinned or instruction-following
@@ -33,10 +35,17 @@ context: |
   write the agent authors citing the reading (owner rulings R1-R7, 2026-09-28;
   change add-sensed-epistemic-model). A model serving two roles is bound by each
   role's rule for that output.
-  The agent alone judges conversation and authors proposals; mutation happens only
-  through governed leaves. Same-modal text-to-text generation server-side stays
-  banned: a server-side reasoning LLM is NEVER added (an LLM instrument emitting
-  closed-label probabilities measures; it does not reason or write). No confidence/authority
+  The active agent is the principal semantic reasoner; mutation happens only
+  through governed leaves. The current admitted server roles above do not permit
+  sampled text proposals or autonomous semantic authorship. This is the current
+  admission boundary, not a permanent product prohibition on model placement
+  (owner refinement, 2026-10-05, close-memory-loop design). A future server-side
+  generation worker requires an explicit output/effect contract and evidence of
+  benefit, with source/version and origin binding, bounded data access/resources,
+  stale-input handling and governed acceptance; this refinement enables no model.
+  Agent-delegated candidate workers may be measured first without changing server
+  admission. No model output becomes canonical truth merely by being emitted.
+  No confidence/authority
   floats on notes. Epistemic surfaces (conflict, staleness) MEASURE and SURFACE
   for review; they never auto-decay notes or rank their authority.
 
