@@ -117,11 +117,12 @@
       --strict`; privacy gate; full sharded corpus at the delivery boundary.
 - [ ] 6.3 Independent review of the diff, then archive this change with
       `openspec archive` in the same delivery.
-- [ ] 6.4 Integrate the learning batch with current main while preserving the accepted
+- [x] 6.4 Integrate the learning batch with current main while preserving the accepted
       heat recovery, released-audience projection and cache keys, multilingual encoder
       identity and vector admission, and restricted-writer behavior. Verify the learning,
       conventions and existing activation suites together, regenerate artifacts from
       the merged source, and obtain independent review before delivering PR #1380.
+      Delivered in PR #1380, merged as 1abb81c79 after independent correctness and filesystem-boundary reviews and required CI (conventions, learning and activation suites: `tests/test_activation_conventions_referential.py`, `tests/test_cjk_readiness.py`, `tests/test_schema_memory_governance_registries.py`).
 
 ## 7. Referential vocabulary and reversible history (close-memory-loop step 5)
 

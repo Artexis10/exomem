@@ -37,4 +37,5 @@
 ## 6. Delivery
 
 - [x] 6.1 Record the before/after on the synthetic fixture in design.md and the PR body.
-- [ ] 6.2 Merge, then synchronize these deltas into the canonical specs and archive the change (orchestrator).
+- [x] 6.2 Merge, then synchronize these deltas into the canonical specs and archive the change (orchestrator).
+  Merged in #1424 (84f95bc91); archived in this delivery with `openspec archive`.

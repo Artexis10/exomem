@@ -8,17 +8,19 @@
       tie-break; v6→v7 invalidation and rebuild convergence; cache-token change
       on the schema bump; missing/stale/disabled readiness statuses;
       single-flight background rebuild scheduling.
-- [ ] 1.2 Run the new file and confirm red.
+- [x] 1.2 Run the new file and confirm red.
+      The red phase was not recorded when PR #313 landed; confirmed afterwards by running the files as first committed (01705476c) against the pre-implementation base 62431ea50: 12 of 12 failed (`relation_participants` absent).
 
 ## 2. Stage 1 Green — Sidecar Implementation
 
-- [ ] 2.1 `src/exomem/epistemic_graph.py`: bump `SCHEMA_VERSION` to 7; add
+- [x] 2.1 `src/exomem/epistemic_graph.py`: bump `SCHEMA_VERSION` to 7; add
       `idx_graph_edges_relation_type(relation_type, src_key, dst_key)` and
       `idx_graph_edges_parent_relation(parent_relation, src_key, dst_key)`;
       implement `RelationFilterResult` and `relation_participants(keys, anchor,
       direction)` through the identity-gated read snapshot using UNIONed
       indexed lookups and `graph_nodes` joins; add single-flight
       `schedule_background_rebuild(vault_root)`.
+      Delivered in PR #313 (merged as 79010a11f): `idx_graph_edges_relation_type` and `idx_graph_edges_parent_relation`, `RelationFilterResult`, `EpistemicGraphIndex.relation_participants` and single-flight `schedule_background_rebuild` in `epistemic_graph.py`, tested in `tests/test_epistemic_graph_relation_filter.py` and the single-flight cases in `tests/test_freshness_liveness_contract.py`. `SCHEMA_VERSION` has since moved to 11 through later graph work.
 - [ ] 2.2 Verify the v6→v7 healing path: a stale-identity sidecar must converge
       through a full rebuild; if path refresh does not re-stamp identity, wire
       the stale-marker path to trigger the rebuild.
@@ -34,26 +36,29 @@
       freshness key includes the graph token and relation-registry identity in
       keyword and empty-query modes when the filter is active; absent-filter
       byte-identity regression reusing the typed-lane parity harness.
-- [ ] 3.2 Run and confirm red.
+- [x] 3.2 Run and confirm red.
+      The red phase was not recorded when PR #313 landed; confirmed afterwards by running the file as first committed (e3baa1036) against the pre-implementation base 62431ea50: 12 of its 13 tests failed, the absent-filter control passing.
 
 ## 4. Stage 1 Green — Find Implementation
 
-- [ ] 4.1 `src/exomem/find.py`: add the three parameters; canonicalize and
+- [x] 4.1 `src/exomem/find.py`: add the three parameters; canonicalize and
       reject through the relation registry; resolve participants once per
       request and intersect `eligible_paths`; apply the parent-path constraint
       on the unit-level branch after raising warming first; widen
       `_freshness_key` conditions; extend both request cache key tuples; thread
       the `relation_match` annotation through the bundle-to-hit path and the
       hit dataclasses.
+      Delivered in PR #313 (merged as 79010a11f) and reviewed in e6a2a80c8: `find.py` takes `relations`, `relation_of` and `relation_direction`, resolves and canonicalizes them before any cache (`INVALID_RELATION_FILTER`, warming raised first), intersects the participant set into `eligible_paths`, widens the freshness and both request cache keys when the filter is active and carries `relation_match` to the hits, tested in `tests/test_find_relation_filter.py`. The deprecated-key advisory is computed but not yet surfaced (`find.py`, `_relation_findings`).
 - [ ] 4.2 Full stage-1 suite green plus the absent-filter parity regression.
 
 ## 5. Stage 2 — Command Surface And Gates
 
 - [ ] 5.1 Command tests: `op_find`/`op_ask_memory` pass-through, `relation_of`
       memory-identifier resolution, error-envelope mapping assertions.
-- [ ] 5.2 `src/exomem/commands.py`: add parameters and Google-style docstring
+- [x] 5.2 `src/exomem/commands.py`: add parameters and Google-style docstring
       Args to both ops; add one bounded relation sentence to bootstrap search
       guidance.
+      Delivered in PR #313 (merged as 79010a11f): `op_find` and `op_ask_memory` in `commands.py` take the three parameters with docstring Args, and the bootstrap search guidance carries one bounded relation sentence.
 - [ ] 5.3 Regenerate `tests/fixtures/mcp_tool_schemas.json` and
       `src/exomem/tool_surface_contract.json` via `scripts/dump-tool-schemas.py`;
       schema-fidelity and tool-surface gates green; record the pending sha in
@@ -63,5 +68,6 @@
       sidecar-absent → warming, not empty); add `CEIL_RELATION_FILTER_MS` to
       `tests/test_latency_gate.py` calibrated on the synthetic vault; confirm
       `tests/golden/relation_compatibility.yaml` is untouched.
-- [ ] 5.5 Ruff on changed files; full lean pytest suite; latency gate; record
+- [x] 5.5 Ruff on changed files; full lean pytest suite; latency gate; record
       verification evidence below.
+      Delivered in PR #313 (merged as 79010a11f): ruff clean on the changed files, and required CI on the merged head green: Linux `tests (py3.11)` and `tests (py3.13)` (full lean suite, including `CEIL_RELATION_FILTER_MS` in `tests/test_latency_gate.py`), `retrieval eval`, `capabilities doc`, `lint + targeted types` and `OpenSpec validation`.

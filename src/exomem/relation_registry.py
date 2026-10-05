@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Container, Iterable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -215,13 +215,36 @@ def core_registry() -> RelationRegistry:
 _CACHE: dict[Path, tuple[str, RelationRegistry]] = {}
 
 
+class _EveryKey:
+    """Container that holds every key: the saved registry is grandfathered whole."""
+
+    def __contains__(self, _key: object) -> bool:
+        return True
+
+
+def _blocking(registry: RelationRegistry) -> list[dict[str, str]]:
+    """Findings that refuse a write; warnings are advisories and never do."""
+    return [item for item in registry.findings if item["severity"] == "error"]
+
+
 def load_registry(
     vault_root: Path | None = None, *, proposal: dict[str, Any] | None = None
 ) -> RelationRegistry:
+    """Load the saved registry, or parse a proposal.
+
+    With both a vault and a proposal, an extension already saved with the same
+    parent and declared family keeps any `family_mismatch` as a warning: a rule
+    added later never turns a saved registry into a refusal.
+    """
     core = core_registry()
     if proposal is not None:
         raw = yaml.safe_dump(proposal, sort_keys=True)
-        return _parse_extension_data(proposal, _content_hash(raw), core)
+        grandfathered = (
+            _unchanged_saved_extensions(vault_root, proposal) if vault_root is not None else ()
+        )
+        return _parse_extension_data(
+            proposal, _content_hash(raw), core, grandfathered=grandfathered
+        )
     if vault_root is None:
         return core
     path = extension_registry_path(vault_root)
@@ -243,13 +266,29 @@ def load_registry(
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
         )
     else:
-        registry = _parse_extension_data(data, digest, core)
+        registry = _parse_extension_data(data, digest, core, grandfathered=_EveryKey())
     _CACHE[path] = (digest, registry)
     return registry
 
 
-def validate_proposal(proposal: dict[str, Any]) -> list[dict[str, str]]:
-    return list(load_registry(proposal=proposal).findings)
+def _unchanged_saved_extensions(vault_root: Path, proposal: dict[str, Any]) -> frozenset[str]:
+    """Saved extensions the proposal keeps with the same parent and declared family."""
+    proposed = proposal.get("extensions") if isinstance(proposal, dict) else None
+    if not isinstance(proposed, dict):
+        return frozenset()
+    return frozenset(
+        key
+        for key, saved in load_registry(vault_root).extensions.items()
+        if isinstance(proposed.get(key), dict)
+        and proposed[key].get("parent") == saved.parent
+        and proposed[key].get("family") == saved.family
+    )
+
+
+def validate_proposal(
+    proposal: dict[str, Any], vault_root: Path | None = None
+) -> list[dict[str, str]]:
+    return _blocking(load_registry(vault_root, proposal=proposal))
 
 
 def require_current_hash(current_hash: str, expected_hash: str) -> None:
@@ -415,9 +454,16 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
         if not isinstance(old, dict):
             raise ValueError(f"UNKNOWN_RELATION: {key}")
         _merge_existing_extension(old, {"status": "deprecated", "replaced_by": replacement})
-    registry = load_registry(proposal=result)
-    if registry.findings:
-        raise ValueError(f"INVALID_RELATION_REGISTRY: {list(registry.findings)!r}")
+    # An extension already in `current` keeps its immutable family, so a
+    # mismatch it carries is grandfathered; one added by this delta is not.
+    registry = _parse_extension_data(
+        result,
+        _content_hash(yaml.safe_dump(result, sort_keys=True)),
+        core_registry(),
+        grandfathered=frozenset(map(str, current.get("extensions") or {})),
+    )
+    if _blocking(registry):
+        raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
     return result
 
 
@@ -550,9 +596,9 @@ def save_registry(
     expected_hash: str | None = None,
     observed_keys: Iterable[str] = (),
 ) -> dict[str, Any]:
-    registry = load_registry(proposal=proposal)
-    if registry.findings:
-        raise ValueError(f"INVALID_RELATION_REGISTRY: {list(registry.findings)!r}")
+    registry = load_registry(vault_root, proposal=proposal)
+    if _blocking(registry):
+        raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
     proposed_keys = set(registry.extensions) | set(registry.aliases)
     removed = sorted(set(observed_keys) - proposed_keys - set(registry.core))
     if removed:
@@ -587,7 +633,12 @@ def empty_proposal() -> dict[str, Any]:
     return {"schema_version": EXTENSION_SCHEMA_VERSION, "extensions": {}}
 
 
-def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> RelationRegistry:
+def _parse_extension_data(
+    data: Any,
+    digest: str,
+    core: RelationRegistry,
+    grandfathered: Container[str] = (),
+) -> RelationRegistry:
     findings: list[dict[str, str]] = []
     if not isinstance(data, dict):
         return RelationRegistry(
@@ -721,12 +772,23 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                 )
             )
             scope = {}
+        parent_family = core.core[parent].family if parent in core.core else ""
+        declared_family = value.get("family")
+        if parent_family and declared_family and str(declared_family) != parent_family:
+            findings.append(
+                _finding(
+                    "family_mismatch",
+                    f"{span}.family",
+                    f"must equal the parent's core family {parent_family!r}, so a declared "
+                    "family cannot relabel the parent's meaning",
+                    relation=key,
+                    severity="warning" if key in grandfathered else "error",
+                )
+            )
         definition = RelationDefinition(
             key=key,
             description=description,
-            family=str(
-                value.get("family") or (core.core[parent].family if parent in core.core else "")
-            ),
+            family=str(declared_family or parent_family),
             direction=direction,
             parent=parent if isinstance(parent, str) else None,
             inverse=_optional(value.get("inverse")),
@@ -915,12 +977,13 @@ def _finding(
     detail: str,
     *,
     relation: str | None = None,
+    severity: str = "error",
 ) -> dict[str, str]:
     finding = {
         "code": code,
         "path": path,
         "span": path,
-        "severity": "error",
+        "severity": severity,
         "detail": detail,
     }
     if relation is not None:
