@@ -844,48 +844,14 @@ def _rest_port() -> int | None:
 
 
 def _service_env_path() -> Path | None:
-    """Mirror of the retrieve hook's `_service_env_path`: the managed
-    install's service EnvironmentFile, where `install-service.sh` persists
-    `EXOMEM_REST_API_KEY`. `EXOMEM_SERVICE_ENV` overrides the location;
-    Windows has no service env."""
-    explicit = os.environ.get("EXOMEM_SERVICE_ENV", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    if os.name == "nt":
-        return None
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Exomem" / "service.env"
-    base = os.environ.get("XDG_CONFIG_HOME", "").strip() or str(Path.home() / ".config")
-    return Path(base) / "exomem" / "service.env"
+    return _state_core().local_credentials().service_env_path()
 
 
 def _resolve_rest_key() -> tuple[str, str]:
-    """Mirror of the retrieve hook's `_resolve_rest_key`: `(key, source)` —
-    from this env (`source="env"`), else the managed install's `service.env`
-    (`source="file"`), else `("", "")`. Never raises; the value is never
-    logged."""
-    from_env = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
-    if from_env:
-        return from_env, "env"
-    path = _service_env_path()
-    if path is None:
-        return "", ""
-    try:
-        text = path.read_text(encoding="utf-8").lstrip("﻿")
-    except Exception:  # noqa: BLE001 — hook must never break a stop hook
-        return "", ""
-    for line in text.splitlines():
-        match = re.match(r"^\s*EXOMEM_REST_API_KEY\s*=\s*(.*)$", line)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if len(value) >= 2 and value[0] == value[-1] == '"':
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif len(value) >= 2 and value[0] == value[-1] == "'":
-            value = value[1:-1]
-        value = value.strip()
-        return (value, "file") if value else ("", "")
-    return "", ""
+    credentials = _state_core().local_credentials()
+    return credentials.rest_key(
+        lambda name: credentials.service_env_value(name, _service_env_path())
+    )
 
 
 def _bounded(call, budget: float):

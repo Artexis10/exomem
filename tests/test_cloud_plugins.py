@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
+import subprocess
+import sys
 import tomllib
 import zipfile
 from pathlib import Path
@@ -20,7 +23,10 @@ def test_directory_starters_ship_from_the_shared_product_definition(tmp_path: Pa
     cloud_plugins.build_packages(ROOT, tmp_path)
     definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
     manifest = json.loads((tmp_path / "openai/plugin.json").read_text())
-    assert manifest["extensions"]["com.openai"]["interface"]["defaultPrompt"] == definition["default_prompts"]
+    assert (
+        manifest["extensions"]["com.openai"]["interface"]["defaultPrompt"]
+        == definition["default_prompts"]
+    )
     for provider in ("claude", "openai"):
         readme = (tmp_path / provider / "README.md").read_text()
         for prompt in definition["default_prompts"]:
@@ -119,6 +125,61 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
             )
     with zipfile.ZipFile(tmp_path / "openai.zip") as archive:
         assert not any(name.startswith("hooks/") for name in archive.namelist())
+
+
+def test_cloud_hooks_run_without_local_credential_reader(tmp_path: Path) -> None:
+    # Catch a public archive carrying local credential access, or losing its
+    # native activation/capture behaviour when that local-only dependency is absent.
+    cloud_plugins.build_packages(ROOT, tmp_path / "built")
+    package = tmp_path / "unpacked"
+    with zipfile.ZipFile(tmp_path / "built/claude.zip") as archive:
+        assert "hooks/exomem_local_credentials.py" not in archive.namelist()
+        for name in archive.namelist():
+            if name.startswith("hooks/") and name.endswith(".py"):
+                assert b"EXOMEM_REST_API_KEY" not in archive.read(name), name
+        archive.extractall(package)
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("EXOMEM_", "KB_", "CLAUDE_", "CODEX_"))
+    }
+    env.update(
+        {
+            "CLAUDE_PLUGIN_DATA": str(tmp_path / "state"),
+            "EXOMEM_PROMINENCE": "maximal",
+            "EXOMEM_CONFIG_PATH": str(tmp_path / "absent-config.json"),
+            "EXOMEM_REST_API_KEY": "synthetic-must-not-be-read",
+            "EXOMEM_CAPTURE_NUDGE_MIN_CHARS": "1",
+            "EXOMEM_EPISODE_ASK_TURNS": "1",
+        }
+    )
+    for stem, event, expected in (
+        ("retrieve_nudge", {"prompt": "continue"}, "activate_context"),
+        (
+            "capture_nudge",
+            {"last_assistant_message": "We settled the adapter boundary."},
+            "Exomem capture check",
+        ),
+    ):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(package / f"hooks/exomem_{stem}.py"),
+                "--client",
+                "claude",
+                "--hook-home-env",
+                "CLAUDE_PLUGIN_DATA",
+                "--activation-mode",
+                "mcp",
+            ],
+            input=json.dumps({"session_id": "packaged-native", **event}),
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert expected in result.stdout
 
 
 @pytest.mark.parametrize("placement", ["root", "extension", "file", "compatibility"])

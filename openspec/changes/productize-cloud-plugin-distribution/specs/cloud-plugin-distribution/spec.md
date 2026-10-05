@@ -71,6 +71,12 @@ The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP UR
 - **THEN** Claude hook payloads match canonical release bytes and bind writable local state with native-MCP-only activation
 - **AND** OpenAI's directory archive excludes lifecycle hooks while its identical Skills continue to govern context activation
 
+#### Scenario: Cloud hooks exclude local credential readers
+- **WHEN** native-MCP Cloud archives are generated from the canonical hook source
+- **THEN** they omit the self-hosted local service credential-reading module
+- **AND** their packaged activation and capture reminders work without that module
+- **AND** self-hosted installation and health checks retain the local dependency and existing transports
+
 ### Requirement: Shared behavioural evaluation
 One versioned corpus SHALL define expected observable behaviour for all provider surfaces. Evaluation SHALL inspect actual tool calls, arguments, responses, citations and independent mutation readbacks. Unit observations or connection-only evidence MUST NOT count as native acceptance.
 
