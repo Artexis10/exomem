@@ -66,7 +66,7 @@ variable "admin_ssh_cidrs" {
   validation {
     condition = alltrue([
       for cidr in var.admin_ssh_cidrs :
-      can(cidrnetmask(cidr)) && cidr != "0.0.0.0/0" && cidr != "::/0"
+      can(cidrhost(cidr, 0)) && cidr != "0.0.0.0/0" && cidr != "::/0"
     ])
     error_message = "Administrator CIDRs must be valid and cannot expose SSH globally."
   }

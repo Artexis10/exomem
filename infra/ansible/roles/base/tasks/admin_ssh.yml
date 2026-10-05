@@ -4,6 +4,13 @@
 # break-glass window; this file adds those rules and retires every public SSH
 # rule the role added earlier that the current list no longer names. Rules
 # with any other comment, or none, are never touched.
+- name: Refuse a global administrator SSH CIDR
+  ansible.builtin.assert:
+    that:
+      - "'0.0.0.0/0' not in base_admin_ssh_cidrs"
+      - "'::/0' not in base_admin_ssh_cidrs"
+    fail_msg: Administrator SSH CIDRs cannot expose SSH globally.
+
 - name: Read the UFW rules already added
   ansible.builtin.command:
     argv: [ufw, show, added]

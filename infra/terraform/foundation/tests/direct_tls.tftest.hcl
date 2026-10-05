@@ -122,6 +122,22 @@ run "empty_admin_cidrs_close_public_ssh" {
   }
 }
 
+run "accepts_an_ipv6_break_glass_cidr" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = ["2001:db8::1/128"]
+  }
+
+  assert {
+    condition = length([
+      for rule in hcloud_firewall.alpha.rule : rule
+      if rule.port == "22" && toset(rule.source_ips) == toset(["2001:db8::1/128"])
+    ]) == 1
+    error_message = "An IPv6 break-glass CIDR must open SSH like an IPv4 one."
+  }
+}
+
 run "rejects_a_global_admin_ssh_cidr" {
   command = plan
 

@@ -35,10 +35,13 @@ inventory and converge every node. Never pass `--limit`: every existing node
 must admit the new one, and the join checks that it does.
 
 A new agent has no public SSH, and `site.yml` refuses a host without NetBird
-when no administrator CIDR is set. Enroll it through the shared NetBird role
-during a temporary break-glass CIDR window (see
-[Administration access](deploy.md#administration-access)), add its NetBird IP
-to the private address map, then revert the CIDR in Terraform and Ansible.
+when no administrator CIDR is set. Open a temporary CIDR window (see
+[Administration access](deploy.md#administration-access)). Enroll the agent
+with substrate-infra's `ansible/administration.yml`, with the agent in its
+`administration_servers` group and a one-use setup key injected as
+`SUBSTRATE_NETBIRD_SETUP_KEY`. Add its NetBird IP to the private address map
+and verify a fresh managed SSH connection over NetBird. Only then revert the
+CIDR in Terraform and Ansible.
 
 ```bash
 # terraform.tfvars (foundation)

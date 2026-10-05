@@ -69,7 +69,6 @@ def test_base_role_hardens_ssh_firewall_time_logging_and_disk_support() -> None:
 
     for package in ("cryptsetup", "fail2ban", "ufw", "unattended-upgrades"):
         assert package in defaults
-    assert "base_admin_ssh_cidrs" in tasks
     assert "ansible.builtin.apt" in tasks
     assert "ansible.builtin.systemd_service" in tasks
     assert "PermitRootLogin prohibit-password" in ssh

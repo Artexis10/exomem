@@ -23,23 +23,70 @@ effectors, not a release checklist; do not edit their release values by hand.
 
 ## Administration access
 
-Hosts have no public SSH. Ansible and operators reach them over the company
-NetBird, using the managed SSH profile with its existing key and host pin; the
-shared NetBird role admits 22/tcp on `wt0`. Keep a private JSON file outside
-the repository that maps each inventory host name (`exomem-alpha`,
-`substrate-control-01`, `exomem-agent-<key>`) to its NetBird IP, and pass it to
-the inventory generator with `--admin-addresses`. Hosts it omits keep their
-public IPv4, which is closed. The base role refuses to run with no public SSH
-CIDR unless the host has `wt0` and UFW admits 22/tcp on it.
+Hosts have no public SSH. Operators and Ansible reach them over the company
+NetBird with the existing key and host pin; the shared NetBird role admits
+22/tcp on `wt0`. Keep a private JSON file outside the repository that maps each
+inventory host name (`exomem-alpha`, `substrate-control-01`,
+`exomem-agent-<key>`) to its NetBird IP, and pass it to the inventory generator
+with `--admin-addresses`. Hosts it omits keep their public IPv4, which is
+closed. The base role refuses to run with no public SSH CIDR unless the host
+has `wt0` and UFW admits 22/tcp on it.
+
+Ansible uses plain OpenSSH, not `harness ssh`. Route it through the
+workstation's NetBird SOCKS listener (the workstation default is
+`127.0.0.1:21080`); setting `ANSIBLE_SSH_ARGS` replaces Ansible's defaults, so
+repeat them:
+
+```bash
+export ANSIBLE_SSH_ARGS="-C -o ControlMaster=auto -o ControlPersist=60s -o ProxyCommand='nc -X 5 -x 127.0.0.1:21080 %h %p'"
+```
+
+`ansible_ssh_common_args` in private group variables works the same way.
+`host_key_checking` stays on, so each NetBird IP needs a known host. Reuse the
+existing pin with a `~/.ssh/config` block per host,
+`Host <NetBird IP>` / `HostKeyAlias <public IPv4>`, as the managed desktop
+aliases do.
 
 Break-glass is the Hetzner console or rescue system. A disposable host with
 public inbound closed at both the Hetzner firewall and UFW returned over
 NetBird after a soft reboot and a hard reset, and stayed publicly unreachable,
-with console access confirmed (2026-10-05). If network access is still
-needed, set one CIDR in `admin_ssh_cidrs` (Terraform) and
-`base_admin_ssh_cidrs` (Ansible), apply both, and revert both to `[]`
-afterwards. The next Ansible run deletes the reverted UFW rule; it never
-touches rules with another comment, including NetBird's.
+with console access confirmed (2026-10-05).
+
+- A fresh host has UFW inactive, so a Terraform window is enough: set one CIDR
+  in `admin_ssh_cidrs` and the same CIDR in `base_admin_ssh_cidrs`, so a base
+  role run keeps admitting it once UFW is enabled.
+- An existing host with NetBird down admits 22/tcp only on `wt0`, so neither
+  Terraform nor Ansible can reach it. From the Hetzner console first run
+  `ufw allow from <ip> to any port 22 proto tcp comment 'Exomem administrator SSH'`,
+  then open the same CIDR in Terraform. The managed comment lets the next
+  Ansible run retire the rule.
+
+Close the window once NetBird SSH works again: revert both lists to `[]`, apply
+Terraform, and run the targeted Ansible command below. It deletes only rules
+carrying the managed comment, never NetBird's or any other.
+
+### Cutover to NetBird-only SSH
+
+Confirm a fresh managed SSH connection over NetBird and console access for each
+host first. Then, with `base_admin_ssh_cidrs: []` in the private group
+variables, converge SSH access alone, one host at a time:
+
+```bash
+cd infra/ansible
+ansible-playbook --inventory inventory.yml site.yml --tags admin_ssh --limit <host>
+```
+
+The tag runs fact gathering and the SSH access tasks only (on the control host
+also the Postgres role's read-only service-mode assert); no package upgrades,
+K3s or Postgres changes. Next, set `admin_ssh_cidrs = []`, review the saved
+foundation plan (in-place rule removal on the alpha, control and agent
+firewalls only), and apply it.
+
+Finally, run `sudo ufw status numbered` on every host and remove any public
+22/tcp rule that remains with `sudo ufw delete <n>`, listing again after each
+deletion. The role deliberately leaves uncommented and hand-written rules
+alone, so these are the operator's to remove. Confirm port 22 is unreachable
+from outside NetBird and a fresh managed connection still works.
 
 ## First rollout of fresh-storage binding
 
