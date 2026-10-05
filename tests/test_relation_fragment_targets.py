@@ -11,6 +11,7 @@ import pytest
 from exomem import (
     audit,
     deferred_index,
+    dreamer_families,
     epistemic_graph,
     freshness,
     relation_census,
@@ -327,6 +328,25 @@ def test_page_level_consumers_see_a_fragment_only_relation_as_an_edge_to_its_pag
         assert consumer(conn, root)
     finally:
         conn.close()
+
+
+def test_dreamer_hydration_finds_an_entity_linked_only_by_a_typed_fragment(
+    tmp_path: Path,
+) -> None:
+    """A canonical relation bullet makes no wikilink edge, so the unit destination is the only link."""
+    root, index = _consumer_vault(tmp_path)
+    _write(
+        root,
+        SOURCE,
+        f"---\ntype: insight\nstatus: active\ntitle: Frag source\nexomem_id: {SOURCE_ID}\n---\n"
+        f"# Frag source\n\n## Relations\n- supports [[{ORG[:-3]}#org-fact]]\n",
+    )
+    index.rebuild_all()
+    ctx = dreamer_families.Context(vault_root=root, store=None, conn=None, now=0.0)
+    try:
+        assert dreamer_families._hydration_entities(ctx, SOURCE) == [ORG]
+    finally:
+        ctx.close()
 
 
 def test_the_isolation_sweep_attributes_a_unit_destination_to_its_page(tmp_path: Path) -> None:

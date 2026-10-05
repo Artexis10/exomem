@@ -146,8 +146,10 @@ argued: `tests/test_latency_gate.py` at 2k and 8k, reported in this change.
 **A unit-level edge changes traversal fan-out.** The graph already holds unit
 *nodes*, but a unit as a *destination* is new. Page-level readers are covered by
 `dst_page_key` above; the rest were checked rather than assumed. The audit
-isolation sweep and the census read the raw `dst_key` on purpose, so an edge to a
-unit is attributed to its page and still reports the unit it points at. Traversal
+isolation sweep takes the edge's page from `dst_page_key` and keeps the raw
+`dst_key`; the census reads the raw `dst_key` and resolves a unit key to its admitted
+page. Either way an edge to a unit is attributed to its page and still reports the
+unit it points at. Traversal
 profile priority, find ranking and the acceptance queue's own ordering were not
 exercised on a unit-destination graph (task 9.2).
 
