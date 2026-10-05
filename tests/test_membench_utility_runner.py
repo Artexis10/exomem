@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -419,6 +420,31 @@ def test_report_breaks_usage_down_by_phase_and_keeps_unknowns_unknown(tmp_path):
     assert report["overhead"]["phase_orchestration_seconds"] is not None
     assert report["overhead"]["outside_phase_seconds"] is not None
     assert report["spend"]["cap_usd"] == 2.0
+    pair = tmp_path / "run" / "pairs" / "helpful_history"
+    observed = [json.loads((pair / arm / "action-result.json").read_text())
+                for arm in ("control", "memory")]
+    assert phases["action"]["tool_calls"]["total"] == sum(r["tool_calls"] for r in observed)
+    assert phases["action"]["tool_calls"]["known_count"] == 2
+    assert phases["action"]["failed_model_calls"]["total"] == sum(r["failed_model_calls"] for r in observed)
+
+
+def test_observed_calls_survive_unknown_provider_token_usage():
+    """A partial provider bill must not erase locally counted execution work."""
+    from membench.utility.runner import _usage_from_phase_result
+    from membench.utility.scoring import aggregate_usage
+
+    measured = _usage_from_phase_result("episode", "helpful_history", "memory", "action", {
+        "model_calls": 2, "tool_calls": 3, "failed_model_calls": 1,
+        "input_tokens": 10, "unknown_usage_calls": 1,
+    })
+    unmeasured = _usage_from_phase_result("episode", "helpful_history", "control", "action", {})
+    assert asdict(measured).get("tool_calls") == 3
+    assert asdict(measured).get("failed_model_calls") == 1
+    assert measured.input_tokens is None
+    totals = aggregate_usage([measured, unmeasured])
+    assert totals["tool_calls"].total == 3
+    assert totals["tool_calls"].known_count == totals["tool_calls"].unknown_count == 1
+    assert totals["failed_model_calls"].total == 1
 
 
 def test_semantic_profile_requires_verified_cell_readiness(tmp_path):

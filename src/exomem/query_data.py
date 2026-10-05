@@ -26,6 +26,7 @@ tables are the sweet spot.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import itertools
 import json
@@ -57,6 +58,13 @@ _COMMON_RECORD_KEYS = ("result", "results", "data", "rows", "items", "entries")
 
 @dataclass
 class QueryDataResult:
+    """Bounded answer with optional evidence from the exact parsed byte snapshot.
+
+    Row indices name zero-based data records (CSV excludes its header); index
+    zero for json_object names the root object, not an array. Aggregates carry
+    the source descriptor only. Adapter rows without raw bytes omit provenance.
+    """
+
     path: str
     format: str
     total_rows: int  # rows in the dataset
@@ -67,9 +75,10 @@ class QueryDataResult:
     aggregate: Any = None
     truncated: bool = False
     warnings: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] | None = None
 
     def as_dict(self) -> dict:
-        return {
+        result = {
             "path": self.path,
             "format": self.format,
             "total_rows": self.total_rows,
@@ -81,6 +90,9 @@ class QueryDataResult:
             "truncated": self.truncated,
             "warnings": self.warnings,
         }
+        if self.provenance is not None:
+            result["provenance"] = self.provenance
+        return result
 
 
 def _bounded_limit(value: int | None) -> int:
@@ -94,13 +106,17 @@ def _bounded_limit(value: int | None) -> int:
     return min(limit, HARD_ROW_CAP) if limit > 0 else DEFAULT_LIMIT
 
 
-def _bounded_response_rows(rows: list[dict]) -> tuple[list[dict], bool]:
+def _bounded_response_rows(
+    rows: list[dict], *, overhead: int = 0, row_indices: list[int] | None = None,
+) -> tuple[list[dict], bool]:
     """Keep serialized query data within a modest, explicit response budget."""
-    size = 2  # JSON list brackets
+    size = 2 + overhead  # JSON list brackets plus optional provenance
     bounded: list[dict] = []
-    for row in rows:
+    for index, row in enumerate(rows):
         row_size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         separator = 1 if bounded else 0
+        if row_indices is not None:
+            row_size += len(str(row_indices[index])) + separator
         if size + separator + row_size > MAX_RESPONSE_BYTES:
             return bounded, True
         bounded.append(row)
@@ -108,14 +124,16 @@ def _bounded_response_rows(rows: list[dict]) -> tuple[list[dict], bool]:
     return bounded, False
 
 
-def _bounded_aggregate(value: Any) -> tuple[Any, bool]:
+def _bounded_aggregate(value: Any, *, overhead: int = 0) -> tuple[Any, bool]:
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(encoded) <= MAX_RESPONSE_BYTES:
+    if len(encoded) + overhead <= MAX_RESPONSE_BYTES:
         return value, False
     return {"truncated": True, "reason": "aggregate exceeds response size cap"}, True
 
 
-def _locate_array(data: Any, record_path: str | None, warnings: list[str]) -> list:
+def _locate_array(
+    data: Any, record_path: str | None, warnings: list[str],
+) -> tuple[list, str, str | None]:
     if record_path:
         located = _get_field(data, record_path) if isinstance(data, (dict, list)) else None
         if not isinstance(located, list):
@@ -123,16 +141,16 @@ def _locate_array(data: Any, record_path: str | None, warnings: list[str]) -> li
                 "BAD_RECORD_PATH",
                 f"record_path {record_path!r} did not resolve to a JSON array",
             )
-        return located
+        return located, "json_array", record_path
     if isinstance(data, list):
-        return data
+        return data, "json_array", None
     if isinstance(data, dict):
         for k in _COMMON_RECORD_KEYS:
             if isinstance(data.get(k), list):
                 warnings.append(f"auto-detected record array at top-level key {k!r}")
-                return data[k]
+                return data[k], "json_array", k
         warnings.append("JSON root is an object with no obvious array; treated as a single row")
-        return [data]
+        return [data], "json_object", None
     raise QueryDataError("BAD_JSON", "JSON root is neither an array nor an object")
 
 
@@ -161,6 +179,8 @@ def load_generic_rows(
     relative_path: str,
     suffix: str,
     record_path: str | None = None,
+    *,
+    provenance: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict], list[str], list[str]]:
     """Read a public dataset through the retained generic leaf before parsing."""
 
@@ -176,7 +196,7 @@ def load_generic_rows(
         }:
             raise QueryDataError("NOT_FOUND", "dataset could not be read") from None
         raise QueryDataError("UNREADABLE", "dataset could not be read safely") from None
-    return load_rows_bytes(snapshot.data, suffix, record_path)
+    return load_rows_bytes(snapshot.data, suffix, record_path, provenance=provenance)
 
 
 def read_dataset_bytes(abs_path: Path) -> bytes:
@@ -197,7 +217,8 @@ def read_dataset_bytes(abs_path: Path) -> bytes:
 
 
 def load_rows_bytes(
-    data: bytes, suffix: str, record_path: str | None = None
+    data: bytes, suffix: str, record_path: str | None = None,
+    *, provenance: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict], list[str], list[str]]:
     """Parse one already-read canonical dataset snapshot without a second file read."""
     suffix = suffix.lower()
@@ -216,20 +237,28 @@ def load_rows_bytes(
             cols = list(reader.fieldnames or [])
         if len(rows) > MAX_PARSED_ROWS:
             raise QueryDataError("TOO_MANY_ROWS", "dataset exceeds the parsed row limit")
-        return ("tsv" if suffix == ".tsv" else "csv"), rows, cols, warnings
-    if suffix == ".json":
+        fmt = "tsv" if suffix == ".tsv" else "csv"
+        record_kind, resolved_path = "csv_records", None
+    elif suffix == ".json":
         try:
             payload = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise QueryDataError("BAD_JSON", f"could not parse JSON: {e}") from None
-        arr = _locate_array(payload, record_path, warnings)
+        arr, record_kind, resolved_path = _locate_array(payload, record_path, warnings)
         if len(arr) > MAX_PARSED_ROWS:
             raise QueryDataError("TOO_MANY_ROWS", "dataset exceeds the parsed row limit")
         rows = [r if isinstance(r, dict) else {"value": r} for r in arr]
-        return "json", rows, _infer_columns(rows), warnings
-    raise QueryDataError(
-        "UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported, got {suffix!r}"
-    )
+        fmt, cols = "json", _infer_columns(rows)
+    else:
+        raise QueryDataError(
+            "UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported, got {suffix!r}"
+        )
+    if provenance is not None:
+        provenance.update(
+            sha256=hashlib.sha256(data).hexdigest(), size=len(data),
+            record_kind=record_kind, record_path=resolved_path,
+        )
+    return fmt, rows, cols, warnings
 
 
 def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
@@ -502,8 +531,9 @@ def query_data(
     if authorize_path is not None and not authorize_path(rel):
         raise QueryDataError("NOT_FOUND", f"path does not exist: {rel}")
 
+    provenance: dict[str, Any] = {}
     fmt, rows, cols, warnings = load_generic_rows(
-        vault_root, rel, abs_path.suffix, record_path
+        vault_root, rel, abs_path.suffix, record_path, provenance=provenance
     )
     return evaluate_rows(
         rows,
@@ -521,6 +551,7 @@ def query_data(
         date_from=date_from,
         date_to=date_to,
         date_column=date_column,
+        provenance=provenance,
     )
 
 
@@ -541,6 +572,7 @@ def evaluate_rows(
     date_from: str | None = None,
     date_to: str | None = None,
     date_column: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> QueryDataResult:
     """Apply the dataset query contract to already-loaded adapter rows."""
     cols = list(columns_available or _infer_columns(rows))
@@ -563,15 +595,31 @@ def evaluate_rows(
     if date_col and date_to:
         flt.append({"column": date_col, "op": "lte", "value": date_to})
 
-    matched = [r for r in rows if all(_match(r, f) for f in flt)]
+    matched = [(i, r) for i, r in enumerate(rows) if all(_match(r, f) for f in flt)]
     total_matched = len(matched)
+    provenance = dict(provenance) if provenance else None
+    if provenance is not None and not aggregate:
+        provenance["row_indices"] = []
+    overhead = (
+        len(json.dumps({"provenance": provenance, "aggregate" if aggregate else "rows": []}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) - 2
+        if provenance is not None else 0
+    )
+    provenance_truncated = overhead + 2 > MAX_RESPONSE_BYTES
+    if provenance_truncated:
+        provenance, overhead = None, 0
+        warnings.append("provenance unavailable: source descriptor exceeds response size cap")
 
     if aggregate:
+        matched_rows = [r for _, r in matched]
         if aggregate.strip() == "profile":
-            agg: Any = _profile_payload(matched, cols, format, path)
+            agg: Any = _profile_payload(matched_rows, cols, format, path)
         else:
-            agg = _aggregate(matched, aggregate, date_col)
-        agg, aggregate_truncated = _bounded_aggregate(agg)
+            agg = _aggregate(matched_rows, aggregate, date_col)
+        bounded_agg, aggregate_truncated = _bounded_aggregate(agg, overhead=overhead)
+        if overhead + len(json.dumps(bounded_agg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_RESPONSE_BYTES:
+            provenance, provenance_truncated = None, True
+            warnings.append("provenance unavailable: source descriptor exceeds response size cap")
+            bounded_agg, aggregate_truncated = _bounded_aggregate(agg)
         if aggregate_truncated:
             warnings.append("response size cap truncated aggregate")
         return QueryDataResult(
@@ -582,13 +630,14 @@ def evaluate_rows(
             returned=0,
             columns=cols,
             rows=[],
-            aggregate=agg,
-            truncated=aggregate_truncated,
+            aggregate=bounded_agg,
+            truncated=aggregate_truncated or provenance_truncated,
             warnings=warnings,
+            provenance=provenance,
         )
 
     if sort_by:
-        matched.sort(key=lambda row: sort_key(_get_field(row, sort_by)), reverse=descending)
+        matched.sort(key=lambda pair: sort_key(_get_field(pair[1], sort_by)), reverse=descending)
 
     limit = _bounded_limit(limit)
     offset = max(0, int(offset))
@@ -596,15 +645,20 @@ def evaluate_rows(
     truncated = (offset + len(window)) < total_matched
 
     if columns:
-        out_rows = [{c: _get_field(r, c) for c in columns} for r in window]
+        out_rows = [{c: _get_field(r, c) for c in columns} for _, r in window]
         out_cols = list(columns)
     else:
-        out_rows = window
+        out_rows = [r for _, r in window]
         out_cols = cols
-    out_rows, response_truncated = _bounded_response_rows(out_rows)
+    row_indices = [i for i, _ in window] if provenance is not None else None
+    out_rows, response_truncated = _bounded_response_rows(
+        out_rows, overhead=overhead, row_indices=row_indices,
+    )
+    if provenance is not None:
+        provenance["row_indices"] = row_indices[:len(out_rows)]
     if response_truncated:
         warnings.append("response size cap truncated returned rows")
-    truncated = truncated or response_truncated
+    truncated = truncated or response_truncated or provenance_truncated
 
     return QueryDataResult(
         path=path,
@@ -617,4 +671,5 @@ def evaluate_rows(
         aggregate=None,
         truncated=truncated,
         warnings=warnings,
+        provenance=provenance,
     )

@@ -1,12 +1,12 @@
 """The episode Records leaf (close-memory-loop 3.5, by ruling with 3.8/3.9).
 
-A `records` candidate carries one `append-record` curation step: curation is
-the executor, the existing Records writer makes the append, and the curation
+A `records` candidate carries `append-record` or `update-record` steps: curation is
+the executor, the existing Records writer makes the transition, and the curation
 witness is committed in that writer's own atomic batch and holds only when the
-Records receipt -- the audit transition that append committed -- corroborates
+Records receipt -- the audit transition the writer committed -- corroborates
 it. Each authority boundary is pinned here on its own:
 
-* only the `records` route owns the kind, and it owns no other kind;
+* only the `records` route owns these kinds, and it owns no other kind;
 * no general curation plan (the `maintain_memory` door) can seal it, though
   curation apply runs one the episode sealed through the same writer;
 * every other step kind still cannot reach the protected Records tree, and a
@@ -14,12 +14,13 @@ it. Each authority boundary is pinned here on its own:
 * the Records writer's own resolution, visibility and profile checks decide,
   and an invisible collection is refused exactly like a missing one;
 * a refused value is not parked as a held candidate;
-* an append has no compensation.
+* a Records transition has no compensation.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 from pathlib import Path
 from typing import get_args
@@ -166,6 +167,73 @@ def _entries(vault: Path, path: str = COLLECTION) -> list[Path]:
     return sorted((vault / path).parent.joinpath("Entries").glob("*.md"))
 
 
+def _correction(
+    vault: Path, temperature: int, *, key: str = "correct", collection: str = COLLECTION
+) -> dict:
+    from exomem.vault import parse_frontmatter
+
+    (entry,) = _entries(vault, collection)
+    frontmatter, _body, _raw = parse_frontmatter(entry.read_text(encoding="utf-8"))
+    return {
+        "leaf_key": key,
+        "effect_revision": 1,
+        "kind": "update-record",
+        "args": {
+            "collection": collection,
+            "item_key": frontmatter["record_id"],
+            "changes": {"temperature_c": temperature},
+            "expected_container_hash": _container(vault, collection),
+            "expected_item_version": hashlib.sha256(entry.read_bytes()).hexdigest(),
+            "why": "Correct the interpretation of the reading, preserving the event.",
+        },
+    }
+
+
+def test_two_corrections_preserve_history_and_old_replay_keeps_latest_value(
+    vault: Path, owner, enabled
+) -> None:
+    _collection(vault)
+    _record(vault)
+    append = _leaf(vault)
+    original = _resume(vault, _prepared(vault, append))
+    assert original["status"] == "ok", original["blocked"]
+    retained = {
+        path: path.read_bytes()
+        for layer in ("Sources", "Evidence")
+        for path in (vault / "Knowledge Base" / layer).rglob("*.md")
+    }
+    leaves = [append]
+    for temperature, key in ((14, "first-correction"), (15, "second-correction")):
+        leaves.append(_correction(vault, temperature, key=key))
+        canonical = {
+            path: path.read_bytes()
+            for path in (*_entries(vault), vault / COLLECTION, vault / "Knowledge Base/log.md")
+        }
+        _episode(vault, action="prepare", candidate="reading", proposal=_proposal("records", leaves))
+        assert {path: path.read_bytes() for path in canonical} == canonical
+        reviewed = _episode(
+            vault, action="disposition", candidate="reading", disposition="routed", reason="Corrected."
+        )
+        executed = _resume(vault, reviewed)
+        assert executed["status"] == "ok", (executed["blocked"], executed["stale"])
+        assert len(executed["executed"]) == 1
+    passed = _episode(vault, action="coverage")
+    assert [item["readback"] for item in passed["receipts"]] == ["verified"] * 3
+    assert _resume(vault, passed, postcommit=True)["complete"] is True
+    with pytest.raises(ValueError, match="EPISODE_REVISION_CONFLICT"):
+        _resume(vault, original)
+    replayed = _resume(
+        vault, _episode(vault, action="candidates"),
+        order=[original["candidates"][0]["leaves"][0]["leaf_id"]],
+    )
+    assert replayed["executed"] == []
+    assert "temperature_c: 15" in _entries(vault)[0].read_text(encoding="utf-8")
+    assert {path: path.read_bytes() for path in retained} == retained
+    history = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+    assert history.count('"operation":"append"') == 1
+    assert history.count('"operation":"update"') == 2
+
+
 def _plan(kind: str, args: dict) -> dict:
     return {"version": 1, "title": "t", "steps": [{"step_id": "s", "kind": kind, "args": args}]}
 
@@ -175,15 +243,19 @@ def _plan(kind: str, args: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def test_only_the_records_route_owns_the_records_leaf(vault: Path, owner) -> None:
+@pytest.mark.parametrize("kind", ["append-record", "update-record"])
+def test_only_the_records_route_owns_the_records_leaf(vault: Path, owner, kind: str) -> None:
     _collection(vault)
     state = model.start_episode(KEY, {"excerpt": "A vat reading."})
     state = model.declare_candidate(state, "reading")
     identity = state["candidates"][0]["candidate_id"]
     leaf = _leaf(vault)
+    if kind == "update-record":
+        commands.op_record_memory(vault, action="append", **leaf["args"])
+        leaf = _correction(vault, 14)
 
     accepted = model.revise_proposal(state, identity, _proposal("records", [leaf]))
-    assert accepted["candidates"][0]["leaves"][0]["kind"] == "append-record"
+    assert accepted["candidates"][0]["leaves"][0]["kind"] == kind
     for route in ("focused_note", "entity", "relation_only", "existing_page", "semantic_unit"):
         with pytest.raises(model.EpisodeError, match="route does not admit"):
             model.revise_proposal(state, identity, _proposal(route, [leaf], target="x"))
@@ -201,28 +273,33 @@ def test_only_the_records_route_owns_the_records_leaf(vault: Path, owner) -> Non
 
     schema = get_args(commands._EpisodeProposalArgument)[1].json_schema  # noqa: SLF001
     kinds = schema["anyOf"][0]["properties"]["leaves"]["items"]["properties"]["kind"]["enum"]
-    assert "append-record" in kinds
+    assert kind in kinds
 
 
+@pytest.mark.parametrize("kind", ["append-record", "update-record"])
 def test_the_curation_door_cannot_seal_a_records_plan_but_runs_one_the_episode_sealed(
-    vault: Path, owner
+    vault: Path, owner, kind: str
 ) -> None:
     """The episode seal is the only way a Records plan comes to exist. Once
     sealed, it is an ordinary curation run: `maintain_memory` curation apply
     runs it through the same Records writer and checks `record_memory` append
     applies, which grants nothing that append does not (ruling on L1)."""
     _collection(vault)
-    args = _leaf(vault)["args"]
+    leaf = _leaf(vault)
+    if kind == "update-record":
+        commands.op_record_memory(vault, action="append", **leaf["args"])
+        leaf = _correction(vault, 14)
+    args = leaf["args"]
     with pytest.raises(curation.CurationError) as refused:
-        curation.propose(vault, _plan("append-record", args))
+        curation.propose(vault, _plan(kind, args))
     assert refused.value.code == "INVALID_STEP_KIND"
     with pytest.raises(ValueError, match="INVALID_STEP_KIND"):
         commands.op_maintain_memory(
-            vault, mode="curation", curation_action="propose", plan=_plan("append-record", args)
+            vault, mode="curation", curation_action="propose", plan=_plan(kind, args)
         )
-    assert _entries(vault) == []
+    assert len(_entries(vault)) == (1 if kind == "update-record" else 0)
     # The one entry point that may seal it seals one step, nothing beside it.
-    two = _plan("append-record", args)
+    two = _plan(kind, args)
     two["steps"].append(
         {"step_id": "t", "kind": "create-note", "args": {"title": "Reading", "content": "R."}}
     )
@@ -231,7 +308,7 @@ def test_the_curation_door_cannot_seal_a_records_plan_but_runs_one_the_episode_s
 
     # An episode-sealed Records plan, applied through the curation door.
     _record(vault)
-    reviewed = _prepared(vault)
+    reviewed = _prepared(vault, leaf)
     run = reviewed["candidates"][0]["leaves"][0]["run_id"]
     plan_id, fingerprint = curation.CurationStore(vault).identities(run)
     applied = commands.op_maintain_memory(
@@ -247,6 +324,10 @@ def test_the_curation_door_cannot_seal_a_records_plan_but_runs_one_the_episode_s
     assert len(_entries(vault)) == 1
     inspected = commands.op_record_memory(vault, action="inspect", collection=COLLECTION)
     assert inspected["audit"]["status"] == "ok"
+
+    with pytest.raises(curation.CurationError, match="CURATION_COMPENSATION_UNAVAILABLE"):
+        curation.propose_compensation(vault, run_id=run)
+    assert curation.compensation_kind(kind) == "unavailable"
 
 
 def test_every_other_kind_stays_out_of_the_records_tree(vault: Path, owner) -> None:
@@ -331,10 +412,17 @@ def test_the_records_receipt_is_the_witness(vault: Path, owner, enabled) -> None
         _resume(vault, executed, postcommit=True)
 
 
-def test_a_changed_collection_is_stale_before_any_attempt(vault: Path, owner, enabled) -> None:
+@pytest.mark.parametrize("kind", ["append-record", "update-record"])
+def test_a_changed_collection_is_stale_before_any_attempt(
+    vault: Path, owner, enabled, kind: str
+) -> None:
     _collection(vault)
     _record(vault)
-    reviewed = _prepared(vault)
+    leaf = _leaf(vault)
+    if kind == "update-record":
+        commands.op_record_memory(vault, action="append", **leaf["args"])
+        leaf = _correction(vault, 14)
+    reviewed = _prepared(vault, leaf)
     commands.op_record_memory(
         vault,
         action="append",
@@ -350,7 +438,128 @@ def test_a_changed_collection_is_stale_before_any_attempt(vault: Path, owner, en
     assert [item["code"] for item in stale["stale"]] == ["CURATION_BINDING_STALE"]
     leaf = stale["candidates"][0]["leaves"][0]
     assert leaf["outcome"] == "pending" and leaf["attempts"] == 0
-    assert len(_entries(vault)) == 1
+    assert len(_entries(vault)) == (2 if kind == "update-record" else 1)
+
+
+@pytest.mark.parametrize("fault", ["invalid-value", "stale-container", "stale-item"])
+def test_refused_correction_preparation_writes_nothing(vault: Path, owner, fault: str) -> None:
+    _collection(vault)
+    commands.op_record_memory(vault, action="append", **_leaf(vault)["args"])
+    _record(vault)
+    leaf = _correction(vault, 14)
+    field, value = {
+        "invalid-value": ("changes", {"temperature_c": "warm"}),
+        "stale-container": ("expected_container_hash", "0" * 64),
+        "stale-item": ("expected_item_version", "0" * 64),
+    }[fault]
+    leaf["args"][field] = value
+    before = {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    reviewed = _episode(vault, action="candidates")
+    with pytest.raises(ValueError):
+        _prepared(vault, leaf)
+    assert {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+    assert _episode(vault, action="candidates")["journal_digest"] == reviewed["journal_digest"]
+    assert commands.op_record_memory(vault, action="inspect", collection=COLLECTION)["coverage"]["held"] == 0
+
+
+def test_correction_exposes_no_internal_writer_options(vault: Path, owner) -> None:
+    _collection(vault)
+    commands.op_record_memory(vault, action="append", **_leaf(vault)["args"])
+    leaf = _correction(vault, 14)
+    for field in ("operation", "body", "delete_fields", "hold", "held", "refresh_presentation"):
+        with pytest.raises(curation.CurationError, match="CURATION_UNKNOWN_FIELD"):
+            curation.validate_forward_plan(
+                _plan("update-record", {**leaf["args"], field: True}), allow_records=True
+            )
+
+
+def test_correction_refuses_a_log_collection(vault: Path, owner) -> None:
+    from record_fixtures import copy_x3_fixture
+
+    collection = (copy_x3_fixture(vault) / "_collection.md").relative_to(vault).as_posix()
+    appended = commands.op_record_memory(
+        vault,
+        action="append",
+        collection=collection,
+        item={"occurred_on": "2026-09-20", "title": "Pull", "status": "completed"},
+        expected_container_hash=_container(vault, collection),
+        why="Record a session.",
+    )
+    _record(vault)
+    leaf = {
+        "leaf_key": "correct",
+        "effect_revision": 1,
+        "kind": "update-record",
+        "args": {
+            "collection": collection,
+            "item_key": appended["item_key"],
+            "changes": {"title": "Push"},
+            "expected_container_hash": appended["after_container_hash"],
+            "expected_item_version": appended["after_item_hash"],
+            "why": "Correct the session title.",
+        },
+    }
+    before = {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError, match="CURATION_RECORDS_STORAGE_UNSUPPORTED"):
+        _prepared(vault, leaf)
+    assert {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("proof", ["valid", "missing", "wrong-before-item"])
+def test_interrupted_correction_requires_its_exact_audit_receipt_and_never_reexecutes(
+    vault: Path, owner, enabled, monkeypatch: pytest.MonkeyPatch, proof: str
+) -> None:
+    from exomem import records
+
+    _collection(vault)
+    commands.op_record_memory(vault, action="append", **_leaf(vault)["args"])
+    _record(vault)
+    reviewed = _prepared(vault, _correction(vault, 14))
+    run = reviewed["candidates"][0]["leaves"][0]["run_id"]
+    store = curation.CurationStore(vault)
+    plan_id, _fingerprint = store.identities(run)
+
+    def interrupt(name: str) -> None:
+        if name == "after-leaf-witness":
+            raise curation.CurationFault(name)
+
+    monkeypatch.setattr(curation, "_fault_barrier", interrupt)
+    with pytest.raises(curation.CurationFault, match="after-leaf-witness"):
+        _resume(vault, reviewed)
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    monkeypatch.setattr(records, "update_record", lambda *a, **kw: pytest.fail("reexecuted"))
+    (entry,) = _entries(vault)
+    committed = entry.read_bytes()
+    assert b"temperature_c: 14" in committed
+
+    log = vault / "Knowledge Base/log.md"
+    if proof != "valid":
+        lines = []
+        for line in log.read_text(encoding="utf-8").splitlines():
+            if '"operation":"update"' in line:
+                if proof == "missing":
+                    continue
+                start = line.index("{")
+                event = json.loads(line[start:])
+                event["before_item_hash"] = "0" * 64
+                line = line[:start] + json.dumps(event, separators=(",", ":"), sort_keys=True)
+            lines.append(line)
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if proof == "valid":
+        recovered = curation.resume(vault, run_id=run, plan_id=plan_id)
+        assert recovered["step"]["outcome"] == "recovered-committed"
+        for _ in range(2):
+            resumed = _resume(vault, _episode(vault, action="candidates"))
+            assert resumed["status"] == "ok", resumed["blocked"]
+            assert resumed["executed"] == []
+        assert len(store.reconstruct(run)["receipts"]) == 1
+    else:
+        with pytest.raises(curation.CurationError, match="CURATION_OUTCOME_UNCERTAIN"):
+            curation.resume(vault, run_id=run, plan_id=plan_id)
+        resumed = _resume(vault, _episode(vault, action="candidates"))
+        assert resumed["status"] == "blocked" and resumed["executed"] == []
+        assert resumed["candidates"][0]["leaves"][0]["outcome"] == "uncertain"
+    assert entry.read_bytes() == committed
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +622,8 @@ def test_an_invisible_collection_is_refused_exactly_like_a_missing_one(vault: Pa
     assert _entries(vault, withheld) == []
 
 
-def test_a_planning_collection_is_not_a_records_destination(vault: Path, owner) -> None:
+@pytest.mark.parametrize("kind", ["append-record", "update-record"])
+def test_a_planning_collection_is_not_a_records_destination(vault: Path, owner, kind: str) -> None:
     from lifecycle_fixtures import PLANNING_PATH, planning_manifest
 
     planning = vault / PLANNING_PATH
@@ -432,6 +642,14 @@ def test_a_planning_collection_is_not_a_records_destination(vault: Path, owner) 
             "expected_container_hash": "0" * 64,
         },
     }
+    if kind == "update-record":
+        leaf["kind"] = kind
+        leaf["args"].pop("item")
+        leaf["args"].update(
+            changes={"title": "Book the kiln"},
+            item_key="11111111-1111-4111-8111-111111111111",
+            expected_item_version="0" * 64,
+        )
     with pytest.raises(ValueError, match="RECORDS_PROFILE_REQUIRED"):
         _episode(vault, action="prepare", candidate="kiln", proposal=_proposal("records", [leaf]))
     assert list((planning.parent / "Items").iterdir()) == []
@@ -499,8 +717,9 @@ def _shape(value: object) -> object:
     return value
 
 
+@pytest.mark.parametrize("kind", ["append-record", "update-record"])
 def test_a_collection_withheld_after_preparation_resumes_exactly_like_a_deleted_one(
-    vault: Path, enabled
+    vault: Path, enabled, kind: str
 ) -> None:
     import shutil
 
@@ -542,6 +761,9 @@ def test_a_collection_withheld_after_preparation_resumes_exactly_like_a_deleted_
                     "expected_container_hash": _container(vault, collection),
                 },
             }
+            if kind == "update-record":
+                commands.op_record_memory(vault, action="append", **leaf["args"])
+                leaf = _correction(vault, 14, collection=collection)
             episode(action="prepare", candidate="reading", proposal=_proposal("records", [leaf]))
             reviewed[collection] = episode(
                 action="disposition", candidate="reading", disposition="routed", reason="r"
@@ -568,7 +790,7 @@ def test_a_collection_withheld_after_preparation_resumes_exactly_like_a_deleted_
     assert [item["code"] for item in outcomes[withheld]["stale"]] == ["CURATION_BINDING_STALE"]
     leaf = outcomes[withheld]["candidates"][0]["leaves"][0]
     assert leaf["outcome"] == "pending" and leaf["attempts"] == 0
-    assert _entries(vault, withheld) == []
+    assert len(_entries(vault, withheld)) == (1 if kind == "update-record" else 0)
 
 
 def test_path_folding_keeps_the_records_tree_closed(vault: Path) -> None:

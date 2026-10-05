@@ -150,6 +150,8 @@ class UsageRecord:
     peak_context_tokens: int | None = None
     cumulative_context_tokens: int | None = None
     cost_usd: float | None = None
+    tool_calls: int | None = None
+    failed_model_calls: int | None = None
 
 
 @dataclass(frozen=True)

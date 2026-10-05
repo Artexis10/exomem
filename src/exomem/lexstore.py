@@ -7788,8 +7788,13 @@ class LexicalStore:
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
         query_units: list | None = None,
         term_budget: QueryTermBudget | None = None,
+        retained_query_units: list | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
-        """Ready-catalogue unit query, optionally ranking bounded material terms."""
+        """Ready-catalogue unit query, optionally ranking bounded material terms.
+
+        `retained_query_units` receives the MATCH's selected units on the same
+        read snapshot, for request-local allocation within the returned pool.
+        """
         if not (categories or kinds or clauses or query_units):
             return CatalogQueryResult(
                 None, CatalogReadiness("unsupported", False, backend())
@@ -7803,6 +7808,8 @@ class LexicalStore:
                 kept, _counted, _dropped = select_query_units(
                     query_units, frequencies, pages, term_budget,
                 )
+                if retained_query_units is not None:
+                    retained_query_units[:] = kept
                 tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
                 if not tokens:
                     return []

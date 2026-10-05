@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -107,6 +108,29 @@ def test_csv_limit_offset_truncation(vault: Path) -> None:
     assert r.returned == 2 and r.total_matched == 5 and r.truncated is True
 
 
+@pytest.mark.parametrize("suffix,delimiter", [("csv", ","), ("tsv", "\t")])
+def test_csv_provenance_follows_duplicate_records_through_query(
+    vault: Path, suffix: str, delimiter: str,
+) -> None:
+    source = 'value,note\n2,"two\nlines"\n1,skip\n3,last\n2,"two\nlines"\n'
+    source = source.replace(",", delimiter)
+    rel = _write(vault, f"Knowledge Base/Evidence/Test/duplicates.{suffix}", source)
+
+    result = qd.query_data(
+        vault, path=rel, filters=[{"column": "value", "op": "gte", "value": 2}],
+        sort_by="value", descending=True, columns=["note"], offset=1, limit=2,
+    )
+
+    assert result.rows == [{"note": "two\nlines"}, {"note": "two\nlines"}]
+    assert result.as_dict().get("provenance") == {
+        "sha256": hashlib.sha256(source.encode()).hexdigest(),
+        "size": len(source.encode()),
+        "record_kind": "csv_records",
+        "record_path": None,
+        "row_indices": [0, 3],
+    }
+
+
 @pytest.mark.parametrize("limit", [0, -1, None, 10_000])
 def test_csv_invalid_or_excessive_limit_remains_bounded(vault: Path, limit: int | None) -> None:
     csv = "value\n" + "".join(f"{number}\n" for number in range(qd.HARD_ROW_CAP + 25))
@@ -119,7 +143,12 @@ def test_csv_invalid_or_excessive_limit_remains_bounded(vault: Path, limit: int 
 
 def test_csv_aggregate_count_max_latest_distinct(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
-    assert qd.query_data(vault, path=rel, aggregate="count").aggregate == {"count": 5}
+    counted = qd.query_data(vault, path=rel, aggregate="count")
+    assert counted.aggregate == {"count": 5}
+    assert counted.as_dict()["provenance"] == {
+        "sha256": hashlib.sha256(CSV.encode()).hexdigest(), "size": len(CSV.encode()),
+        "record_kind": "csv_records", "record_path": None,
+    }
 
     igf = [{"column": "analyte", "op": "eq", "value": "IGF-1"}]
     assert (
@@ -156,6 +185,7 @@ def test_response_size_cap_refuses_an_oversized_row(vault: Path) -> None:
     result = qd.query_data(vault, path=rel)
 
     assert result.returned == 0
+    assert result.as_dict()["provenance"]["row_indices"] == []
     assert result.truncated is True
     assert "response size cap" in result.warnings[0]
 
@@ -184,6 +214,11 @@ def test_json_top_level_array(vault: Path) -> None:
     )
     assert r.format == "json" and r.total_rows == 2 and r.total_matched == 1
     assert r.rows[0]["value"] == 77
+    assert r.as_dict()["provenance"] == {
+        "sha256": hashlib.sha256(json.dumps(data).encode()).hexdigest(),
+        "size": len(json.dumps(data).encode()), "record_kind": "json_array",
+        "record_path": None, "row_indices": [0],
+    }
 
 
 def test_uuid_filters_use_exact_string_comparison(vault: Path) -> None:
@@ -225,6 +260,8 @@ def test_json_nested_record_path_and_dotted_column(vault: Path) -> None:
     )
     assert r.total_matched == 1
     assert r.rows[0] == {"performer.name": "Confido", "dt": "2024"}
+    assert r.as_dict()["provenance"]["record_path"] == "sections.log"
+    assert r.as_dict()["provenance"]["row_indices"] == [0]
 
 
 def test_json_common_key_autodetect(vault: Path) -> None:
@@ -234,6 +271,97 @@ def test_json_common_key_autodetect(vault: Path) -> None:
     r = qd.query_data(vault, path=rel)
     assert r.total_rows == 2
     assert any("auto-detected" in w for w in r.warnings)
+    assert r.as_dict()["provenance"]["record_path"] == "result"
+    assert r.as_dict()["provenance"]["row_indices"] == [0, 1]
+
+
+@pytest.mark.parametrize("data,kind,indices", [
+    ({"value": "root"}, "json_object", [0]),
+    (["skip", "root", "root"], "json_array", [1, 2]),
+])
+def test_json_provenance_distinguishes_root_object_and_scalar_array(
+    vault: Path, data: object, kind: str, indices: list[int],
+) -> None:
+    source = json.dumps(data)
+    rel = _write(vault, "Knowledge Base/Evidence/Test/root.json", source)
+    result = qd.query_data(
+        vault, path=rel, filters=[{"column": "value", "value": "root"}],
+    )
+    assert result.as_dict()["provenance"] == {
+        "sha256": hashlib.sha256(source.encode()).hexdigest(), "size": len(source.encode()),
+        "record_kind": kind, "record_path": None, "row_indices": indices,
+    }
+
+
+@pytest.mark.parametrize("aggregate", [None, "count"])
+def test_adapter_rows_do_not_invent_raw_source_provenance(aggregate: str | None) -> None:
+    result = qd.evaluate_rows([{"value": 1}], path="rows", format="json", aggregate=aggregate)
+    assert "provenance" not in result.as_dict()
+
+
+def test_provenance_binds_retained_bytes_when_file_changes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = _write(vault, "Knowledge Base/Evidence/Test/changing.csv", CSV)
+    original_read = qd.reserved_paths.read_generic_bytes
+
+    def read_then_replace(*args, **kwargs):
+        snapshot = original_read(*args, **kwargs)
+        (vault / rel).write_text("value\nreplacement\n", encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(qd.reserved_paths, "read_generic_bytes", read_then_replace)
+    result = qd.query_data(vault, path=rel)
+    assert result.total_rows == 5
+    assert result.rows[0]["analyte"] == "IGF-1"
+    assert result.as_dict()["provenance"]["sha256"] == hashlib.sha256(CSV.encode()).hexdigest()
+    assert result.as_dict()["provenance"]["size"] == len(CSV.encode())
+
+
+def test_response_cap_includes_provenance_and_aligned_record_indices(vault: Path) -> None:
+    source = "value\n" + ("x" * 50 + "\n") * qd.HARD_ROW_CAP
+    rel = _write(vault, "Knowledge Base/Evidence/Test/bounded.csv", source)
+    result = qd.query_data(vault, path=rel, limit=qd.HARD_ROW_CAP)
+    provenance = result.as_dict()["provenance"]
+    payload = {"rows": result.rows, "provenance": provenance}
+    assert len(json.dumps(payload, separators=(",", ":")).encode()) <= qd.MAX_RESPONSE_BYTES
+    assert 0 < result.returned < qd.HARD_ROW_CAP
+    assert provenance["row_indices"] == list(range(result.returned))
+    assert result.truncated
+
+
+def test_aggregate_cap_includes_source_descriptor(vault: Path) -> None:
+    source = "value\n" + "x" * (qd.MAX_RESPONSE_BYTES - 100) + "\n"
+    rel = _write(vault, "Knowledge Base/Evidence/Test/bounded.csv", source)
+    result = qd.query_data(vault, path=rel, aggregate="latest:value")
+    assert result.aggregate["truncated"] is True
+    assert result.truncated
+    assert "row_indices" not in result.as_dict()["provenance"]
+
+
+def test_aggregate_cap_accounts_for_its_actual_response_key(vault: Path) -> None:
+    source = json.dumps([{"value": "x" * (qd.MAX_RESPONSE_BYTES - 201)}])
+    rel = _write(vault, "Knowledge Base/Evidence/Test/edge.json", source)
+    result = qd.query_data(vault, path=rel, aggregate="latest:value")
+    payload = {"aggregate": result.aggregate, "provenance": result.provenance}
+    assert len(json.dumps(payload, separators=(",", ":")).encode()) <= qd.MAX_RESPONSE_BYTES
+    assert result.truncated
+
+
+@pytest.mark.parametrize("aggregate", [None, "count"])
+def test_oversized_locator_omits_provenance_with_explicit_warning(
+    vault: Path, aggregate: str | None,
+) -> None:
+    key = "x" * qd.MAX_RESPONSE_BYTES
+    rel = _write(vault, "Knowledge Base/Evidence/Test/long-key.json", json.dumps({key: [1]}))
+    result = qd.query_data(vault, path=rel, record_path=key, aggregate=aggregate)
+    assert "provenance" not in result.as_dict()
+    assert result.truncated
+    assert "provenance unavailable: source descriptor exceeds response size cap" in result.warnings
+    if aggregate:
+        assert result.aggregate == {"count": 1}
+    else:
+        assert result.rows == [{"value": 1}]
 
 
 def test_json_bad_record_path(vault: Path) -> None:

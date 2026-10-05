@@ -136,6 +136,15 @@ def test_an_ordinary_record_passes_ordinary_agent_acceptance() -> None:
     assert report.ordinary_agent_acceptance.outcome == "pass"
 
 
+def test_a_records_correction_is_reported_as_an_update_not_an_extra_event() -> None:
+    # A committed correction must survive observation ingestion without being
+    # relabelled as another append; otherwise the lifecycle report loses it.
+    record = _load(leaf_effects=[_effect(10, kind="update_record")])
+
+    assert record.leaf_effects[0].kind == "update_record"
+    assert obs.evaluate(record, FROZEN).leaf_effects.outcome == "pass"
+
+
 def test_the_report_keeps_five_separate_verdicts_and_no_score() -> None:
     report = obs.evaluate(_load(), FROZEN)
     verdicts = obs.report_to_dict(report)["verdicts"]
