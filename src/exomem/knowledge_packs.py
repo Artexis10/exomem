@@ -143,8 +143,6 @@ class PackSuggestion:
         return data
 
 
-
-
 def pack_schema() -> dict:
     """Return the public declarative schema for knowledge-pack metadata."""
     return {

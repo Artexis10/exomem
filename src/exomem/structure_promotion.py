@@ -34,7 +34,6 @@ what writes deposit, so the reason codes speak of units and claim nothing more.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,8 +76,6 @@ BREADTH_TAGS = frozenset({"hub", "snapshot"})
 
 #: Filenames the corpus already treats as navigation rather than knowledge.
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
-
-_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 
 #: Closed-class English function words: prepositions, conjunctions, auxiliaries,
 #: pronouns, determiners and a few ubiquitous verbs. Never a content word, however
