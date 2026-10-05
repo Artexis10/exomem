@@ -9,6 +9,9 @@
 # Format: `key: { folder: <Folder Name>, category: <bucket> }`. Category is
 # informational (umbrella / product / activity / domain / cross-cutting) — it
 # groups keys in `Notes/index.md` and isn't enforced by validation.
+# Add `tenant_scoped: true` to a key whose pages may carry a `tenant:` field,
+# e.g. `client-work: { folder: Client Work, category: product, tenant_scoped: true }`;
+# `audit` flags `tenant:` on pages of every other project.
 #
 # These are starter examples — rename or replace them with your own.
 

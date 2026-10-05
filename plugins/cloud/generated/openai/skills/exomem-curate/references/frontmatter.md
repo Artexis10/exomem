@@ -59,6 +59,7 @@ not seen before is normal and requires no setup.
 | `sources` | yes | list of wikilinks to `Sources/` files this note draws from |
 | `supersedes` | optional | wikilink to the page this one replaces |
 | `superseded_by` | optional | wikilink to the page that replaced this one (set when status flips to `superseded`) |
+| `tenant` | optional | the tenant a note concerns; only on pages of a project whose `_Schema/project-keys.yaml` entry sets `tenant_scoped: true` (`audit` flags it on any other project) |
 
 ### insight, failure, pattern
 
