@@ -319,7 +319,8 @@ def _outcome_for_decision(
     purpose_is_bound: bool = False,
 ) -> None:
     """Project a decision into the receipt union without carrying a path/title."""
-    if policy.empty and decision is not None and not raw_protection.marked(rel_path):
+    if (decision is not None and _file_policy_empty(vault_root, policy)
+            and not raw_protection.marked(rel_path)):
         return
     value = _decision_receipt_dimensions(
         vault_root, decision=decision, policy=policy, audience=audience,
