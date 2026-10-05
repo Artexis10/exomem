@@ -169,8 +169,7 @@ def test_the_advertised_leaf_kinds_exclude_destructive_steps() -> None:
 
     schema = get_args(commands._EpisodeProposalArgument)[1].json_schema  # noqa: SLF001
     kinds = schema["anyOf"][0]["properties"]["leaves"]["items"]["properties"]["kind"]["enum"]
-    # The Records leaf joined by ruling (close-memory-loop 3.5); it appends and
-    # its route owns nothing else.
+    # The Records route owns only append and guarded correction leaves.
     assert set(kinds) == {
         "create-note",
         "create-entity",
@@ -178,6 +177,7 @@ def test_the_advertised_leaf_kinds_exclude_destructive_steps() -> None:
         "edit",
         "supersede",
         "append-record",
+        "update-record",
     }
 
 

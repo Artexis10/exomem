@@ -25,6 +25,8 @@ The episode workflow SHALL accept supported unstructured and multimodal inputs w
 
 An authorized conversational correction SHALL revise affected episode candidates and canonical projections through current guarded writers while retaining original evidence and historical interpretation. The workflow SHALL distinguish interpretation errors, new events, disputed evidence and expressed changes of intent. It SHALL reconcile known affected effects/publications, report pending or unavailable work, and prevent a stale replay from restoring the corrected interpretation. Later query/context SHALL use current corrected knowledge or visibly qualify unavailable/pending currency. A reusable alias, schema or routing lesson SHALL be a separate scoped, evidence-bound and reversible proposal through its existing owner, not an automatic generalization from one correction. Routine permitted correction SHALL NOT require an extra confirmation or background learner.
 
+The first integrated Records correction SHALL be one closed `update-record` leaf under the existing `records` route for a `markdown-items` collection. Its arguments SHALL be collection, item key, changes, expected container hash, expected item version, and reason. Preparation SHALL run the existing Records writer through current guards, value validation, audit planning, and write-set authorisation without publishing. Execution SHALL repeat the current checks with `hold=False`. Recovery SHALL require the existing atomic curation witness and a verified Records update transition matching the sealed collection/item identity, before-manifest/container/item hashes, and witnessed after-item hash; matching current values alone SHALL NOT establish commitment. Committed leaves SHALL stay immutable, and current coverage SHALL follow the existing per-path hash chain with only its tip checked against live state. This adapter SHALL grant no new authority, compensation, generic curation proposal, or internal writer options.
+
 #### Scenario: The agent misread a unit in an image
 
 - **WHEN** the user corrects an image-derived value after it has reached a row and a compiled note
@@ -36,6 +38,24 @@ An authorized conversational correction SHALL revise affected episode candidates
 
 - **WHEN** a user corrects one supplier, date, destination or entity reading
 - **THEN** that correction can take effect without installing a global alias or schema rule
+
+#### Scenario: A Records correction commits before its acknowledgement is retained
+
+- **WHEN** an authorised episode update commits its atomic batch but interruption prevents its terminal curation receipt
+- **THEN** the existing recovery owner verifies the witness and exact Records audit transition without executing another update
+- **AND** missing or mismatched proof leaves the effect uncertain and non-retryable
+
+#### Scenario: Successive Records corrections preserve historical coverage
+
+- **WHEN** an episode appends one item and later corrects it twice through current guarded updates
+- **THEN** the immutable leaves form an unbroken before/after item-hash chain and only the latest result must match the current item and Records receipt
+- **AND** replay of an earlier committed leaf reads its receipt rather than restoring an older value
+
+#### Scenario: An old or newly withheld Records target cannot be corrected
+
+- **WHEN** a prepared update's item/container guards are stale or the caller no longer has mutation visibility
+- **THEN** the workflow reports the existing stale or unavailable state without an attempt or canonical write
+- **AND** no capture grant is treated as update authority
 - **AND** any proposed reusable convention requires its own scoped evidence and authority and remains reversible
 
 ### Requirement: Episode decomposition precedes destination selection

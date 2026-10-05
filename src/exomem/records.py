@@ -625,6 +625,102 @@ def append_receipt(
     }
 
 
+class _UpdatePrepared(Exception):
+    """Carries a guarded update out of the writer before it publishes."""
+
+    def __init__(self, prepared: dict[str, Any]):
+        super().__init__("update prepared")
+        self.prepared = prepared
+
+
+def prepare_update(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    item_key: str,
+    changes: Mapping[str, Any],
+    expected_container_hash: str,
+    expected_item_version: str,
+    why: str,
+) -> dict[str, Any]:
+    """Run the actual guarded update through authorisation without publishing."""
+    def stop(prepared: dict[str, Any]) -> None:
+        raise _UpdatePrepared(prepared)
+
+    try:
+        update_record(
+            vault_root,
+            collection,
+            item_key=item_key,
+            changes=changes,
+            expected_container_hash=expected_container_hash,
+            expected_item_version=expected_item_version,
+            why=why,
+            hold=False,
+            _prepare=stop,
+        )
+    except _UpdatePrepared as prepared:
+        return prepared.prepared
+    raise collections.CollectionError(
+        "RECORD_PREPARE_INCOMPLETE", "the update did not stop before publication"
+    )
+
+
+def update_receipt(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    item_key: str,
+    before_manifest_hash: str,
+    before_container_hash: str,
+    before_item_hash: str,
+    after_item_hash: str,
+) -> dict[str, Any] | None:
+    """Read the exact guarded update from the item's verified audit chain."""
+    root = Path(vault_root)
+    try:
+        manifest = record_governance.require_records_profile(
+            record_governance.resolve_collection_for_mutation(root, collection)
+        )
+        if manifest.storage.strategy != "markdown-items":
+            return None
+        snapshot = record_formats.load_adapter(root, manifest).read()
+        matches = [record for record in snapshot.records if record.identity.key == item_key]
+        if len(matches) != 1 or matches[0].ambiguous:
+            return None
+        record = matches[0]
+        if record.source.hash != after_item_hash:
+            return None
+        correlation = _record_audit_correlation(manifest, snapshot, record)
+        chain = _inspect_audit_chain(root, manifest, authorize_path=None, snapshot=snapshot)
+        if correlation is None or chain.status != "ok":
+            return None
+        matching = [
+            event
+            for event in chain.events
+            if event["transition_id"] == correlation
+            and _event_matches_transition(event, manifest)
+            and event["operation"] == "update"
+            and event["item_key"] == item_key
+            and event["canonical_path"] == record.source.path
+            and event["before_manifest_hash"] == before_manifest_hash
+            and event["before_container_hash"] == before_container_hash
+            and event["before_item_hash"] == before_item_hash
+            and event["after_item_hash"] == after_item_hash
+        ]
+        if len(matching) != 1:
+            return None
+    except (collections.CollectionError, vault.PathGuardError, OSError, ValueError):
+        return None
+    return {
+        "collection_id": manifest.collection_id,
+        "item_key": item_key,
+        "canonical_path": record.source.path,
+        "after_item_hash": record.source.hash,
+        "audit_correlation": correlation,
+    }
+
+
 def _delivery_refusal(
     code: str,
     reason: str,
@@ -1449,6 +1545,7 @@ def update_record(
         None,
     ]
     | None = None,
+    _prepare: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Apply a guarded, exact-key update to one existing Markdown record."""
     root = Path(vault_root)
@@ -1661,6 +1758,20 @@ def update_record(
                 *(write.path.relative_to(root).as_posix() for write in log_plan.writes),
             ),
         )
+        if _prepare is not None:
+            _prepare(
+                {
+                    "collection_id": manifest.collection_id,
+                    "manifest_path": manifest.path,
+                    "semantic_profile": manifest.semantic_profile,
+                    "strategy": manifest.storage.strategy,
+                    "item_key": item_key,
+                    "path": record.source.path,
+                    "before_manifest_hash": manifest.manifest_version.hash,
+                    "before_container_hash": before_container_hash,
+                    "before_item_hash": record.source.hash,
+                }
+            )
         try:
             vault.batch_atomic_write(
                 [
