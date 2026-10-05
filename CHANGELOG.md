@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.107.0](https://github.com/Artexis10/exomem/compare/v0.106.0...v0.107.0) (2026-10-05)
+
+
+### Features
+
+* **cloud:** add opt-in shared worker capacity and placement ([#1571](https://github.com/Artexis10/exomem/issues/1571)) ([398df71](https://github.com/Artexis10/exomem/commit/398df718ae2f6df8440eacad9cc2c7f98f160725))
+* **memory:** retain evidence, guarded corrections and multi-topic context ([#1569](https://github.com/Artexis10/exomem/issues/1569)) ([b46bc93](https://github.com/Artexis10/exomem/commit/b46bc9343ff9420fe4172f1c9b0a0128bb0ac244))
+* **query:** add declared indexes and authenticated row pages ([#1566](https://github.com/Artexis10/exomem/issues/1566)) ([65e2358](https://github.com/Artexis10/exomem/commit/65e2358a8e6cd888f1912e062cdabe1767462b18))
+
+
+### Bug Fixes
+
+* **bootstrap:** align quick-start recall ordering ([#1572](https://github.com/Artexis10/exomem/issues/1572)) ([3becd9b](https://github.com/Artexis10/exomem/commit/3becd9b8825361d8b40366157a0e41261275fcca))
+* **cloud:** keep background warming from competing with recall ([#1574](https://github.com/Artexis10/exomem/issues/1574)) ([fa74c4a](https://github.com/Artexis10/exomem/commit/fa74c4a93d5c502a95652e69634f1594d13fd488))
+* **plugin:** accept deduplicating capture in directory checks ([#1568](https://github.com/Artexis10/exomem/issues/1568)) ([80f1a5a](https://github.com/Artexis10/exomem/commit/80f1a5abc2152b2cf17fa78ec6bf59e7ceb3a40d))
+* **plugins:** exclude local credential readers from Cloud hooks ([#1575](https://github.com/Artexis10/exomem/issues/1575)) ([1266ccc](https://github.com/Artexis10/exomem/commit/1266ccc06594812ec74bbf525da8b7168e2919c3))
+* **release:** query evidence runs by exact source commit ([#1577](https://github.com/Artexis10/exomem/issues/1577)) ([f9b7841](https://github.com/Artexis10/exomem/commit/f9b78412bd9057f5329bacb51f8a26bf7d5d825a))
+
 ## [0.106.0](https://github.com/Artexis10/exomem/compare/v0.105.0...v0.106.0) (2026-10-05)
 
 
