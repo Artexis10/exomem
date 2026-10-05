@@ -49,7 +49,7 @@ Each cell gets one logical volume with its own ext4 filesystem, provisioned by T
 - **Thin pool:** this gives CSI snapshots and clones, which D3 needs.
 - **No overcommit:** with ratio 1.0, the virtual size of every volume, snapshot and clone can never exceed the pool, so one tenant's backup can't take the whole pool down. A snapshot and its clone are each full-size thin volumes for this accounting.
 - **ext4, pinned:** a clone of a dirty filesystem must mount read-only on the same node. XFS needs `nouuid` for that and refuses some dirty logs read-only. ext4's default `auto_da_alloc` also makes write-to-temp-then-rename survive a power cut in practice (D9).
-- **Metadata:** the thin pool's metadata volume is sized for hourly snapshot churn (spike 1.1 measures it), with monitoring on its use.
+- **Metadata:** snapshot churn does not grow it. In spike 1.1, an empty 24 GiB pool at 64 KiB chunks used 10.1% of a 128 MiB metadata volume, data at 5.4% added 0.4 points, and 24 rounds of snapshot, clone and delete left it flat (peak 10.52%). The metadata volume takes LVM's default size for its pool and chunk size, and an alert fires at 80% use.
 - **Capacity and resize:** TopoLVM publishes free capacity per node and supports online resize, so the import runbook's `storage_gib` increase still works.
 - **Operational weight:** one pinned subchart. Its webhook uses the cert-manager already installed.
 
@@ -92,8 +92,14 @@ Each hourly backup is a new hold kind, `snapshot-backup`, that does not stop the
 - **Scope:** the backup keeps vault and custody in full, indexes included. Rebuilding embeddings for a large vault would dominate recovery time.
 - **Unchanged:** the stopped pre-upgrade backup and restore-based rollback (D6), because their semantics depend on an exact pre-upgrade state.
 - **Quota:** the cell's ResourceQuota allows two claims, twice the storage, and the serving pod plus one backup Job's CPU and memory requests and CPU limit. The resource-policy envelope charges that overlap.
-- **Placement:** a clone of a TopoLVM snapshot lives in the source's volume group, so the Job must run on the cell's node. Spike 1.1 checks whether the provisioner pins the clone's node, so that the scheduler follows its PV. If it does not, the Job gets an own-node selector derived from the cell's PV, as a named exception to the resource policy's ban on arbitrary scheduling fields.
-- **Throughput:** backup concurrency becomes a per-node setting. Spike 1.1 measures incremental backup time per cell, which sets how many cells one node can back up within the hour.
+- **Snapshot controller:** k3s bundles neither the snapshot CRDs nor a controller (spike 1.1), so the chart ships both, from the pinned external-snapshotter release.
+- **Placement:** a clone of a TopoLVM snapshot lives in the source's volume group, so the Job must run on the cell's node. The clone claim uses its own Immediate-binding class. In spike 1.1 TopoLVM gave such a clone's PV a nodeAffinity for the source's node, so the Job follows its PV with no selector, and the resource policy keeps its ban on arbitrary scheduling fields. A WaitForFirstConsumer clone has no PV until a pod is scheduled, so it would leave the node choice to the scheduler. The spike cluster had one node; the drill (4.1) has two and confirms the Job lands on the cell's node.
+- **Throughput:** backup concurrency becomes a per-node setting, default 2. In spike 1.1 a whole cycle took 12.5–16.6 s per cell, including a full first backup of 1.04 GiB:
+  - snapshot ready: 1.4–2.2 s;
+  - clone bound, mounted and Job started: 9–12.7 s;
+  - restic: 2–4 s;
+  - cleanup: 1.6–2.2 s.
+  The cost is per cell, not per byte, so one node can back up about 200 lightly changed cells an hour, one at a time. The repository sat on the runner's disk, so upload to B2 is not in these numbers; the drill measures it. A second slot keeps one slow cell from delaying the rest.
 - **Alerting:** the existing alerting raises when any running cell's last successful backup is older than two hours.
 - **Cells on Hetzner volumes:** those volumes can't take CSI snapshots, and cells stay on them until their own migration, which waits on the hardware purchase. A cell whose class has no snapshot support therefore keeps the nightly stopped backup, its window, concurrency 1 and its prune, and its backup-age alert fires at 26 hours.
 
@@ -123,7 +129,13 @@ Setting Retain before the claim delete means deleting a claim never deletes data
 1. The control database is unaffected, since it is on its own server.
 2. If the server node is lost, restore etcd from B2 first, then reconcile volumes. A snapshot up to 30 minutes old misses volumes created or relocated since, and those hold the only copy of recent writes, so:
    - an Ansible step lists each agent's logical volumes, since cellctl has no host access;
-   - a logical volume matching a row's `volume_id` is re-adopted by an operator runbook step that recreates its TopoLVM LogicalVolume object and its PV, after which cellctl's identity check confirms the match. cellctl gets no PV create: re-adoption is rare and operator-run, and keeping cellctl's PV write to the one Retain patch is worth more than automating it;
+   - a logical volume matching a row's `volume_id` is re-adopted by an operator runbook step. TopoLVM names a logical volume after its LogicalVolume object's UID, which is also the PV's volume handle. Spike 1.1 showed that recreating the object and PV alone gives a new, empty volume under a new ID, and leaves the old one untouched on the host. The step therefore:
+     1. creates the LogicalVolume object;
+     2. on the host, removes the new empty volume and renames the old one to the new object's volume ID (`lvremove`, `lvrename`);
+     3. creates the PV with that handle and binds the claim;
+     4. clears the row's `volume_id` by compare-and-set on the old ID, the same step as a migration (D7). cellctl then records the new handle, and its class and claim checks still apply.
+     The spike read a marker file back through this path. cellctl gets no PV create: re-adoption is rare and operator-run, and keeping cellctl's PV write to the one Retain patch is worth more than automating it;
+   - deleting a LogicalVolume object on a node whose TopoLVM plugin is running destroys the logical volume, even with the object's finalizer removed (spike 1.1). No runbook step deletes one except to destroy its volume;
    - one matching no row is reported and released only by an operator on the host;
    - a row whose volume can't be re-adopted is relocated from backup. The identity check is never skipped to clear a mismatch.
 3. Ensure replacement capacity: a surviving agent or a new one.
@@ -162,11 +174,13 @@ For a local-storage node, the storage term is:
 and a cell larger than the default consumes `ceil(size / default)` slots of it.
 
 - **Pool size, not free bytes:** free bytes fall while a backup's snapshot and clone exist, so a term built on them would dip on every backup.
-- **Snapshot reserve:** 2 × the largest cell's size × the node's backup concurrency, because each concurrent backup holds a full-size snapshot and a full-size clone.
+- **Observing the pool size:** TopoLVM publishes free capacity, not pool size: its CSIStorageCapacity and node annotation both report the pool less every volume's virtual size (spike 1.1). At ratio 1.0, pool size is therefore that free capacity plus the sizes of the node's LogicalVolume objects. cellctl gains read-only `list` on LogicalVolumes for this.
+- **Snapshot reserve:** 2 × the largest cell's size × the node's backup concurrency. In spike 1.1, a snapshot and its clone of a 4 GiB volume each took the full 4 GiB from published free capacity.
+- **Scheduler backstop:** the scheduler refuses a claim larger than a node's published free capacity ("did not have enough free storage"), and the capacity object followed the node within half a second in the spike. A miscount in this term therefore stops a cell from scheduling; it does not overfill a pool.
 - **Published slots:** the minimum of the qualified occupancy, CPU, memory and storage terms.
 - **No pool, no slots:** a node whose storage driver has not published a pool publishes zero slots. Once the configured domain is local, that is what keeps cells off the control-plane node: it has no cell pool. No separate rule names the server.
 - **Configuration only:** the driver name, the topology key and PV nodeAffinity matching become configuration.
-- **Attachment term:** TopoLVM creates no VolumeAttachments, so the attachment term doesn't apply to it. That term is deleted when Hetzner volumes are retired.
+- **Attachment term:** TopoLVM creates no VolumeAttachments, and its CSINode entry carries no allocatable count (spike 1.1), so the attachment term doesn't apply to it. That term is deleted when Hetzner volumes are retired.
 - **Observed, not configured:** the pool size comes from what TopoLVM publishes, so the D9 rule from `adopt-exomem-cloud-plain-cells` (observed, not configured) holds.
 
 ### D7. One domain publishes capacity; two classes coexist only while cells migrate
@@ -220,7 +234,12 @@ A block snapshot is the state a power cut would leave.
 - **Write leases** expire after their 30 s TTL, so a restored cell never inherits a live lease.
 - **JSON state:** several files are written to a temp file and renamed without an fsync (`prominence.py`, `envelope.py`, `mode.py`, `dreamer.py`), and the writer-lease commit counter is overwritten in place. `read_config` falls back to `{}` on a truncated file, which would silently reset a tenant's settings. ext4's `auto_da_alloc` flushes a rename-over-existing in practice. This change still makes those writers fsync the temp file before the rename, and write the counter by rename, so the guarantee doesn't rest on a mount default.
 
-The promise is therefore a consistent state no newer than the snapshot, not the snapshot instant. Spike 1.1 checks it with a round trip of a snapshot taken mid-write.
+The promise is therefore a consistent state no newer than the snapshot, not the snapshot instant. Spike 1.1 checked it with a snapshot taken while a cell wrote notes through `remember` in a loop:
+- No write acknowledged before the snapshot was missing from the restore, and none started after it was present.
+- The restored cell was ready in 13 s.
+- It answered recall for the seed note and the newest write.
+- It reported the same governance-schema status as its source.
+- It accepted a governed write.
 
 ### Archive order
 
@@ -229,7 +248,7 @@ The `cloud-cell` and `cloud-service-resource-policy` requirements modified here 
 ## Risks / Trade-offs
 
 - **Node loss now costs up to an hour of writes,** where it cost none before. This is accepted for the cost and density gain. RAID1 covers the more common disk failure with no loss.
-- **The snapshot path adds moving parts:** a snapshot controller, clones, quota headroom and thin-pool metadata. The rehearsal spike proves them before any production use. If thin-snapshot accounting misbehaves at ratio 1.0, the fallback is the stopped backup at reduced frequency, never an overcommitted pool.
+- **The snapshot path adds moving parts:** a snapshot controller, clones, quota headroom and thin-pool metadata. Spike 1.1 exercised them on a one-node rehearsal cluster (run 37382385459), and the drill repeats them across two agents before any production use. If thin-snapshot accounting misbehaves at ratio 1.0, the fallback is the stopped backup at reduced frequency, never an overcommitted pool.
 - **Unlock depends on Tang on the server node.** If the server is down, a rebooting agent waits. Cells could not serve without the server anyway, and the escrowed passphrase and Tang keys allow a manual unlock or a rebind.
 - **Single-node blast radius:** one dedicated node holds many tenants. Recovery time therefore grows with cells per node, which the drill measures. Scaling adds nodes rather than bigger nodes.
 - **Under-admission during migration:** cells still on Hetzner volumes count against local slots until they move. It lasts days and costs a few slots.

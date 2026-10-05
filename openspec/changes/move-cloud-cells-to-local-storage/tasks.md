@@ -1,6 +1,6 @@
 ## 1. Rehearsal spike (no hardware)
 
-- [ ] 1.1 Run TopoLVM on a loop-device volume group in the cloud rehearsal cluster, with a thin device class at overprovision ratio 1.0 and ext4. Record:
+- [x] 1.1 Run TopoLVM on a loop-device volume group in the cloud rehearsal cluster, with a thin device class at overprovision ratio 1.0 and ext4. Record:
   - whether k3s bundles a snapshot controller;
   - the snapshot and clone round trip, including a snapshot taken while a cell is writing, restored and checked with recall, governance status and a governed write;
   - how a snapshot and its clone count against the pool at ratio 1.0;
@@ -10,14 +10,15 @@
   - thin-pool metadata use across a day of hourly snapshot churn;
   - incremental backup time per cell, which sets per-node backup concurrency;
   - that an existing logical volume can be re-adopted by recreating its LogicalVolume object and PV.
-  - Evidence: the rehearsal log.
-- [ ] 1.2 Check that the node plugin's privileged container and hostPaths can run under a named exception without widening `infra/policy/kubernetes.rego` for any other workload. Evidence: a conftest run.
+  - Evidence: Cloud rehearsal run 37382385459 (`storage-spike` mode, commit 4cb5301d1); results are in design D1, D3, D4, D6 and D9.
+- [x] 1.2 Check that the node plugin's privileged container and hostPaths can run under a named exception without widening `infra/policy/kubernetes.rego` for any other workload. Evidence: `conftest test` of the rendered TopoLVM 17.2.0 chart passes 231 checks with the exception, and fails on its two DaemonSets' privileged containers and hostPaths without it; `conftest verify` passes the 5 policy tests, which deny an unnamed privileged pod, the same name in another namespace, another hostPath and a second privileged container.
 
 ## 2. cellctl and runtime (red-first)
 
 - [ ] 2.1 Make the storage classes, driver and topology key configuration rather than constants. Accept a cell PV on any configured cell class in the identity check, and match PVs to nodes for local volumes. Evidence: unit tests, including an unmigrated cell on the old class while the local class is configured.
 - [ ] 2.2 Add the storage-capacity term:
   - pool size minus twice the largest cell per concurrent backup, over the default size;
+  - pool size observed as published free capacity plus the node's LogicalVolume sizes, with read-only `list` on LogicalVolumes;
   - larger cells charge more;
   - no published pool means zero;
   - only the configured domain publishes slots, and every non-deleted cell counts against them.
@@ -26,9 +27,9 @@
   - snapshot, read-only clone, restic on the clone, cleanup whatever the outcome;
   - one hold per cell at a time;
   - prune only on the first backup after 02:00 UTC, and never on the pre-upgrade backup;
-  - per-node backup concurrency;
+  - per-node backup concurrency, default 2;
   - a quota of two claims, twice the storage, and the serving pod plus one backup Job's CPU and memory;
-  - an own-node selector on the Job only if 1.1 shows the clone is not pinned;
+  - the clone claim on an Immediate-binding clone class, so the Job follows the clone's PV to the cell's node with no selector;
   - the stopped pre-upgrade backup unchanged;
   - a cell on a class without snapshot support keeps the nightly stopped backup, window, concurrency 1 and prune.
   - Evidence: unit tests for both classes, and a rehearsal backup of a serving cell.
@@ -47,14 +48,15 @@
 - [ ] 2.8 Alert when a running cell's last successful backup is older than two hours, or 26 hours for a cell on the nightly backup. Evidence: an alert-rule test.
 - [ ] 2.9 Add the post-etcd-restore reconciliation:
   - an Ansible step on each agent lists logical volumes;
-  - an operator runbook step re-adopts each one that matches a row's `volume_id` by recreating its LogicalVolume object and PV, and cellctl's identity check confirms the match (cellctl gains no PV create);
+  - an operator runbook step re-adopts each one that matches a row's `volume_id` (design D4): it recreates the LogicalVolume object, renames the old volume to the new volume ID in place of the new empty one, creates the PV, and clears the row's `volume_id` by compare-and-set so cellctl records the new one (cellctl gains no PV create);
+  - no step deletes a LogicalVolume object except to destroy its volume;
   - volumes that match no row are reported and released only by an operator step on the host;
   - a row whose volume cannot be re-adopted is relocated from backup, and the identity check is never skipped.
   - Evidence: unit tests on a recorded mismatch, and a rehearsal etcd restore from an older snapshot.
 
 ## 3. Chart, admission, policy
 
-- [ ] 3.1 Add TopoLVM, the snapshot controller if k3s lacks one, the local StorageClass and the VolumeSnapshotClass to the platform chart, alongside the existing class.
+- [ ] 3.1 Add TopoLVM, the snapshot CRDs and controller (k3s bundles neither), the local StorageClass, the Immediate-binding clone class and the VolumeSnapshotClass to the platform chart, alongside the existing class.
 - [ ] 3.2 Extend admission:
   - cell claims on any configured cell class;
   - clone sources limited to the same cell's own snapshots;
@@ -72,6 +74,7 @@
   - write once more;
   - destroy its agent;
   - recover onto another agent through relocation.
+  - Record that each hourly backup Job ran on its cell's node with no selector, and the upload time to the bucket.
   - Record the measured recovery point and recovery time, and accept with recall, governance status and a governed write.
 - [ ] 4.2 Prove the empty-vault guard: deliberately start the backed-up cell on an empty claim before any restore, and record that it refuses, stays not ready and reports its reason on the row.
 - [ ] 4.3 Interrupt a relocation's restore and record that the cell does not start and the retained volume is untouched.
