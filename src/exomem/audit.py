@@ -2879,15 +2879,16 @@ def _check_frontmatter_compliance(
         if fm.get("tenant"):
             more = fm.get("projects")
             declared = [fm.get("project"), *(more if isinstance(more, list) else [])]
-            if not {item for item in declared if isinstance(item, str)} & tenant_scoped:
+            named = [item for item in declared if isinstance(item, str)]
+            if not set(named) & tenant_scoped:
                 findings.append(
                     AuditFinding(
                     category="frontmatter_compliance",
                     severity="warn",
                     path=page.rel_path,
                     detail=(
-                        f"`tenant: {fm['tenant']!r}` set but the page's project "
-                        f"({fm.get('project')!r}) is not declared `tenant_scoped` "
+                        f"`tenant: {fm['tenant']!r}` set but none of the page's "
+                        f"projects ({named!r}) is declared `tenant_scoped` "
                         "in the project registry."
                     ),
                     proposed_fix=(

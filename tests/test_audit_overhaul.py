@@ -147,11 +147,18 @@ def test_audit_tenant_field_follows_the_registry_not_a_project_name(vault: Path)
             "status: active\ncreated: 2026-05-15\nupdated: 2026-05-15\n"
             f"tags: []\n---\n\n# Tenant on {project}\n\nBody.\n",
         )
+    for name, projects in (("list-accepted", "[project-alpha, project-beta]"), ("list-flagged", "[project-alpha]")):
+        _seed(
+            vault / "Knowledge Base" / "Notes" / "Insights" / f"{name}.md",
+            f"---\ntype: insight\nprojects: {projects}\ntenant: acme\n"
+            "status: active\ncreated: 2026-05-15\nupdated: 2026-05-15\n"
+            f"tags: []\n---\n\n# Tenant on {name}\n\nBody.\n",
+        )
     report = audit_module.audit(vault, categories=["frontmatter_compliance"])
-    flagged = {
-        Path(f.path).stem for f in report.findings if "`tenant:" in f.detail
-    }
-    assert flagged == {"project-alpha", "q"}, [f.as_dict() for f in report.findings]
+    flagged = {Path(f.path).stem: f.detail for f in report.findings if "`tenant:" in f.detail}
+    assert set(flagged) == {"project-alpha", "q", "list-flagged"}, flagged
+    # The detail names the projects the page declares, also when it only has `projects:`.
+    assert "None" not in flagged["list-flagged"] and "project-alpha" in flagged["list-flagged"]
 
 
 def test_audit_frontmatter_compliance_flags_singular_project_on_pattern(vault: Path) -> None:
