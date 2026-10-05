@@ -1049,7 +1049,7 @@ resolves an activation or attention item, or vice versa.
 - **THEN** activation and attention review decisions remain unchanged
 
 ### Requirement: Unreflected observations is a structured family derived from collection claims
-The audit SHALL register an `unreflected_observations` category. An entry SHALL exist per (collection, observation page) when a compiled-note or Evidence write's terms cover at least the minimum coverage of exactly one routing-target collection's effective claims and no record in that collection links the page or carries a matching natural-key value. Entries younger than a provisional grace window SHALL be stored as pending with their due date and served only after it. The finding SHALL carry the collection, the page reference, the matched terms and a `signal_version` derived from authored state only; its fingerprint SHALL be the collection identity, the page reference and the sorted matched terms, so a re-write adding matched terms resurfaces a dismissed entry while the dismissal record stands. The finding SHALL resolve only when a record in that collection links the page or carries a matching natural-key value, when the page is gone, or when the collection no longer covers the entry's terms — never by time and never by the runtime writing a record. The category SHALL be in the default attention union, in the due-state projection categories and in the structured delta categories, with edit rules of its own, separate from `unreflected_outcomes`, and therefore a registered family for dispositions. Disclosure SHALL require that the requesting audience may read both the page and the manifest; served entries SHALL be recomposed at serve time.
+The audit SHALL register an `unreflected_observations` category. An entry SHALL exist per (collection, observation page) when a compiled-note or Evidence write routes to exactly one routing-target collection under the command-surface routing rule (declared predicates first, ranked by predicates held and then coverage; otherwise coverage of the effective claims over the collections the page does not contradict), and no record in that collection links the page or carries a matching natural-key value; a predicate entry SHALL carry its matched predicates and store the page's folded facets so a serve recomposes it identically. The recompute SHALL additionally group every untracked page older than the discovery lookback that routes to a collection with strength `strong` or by its declared predicates, and that no record reflects, into ONE grouped entry per collection (`kind: backfill`), keyed by the manifest, carrying the count, whether the count is `truncated`, at most a provisional number of observation references and a `signal_version` derived from the collection and its declared `claims` and `claims.match` only, so a decision holds while more matching pages accumulate or records are appended, and a change to the declared claims asks again. The grouped entry SHALL be computed only by the recompute and never on the request path; write-time deltas SHALL leave it unchanged. It SHALL be bounded by a pre-filter admitting a page for a collection only when its title and tags share at least two of the collection's claim words without contradicting its predicates, or its frontmatter satisfies them, and by a provisional maximum of parsed pages per collection per recompute. A collection that reaches that maximum SHALL resume after a cursor keyed by its collection identity and claims signal on the next recompute, carrying forward what earlier windows found, and SHALL report `truncated` beside its count wherever the count is shown until a scan reaches the last page. The grouped entry SHALL be asked about once at every prominence and SHALL NOT be filed in bulk under a standing prominence. Entries younger than a provisional grace window SHALL be stored as pending with their due date and served only after it. The finding SHALL carry the collection, the page reference, the matched terms and a `signal_version` derived from authored state only; its fingerprint SHALL be the collection identity, the page reference and the sorted matched terms, so a re-write adding matched terms resurfaces a dismissed entry while the dismissal record stands. The finding SHALL resolve only when a record in that collection links the page or carries a matching natural-key value, when the page is gone, or when the collection no longer covers the entry's terms — never by time and never by the runtime writing a record. The category SHALL be in the default attention union, in the due-state projection categories and in the structured delta categories, with edit rules of its own, separate from `unreflected_outcomes`, and therefore a registered family for dispositions. Disclosure SHALL require that the requesting audience may read both the page and the manifest; served entries SHALL be recomposed at serve time.
 
 #### Scenario: A preserved publication artifact opens an entry
 - **WHEN** an Evidence artifact tagged with a platform and account value a collection claims is preserved and no record links it
@@ -1087,8 +1087,32 @@ The audit SHALL register an `unreflected_observations` category. An entry SHALL 
 - **WHEN** the category is removed from the structured delta categories
 - **THEN** record writes no longer add or settle entries and only reconcile maintains them, proving the mechanism is load-bearing
 
+#### Scenario: Creating a collection backfills one grouped item
+- **WHEN** a collection declaring `match: {type: [failure], project: [example-product]}` is created over a vault holding twelve untracked failure notes older than the lookback
+- **THEN** the next recompute stores one grouped `unreflected_observations` entry for that collection with count 12 and at most the provisional number of references, and no per-page entries for those notes
+
+#### Scenario: The backfill decision holds until the claims change
+- **WHEN** the grouped entry is dismissed and another matching old note appears, or ordinary records are appended to the collection
+- **THEN** its fingerprint is unchanged and it stays dismissed, while editing the collection's declared claims produces a new signal version
+
+#### Scenario: A large backfill reaches every page over later recomputes
+- **WHEN** a collection covers more old notes than the per-collection maximum
+- **THEN** the first recompute reports that maximum with `truncated`, a later recompute resumes after the cursor and reports the larger count, the count stops being truncated once the scan reaches the last page, and another collection's grouped entry, even one declaring identical claims, is unaffected by the first one's budget and cursor
+
+#### Scenario: Only confident routes join the backfill
+- **WHEN** old notes share claim words with a collection but route to it only as `moderate`
+- **THEN** no grouped entry is produced for them
+
+#### Scenario: Backfill stays off the request path
+- **WHEN** a compiled write commits after the grouped entry exists
+- **THEN** the write's delta leaves the grouped entry byte-identical
+
+#### Scenario: Reflected pages leave the backfill
+- **WHEN** a record in the collection cites one of the grouped notes in `sources`
+- **THEN** the next recompute's count excludes that note
+
 ### Requirement: Collection candidacy is a projected audit category resolved by claims
-The audit SHALL register a `collection_candidate` category computed over parsed compiled pages the requesting audience may read. A domain term SHALL be a candidate when it is neither breadth vocabulary, a project key nor a core epistemic category, is not covered by any collection's effective claims, and its units recur across at least the provisional minimum number of pages and distinct dates spanning the provisional minimum span, with at least the provisional minimum number of units carrying a state-change lexeme, a currency amount or an ISO date, and at least two co-recurring identity terms. One finding SHALL be produced per qualifying term, partitioned by that term, carrying the domain terms (at most six), bounded evidence unit references (at most eight), a strength of exactly `strong` or `moderate`, and a `signal_version` derived from the sorted evidence unit references so new evidence resurfaces a dismissed candidate. The category SHALL be in the due-state projection categories as a recompute-only category and registered as an opt-in attention category, not in the default union. It SHALL resolve when a manifest's effective claims cover the domain terms, with no dismissal memory beyond the fingerprint rule. Every constant SHALL be declared provisional in one module. No finding SHALL report a numeric confidence.
+The audit SHALL register a `collection_candidate` category computed over parsed compiled pages the requesting audience may read. A domain term SHALL be a candidate when it is neither breadth vocabulary, a function word, a project key nor a core epistemic category, is distinctive (carried by no more than a provisional share of the units table once the table holds at least a provisional minimum number of units, a verdict stored with the entry so serve-time recomposition from a subset keeps it), is not covered by any collection's effective claims, and its units recur across at least the provisional minimum number of pages and distinct dates spanning the provisional minimum span, with at least the provisional minimum number of units carrying a state-change lexeme, a currency amount or an ISO date, and at least two co-recurring identity terms. One finding SHALL be produced per qualifying term, partitioned by that term, carrying the domain terms (at most six), bounded evidence unit references (at most eight), a strength of exactly `strong` or `moderate`, and a `signal_version` derived from the sorted evidence unit references so new evidence resurfaces a dismissed candidate. The category SHALL be in the due-state projection categories as a recompute-only category and registered as an opt-in attention category, not in the default union. It SHALL resolve when a manifest's effective claims cover the domain terms, with no dismissal memory beyond the fingerprint rule. Every constant SHALL be declared provisional in one module. No finding SHALL report a numeric confidence.
 
 #### Scenario: A recurring longitudinal domain surfaces
 - **WHEN** four compiled pages written on three dates two weeks apart carry units tagged with the same domain term, three of them stating purchases, cancellations or amounts, with two recurring identity terms, and no collection claims the term
@@ -1109,6 +1133,18 @@ The audit SHALL register a `collection_candidate` category computed over parsed 
 #### Scenario: Withheld pages contribute nothing
 - **WHEN** a page carrying qualifying units is withheld from the requesting audience
 - **THEN** its units contribute to no gate, count or evidence reference served to that audience
+
+#### Scenario: Generic vocabulary stays quiet
+- **WHEN** three hundred dated state units across sixty pages carry only generic words such as result, technique and workflow
+- **THEN** no candidate is produced, strong or moderate
+
+#### Scenario: One real domain is one candidate
+- **WHEN** the same table also holds four dated state units across four pages tagged with one domain term and two identity terms that ride the same units
+- **THEN** exactly one candidate is produced for that domain, naming all three terms
+
+#### Scenario: Serving is capped per response
+- **WHEN** more qualifying candidates are open than the provisional per-response maximum
+- **THEN** a served due-state block counts at most that many `collection_candidate` items, strongest and widest first, after audience filtering and triage
 
 ### Requirement: Role and transient-state signals share the review lifecycle
 
