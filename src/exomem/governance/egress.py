@@ -2817,9 +2817,13 @@ def page_release_filter(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    pages: Iterable[str] | None = None,
 ) -> Callable[[str], bool] | None:
     """`quick_page_visible` for many pages in one request, or `None` when
-    every page is released (an ungoverned vault with no tombstone).
+    every page is released: an ungoverned vault with no tombstone, where none
+    of `pages` (every page the caller will ask about) carries the RAW mark.
+    Without `pages` a callable is always returned, since a marked original
+    can be withheld even under an empty policy.
 
     The policy, the tombstones, the principal, the grants hash and the
     declared purpose are resolved once, and each page costs only its own
@@ -2832,6 +2836,8 @@ def page_release_filter(
     memo: dict[str, bool] = {}
     if _file_policy_empty(root, policy):
         tombstones = lifecycle.tombstoned_paths(root)
+        if not tombstones and pages is not None and not any(map(raw_protection.marked, pages)):
+            return None
         if lifecycle.FAIL_CLOSED_TOMBSTONE in tombstones:
             return lambda _rel_path: False
         return lambda rel_path: (

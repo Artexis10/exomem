@@ -526,6 +526,23 @@ def test_unrestricted_workspace_mark_caps_and_order_are_unchanged(
     assert runtime.visible_marks(tmp_path, profile, heat.Attribution(), released=released) == {}
 
 
+def test_a_guests_served_thread_loses_a_marked_original_without_policy(tmp_path: Path) -> None:
+    """RAW: with no policy and no tombstone, the "every page is released" fast
+    path still withholds a preserved original from a guest's served thread."""
+    from test_governance_egress import _external
+
+    from exomem import working_set_runtime as runtime
+    from exomem.governance.principal import request_scope
+
+    original = f"{KB}/Evidence/__exomem_raw_v1__receipt.pdf"
+    own = _mark("s-own", "w", (SLED, original), T0)
+    with request_scope(_external()):
+        visible = runtime.visible_marks(
+            tmp_path, profile_of(sessions=(own,)), heat.Attribution(session=own.session),
+        )
+    assert visible[own.session].paths == (SLED,)
+
+
 def test_selection_never_lifts_a_tier_over_a_deliberate_act_below_it() -> None:
     profile = profile_of(
         ev(T0, SLED, "work"),
