@@ -749,3 +749,26 @@ jobs:
             echo "unexpected CI result for full_ci=$FULL_CI: $result" >&2
             exit 1
           done
+
+  # A full run that release-evidence-automation.yml dispatched with
+  # GITHUB_TOKEN raises no workflow_run event when it completes, so the full
+  # run signals its own evidence: after its gate passes it dispatches that
+  # workflow, which waits for this run's recorded completion and then re-runs
+  # the waiting release PR's failed checks. Known bound: a release PR run still
+  # in progress then has nothing to re-run; the PR tier normally finishes well
+  # inside the full tier's duration.
+  release-evidence-landed:
+    name: signal release evidence landed
+    needs: gate
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the release check re-run for this evidence run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVIDENCE_RUN: ${{ github.run_id }}
+        run: gh workflow run release-evidence-automation.yml --ref main -f evidence_run="$EVIDENCE_RUN"
