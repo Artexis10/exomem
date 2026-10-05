@@ -16,7 +16,13 @@
 #   2. Whenever a scheduled or dispatched full run completes green on main,
 #      the open release PR at that revision gets its failed checks re-run
 #      automatically. The nightly schedule therefore turns a waiting release
-#      PR green with zero human action.
+#      PR green with zero human action. The full run signals this by
+#      dispatching this workflow from its last job (ci.yml
+#      `release-evidence-landed`): a run that step 1 dispatched with
+#      GITHUB_TOKEN raises no workflow_run event when it completes, and
+#      workflow_dispatch is the one event GITHUB_TOKEN may raise. The
+#      dispatched job waits for the evidence run's recorded green completion,
+#      which the release evidence check requires, before re-running anything.
 #
 # Together: enable auto-merge on the release PR and walk away — evidence is
 # produced, the checks re-evaluate, and GitHub merges when they pass.
@@ -26,9 +32,12 @@ name: release evidence automation
 on:
   pull_request:
     types: [auto_merge_enabled]
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      evidence_run:
+        description: Full CI run on main whose green completion re-runs the release PR's failed checks
+        required: true
+        type: string
 
 permissions:
   actions: write
@@ -44,7 +53,7 @@ env:
 # dispatch is visible, yielding two full-tier runs. Queue, don't cancel — a
 # cancelled rerun job would drop the re-run silently.
 concurrency:
-  group: release-evidence-automation-${{ github.event.pull_request.number || github.event.workflow_run.head_sha }}
+  group: release-evidence-automation-${{ github.event.pull_request.number || inputs.evidence_run }}
 
 jobs:
   dispatch-evidence:
@@ -78,20 +87,37 @@ jobs:
 
   rerun-evidence-check:
     name: re-run release checks when evidence lands
-    if: >-
-      ${{ github.event_name == 'workflow_run' &&
-          github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.head_branch == 'main' &&
-          (github.event.workflow_run.event == 'workflow_dispatch' ||
-           github.event.workflow_run.event == 'schedule') }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Re-run the release PR's failed checks at this evidence revision
         env:
           GH_TOKEN: ${{ github.token }}
-          EVIDENCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVIDENCE_RUN: ${{ inputs.evidence_run }}
         run: |
+          case "$EVIDENCE_RUN" in
+            ''|*[!0-9]*) echo "evidence_run must be a workflow run id" >&2; exit 1 ;;
+          esac
+          # The dispatching run is still finishing its last job. The release
+          # evidence check counts only completed green runs, so wait for that
+          # recorded completion before re-running anything.
+          for attempt in $(seq 1 40); do
+            fields=$(gh api "repos/${{ github.repository }}/actions/runs/$EVIDENCE_RUN" \
+              --jq '[.status, .conclusion, .event, .head_branch, .path, .head_sha] | map(. // "-") | join(" ")')
+            set -- $fields
+            test "$1" = completed && break
+            sleep 15
+          done
+          status=$1 conclusion=$2 event=$3 branch=$4 path=$5 EVIDENCE_SHA=$6
+          if test "$status $conclusion $branch $path" != "completed success main .github/workflows/ci.yml"; then
+            echo "run $EVIDENCE_RUN is not a completed green CI run on main; nothing to re-run"
+            exit 0
+          fi
+          case "$event" in
+            workflow_dispatch|schedule) ;;
+            *) echo "run $EVIDENCE_RUN is not full-tier evidence; nothing to re-run"; exit 0 ;;
+          esac
           pr=$(gh api "repos/${{ github.repository }}/pulls?state=open&head=${{ github.repository_owner }}:release-please--branches--main" \
             --jq '.[0] // empty')
           if test -z "$pr"; then
