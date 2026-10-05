@@ -11526,6 +11526,7 @@ def op_record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "history",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,

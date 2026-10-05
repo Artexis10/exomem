@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import query_data, record_governance, records, structured_collections
+from . import query_data, record_governance, record_history, records, structured_collections
 from .cli_ops import OpError
 from .structured_collections import CollectionError
 
@@ -25,6 +25,7 @@ ACTIONS = frozenset(
         "revise",
         "rebaseline",
         "discard",
+        "history",
     }
 )
 
@@ -83,6 +84,7 @@ _ACTION_FIELDS = {
         {"collection", "rows", "why", "expected_container_hash", "source", "on_reject"}
     ),
     "discard": frozenset({"collection", "held", "why"}),
+    "history": frozenset({"collection", "item_key", "limit", "continuation"}),
     "revise": frozenset(
         {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
     ),
@@ -100,6 +102,7 @@ _REQUIRED_FIELDS = {
     # which the argument rules below say in as many words.
     "append": frozenset({"collection", "why"}),
     "discard": frozenset({"collection", "held", "why"}),
+    "history": frozenset({"collection", "item_key"}),
     "bulk_upsert": frozenset({"collection", "rows", "why", "expected_container_hash"}),
     "update": frozenset(
         {
@@ -148,6 +151,7 @@ def record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "history",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -352,6 +356,16 @@ def record_memory(
                 manifest,
                 output_format="json" if output_format is None else output_format,
                 agent_history=history,
+            )
+        if action == "history":
+            assert collection is not None and item_key is not None
+            return record_history.read(
+                vault_root,
+                collection,
+                item_key=item_key,
+                semantic_profile="records",
+                limit=limit,
+                continuation=continuation,
             )
         if action == "append":
             assert collection is not None

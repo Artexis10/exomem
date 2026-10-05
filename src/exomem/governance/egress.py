@@ -748,6 +748,7 @@ _FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
         "record_manifest",
         "record_template",
         "record_mutation",
+        "record_history",
         "planning_query",
         "planning_inspection",
         "planning_mutation",
@@ -5016,6 +5017,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+        "history": "structure",
     },
     ("episode_memory", "action"): {
         "record": "mutation",
@@ -5040,6 +5042,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "triage": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
+        "history": "structure",
     },
 }
 
