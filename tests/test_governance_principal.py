@@ -104,6 +104,22 @@ def test_mcp_stdio_without_auth_is_owner(monkeypatch: pytest.MonkeyPatch) -> Non
     assert resolved.resolved is True
 
 
+def test_http_request_with_only_excluded_headers_is_not_stdio_owner() -> None:
+    """An empty filtered header map is not proof of owner-local transport."""
+    from fastmcp.server.dependencies import _current_http_request
+    from starlette.requests import Request
+
+    request = Request({"type": "http", "method": "POST", "path": "/mcp", "headers": [(b"host", b"memory.example"), (b"content-type", b"application/json")]})
+    token = _current_http_request.set(request)
+    try:
+        remote = resolve_mcp_principal()
+    finally:
+        _current_http_request.reset(token)
+    assert remote.resolved is False
+    assert remote.audience_id == MOST_RESTRICTIVE_AUDIENCE
+    assert resolve_mcp_principal().issuer_family == "mcp-local-stdio"
+
+
 def test_mcp_unresolved_but_expected_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

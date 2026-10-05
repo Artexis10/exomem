@@ -19,13 +19,18 @@ A download capability also names WHO minted it:
 the expiry. `/download` decides every requested path under that audience, so a
 caller cannot download more than it could read — the owner's secret signs the
 token, but only the owner's own mint carries the owner's audience.
+
+`v3` additionally carries trusted ingress/session provenance and is signed only
+with the server-private signing root, never the bearer accepted by the route.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import time
+from dataclasses import asdict
 
 PREFIX = "v1."
 DEFAULT_TTL = 900  # 15 minutes
@@ -145,6 +150,50 @@ def bound_audience(
     return audience
 
 
+def private_signing_root(bearer: str | None, configured: str | None) -> str | None:
+    """A credential accepted from clients cannot also attest their ingress."""
+    root = (configured or "").strip()
+    if not root or bearer is not None and hmac.compare_digest(root.encode(), bearer.encode()):
+        return None
+    return root
+
+
+def mint_principal(signing_root: str, principal, *, ttl: int = DEFAULT_TTL) -> str:
+    """Carry the trusted ingress binding through a download capability."""
+    exp = int(time.time()) + ttl
+    claim = json.dumps(asdict(principal), sort_keys=True, separators=(",", ":")).encode().hex()
+    message = f"exomem.transfer-principal/v3\0download\0{exp}\0{claim}"
+    signature = hmac.new(signing_root.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return f"v3.{exp}.{claim}.{signature}"
+
+
+def bound_principal(presented: str, signing_root: str | None, *, now: int | None = None):
+    from .governance.authorization_session_lifecycle import AuthorizationSessionContext
+    from .governance.principal import RequestPrincipal
+
+    if signing_root is None or len(presented) > 16384:
+        return None
+    parts = presented.split(".")
+    if len(parts) != 4 or parts[0] != "v3":
+        return None
+    _, expires, claim, signature = parts
+    exp = _parse_exp(expires)
+    if exp is None or int(time.time() if now is None else now) > exp:
+        return None
+    message = f"exomem.transfer-principal/v3\0download\0{exp}\0{claim}"
+    expected = hmac.new(signing_root.encode(), message.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature.encode(), expected.encode()):
+        return None
+    try:
+        values = json.loads(bytes.fromhex(claim))
+        session = values.get("verified_authorization_session")
+        if session is not None:
+            values["verified_authorization_session"] = AuthorizationSessionContext(**session)
+        return RequestPrincipal(**values)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 #: Destination lanes an upload capability may be minted for. `evidence` signs the
 #: bare `upload` scope so every token issued before lanes existed keeps verifying.
 UPLOAD_LANES = ("evidence", "source")
@@ -180,6 +229,8 @@ def mint_for_endpoint(
     large_base_url: str | None = None,
     lane: str | None = None,
     audience: str | None = None,
+    principal=None,
+    signing_root: str | None = None,
 ) -> dict:
     """Response payload for the `mint_<scope>_token` MCP tools (or raise if off).
 
@@ -198,6 +249,7 @@ def mint_for_endpoint(
     """
     if secret is None:
         raise ValueError(f"{scope.upper()}_DISABLED: server has no EXOMEM_UPLOAD_TOKEN configured")
+    signing_root = private_signing_root(secret, signing_root)
     # The lane is signed into the scope but never into the URL: both lanes post
     # to the same endpoint, and the server reads the destination off the token.
     signed_scope = upload_scope(lane) if lane is not None and scope == "upload" else scope
@@ -208,6 +260,8 @@ def mint_for_endpoint(
             secret,
             audience=audience if audience is not None else MOST_RESTRICTIVE_AUDIENCE,
         )
+        if principal is not None and signing_root is not None:
+            token = mint_principal(signing_root, principal)
     else:
         token = mint(secret, scope=signed_scope)
     out = {
@@ -217,6 +271,10 @@ def mint_for_endpoint(
     }
     if scope == "upload":
         out["lane"] = lane or "evidence"
+    if scope == "download":
+        out["preserves_ingress_principal"] = principal is not None and signing_root is not None
+        if not out["preserves_ingress_principal"]:
+            out["raw_transfer_unavailable_reason"] = "Private signing authority or verified ingress principal is unavailable."
     if large_base_url:
         out["large_upload_url"] = f"{large_base_url}/upload"
     return out

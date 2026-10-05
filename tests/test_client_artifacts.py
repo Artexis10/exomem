@@ -81,6 +81,7 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         "adoption",
         "transcriptions",
         "response_detail",
+        "raw_protection",
     }
     vault_root = tmp_path / "vault"
     shutil.copytree(Path(__file__).resolve().parent / "fixtures", vault_root)
@@ -977,6 +978,60 @@ def _staged(tmp_path: Path, file_id: str, filename: str, payload: bytes):  # noq
         content_type="application/octet-stream",
         filename=filename,
     )
+
+
+@pytest.mark.parametrize("producer", ["text", "batch"])
+def test_protected_dedup_reads_only_requested_originals(vault, tmp_path, monkeypatch, producer):
+    """A tiny capture/retry verifies matching originals without rereading unrelated bodies."""
+    from exomem import client_artifacts, preserve, reserved_paths
+
+    destination = dict(scope="Test", category="raw", raw_protection=True)
+    unrelated = {
+        preserve.preserve_bytes(vault, filename=f"unrelated-{index}.bin", data=bytes([index]) * 4096,
+                                **destination).path
+        for index in range(2)
+    }
+    payloads = [b"tiny original"] if producer == "text" else [b"tiny original", b"another tiny original"]
+    originals = set(unrelated)
+    body_bytes = {}
+    read = reserved_paths.read_generic_bytes
+
+    def observed_read(root, path, **kwargs):
+        snapshot = read(root, path, **kwargs)
+        if str(path) in originals:
+            body_bytes[str(path)] = body_bytes.get(str(path), 0) + len(snapshot.data)
+        return snapshot
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", observed_read)
+
+    def capture(prefix):
+        if producer == "text":
+            return [commands.op_preserve_evidence(
+                vault, filename=f"{prefix}.txt", content=payloads[0].decode(), **destination,
+            )]
+        monkeypatch.setattr(client_artifacts, "stage_artifact", lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], f"{prefix}-{file['file_id']}.bin", payloads[int(file["file_id"])],
+        ))
+        return commands.op_preserve_artifacts(
+            vault, files=[{"file_id": str(index), "download_url": f"https://files.example/{index}"}
+                          for index in range(len(payloads))], **destination,
+        )["files"]
+
+    saved = capture("first")
+    assert all(row.get("state") != "already_stored" for row in saved)
+    assert not unrelated.intersection(body_bytes)
+    originals.update(row["path"] for row in saved)
+    body_bytes.clear()
+    retry = capture("retry")
+    assert [row["path"] for row in retry] == [row["path"] for row in saved]
+    assert all(row["state"] == "already_stored" for row in retry)
+    assert not unrelated.intersection(body_bytes)
+    assert all(body_bytes[row["path"]] >= len(payload) for row, payload in zip(saved, payloads, strict=True))
+    (vault / saved[0]["path"]).write_bytes(b"corrupted original")
+    corrected = capture("corrected")
+    assert corrected[0]["path"] != saved[0]["path"]
+    assert (vault / corrected[0]["path"]).read_bytes() == payloads[0]
+    assert not unrelated.intersection(body_bytes)
 
 
 def test_preserve_artifacts_reports_one_terminal_state_per_file(

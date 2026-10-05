@@ -84,6 +84,117 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     assert companions.classify(vault, result.path).projects == ()
 
 
+def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: Path) -> None:
+    """An exact-byte legacy duplicate must not undo the caller's protection opt-in."""
+    from exomem import commands
+    from exomem.governance import egress, raw_protection
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    arguments = dict(scope="Test", category="raw", filename="sample.txt", content="sensitive original")
+    legacy = commands.op_preserve_evidence(vault, **arguments)
+    protected = commands.op_preserve_evidence(vault, **arguments, raw_protection=True)
+    retried = commands.op_preserve_evidence(vault, **arguments, raw_protection=True)
+    assert protected["path"] != legacy["path"]
+    assert retried["path"] == protected["path"]
+    assert retried["state"] == "already_stored"
+    sidecar = vault / protected["sidecar_path"]
+    before = raw_protection.binding(vault, protected["path"])[0]
+    preserve_module.update_sidecar_extraction(vault, sidecar, text="sensitive extraction", engine="upload")
+    assert raw_protection.binding(vault, protected["path"])[0] == before
+    remote = RequestPrincipal("owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic")
+    with request_scope(remote):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_read_memory(vault, path=protected["sidecar_path"])
+        receipt = egress.postfilter("preserve_evidence", protected, vault)
+        assert protected["hash"] not in str(receipt)
+        assert protected["path"] not in str(receipt)
+        assert protected["ref"] not in str(receipt)
+        assert egress.release_allows_download(vault, legacy["path"])
+    sidecar.write_text("---\ntype: source\n---\nstripped companion\n", encoding="utf-8")
+    assert not egress.release_allows_download(vault, protected["path"], principal=remote)
+
+
+def test_protected_dedup_requires_a_real_pair_and_matching_original_bytes(vault: Path) -> None:
+    """Authored Markdown cannot substitute an unrelated or changed original for new bytes."""
+    import hashlib
+
+    from exomem import commands
+
+    desired = "new protected original"
+    decoy = preserve_module.preserve(
+        vault, scope="Test", category="raw", filename="decoy.txt", content="different bytes",
+    )
+    forged = (vault / decoy.sidecar_path).read_text().replace(
+        decoy.hash, hashlib.sha256(desired.encode()).hexdigest(),
+    )
+    preserve_module.preserve(
+        vault, scope="Test", category="raw", filename="authored.md",
+        content=forged, raw_protection=True,
+    )
+    arguments = dict(scope="Test", category="raw", content=desired, raw_protection=True)
+    saved = commands.op_preserve_evidence(vault, filename="wanted.txt", **arguments)
+    assert saved.get("state") != "already_stored"
+    assert (vault / saved["path"]).read_text() == desired
+    (vault / saved["path"]).write_text("changed original")
+    fresh = commands.op_preserve_evidence(vault, filename="fresh.txt", **arguments)
+    assert fresh["path"] != saved["path"]
+    assert (vault / fresh["path"]).read_text() == desired
+    retried = commands.op_preserve_evidence(vault, filename="retry.txt", **arguments)
+    assert retried["state"] == "already_stored"
+    assert retried["path"] == fresh["path"]
+
+
+def test_raw_rollback_survivor_keeps_its_intrinsic_floor(vault: Path, monkeypatch) -> None:
+    """Failed cleanup must not turn a surviving original into a public orphan."""
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, owner_principal
+
+    original = vault / "Knowledge Base/Evidence/Test/raw/__exomem_raw_v1__sample.txt"
+    companion = original.with_name(original.name + ".md")
+    unlink = vault_module._BatchWorkspace.unlink_installed
+
+    def fail_after_original(path):
+        if path == original:
+            assert companion.is_file()
+            raise OSError("synthetic publication failure")
+
+    def fail_original_cleanup(workspace, final, identity):
+        if final == original:
+            raise OSError("synthetic cleanup failure")
+        return unlink(workspace, final, identity)
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_original)
+    monkeypatch.setattr(vault_module._BatchWorkspace, "unlink_installed", fail_original_cleanup)
+    with pytest.raises(vault_module.BatchWriteError, match="BATCH_ROLLBACK_INCOMPLETE"):
+        preserve_module.preserve(
+            vault, scope="Test", category="raw", filename="sample.txt",
+            content="exact surviving bytes", raw_protection=True,
+        )
+    assert original.read_bytes() == b"exact surviving bytes"
+    assert not companion.exists()
+    rel = original.relative_to(vault).as_posix()
+    assert not egress.release_allows_download(vault, rel, principal=RequestPrincipal("owner", remote_owner=True))
+    assert egress.release_allows_download(vault, rel, principal=owner_principal(surface="library"))
+    with pytest.raises(preserve_module.PreserveError) as retry:
+        preserve_module.preserve(
+            vault, scope="Test", category="raw", filename="sample.txt",
+            content="replacement must not overwrite a surviving original", raw_protection=True,
+        )
+    assert retry.value.code == "ARTIFACT_EXISTS"
+    assert original.read_bytes() == b"exact surviving bytes"
+
+
+def test_raw_markdown_original_is_not_rewritten_as_a_managed_page(vault: Path) -> None:
+    """Markdown is still an exact original, not frontmatter for the writer to repair."""
+    original = "---\nunfinished: [\n---\n\nOriginal café\n"
+    saved = preserve_module.preserve(
+        vault, scope="Test", category="raw", filename="original.md",
+        content=original, raw_protection=True,
+    )
+    assert (vault / saved.path).read_bytes() == original.encode("utf-8")
+    assert saved.sidecar_path == saved.path + ".md"
+
+
 def test_cap_extracted_text_passthrough_under_limit() -> None:
     assert preserve_module._cap_extracted_text("short content") == "short content"
 

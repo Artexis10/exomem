@@ -227,7 +227,7 @@ def _mcp_identity_claims() -> tuple[dict[str, Any] | None, str | None]:
     the resolution contract without pinning FastMCP internals.
     """
     try:
-        from fastmcp.server.dependencies import get_access_token, get_http_headers
+        from fastmcp.server.dependencies import get_access_token, get_http_headers, get_http_request
     except ImportError:  # pragma: no cover - fastmcp is a hard dependency
         return None, None
 
@@ -247,8 +247,13 @@ def _mcp_identity_claims() -> tuple[dict[str, Any] | None, str | None]:
     except (LookupError, RuntimeError):
         return None, None
     if not headers:
-        # No HTTP request bound at all -> local stdio transport -> owner.
-        return None, None
+        # A request containing only excluded headers also produces {}.
+        # Only absence of an HTTP binding proves the stdio fallback.
+        try:
+            get_http_request()
+        except (LookupError, RuntimeError):
+            return None, None
+        return None, "authenticated"
     authorization = str(headers.get("authorization", "")).strip()
     scheme, separator, credential = authorization.partition(" ")
     if separator and scheme.lower() == "bearer" and credential.strip():

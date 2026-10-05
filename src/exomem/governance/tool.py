@@ -1649,9 +1649,10 @@ def _standing_grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
     store.require_authoring_schema(vault_root)
     raw_scope_ids = kwargs.get("scope_ids")
+    raw_release = kwargs.get("raw_release")
     audience = str(kwargs.get("audience") or "").strip()
     ceiling = kwargs.get("ceiling")
-    if (
+    if raw_release is None and (
         not isinstance(raw_scope_ids, list)
         or not raw_scope_ids
         or not all(isinstance(value, str) and value for value in raw_scope_ids)
@@ -1664,18 +1665,36 @@ def _standing_grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     current = policy_module.load(vault_root)
     if current.blocked:
         raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
-    if grant_id in {grant.id for grant in current.grants}:
+    if grant_id in {grant.id for grant in (*current.grants, *current.release_grants)}:
         raise GovernanceError("GRANT_EXISTS", "standing grant already exists")
-    if not set(raw_scope_ids) <= set(current.scopes):
+    if raw_release is None and not set(raw_scope_ids) <= set(current.scopes):
         raise GovernanceError("SCOPE_UNKNOWN", "one or more scopes do not exist")
+    if raw_release is not None:
+        from . import raw_protection
+
+        if (not isinstance(raw_release, dict)
+                or set(raw_release) != {"version", "surface", "issuer_family", "purpose", "includes_location"}
+                or raw_release.get("includes_location") is not True
+                or not isinstance(kwargs.get("path"), str)):
+            raise GovernanceError("INVALID_RAW_RELEASE", "an explicit recipient and included-location acknowledgment are required")
+        bound = raw_protection.binding(vault_root, kwargs["path"])
+        if bound is None:
+            raise GovernanceError("INVALID_RAW_RELEASE", "protected original is unavailable")
+        block, companion, snapshot_hash = bound
+        document_data = {
+            "governance_version": 1, "id": grant_id, "kind": "raw-artifact",
+            "path": companion, "ref": block["original_ref"], "content_hash": snapshot_hash,
+            "to_audience": audience, "released_at": datetime.now(UTC).isoformat(),
+            "why": str(kwargs.get("intent") or "Explicit whole-artifact release including location"),
+            "raw_protection": {**raw_release, "artifact_sha256": block["artifact_sha256"], "revision": block["revision"]},
+        }
+    else:
+        document_data = {
+            "governance_version": 1, "id": grant_id, "scope_ids": sorted(set(raw_scope_ids)),
+            "audience": audience, "ceiling": ceiling,
+        }
     document = yaml.safe_dump(
-        {
-            "governance_version": 1,
-            "id": grant_id,
-            "scope_ids": sorted(set(raw_scope_ids)),
-            "audience": audience,
-            "ceiling": ceiling,
-        },
+        document_data,
         sort_keys=False,
         allow_unicode=True,
     )
@@ -1704,7 +1723,7 @@ def _standing_revoke(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
     store.require_authoring_schema(vault_root)
     current = policy_module.load(vault_root)
-    match = next((grant for grant in current.grants if grant.id == grant_id), None)
+    match = next((grant for grant in (*current.grants, *current.release_grants) if grant.id == grant_id), None)
     if match is None:
         raise GovernanceError("GRANT_UNKNOWN", "standing grant does not exist")
     return _yaml_transition(
@@ -6594,6 +6613,10 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
         raise GovernanceError(
             "UNKNOWN_GOVERNANCE_OPERATION", f"unsupported operation {operation!r}"
         )
+    if kwargs.get("raw_release") is not None and (
+        operation != "grant" or kwargs.get("scope") != "standing"
+    ):
+        raise GovernanceError("INVALID_GOVERNANCE_ARGUMENT", "raw_release requires a standing grant")
     if not reserved_paths.owner_authorized("governance-tree"):
         raise GovernanceError(
             "GOVERNANCE_AUTHORITY_REQUIRED",

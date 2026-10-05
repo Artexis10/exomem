@@ -919,6 +919,113 @@ def test_missing_download_is_existence_neutral_and_burns_grant(tmp_path: Path) -
     assert security.consumed == {JTI}
 
 
+def test_raw_hosted_download_decides_the_held_snapshot(tmp_path, monkeypatch) -> None:
+    """An approved pathname cannot authorize different bytes returned by safe-open."""
+    import io
+
+    from exomem import commands
+    from exomem.governance import principal
+    from exomem.writer_lease import invoke_command
+
+    security = FakeSecurityAuthority()
+    app, config, lifecycle = _app(tmp_path, security)
+    root = config.vault_root
+    recipient = principal.resolve_hosted_principal(PRINCIPAL)
+    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        saved = commands.op_preserve_evidence(
+            root, scope="Test", category="raw", filename="route.csv",
+            content="timestamp,latitude\n2026-10-01,12.345\n", raw_protection=True,
+        )
+        released = invoke_command(
+            govern, root, operation="grant", scope="standing",
+            grant_id="01ARZ3NDEKTSV4RRFFQ69G5FB0", path=saved["path"],
+            audience=recipient.audience_id,
+            raw_release={"version": 1, "surface": recipient.surface,
+                         "issuer_family": recipient.issuer_family,
+                         "purpose": None, "includes_location": True},
+        )
+    assert released["ok"], released
+    held = io.BytesIO(b"unapproved held bytes")
+    monkeypatch.setattr(hosted_transfer_routes, "_open_bounded_vault_file", lambda *_a, **_kw: (held, len(held.getvalue()), "route.csv"))
+    response = asyncio.run(_request(
+        app, "GET", hosted_transfer.TRANSFER_DOWNLOAD_PATH,
+        headers={"Origin": ORIGIN, hosted_transfer.TRANSFER_GRANT_HEADER: _grant(
+            operation="download", target={"kind": "download-v1", "path": saved["path"]},
+        )},
+    ))
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "TRANSFER_TARGET_UNAVAILABLE"
+    assert "unapproved" not in response.text
+    assert held.closed
+    assert lifecycle.snapshot().active_transfers == 0
+
+
+def test_private_v1_raw_download_rechecks_companion_updated_during_open(tmp_path, monkeypatch):
+    """A supported extraction update must not ride an earlier whole-artifact grant."""
+    from datetime import UTC, datetime
+
+    from exomem import commands, preserve, server_hosted
+    from exomem.governance import principal
+    from exomem.writer_lease import invoke_command
+
+    config = replace(
+        _config(tmp_path), enforce_transfer_v1_compatibility=True,
+        signed_release_build_time=datetime.fromtimestamp(NOW - 60, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        transfer_v1_compat_until=datetime.fromtimestamp(NOW + 3600, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    app, config, lifecycle = _app(tmp_path, FakeSecurityAuthority(), config_value=config)
+    recipient = principal.resolve_hosted_principal(PRINCIPAL)
+    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        saved = commands.op_preserve_evidence(
+            config.vault_root, scope="Test", category="raw", filename="original.txt",
+            content="approved original", raw_protection=True,
+        )
+        released = invoke_command(
+            govern, config.vault_root, operation="grant", scope="standing",
+            grant_id="01ARZ3NDEKTSV4RRFFQ69G5FB0", path=saved["path"], audience=recipient.audience_id,
+            raw_release={"version": 1, "surface": recipient.surface,
+                         "issuer_family": recipient.issuer_family,
+                         "purpose": None, "includes_location": True},
+        )
+    assert released["ok"], released
+    open_file = server_hosted._open_bounded_vault_file
+    opened = []
+
+    def update_then_open(root, path, **kwargs):
+        preserve.update_sidecar_extraction(root, root / path, text="new unapproved extraction", engine="upload")
+        result = open_file(root, path, **kwargs)
+        opened.append(result[0])
+        return result
+
+    request = {
+        "headers": {
+            "Authorization": f"Bearer {config.service_credential}",
+            gateway.CELL_HEADER: config.cell_id, gateway.PROTOCOL_HEADER: config.protocol_version,
+            gateway.REQUEST_HEADER: "33333333-3333-4333-8333-333333333333",
+            gateway.PRINCIPAL_HEADER: PRINCIPAL,
+            gateway.TRANSFER_GRANT_HEADER: gateway.mint_transfer_grant(
+                config, tenant_scope="tenant-alpha", principal_scope=PRINCIPAL,
+                operation="download", jti="raw-companion-swap", max_bytes=65536,
+            ),
+        },
+        "json": {"path": saved["sidecar_path"]},
+    }
+    approved = (config.vault_root / saved["sidecar_path"]).read_bytes()
+    positive = asyncio.run(_request(app, "POST", "/private/exomem/v1/download", **request))
+    assert positive.status_code == 200, positive.text
+    assert positive.content == approved
+    monkeypatch.setattr(server_hosted, "_open_bounded_vault_file", update_then_open)
+    response = asyncio.run(_request(
+        app, "POST", "/private/exomem/v1/download", **request,
+    ))
+    assert response.status_code == 404, response.text
+    assert "new unapproved extraction" not in response.text
+    assert opened and all(stream.closed for stream in opened)
+    assert lifecycle.snapshot().active_transfers == 0
+
+
 def test_hosted_transfer_defaults_and_private_v1_deadline_are_fail_closed(
     tmp_path: Path,
 ) -> None:

@@ -25,8 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy
-from . import working_set_heat
+from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy, working_set_heat
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -174,6 +173,15 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
     Returns None for an ordinary page, which is the common case: a source page
     whose stem happens to have no sibling file is not a pair.
     """
+    from .governance.raw_protection import marked
+
+    if marked(rel):
+        from .governance.raw_protection import binding
+
+        pair = binding(vault_root, rel)
+        if pair is not None:
+            block, companion, _ = pair
+            return companion, block["artifact_path"]
     if rel.lower().endswith(".md"):
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
@@ -190,7 +198,17 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         def replace(match: re.Match[str]) -> str:
             return f"{match.group(1)}{new_binary}" if match.group(2) == old_binary else match.group(0)
 
-        return _ARTIFACT_POINTER_RE.sub(replace, text)
+        from .governance.raw_protection import marked
+
+        result = _ARTIFACT_POINTER_RE.sub(replace, text)
+        if marked(old_binary):
+            from .vault import yaml_scalar
+
+            result = re.sub(
+                r"(?m)^(  artifact_path:).*$", r"\g<1> " + yaml_scalar(new_binary), result
+            )
+            result = re.sub(r"(?m)^(data_file:).*$", r"\g<1> " + yaml_scalar(new_binary), result)
+        return result
 
     return transform
 
@@ -303,6 +321,11 @@ def move_file(
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
+    from .governance import raw_protection
+
+    if raw_protection.marked(old_rel) and not raw_protection.marked(new_abs.name):
+        new_abs = new_abs.with_name(raw_protection.PREFIX + new_abs.name)
+        new_rel = new_abs.relative_to(vault_root).as_posix()
     if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
@@ -322,7 +345,7 @@ def move_file(
     if pair is not None:
         page_rel, binary_rel = pair
         if old_rel == binary_rel:
-            if not new_rel.lower().endswith(".md"):
+            if not new_rel.lower().endswith(".md") or raw_protection.marked(old_rel):
                 paired_binary = (binary_rel, new_rel)
                 new_rel = f"{new_rel}.md"
                 new_abs = new_abs.with_name(new_abs.name + ".md")

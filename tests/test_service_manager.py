@@ -384,6 +384,60 @@ def test_target_inspection_is_read_only_and_checks_worker_protocol(tmp_path, mon
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("entrypoint", ["upgrade", "cold-configured", "cold-recorded", "cold-compatible"])
+def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_path, monkeypatch, entrypoint):
+    """A fresh external state cannot make a copied protected vault safe for an older reader."""
+    interpreter = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
+    if not interpreter:
+        pytest.skip("requires an installed pre-RAW reader")
+    module = _manager()
+    root = tmp_path / "copied-vault"
+    source = tmp_path / "original-vault"
+    raw = source / "Knowledge Base/Sources/Other/__exomem_raw_v1__sample.txt"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"synthetic sensitive original")
+    import shutil
+
+    shutil.copytree(source, root)
+    state = tmp_path / "fresh-state"
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(state))
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "candidate.sock", host="127.0.0.1", port=8765)
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        compatible = entrypoint == "cold-compatible"
+        target = await runtime.inspect({"python": sys.executable if compatible else interpreter, "version": "0.106.0"})
+        assert ("raw-protection-v1" in runtime._verified_state_compatibility[1]) == compatible
+        if entrypoint == "upgrade":
+            result = await manager.upgrade(target)
+            assert not result["ok"], result
+            assert "current admission unchanged" in result["error"], result
+            assert serving.pid == 100
+        else:
+            serving.pid = 0
+            if entrypoint == "cold-recorded":
+                manager.records.accept(target)
+            else:
+                manager.initial_target = target
+            if compatible:
+                await manager.start()
+                assert serving.pid == 200
+                assert manager.phase == "ready"
+            else:
+                with pytest.raises(ValueError, match="required state compatibility"):
+                    await manager.start()
+                assert serving.pid == 0
+                assert manager.phase == "unavailable"
+        if not compatible:
+            assert serving.events == ingress.events == []
+        assert not state.exists()
+
+    asyncio.run(scenario())
+
+
 def _mixed_marker(vault):
     from exomem.collection_store import authority
 

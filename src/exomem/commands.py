@@ -3598,6 +3598,7 @@ def op_add(
     source_kind: str | None = None,
     domain: str | None = None,
     projects: list[str] | None = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture raw content as an immutable source page in the Knowledge Base.
 
@@ -3643,6 +3644,7 @@ def op_add(
             why_captured=why_captured,
             domain=domain,
             projects=projects,
+            raw_protection=raw_protection,
         )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -4898,6 +4900,7 @@ def op_preserve(
     filename: str,
     content: str,
     description: str | None = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture a TEXT artifact to Evidence/<scope>/<category>/.
 
@@ -4954,7 +4957,7 @@ def op_preserve(
     # second one that no later reader can tell apart.
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
     duplicate = preserve_module.find_duplicate_artifact(
-        vault_root, scope=scope, category=category, sha256=digest
+        vault_root, scope=scope, category=category, sha256=digest, raw_protection=raw_protection
     )
     if duplicate is not None:
         from .writer_lease import mark_active_mutation_committed
@@ -4994,6 +4997,7 @@ def op_preserve(
             filename=filename,
             content=content,
             description=description,
+            raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
@@ -7631,6 +7635,7 @@ def op_capture_source(
     projects: list[str] | None = None,
     files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
     adoption: _OptionalArtifactAdoption = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
@@ -7658,6 +7663,7 @@ def op_capture_source(
         files: Client file handles, captured instead of `content`.
         adoption: Selects exactly one supplied handle. Establishes eligibility,
             not write consent; agent-initiated use obeys proactive_capture.
+        raw_protection: Keep the original owner-local until a whole-artifact release.
     """
     if files or adoption is not None:
         from . import client_artifacts
@@ -7675,6 +7681,7 @@ def op_capture_source(
             domain=domain,
             projects=projects,
             adoption=adoption,
+            raw_protection=raw_protection,
         )
         _note_committed_artifact_targets(captured)
         return captured
@@ -7691,6 +7698,7 @@ def op_capture_source(
         source_kind=source_kind,
         domain=domain,
         projects=projects,
+        raw_protection=raw_protection,
     )
     out: dict = {"source": source}
     if "vocabulary_resolution" in source:
@@ -7968,6 +7976,7 @@ def op_preserve_evidence(
     filename: str,
     content: str,
     description: str | None = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Preserve text as append-only proof.
 
@@ -7981,6 +7990,7 @@ def op_preserve_evidence(
         filename: Filename with extension.
         content: Exact UTF-8 text.
         description: Sidecar description.
+        raw_protection: Keep the original owner-local until a whole-artifact release.
     """
     return op_preserve(
         vault_root,
@@ -7989,6 +7999,7 @@ def op_preserve_evidence(
         filename=filename,
         content=content,
         description=description,
+        raw_protection=raw_protection,
     )
 
 
@@ -7999,6 +8010,7 @@ def op_preserve_artifacts(
     files: _ClientArtifactFiles,
     adoption: _OptionalArtifactAdoption = None,
     transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
+    raw_protection: bool = False,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -8012,6 +8024,7 @@ def op_preserve_artifacts(
         scope: Case/project key; one path segment.
         category: One path segment.
         adoption: Selected handle: eligibility, not write consent; proactive_capture applies.
+        raw_protection: Keep originals owner-local until whole-artifact release.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -8026,6 +8039,7 @@ def op_preserve_artifacts(
             files=files,
             adoption=adoption,
             transcriptions=transcriptions,
+            raw_protection=raw_protection,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -8057,9 +8071,8 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
-    # `/download` decides every path under the audience the token carries, so
-    # it carries the caller's: the secret that signs it is the owner's, the
-    # caller need not be. An unresolved caller binds the fail-closed floor.
+    # Full ingress provenance requires private signing authority. The legacy
+    # bearer can bind an audience, but cannot prove that audience arrived locally.
     who = principal_module.effective_principal()
     audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(
@@ -8069,6 +8082,8 @@ def op_transfer_artifact(
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
         audience=audience if operation == "download" else None,
+        principal=who if operation == "download" else None,
+        signing_root=os.environ.get("EXOMEM_JWT_SIGNING_KEY"),
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
@@ -11712,6 +11727,7 @@ def op_govern_memory(
     backfill_action: Literal["preview", "commit"] | None = None,
     companion_input: dict[str, object] | None = None,
     vocabulary_request_id: str | None = None,
+    raw_release: dict[str, object] | None = None,
 ) -> dict:
     """Inspect or author opt-in confidential governance policy.
 
@@ -11735,6 +11751,7 @@ def op_govern_memory(
         backfill_action: Owner-reviewed companion backfill step.
         companion_input: Version-1 artifact, companion, semantics and binding input.
         vocabulary_request_id: Pending additive request id (inspect via vocabulary-request).
+        raw_release: Version-1 whole-artifact recipient surface/issuer, purpose and included-location acknowledgment; use grant, scope=standing, path and audience.
     """
     values = {
         "session_action": session_action,
@@ -11760,6 +11777,7 @@ def op_govern_memory(
         "backfill_action": backfill_action,
         "companion_input": companion_input,
         "vocabulary_request_id": vocabulary_request_id,
+        "raw_release": raw_release,
     }
     return governance_tool_module.op_govern_memory(
         vault_root,

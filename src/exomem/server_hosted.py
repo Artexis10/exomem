@@ -6,6 +6,7 @@ import base64
 import errno
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -2141,6 +2142,7 @@ def register_hosted_routes(
         started = time.perf_counter()
         context: gateway.TrustedGatewayContext | None = None
         transfer_admission: AbstractContextManager[None] | None = None
+        stream: BinaryIO | None = None
         try:
             context = _trusted_context(request, config, private_authenticator)
             if not config.private_v1_transfer_enabled():
@@ -2174,12 +2176,14 @@ def register_hosted_routes(
             # artifact is indistinguishable from one that does not exist.
             from .governance import egress as egress_module
             from .governance import principal as principal_module
+            from .governance import raw_protection
 
+            principal = principal_module.resolve_hosted_principal(context.principal_scope)
             allowed = await run_in_threadpool(
                 egress_module.release_allows_download,
                 config.vault_root,
                 requested_path,
-                principal=principal_module.resolve_hosted_principal(context.principal_scope),
+                principal=principal,
             )
             if not allowed:
                 raise VaultPathError("NOT_FOUND", "file does not exist")
@@ -2189,17 +2193,18 @@ def register_hosted_routes(
                 requested_path,
                 max_bytes=grant.max_bytes,
             )
-        except VaultPathError as exc:
-            if transfer_admission is not None:
-                transfer_admission.__exit__(None, None, None)
-            return _error_response(
-                exc.code,
-                config=config,
-                operation="download",
-                request_id=context.request_id if context else None,
-                started=started,
-            )
-        except (gateway.HostedGatewayError, HostedLifecycleError) as exc:
+            if raw_protection.marked(requested_path):
+                snapshot = await run_in_threadpool(stream.read, size + 1)
+                stream.close()
+                if len(snapshot) != size or not await run_in_threadpool(
+                    egress_module.release_allows_download, config.vault_root,
+                    requested_path, principal=principal, snapshot=snapshot,
+                ):
+                    raise VaultPathError("NOT_FOUND", "file does not exist")
+                stream = io.BytesIO(snapshot)
+        except (VaultPathError, gateway.HostedGatewayError, HostedLifecycleError) as exc:
+            if stream is not None:
+                stream.close()
             if transfer_admission is not None:
                 transfer_admission.__exit__(None, None, None)
             return _error_response(
@@ -2210,6 +2215,8 @@ def register_hosted_routes(
                 started=started,
             )
         except Exception:  # noqa: BLE001 - private boundary redacts path/open details
+            if stream is not None:
+                stream.close()
             if transfer_admission is not None:
                 transfer_admission.__exit__(None, None, None)
             return _error_response(

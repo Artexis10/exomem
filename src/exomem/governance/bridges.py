@@ -838,7 +838,7 @@ def admit(
 
     candidates = [
         grant
-        for grant in policy.release_grants
+        for grant in policy.release_grants if grant.raw_protection is None
         if grant.path == rel_path
         and grant.ref == metadata.ref
         and grant.to_audience == audience
@@ -918,7 +918,7 @@ def resolve_approved_abstraction(
     """
     candidates = [
         grant
-        for grant in policy.release_grants
+        for grant in policy.release_grants if grant.raw_protection is None
         if grant.id == bridge_id and grant.to_audience == audience
     ]
     if not candidates:
@@ -981,6 +981,8 @@ def review_signal(
     today: dt.date,
 ) -> BridgeReviewSignal | None:
     """Derive one approval-bound review signal without writing sidecars."""
+    if grant.raw_protection is not None:
+        return None
     unavailable_hash = hashlib.sha256(b"bridge-unavailable").hexdigest()
     try:
         target, canonical = resolve_under_vault(

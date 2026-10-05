@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -347,14 +348,14 @@ def register_public_transfer_routes(
             # indistinguishable from one that never existed.
             from .governance import egress as egress_module
             from .governance import principal as principal_module
+            from .governance import raw_protection
 
+            principal = principal_module.resolve_hosted_principal(grant.principal_scope)
             allowed = await run_in_threadpool_func(
                 egress_module.release_allows_download,
                 config.vault_root,
                 requested_path,
-                principal=principal_module.resolve_hosted_principal(
-                    grant.principal_scope
-                ),
+                principal=principal,
             )
             if not allowed:
                 raise VaultPathError(code="NOT_FOUND", reason="path does not exist")
@@ -364,6 +365,17 @@ def register_public_transfer_routes(
                 requested_path,
                 max_bytes=grant.max_bytes,
             )
+            if raw_protection.marked(requested_path):
+                # Hold the exact bytes sent, not a mutable descriptor approved
+                # by pathname before streaming.
+                snapshot = await run_in_threadpool_func(stream.read, size + 1)
+                stream.close()
+                if len(snapshot) != size or not await run_in_threadpool_func(
+                    egress_module.release_allows_download, config.vault_root,
+                    requested_path, principal=principal, snapshot=snapshot,
+                ):
+                    raise VaultPathError(code="NOT_FOUND", reason="path does not exist")
+                stream = io.BytesIO(snapshot)
         except hosted_transfer.TransferSecurityUnavailable:
             _release(admission)
             return _error_response("TRANSFER_SECURITY_UNAVAILABLE", request=request, config=config)
@@ -374,6 +386,8 @@ def register_public_transfer_routes(
             _release(admission)
             return _error_response("TRANSFER_ADMISSION_CLOSED", request=request, config=config)
         except VaultPathError:
+            if stream is not None:
+                stream.close()
             _release(admission)
             return _error_response("TRANSFER_TARGET_UNAVAILABLE", request=request, config=config)
         except PublicRequestError as exc:

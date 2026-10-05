@@ -66,6 +66,28 @@ def test_withheld_preserved_source_refuses_before_storing_provenance(store):
     assert tuple(store.connection.iterdump()) == before
 
 
+def test_raw_source_cannot_enter_remote_owner_provenance_without_policy(request):
+    """Canonical collection admission must not inherit the file-mode owner shortcut."""
+    writer = request.getfixturevalue("store")
+    create(writer)
+    source = "Knowledge Base/Sources/__exomem_raw_v1__private.md"
+    page = writer.root / source
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: source\n---\nPrivate original\n")
+    before = tuple(writer.connection.iterdump())
+    remote = RequestPrincipal("owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic")
+    with request_scope(remote):
+        with pytest.raises(collections.CollectionError, match="INVALID_RECORD_SOURCE"):
+            writer.append_record(CID, item={"title": "One"}, item_key=KEY,
+                                 sources=(source,), why="capture")
+    assert tuple(writer.connection.iterdump()) == before
+    with request_scope(owner_principal(surface="library")):
+        result = writer.append_record(CID, item={"title": "One"}, item_key=KEY,
+                                      sources=(source,), why="capture")
+    assert result["outcome"] == "committed"
+    assert writer.connection.execute("SELECT source_ref FROM item_sources").fetchall() == [(source,)]
+
+
 def test_inspection_coverage_omits_withheld_observation_refs(store):
     """Observation coverage cannot disclose a restricted ancillary page."""
     from exomem import due_state
