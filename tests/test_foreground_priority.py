@@ -364,6 +364,28 @@ def test_a_bulk_pass_keeps_progressing_under_overlapping_requests() -> None:
     assert took[0] < foreground_priority.MAX_YIELD_SECONDS + 4 * units * unit_seconds
 
 
+def test_overlapping_requests_receive_only_one_bulk_grace_wait(monkeypatch) -> None:
+    """Continuous foreground traffic cannot charge the initial grace twice."""
+    clock = [0.0]
+
+    def capped_wait(predicate, *, timeout):
+        clock[0] += timeout
+        return False
+
+    monkeypatch.setattr(
+        foreground_priority, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(foreground_priority._condition, "wait_for", capped_wait)
+    monkeypatch.setattr(foreground_priority, "_in_flight", 1)
+    with foreground_priority.bulk():
+        for _ in foreground_priority.yielding_in_bulk(range(100)):
+            clock[0] += 0.01
+
+    # One second of useful work permits one second of additional waiting at
+    # the 50% share, after the single initial grace.
+    assert clock[0] <= foreground_priority.MAX_YIELD_SECONDS + 2.0
+
+
 def test_a_lone_request_mid_pass_still_holds_the_pass() -> None:
     """The floor must not cost a single request its priority: mid-pass, one
     request still holds the next unit until it ends."""
