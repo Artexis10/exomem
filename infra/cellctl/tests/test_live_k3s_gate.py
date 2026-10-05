@@ -28,6 +28,7 @@ LIVE_PATHS = {
     "infra/helm/platform/values.validation.yaml",
     "infra/helm/platform/Chart.lock",
     "infra/cellctl/src/cellctl/manifests.py",
+    "infra/ansible/roles/k3s/files/audit-policy.yaml",
     "infra/cellctl/tests/test_k3s_integration.py",
 }
 
