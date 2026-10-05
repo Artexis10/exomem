@@ -6019,6 +6019,22 @@ def release_walk_filter(
     return keep
 
 
+def _release_caller(
+    vault_root: Path, principal: RequestPrincipal | None
+) -> tuple[str, RequestPrincipal | None]:
+    """Which release question a caller is asked: `"walk"` (a bound preview,
+    or a file-mode caller other than a resolved owner), `"owner"`, or
+    `"unbound"` (a library call outside any request)."""
+    if bound_writer(vault_root) is not None:
+        return "walk", principal
+    who = principal if principal is not None else current_principal()
+    if who is None:
+        return "unbound", None
+    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+        return "owner", who
+    return "walk", who
+
+
 def restricted_release_filter(
     vault_root: Path,
     *,
@@ -6033,20 +6049,37 @@ def restricted_release_filter(
     the owner keeps the existing answer and cost. A bound preview decides its
     projections for every caller before the walk.
     """
-    if bound_writer(vault_root) is not None:
-        return release_walk_filter(vault_root, principal=principal, purpose=purpose)
-    who = principal if principal is not None else current_principal()
-    if who is None:
+    branch, who = _release_caller(vault_root, principal)
+    if branch == "unbound":
         # A library call outside any request: no surface bound a caller, so
         # there is no audience to decide for and the leaf answers as it always
         # did. Every surface binds a principal before the dispatcher, whose
         # entry filter still decides for the unbound floor.
         return None
-    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+    if branch == "owner":
         if raw_protection.owner_local(who):
             return None
         return lambda path: raw_protection.permits(vault_root, path, who)
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+def restricted_audience(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """True when the caller's audience, not RAW, restricts what it may see.
+
+    Retrieval diagnostics (explain, the graph lane) and vault generation
+    counters follow this: an owner-audience caller without owner-local
+    provenance keeps them. Every ref, path and content it receives still
+    passes `restricted_release_filter`, which applies RAW admission.
+    """
+    branch, who = _release_caller(vault_root, principal)
+    return branch == "walk" and (
+        release_walk_filter(vault_root, principal=who, purpose=purpose) is not None
+    )
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;

@@ -2338,6 +2338,40 @@ def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
     assert "graph_hop" in _text(owner), owner
 
 
+def test_a_remote_owners_graph_recall_never_names_a_marked_original(tmp_path: Path) -> None:
+    """RAW: an owner reached without owner-local provenance keeps the graph lane
+    and explain, yet no hop, enrichment node, edge or explanation it receives
+    names a preserved original, even with no policy."""
+    import shutil
+
+    marked = "__exomem_raw_v1__beta-topic"
+    files = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="Beta Topic"), type="insight"),
+        f"{NOTES}/{marked}.md": _page(
+            "Hidden Draft", "Beta rollout background.", type="insight", title="Beta Topic"
+        ),
+    }
+    vault = _materialize(tmp_path / "vault", files, "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    calls = {
+        **{label: _RECALL_GRAPH_SURFACES[label] for label in ("ask-enrich-full", "ask-deep")},
+        "ask-explain": ("ask_memory", {"query": "Alpha", "explain": True, "graph_enrich": True}),
+    }
+
+    local = {label: _call(vault, None, command, **kw) for label, (command, kw) in calls.items()}
+    remote = {
+        label: _call(vault, owner_principal(surface="rest"), command, **kw)
+        for label, (command, kw) in calls.items()
+    }
+
+    assert marked in _text(local["ask-enrich-full"])
+    for label in calls:
+        assert "__error__" not in remote[label], remote[label]
+        assert marked not in _text(remote[label]) and "Hidden Draft" not in _text(remote[label])
+    assert remote["ask-explain"]["retrieval_profile"]["lanes"]["graph"]["status"] == "participated"
+
+
 def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:
     base = {
         **_filler(),

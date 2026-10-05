@@ -1008,11 +1008,16 @@ def assemble_pack(
 def _graph_enrichment(vault_root: Path, packed_pages: list[ParsedPage]) -> dict:
     if not packed_pages:
         return {"available": False, "reason": "no packed pages", "nodes": [], "edges": []}
+    from .governance import egress
+
+    # The neighbourhood's own release decision: a page the caller may not see
+    # is never a node, an edge endpoint or a hop (`graph_context`'s `keep`).
+    visible = egress.visible_page_filter(vault_root)
     nodes: dict[str, dict] = {}
     edges: dict[str, dict] = {}
     unavailable: list[str] = []
     for page in packed_pages:
-        ctx = epistemic_graph.graph_context(vault_root, path=page.rel_path, depth=1)
+        ctx = epistemic_graph.graph_context(vault_root, path=page.rel_path, depth=1, keep=visible)
         if not ctx.get("available"):
             unavailable.append(str(ctx.get("reason") or "graph unavailable"))
             continue

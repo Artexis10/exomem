@@ -2662,10 +2662,12 @@ def op_find(
     # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
     # graph in-degree and the keyword-fallback marker are computed over the
     # whole corpus before any page is decided, so each moves with pages the
-    # caller may not see. The hits themselves are unchanged.
+    # caller may not see. The hits themselves are unchanged. An owner-audience
+    # caller without owner-local provenance keeps them: under RAW it may infer
+    # that a protected capture exists, never what it holds.
     restricted = (
         projection_runtime is None
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+        and egress_module.restricted_audience(vault_root, purpose=purpose)
     )
     if restricted:
         explain = False
@@ -6483,7 +6485,7 @@ def _withhold_vault_generation(vault_root: Path, packet: Any, *, purpose: str | 
     if (
         isinstance(generation, dict)
         and any(name in generation for name in _VAULT_GENERATION_FIELDS)
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+        and egress_module.restricted_audience(vault_root, purpose=purpose)
     ):
         packet["generation"] = {
             key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
