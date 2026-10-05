@@ -233,6 +233,16 @@ def test_two_corrections_preserve_history_and_old_replay_keeps_latest_value(
     history = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
     assert history.count('"operation":"append"') == 1
     assert history.count('"operation":"update"') == 2
+    manifest = collections.load_manifest(vault, COLLECTION)
+    (row,) = record_formats.load_adapter(vault, manifest).read().records
+    kept = commands.op_record_memory(
+        vault, action="history", collection=COLLECTION, item_key=row.identity.key
+    )
+    # Each kept prior payload names the curation run that corrected it.
+    assert [revision["prior"]["values"]["temperature_c"] for revision in kept["revisions"]] == [
+        14, READING["temperature_c"]
+    ]
+    assert all(revision["binding"]["curation_run"] for revision in kept["revisions"])
 
 
 def _plan(kind: str, args: dict) -> dict:

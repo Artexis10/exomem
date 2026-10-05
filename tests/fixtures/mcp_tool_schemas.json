@@ -2205,7 +2205,8 @@
             "update",
             "triage",
             "revise",
-            "rebaseline"
+            "rebaseline",
+            "history"
           ],
           "type": "string"
         },
@@ -2729,7 +2730,8 @@
             "update",
             "revise",
             "rebaseline",
-            "discard"
+            "discard",
+            "history"
           ],
           "type": "string"
         },

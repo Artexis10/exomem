@@ -1172,6 +1172,7 @@ def bulk_upsert_records(
     still reports every row's would-be outcome; `skip` commits the accepted rows.
     """
     root = Path(vault_root)
+    from . import record_history
     from .collection_store.preview import selected_writer
 
     writer = selected_writer(root, collection)
@@ -1453,6 +1454,7 @@ def bulk_upsert_records(
         new_item_guards: dict[int, vault.DirectoryCensusGuard] = {}
         audit_bodies: list[str] = []
         origin_inputs: list[Any] = []
+        history_writes: list[vault.PlannedWrite] = []
         by_index = {row["index"]: row for row in outcomes}
 
         def _shift(pos: int, *, is_end: bool) -> int:
@@ -1532,6 +1534,7 @@ def bulk_upsert_records(
             else:
                 assert record is not None
                 canonical = record.source.path
+                after_body = record.body
                 if is_log:
                     replacement = record_formats.render_markdown_log_item(
                         manifest, plan.values, plan.key, _newline(source_bytes), transition
@@ -1593,6 +1596,7 @@ def bulk_upsert_records(
                         )
                         origin_inputs.append(prepared)
                     replacement = render_update(update_body)
+                    after_body = record.body if update_body is None else update_body
                     item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
                     item_writes.append(
                         vault.PlannedWrite(root / canonical, replacement, guard=item_guard)
@@ -1605,6 +1609,23 @@ def bulk_upsert_records(
                 operation = "update"
                 before_item_hash = record.source.hash
                 payload_hash = None
+                kept = record_history.plan_entry(
+                    root,
+                    manifest,
+                    item_key=plan.key,
+                    canonical_path=canonical,
+                    prior_values=record.values,
+                    prior_body=record.body,
+                    after_values=plan.values,
+                    after_body=after_body,
+                    operation=operation,
+                    why=plan.rationale,
+                    transition_id=transition,
+                    before_item_hash=record.source.hash,
+                    after_item_hash=item_hash,
+                )
+                if kept is not None:
+                    history_writes.append(kept)
             audit_bodies.append(
                 _audit_body(
                     transition_id=transition,
@@ -1657,6 +1678,8 @@ def bulk_upsert_records(
             snapshot,
             planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
         )
+        # Kept history is owner-internal, released only through its row.
+        writes.extend(history_writes)
         _publish_with_origin(
             root,
             writes,
@@ -1696,8 +1719,14 @@ def update_record(
     ]
     | None = None,
     _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _history_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Apply a guarded, exact-key update to one existing Markdown record."""
+    """Apply a guarded, exact-key update to one existing Markdown record.
+
+    A correction that changes the row's payload keeps the payload it replaced,
+    its `why` and `_history_binding` (the curation run an episode correction
+    came from) in the same atomic batch; see `record_history`.
+    """
     root = Path(vault_root)
     _validate_why(why)
     hold = _validate_hold(hold)
@@ -1938,12 +1967,32 @@ def update_record(
                     "before_item_hash": record.source.hash,
                 }
             )
+        from . import record_history
+
+        # Kept history is owner-internal, released only through its row.
+        kept = record_history.plan_entry(
+            root,
+            manifest,
+            item_key=item_key,
+            canonical_path=record.source.path,
+            prior_values=record.values,
+            prior_body=record.body,
+            after_values=values,
+            after_body=record.body if body is None else body,
+            operation=operation,
+            why=why,
+            transition_id=audit_correlation,
+            before_item_hash=record.source.hash,
+            after_item_hash=after_item_hash,
+            binding=_history_binding,
+        )
         _publish_with_origin(
             root,
             [
                 vault.PlannedWrite(canonical_path, after_text, guard=source_guard),
                 vault.PlannedWrite(root / manifest.path, after_manifest_text, guard=manifest_guard),
                 *log_plan.writes,
+                *((kept,) if kept is not None else ()),
             ],
             required_guards=(
                 *directory_guards,

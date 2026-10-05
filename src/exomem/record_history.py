@@ -12,12 +12,14 @@ keeps the payload it replaced, in the SAME atomic batch as the correction:
 
 An entry is one create-only JSON file per correction, named like
 `registry_history` versions and kept under
-`<Knowledge Base>/_Governance/record-history/<collection_id>/<item_key>/`.
-That tree is reserved: no read surface serves its files, so the only way to a
-kept payload is `read`, which first releases the row itself exactly as a
-query would. History is withheld exactly when the row is, and a withheld row
-answers like a missing one. The export registry keeps the tree as canonical
-content, so supported export and restore carry it.
+`<Knowledge Base>/_Collections/history/<collection_id>/<item_key>/`, inside the
+collection store's own reserved tree. No read surface serves a reserved file,
+so the only way to a kept payload is `read`, which first releases the row
+itself exactly as a query would. History is withheld exactly when the row is,
+and a withheld row answers like a missing one. Export keeps the history subtree
+as canonical content, beside the store's mode marker and replica, so supported
+export and restore carry it. (Not `_Governance`: that tree is the governance
+authoring workspace and administration state no Records writer may reach.)
 
 This module is the logical interface. Store-mode collections keep row content
 in `item_versions`; that backing replaces the file entries without changing
@@ -73,7 +75,12 @@ def history_dir(collection_id: str, item_key: str) -> str:
             raise collections.CollectionError(
                 "RECORD_HISTORY_UNAVAILABLE", "row identity cannot name a history location"
             )
-    return f"{kb_dirname()}/_Governance/record-history/{collection_id}/{item_key}"
+    return f"{history_root()}/{collection_id}/{item_key}"
+
+
+def history_root() -> str:
+    """The vault-relative tree every row's kept corrections live under."""
+    return f"{kb_dirname()}/_Collections/history"
 
 
 def plan_entry(

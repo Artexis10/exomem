@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from test_episode_records_leaf import COLLECTION, READING, _collection, _container, _entries
 
-from exomem import commands, record_history, registry_history
+from exomem import commands, record_history, registry_history, writer_lease
 from exomem import hosted_portability as portability
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.vault import parse_frontmatter
@@ -182,13 +182,17 @@ def test_history_is_withheld_exactly_when_its_row_is(vault: Path) -> None:
         assert _temperatures(_history(vault, visible)) == [41]
         missing = _refusal(lambda: _history(vault, "0" * 32))
         assert _refusal(lambda: _history(vault, hidden)) == missing
-        absent = "Knowledge Base/_Governance/record-history/absent.json"
-        for read in (commands.op_read_memory, commands.op_query_dataset):
-            assert _refusal(lambda read=read: read(vault, path=kept_relative)) == _refusal(
-                lambda read=read: read(vault, path=absent)
-            )
+        # The public dispatcher every surface shares serves no kept file directly.
+        absent = record_history.history_root() + "/absent.json"
+        for name in ("read_memory", "query_dataset"):
+            command = next(c for c in commands.PRODUCT_COMMANDS if c.name == name)
+            assert _refusal(
+                lambda command=command: writer_lease.invoke_command(command, vault, path=kept_relative)
+            ) == _refusal(lambda command=command: writer_lease.invoke_command(command, vault, path=absent))
 
 
+# Two hundred guarded corrections dominate this case; the bound it pins is the read.
+@pytest.mark.timeout(300)
 def test_a_deep_history_reads_one_bounded_page_and_reports_truncation(
     vault: Path, owner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
