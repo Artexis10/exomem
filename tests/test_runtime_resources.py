@@ -467,6 +467,7 @@ def test_cold_product_getters_reserve_sync_status_capacity(
     from exomem import embedding_backend, embeddings
 
     monkeypatch.setattr(embeddings, "_MODEL", None)
+    monkeypatch.setattr(embedding_backend, "ensure_served_artifact", lambda _name: None)
     monkeypatch.setattr(runtime_resources, "_gate", None)
     monkeypatch.setattr(runtime_resources, "_gate_capacity", None)
     started = threading.Event()
@@ -489,7 +490,7 @@ def test_cold_product_getters_reserve_sync_status_capacity(
                 for _ in range(4)
             ]
             try:
-                assert await anyio.to_thread.run_sync(started.wait)
+                assert await anyio.to_thread.run_sync(lambda: started.wait(timeout=2))
                 # `started` proves only that ONE caller is inside the loader.
                 # The refusal below is about a FULL gate, so wait for all four
                 # admissions: a caller whose worker thread starts late would
