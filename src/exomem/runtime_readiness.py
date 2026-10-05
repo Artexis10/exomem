@@ -450,6 +450,28 @@ def build_runtime_readiness(
     return payload
 
 
+_TAIL_BLOCK_BYTES = 8192
+
+
+def _last_line(path: Path) -> str:
+    """The file's last line, read from the end so a probe costs one block, not
+    the whole (up to rotation-size) journal. A single trailing newline ends the
+    last line rather than starting an empty one."""
+    with path.open("rb") as handle:
+        position = handle.seek(0, os.SEEK_END)
+        tail = b""
+        while position > 0:
+            step = min(_TAIL_BLOCK_BYTES, position)
+            position -= step
+            handle.seek(position)
+            tail = handle.read(step) + tail
+            if b"\n" in tail[:-1]:
+                break
+    if tail.endswith(b"\n"):
+        tail = tail[:-1]
+    return tail.rsplit(b"\n", 1)[-1].decode("utf-8")
+
+
 def _measure_observability() -> dict[str, Any]:
     """Measure log-dir writability, metrics-snapshot freshness, and journal
     health, without ever raising into readiness."""
@@ -485,10 +507,10 @@ def _measure_observability() -> dict[str, Any]:
         if not path.exists():
             journal_ok = True
         else:
-            last_line = path.read_text(encoding="utf-8").splitlines()[-1:] or [""]
             import json as _json
 
-            _json.loads(last_line[0]) if last_line[0].strip() else None
+            last_line = _last_line(path)
+            _json.loads(last_line) if last_line.strip() else None
             journal_ok = True
     except Exception:  # noqa: BLE001 - readiness must stay structured
         journal_ok = False

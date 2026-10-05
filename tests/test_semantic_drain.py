@@ -281,3 +281,87 @@ def test_scan_revisits_skipped_bulk_despite_refusals_and_continuous_arrivals(vau
         assert not deferred_index.snapshot(vault, paths={bulk_rel})
     finally:
         owner.stop(timeout=5)
+
+
+def _loop_sleeps(owner, turns: int) -> list[float]:
+    """How long the real `_run` loop sleeps after each of its first `turns` turns."""
+    sleeps: list[float] = []
+
+    class Wake:
+        def wait(self, timeout=None):
+            sleeps.append(timeout)
+            if len(sleeps) > turns:
+                owner._stop.set()
+
+        def clear(self):
+            pass
+
+        def set(self):
+            pass
+
+    owner._wake = Wake()
+    owner._run()
+    return sleeps[1:]  # the first wait is the startup sleep, before any turn
+
+
+def _queue_refused(vault: Path, count: int, *, policy: str = "policy") -> None:
+    from exomem import semantic_drain
+
+    for number in range(count):
+        rel = f"Knowledge Base/refused-{number:03d}.md"
+        (vault / rel).write_text("# Input\n\nA fact.\n", encoding="utf-8")
+        [receipt] = deferred_index.add_receipts(vault, [rel])
+        deferred_index.retry_semantic(
+            vault, receipt, failure_code="resource_budget_exceeded",
+            input_signature=semantic_drain._input_signature(vault / rel), policy=policy,
+        )
+
+
+def test_input_gated_refusal_does_not_drive_the_one_second_cadence(vault: Path, monkeypatch) -> None:
+    """A parent refused for budget waits for changed input; rescanning it every second is idle CPU."""
+    from exomem import semantic_drain
+
+    monkeypatch.setattr(semantic_drain, "preparation_policy", lambda _root: "policy")
+    _queue_refused(vault, 1)
+    assert _loop_sleeps(semantic_drain.SemanticDrain(vault), turns=2) == [semantic_drain.IDLE_POLL_SECONDS] * 2
+
+
+def test_refused_backlog_spanning_pages_polls_fast_until_the_sweep_finishes(vault: Path, monkeypatch) -> None:
+    """A scan cut short has unseen rows, so it keeps the fast cadence; a finished one settles."""
+    from exomem import semantic_drain
+
+    monkeypatch.setattr(semantic_drain, "preparation_policy", lambda _root: "policy")
+    _queue_refused(vault, semantic_drain.SCAN_LIMIT + 6)
+    assert _loop_sleeps(semantic_drain.SemanticDrain(vault), turns=2) == [
+        semantic_drain.RETRY_POLL_SECONDS, semantic_drain.IDLE_POLL_SECONDS,
+    ]
+
+
+def test_time_gated_retry_wakes_the_loop_when_it_falls_due(vault: Path, monkeypatch) -> None:
+    """Dropping the cadence must not park a due retry behind a full idle poll."""
+    import time
+
+    from exomem import semantic_drain
+
+    monkeypatch.setattr(semantic_drain, "preparation_policy", lambda _root: "policy")
+    rel = "Knowledge Base/retry.md"
+    (vault / rel).write_text("# Input\n\nA fact.\n", encoding="utf-8")
+    [receipt] = deferred_index.add_receipts(vault, [rel])
+    deferred_index.retry_semantic(vault, receipt, failure_code="embedding_failed", now=time.time() + 4.0)
+    [sleep] = _loop_sleeps(semantic_drain.SemanticDrain(vault), turns=1)
+    assert 3.0 < sleep <= 5.0
+
+
+def test_runnable_receipt_held_back_by_the_occupied_bulk_slot_keeps_polling(vault: Path, monkeypatch) -> None:
+    """Debt that can run as soon as the slot frees must not wait out the idle poll."""
+    from exomem import semantic_drain
+
+    monkeypatch.setattr(semantic_drain, "preparation_policy", lambda _root: "policy")
+    monkeypatch.setattr(semantic_drain, "_small_parent", lambda *_a: False)
+    rel = "Knowledge Base/bulk.md"
+    (vault / rel).write_text("# Bulk\n\nA fact.\n", encoding="utf-8")
+    deferred_index.add_receipts(vault, [rel])
+    owner = semantic_drain.SemanticDrain(vault)
+    owner._bulk_path = "Knowledge Base/other.md"
+    assert _loop_sleeps(owner, turns=1) == [semantic_drain.RETRY_POLL_SECONDS]
+

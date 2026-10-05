@@ -22,6 +22,7 @@ TURN_LIMIT = 8
 TURN_OVERHEAD_SECONDS = 1.0
 IDLE_POLL_SECONDS = 30.0
 RETRY_POLL_SECONDS = 1.0
+MIN_WAKE_SECONDS = 0.05
 PROOF_LIMIT = 64
 _LOCK = threading.Lock()
 _ACTIVE: dict[str, SemanticDrain] = {}
@@ -149,6 +150,8 @@ class SemanticDrain:
         self._hints: set[str] = set()
         self._scan_after = 0
         self._scan_through: int | None = None
+        # Earliest time-gated retry seen in the current sweep (epoch seconds).
+        self._sweep_retry_at: float | None = None
         self._proofs: OrderedDict[str, Any] = OrderedDict()
 
     def start(self) -> SemanticDrain:
@@ -198,15 +201,22 @@ class SemanticDrain:
             if self._stop.is_set():
                 break
             try:
-                progressed, has_debt = self._turn()
+                progressed, interval = self._turn()
                 if progressed:
                     process_memory.trim_allocator()
-                interval = 0.05 if progressed else RETRY_POLL_SECONDS if has_debt else IDLE_POLL_SECONDS
             except Exception:  # noqa: BLE001 - debt is durable, no source in diagnostics
                 log.warning("service semantic recovery turn failed")
                 interval = RETRY_POLL_SECONDS
 
-    def _turn(self) -> tuple[bool, bool]:
+    def _turn(self) -> tuple[bool, float]:
+        """Run one bounded turn; return (progressed, seconds until the next one).
+
+        The 1 s cadence is only for debt that can run now. A time-gated retry
+        wakes the loop at its ``next_attempt_at``; a parent refused for
+        ``resource_budget_exceeded`` waits for changed input or policy and
+        sets no cadence, because the writer hints (``signal``/``_wake``) and
+        the idle poll deliver that change.
+        """
         with self._lock:
             hints = self._hints
             self._hints = set()
@@ -218,6 +228,7 @@ class SemanticDrain:
         )
         if not page:
             self._scan_after = 0
+            self._sweep_retry_at = None
             self._scan_through = deferred_index.semantic_scan_ceiling(self.root)
             page = deferred_index.snapshot(
                 self.root, after_rowid=0, through_rowid=self._scan_through, limit=SCAN_LIMIT,
@@ -226,6 +237,7 @@ class SemanticDrain:
         attempted = 0
         overhead = 0.0
         progressed = False
+        runnable_pending = False
         policy = preparation_policy(self.root)
         def candidates():
             # Reserve one execution for the finite sweep before hints. The
@@ -243,6 +255,7 @@ class SemanticDrain:
 
         for receipt, scanned in candidates():
             if self._stop.is_set() or attempted >= TURN_LIMIT or overhead >= TURN_OVERHEAD_SECONDS:
+                runnable_pending = True
                 break
             if scanned:
                 self._scan_after = receipt.scan_rowid
@@ -254,10 +267,17 @@ class SemanticDrain:
             signature = _input_signature(path)
             with self._lock:
                 inflight = self._bulk_path == receipt.rel_path
-            if inflight or not deferred_index.semantic_receipt_eligible(
+            if inflight:
+                overhead += time.monotonic() - began
+                continue  # the bulk thread wakes the loop when it finishes
+            if not deferred_index.semantic_receipt_eligible(
                 receipt, input_signature=signature, policy=policy, now=time.time()
             ):
                 overhead += time.monotonic() - began
+                if receipt.failure_code != "resource_budget_exceeded":
+                    retry_at = receipt.next_attempt_at
+                    if self._sweep_retry_at is None or retry_at < self._sweep_retry_at:
+                        self._sweep_retry_at = retry_at
                 continue
             small = _small_parent(self.root, path)
             overhead += time.monotonic() - began
@@ -274,6 +294,7 @@ class SemanticDrain:
             else:
                 with self._lock:
                     if self._bulk_path is not None:
+                        runnable_pending = True
                         continue
                     attempted += 1
                     self._bulk_path = receipt.rel_path
@@ -288,7 +309,18 @@ class SemanticDrain:
         # this volatile hint, own execution across crashes and hint overflow.
         with self._lock:
             self._hints.update(sorted(hints - seen)[:max(0, SCAN_LIMIT - len(self._hints))])
-        return progressed, bool(hinted or page)
+        if progressed:
+            return True, MIN_WAKE_SECONDS
+        if len(page) < SCAN_LIMIT and not runnable_pending:
+            # The sweep finished: only rows past its frozen tail (arrivals no
+            # hint announced) are runnable debt for the next one.
+            runnable_pending = deferred_index.semantic_scan_ceiling(self.root) > self._scan_through
+        else:
+            runnable_pending = True
+        wait = RETRY_POLL_SECONDS if runnable_pending else IDLE_POLL_SECONDS
+        if self._sweep_retry_at is not None:
+            wait = min(wait, max(MIN_WAKE_SECONDS, self._sweep_retry_at - time.time()))
+        return False, wait
 
     def _bulk(self, receipt, signature: str, policy: str) -> None:
         try:
