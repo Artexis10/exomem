@@ -34,6 +34,15 @@ Add one entry to the foundation variables, then plan, apply, regenerate the
 inventory and converge every node. Never pass `--limit`: every existing node
 must admit the new one, and the join checks that it does.
 
+A new agent has no public SSH, and `site.yml` refuses a host without NetBird
+when no administrator CIDR is set. Open a temporary CIDR window (see
+[Administration access](deploy.md#administration-access)). Enroll the agent
+with substrate-infra's `ansible/administration.yml`, with the agent in its
+`administration_servers` group and a one-use setup key injected as
+`SUBSTRATE_NETBIRD_SETUP_KEY`. Add its NetBird IP to the private address map
+and verify a fresh managed SSH connection over NetBird. Only then revert the
+CIDR in Terraform and Ansible.
+
 ```bash
 # terraform.tfvars (foundation)
 #   k3s_agent_nodes = {
@@ -46,7 +55,8 @@ infra/scripts/apply_saved_plan.sh foundation /run/user/$UID/foundation-agents.tf
 terraform -chdir=infra/terraform/foundation output -json > /run/user/$UID/foundation.json
 chmod 0600 /run/user/$UID/foundation.json
 infra/scripts/generate_ansible_inventory.py /run/user/$UID/foundation.json \
-  infra/ansible/inventory.yml --user exomem-admin
+  infra/ansible/inventory.yml --user exomem-admin \
+  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}"
 infra/scripts/ansible_with_sops.sh \
   --inventory infra/ansible/inventory.yml \
   --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \

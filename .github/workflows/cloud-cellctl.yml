@@ -6,6 +6,7 @@ on:
       - "infra/cellctl/**"
       - "infra/helm/platform/**"
       - "infra/tool-versions.env"
+      - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - ".github/workflows/cloud-cellctl.yml"
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - "infra/cellctl/**"
       - "infra/helm/platform/**"
       - "infra/tool-versions.env"
+      - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - ".github/workflows/cloud-cellctl.yml"
   # A manual run also replays the live K3s suite (live-k3s below).
   workflow_dispatch:
@@ -126,11 +128,12 @@ jobs:
           # Every file whose change can alter what the live suite proves:
           # all platform templates (including cellctl's scope policy), the
           # values schema and validation values, the vendored subcharts, the
-          # cell manifest renderer, and the live suite itself. values.yaml
+          # cell manifest renderer, the node audit policy it mounts, and the
+          # live suite itself. values.yaml
           # is left out because release bumps touch it; chart tests pin the
           # invariants it carries. Git quotes a path with special or
           # non-ASCII characters, hence the optional leading quote.
-          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/tests/test_k3s_integration\.py$)'
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$)'
         run: |
           case "$EVENT" in
             workflow_dispatch) run=true ;;

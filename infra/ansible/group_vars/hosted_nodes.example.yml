@@ -1,6 +1,7 @@
 ---
-base_admin_ssh_cidrs:
-  - 192.0.2.1/32
+# Administration arrives over the company NetBird (wt0). List a CIDR only for
+# a temporary break-glass run; the next run without it retires the rule.
+base_admin_ssh_cidrs: []
 base_administrator_authorized_keys:
   - ssh-ed25519 replace-with-operator-public-key
 

@@ -13,5 +13,6 @@
 ## 3. Verification
 
 - [x] 3.1 Run focused audit and connectivity-lane tests.
-- [ ] 3.2 Run the full pytest suite and `ruff check . --select F` on Linux.
+- [x] 3.2 Run the full pytest suite and `ruff check . --select F` on Linux.
+  Delivered in PR #428 (merged as 7d470659e): the required PR CI ran the complete Linux suite on py3.11 and py3.13 and the `lint + targeted types` job (`ruff check . --select F`), all green.
 - [x] 3.3 Validate the OpenSpec change in strict mode.

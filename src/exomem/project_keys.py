@@ -56,6 +56,9 @@ class ProjectRegistry:
 
     project_to_folder: dict[str, str]
     project_to_category: dict[str, str]
+    # Keys whose registry entry declares `tenant_scoped: true`: the only
+    # projects whose pages may carry a `tenant:` field.
+    tenant_scoped: frozenset[str] = frozenset()
 
     @property
     def keys(self) -> tuple[str, ...]:
@@ -160,12 +163,15 @@ def _registry_from_data(data: object) -> ProjectRegistry | None:
 
     project_to_folder: dict[str, str] = {}
     project_to_category: dict[str, str] = {}
+    tenant_scoped: set[str] = set()
     for key, entry in projects.items():
         if not isinstance(key, str):
             continue
         if isinstance(entry, dict):
             folder = entry.get("folder") or _title_case_slug(key)
             category = entry.get("category") or "uncategorized"
+            if entry.get("tenant_scoped") is True:
+                tenant_scoped.add(key)
         elif isinstance(entry, str):
             # Tolerate short form `key: FolderName`.
             folder = entry
@@ -179,6 +185,7 @@ def _registry_from_data(data: object) -> ProjectRegistry | None:
     return ProjectRegistry(
         project_to_folder=project_to_folder,
         project_to_category=project_to_category,
+        tenant_scoped=frozenset(tenant_scoped),
     )
 
 

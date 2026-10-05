@@ -96,5 +96,6 @@
 - [ ] 5.1 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
       plugin tree, hosted render, harness modules pin); `openspec validate --all
       --strict`; privacy gate; full sharded corpus at the delivery boundary.
+      Prepared on origin/main 0a9d4517b, left unticked until the delivery CI shows the rest: `scripts/dump-tool-schemas.py` regenerates `tests/fixtures/mcp_tool_schemas.json` and `src/exomem/tool_surface_contract.json` with no diff (fingerprint 441ccfe8), and `generate-capabilities.py --check`, `generate_harness_modules.py --check`, `hosted-plugin.py check --platform claude` and `cloud-plugin.py check` are current; strict validation is green. The plugin skill tree, the privacy gate and the full sharded corpus remain for the delivery run.
 - [ ] 5.2 Independent review of the diff.
 - [ ] 5.3 Archive with `openspec archive` in the same delivery, after confirming 1.3.

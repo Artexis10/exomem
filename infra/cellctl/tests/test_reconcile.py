@@ -66,6 +66,15 @@ class FakeClusterGateway:
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
         return self.observations.get(cell_id, ClusterObservation())
 
+    def observe_cells(self, cells: dict[str, str]) -> dict[str, ClusterObservation | Exception]:
+        results: dict[str, ClusterObservation | Exception] = {}
+        for cell_id, namespace in cells.items():
+            try:
+                results[cell_id] = self.observe(cell_id, namespace)
+            except Exception as error:  # noqa: BLE001 - the per-cell error ClusterClient returns
+                results[cell_id] = error
+        return results
+
     def apply_all(self, manifests: list[dict]) -> None:
         for manifest in manifests:
             key = (manifest["metadata"].get("namespace", ""), manifest["kind"], manifest["metadata"]["name"])
@@ -764,8 +773,8 @@ async def test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row(
     exactly the "generation-1 row with no observed state" case. This proves
     reconcile.run_loop's LISTEN (not just its poll) is what picks up a cell
     created after the loop is already running: the row must converge to
-    "provisioning" well inside POLL_INTERVAL_SECONDS (5s), not only after
-    the poll timeout would eventually retry anyway.
+    "provisioning" well inside the poll interval, not only after the poll
+    timeout would eventually retry anyway.
     """
 
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
@@ -808,7 +817,7 @@ async def test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row(
 
         connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
         try:
-            deadline = time.monotonic() + 2.0  # well inside the 5s poll interval
+            deadline = time.monotonic() + 2.0  # well inside the poll interval
             observed = None
             while time.monotonic() < deadline:
                 rows = await db.select_all_rows(connection)
@@ -1081,6 +1090,11 @@ async def test_an_init_deadline_failure_is_observed_every_pass_but_never_re_appl
         assert cluster.applied == {}
         row = (await db.select_all_rows(connection))[0]
         assert (row.observed_state, row.last_error_code) == ("failed", "INIT_DEADLINE_EXCEEDED")
+        # A settled failure is observed at the idle cadence: one broken
+        # tenant must not hold the whole fleet's loop at the fast one.
+        assert await reconcile.reconcile_once(
+            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        ) is False
 
         cluster.observations[cell_id] = _served(pod_exists=True, pod_init_completed=True, statefulset_row_generation=1)
         await reconcile.reconcile_once(
@@ -1225,7 +1239,7 @@ async def test_a_notification_during_a_pass_triggers_the_next_pass(cell_db: Cell
         )
     )
     try:
-        deadline = time.monotonic() + 2.0  # well inside the 5 s poll interval
+        deadline = time.monotonic() + 2.0  # well inside the poll interval
         while time.monotonic() < deadline and len(passes) < 2:
             await asyncio.sleep(0.05)
         assert len(passes) >= 2, "a notification received during a pass was dropped"
@@ -2224,7 +2238,9 @@ async def test_a_deleting_row_asks_hetzner_at_most_once_a_minute(cell_db: CellDa
         await connection.close()
 
 
-async def test_observed_at_is_written_on_every_observation_including_a_converged_row(cell_db: CellDatabase) -> None:
+async def test_a_converged_rows_unchanged_observation_writes_nothing(cell_db: CellDatabase, monkeypatch) -> None:
+    # D4 amendment: observed_at moves only with an observed change. A write
+    # per cell per pass is the idle cost that grows with the fleet.
     cell_id = "aaaaaaaaaaaaaaaa"
     await _seed_cell(cell_db, cell_id, "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
@@ -2236,9 +2252,43 @@ async def test_observed_at_is_written_on_every_observation_including_a_converged
         await _converge(connection, cluster, cell_id, now)
         row = (await db.select_all_rows(connection))[0]
         assert row.is_dirty() is False
-        later = now + timedelta(minutes=3)
-        await _pass(connection, cluster, later)
-        assert (await db.select_all_rows(connection))[0].observed_at == later
+        writes: list[dict[str, object]] = []
+
+        async def recording_write(_connection, _cell_id, updates):
+            writes.append(dict(updates))
+
+        monkeypatch.setattr(db, "write_observed", recording_write)
+        await _pass(connection, cluster, now + timedelta(minutes=3))
+        assert writes == []
+    finally:
+        await connection.close()
+
+
+async def test_a_settled_rows_observed_at_is_refreshed_once_it_is_five_minutes_old(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    # Operators read observed_at as "last observed": a healthy cell must not
+    # show "observed days ago", and the refresh must not make the pass fast.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge(connection, cluster, cell_id, now)
+        writes: list[dict[str, object]] = []
+        real_write = db.write_observed
+
+        async def recording_write(connection, row_cell_id, updates):
+            writes.append(dict(updates))
+            await real_write(connection, row_cell_id, updates)
+
+        monkeypatch.setattr(db, "write_observed", recording_write)
+        later = now + timedelta(minutes=5, seconds=1)
+        fast = await reconcile.reconcile_once(
+            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=later
+        )
+        assert (writes, fast) == ([{"observed_at": later}], False)
     finally:
         await connection.close()
 
@@ -2690,6 +2740,86 @@ async def test_the_pass_is_skipped_without_the_isolation_policy_too(cell_db: Cel
         await connection.close()
 
 
+# --- D4 amendment: idle cadence, fast while anything is in transition -----------
+
+
+async def test_only_a_settled_fleet_drops_to_the_idle_cadence(cell_db: CellDatabase) -> None:
+    # reconcile_once says whether the next pass must come at the fast
+    # cadence. A pod that turns NotReady is followed at the fast cadence
+    # until it is Ready again; a converged fleet goes idle.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+
+    async def fast(at: datetime) -> bool:
+        return await reconcile.reconcile_once(
+            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=at
+        )
+
+    try:
+        assert await fast(now) is True  # a new cell is provisioning
+        await _converge(connection, cluster, cell_id, now)
+        assert await fast(now + timedelta(seconds=30)) is False
+
+        served = cluster.observations[cell_id]
+        cluster.observations[cell_id] = dataclasses.replace(served, pod_ready=False, ready_pod_image=None)
+        assert await fast(now + timedelta(seconds=60)) is True  # the flip itself
+        assert await fast(now + timedelta(seconds=65)) is True  # still not Ready
+        cluster.observations[cell_id] = served
+        assert await fast(now + timedelta(seconds=70)) is True  # back to Ready
+        assert await fast(now + timedelta(seconds=75)) is False
+    finally:
+        await connection.close()
+
+
+async def test_an_idle_loop_waits_the_idle_interval_until_a_notification_wakes_it(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    # The idle cadence is only safe because a desired-state change still
+    # wakes the loop at once; once woken into a transition it polls fast.
+    monkeypatch.setattr(reconcile, "FAST_POLL_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(reconcile, "IDLE_POLL_INTERVAL_SECONDS", 3600.0)
+    real_pass = reconcile.reconcile_once
+    passes: list[float] = []
+
+    async def counted(*args, **kwargs):
+        passes.append(time.monotonic())
+        return await real_pass(*args, **kwargs)
+
+    monkeypatch.setattr(reconcile, "reconcile_once", counted)
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    await owner.execute(
+        "INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        IMAGE_A,
+    )
+    task = asyncio.create_task(
+        reconcile.run_loop(
+            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+            _secrets_config(), _cluster_config(),
+        )
+    )
+    try:
+        await asyncio.sleep(0.5)
+        assert len(passes) == 1, "an empty fleet was polled at the fast cadence"
+        tenant = await insert_tenant(owner, "tenant-idle")
+        await owner.execute(
+            "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) VALUES ('aaaaaaaaaaaaaaaa', $1, 'running')",
+            tenant,
+        )
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(passes) < 4:
+            await asyncio.sleep(0.05)
+        assert len(passes) >= 4, "the notification did not wake the idle loop into the fast cadence"
+    finally:
+        await owner.close()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 # --- ready is an observation, never a memory -----------------------------------
 
 
@@ -2698,8 +2828,8 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
 ) -> None:
     # Ready is an observation: it follows the pod both ways, on the next
     # pass. Readiness alone never re-applies the cell's manifests, keeps the
-    # served observed_state (so nightly backups still select it) and costs
-    # one row write per pass at most.
+    # served observed_state (so nightly backups still select it) and writes
+    # the row only when readiness flips.
     cell_id = "aaaaaaaaaaaaaaaa"
     await _seed_cell(cell_db, cell_id, "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
@@ -2727,10 +2857,6 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
 
         monkeypatch.setattr(db, "write_observed", recording_write)
         applies_before = cluster.applies
-        # Unchanged: observed_at is the only write.
-        await _pass(connection, cluster, now + timedelta(seconds=5))
-        assert writes == [{"observed_at": now + timedelta(seconds=5)}]
-
         cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=False, ready_pod_image=None)
         writes.clear()
         for step in range(3):
@@ -2738,11 +2864,7 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
             await _pass(connection, cluster, at)
             row = (await db.select_all_rows(connection))[0]
             assert (row.ready, row.observed_state) == (False, "running"), step
-        assert writes == [
-            {"ready": False, "observed_at": now + timedelta(seconds=10)},
-            {"observed_at": now + timedelta(seconds=15)},
-            {"observed_at": now + timedelta(seconds=20)},
-        ]
+        assert writes == [{"ready": False, "observed_at": now + timedelta(seconds=10)}]
         assert cluster.applies == applies_before
         # Still backed up while NotReady: the volume is intact.
         window = datetime(2026, 1, 2, 3, tzinfo=UTC)
