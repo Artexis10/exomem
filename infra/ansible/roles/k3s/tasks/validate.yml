@@ -9,6 +9,17 @@
          and k3s_agent_dedicated_cell is match('^[a-z2-7]{16}$'))
     fail_msg: A dedicated reservation requires an agent and its exact 16-character base32 cell ID.
 
+- name: Validate the shared worker profile
+  ansible.builtin.assert:
+    that:
+      - k3s_agent_shared_profile is string
+      - >-
+        k3s_agent_shared_profile == '' or
+        (k3s_node_role == 'agent' and k3s_agent_dedicated_cell == ''
+         and k3s_agent_shared_profile | length <= 63
+         and k3s_agent_shared_profile is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'))
+    fail_msg: A shared profile requires a non-dedicated agent and a DNS label.
+
 - name: Resolve the one K3s server in the inventory
   ansible.builtin.set_fact:
     k3s_server_hosts: >-

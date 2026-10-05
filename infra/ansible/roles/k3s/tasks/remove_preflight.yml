@@ -36,12 +36,18 @@
             + ((target.spec | default({})).taints | default([])
                | selectattr('key', 'equalto', 'exomem.io/dedicated-cell')
                | map(attribute='value', default='') | list) -%}
+      {%- set shared_profiles = [labels.get('exomem.io/shared-profile')]
+            + ((target.spec | default({})).taints | default([])
+               | selectattr('key', 'equalto', 'exomem.io/shared-profile')
+               | map(attribute='value', default='') | list) -%}
       {%- set cells = [] -%}
       {%- for workload in k3s_remove_statefulsets_doc['items']
           if workload.metadata.namespace.startswith(k3s_cell_namespace_prefix) -%}
         {%- set selector = workload.spec.template.spec.nodeSelector | default({}) -%}
-        {%- if 'exomem.io/dedicated-cell' in selector
-            and selector['exomem.io/dedicated-cell'] in reservations -%}
+        {%- if ('exomem.io/dedicated-cell' in selector
+            and selector['exomem.io/dedicated-cell'] in reservations)
+            or ('exomem.io/shared-profile' in selector
+            and selector['exomem.io/shared-profile'] in shared_profiles) -%}
           {%- set _ = cells.append(workload.metadata.namespace) -%}
         {%- endif -%}
       {%- endfor -%}
@@ -85,8 +91,11 @@
       {%- set total = namespace(slots=0) -%}
       {%- for node in k3s_remove_nodes_doc['items'] if node.metadata.name != k3s_remove_node
           and 'exomem.io/dedicated-cell' not in (node.metadata.labels | default({}))
+          and 'exomem.io/shared-profile' not in (node.metadata.labels | default({}))
           and not (node.spec.taints | default([])
                    | selectattr('key', 'equalto', 'exomem.io/dedicated-cell') | list)
+          and not (node.spec.taints | default([])
+                   | selectattr('key', 'equalto', 'exomem.io/shared-profile') | list)
           and not (node.spec.unschedulable | default(false))
           and (node.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready')
                | map(attribute='status') | first | default('False')) == 'True' -%}

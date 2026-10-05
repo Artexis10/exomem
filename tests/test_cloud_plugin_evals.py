@@ -342,6 +342,32 @@ def test_successful_capture_requires_bound_fresh_readback():
     assert checks.evaluate_trace(capture_trace(), case("proactive-outcome"), IDENTITY)["ok"]
 
 
+@pytest.mark.parametrize("case_id", ["proactive-outcome", "explicit-capture"])
+def test_capture_can_extend_existing_note(case_id):
+    value = capture_trace()
+    scenario = case(case_id)
+    value["case_id"] = case_id
+    prompt = scenario["prompt"].format(marker=value["marker"])
+    value["observations"][0]["text"] = prompt
+    value["observations"][2]["arguments"]["turn"] = prompt
+    value["readback"]["prompt"] = scenario["readback_prompt"]
+    value["readback"]["observations"][0]["text"] = scenario["readback_prompt"]
+    write = next(o for o in value["observations"] if o.get("name") == "remember")
+    write["name"] = "edit_memory"
+    write["arguments"] = {
+        "path": "exomem://memory/sample",
+        "why": "Extend existing knowledge rather than create a duplicate",
+        "operation": {
+            "kind": "append_section",
+            "content": "sample-unique-731 compact retrieval result",
+        },
+    }
+    write["result"]["mutated"] = True
+    assert checks.evaluate_trace(value, scenario, IDENTITY)["ok"]
+    write["result"]["mutated"] = False
+    assert not checks.evaluate_trace(value, scenario, IDENTITY)["ok"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

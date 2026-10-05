@@ -1,4 +1,12 @@
 {{- if .Values.cellctl.enabled }}
+{{- $shared := .Values.cellctl.sharedWorker }}
+{{- if ne $shared.mode "off" }}
+{{- range $shared.cell_ids }}
+{{- if has . $.Values.cellctl.dedicatedCellIds }}
+{{- fail "dedicated and shared cell selections overlap" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if and .Values.cloudDatabase.privateIp (not (has (printf "%s/32" .Values.cloudDatabase.privateIp) .Values.cellctl.databaseEgressCidrs)) }}
 {{- fail "cloudDatabase.privateIp/32 must be listed in cellctl.databaseEgressCidrs" }}
 {{- end }}
@@ -142,6 +150,8 @@ spec:
           image: {{ .Values.cellctl.image | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            - name: CELLCTL_SHARED_WORKER
+              value: {{ .Values.cellctl.sharedWorker | toJson | quote }}
             - name: CELLCTL_DEDICATED_CELL_IDS
               value: {{ .Values.cellctl.dedicatedCellIds | toJson | quote }}
             - name: CELLCTL_LOG_LEVEL
@@ -458,11 +468,29 @@ spec:
               has(variables.podSpec.tolerations[0].value) &&
               variables.podSpec.tolerations[0].value == variables.namespaceName.substring(9) &&
               variables.podSpec.tolerations[0].effect == 'NoSchedule' &&
-              !has(variables.podSpec.tolerations[0].tolerationSeconds))) &&
+              !has(variables.podSpec.tolerations[0].tolerationSeconds))
+            {{- if ne $shared.mode "off" }}
+            ||
+            ({{ if eq $shared.mode "all-shared" }}!(variables.namespaceName.substring(9) in {{ .Values.cellctl.dedicatedCellIds | toJson }}){{ else }}variables.namespaceName.substring(9) in {{ $shared.cell_ids | toJson }}{{ end }} &&
+              has(variables.podSpec.nodeSelector) && variables.podSpec.nodeSelector.size() == 2 &&
+              'exomem.io/shared-profile' in variables.podSpec.nodeSelector &&
+              variables.podSpec.nodeSelector['exomem.io/shared-profile'] == {{ $shared.profile | toJson }} &&
+              {{ $shared.topology_key | toJson }} in variables.podSpec.nodeSelector &&
+              variables.podSpec.nodeSelector[{{ $shared.topology_key | toJson }}] == {{ $shared.topology_value | toJson }} &&
+              has(variables.podSpec.tolerations) && variables.podSpec.tolerations.size() == 1 &&
+              has(variables.podSpec.tolerations[0].key) &&
+              variables.podSpec.tolerations[0].key == 'exomem.io/shared-profile' &&
+              variables.podSpec.tolerations[0].operator == 'Equal' &&
+              has(variables.podSpec.tolerations[0].value) &&
+              variables.podSpec.tolerations[0].value == {{ $shared.profile | toJson }} &&
+              variables.podSpec.tolerations[0].effect == 'NoSchedule' &&
+              !has(variables.podSpec.tolerations[0].tolerationSeconds))
+            {{- end }}
+          ) &&
           !has(variables.podSpec.affinity) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may use only an exact own-cell dedicated selector/toleration pair for chart-selected cells, without nodeName, affinity, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates.
+      message: cellctl may use only exact operator-selected dedicated or qualified shared placement, without nodeName, affinity, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
