@@ -336,6 +336,7 @@ class _Row(NamedTuple):
     dst_page: str | None
     dst_kind: str | None  # "file" or the unit kind
     dst_anchor: str | None
+    fragment: str | None  # how a `#fragment` target resolved: unit, missing or ambiguous
 
     @property
     def touches_other(self) -> bool:
@@ -346,7 +347,8 @@ _ROWS_SQL = (
     "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, registry_status, "
     "origin, source_path, source_anchor, resolver_source_kind, resolver_target_kind, "
     "CASE WHEN registry_status = 'unregistered' "
-    "THEN json_extract(metadata, '$.line') END "
+    "THEN json_extract(metadata, '$.line') END, "
+    "json_extract(metadata, '$.fragment_resolution') "
     "FROM graph_edges WHERE origin NOT IN (?, ?)"
 )
 
@@ -443,6 +445,7 @@ class _Reader:
             source_kind,
             target_kind,
             line,
+            fragment,
         ) in self.connection.execute(_ROWS_SQL, _STRUCTURAL_ORIGINS):
             if not self.author_ok(source_path):
                 continue
@@ -467,6 +470,7 @@ class _Reader:
                 dst_path,
                 dst_kind,
                 dst_anchor,
+                fragment,
             )
 
     def pair_checks(
@@ -608,6 +612,7 @@ def _census_payload(
     by_status = dict.fromkeys(_STATUS_KEYS, 0)
     authored_edges = 0
     unresolved_target_edges = 0
+    fragment_edges = {"missing": 0, "ambiguous": 0}
     predicate_edges: Counter[str] = Counter()
     aliases_in_use: set[str] = set()
     unregistered_pages: dict[str, set[str]] = {}
@@ -672,6 +677,8 @@ def _census_payload(
             )
         if row.origin in _AUTHORED_ORIGINS:
             authored_edges += 1
+            if row.fragment in fragment_edges:
+                fragment_edges[row.fragment] += 1
             bucket = _bucket(row)
             by_status[bucket] += 1
             if bucket == "unregistered":
@@ -704,6 +711,10 @@ def _census_payload(
     metrics: dict[str, Any] = {
         "authored_edges": authored_edges,
         "unresolved_target_edges": unresolved_target_edges,
+        # A `[[Page#unit]]` target whose fragment named no unit, or several: the
+        # edge stayed on the page, and these are the authors to tell.
+        "unresolved_fragment_edges": fragment_edges["missing"],
+        "ambiguous_fragment_edges": fragment_edges["ambiguous"],
         "by_status": by_status,
         "generic_share": _ratio(by_status["core_generic"], registered_edges),
         "typed_coverage": {

@@ -323,6 +323,17 @@ class SemanticUnitDocument:
     def canonical_note_relations(self) -> tuple[markdown_relations.MarkdownRelation, ...]:
         return tuple(relation for relation in self.note_relations if relation.canonical)
 
+    def resolve_fragment(self, fragment: str) -> SemanticUnitResolution:
+        """Resolve a `[[Page#fragment]]` fragment to one unit of this page.
+
+        The fragment is an authored anchor or a `unit-<fingerprint>` identity, so
+        it takes exactly the path an exact `unit_ref` takes. A page without a
+        parent reference addresses nothing.
+        """
+        if not self.parent_ref:
+            return SemanticUnitResolution(status="missing", unit_ref="")
+        return self.resolve_unit(_anchored_unit_ref(self.parent_ref, fragment))
+
     def resolve_unit(
         self,
         unit_ref: str,

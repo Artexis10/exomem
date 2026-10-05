@@ -23,7 +23,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     access,
@@ -70,7 +70,7 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _DEPENDENCY_FORMAT = 1
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
@@ -5454,6 +5454,32 @@ class EpistemicGraphIndex:
             )
         return rows
 
+    def _fragment_dependants(
+        self, rels: set[str], resolver: vault_module.WikilinkResolver
+    ) -> set[str] | None:
+        """Pages whose `[[Page#unit]]` targets name one of `rels`; None when unreadable.
+
+        Read from the persisted raw dependencies, so it is as conservative as
+        the topology widening beside it (a shared stem over-matches, never
+        under-matches) and costs one indexed lookup, not a vault walk.
+        """
+        if not rels or not self.path.exists():
+            return set()
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect_existing(readonly=True)
+            conn.execute("BEGIN")
+            sources = self._dependency_sources_for_keys(
+                conn, _dependency_changed_keys(rels, resolver)
+            )
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.rollback()
+                conn.close()
+        return {source for source, raw_target in sources if "#" in raw_target} - rels
+
     def _resolver_affected_sources(
         self,
         indexed_sources: dict[str, str],
@@ -6134,6 +6160,16 @@ class EpistemicGraphIndex:
             self._mark_unavailable()
             return fallback("caller_path_outside_delta")
         refresh_paths = set(delta_paths)
+        # A `[[Page#unit]]` relation lands on a unit key that the page's own
+        # bytes decide -- the rich key hashes the body, and an edit can add,
+        # remove or duplicate the anchor -- so the pages that point at a changed
+        # page re-derive even when no resolver topology moved.
+        fragment_dependants = self._fragment_dependants(delta_rels, resolver)
+        if fragment_dependants is None:
+            self._mark_unavailable()
+            return fallback("fragment_dependants_unavailable")
+        refresh_paths.update(str(self.vault_root / rel) for rel in fragment_dependants)
+        deferred_scope.update(fragment_dependants)
         topology_versions: dict[str, GraphSourceSignature] = {}
         resolver_versions: dict[str, GraphSourceSignature] = {}
         expected_membership: frozenset[str] | None = None
@@ -7746,6 +7782,10 @@ class EpistemicGraphIndex:
                 "ORDER BY source_path, target_path, dst_key, other_anchor LIMIT ?",
                 (*selected, _STRUCTURAL_ROW_LIMIT, branch_cap + 1),
             ).fetchall()
+            # A shared target can be a unit; the page it belongs to is the label.
+            resolution_targets = {
+                str(row[2]): _path_for_node_key(conn, str(row[2])) for row in resolution_rows
+            }
             frontmatter_rows = conn.execute(
                 "WITH ranked AS (SELECT e.source_path, "
                 "COALESCE(d.path, SUBSTR(e.dst_key, 6)) AS target_path, "
@@ -8054,7 +8094,7 @@ class EpistemicGraphIndex:
             resolution_authored[key] = bool(authored_match)
             resolution_matches.setdefault(key, []).append(
                 {
-                    "target": _with_md(str(target_key or "").removeprefix("file:")),
+                    "target": _with_md(resolution_targets.get(str(target_key or "")) or ""),
                     "relation": relation,
                     "anchor": anchor,
                     "unit_ref": unit_ref,
@@ -10274,10 +10314,7 @@ def _edges_for_page(
             )
         )
         for relation in unit.relations:
-            target = relation.target
-            if target.startswith("[[") and target.endswith("]]"):
-                target = target[2:-2]
-            target = target.split("|", 1)[0].split("#", 1)[0].strip()
+            target, fragment = _split_target_fragment(relation.target)
             try:
                 canonical, warning = vault_module.normalize_wikilink(
                     target, vault_root, resolver=resolver, strict=False, visible=visible
@@ -10286,10 +10323,13 @@ def _edges_for_page(
                 continue
             if not canonical:
                 continue
+            dst_key, fragment_metadata = _relation_destination(
+                vault_root, canonical, warning, fragment
+            )
             edges.append(
                 page_edge(
                     block_key,
-                    _file_key(_with_md(canonical)),
+                    dst_key,
                     relation.kind,
                     "semantic_relation",
                     source_path=rel,
@@ -10302,6 +10342,7 @@ def _edges_for_page(
                         "line": relation.line,
                         "raw": relation.raw,
                         "target_resolution": "unresolved" if warning else "resolved",
+                        **fragment_metadata,
                         **generation,
                     },
                 )
@@ -10414,21 +10455,28 @@ def _relation_line_edges(
     edges: list[GraphEdge] = []
     canonical_lines: set[int] = set()
     for relation in relations:
+        target, fragment = _split_target_fragment(relation.target)
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, resolver=resolver, strict=False, visible=visible
+                target or relation.target,
+                vault_root,
+                resolver=resolver,
+                strict=False,
+                visible=visible,
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if not canonical:
             continue
-        target_path = _with_md(canonical)
+        dst_key, fragment_metadata = _relation_destination(
+            vault_root, canonical, warning, fragment
+        )
         if relation.canonical:
             canonical_lines.add(relation.line)
         edges.append(
             _edge(
                 file_key,
-                _file_key(target_path),
+                dst_key,
                 relation.kind,
                 "markdown_relation" if relation.canonical else "semantic_relation",
                 source_path=rel_path,
@@ -10444,6 +10492,7 @@ def _relation_line_edges(
                     "line": relation.raw,
                     "canonical": relation.canonical,
                     "target_resolution": "unresolved" if warning else "resolved",
+                    **fragment_metadata,
                 },
             )
         )
@@ -10528,6 +10577,48 @@ def _links_from_string(value: str) -> list[str]:
         return [m.split("#", 1)[0].strip() for m in matches if m.strip()]
     stripped = value.strip()
     return [stripped] if stripped else []
+
+
+def _split_target_fragment(raw: str) -> tuple[str, str]:
+    """`[[Page#unit|alias]]` as (`Page`, `unit`).
+
+    A same-page `#unit` names no other page, so it carries no fragment here: the
+    relation graph has never given it a destination of its own.
+    """
+    text = str(raw).strip()
+    if text.startswith("[[") and text.endswith("]]"):
+        text = text[2:-2]
+    page, _separator, fragment = text.split("|", 1)[0].partition("#")
+    page = page.strip()
+    return page, fragment.strip() if page else ""
+
+
+def _relation_destination(
+    vault_root: Path, canonical: str, warning: str | None, fragment: str
+) -> tuple[str, dict[str, str]]:
+    """Where a relation edge lands, and what the author should be told.
+
+    A fragment that names exactly one unit on the resolved target page lands the
+    edge on that unit. Every other outcome keeps the page-level edge the target
+    always produced, and records why, so a typo degrades instead of deleting.
+    """
+    page_key = _file_key(_with_md(canonical))
+    if not fragment or warning:
+        return page_key, {}
+    resolved = _current_page_unit(
+        vault_root,
+        _with_md(canonical),
+        lambda document: document.resolve_fragment(fragment),
+    )
+    if resolved.drift is None:
+        return _unit_key(resolved.page, resolved.unit), {
+            "target_fragment": fragment,
+            "fragment_resolution": "unit",
+        }
+    return page_key, {
+        "target_fragment": fragment,
+        "fragment_resolution": "ambiguous" if resolved.status == "ambiguous" else "missing",
+    }
 
 
 def _with_md(path: str) -> str:
@@ -10971,6 +11062,62 @@ def _current_unit_status(
     return "found", paths, seeds, drift_counts, False
 
 
+class _PageUnit(NamedTuple):
+    """One page's current answer to "which unit does this reference name"."""
+
+    status: str  # the unit resolution's own: found | missing | ambiguous | stale
+    unit: semantic_units.SemanticUnit | None
+    page: Any
+    state: semantic_index.SemanticParentIndexState | None
+    drift: str | None  # why the page could not answer, else None
+
+
+def _current_page_unit(
+    vault_root: Path,
+    rel: str,
+    resolve: Callable[[semantic_units.SemanticUnitDocument], semantic_units.SemanticUnitResolution],
+    *,
+    parent_ref: str | None = None,
+) -> _PageUnit:
+    """Resolve a unit on `rel` from the page's current bytes, never from the sidecar.
+
+    The one owner of that read. A caller holding a `parent_ref` (the sidecar's
+    claim about who owns the page) has it proved against the bytes; a caller
+    holding only a path and a fragment lets the page name its own parent.
+    """
+
+    def unanswered(status: str, drift: str) -> _PageUnit:
+        return _PageUnit(status, None, None, None, drift)
+
+    path = vault_root / rel
+    # The parent-ref sidecar may predate Records admission.  Suppress raw
+    # Records by path before opening them, while missing ordinary paths
+    # remain evidence for the stale-seed collision recovery below.
+    if _records_suppressed_path(vault_root, rel):
+        return unanswered("missing", "suppressed_record_parent")
+    try:
+        source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+    except FileNotFoundError:
+        return unanswered("missing", "missing_parent")
+    except (OSError, UnicodeError):
+        return unanswered("missing", "parent_unavailable")
+    if parent_ref is not None and memory_refs.ref_from_markdown(source) != parent_ref:
+        return unanswered("missing", "parent_ref_mismatch")
+    try:
+        state = semantic_index.current_parent_index_state(vault_root, path, source=source)
+    except (TypeError, ValueError):
+        return unanswered("missing", "invalid_current_parent")
+    resolution = resolve(state.document)
+    if resolution.status != "found" or resolution.unit is None:
+        return _PageUnit(resolution.status, None, None, state, "missing_current_unit")
+    page = find_module._parse_page(
+        path, 0.0, vault_root, content=source.encode("utf-8"), resolved_relative=rel
+    )
+    if page is None:
+        return unanswered("missing", "invalid_current_parent")
+    return _PageUnit("found", resolution.unit, page, state, None)
+
+
 def _current_unit_parent_paths(
     conn: sqlite3.Connection,
     vault_root: Path,
@@ -10987,50 +11134,17 @@ def _current_unit_parent_paths(
     drift_counts: dict[str, int] = {}
     for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
         rel = str(row[0])
-        path = vault_root / rel
-        # The parent-ref sidecar may predate Records admission.  Suppress raw
-        # Records by path before opening them, while missing ordinary paths
-        # remain evidence for the stale-seed collision recovery below.
-        if _records_suppressed_path(vault_root, rel):
-            drift_counts["suppressed_record_parent"] = (
-                drift_counts.get("suppressed_record_parent", 0) + 1
-            )
-            continue
-        try:
-            source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
-        except FileNotFoundError:
-            drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
-            continue
-        except (OSError, UnicodeError):
-            drift_counts["parent_unavailable"] = drift_counts.get("parent_unavailable", 0) + 1
-            continue
-        if memory_refs.ref_from_markdown(source) != parent_ref:
-            drift_counts["parent_ref_mismatch"] = drift_counts.get("parent_ref_mismatch", 0) + 1
-            continue
-        try:
-            state = semantic_index.current_parent_index_state(vault_root, path, source=source)
-        except (TypeError, ValueError):
-            drift_counts["invalid_current_parent"] = (
-                drift_counts.get("invalid_current_parent", 0) + 1
-            )
-            continue
-        resolution = state.document.resolve_unit(unit_ref)
-        if resolution.status != "found" or resolution.unit is None:
-            drift_counts["missing_current_unit"] = drift_counts.get("missing_current_unit", 0) + 1
-            continue
-        page = find_module._parse_page(
-            path,
-            0.0,
+        resolved = _current_page_unit(
             vault_root,
-            content=source.encode("utf-8"),
+            rel,
+            lambda document: document.resolve_unit(unit_ref),
+            parent_ref=parent_ref,
         )
-        if page is None:
-            drift_counts["invalid_current_parent"] = (
-                drift_counts.get("invalid_current_parent", 0) + 1
-            )
+        if resolved.drift is not None:
+            drift_counts[resolved.drift] = drift_counts.get(resolved.drift, 0) + 1
             continue
         current_paths.append(rel)
-        current_seeds.append(_unit_node(page, resolution.unit, state).as_dict())
+        current_seeds.append(_unit_node(resolved.page, resolved.unit, resolved.state).as_dict())
         if len(current_paths) == 2:
             return current_paths, current_seeds, drift_counts, False
     return (
@@ -11889,7 +12003,7 @@ def _shared_resolution_target_candidates(
             continue
         grouped.setdefault(target, []).append(
             {
-                "target": _with_md(str(target_key or "").removeprefix("file:")),
+                "target": _with_md(_path_for_node_key(conn, str(target_key or "")) or ""),
                 "relation": relation,
                 "anchor": anchor,
                 "unit_ref": unit_ref,
