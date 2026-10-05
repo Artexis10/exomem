@@ -447,6 +447,27 @@ def test_resolver_ranks_decomposed_lexical_evidence_without_selecting_it() -> No
     assert result["selected_relation"] is None
 
 
+def test_resolver_finds_lexical_evidence_in_non_ascii_descriptions() -> None:
+    registry = relation_registry.load_registry(
+        proposal=_proposal(
+            **{
+                "vault.a_other": _extension("Unrelated meaning"),
+                "vault.z_supplies": _extension("Поставщик поставляет товары Zorblex™"),
+            }
+        )
+    )
+
+    result = relation_vocabulary.resolve_relation(
+        registry, query="поставщик ТОВАРЫ zorblex"
+    )
+
+    first = result["candidates"][0]
+    assert first["canonical"] == "vault.z_supplies"
+    assert first["evidence"] == [
+        {"source": "description", "terms": ["zorblex", "поставщик", "товары"]}
+    ]
+
+
 def test_resolver_isolated_between_vault_registries(tmp_path: Path) -> None:
     left = tmp_path / "left"
     right = tmp_path / "right"

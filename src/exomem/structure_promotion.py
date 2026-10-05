@@ -34,14 +34,12 @@ what writes deposit, so the reason codes speak of units and claim nothing more.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .text_scripts import is_scriptio_continua, vocabulary_words
+from .text_scripts import comparison_words, is_scriptio_continua
 
 KIND = "scope_divergence"
 
@@ -78,8 +76,6 @@ BREADTH_TAGS = frozenset({"hub", "snapshot"})
 
 #: Filenames the corpus already treats as navigation rather than knowledge.
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
-
-_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 
 #: Closed-class English function words: prepositions, conjunctions, auxiliaries,
 #: pronouns, determiners and a few ubiquitous verbs. Never a content word, however
@@ -129,19 +125,12 @@ def _is_term(token: str) -> bool:
 def _terms(values: Iterable[str]) -> frozenset[str]:
     """Normalise tags, title words, and project keys into one comparable vocabulary.
 
-    ASCII splits exactly as it always has. Other text is NFKC-normalised and
-    read as words in every script (`text_scripts.vocabulary_words`), so a
-    Japanese title yields its words instead of nothing.
+    Words are `text_scripts.comparison_words`: ASCII splits exactly as it
+    always has, and a Japanese title yields its words instead of nothing.
     """
     out: set[str] = set()
     for value in values:
-        text = str(value).casefold()
-        tokens = (
-            _TOKEN_SPLIT.split(text)
-            if text.isascii()
-            else vocabulary_words(unicodedata.normalize("NFKC", text).casefold())
-        )
-        out.update(token for token in tokens if _is_term(token))
+        out.update(token for token in comparison_words(str(value).casefold()) if _is_term(token))
     return frozenset(out)
 
 
