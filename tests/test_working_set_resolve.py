@@ -2091,7 +2091,7 @@ def test_the_anchor_cut_is_unchanged_when_recency_cannot_resolve() -> None:
     ]
 
 
-def test_a_hot_candidate_survives_the_candidate_cut_on_a_referential_turn() -> None:
+def test_all_candidates_reach_adjudication_including_a_hot_referent() -> None:
     rows = [_row(f"Notes/a-hit-{index:02d}.md", f"Hit {index}") for index in range(30)]
     rows.append(_row("Products/z-hot.md", "Hot Page", kind="resource"))
     hits = frozenset(f"Notes/a-hit-{index:02d}.md" for index in range(30))
@@ -2110,12 +2110,11 @@ def test_a_hot_candidate_survives_the_candidate_cut_on_a_referential_turn() -> N
         hot_paths=hot,
     )
 
-    assert len(referential) == resolve_module.MAX_CANDIDATES
+    assert len(referential) == 31
     assert "Products/z-hot.md" in {item.anchor_id for item in referential}
-    # Any other turn is cut exactly as before: the prior admits nothing there,
-    # and the first MAX_CANDIDATES recall hits by the ordinary order remain.
+    # On an ordinary turn the prior admits nothing, but every recall hit remains.
     assert [item.anchor_id for item in ordinary] == [
-        f"Notes/a-hit-{index:02d}.md" for index in range(resolve_module.MAX_CANDIDATES)
+        f"Notes/a-hit-{index:02d}.md" for index in range(30)
     ]
 
 

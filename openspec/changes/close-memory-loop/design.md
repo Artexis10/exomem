@@ -1160,14 +1160,44 @@ later roles follow. Categorical portions retain their unit-first ordering, and
 packets without material retain the old ordering. This explicit boundary avoids
 the cycle between global unit-first ordering and mixed material ordering without
 letting material displace earlier identity or constraint context. Own/promoted
-tiers, current-state/Planning precedence and the shared material cap remain.
+tiers and current-state/Planning precedence remain.
 
-This adds no search, traversal, model call, context admission or packet capacity.
-The 200-unit/three-pointer candidate bounds and three served material items stay
-unchanged. Missing candidates and truncation remain visible; representation is
+The shared material allowance remains three items by default. Beyond that baseline,
+an item is eligible only when it covers another distinct resolved anchor with a
+current-turn request and matching evidence not represented by prior served material.
+Equivalent questions about the same anchor do not multiply allowance, and an item
+covering several anchors does not leave unused extra slots for unrelated content.
+Keep coverage on in-process lane items and enforce it across material roles, units
+and pointers at packet assembly; do not serialize it as new provenance. Categorical
+item caps, six roles, earlier-role priority and the existing prose budget remain.
+
+Sense adjudication operates on the complete caller-visible index-bounded match set
+before candidate/admission limits. The existing index caps all anchor kinds together
+at 2,000 identities; qualification from conversation/focus cannot multiply that set.
+After the existing narrowing and competing-sense rules, current-turn exact names
+and explicit agent choices can expand ordinary six-anchor admission to at most 24;
+resolved anchors precede partial anchors in stable existing rank order, so admission
+cannot discard every resolved anchor while retaining a resolved verdict. Extra
+explicit anchors consume the ordinary allowance first. Partial, focus-only,
+recency and implicit candidates retain their old allowance. Display choices remain
+bounded without changing the full-set verdict; section-level omission reasons name
+neither omitted alternatives nor hidden counts. This does not prove completeness
+beyond the maintained index.
+
+Full-set adjudication must remain cheap: deduplicate wider-anchor work by identity,
+reuse path/neighbour membership for graph corroboration where equivalent, and measure
+the 2,000-identity worst case. Finite work alone does not prove acceptable latency.
+The current continuation decoder's ref, role and 8,192-character bounds remain;
+mint a valid token or none, never silently trim alternatives to manufacture a unique
+follow-up. No new candidate-completeness registry or conservative kind-wide refusal
+is needed: existing exact sense rules adjudicate the available full set.
+
+This adds no search, traversal or model call. The 200-unit/three-pointer candidate
+bounds stay unchanged. Missing candidates and truncation remain visible; representation is
 not a claim of complete answers. Verify distinct-claim competition, reversed
 question order, bare-name and focus negatives, single-topic capacity, existing
-ownership/egress/continuity controls and matched latency before delivery. This
+ownership/egress/continuity controls, four/seven named-domain coverage, full-set
+ambiguity, matched latency and whole-packet bytes/reference tokens before delivery. This
 does not close the original client incident without its actual request and packet.
 
 ## Risks / Trade-offs
