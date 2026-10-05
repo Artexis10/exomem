@@ -842,11 +842,17 @@ def _warm_request_path(vault_root: Path) -> None:
 
 
 def _warm_embedding_matrix(vault_root: Path) -> None:
-    """One tiny vector search so the first hybrid recall or write skips the load."""
+    """Warm a retained corpus matrix without scanning the disk-only profile."""
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return
     started = time.perf_counter()
     try:
+        from . import cloud_cell
+
+        # service-v1 retains no matrix; warming repeats a complete disk scan
+        # while foreground recall is already serving.
+        if cloud_cell.resource_policy() == "service-v1":
+            return
         import numpy as np
 
         from . import embeddings, recall_space

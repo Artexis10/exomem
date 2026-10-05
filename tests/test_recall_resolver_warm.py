@@ -88,6 +88,31 @@ def test_eviction_warms_the_cache_instead_of_leaving_it_for_a_reader(
     assert Path(root) in find_module._RECALL_RESOLVER_CACHE
 
 
+def test_background_resolver_warm_yields_to_an_active_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolver warm must not parse the vault beside an active reader."""
+    from exomem import foreground_priority
+
+    root = _seed(tmp_path)
+    checkpoint = threading.Event()
+    real_yield = foreground_priority.yield_to_foreground
+
+    def observed_yield(**kwargs):
+        checkpoint.set()
+        return real_yield(**kwargs)
+
+    monkeypatch.setattr(foreground_priority, "yield_to_foreground", observed_yield)
+    with foreground_priority.foreground():
+        find_module._schedule_recall_resolver_rebuild(root)
+        assert checkpoint.wait(timeout=1), "background warm did not yield"
+        assert not find_module.await_recall_resolver_warm(timeout=0.05)
+
+    assert find_module.await_recall_resolver_warm(timeout=5)
+    resolver = find_module.recall_resolver_snapshot(root)
+    assert resolver.title_key_for_path("Knowledge Base/Notes/Insights/page-0.md") == "page 0"
+
+
 def test_a_cold_burst_of_readers_walks_the_vault_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
