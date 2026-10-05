@@ -63,7 +63,15 @@ from .storage.interface import CELL_KEY_CAPABILITIES
 
 logger = logging.getLogger("cellctl")
 
-POLL_INTERVAL_SECONDS = 5.0
+# D4 amendment (2026-10-05): a pass follows the last one after the fast
+# interval while anything is in transition, and after the idle interval once
+# the fleet has settled. A NOTIFY wakes the loop at once either way.
+FAST_POLL_INTERVAL_SECONDS = 5.0
+IDLE_POLL_INTERVAL_SECONDS = 30.0
+# D4 amendment: observed_at is written with an observed change, and on its
+# own once the stored value is this old, so it reads as "last observed, at
+# most about this stale" without a write per cell per pass.
+OBSERVED_AT_REFRESH = timedelta(minutes=5)
 RECONNECT_BACKOFF_INITIAL_SECONDS = 1.0
 RECONNECT_BACKOFF_MAX_SECONDS = 30.0
 DEFAULT_HEARTBEAT_PATH = "/tmp/cellctl-heartbeat"
@@ -330,7 +338,9 @@ class ClusterGateway:
     """The subset of ClusterClient + storage that reconcile.py needs, kept
     as a Protocol-shaped class so tests can supply a fake."""
 
-    def observe(self, cell_id: str, namespace: str) -> ClusterObservation: ...  # pragma: no cover
+    def observe_cells(
+        self, cells: dict[str, str]
+    ) -> dict[str, ClusterObservation | Exception]: ...  # pragma: no cover
     def apply_all(self, manifests: list[dict]) -> None: ...  # pragma: no cover
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
@@ -800,7 +810,11 @@ async def reconcile_once(
     config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG,
     now: datetime | None = None,
     memory: LoopMemory | None = None,
-) -> None:
+) -> bool:
+    """One pass. Returns whether the next one is due at the fast cadence:
+    True while any cell is in transition or this pass observed a change,
+    False once the whole fleet has settled."""
+
     now = now or datetime.now(UTC)
     memory = memory if memory is not None else LoopMemory()
 
@@ -817,7 +831,7 @@ async def reconcile_once(
                 policy_name,
                 binding_name,
             )
-            return
+            return True
 
     if cluster_config.shared_worker and cluster_config.shared_worker.mode == "selected":
         # Close the old domain before inventory/workloads. An earlier redemption
@@ -834,12 +848,19 @@ async def reconcile_once(
     rows = [row for row in rows if row.cell_id in committed]
 
     # H4: one row's observe() must not take every other row down with it.
+    # D4 API budget: one list per kind for the whole fleet, not reads per cell.
     observations: dict[str, ClusterObservation] = {}
+    try:
+        observed = cluster.observe_cells({row.cell_id: namespace_name(row.cell_id) for row in rows})
+    except Exception as error:  # noqa: BLE001 - every row goes unobserved this pass
+        logger.error("cellctl could not observe the fleet: %s", _describe_error(error))
+        observed = {}
     for row in rows:
-        try:
-            observations[row.cell_id] = cluster.observe(row.cell_id, namespace_name(row.cell_id))
-        except Exception as error:  # noqa: BLE001
-            logger.error("cellctl observe failed for cell %s: %s", row.cell_id, _describe_error(error))
+        result = observed.get(row.cell_id)
+        if isinstance(result, ClusterObservation):
+            observations[row.cell_id] = result
+        elif result is not None:
+            logger.error("cellctl observe failed for cell %s: %s", row.cell_id, _describe_error(result))
     # A non-deleted row that could not be observed may be the owner's canary
     # or hold an upgrade or restore. Deciding a rollout without it could pick
     # a tenant as canary or start a second upgrade, so this pass starts no
@@ -902,9 +923,20 @@ async def reconcile_once(
             non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked
         )
 
+    # D4 amendment: a hold, a dirty row or a maintenance start keeps the fast
+    # cadence. A settled failure (identity conflict, init deadline) does not:
+    # it changes only when its pod or its row does, and one broken tenant must
+    # not hold the whole fleet at the fast cadence.
+    fast = (
+        fleet_unobserved
+        or upgrade_candidate is not None
+        or bool(backup_candidates)
+        or render_digest_candidate is not None
+        or any(_in_transition(row, observations[row.cell_id], row.cell_id in parked) for row in rows)
+    )
     for row in rows:
         try:
-            await _reconcile_row(
+            fast |= await _reconcile_row(
                 connection,
                 cluster,
                 object_storage,
@@ -928,6 +960,7 @@ async def reconcile_once(
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
                 raise
             logger.error("cellctl reconcile failed for cell %s: %s", row.cell_id, _describe_error(error))
+            fast = True
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -942,7 +975,7 @@ async def reconcile_once(
         observation = cluster.capacity_inputs(**kwargs)
     except Exception as error:  # noqa: BLE001 - capacity must not take the pass down
         logger.error("cellctl: capacity read failed; keeping the last published capacity: %s", _describe_error(error))
-        return
+        return True
     if cluster_config.shared_worker:
         capacities = compute_shared_capacity(observation, policy=cluster_config.shared_worker,
                                              config=cluster_config.capacity,
@@ -963,7 +996,32 @@ async def reconcile_once(
                                 if node in observation.reserved_nodes else value)
             if not value.limit_known:
                 logger.warning("cellctl: node %s has no known attachments limit; publishing 0 cell_slots", node)
+    # D9: capacity is published on every pass, so admission's five-minute
+    # freshness bound holds at the idle cadence too.
     await db.write_capacity_snapshot(connection, capacities=capacities, observed_at=now)
+    return fast
+
+
+def _in_transition(row: CellRow, observation: ClusterObservation, refusal_parked: bool) -> bool:
+    if _active_hold(row, observation) is not None or row.hold_kind is not None:
+        return True
+    if row.observed_state == "failed" and row.generation == row.observed_generation:
+        return False
+    return row.is_dirty(refusal_parked=refusal_parked)
+
+
+async def _write_observed(connection: asyncpg.Connection, row: CellRow, updates: dict[str, object], now: datetime) -> bool:
+    """D4 amendment: observed_at is written with every observed change, and
+    alone once the row's stored value is OBSERVED_AT_REFRESH old. Returns
+    whether an observed column changed; a refresh alone is not a change and
+    never makes the next pass fast."""
+
+    if updates:
+        await db.write_observed(connection, row.cell_id, {**updates, "observed_at": now})
+        return True
+    if row.observed_at is None or now - row.observed_at >= OBSERVED_AT_REFRESH:
+        await db.write_observed(connection, row.cell_id, {"observed_at": now})
+    return False
 
 
 async def _publish_parked_canary(
@@ -1017,7 +1075,9 @@ async def _reconcile_row(
     is_render_digest_candidate: bool,
     refusal_parked: bool,
     memory: LoopMemory,
-) -> None:
+) -> bool:
+    """Returns whether the row's observation changed (and was written)."""
+
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
     nothing_to_start = (
@@ -1030,7 +1090,7 @@ async def _reconcile_row(
     # whose only change is its pod's readiness is observed, not re-applied:
     # ready follows the pod on the update revision both ways, observed_state
     # stays served (so it is still backed up), and nothing is written but
-    # ready when it changes and observed_at.
+    # ready, and observed_at with it, when it changes.
     readiness_only = (
         nothing_to_start
         and already_served
@@ -1040,18 +1100,14 @@ async def _reconcile_row(
         and observation.statefulset_image == row.observed_image
     )
     if readiness_only:
-        updates: dict[str, object] = {"observed_at": now}
-        if row.ready != observation.pod_ready:
-            updates = {"ready": observation.pod_ready, **updates}
-        await db.write_observed(connection, row.cell_id, updates)
-        return
+        changed = {"ready": observation.pod_ready} if row.ready != observation.pod_ready else {}
+        return await _write_observed(connection, row, changed, now)
     # A parked refused row is not dirty, but it still goes through decide(),
     # which applies nothing while it is parked and observes it this pass.
     if not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start:
-        # D4: observed_at is written on every observation, including one
-        # that finds nothing to do.
-        await db.write_observed(connection, row.cell_id, {"observed_at": now})
-        return
+        # D4 amendment: an observation that finds nothing changed writes only
+        # a due observed_at refresh.
+        return await _write_observed(connection, row, {}, now)
 
     if row.desired_state == "deleted":
         observation = _augment_deletion_observation(
@@ -1205,7 +1261,7 @@ async def _reconcile_row(
                 connection,
                 {"paused": True, "error_code": TARGET_REJECTED, "held_cell_id": row.cell_id},
             )
-            return
+            return True
         # D4: parked in memory on (generation, applied digest, image), and
         # retried on the backoff; success resets it.
         refusal_key = (row.generation, render_digest, spec.image)
@@ -1214,8 +1270,8 @@ async def _reconcile_row(
             # recorded. observed_generation is not written, since nothing
             # converged. A refused hold start is retried on the backoff too.
             _record_refusal(memory, row.cell_id, refusal_key, now, statefulset_blocked=True)
-            await db.write_observed(connection, row.cell_id, {"last_error_code": MANIFEST_IMMUTABLE, "observed_at": now})
-            return
+            changed = {"last_error_code": MANIFEST_IMMUTABLE} if row.last_error_code != MANIFEST_IMMUTABLE else {}
+            return await _write_observed(connection, row, changed, now)
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
@@ -1262,7 +1318,7 @@ async def _reconcile_row(
     if decision.delete_b2_key and row.b2_key_id:
         object_storage.delete_key(row.b2_key_id)
 
-    row_updates: dict[str, object] = {**decision.row_updates, "observed_at": now}
+    row_updates: dict[str, object] = dict(decision.row_updates)
     if refused:
         # D4: the StatefulSet landed but another object was refused. The
         # refusal is what the row records, and nothing converged.
@@ -1271,14 +1327,11 @@ async def _reconcile_row(
     elif applied_cleanly and row.last_error_code == MANIFEST_IMMUTABLE and "last_error_code" not in row_updates:
         row_updates["last_error_code"] = None
     # Bounded writes: a column whose value is unchanged is not written again.
-    row_updates = {
-        column: value
-        for column, value in row_updates.items()
-        if column == "observed_at" or getattr(row, column) != value
-    }
-    await db.write_observed(connection, row.cell_id, row_updates)
+    row_updates = {column: value for column, value in row_updates.items() if getattr(row, column) != value}
+    changed = await _write_observed(connection, row, row_updates, now)
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
+    return changed or decision.apply_manifests
 
 
 def _delete_all_backup_objects(object_storage, row: CellRow) -> None:
@@ -1314,7 +1367,9 @@ async def run_loop(
     stop: asyncio.Event | None = None,
     heartbeat_path: str = DEFAULT_HEARTBEAT_PATH,
 ) -> None:
-    """D4: poll every 5 seconds, plus LISTEN on a direct session.
+    """D4: poll, plus LISTEN on a direct session. The poll comes after
+    FAST_POLL_INTERVAL_SECONDS while a pass reports a transition and after
+    IDLE_POLL_INTERVAL_SECONDS once the fleet has settled (D4 amendment).
 
     The loop survives its dependencies: a lost database session is reopened
     with capped exponential backoff (1s up to 30s), re-taking the single-
@@ -1336,6 +1391,11 @@ async def run_loop(
                     connection = await db.connect(dsn)
                     woken = asyncio.Event()
                     await connection.add_listener(db.NOTIFY_CHANNEL, lambda *_args, w=woken: w.set())
+                    # A session the server closes wakes the loop too, so an
+                    # idle wait does not delay the reconnect (D4: notifications
+                    # sent while it is down are lost; the full pass after it
+                    # is what picks their rows up).
+                    connection.add_termination_listener(lambda *_args, w=woken: w.set())
                     if not await db.try_advisory_lock(connection):
                         raise RuntimeError("cellctl advisory lock is held by another writer")
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
@@ -1353,8 +1413,9 @@ async def run_loop(
             # D4: clear a pending notification before the pass, never after
             # it, so one that arrives during the pass triggers the next one.
             woken.clear()
+            interval = FAST_POLL_INTERVAL_SECONDS
             try:
-                await reconcile_once(
+                fast = await reconcile_once(
                     connection,
                     cluster,
                     object_storage,
@@ -1364,6 +1425,8 @@ async def run_loop(
                     config=config,
                     memory=memory,
                 )
+                if not fast:
+                    interval = IDLE_POLL_INTERVAL_SECONDS
             except (asyncpg.InterfaceError, asyncpg.PostgresConnectionError, OSError) as error:
                 # D4: a dropped session is reopened, not retried on the same
                 # (now-dead) connection forever.
@@ -1376,7 +1439,7 @@ async def run_loop(
                 logger.error("cellctl reconcile pass failed: %s", _describe_error(error))
 
             try:
-                await asyncio.wait_for(woken.wait(), timeout=POLL_INTERVAL_SECONDS)
+                await asyncio.wait_for(woken.wait(), timeout=interval)
             except TimeoutError:
                 pass
     finally:

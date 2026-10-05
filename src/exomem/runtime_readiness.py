@@ -450,6 +450,40 @@ def build_runtime_readiness(
     return payload
 
 
+_TAIL_BLOCK_BYTES = 8192
+_TAIL_LINE_MAX_BYTES = 1024 * 1024
+
+
+def _last_line(path: Path) -> str:
+    """The file's last line, read from the end so a probe costs one block, not
+    the whole (up to rotation-size) journal. A single trailing newline ends the
+    last line rather than starting an empty one. A line over the cap raises
+    ValueError: a torn file must not stall the probe."""
+    with path.open("rb") as handle:
+        end = handle.seek(0, os.SEEK_END)
+        if end:
+            handle.seek(end - 1)
+            if handle.read(1) == b"\n":
+                end -= 1
+        parts: list[bytes] = []
+        length = 0
+        while end > 0:
+            step = min(_TAIL_BLOCK_BYTES, end)
+            end -= step
+            handle.seek(end)
+            block = handle.read(step)
+            newline = block.rfind(b"\n")
+            if newline >= 0:
+                block = block[newline + 1:]
+            parts.append(block)
+            length += len(block)
+            if length > _TAIL_LINE_MAX_BYTES:
+                raise ValueError("journal last line exceeds the probe cap")
+            if newline >= 0:
+                break
+    return b"".join(reversed(parts)).decode("utf-8")
+
+
 def _measure_observability() -> dict[str, Any]:
     """Measure log-dir writability, metrics-snapshot freshness, and journal
     health, without ever raising into readiness."""
@@ -485,10 +519,10 @@ def _measure_observability() -> dict[str, Any]:
         if not path.exists():
             journal_ok = True
         else:
-            last_line = path.read_text(encoding="utf-8").splitlines()[-1:] or [""]
             import json as _json
 
-            _json.loads(last_line[0]) if last_line[0].strip() else None
+            last_line = _last_line(path)
+            _json.loads(last_line) if last_line.strip() else None
             journal_ok = True
     except Exception:  # noqa: BLE001 - readiness must stay structured
         journal_ok = False
