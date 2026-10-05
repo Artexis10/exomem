@@ -44,8 +44,8 @@ def test_record_window_matches_the_etcd_bucket_lifecycle() -> None:
     # The bucket deletes a snapshot after hide + delete days; a record older than
     # that names an object that no longer exists. Keep the two in step.
     storage = (ROOT / "infra/terraform/durability/storage.tf").read_text(encoding="utf-8")
-    recovery = storage.split('resource "b2_bucket" "recovery"', 1)[1].split("\nresource ", 1)[0]
-    hide = int(re.search(r"days_from_uploading_to_hiding\s*=\s*(\d+)", recovery).group(1))
-    delete = int(re.search(r"days_from_hiding_to_deleting\s*=\s*(\d+)", recovery).group(1))
+    bucket = storage.split('resource "b2_bucket" "etcd_snapshot"', 1)[1].split("\nresource ", 1)[0]
+    hide = int(re.search(r"days_from_uploading_to_hiding\s*=\s*(\d+)", bucket).group(1))
+    delete = int(re.search(r"days_from_hiding_to_deleting\s*=\s*(\d+)", bucket).group(1))
     defaults = yaml.safe_load((K3S_ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
     assert defaults["k3s_etcd_s3_record_max_age_days"] == hide + delete

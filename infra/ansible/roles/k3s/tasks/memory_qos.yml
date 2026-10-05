@@ -20,15 +20,6 @@
     fail_msg: MemoryQoS adoption requires cgroup v2 and the kernel 5.9 memory.high fix.
   when: k3s_memory_qos_enabled
 
-- name: Create the kubelet drop-in directory for node memory policy
-  ansible.builtin.file:
-    path: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  when: k3s_memory_qos_enabled
-
 - name: Install the adopted node memory policy
   ansible.builtin.copy:
     src: 20-exomem-memoryqos.conf

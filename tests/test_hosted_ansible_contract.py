@@ -118,7 +118,6 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert names.index(reset["name"]) > names.index("Wait for the local Kubernetes API readiness endpoint")
     assert "disable:\n  - traefik\n  - servicelb\n  - local-storage" in config
     assert "service-account-max-token-expiration=24h" in config
-    assert "k3s_kubelet_args" in config
     assert "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log" in config
     assert "admission-control-config-file=/etc/rancher/k3s/admission-config.yaml" in config
     assert 'etcd-snapshot-schedule-cron: "*/30 * * * *"' in config

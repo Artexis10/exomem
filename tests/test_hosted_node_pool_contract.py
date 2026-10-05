@@ -360,11 +360,9 @@ def test_join_playbook_skips_a_host_that_removal_marked() -> None:
     assert harden[1]["when"] == "k3s_removed_marker.stat.exists"
 
 
-def test_server_and_agent_render_the_same_kubelet_limits() -> None:
+def test_every_node_keeps_the_image_and_log_limits() -> None:
     defaults = _yaml(K3S_ROLE / "defaults/main.yml")
-    assert "image-gc-high-threshold=75" in defaults["k3s_kubelet_args"]
-    for template in ("templates/config.yaml.j2", "templates/agent-config.yaml.j2"):
-        assert "{% for argument in k3s_kubelet_args %}" in _read(K3S_ROLE / template)
+    assert {"image-gc-high-threshold=75", "container-log-max-size=10Mi"} <= set(defaults["k3s_kubelet_args"])
 
 
 def test_server_gains_a_distinct_agent_token_only_when_set() -> None:

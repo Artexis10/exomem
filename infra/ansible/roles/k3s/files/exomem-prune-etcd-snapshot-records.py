@@ -48,7 +48,7 @@ def main() -> int:
     ).stdout
     names = expired(json.loads(listing)["items"], datetime.datetime.now(datetime.timezone.utc), args.max_age_days)
     for start in range(0, len(names), 100):
-        subprocess.run([*KUBECTL, "delete", RESOURCE, "--wait=false", *names[start : start + 100]], check=True)
+        subprocess.run([*KUBECTL, "delete", RESOURCE, "--ignore-not-found", "--wait=false", *names[start : start + 100]], check=True)
     print(f"deleted {len(names)} expired S3 etcd snapshot records")
     return 0
 
