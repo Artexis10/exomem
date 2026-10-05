@@ -1546,19 +1546,13 @@ def reset_verifier_cache() -> None:
 
 @dataclass(frozen=True)
 class FixturePair:
-    """One golden claim pair with the label an admitted verifier must produce.
-
-    `heuristic_fails` records whether the retired lexical stand-in gets this
-    pair wrong. It is documentation of WHY the tier exists, and the input to
-    the fixture-set precision table — not something admission consults.
-    """
+    """One golden claim pair with the label an admitted verifier must produce."""
 
     claim_a: str
     claim_b: str
     expected: str
     note: str
     language_shape: str
-    heuristic_fails: bool = False
 
 
 #: Bounded multilingual admission evidence. The English pairs preserve the
@@ -1580,7 +1574,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "contradict",
             "genuine contradiction across differing surface forms",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Caching improves latency for repeat reads.",
@@ -1595,7 +1588,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "duplicate",
             "restatement, reordered surface",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Batching similar work helps focus.",
@@ -1610,7 +1602,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "compatible but non-entailing evidence remains neutral",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Batching does not hurt focus.",
@@ -1618,7 +1609,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "refine",
             "concordant evidence: negation parity differs, one stance",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Tesseract is required for image OCR on Windows.",
@@ -1626,7 +1616,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "disjoint topics are inside NLI's neutral fallback",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The upload route parses multipart bodies through Starlette.",
@@ -1634,7 +1623,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "disjoint topics with shared house vocabulary remain neutral",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Der Cache reduziert die Latenz.",
@@ -1642,7 +1630,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "contradict",
             "same-language German contradiction",
             "de/de",
-            heuristic_fails=True,
         ),
         FixturePair(
             "La sauvegarde démarre chaque nuit.",
@@ -1657,7 +1644,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "duplicate",
             "same-language Estonian reordered restatement",
             "et/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The cache reduces latency.",
@@ -1665,7 +1651,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "contradict",
             "mixed English/Estonian contradiction",
             "en/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The backup runs every night.",
@@ -1673,7 +1658,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "duplicate",
             "mixed English/Estonian equivalence",
             "en/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The backup runs every night.",
@@ -1681,7 +1665,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "refine",
             "mixed English/Estonian added detail",
             "en/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The cache reduces latency.",
@@ -1689,7 +1672,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "mixed English/Estonian neutral pair",
             "en/et",
-            heuristic_fails=True,
         ),
     ),
 }

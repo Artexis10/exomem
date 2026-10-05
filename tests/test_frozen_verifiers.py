@@ -2,8 +2,7 @@
 
 The admission rule as tests. A verifier labels a review-queue entry only under a
 pinned weights digest, a versioned label map, a green fixture set, and its
-opt-in gate; anything else degrades to ABSENCE — never to the lexical heuristic
-wearing the verifier's method name.
+opt-in gate; anything else degrades to ABSENCE.
 
 Torch-free by construction: every test injects a fake predictor, so the suite
 runs on a box with no cross-encoder weights and no `nli` extra installed.
@@ -396,7 +395,7 @@ def test_a_second_resident_revision_does_not_change_admission_identity(
     assert admission.model_revision == _FAKE_REVISION
 
 
-def test_refused_verifier_never_lets_the_heuristic_wear_the_nli_name(monkeypatch) -> None:
+def test_refused_verifier_returns_no_polarity(monkeypatch) -> None:
     monkeypatch.setattr(claims, "VERIFIER_PINS", ())
     monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
@@ -580,8 +579,6 @@ def test_fixture_set_covers_the_four_corpus_shapes() -> None:
         "et/et",
         "en/et",
     }
-    # The heuristic's known failure cases are carried explicitly, not implied.
-    assert sum(1 for pair in fixtures if pair.heuristic_fails) >= 3
 
 
 def test_green_fixtures_admit_the_verifier(tmp_path, monkeypatch) -> None:
@@ -774,7 +771,7 @@ def _contradiction_fixture() -> claims.FixturePair:
     return next(
         pair
         for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]
-        if pair.expected == "contradict" and not pair.heuristic_fails
+        if pair.expected == "contradict"
     )
 
 
@@ -871,8 +868,8 @@ def test_admitted_verifier_writes_the_label_with_digest_and_label_map(
     assert "CONTRADICT" in findings[0].detail
 
 
-def test_refused_verifier_writes_no_heuristic_label(tmp_path, monkeypatch) -> None:
-    """The heuristic never wears the verifier's name — and never appears at all."""
+def test_refused_verifier_writes_no_polarity_label(tmp_path, monkeypatch) -> None:
+    """A refused verifier leaves the finding exactly as it was: no polarity at all."""
     fixture = _contradiction_fixture()
     _wire_claim_texts(monkeypatch, {_PAGE_A: fixture.claim_a, _PAGE_B: fixture.claim_b})
     monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
