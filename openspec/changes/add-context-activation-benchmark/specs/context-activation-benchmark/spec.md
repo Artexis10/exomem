@@ -62,6 +62,20 @@ Required ordinary-use evidence SHALL include rich-turn capture/readback and publ
 - **WHEN** a retained conversation is replayed without the original activation request and response
 - **THEN** the result is labelled a reconstructed reproduction, not verified diagnosis or closure of the original invocation
 
+### Requirement: Substrate acceptance joins exact state and interpretation
+
+The native lifecycle cohort SHALL exercise an exact observation and a supported compiled interpretation across correction and a fresh-session useful answer. Claimed historical reconstruction SHALL use product-readable retained content, not only evaluator snapshots or hashes. It SHALL include stale input replay and a case outside the correction's scope. Optional worker comparisons SHALL distinguish repeated interpretation of one origin from independent evidence. Embedded-product claims SHALL identify the actual consumer interface exercised, domain ownership, tenant isolation and operation-level authority; synthetic product-shaped trials SHALL NOT establish deployed integration. Reuse the existing quality-cost accounting without a new aggregate score or framework.
+
+#### Scenario: Evaluator knows history that the product cannot recover
+
+- **WHEN** the oracle retains the old interpretation but the product returns only a rationale and hash
+- **THEN** current-answer correctness may pass separately, but recoverable-history acceptance fails
+
+#### Scenario: A creator workflow is only simulated
+
+- **WHEN** a synthetic Exomem workflow passes without exercising a separate application's adapter
+- **THEN** the report establishes that bounded product-shaped workflow and leaves actual application integration unverified
+
 ### Requirement: Derived references retain independent scoring identities
 
 Every distinct reference surfaced in a precision-bearing channel SHALL remain a

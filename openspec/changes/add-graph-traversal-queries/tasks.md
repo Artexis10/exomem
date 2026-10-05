@@ -32,6 +32,8 @@ All implementation tasks remain unchecked. G1–G3 can run dark after collection
 - [ ] 3.6 Implement quotable path explanation and agent-repairable errors/explain; verify 3.5 passes with authored/raw versus current vocabulary clearly identified.
 - [ ] 3.7 **G3 gate:** run scoped path/pattern/aggregate/explanation suites plus independent reference and all visibility twins; require exact results or explicit refusal for exhaustive/shortest work.
 
+- [ ] 3.8 Integrate the existing fragment-target owner and memory-loop correction revision bindings into G3 explanation. Test exact target versus labelled page fallback, two historical refinements, missing retained premise content and current-versus-historical requests; never resolve a missing historical premise by silently reading its current text. Keep GP's supported page-level answers independent of unavailable exact history and add no competing resolver or inference engine.
+
 ## 4. G4 — Consolidated store migration and replay safety
 
 - [ ] 4.1 Red: add graph-only rebuild/current-source/registry/parser/dependency/checkpoint parity, failed staging/cutover, concurrent collection write, combined-store file replacement prohibition and canonical head/audit invariance tests; verify old sidecar replacement cannot be reused against the canonical store.

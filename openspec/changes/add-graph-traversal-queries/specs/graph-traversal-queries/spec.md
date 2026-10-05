@@ -59,6 +59,16 @@ connectivity SHALL NOT be represented as strongest evidence.
 - **WHEN** X depends_on Y and X supports Z and the agent asks what a change to Y or X might affect
 - **THEN** inbound dependency traversal from Y and outbound support traversal from X identify the respective admitted review candidates with witness paths, without mutating or automatically invalidating their status
 
+### Requirement: Explanations distinguish exact historical bindings from connectivity
+
+Graph explanations SHALL preserve authored exact-unit targets when admitted by the existing fragment resolver, and label compatible page-level fallback as coarse connectivity. Historical derivation claims SHALL identify the retained premise and conclusion revisions actually used; current bytes SHALL NOT silently replace unavailable historical content. Unknown bindings SHALL remain unknown. Independent edges SHALL NOT be presented as a proven joint inference or independent corroborations. Technical projection freshness, changed-support review candidates and authored supersession SHALL remain distinct.
+
+#### Scenario: A target claim changes after an authored derivation
+
+- **WHEN** a user asks why a conclusion was reached before its supporting claim was refined
+- **THEN** the explanation uses retained historical bindings where available and reports missing history explicitly
+- **AND** the updated support may produce a review candidate without automatically declaring the conclusion false
+
 ### Requirement: Dynamic ontology resolves transitive types and stable identities
 
 Relation types, open-vocabulary categories, entity kinds and declared collection types SHALL be first-class query dimensions with stable internal identities and current released definitions or explicit undefined status. Versioned vocabulary/alias/closure projections SHALL live beside graph edges in the same per-vault store and remain derived from governed Markdown/registry authoring sources. Queries by parent relation SHALL include all audience-admitted recursive subtypes by default; exact-only SHALL be explicit. Type-hierarchy cycles SHALL be rejected. Is-a/part-of instance closure SHALL traverse admitted hops and preserve path provenance, never use global closure to bypass release.
