@@ -1770,8 +1770,9 @@ def test_a9_never_changes_the_raw_metrics() -> None:
 
 # -- Amendment A10: invalid twins (pre-registered list; digest pinned) ---------
 
-#: Pinned in the commit that introduced A10, before its first run.
-INVALID_TWINS_SHA256 = "7828bc8f4e39f90fac71a13c37e22e87c002bb4a98367ee0f8dc82be09757c61"
+#: Pinned in the commit that introduced A10, before its first run; re-pinned
+#: when T1 left the list (corpus v5, Hugo 2026-10-05).
+INVALID_TWINS_SHA256 = "056cfee688b497b65b5c727cde4c1c20e0273d971d9f213769b82ccca9a5361a"
 
 
 def test_a10_is_the_pre_registered_list() -> None:
@@ -1779,7 +1780,6 @@ def test_a10_is_the_pre_registered_list() -> None:
 
     assert invalid_twins_digest() == INVALID_TWINS_SHA256
     assert {case: page for case, (page, _why) in INVALID_TWINS.items()} == {
-        "T1": "t1_fitness_goal_note",
         "T2": "t2_camera_gear_note",
         "T9": "t2_camera_gear_note",
     }
@@ -1802,20 +1802,20 @@ def test_a10_excludes_a_listed_twin_and_leaves_raw_alone() -> None:
     from membench.utility.context_activation import INVALID_TWIN, excluded_case_ids
 
     packet = ActivationPacket(
-        anchors=(Anchor(ref="t1_fitness_goal_note", title="t", kind="page", status="retrieval_carried"),),
-        units=(Unit(ref="t1_fitness_goal_note#unit-1", role="preferences", text="step-count goal"),),
+        anchors=(Anchor(ref="t2_camera_gear_note", title="t", kind="page", status="retrieval_carried"),),
+        units=(Unit(ref="t2_camera_gear_note#unit-1", role="resources", text="camera body and prime lens"),),
         abstained=True,
         abstention_reason="unresolved",
     )
-    raw = score_case(packet, fixture_by_id("T1"))
-    amended = _amended(packet, "T1", amendments={INVALID_TWIN})
+    raw = score_case(packet, fixture_by_id("T2"))
+    amended = _amended(packet, "T2", amendments={INVALID_TWIN})
     assert not raw.passed and "twin surfaced a ref outside its own gold" in raw.failure_reasons
-    assert amended.failure_reasons[0].startswith("A10: invalid twin, excluded: t1_fitness_goal_note")
-    assert excluded_case_ids([raw, amended]) == ("T1",)
+    assert amended.failure_reasons[0].startswith("A10: invalid twin, excluded: t2_camera_gear_note")
+    assert excluded_case_ids([raw, amended]) == ("T2",)
     assert (amended.precision, amended.twin_false_activation) == (raw.precision, raw.twin_false_activation)
 
 
-@pytest.mark.parametrize("case_id", ["T6", "T3", "C1"])
+@pytest.mark.parametrize("case_id", ["T1", "T6", "T3", "C1"])
 def test_a10_leaves_every_other_case_unchanged(case_id: str) -> None:
     from membench.utility.context_activation import INVALID_TWIN
 
@@ -1827,3 +1827,120 @@ def test_a10_leaves_every_other_case_unchanged(case_id: str) -> None:
     raw = score_case(packet, fixture_by_id(case_id))
     amended = _amended(packet, case_id, amendments={INVALID_TWIN})
     assert (amended.passed, amended.failure_reasons) == (raw.passed, raw.failure_reasons)
+
+
+# -- v5 scorer: S1 (unit counts as its page) and T6 (partial-only hedge) ------
+# Hugo's 2026-10-05 instrument rulings. Raw v4 stays as it is; v5 is its own
+# column (`V5_AMENDMENTS`).
+
+
+def _v5(packet, case_id, parents):
+    from membench.utility.context_activation import V5_AMENDMENTS
+
+    return _amended(packet, case_id, amendments=set(V5_AMENDMENTS), unit_parents=parents)
+
+
+def test_v5_credits_two_units_of_one_gold_page_once() -> None:
+    # The product serves a gold page as an anchor plus its own `#unit-` fragments.
+    # Raw counts each fragment as a distinct ref, so the right page scores 1/3.
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="c8_active_head", title="head", kind="note", status="resolved"),),
+        units=(
+            Unit(ref="page-head#unit-1", role="current_state", text="version 3"),
+            Unit(ref="page-head#unit-2", role="current_state", text="version 3 rollout"),
+        ),
+    )
+    parents = {"page-head": "c8_active_head"}
+    assert score_case(packet, fixture_by_id("C8")).precision < PRECISION_FLOOR
+    scored = _v5(packet, "C8", parents)
+    assert (scored.gold_hit, scored.precision) == (1, 1.0)
+
+
+def test_v5_counts_a_poison_pages_unit_as_a_poison_hit() -> None:
+    # Raw never sees poison served through a fragment of its page.
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="c8_active_head", title="head", kind="note", status="resolved"),),
+        units=(
+            Unit(ref="c8_active_head", role="current_state", text="version 3"),
+            Unit(ref="page-old#unit-1", role="current_state", text="version 2"),
+        ),
+    )
+    parents = {"page-old": "c8_superseded_ancestor_1"}
+    assert score_case(packet, fixture_by_id("C8")).poison_hit == 0
+    assert _v5(packet, "C8", parents).poison_hit == 1
+
+
+def test_v5_does_not_flag_a_narrow_gold_twins_own_page_unit() -> None:
+    # T7 resolves one hub of its own; serving that hub's fact as a unit is not a
+    # false activation, but the same unit from a hub outside its gold still is.
+    anchor = Anchor(ref="c7_hub_feature", title="feature", kind="hub", status="resolved")
+    own = ActivationPacket(
+        anchors=(anchor,), units=(Unit(ref="page-feature#unit-1", role="hub_context", text="feature"),)
+    )
+    other = ActivationPacket(
+        anchors=(anchor,), units=(Unit(ref="page-market#unit-1", role="hub_context", text="market"),)
+    )
+    parents = {"page-feature": "c7_hub_feature", "page-market": "c7_hub_market"}
+    assert score_case(own, fixture_by_id("T7")).twin_false_activation is True
+    assert _v5(own, "T7", parents).twin_false_activation is False
+    assert _v5(other, "T7", parents).twin_false_activation is True
+
+
+def test_v5_still_fails_sixty_junk_fragments_from_unbound_pages() -> None:
+    # Only fragments of a bound page collapse. Unbound pages stay distinct refs,
+    # so padding cannot be laundered through the map.
+    c1 = fixture_by_id("C1")
+    anchors = tuple(Anchor(ref=key, title=key, kind="note", status="resolved") for key in c1.gold[:2])
+    units = tuple(Unit(ref=f"junk-{i}#unit-1", role="note", text=f"junk {i}") for i in range(60))
+    scored = _v5(ActivationPacket(anchors=anchors, units=units), "C1", {"page-gold": c1.gold[0]})
+    assert scored.precision is not None and scored.precision < PRECISION_FLOOR
+    assert any("precision" in reason for reason in scored.failure_reasons)
+
+
+def test_v5_needs_the_frozen_parent_map() -> None:
+    from membench.utility.context_activation import UNIT_PAGE
+
+    with pytest.raises(ValueError, match="unit_parents"):
+        _amended(ActivationPacket(), "C8", amendments={UNIT_PAGE})
+
+
+def _abstained_partial(*refs: str, **extra) -> ActivationPacket:
+    # What the product emits for a turn that names only a partial candidate: it
+    # abstains, so the turn reads `unresolved`, with the partial anchors listed.
+    return ActivationPacket(
+        anchors=_partial(*refs), abstained=True, abstention_reason="unresolved", **extra
+    )
+
+
+def test_v5_counts_an_abstained_partial_only_twin_as_the_runs_hedge() -> None:
+    packet = _abstained_partial("c2_grill_equipment_page")
+    raw = score_case(packet, fixture_by_id("T6"))
+    scored = _v5(packet, "T6", {})
+    assert raw.hedged is False and not raw.passed
+    assert scored.hedged is True and scored.poison_hit == 0
+    assert scored.passed, scored.failure_reasons
+
+
+def test_v5_two_abstained_partial_twins_exceed_the_hedge_ceiling() -> None:
+    from membench.utility.context_activation import V5_AMENDMENTS
+
+    manifest = validate_manifest(MANIFEST)
+    packets = dict.fromkeys([f.case_id for f in FIXTURES], DISABLED_PACKET)
+    packets["T1"] = _abstained_partial("x")
+    packets["T6"] = _abstained_partial("c2_grill_equipment_page")
+    report = run_audit(packets, manifest=manifest, amendments=V5_AMENDMENTS, unit_parents={})
+    assert report_to_dict(report)["hedged_twins"]["count"] == 2 > HEDGED_TWINS_CEILING
+    assert audit_passed(report) is False
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"units": (Unit(ref="c2_grill_equipment_page", role="equipment_profile", text="grill"),)},
+        {"pointers": (Pointer(ref="c2_grill_equipment_page"),)},
+    ],
+    ids=["unit", "pointer"],
+)
+def test_v5_a_unit_or_pointer_disqualifies_the_hedge(extra) -> None:
+    scored = _v5(_abstained_partial("c2_grill_equipment_page", **extra), "T6", {})
+    assert scored.hedged is False and not scored.passed
