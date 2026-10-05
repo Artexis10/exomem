@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -409,7 +410,13 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
         serving.inspect = runtime.inspect
         serving.migration_required = runtime.migration_required
         compatible = entrypoint == "cold-compatible"
-        target = await runtime.inspect({"python": sys.executable if compatible else interpreter, "version": "0.106.0"})
+        python = sys.executable if compatible else interpreter
+        # The probe compares against the staged interpreter's own release, so ask it.
+        version = subprocess.run(
+            [python, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target = await runtime.inspect({"python": python, "version": version})
         assert ("raw-protection-v1" in runtime._verified_state_compatibility[1]) == compatible
         if entrypoint == "upgrade":
             result = await manager.upgrade(target)
