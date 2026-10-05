@@ -72,7 +72,7 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
                     "VOCABULARY_DECISION_INVALID: proposal conflicts with the current registry; "
                     + str(exc)[:1024]
                 ) from None
-            findings = relation_registry.validate_proposal(proposal)
+            findings = relation_registry.validate_proposal(proposal, vault_root)
         else:
             definition = registry.definition(canonical)
             if definition is None or definition.status != "active":
