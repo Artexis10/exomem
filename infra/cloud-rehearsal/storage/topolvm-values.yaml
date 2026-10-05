@@ -1,0 +1,38 @@
+# TopoLVM values for the storage spike (move-cloud-cells-to-local-storage D1):
+# one thin device class at overprovision ratio 1.0 and ext4.
+# cert-manager is installed separately, as the platform chart will have it.
+lvmd:
+  managed: true
+  deviceClasses:
+    - name: thin
+      volume-group: cells
+      default: true
+      type: thin
+      thin-pool:
+        name: pool0
+        overprovision-ratio: 1.0
+storageClasses:
+  # The cell class: the claim waits for its pod, so the scheduler picks the node.
+  - name: exomem-local
+    storageClass:
+      fsType: ext4
+      volumeBindingMode: WaitForFirstConsumer
+      allowVolumeExpansion: true
+      additionalParameters:
+        '{{ include "topolvm.pluginName" . }}/device-class': thin
+  # Spike only: binds at once, so the PV exists and its node pin can be read.
+  - name: exomem-local-immediate
+    storageClass:
+      fsType: ext4
+      volumeBindingMode: Immediate
+      allowVolumeExpansion: true
+      additionalParameters:
+        '{{ include "topolvm.pluginName" . }}/device-class': thin
+controller:
+  replicaCount: 1
+webhook:
+  certManager: true
+cert-manager:
+  enabled: false
+snapshot:
+  enabled: true

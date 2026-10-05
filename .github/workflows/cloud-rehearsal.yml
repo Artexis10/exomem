@@ -9,6 +9,12 @@ on:
   # after any change to cellctl, the platform chart, the cell image or the
   # pinned Substrate commit.
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "full: the P3 rehearsal. storage-spike: TopoLVM thin snapshots on a loop-device volume group (no images built)."
+        type: choice
+        options: [full, storage-spike]
+        default: full
 
 permissions:
   contents: read
@@ -46,6 +52,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -100,5 +107,59 @@ jobs:
           path: |
             ${{ runner.temp }}/cloud-rehearsal-report.json
             ${{ runner.temp }}/rehearsal-diagnostics
+          if-no-files-found: warn
+          retention-days: 30
+
+  storage-spike:
+    name: Local-storage spike (TopoLVM thin snapshots on K3s)
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'storage-spike'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Install the pinned Helm release binary
+        run: |
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_LINUX_AMD64_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
+      - name: Run the storage spike
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 65
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/spike-diagnostics
+        run: |
+          uv run --frozen exomem-cloud-rehearsal storage-spike --report "${RUNNER_TEMP}/storage-spike-report.json"
+      - name: Summarize the findings
+        if: always()
+        run: |
+          if test -f "${RUNNER_TEMP}/storage-spike-report.md"; then
+            cat "${RUNNER_TEMP}/storage-spike-report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No spike report was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: storage-spike-report
+          path: |
+            ${{ runner.temp }}/storage-spike-report.json
+            ${{ runner.temp }}/storage-spike-report.md
+            ${{ runner.temp }}/spike-diagnostics
           if-no-files-found: warn
           retention-days: 30

@@ -66,11 +66,20 @@ def _parser() -> argparse.ArgumentParser:
         help="exit 0 whenever the rehearsal itself worked, even if it recorded product findings "
         "(pull-request CI); without it, only a report that gates the node exits 0",
     )
+    spike_parser = sub.add_parser(
+        "storage-spike", help="measure TopoLVM thin snapshots on K3s on this runner (move-cloud-cells-to-local-storage 1.1)"
+    )
+    spike_parser.add_argument("--report", type=Path, default=Path("storage-spike-report.json"))
+    spike_parser.add_argument("--workdir", type=Path, default=Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "storage-spike")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "storage-spike":
+        from .storage_spike import run_spike
+
+        return run_spike(args.report, args.workdir, Path(os.environ["REHEARSAL_DIAGNOSTICS_DIR"]) if "REHEARSAL_DIAGNOSTICS_DIR" in os.environ else None)
     return asyncio.run(_run(args))
 
 
