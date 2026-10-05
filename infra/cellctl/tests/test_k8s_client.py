@@ -720,6 +720,7 @@ def test_listed_objects_are_attributed_only_to_their_own_cells_namespace() -> No
     owner_restore.metadata.labels = {"app.kubernetes.io/name": "cloud-owner-restore"}
     foreign_pod = _ready_cell_pod()
     foreign_pod.metadata.namespace = foreign
+    foreign_pod.metadata.deletion_timestamp = "2026-01-01T00:00:00+00:00"
     namespaces = [NS(metadata=NS(name=NAMESPACE, labels={CELL_LABEL: CELL_ID})),
                   NS(metadata=NS(name=foreign, labels={}))]
     client = _client(hold_started_at=None, jobs={}, pods=[owner_restore, foreign_pod])
@@ -730,5 +731,5 @@ def test_listed_objects_are_attributed_only_to_their_own_cells_namespace() -> No
     cell = observed[CELL_ID]
     assert (cell.pvc_uid, cell.pv_claim_ref_uid, cell.pvc_volume_id) == (f"uid-{NAMESPACE}",) * 2 + (f"volume-{NAMESPACE}",)
     assert (cell.statefulset_exists, cell.pod_ready) == (False, False)
-    assert (cell.pod_exists, cell.pod_uses_volume) == (True, True)
+    assert (cell.pod_exists, cell.pod_uses_volume, cell.pod_terminating) == (True, True, False)
     assert observed["bbbbbbbbbbbbbbbb"].namespace_exists is False
