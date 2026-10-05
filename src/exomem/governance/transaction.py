@@ -137,8 +137,20 @@ def policy_target(governance_root: Path, relative: str) -> Path:
     return root.joinpath(*rel.parts)
 
 
-def fsync_directory(path: Path) -> None:
+class DirectoryChangedError(OSError):
+    """The directory opened for a flush is not the entry the caller checked."""
+
+
+def fsync_directory(path: Path, *, expected: os.stat_result | None = None) -> None:
     """Flush one directory entry so a completed rename survives a crash.
+
+    This is the one directory flush; callers keep their own error policy
+    around it (raise, translate, or swallow for best effort).
+
+    `expected` is the caller's `os.lstat` of a directory it has already
+    checked is real. The POSIX open then refuses to follow a symlink and
+    raises `DirectoryChangedError` if the opened directory is not that entry.
+    The Windows flush always opens without following and checks identity.
 
     Windows has no CRT route to this. `os.open` on a directory raises
     `PermissionError: [Errno 13]` there, so the POSIX idiom below did not
@@ -157,8 +169,13 @@ def fsync_directory(path: Path) -> None:
 
         mutation_lock._windows_flush_directory(path)
         return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if expected is not None:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
     try:
+        if expected is not None and not os.path.samestat(expected, os.fstat(descriptor)):
+            raise DirectoryChangedError(f"directory changed during open: {path}")
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

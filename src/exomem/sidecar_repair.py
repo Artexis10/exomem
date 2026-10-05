@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .kbdir import kb_dirname
-from .vault import parse_frontmatter, walk_vault_md
+from .vault import _FM_PATTERN, parse_frontmatter, walk_vault_md
 
 PRESERVED_HEADING = "## Preserved notes"
 EXTRACTED_HEADING = "## Extracted text"
@@ -235,14 +235,7 @@ def _longest_extraction(content: str) -> int:
 
 def _split_frontmatter(content: str) -> tuple[str, str]:
     """Split into (verbatim frontmatter block, body). Frontmatter is never edited."""
-    if not content.startswith("---"):
+    match = _FM_PATTERN.match(content)
+    if match is None:
         return "", content
-    end = content.find("\n---", 3)
-    if end == -1:
-        return "", content
-    boundary = end + len("\n---")
-    if content.startswith("\r\n", boundary):
-        boundary += 2
-    elif content.startswith("\n", boundary):
-        boundary += 1
-    return content[:boundary], content[boundary:]
+    return content[: match.start(2)], content[match.start(2) :]

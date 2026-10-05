@@ -14,6 +14,7 @@ unspaced paragraphs) should read the same table rather than declare its own.
 from __future__ import annotations
 
 import bisect
+import re
 import unicodedata
 from functools import lru_cache
 
@@ -168,6 +169,27 @@ def vocabulary_words(text: str) -> list[str]:
             parts.append([kind, character])
     close()
     return words
+
+
+_ASCII_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def comparison_words(text: str) -> list[str]:
+    """The unstemmed words of `text`, for matching labels against labels.
+
+    ASCII text reads as `[a-z0-9]+` over its lowercase, exactly as these
+    comparisons always have. Other text goes through the lexical tokenizer's
+    raw-text table (symbols separate, so "Zorblex™" stays `zorblex`), NFKC and
+    casefolding, then `vocabulary_words`, so a Cyrillic, Greek or Japanese
+    label yields its words instead of nothing. Search ranking stems; use
+    `bm25.tokenize` there instead.
+    """
+    if text.isascii():
+        return _ASCII_WORD_RE.findall(text.lower())
+    from .bm25 import _character_tables  # bm25 imports this module
+
+    table = _character_tables()[1]
+    return vocabulary_words(unicodedata.normalize("NFKC", text.translate(table)).casefold())
 
 
 def continua_character_class() -> str:

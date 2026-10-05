@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
 from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Any
 
 from .entity_types import ENTITY_TYPE_IDS, load_entity_types
 from .kbdir import kb_dirname, kb_prefix
+from .text_scripts import comparison_words
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 PACK_DIRECTORY = "packs"
@@ -143,7 +143,6 @@ class PackSuggestion:
         return data
 
 
-_TOKEN = re.compile(r"[a-z0-9]+")
 
 
 def pack_schema() -> dict:
@@ -489,7 +488,7 @@ def write_selected_packs(
 
 
 def _tokens(text: str) -> set[str]:
-    return set(_TOKEN.findall(text.lower()))
+    return set(comparison_words(text))
 
 
 def _overview_signal_text(scan: dict) -> dict[str, str]:
