@@ -46,10 +46,13 @@ def test_apply_uses_the_cellctl_field_manager_for_server_side_apply() -> None:
     )
 
 
-def _matches(labels: dict[str, str], selector: str) -> bool:
-    for term in selector.split(","):
+def _matches(labels: dict[str, str], selector: str | None) -> bool:
+    for term in filter(None, (selector or "").split(",")):
         if term.startswith("!"):
             if term[1:] in labels:
+                return False
+        elif "=" not in term:
+            if term not in labels:
                 return False
         else:
             key, _, value = term.partition("=")
@@ -67,25 +70,41 @@ def _job_pod(job_name: str, *, snapshot_id: str):
     terminated = NS(exit_code=0, message=snapshot_id)
     return NS(
         metadata=NS(labels={JOB_KIND_LABEL: "backup", "batch.kubernetes.io/job-name": job_name},
-                    deletion_timestamp=None),
+                    namespace=NAMESPACE, deletion_timestamp=None),
         spec=NS(node_name="node-1"),
         status=NS(phase="Succeeded", conditions=[], init_container_statuses=None,
                   container_statuses=[NS(state=NS(terminated=terminated))]),
     )
 
 
+def _named(objects: list, field_selector: str) -> list:
+    name = field_selector.removeprefix("metadata.name=")
+    return [obj for obj in objects if obj.metadata.name == name]
+
+
 class _Core:
-    def __init__(self, pods: list) -> None:
+    """Lists across every namespace, as the API server serves them."""
+
+    def __init__(self, pods: list, *, namespaces: list | None = None, pvcs: list = (), pvs: list = ()) -> None:
         self._pods = pods
+        self._namespaces = namespaces or [NS(metadata=NS(name=NAMESPACE, labels={CELL_LABEL: CELL_ID}))]
+        self._pvcs, self._pvs = list(pvcs), list(pvs)
 
-    def read_namespace(self, name):
-        return NS(metadata=NS(labels={CELL_LABEL: CELL_ID}))
+    def list_namespace(self):
+        return NS(items=self._namespaces)
 
-    def read_namespaced_persistent_volume_claim(self, name, namespace):
-        raise ApiException(status=404)
+    def list_persistent_volume_claim_for_all_namespaces(self, field_selector):
+        return NS(items=_named(self._pvcs, field_selector))
+
+    def list_persistent_volume(self):
+        return NS(items=self._pvs)
+
+    def list_pod_for_all_namespaces(self, label_selector):
+        return NS(items=[pod for pod in self._pods if _matches(pod.metadata.labels, label_selector)])
 
     def list_namespaced_pod(self, namespace, label_selector):
-        return NS(items=[pod for pod in self._pods if _matches(pod.metadata.labels, label_selector)])
+        return NS(items=[pod for pod in self._pods
+                         if pod.metadata.namespace == namespace and _matches(pod.metadata.labels, label_selector)])
 
 
 class _Apps:
@@ -96,13 +115,13 @@ class _Apps:
         if hold_started_at:
             annotations.update({HOLD_ANNOTATION: "upgrade", HOLD_STARTED_ANNOTATION: hold_started_at})
         self._statefulset = NS(
-            metadata=NS(annotations=annotations, generation=generation),
+            metadata=NS(name="cell", namespace=NAMESPACE, annotations=annotations, generation=generation),
             spec=NS(replicas=0, template=NS(spec=NS(containers=[NS(image="registry.example/cell@sha256:" + "a" * 64)]))),
             status=NS(update_revision="cell-rev-1", observed_generation=observed_generation),
         )
 
-    def read_namespaced_stateful_set(self, name, namespace):
-        return self._statefulset
+    def list_stateful_set_for_all_namespaces(self, field_selector):
+        return NS(items=_named([self._statefulset], field_selector))
 
 
 class _Batch:
@@ -175,7 +194,8 @@ def _cell_pod(
     *, init_state, last_state=None, created: str = "2026-01-01T00:00:00+00:00", revision: str = "cell-rev-1"
 ):
     return NS(
-        metadata=NS(labels={"controller-revision-hash": revision}, deletion_timestamp=None, creation_timestamp=created),
+        metadata=NS(labels={"controller-revision-hash": revision}, namespace=NAMESPACE, deletion_timestamp=None,
+                    creation_timestamp=created),
         spec=NS(node_name="node-1", containers=[NS(image="registry.example/cell@sha256:" + "a" * 64)]),
         status=NS(
             phase="Running",
@@ -675,3 +695,41 @@ def test_shared_pending_reservations_respect_noexecute_taints(shared_capacity_cl
     observation = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
     assert bool(observation.pods) is tolerated
     assert bool(observation.attachments) is tolerated
+
+
+# --- D4 API budget: one list per kind, attributed by exact namespace ----------
+
+
+def test_listed_objects_are_attributed_only_to_their_own_cells_namespace() -> None:
+    # The fleet is observed from cluster-wide lists. A foreign namespace's
+    # same-named objects must never reach a cell, and any non-Job pod in the
+    # cell's namespace -- an operator's unlabelled owner-restore pod among
+    # them -- still holds the RWO volume, so no Job or runtime mounts it.
+    foreign = "kube-system"
+    pvcs = [
+        NS(metadata=NS(name="cell-data", namespace=ns, uid=f"uid-{ns}"), spec=NS(volume_name=f"pv-{ns}"),
+           status=NS(phase="Bound"))
+        for ns in (NAMESPACE, foreign)
+    ]
+    pvs = [
+        NS(metadata=NS(name=f"pv-{ns}"), spec=NS(claim_ref=NS(uid=f"uid-{ns}"), storage_class_name=None,
+                                               csi=NS(volume_handle=f"volume-{ns}")))
+        for ns in (NAMESPACE, foreign)
+    ]
+    owner_restore = _cell_pod(init_state=None)
+    owner_restore.metadata.labels = {"app.kubernetes.io/name": "cloud-owner-restore"}
+    foreign_pod = _ready_cell_pod()
+    foreign_pod.metadata.namespace = foreign
+    foreign_pod.metadata.deletion_timestamp = "2026-01-01T00:00:00+00:00"
+    namespaces = [NS(metadata=NS(name=NAMESPACE, labels={CELL_LABEL: CELL_ID})),
+                  NS(metadata=NS(name=foreign, labels={}))]
+    client = _client(hold_started_at=None, jobs={}, pods=[owner_restore, foreign_pod])
+    client._core = _Core([owner_restore, foreign_pod], namespaces=namespaces, pvcs=pvcs, pvs=pvs)
+    client._apps._statefulset.metadata.namespace = foreign
+
+    observed = client.observe_cells({CELL_ID: NAMESPACE, "bbbbbbbbbbbbbbbb": "exo-cell-bbbbbbbbbbbbbbbb"})
+    cell = observed[CELL_ID]
+    assert (cell.pvc_uid, cell.pv_claim_ref_uid, cell.pvc_volume_id) == (f"uid-{NAMESPACE}",) * 2 + (f"volume-{NAMESPACE}",)
+    assert (cell.statefulset_exists, cell.pod_ready) == (False, False)
+    assert (cell.pod_exists, cell.pod_uses_volume, cell.pod_terminating) == (True, True, False)
+    assert observed["bbbbbbbbbbbbbbbb"].namespace_exists is False
