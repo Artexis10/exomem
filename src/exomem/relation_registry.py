@@ -721,12 +721,22 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                 )
             )
             scope = {}
+        parent_family = core.core[parent].family if parent in core.core else ""
+        declared_family = value.get("family")
+        if parent_family and declared_family and str(declared_family) != parent_family:
+            findings.append(
+                _finding(
+                    "family_mismatch",
+                    f"{span}.family",
+                    f"must equal the parent's core family {parent_family!r}, so a declared "
+                    "family cannot relabel the parent's meaning",
+                    relation=key,
+                )
+            )
         definition = RelationDefinition(
             key=key,
             description=description,
-            family=str(
-                value.get("family") or (core.core[parent].family if parent in core.core else "")
-            ),
+            family=str(declared_family or parent_family),
             direction=direction,
             parent=parent if isinstance(parent, str) else None,
             inverse=_optional(value.get("inverse")),
