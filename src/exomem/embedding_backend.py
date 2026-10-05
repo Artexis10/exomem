@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import gc
 import hashlib
 import json
 import logging
@@ -39,7 +40,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import accel, model_cache, runtime_resources
+from . import accel, compact_tokenizer, model_cache, process_memory, runtime_resources
 from .log_events import log_event
 
 log = logging.getLogger(__name__)
@@ -513,13 +514,21 @@ class _OnnxEncoder:
             self.profile = dataclasses.replace(self.profile, artifact_digest=digest)
             device, providers = "cpu", ["CPUExecutionProvider"]
 
-        self._tokenizer = Tokenizer.from_file(tokenizer_path)
-        self._tokenizer.enable_truncation(max_length=self.profile.max_seq)
-        pad_id = self._tokenizer.token_to_id(self.profile.pad_token)
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+        tokenizer.enable_truncation(max_length=self.profile.max_seq)
+        pad_id = tokenizer.token_to_id(self.profile.pad_token)
         if pad_id is None:
             raise ValueError(f"{model_name}: padding token {self.profile.pad_token!r} is not in its tokenizer")
-        self._tokenizer.enable_padding(pad_id=pad_id, pad_token=self.profile.pad_token)
+        tokenizer.enable_padding(pad_id=pad_id, pad_token=self.profile.pad_token)
         self._pad_id = pad_id
+        # A Unigram vocabulary of bge-m3's size is ~264 MiB inside the Rust
+        # tokenizer and ~64 MiB as the compact one, with the same token ids.
+        compact = compact_tokenizer.from_hf(tokenizer, max_length=self.profile.max_seq, pad_id=pad_id)
+        self._tokenizer = compact or tokenizer
+        if compact is not None:
+            del tokenizer
+            gc.collect()
+            process_memory.trim_allocator()
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
