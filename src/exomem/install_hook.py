@@ -63,6 +63,7 @@ _HOOK_SPECS = (
     ("exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh", "UserPromptSubmit"),
 )
 _CONTINUATION_SCRIPT = "exomem_continuation_checkpoint.py"
+_LOCAL_CREDENTIAL_SCRIPT = "exomem_local_credentials.py"
 _CONTINUATION_WRAPPER = "exomem-continuation-checkpoint.sh"
 _CONTINUATION_LEGACY = (
     "kb_continuation_checkpoint.py",
@@ -764,7 +765,10 @@ def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
             directory_context.__exit__(None, None, None)
         directory_context = None
         directory = None
-    for name in (script, wrapper):
+    names = (script, wrapper)
+    if any(script == spec[0] for spec in _HOOK_SPECS):
+        names += (_LOCAL_CREDENTIAL_SCRIPT,)
+    for name in names:
         src = _HOOK_DIR_SRC / name
         dst = hook_dir / name
         source = _safe_file_status(src)
@@ -1803,7 +1807,7 @@ def install_hook(
     source_specs = list(specs)
     bundled = {name for py_name, sh_name, _event in source_specs for name in (py_name, sh_name)}
     if specs is _HOOK_SPECS:
-        bundled.update({_CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER})
+        bundled.update({_CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER, _LOCAL_CREDENTIAL_SCRIPT})
     for name in bundled:
         if not (_HOOK_DIR_SRC / name).exists():
             raise FileNotFoundError(
@@ -1831,6 +1835,7 @@ def install_hook(
         _deploy_file(_HOOK_DIR_SRC / sh_name, hook_dir / sh_name)
         installed.append(_nudge_item(py_name, sh_name, event, hook_dir, client, home, activation_mode, timeout))
     if specs is _HOOK_SPECS:
+        _deploy_file(_HOOK_DIR_SRC / _LOCAL_CREDENTIAL_SCRIPT, hook_dir / _LOCAL_CREDENTIAL_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_SCRIPT, hook_dir / _CONTINUATION_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_WRAPPER, hook_dir / _CONTINUATION_WRAPPER)
         installed.extend(_continuation_items(hook_dir, client, home, activation_mode))
@@ -2231,6 +2236,7 @@ _DEPLOYED_NAMES = (
     *(name for py_name, sh_name, _event in _HOOK_SPECS for name in (py_name, sh_name)),
     _CONTINUATION_SCRIPT,
     _CONTINUATION_WRAPPER,
+    _LOCAL_CREDENTIAL_SCRIPT,
     *_CONTINUATION_LEGACY,
     "kb_capture_nudge.py",
     "kb-capture-nudge.sh",

@@ -18,8 +18,8 @@ default.)
 Opt-in **inject mode** (`EXOMEM_RETRIEVE_INJECT`) upgrades the reminder to real
 retrieved content: on the same gated prompt, it fetches the top compact routing
 stubs (`ask_memory(detail="compact", mode="hybrid")`) via a short transport
-ladder — REST first (`EXOMEM_REST_API_KEY` in this env, else read from the
-managed install's `service.env`), then an opt-in CLI fallback
+ladder — REST first (the separate self-hosted credential module reads the
+managed local service's key), then an opt-in CLI fallback
 (`EXOMEM_RETRIEVE_INJECT_CLI`) — and appends them to the reminder. Any transport
 failure (or the flag being off) falls straight through to the reminder-only
 floor; the hook never blocks or raises past that point.
@@ -690,59 +690,15 @@ def _fetch_via_cli(
 
 
 def _service_env_path() -> Path | None:
-    """The managed install's service EnvironmentFile, where `install-service.sh`
-    persists `EXOMEM_REST_API_KEY` (mirrors its CONFIG_ROOT per platform).
-    `EXOMEM_SERVICE_ENV` overrides the location; Windows has no service env."""
-    explicit = os.environ.get("EXOMEM_SERVICE_ENV", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    if os.name == "nt":
-        return None
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Exomem" / "service.env"
-    base = os.environ.get("XDG_CONFIG_HOME", "").strip() or str(Path.home() / ".config")
-    return Path(base) / "exomem" / "service.env"
+    return _state_core().local_credentials().service_env_path()
 
 
 def _resolve_rest_key() -> tuple[str, str]:
-    """`(key, source)`: the key from this env (`source="env"`), else from the
-    managed install's `service.env` (`source="file"`, #1142), else `("", "")`.
-    On a managed install the key lives only in the service's EnvironmentFile,
-    so the client shell never carries it and the REST rung never ran.
-
-    The file read mirrors `scripts/_service-common.sh`'s
-    `exomem_dotenv_file_value` — first `NAME=` line, one layer of matching
-    quotes stripped — and additionally reverses the `systemd_quote` escaping
-    `install-service.sh` writes inside double quotes (`\\` and `\"`). Never
-    raises; the value is never logged."""
-    from_env = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
-    if from_env:
-        return from_env, "env"
-    value = _service_env_value("EXOMEM_REST_API_KEY")
-    return (value, "file") if value else ("", "")
+    return _state_core().local_credentials().rest_key(_service_env_value)
 
 
 def _service_env_value(name: str) -> str:
-    """The first `NAME=` value in the managed install's `service.env`, else "".
-    Never raises; the value is never logged."""
-    path = _service_env_path()
-    if path is None:
-        return ""
-    try:
-        text = path.read_text(encoding="utf-8").lstrip("\ufeff")
-    except Exception:  # noqa: BLE001 - hook must never break prompt submission
-        return ""
-    for line in text.splitlines():
-        match = re.match(rf"^\s*{re.escape(name)}\s*=\s*(.*)$", line)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if len(value) >= 2 and value[0] == value[-1] == '"':
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif len(value) >= 2 and value[0] == value[-1] == "'":
-            value = value[1:-1]
-        return value.strip()
-    return ""
+    return _state_core().local_credentials().service_env_value(name, _service_env_path())
 
 
 def _local_port() -> int | None:
@@ -757,23 +713,7 @@ def _local_port() -> int | None:
 
 
 def _resolve_local_credential() -> tuple[str, int | None]:
-    """`(token, port)` for the local listener rung, or `("", None)`.
-
-    The token comes only from the file `EXOMEM_LOCAL_TOKEN_FILE` names (an
-    `exomem auth issue-local` output); it is never logged. The rung it enables
-    always targets literal loopback, never `EXOMEM_HOST`.
-    """
-    path = os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
-    if not path:
-        return "", None
-    try:
-        token = Path(path).expanduser().read_text(encoding="ascii").strip()
-    except Exception:  # noqa: BLE001 - hook must never break prompt submission
-        return "", None
-    if not token or any(character.isspace() for character in token):
-        return "", None
-    port = _local_port()
-    return (token, port) if port is not None else ("", None)
+    return _state_core().local_credentials().local_credential(_local_port)
 
 
 def _rest_api_key() -> str:

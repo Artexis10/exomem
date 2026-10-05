@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -20,8 +21,24 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+
+@lru_cache(maxsize=1)
+def local_credentials():
+    """Load the self-hosted transport dependency only when that mode uses it.
+
+    Cloud packages deliberately omit this module; native-MCP paths never call
+    this loader. Standalone local installs keep it beside these shared scripts.
+    """
+    path = Path(__file__).with_name("exomem_local_credentials.py")
+    spec = importlib.util.spec_from_file_location("_exomem_local_credentials", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 SCHEMA_VERSION = 1
 EVENT_CONTRACT_VERSION = 1
