@@ -239,12 +239,14 @@ def append_record(
     hold: bool = True,
     held: str | None = None,
     validate_snapshot: Callable[
-        [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]],
+        [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any], str],
         None,
     ]
     | None = None,
 ) -> dict[str, Any]:
     """Append one structured item, or return a content-identical replay."""
+    from . import context_refs, origin_bindings, provenance, semantic_units
+
     root = Path(vault_root)
     _validate_why(why)
     hold = _validate_hold(hold)
@@ -349,6 +351,45 @@ def append_record(
                 "an existing item already holds this natural key under another identity",
                 {"item_keys": twins},
             )
+        origin_inputs = None
+        new_item = None
+        if manifest.storage.strategy == "markdown-items":
+            prior_body = existing[0].body if len(existing) == 1 else None
+            try:
+                if origin_bindings._authored_origin(body, prior_body) is not None:  # noqa: SLF001
+                    body = origin_bindings.place_authored_origin(body, before_source=prior_body)
+                    if existing:
+                        item_path = root / existing[0].source.path
+                    else:
+                        new_item = _new_item_path(root, manifest, key, values, snapshot)
+                        item_path = new_item[0]
+                    item_relative = item_path.relative_to(root).as_posix()
+                    rendered = record_formats.render_markdown_item(
+                        manifest,
+                        values,
+                        key,
+                        body,
+                        resolve_relationship=_presentation_relationship_resolver(
+                            root, manifest, snapshot
+                        ),
+                    )
+                    _fields, rendered_body, _ = vault.parse_frontmatter(rendered)
+                    body = origin_bindings.normalize_origin_scopes(
+                        body,
+                        document=semantic_units.parse_semantic_units(
+                            rendered_body,
+                            path=item_relative,
+                        ),
+                        fields=values,
+                        owner_ref=context_refs.vault_ref(item_relative),
+                        record_identity=(manifest.collection_id, key),
+                        before_source=prior_body,
+                    )
+                    _validate_body(body)
+                    if not existing:
+                        origin_inputs = origin_bindings.prepare_origin_inputs(root, body)
+            except provenance.OriginError as error:
+                raise collections.CollectionError(error.code, error.reason) from error
         payload_hash = _payload_hash(manifest, key, values, body)
         delivery_guard = (
             _validate_artifact_delivery(root, manifest, values, delivery)
@@ -356,7 +397,7 @@ def append_record(
             else None
         )
         if validate_snapshot is not None:
-            validate_snapshot(manifest, snapshot, key, values)
+            validate_snapshot(manifest, snapshot, key, values, body)
         if existing:
             if len(existing) != 1 or existing[0].ambiguous:
                 raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
@@ -420,7 +461,9 @@ def append_record(
             canonical_path = source_path
             canonical_guard = source_guard
         else:
-            canonical_path, new_item_guards = _new_item_path(root, manifest, key, values, snapshot)
+            canonical_path, new_item_guards = new_item or _new_item_path(
+                root, manifest, key, values, snapshot
+            )
             directory_guards = (*directory_guards, *new_item_guards)
             replacement = record_formats.render_markdown_item(
                 manifest,
@@ -477,7 +520,10 @@ def append_record(
             snapshot,
             planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
         )
+        origin_guards = ()
         try:
+            if origin_inputs is not None:
+                origin_guards = origin_inputs.required_guards(root, writes)
             vault.batch_atomic_write(
                 writes,
                 vault_root=root,
@@ -485,11 +531,25 @@ def append_record(
                     *directory_guards,
                     *snapshot.path_guards,
                     *((delivery_guard,) if delivery_guard is not None else ()),
+                    *origin_guards,
+                ),
+                _validate_prepared_bindings=(
+                    (lambda: origin_inputs.revalidate(root)) if origin_inputs is not None else None
                 ),
             )
         except vault.BatchWriteError:
             raise
-        except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
+        except provenance.OriginError as error:
+            raise collections.CollectionError(error.code, error.reason) from error
+        except vault.PathGuardError as error:
+            try:
+                vault.recheck_path_guards(root, origin_guards)
+            except vault.PathGuardError as origin_error:
+                raise collections.CollectionError(
+                    "ORIGIN_INPUT_STALE", "retained input changed during commit"
+                ) from origin_error
+            raise _publication_error(error) from error
+        except (vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         committed_path = canonical_path.relative_to(root).as_posix()
         committed = _result(
@@ -544,13 +604,13 @@ def prepare_append(
     a prepared append always creates.
     """
     root = Path(vault_root)
-    text = _resumed_body(None, body)
 
     def stop(
         manifest: collections.CollectionManifest,
         snapshot: record_formats.AdapterSnapshot,
         key: str,
         values: Mapping[str, Any],
+        body: str,
     ) -> None:
         if any(record.identity.key == key for record in snapshot.records):
             raise collections.CollectionError("RECORD_ID_CONFLICT", "record key already exists")
@@ -563,7 +623,8 @@ def prepare_append(
                 "strategy": manifest.storage.strategy,
                 "item_key": key,
                 "path": path.relative_to(root).as_posix(),
-                "payload_hash": _payload_hash(manifest, key, values, text),
+                "payload_hash": _payload_hash(manifest, key, values, body),
+                "body": body,
             }
         )
 
@@ -4981,21 +5042,33 @@ def _semantic_body(
     values: Mapping[str, Any] | None = None,
 ) -> str:
     """Ignore one valid renderer span when comparing append retries."""
+    shared = manifest is not None and manifest.item_presentation is not None
     try:
-        span = record_formats._presentation_span(body)
+        span = (
+            record_formats._item_presentation_span(body)
+            if shared else record_formats._presentation_span(body)
+        )
     except collections.CollectionError:
         return body
     if span is None:
         return body
     if manifest is not None and values is not None:
-        payload = record_formats._presentation_payload(manifest, values)
-        canonical = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
-        expected_digest = hashlib.sha256(canonical).hexdigest()
-        marker = record_formats._PRESENTATION_OPEN.search(body, span[0], span[1])
-        if marker is None or marker.group(1) != expected_digest:
-            return body
+        if shared:
+            recipe_digest, item_digest, _ = record_formats._item_presentation_digests(
+                manifest, values
+            )
+            marker = record_formats._ITEM_PRESENTATION_OPEN.search(body, span[0], span[1])
+            if marker is None or marker.groups() != (recipe_digest, item_digest):
+                return body
+        else:
+            payload = record_formats._presentation_payload(manifest, values)
+            canonical = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            expected_digest = hashlib.sha256(canonical).hexdigest()
+            marker = record_formats._PRESENTATION_OPEN.search(body, span[0], span[1])
+            if marker is None or marker.group(1) != expected_digest:
+                return body
     rendered = body[: span[0]] + body[span[1] :]
     # Remove only the renderer's structural separator.  Author-authored leading
     # blank lines remain part of semantic append identity.

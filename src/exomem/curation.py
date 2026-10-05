@@ -1302,6 +1302,8 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     expected_container_hash=args["expected_container_hash"],
                     why=args["why"],
                 )
+                if appended["body"] != (args.get("body") or ""):
+                    step["args"]["body"] = appended["body"]
             else:
                 appended = records_module.prepare_update(
                     vault_root,

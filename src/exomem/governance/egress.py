@@ -67,7 +67,13 @@ from . import policy as policy_module
 from .decisions import Decision, decide
 from .decisions import _meet_decisions as _meet_decisions
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
-from .principal import OWNER_AUDIENCE, RequestPrincipal, current_principal, effective_principal
+from .principal import (
+    OWNER_AUDIENCE,
+    RequestPrincipal,
+    current_principal,
+    effective_principal,
+    request_scope,
+)
 
 log = logging.getLogger(__name__)
 
@@ -4004,6 +4010,43 @@ def _attach_raw_content(
     return out
 
 
+def _project_page_origin(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    principal: RequestPrincipal,
+    purpose: str | None,
+    snapshot_content: str | bytes | None,
+) -> tuple[dict[str, Any], bool]:
+    text = snapshot_content if snapshot_content is not None else page.get("body")
+    if isinstance(text, bytes):
+        try:
+            text = text.decode("utf-8")
+        except UnicodeDecodeError:
+            return page, False  # Existing raw-content and snapshot owners refuse these bytes.
+    if not isinstance(text, str) or "<!--" not in text or "exomem-origin" not in text.lower():
+        return page, False
+    from .. import origin_bindings, source_closure
+
+    if source_closure._eligible_path(str(page.get("path") or "")):  # noqa: SLF001
+        return page, False  # Captured evidence is not managed attribution.
+    with request_scope(principal.with_purpose(_declared_purpose(vault_root, principal, purpose))):
+        projected = origin_bindings.project_origin_text(vault_root, text)
+    if projected == text:
+        return page, False
+    out = dict(page)
+    if snapshot_content is not None:
+        frontmatter, body, _ = vault.parse_frontmatter(projected)
+        if "frontmatter" in out:
+            out["frontmatter"] = frontmatter
+        if "body" in out:
+            out["body"] = body
+    elif "body" in out:
+        out["body"] = projected
+    out.pop("content", None)  # A redacted projection is never an exact raw read.
+    return out, True
+
+
 @canonical_read
 def annotate_page(
     vault_root: Path,
@@ -4030,7 +4073,10 @@ def annotate_page(
     who = principal if principal is not None else effective_principal()
 
     if _file_policy_empty(vault_root, policy):
-        return _attach_raw_content(page, snapshot_content) if include_raw else page
+        out, redacted = _project_page_origin(
+            vault_root, page, principal=who, purpose=purpose, snapshot_content=snapshot_content
+        )
+        return _attach_raw_content(out, snapshot_content) if include_raw and not redacted else out
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
         return None
@@ -4218,6 +4264,9 @@ def annotate_page(
             bridge_abstraction=decision.bridge_abstraction,
         )
 
+    page, origin_redacted = _project_page_origin(
+        vault_root, page, principal=who, purpose=declared_purpose, snapshot_content=snapshot_content
+    )
     # L5/L6: the page is released. Its own provenance must still not name a
     # sub-notice item (D3 applies the strip at EVERY level, not just below
     # full), so decide the items this page points at before answering.
@@ -4256,7 +4305,7 @@ def annotate_page(
 
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
     if level == LEVEL_EXCERPT:
-        body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        body = str(page.get("body") or "")
         body = redact_withheld_references(
             vault_root,
             body,
@@ -4284,7 +4333,7 @@ def annotate_page(
             decision.release_strip,
             direct_page=True,
         )
-    return _attach_raw_content(out, snapshot_content) if include_raw else out
+    return _attach_raw_content(out, snapshot_content) if include_raw and not origin_redacted else out
 
 
 def _iter_reference_targets(value: Any) -> Iterable[str]:
@@ -4483,6 +4532,9 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    evidence_projection = (
+        result if isinstance(result, dict) and "evidence_version" in result else None
+    )
     issuance_context = scrubber._issuance_projection_context(result)
     if issuance_context is not None:
         # `rotate` has already invalidated the request's prior credential by
@@ -4520,6 +4572,15 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
+    # A material version requires an unchanged requested page or exact unit.
+    # Later filtering can turn that response into a projection; keep its
+    # canonical hash, but withdraw the binding without scanning unreturned text.
+    if (
+        evidence_projection is not None
+        and isinstance(cleaned, dict)
+        and cleaned != evidence_projection
+    ):
+        cleaned.pop("evidence_version", None)
     return (canonical_governance._seal_inspection_projection(cleaned, inspection_evidence)
             if inspection_evidence is not None else cleaned)
 

@@ -536,10 +536,6 @@ def parse_page(
             # ambiguous metadata, not proof that the page has no metadata.
             frontmatter_valid = False
 
-    from .vault import resolve_display_title
-
-    title = resolve_display_title(frontmatter, body, path)
-
     if resolved_relative is not None:
         rel_path = resolved_relative
     else:
@@ -547,6 +543,19 @@ def parse_page(
             rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
         except ValueError:
             rel_path = path.as_posix()
+
+    from . import provenance
+    from .vault import resolve_display_title
+
+    display_frontmatter = frontmatter
+    authored_title = frontmatter.get("title")
+    if authored_title is not None:
+        display_title = provenance.origin_prose(str(authored_title), owner_path=rel_path)
+        if display_title != str(authored_title):
+            display_frontmatter = {**frontmatter, "title": display_title}
+    title = resolve_display_title(
+        display_frontmatter, provenance.origin_prose(body, owner_path=rel_path), path
+    )
 
     return ParsedPage(
         path=path,

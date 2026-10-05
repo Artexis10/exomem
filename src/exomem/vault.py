@@ -33,6 +33,7 @@ from slugify import slugify as _slugify
 
 from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths
 from .kbdir import kb_dirname, kb_prefix
+from .markdown_regions import mask_code
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
@@ -4767,6 +4768,7 @@ def batch_atomic_write(
     defer_graph_completion: bool = False,
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -4775,7 +4777,9 @@ def batch_atomic_write(
     descriptor-owned staging, exact rollback snapshots, and one post-commit
     index fan-out. ``completion_guards`` bind large read-only inputs once before
     publication and once at the rollback-capable completion point, avoiding a
-    full content rehash before every destination flip.
+    full content rehash before every destination flip. A trusted owner's private
+    binding validator runs at those same boundaries; byte guards alone cannot
+    establish fresh input permission.
     """
     from . import working_set_heat
 
@@ -4813,6 +4817,7 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 publication_intents_out=publication_intents_out,
+                _validate_prepared_bindings=_validate_prepared_bindings,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -4836,6 +4841,7 @@ def _batch_atomic_write_locked(
     defer_graph_completion: bool = False,
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5298,6 +5304,8 @@ def _batch_atomic_write_locked(
         validate_active_write_fence()
         log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
         for index, (final, workspace, artifact) in enumerate(staged):
+            if index == 0 and _validate_prepared_bindings is not None:
+                _validate_prepared_bindings()
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
             for _pending_final, _pending_workspace, pending_artifact in staged[index:]:
@@ -5382,6 +5390,11 @@ def _batch_atomic_write_locked(
             )
             _after_batch_destination_published(final)
             workspace.recheck()
+        if _validate_prepared_bindings is not None:
+            # Judge complete post-images, never a Source backref whose new
+            # destination is still in flight. Recheck byte guards afterwards:
+            # an external editor may have changed a file while validation waited.
+            _validate_prepared_bindings()
         if read_only_guards or all_completion_guards:
             recheck_path_guards(Path(vault_root), (*read_only_guards, *all_completion_guards))
         for workspace in workspace_by_parent.values():
@@ -7115,39 +7128,13 @@ def _mask_code_spans(text: str) -> str:
     unchanged. Used so wikilink scanners can ignore `[[X]]` inside code while
     still reporting accurate offsets into the original text.
     """
-    out = list(text)
-    # Fenced code blocks (``` or ~~~), allowing up to 3 leading spaces per CommonMark.
-    fence_open = re.compile(r"^( {0,3})(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
-    pos = 0
-    while True:
-        m = fence_open.search(text, pos)
-        if not m:
-            break
-        fence = m.group(2)
-        char = fence[0]
-        length = len(fence)
-        close_re = re.compile(
-            rf"^ {{0,3}}{re.escape(char)}{{{length},}}\s*$",
-            re.MULTILINE,
-        )
-        close_m = close_re.search(text, m.end())
-        end = close_m.end() if close_m else len(text)
-        for i in range(m.start(), end):
-            if text[i] != "\n":
-                out[i] = " "
-        pos = end
-    # Inline code: single-line backtick-delimited spans.
-    inline_re = re.compile(r"(`+)([^\n`]+?)\1")
-    masked_str = "".join(out)
-    for m in inline_re.finditer(masked_str):
-        for i in range(m.start(), m.end()):
-            if out[i] != "\n":
-                out[i] = " "
-    return "".join(out)
+    return mask_code(text)
 
 
 def find_body_wikilinks(text: str) -> list[re.Match[str]]:
     """Return wikilink matches in `text`, skipping fenced code + inline code."""
+    if "[[" not in text:
+        return []
     masked = _mask_code_spans(text)
     return list(_WIKILINK_PATTERN.finditer(masked))
 

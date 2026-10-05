@@ -39,8 +39,10 @@ dependencies = [
     "fastmcp==4.0.3",
     "httpx>=0.27",
     "httpx2>=2.12,<3",         # FastMCP provider clients use a distinct exception family
+    "html5lib==1.1",          # opaque HTML comment ownership and namespace transitions
     "jsonschema>=4.23,<5",     # portable cloud package manifest validation
     "ijson>=3.5.1,<4",        # bounded, lossless selection from stored JSON streams
+    "markdown-it-py==4.2.0",   # shared CommonMark syntax and exact original-region adapter
     "pyyaml>=6.0",
     "python-slugify>=8.0",
     "python-dotenv>=1.0",

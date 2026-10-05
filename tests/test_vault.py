@@ -416,6 +416,116 @@ def test_batch_completion_guard_hash_work_is_independent_of_write_count(
     assert reads == 2
 
 
+@pytest.mark.parametrize("revoke_during_publication", [False, True])
+def test_batch_binding_refusal_preserves_existing_bytes_and_removes_new_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revoke_during_publication: bool,
+) -> None:
+    """Input permission can change without changing any guarded source bytes."""
+    existing = tmp_path / "existing.md"
+    created = tmp_path / "new.md"
+    existing.write_text("before", encoding="utf-8")
+    allowed = revoke_during_publication
+    original_hook = vault._after_batch_destination_published
+
+    def revoke_after_first_publication(path: Path) -> None:
+        nonlocal allowed
+        original_hook(path)
+        if not revoke_during_publication:
+            raise AssertionError("an unavailable binding reached publication")
+        if path == existing:
+            allowed = False
+
+    def validate_bindings() -> None:
+        if not allowed:
+            raise PermissionError("retained input unavailable")
+
+    monkeypatch.setattr(
+        vault, "_after_batch_destination_published", revoke_after_first_publication
+    )
+    with pytest.raises(PermissionError, match="retained input unavailable"):
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(existing, "after"),
+                vault.PlannedWrite(created, "new effect", create_only=True),
+            ],
+            vault_root=tmp_path,
+            post_commit_fanout=False,
+            _validate_prepared_bindings=validate_bindings,
+        )
+
+    assert existing.read_text(encoding="utf-8") == "before"
+    assert not created.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["existing.md"]
+
+
+def test_batch_binding_validation_accepts_only_complete_pre_and_post_images(tmp_path: Path) -> None:
+    """A Source backref must not be judged against a destination still in flight."""
+    source = tmp_path / "source.md"
+    output = tmp_path / "output.md"
+    source.write_text("original", encoding="utf-8")
+    validated_images: set[str] = set()
+
+    def validate_bindings() -> None:
+        if source.read_text(encoding="utf-8") == "original":
+            assert not output.exists()
+            validated_images.add("before")
+        else:
+            assert source.read_text(encoding="utf-8") == "original with output backref"
+            assert output.read_text(encoding="utf-8") == "compiled output"
+            validated_images.add("after")
+
+    result = vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(source, "original with output backref"),
+            vault.PlannedWrite(output, "compiled output", create_only=True),
+        ],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+        _validate_prepared_bindings=validate_bindings,
+    )
+
+    assert result == [source, output]
+    assert source.read_text(encoding="utf-8") == "original with output backref"
+    assert output.read_text(encoding="utf-8") == "compiled output"
+    assert validated_images == {"before", "after"}
+
+
+@pytest.mark.parametrize("edit_at_completion", [False, True])
+def test_batch_rechecks_destination_bytes_after_a_binding_validation_wait(
+    tmp_path: Path, edit_at_completion: bool
+) -> None:
+    """An editor's change during a slow input check must not be overwritten."""
+    existing = tmp_path / "existing.md"
+    existing.write_text("before", encoding="utf-8")
+    guard = vault.PathGuard.capture(
+        tmp_path,
+        "existing.md",
+        leaf_policy="content",
+        expected_content_hash=hashlib.sha256(b"before").hexdigest(),
+        expected_content_size=len(b"before"),
+    )
+
+    def validate_bindings() -> None:
+        # Model the external edit that completes while the trusted reader waits
+        # for current input authority. It does not share the batch's mutex.
+        at_completion = existing.read_text(encoding="utf-8") == "planned replacement"
+        if at_completion == edit_at_completion:
+            existing.write_text("external edit", encoding="utf-8")
+
+    expected_error = vault.BatchWriteError if edit_at_completion else vault.PathGuardError
+    with pytest.raises(expected_error):
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(existing, "planned replacement", guard=guard)],
+            vault_root=tmp_path,
+            post_commit_fanout=False,
+            _validate_prepared_bindings=validate_bindings,
+        )
+
+    assert existing.read_text(encoding="utf-8") == "external edit"
+
+
 def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
     paths = [tmp_path / "new/nested/one.md", tmp_path / "new/nested/two.md"]
     writes = [

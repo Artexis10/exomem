@@ -118,6 +118,40 @@ def test_review_context_contract_is_bounded_and_json_serializable(
     assert json.loads(json.dumps(result))["item"]["ref"] == item.ref
 
 
+def test_review_context_excludes_managed_attribution_before_clipping(
+    review_item_vault: tuple[Path, object],
+) -> None:
+    from exomem import commands
+    from exomem.governance import egress
+
+    vault, _item = review_item_vault
+    carrier = "<!-- exomem-origin:v2 " + "PRIVATE-ASSESSMENT " * 60 + "-->\n"
+    snapshots = {}
+    for path, heading in ((TARGET, "# Review target"), (RELATED, "# Related note")):
+        content = (vault / path).read_text(encoding="utf-8")
+        content = content.replace(heading, carrier + heading)
+        content = content.replace(
+            "status: active", "status: 'active <!-- exomem-origin:v2 PRIVATE-FIELD -->'"
+        )
+        _write(vault, path, content)
+        snapshots[path] = (vault / path).read_bytes()
+    find_module.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    item = next(
+        candidate for candidate in attention.activation(vault, limit=0).items
+        if candidate.path == TARGET
+    )
+
+    response = commands.op_review_item_context(vault, ref=item.ref, max_body_chars=180)
+    response = egress.postfilter("review_item_context", response, vault)
+    wire = json.dumps(response, default=str)
+    assert "PRIVATE-ASSESSMENT" not in wire and "PRIVATE-FIELD" not in wire
+    assert "Review target" in response["target"]["body"]
+    assert any("Related note" in row["excerpt"] for row in response["related"]["items"])
+    assert len(response["target"]["body"]) <= 180
+    assert all((vault / path).read_bytes() == content for path, content in snapshots.items())
+
+
 def test_review_context_rejects_a_stale_expected_fingerprint(
     review_item_vault: tuple[Path, object],
 ) -> None:

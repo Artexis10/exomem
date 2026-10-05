@@ -557,7 +557,9 @@ def test_projected_find_uses_only_bound_variant_text(monkeypatch, tmp_path) -> N
         fingerprint="f" * 64,
         scopes={closed.id: closed, visible.id: visible},
     )
-    key = projections.ProjectionNamespaceKey(policy.fingerprint, 1, 1)
+    key = projections.ProjectionNamespaceKey(
+        policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1
+    )
 
     def item(path: str, content_hash: str, scope_ids: tuple[str, ...], body: str):
         return projection_store.ProjectionItemVariants(
@@ -569,7 +571,7 @@ def test_projected_find_uses_only_bound_variant_text(monkeypatch, tmp_path) -> N
                 content_hash=content_hash,
                 scope_ids=scope_ids,
                 policy=policy,
-                projector_schema_version=1,
+                projector_schema_version=key.projector_schema_version,
                 full_search_fields={"title": path.rsplit("/", 1)[-1], "body": body},
             ),
         )
@@ -724,7 +726,9 @@ def test_projected_runtime_refuses_still_unsupported_public_lanes(
         fingerprint="f" * 64,
         scopes={visible.id: visible},
     )
-    key = projections.ProjectionNamespaceKey(policy.fingerprint, 1, 1)
+    key = projections.ProjectionNamespaceKey(
+        policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1
+    )
     item = projection_store.ProjectionItemVariants(
         item_identity="Knowledge Base/visible.md",
         content_hash="1" * 64,
@@ -734,7 +738,7 @@ def test_projected_runtime_refuses_still_unsupported_public_lanes(
             content_hash="1" * 64,
             scope_ids=(visible.id,),
             policy=policy,
-            projector_schema_version=1,
+            projector_schema_version=key.projector_schema_version,
             full_search_fields={"title": "Visible", "body": "term"},
         ),
     )

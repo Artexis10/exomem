@@ -22,6 +22,8 @@ from . import (
     entity_candidates,
     indexes,
     memory_refs,
+    origin_bindings,
+    provenance,
     semantic_writes,
     tag_variants,
     temporal,
@@ -561,6 +563,7 @@ def _render_entity(
     definition: EntityTypeDefinition,
     facets: list[tuple[str, list[str], bool]] | None = None,
     aliases: list[str] | None = None,
+    origin_metadata: str | None = None,
 ) -> str:
     lines = ["---"]
     lines.append("type: entity")
@@ -606,6 +609,8 @@ def _render_entity(
         lines.append("tags: []")
     lines.append("---")
     lines.append("")
+    if origin_metadata is not None:
+        lines.extend([origin_metadata, ""])
     lines.append(f"# {name}")
     lines.append("")
     lines.append("## Summary")
@@ -862,6 +867,12 @@ def link(
             filename_slug, slug_warnings = resolve_filename_slug(name, slug)
         except InvalidSlugError as error:
             raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
+    origin_block = None
+    if isinstance(summary, str):
+        try:
+            summary, origin_block = origin_bindings.extract_origin_metadata(summary)
+        except provenance.OriginError as error:
+            raise LinkError(error.code, [], error.reason) from error
     err = _validate(
         entity_type=entity_type,
         name=name,
@@ -1040,6 +1051,7 @@ def link(
         definition=definition,
         facets=facet_values,
         aliases=aliases_clean,
+        origin_metadata=origin_block,
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)

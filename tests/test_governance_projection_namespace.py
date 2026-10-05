@@ -9,6 +9,7 @@ from dataclasses import replace
 
 import pytest
 
+from exomem import provenance
 from exomem.governance import bridges, projections
 from exomem.governance.decisions import Decision, decide
 from exomem.governance.policy import Policy, Rule, Scope, StandingGrant
@@ -86,6 +87,7 @@ def test_repository_governed_retrieval_limits_are_fixed() -> None:
     (
         {"body": "é" * 524_289},
         {"body": "a" * 600_000, "title": "b" * 600_000},
+        {"body": "<!-- exomem-origin:v2 " + "é" * 524_289 + "-->"},
     ),
 )
 def test_searchable_item_capacity_is_aggregate_utf8_bytes(
@@ -238,22 +240,144 @@ def test_low_level_fixed_search_projection(
 
 
 def test_l5_projection_is_query_independent_first_600_code_points() -> None:
-    body = " ".join(["visible"] * 90) + " hidden-later-term"
+    prose = " ".join(["visible"] * 90) + " hidden-later-term"
+    carrier = "<!-- exomem-origin:v2 " + "private-attribution " * 50 + "-->"
+    body = carrier + "\n\n" + prose
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
     variant = projections.build_projection_variant(
-        item_identity="item-l5",
-        content_hash="e" * 64,
+        item_identity="Knowledge Base/Notes/projected.md",
+        content_hash=content_hash,
         decision=Decision(level=5),
-        projector_schema_version=1,
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
         full_search_fields={"body": body, "title": "Secret title"},
     )
 
+    assert "private-attribution" in projections.fixed_excerpt(body)
+    assert "-->" not in projections.fixed_excerpt(body)
     assert variant is not None
     assert set(variant.search_fields) == {"body"}
     excerpt = variant.search_fields["body"]
     assert len(excerpt.removesuffix(" …")) <= 600
     assert excerpt.endswith(" …")
     assert "hidden-later-term" not in excerpt
-    assert excerpt == projections.fixed_excerpt(body)
+    assert "private-attribution" not in excerpt
+    assert excerpt == projections.fixed_excerpt(prose)
+    assert variant.content_hash == content_hash
+
+
+@pytest.mark.parametrize("status", ("valid", "unsupported", "duplicate"))
+def test_l6_projection_omits_managed_origin_without_changing_canonical_identity(
+    status: str,
+) -> None:
+    carrier = provenance.encode_origin(
+        {
+            "inputs": {
+                "original": {
+                    "reference": "exomem://memory/12345678-1234-5678-1234-567812345678",
+                    "version": "a" * 64,
+                }
+            },
+            "assessments": [],
+            "bindings": [],
+        }
+    )
+    if status == "unsupported":
+        carrier = "<!-- exomem-origin:v2 private-attribution -->"
+    elif status == "duplicate":
+        carrier += carrier
+    fields = {
+        "body": carrier + "\n\nPublic prose.",
+        "title": carrier + "Public title",
+        "status": "active " + carrier,
+    }
+    content_hash = hashlib.sha256(fields["body"].encode()).hexdigest()
+    arguments = {
+        "item_identity": "Knowledge Base/Notes/projected.md",
+        "content_hash": content_hash,
+        "decision": Decision(level=6),
+        "projector_schema_version": projections.PROJECTOR_SCHEMA_VERSION,
+    }
+
+    variant = projections.build_projection_variant(**arguments, full_search_fields=fields)
+    marker_free = projections.build_projection_variant(
+        **arguments,
+        full_search_fields={"body": "\n\nPublic prose.", "title": "Public title", "status": "active "},
+    )
+
+    assert variant is not None
+    assert "exomem-origin" not in " ".join(variant.search_fields.values())
+    assert variant == marker_free
+    assert variant.content_hash == content_hash
+
+
+@pytest.mark.parametrize(
+    ("item_identity", "body"),
+    (
+        (
+            "Knowledge Base/Sources/original.md",
+            "<!-- exomem-origin:v2 captured attribution -->\nOriginal prose.",
+        ),
+        (
+            "Knowledge Base/Notes/example.md",
+            "Literal `<!-- exomem-origin:v2 example -->` remains prose.",
+        ),
+        ("Knowledge Base/Notes/spacing.md", " \n"),
+    ),
+)
+def test_l6_projection_preserves_unmanaged_prose(
+    item_identity: str, body: str
+) -> None:
+    variant = projections.build_projection_variant(
+        item_identity=item_identity,
+        content_hash=hashlib.sha256(body.encode()).hexdigest(),
+        decision=Decision(level=6),
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
+        full_search_fields={"body": body},
+    )
+
+    assert variant is not None
+    assert variant.search_fields == {"body": body}
+
+
+def test_origin_prose_projector_version_invalidates_derived_identities() -> None:
+    assert projections.PROJECTOR_SCHEMA_VERSION == 2
+    fields = {"body": "Public prose."}
+    arguments = {
+        "item_identity": "Knowledge Base/Notes/projected.md",
+        "content_hash": hashlib.sha256(fields["body"].encode()).hexdigest(),
+        "decision": Decision(level=6),
+        "full_search_fields": fields,
+    }
+    previous = projections.build_projection_variant(**arguments, projector_schema_version=1)
+    current = projections.build_projection_variant(
+        **arguments, projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION
+    )
+    namespace = projections.ProjectionNamespaceKey("a" * 64, 1, 17)
+
+    assert previous is not None and current is not None
+    assert current.search_fields == previous.search_fields
+    assert current.content_hash == previous.content_hash
+    assert current.projection_variant_id != previous.projection_variant_id
+    assert replace(namespace, projector_schema_version=2).namespace_id != namespace.namespace_id
+
+
+@pytest.mark.parametrize("remaining_fields", ({}, {"title": "Public title"}))
+def test_origin_only_body_lowers_to_remaining_fields_or_absence(
+    remaining_fields: dict[str, str],
+) -> None:
+    body = "<!-- exomem-origin:v2 private-attribution -->\n\n"
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    variant = projections.build_projection_variant(
+        item_identity="Knowledge Base/Notes/projected.md",
+        content_hash=content_hash,
+        decision=Decision(level=6),
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
+        full_search_fields={"body": body, **remaining_fields},
+    )
+
+    assert (None if variant is None else variant.search_fields) == (remaining_fields or None)
+    if variant is not None:
+        assert variant.content_hash == content_hash
 
 
 @pytest.mark.parametrize(

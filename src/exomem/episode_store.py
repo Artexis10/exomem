@@ -9,6 +9,7 @@ The hash chain detects corruption; it is not authentication against a vault owne
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -22,8 +23,10 @@ from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
     CreateOnlyConflict,
+    PathGuard,
     PlannedWrite,
     batch_atomic_write,
+    read_bounded_guarded_bytes,
 )
 from .writer_lease import active_manager
 
@@ -254,6 +257,23 @@ class EpisodeStore:
         """Return historical state; no current evidence/disclosure claim is made."""
         with self._guard():
             return self._load(identity)[1]
+
+    def read_guarded(self, identity: str) -> tuple[dict[str, Any], PathGuard]:
+        """Reconstruct one bounded journal and guard those exact source bytes."""
+        with self._guard():
+            path = self.path(identity)
+            self.curation._assert_safe(path)
+            relative = self.curation._vault_relative(path).as_posix()
+            raw, guard = read_bounded_guarded_bytes(
+                self.vault_root, relative, limit=MAX_JOURNAL_BYTES
+            )
+            try:
+                journal = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+                raise curation.CurationError(
+                    "CURATION_ARTIFACT_CORRUPT", "curation artifact is unreadable"
+                ) from error
+            return self._reconstruct(identity, journal), guard
 
     def _write(self, identity: str, journal: Mapping[str, Any], prior: Any = None) -> None:
         path = self.path(identity)

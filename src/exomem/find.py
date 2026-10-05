@@ -2093,8 +2093,11 @@ def _eligible_unit_records(
             )
             continue
         page_value = structured_filters.page_view(page)
+        prose_units = find_results.prose_units(page, state.document.units)
         for source_order, unit in enumerate(state.document.units):
             if unit.unit_ref is None:
+                continue
+            if prose_units is not state.document.units and unit not in prose_units:
                 continue
             if structured_filters.evaluate_filter(
                 plan,
@@ -2152,7 +2155,7 @@ def _hydrate_indexed_unit_records(
     """Hydrate only sidecar-selected parents, rejecting any generation race."""
     from . import semantic_index
 
-    parents: dict[str, tuple[ParsedPage, Any] | None] = {}
+    parents: dict[str, tuple[ParsedPage, Any, tuple[Any, ...]] | None] = {}
     records: dict[str, tuple[ParsedPage, Any, int]] = {}
     for hit in indexed:
         parent = parents.get(hit.parent_path)
@@ -2192,11 +2195,11 @@ def _hydrate_indexed_unit_records(
                     stale_out.append(hit.unit_ref)
                 parents[hit.parent_path] = None
                 continue
-            parent = (page, state)
+            parent = (page, state, find_results.prose_units(page, state.document.units))
             parents[hit.parent_path] = parent
         if parent is None:
             continue
-        page, state = parent
+        page, state, prose_units = parent
         located = next(
             (
                 (source_order, candidate)
@@ -2210,6 +2213,8 @@ def _hydrate_indexed_unit_records(
                 stale_out.append(hit.unit_ref)
             continue
         source_order, unit = located
+        if prose_units is not state.document.units and unit not in prose_units:
+            continue
         if not structured_filters.evaluate_filter(
             plan,
             page=structured_filters.page_view(page),
@@ -2961,7 +2966,7 @@ def _annotate_matched_units(
         page_value = structured_filters.page_view(page)
         matched = [
             unit
-            for unit in state.document.units
+            for unit in find_results.prose_units(page, state.document.units)
             if structured_filters.evaluate_filter(
                 plan,
                 page=page_value,
