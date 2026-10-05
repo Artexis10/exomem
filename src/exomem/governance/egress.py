@@ -5942,6 +5942,14 @@ def gate_artifact_references(
     return gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
 
 
+def _audience_withholds_nothing(
+    vault_root: Path, policy: Policy, tombstones: frozenset[str]
+) -> bool:
+    """An ungoverned vault with no tombstone: no audience is withheld anything,
+    so only RAW admission can still decide a path."""
+    return _file_policy_empty(vault_root, policy) and not tombstones
+
+
 def release_walk_filter(
     vault_root: Path,
     *,
@@ -5973,7 +5981,7 @@ def release_walk_filter(
     """
     policy = policy_module.load(Path(vault_root))
     tombstones = lifecycle.tombstoned_paths(vault_root)
-    if _file_policy_empty(vault_root, policy) and not tombstones:
+    if _audience_withholds_nothing(vault_root, policy, tombstones):
         who = principal if principal is not None else effective_principal()
         return lambda path: raw_protection.permits(vault_root, path, who)
 
@@ -6071,15 +6079,19 @@ def restricted_audience(
 ) -> bool:
     """True when the caller's audience, not RAW, restricts what it may see.
 
-    Retrieval diagnostics (explain, the graph lane) and vault generation
-    counters follow this: an owner-audience caller without owner-local
-    provenance keeps them. Every ref, path and content it receives still
+    Retrieval diagnostics (explain's lane statuses, ranks and scores) and vault
+    generation counters follow this: an owner-audience caller without
+    owner-local provenance keeps them, and so does any caller on an ungoverned
+    vault with no tombstone. Every ref, path and content it receives still
     passes `restricted_release_filter`, which applies RAW admission.
     """
     branch, who = _release_caller(vault_root, principal)
-    return branch == "walk" and (
-        release_walk_filter(vault_root, principal=who, purpose=purpose) is not None
-    )
+    if branch != "walk":
+        return False
+    policy = policy_module.load(Path(vault_root))
+    if _audience_withholds_nothing(vault_root, policy, lifecycle.tombstoned_paths(vault_root)):
+        return False
+    return release_walk_filter(vault_root, principal=who, purpose=purpose) is not None
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;

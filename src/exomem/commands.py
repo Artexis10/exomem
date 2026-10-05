@@ -2658,7 +2658,7 @@ def op_find(
             explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
-    # A caller other than the owner receives no retrieval diagnostics. Lane
+    # A caller its audience restricts receives no retrieval diagnostics. Lane
     # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
     # graph in-degree and the keyword-fallback marker are computed over the
     # whole corpus before any page is decided, so each moves with pages the
@@ -2671,9 +2671,14 @@ def op_find(
     )
     if restricted:
         explain = False
-        # Graph hops, in-degree and graph enrichment follow link resolution
-        # over the whole vault, and the shared recall cache is keyed by
-        # `graph`, so such a caller recalls without the graph lane.
+    if (
+        projection_runtime is None
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    ):
+        # The graph lane is retrieval, not a diagnostic: hops are seeded from
+        # pages before any is decided, follow link resolution over the whole
+        # vault, and the shared recall cache is keyed by `graph`. A caller
+        # anything could be withheld from, RAW included, recalls without it.
         graph = False
         graph_enrich = False
     compute_profile: dict[str, str | bool] = {}
@@ -2884,6 +2889,7 @@ def op_find(
                     deadline=None if active_budget is None else active_budget.deadline,
                     graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
                     timings=timings,
+                    purpose=purpose,
                 )
                 if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
                     pack_obj.get("truncation") or []

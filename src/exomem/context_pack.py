@@ -731,6 +731,7 @@ def assemble_pack(
     deadline: float | None = None,
     graph_enrich_reserve_seconds: float = 0.0,
     timings: find_module.FindTimings | None = None,
+    purpose: str | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -1001,18 +1002,20 @@ def assemble_pack(
             truncation.append(GRAPH_ENRICH_BUDGET_SKIP)
         else:
             with find_module._span(timings, "graph_enrich"):
-                result["graph"] = _graph_enrichment(vault_root, packed_pages)
+                result["graph"] = _graph_enrichment(vault_root, packed_pages, purpose=purpose)
     return result
 
 
-def _graph_enrichment(vault_root: Path, packed_pages: list[ParsedPage]) -> dict:
+def _graph_enrichment(
+    vault_root: Path, packed_pages: list[ParsedPage], *, purpose: str | None = None
+) -> dict:
     if not packed_pages:
         return {"available": False, "reason": "no packed pages", "nodes": [], "edges": []}
     from .governance import egress
 
     # The neighbourhood's own release decision: a page the caller may not see
     # is never a node, an edge endpoint or a hop (`graph_context`'s `keep`).
-    visible = egress.visible_page_filter(vault_root)
+    visible = egress.visible_page_filter(vault_root, purpose=purpose)
     nodes: dict[str, dict] = {}
     edges: dict[str, dict] = {}
     unavailable: list[str] = []
