@@ -198,6 +198,7 @@ def _fake_onnx_encoder(
         enable_truncation=lambda **_kwargs: None,
         enable_padding=lambda **_kwargs: None,
         token_to_id=lambda _token: 0,
+        to_str=lambda: "{}",  # not a Unigram tokenizer: the compact one stays out
     )
     profile = embedding_backend.EncoderProfile(
         model="model",

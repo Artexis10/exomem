@@ -15,7 +15,8 @@ Checks (all read-only; no writes ever):
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
 - `tag_inconsistency`: case/separator variants of the same tag
 - `frontmatter_compliance`: per-page-type required-field gaps,
-  `tenant:` set without `project: q`, patterns using `project:` (singular)
+  `tenant:` set on a page of a project the registry does not declare
+  `tenant_scoped`, patterns using `project:` (singular)
   instead of `projects:` (plural list)
 - `stale_review`: active compiled conclusion that is old AND rarely surfaced in
   `find` AND low inbound-link degree — a measurement-only review candidate.
@@ -531,7 +532,7 @@ def audit(
     if "tag_inconsistency" in selected:
         findings.extend(_check_tag_inconsistency(pages))
     if "frontmatter_compliance" in selected:
-        findings.extend(_check_frontmatter_compliance(pages))
+        findings.extend(_check_frontmatter_compliance(pages, vault_root))
     if "entity_type_unregistered" in selected:
         findings.extend(_check_unregistered_entity_types(vault_root, pages))
     if "unregistered_project_key" in selected:
@@ -2792,16 +2793,21 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
 
 def _check_frontmatter_compliance(
     pages: list[find_module.ParsedPage],
+    vault_root: Path,
 ) -> list[AuditFinding]:
     """Surface per-page-type frontmatter problems.
 
     Three classes of finding:
     - Missing required field for the declared `type:`.
-    - `tenant:` set on a non-Q page (the `tenant` field is Q-only).
+    - `tenant:` set on a page whose project the registry does not declare
+      `tenant_scoped: true` in `_Schema/project-keys.yaml`.
     - Pattern page with singular `project:` instead of plural `projects:`
       (the convention for cross-project patterns).
     """
     findings: list[AuditFinding] = []
+    from . import project_keys as project_keys_module
+
+    tenant_scoped = project_keys_module.load_project_registry(vault_root).tenant_scoped
     for page in pages:
         fm = page.frontmatter
         excluded = vault_module.first_excluded_field(fm)
@@ -2875,24 +2881,29 @@ def _check_frontmatter_compliance(
                     ),
                     )
                 )
-        # tenant: is Q-only.
-        if fm.get("tenant") and fm.get("project") != "q":
-            findings.append(
-                AuditFinding(
-                category="frontmatter_compliance",
-                severity="warn",
-                path=page.rel_path,
-                detail=(
-                    f"`tenant: {fm['tenant']!r}` set but `project` is "
-                    f"{fm.get('project')!r}, not 'q'. The tenant field is "
-                    f"Q-only."
-                ),
-                proposed_fix=(
-                    "Either set `project: q` (if this is a Q-tenant note) "
-                    "or remove the `tenant:` field."
-                ),
+        # `tenant:` belongs only on pages of a project the registry declares tenant-scoped.
+        if fm.get("tenant"):
+            more = fm.get("projects")
+            declared = [fm.get("project"), *(more if isinstance(more, list) else [])]
+            named = [item for item in declared if isinstance(item, str)]
+            if not set(named) & tenant_scoped:
+                findings.append(
+                    AuditFinding(
+                    category="frontmatter_compliance",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=(
+                        f"`tenant: {fm['tenant']!r}` set but none of the page's "
+                        f"projects ({named!r}) is declared `tenant_scoped` "
+                        "in the project registry."
+                    ),
+                    proposed_fix=(
+                        "Either mark the project `tenant_scoped: true` in "
+                        "`_Schema/project-keys.yaml` (if it is tenant-scoped) "
+                        "or remove the `tenant:` field."
+                    ),
+                    )
                 )
-            )
         # Patterns should use plural `projects:`, not singular `project:`.
         if page_type == "pattern" and fm.get("project") and not fm.get("projects"):
             findings.append(

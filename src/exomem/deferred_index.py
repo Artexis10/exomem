@@ -1506,6 +1506,30 @@ def semantic_scan_ceiling(vault_root: Path) -> int:
         conn.close()
 
 
+def semantic_next_retry_at(vault_root: Path, *, after: float) -> float | None:
+    """Earliest time a time-gated semantic retry falls due after `after`.
+
+    Same receipts as `semantic_receipt_eligible`'s time branch: a budget refusal
+    waits on its input, not on the clock, and a stale revision's retry is void.
+    """
+    if not store_path(vault_root).exists():
+        return None
+    conn = _connect(vault_root, create=False)
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(semantic_upserts)")}
+        if not set(_SEMANTIC_RETRY_COLUMNS) <= columns:
+            return None
+        row = conn.execute(
+            "SELECT min(next_attempt_at) FROM semantic_upserts "
+            "WHERE next_attempt_at > ? AND retry_revision = revision "
+            "AND coalesce(failure_code, '') != 'resource_budget_exceeded'",
+            (after,),
+        ).fetchone()
+        return None if row[0] is None else float(row[0])
+    finally:
+        conn.close()
+
+
 def snapshot(
     vault_root: Path,
     *,

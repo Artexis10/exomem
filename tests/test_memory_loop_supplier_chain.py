@@ -746,19 +746,17 @@ def test_probe_r3b_an_ownership_extension_for_the_new_operator_fails(
 def test_probe_r4_a_declared_family_does_not_launder_an_ownership_extension(
     worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The fixture judges an extension by its parent's core family, never the
-    family the proposal declares."""
+    """The registry refuses an extension whose declared family differs from its
+    parent's core family, so no relation can carry ownership under another one."""
 
     from exomem import relation_registry
 
-    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
-    before = read_state(root)
-    _save_relation(root, "vault.holds_site", "Holds a site.", parent="owns", family="association")
-    assert relation_registry.load_registry(root).definition("vault.holds_site").family == "association"
-    _correct_succession(root, world, relation="vault.holds_site")
-
-    failed = set(_check("operator-succession", root, world, before).failed())
-    assert {"operator-succession/current-operator-on-site", "operator-succession/no-new-ownership"} <= failed
+    root, _world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="family_mismatch"):
+        _save_relation(
+            root, "vault.holds_site", "Holds a site.", parent="owns", family="association"
+        )
+    assert relation_registry.load_registry(root).definition("vault.holds_site") is None
 
 
 def test_probe_r3b_an_ownership_extension_to_the_brand_fails_both_sellers(

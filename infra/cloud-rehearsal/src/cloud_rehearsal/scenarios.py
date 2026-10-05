@@ -1142,9 +1142,10 @@ async def ready_matches_pods(ctx: Context) -> list[dict[str, Any]]:
             continue
         pod_ready = ctx.pod_ready(tenant.cell_id)
         if bool(row["ready"]) != pod_ready:
-            # Resample after several cellctl passes: a pod caught mid-restart
-            # is not a finding; a mismatch that outlives the passes is.
-            await asyncio.sleep(20)
+            # Resample after more than one idle cellctl interval (30 s): a pod
+            # caught mid-restart is not a finding; a mismatch that outlives
+            # the next pass is.
+            await asyncio.sleep(40)
             row = await ctx.fetchrow("SELECT ready, observed_state, observed_at FROM exomem_cloud_cells WHERE cell_id = $1", tenant.cell_id)
             pod_ready = ctx.pod_ready(tenant.cell_id)
         if row and bool(row["ready"]) != pod_ready:

@@ -1,12 +1,9 @@
 ---
-- name: Validate administrator access inputs
+- name: Require administrator keys
   ansible.builtin.assert:
     that:
-      - base_admin_ssh_cidrs | length > 0
       - base_administrator_authorized_keys | length > 0
-      - "'0.0.0.0/0' not in base_admin_ssh_cidrs"
-      - "'::/0' not in base_admin_ssh_cidrs"
-    fail_msg: At least one non-global SSH CIDR and administrator key are required.
+    fail_msg: At least one administrator key is required.
 
 - name: Update the apt cache and installed packages
   ansible.builtin.apt:
@@ -136,14 +133,11 @@
     group: root
     mode: "0644"
 
-- name: Allow SSH only from explicit administrator networks
-  community.general.ufw:
-    rule: allow
-    port: "22"
-    proto: tcp
-    src: "{{ item }}"
-    comment: Exomem administrator SSH
-  loop: "{{ base_admin_ssh_cidrs }}"
+# Tagged so a cutover can converge SSH access alone:
+#   ansible-playbook site.yml --tags admin_ssh --limit <host>
+- name: Converge administrator SSH access
+  ansible.builtin.import_tasks: admin_ssh.yml
+  tags: [admin_ssh]
 
 - name: Allow the fixed K3s pod and service networks
   community.general.ufw:
