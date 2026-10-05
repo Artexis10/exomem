@@ -67,7 +67,7 @@ from datetime import date
 from pathlib import Path
 
 FIXTURE_SET_ID = "context-activation-fixtures-v1"
-CORPUS_ID = "context-activation-corpus-v4"
+CORPUS_ID = "context-activation-corpus-v5"
 
 CASE_IDS: tuple[str, ...] = tuple(f"C{i}" for i in range(1, 10))
 TWIN_IDS: tuple[str, ...] = tuple(f"T{i}" for i in range(1, 10))
@@ -150,11 +150,14 @@ FIXTURES: tuple[FixtureCase, ...] = (
             "why: flat-rate plans scale by parallel pools, not a bigger per-call quota."
         ),
     ),
+    # T1 is re-authored for corpus v5 (Hugo, 2026-10-05). Its v4 turn, a step
+    # count goal, was answered by C1's poison page, so the twin was invalid
+    # (design.md A10). The v5 turn shares C1's frame and nothing a page records.
     FixtureCase(
         case_id="T1",
         pairs_with="C1",
-        turn="I keep hitting my step count goal again this week.",
-        reminder_turn="No, this one's just a fitness goal — nothing to pull in from tooling notes.",
+        turn="I keep hitting the snooze button again this week.",
+        reminder_turn="No, this one's just a sleep habit — nothing to pull in from tooling notes.",
         gold=(),
         poison=("c1_subscriptions_collection", "c1_weekly_limit_insight", "c1_capacity_ceilings_pattern"),
         roles=(),

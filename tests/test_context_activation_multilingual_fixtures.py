@@ -44,7 +44,7 @@ pytestmark = pytest.mark.timeout(600)
 
 #: The English set's digest at the revision this sibling was authored against.
 #: The multilingual set must never be folded into it or edit it.
-ENGLISH_SET_DIGEST = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f"
+ENGLISH_SET_DIGEST = "9d15d155bd61096ba0ff2613d6752a35e03d3fb4078fa189e42b4c1ce2a3bdaa"
 
 #: The design table's rows (STEP4 §9.1), by id.
 DESIGN_ROWS = {

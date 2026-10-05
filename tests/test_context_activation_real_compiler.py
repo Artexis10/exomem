@@ -25,7 +25,7 @@ named as such.
 
 Re-record the report after a deliberate change::
 
-    CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09-v4.json \\
+    CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-10-v5.json \\
         uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 """
 
@@ -53,15 +53,18 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 pytestmark = pytest.mark.timeout(1800)
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-#: Corpus v4's report. The v3 report beside it is kept as history.
-RECORDED_REPORT = REPOSITORY / "docs" / "benchmarks" / "context-activation-product-2026-09-v4.json"
+#: Corpus v5's report. The v3 and v4 reports beside it are kept as history.
+RECORDED_REPORT = REPOSITORY / "docs" / "benchmarks" / "context-activation-product-2026-10-v5.json"
+V4_REPORT = REPOSITORY / "docs" / "benchmarks" / "context-activation-product-2026-09-v4.json"
 HISTORICAL_REPORT = REPOSITORY / "docs" / "benchmarks" / "context-activation-product-2026-09.json"
 RECORD_ENV = "CONTEXT_ACTIVATION_RECORD_REPORT"
 
 #: Frozen digests. The fixture set is the pre-registered one, unchanged; the
 #: threshold digest covers the scorer's own constants; the logical corpus
 #: digests bind the recorded report to the corpus it was measured on.
-FIXTURE_SET_SHA256 = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f"
+FIXTURE_SET_SHA256 = "9d15d155bd61096ba0ff2613d6752a35e03d3fb4078fa189e42b4c1ce2a3bdaa"
+#: The v4 fixture set (T1's step count turn), which the v3 and v4 reports record.
+V4_FIXTURE_SET_SHA256 = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f"
 THRESHOLD_SHA256 = "7b2785cf81437ad98eeede3fb9bb046baa80fdcddf883d33c293cae91fbf867a"
 
 #: The pre-registered thresholds, spelled out once so a change to any of them
@@ -81,12 +84,12 @@ PRE_REGISTERED_THRESHOLDS = {
     "end_to_end_p95_ms_ceiling": 16488.201,
 }
 
-#: Today's outcome on corpus v4, case by case (raw, pre-registered). A red
+#: Today's outcome on corpus v5, case by case (raw, pre-registered). A red
 #: case lists reasons its report must contain (by prefix); a passing case
 #: lists none. T3, T4, T5 and T7 pass since the activation-quality round:
 #: the Planning item's own page (task 6.12), a bare shared name asks, the
 #: anchor lede is not repeated as a unit, and a qualifier narrows two senses.
-PASSING_TODAY = frozenset({"T2", "T3", "T4", "C5", "T5", "C6", "C7", "T7", "T9"})
+PASSING_TODAY = frozenset({"T1", "T2", "T3", "T4", "C5", "T5", "C6", "C7", "T7", "T9"})
 RED_TODAY: dict[str, tuple[str, ...]] = {
     # A page the turn names beside the resolved collection is carried beside
     # it (recall breadth): the weekly-limit note arrives, the capacity-ceilings
@@ -95,9 +98,6 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "gold recall 0.67 below the 0.9 floor",
         "missing required fact(s): ['capacity ceiling']",
     ),
-    # The retrieval carry is live on this corpus and carries the step-count
-    # fitness-goal page (C1's pre-registered poison): outside T1's empty gold.
-    "T1": ("twin surfaced a ref outside its own gold", "precision 0.00 below the 0.8 floor"),
     # Stays red by ruling (R3): the grill resolves only partially, and a
     # shared tag is not corroboration on a real vault. Semantic corroboration
     # is future sensed-model work.
@@ -163,8 +163,14 @@ A8_PASSING_TODAY = PASSING_TODAY | {"C8"}
 #: passes under A9 (raw still fails it: raw precision does not count a carry).
 A9_PASSING_TODAY = PASSING_TODAY | {"C8"}
 
+#: The same packets under the v5 scorer (a unit counts as its bound page; a
+#: partial-only abstention is the run's one hedge). T6 passes as that hedge. C8
+#: and T8 still fail for their status: v5 does not take A8's carried-counts
+#: clause, so only a compiler change moves them.
+V5_PASSING_TODAY = PASSING_TODAY | {"T6"}
+
 #: Negative controls whose pre-registered mechanism does not change their
-#: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming
+#: outcome. Empty on corpus v5: C6, T1, T2 and T9 each fail with the naming
 #: gate removed. (Under the kill switch every negative control passes, as it
 #: must: a disabled compiler abstains, which is their correct answer.)
 NOT_LOAD_BEARING_TODAY: frozenset[str] = frozenset()
@@ -232,6 +238,8 @@ class Run:
     amended_a8: audit.AuditReport
     #: The same packets under amendment A9 alone (agent-choice scoring).
     amended_a9: audit.AuditReport
+    #: The same packets under the v5 scorer (S1 and T6), its own column.
+    amended_v5: audit.AuditReport
     #: gold note key -> every unit ref any role lane serves from its page.
     note_units: dict[str, tuple[str, ...]]
 
@@ -297,6 +305,7 @@ def _compute(workdir: Path) -> Run:
     amended_a7 = product.score_trees(trees, raw, amendments=product.AMBIGUITY_AMENDMENTS)
     amended_a8 = product.score_trees(trees, raw, amendments=product.CARRIED_GOLD_AMENDMENTS)
     amended_a9 = product.score_trees(trees, raw, amendments=product.AGENT_CHOICE_AMENDMENTS)
+    amended_v5 = product.score_trees(trees, raw, amendments=product.V5_AMENDMENTS)
     base = next(tree for tree in trees if tree.distractor_count == 0)
     return Run(
         trees,
@@ -309,6 +318,7 @@ def _compute(workdir: Path) -> Run:
         amended_a7,
         amended_a8,
         amended_a9,
+        amended_v5,
         _note_units(base),
     )
 
@@ -515,11 +525,14 @@ def test_current_runtime_amended_outcomes_are_recorded_beside_the_raw_ones(run: 
     assert {s.case_id for s in run.amended_a7.per_case if s.passed} == A7_PASSING_TODAY
     assert {s.case_id for s in run.amended_a8.per_case if s.passed} == A8_PASSING_TODAY
     assert {s.case_id for s in run.amended_a9.per_case if s.passed} == A9_PASSING_TODAY
+    assert {s.case_id for s in run.amended_v5.per_case if s.passed} == V5_PASSING_TODAY
     assert {s.case_id for s in run.report.per_case if s.passed} == PASSING_TODAY
     raw = {s.case_id: s for s in run.report.per_case}
     for amended in run.amended.per_case:
         assert amended.gold_hit >= raw[amended.case_id].gold_hit, amended.case_id
     assert audit.audit_passed(run.amended) is False
+    assert [s.case_id for s in run.amended_v5.per_case if s.hedged] == ["T6"]
+    assert audit.audit_passed(run.amended_v5) is False
 
 
 def test_current_runtime_the_audit_is_red_and_padding_robustness_fails(run: Run) -> None:
@@ -696,7 +709,7 @@ def test_the_passing_positives_and_twins_fail_for_their_mechanisms_reason(run: R
     assert run.score("C7").passed and by["competing_senses"]["C7"].observed_status == "resolved"
 
 
-def test_the_negative_controls_are_load_bearing_on_corpus_v4(run: Run) -> None:
+def test_the_negative_controls_are_load_bearing_on_corpus_v5(run: Run) -> None:
     """Amendment A1's purpose. On corpus v3 these controls passed with the
     compiler disabled and under every removal, because nothing there could
     serve their words. On v4 the carry is live and the ordinary notes share
@@ -710,7 +723,7 @@ def test_the_negative_controls_are_load_bearing_on_corpus_v4(run: Run) -> None:
         assert product.FIXTURE_MECHANISMS[case_id] == "naming_gate", case_id
         assert not naming_gate[case_id].passed, case_id
         assert disabled[case_id].passed, case_id
-    assert {case for case in NEGATIVE_CONTROLS if run.score(case).passed} == {"C6", "T2", "T9"}
+    assert {case for case in NEGATIVE_CONTROLS if run.score(case).passed} == NEGATIVE_CONTROLS
 
 
 # --------------------------------------------------------------------------- #
@@ -727,13 +740,14 @@ def test_the_recorded_report_is_the_current_product_run(run: Run) -> None:
         amended_a7=run.amended_a7,
         amended_a8=run.amended_a8,
         amended_a9=run.amended_a9,
+        amended_v5=run.amended_v5,
     )
     target = os.environ.get(RECORD_ENV)
     if target:
         path = Path(target)
         path.write_text(json.dumps(live, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     recorded = json.loads(RECORDED_REPORT.read_text(encoding="utf-8"))
-    assert recorded["corpus_id"] == "context-activation-corpus-v4"
+    assert recorded["corpus_id"] == "context-activation-corpus-v5"
     assert recorded["mechanism"] == product.PRODUCT_MECHANISM
     assert recorded["fixture_set_digest"] == FIXTURE_SET_SHA256
     assert recorded["threshold_digest"] == THRESHOLD_SHA256
@@ -762,14 +776,21 @@ def _differences(recorded: Any, live: Any, where: str = "") -> list[str]:
     return [] if recorded == live else [where or "/"]
 
 
+def test_the_v4_report_is_kept_as_history() -> None:
+    history = json.loads(V4_REPORT.read_text(encoding="utf-8"))
+    assert history["corpus_id"] == "context-activation-corpus-v4"
+    assert history["fixture_set_digest"] == V4_FIXTURE_SET_SHA256
+    assert "amended_v5" not in history
+
+
 def test_the_v3_report_is_kept_as_history() -> None:
     history = json.loads(HISTORICAL_REPORT.read_text(encoding="utf-8"))
     assert "corpus_id" not in history
-    assert history["fixture_set_digest"] == FIXTURE_SET_SHA256
+    assert history["fixture_set_digest"] == V4_FIXTURE_SET_SHA256
     assert [case["case_id"] for case in history["per_case"] if case["passed"]] == [
         "T1", "T2", "C5", "T5", "C6", "C7", "T9"
     ]
 
 
 def test_the_recorded_report_passes_the_privacy_gate() -> None:
-    assert_public_artifacts_clean([RECORDED_REPORT, HISTORICAL_REPORT])
+    assert_public_artifacts_clean([RECORDED_REPORT, V4_REPORT, HISTORICAL_REPORT])

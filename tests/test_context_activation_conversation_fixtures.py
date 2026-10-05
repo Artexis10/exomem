@@ -52,7 +52,7 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 pytestmark = pytest.mark.timeout(600)
 
 #: The English set's digest. The conversation group must never edit that module.
-ENGLISH_SET_DIGEST = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f"
+ENGLISH_SET_DIGEST = "9d15d155bd61096ba0ff2613d6752a35e03d3fb4078fa189e42b4c1ce2a3bdaa"
 
 #: The pinned digest of this group. Editing any fixture field, gold list
 #: included, changes it, and that voids every run manifest that names the old one.
