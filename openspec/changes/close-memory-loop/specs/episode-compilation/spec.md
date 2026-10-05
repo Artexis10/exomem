@@ -58,6 +58,28 @@ The first integrated Records correction SHALL be one closed `update-record` leaf
 - **AND** no capture grant is treated as update authority
 - **AND** any proposed reusable convention requires its own scoped evidence and authority and remains reversible
 
+### Requirement: Consequential corrections retain recoverable interpretations
+
+For newly supported conversational semantic corrections, the owning writer SHALL retain enough authorized prior interpretation content, stable object/unit identity, reason, operation attribution and source/version bindings to reconstruct the changed meaning. It SHALL preserve the original evidence separately. A hash or rationale summary without recoverable content SHALL NOT count as historical interpretation. Ordinary correction SHALL NOT require a new user-visible page; explicit supersession remains a semantic operation with its existing authority.
+
+Revision history SHALL use the canonical owner's storage and recovery boundary, not a disposable retrieval projection. Historical reads SHALL be bounded and subject to current disclosure and retention policy. Missing, withheld or pruned historical content SHALL be unavailable without invented reconstruction or permission leakage. Supported backup/export/restore SHALL preserve retained history. Current-state reads SHALL remain usable without loading every revision.
+
+#### Scenario: Two refinements do not create three visible pages
+
+- **WHEN** an authorized agent qualifies the same interpretation twice through the supported correction route
+- **THEN** the object keeps its stable identity and history can recover both prior meanings, their reasons and evidence bindings
+- **AND** current recall uses the current interpretation without flooding ordinary results with revision entries
+
+#### Scenario: Historical evidence is unavailable
+
+- **WHEN** only a legacy hash remains or the current audience cannot read a retained revision
+- **THEN** the historical answer reports unavailable content without claiming the hash recovers the earlier proposition or revealing withheld text
+
+#### Scenario: History grows while current reads stay bounded
+
+- **WHEN** a supported object accumulates many corrections and is restored through its supported portability path
+- **THEN** current reads and a bounded history page remain bounded, retained revision meanings survive, and measured write/storage amplification is reported separately
+
 ### Requirement: Episode decomposition precedes destination selection
 
 At a supported substantive episode boundary the active agent SHALL consider the original input for durable observations, outcomes, entity creation/hydration, facets, relationships, Records events, expressed Planning changes, Source/Evidence preservation and structural-routing candidates before choosing write destinations. It SHALL first partition independently reusable objects by retrieval question, subject/domain, temporal episode and epistemic role. A currently open note is an inspected alternative, not a preferred default. A meaningful stable cluster SHALL receive a canonical home when it answers a distinct future question or supports independent continuation, while details within an existing cluster SHALL remain in scope rather than manufacture a new destination. Each candidate SHALL be resolved against current knowledge and receive an attributable disposition. Capture sweep SHALL NOT be the sole trigger or completeness check. No-op, uncertain, rejected, deferred and awaiting-authority outcomes SHALL be legitimate and distinct.
