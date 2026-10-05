@@ -1,11 +1,13 @@
-"""CommonMark-owned code locations, and comment carriers outside them.
+"""CommonMark-owned code locations, and comment spans outside them.
 
 markdown-it owns code: fenced and indented blocks and inline code spans, at
-exact original offsets. A comment carrier is deliberately conservative: every
-`<!--` outside code and not backslash-escaped opens one, which runs to its
-first `-->` (or the end of the text). On read, treating a literal that HTML
-would not parse as a comment as a carrier only over-hides it; on write, more
-than one designated carrier is refused by the origin grammar.
+exact original offsets. It is used only to say where code is; wikilink
+scanning keeps its own line-regex masker on every page.
+
+`outside` is the one rule for "not code and not backslash-escaped". Origin
+carriers apply it to each reserved opener directly (see `provenance`), so no
+other comment can hide one. `comment_spans` is the provenance tag scanner's
+view: every `<!--` outside code opens a span to its first `-->`.
 """
 
 from __future__ import annotations
@@ -189,14 +191,27 @@ def _escaped(text: str, index: int) -> bool:
     return slashes % 2 == 1
 
 
+def code_spans(text: str) -> tuple[Span, ...]:
+    """Every code region's exact original offsets; empty when no code marker exists."""
+    if not _may_have_code(text):
+        return ()
+    locations = _Locations(text)
+    _PARSER.parse(text, {"locations": locations})
+    return _merge(locations.code)
+
+
+def outside(text: str, index: int, code: tuple[Span, ...]) -> bool:
+    """Whether `index` is neither inside code nor backslash-escaped."""
+    owner = bisect_right([start for start, _end in code], index) - 1
+    return not (owner >= 0 and index < code[owner][1]) and not _escaped(text, index)
+
+
 def _comments(text: str, code: tuple[Span, ...]) -> tuple[Span, ...]:
-    starts = [start for start, _end in code]
     comments: list[Span] = []
     cursor = 0
     for opener in re.finditer("<!--", text):
         start = opener.start()
-        owner = bisect_right(starts, start) - 1
-        if start < cursor or (owner >= 0 and start < code[owner][1]) or _escaped(text, start):
+        if start < cursor or not outside(text, start, code):
             continue
         closer = text.find("-->", start + 4)
         cursor = len(text) if closer < 0 else closer + 3
@@ -205,28 +220,8 @@ def _comments(text: str, code: tuple[Span, ...]) -> tuple[Span, ...]:
 
 
 def scan_markdown(text: str) -> MarkdownRegions:
-    """Locate code, then comment carriers outside it, at exact original offsets."""
-    code: tuple[Span, ...] = ()
-    if _may_have_code(text):
-        locations = _Locations(text)
-        _PARSER.parse(text, {"locations": locations})
-        code = _merge(locations.code)
+    """Locate code, then comment spans outside it, at exact original offsets."""
+    code = code_spans(text)
     if "<!--" not in text:
         return MarkdownRegions(code)
     return MarkdownRegions(code, _comments(text, code))
-
-
-def mask_code(text: str, regions: MarkdownRegions | None = None) -> str:
-    """Blank code while preserving every original character position and CR/LF."""
-    if regions is None:
-        if not _may_have_code(text):
-            return text
-        regions = scan_markdown(text)
-    if not regions.code_spans:
-        return text
-    out = list(text)
-    for start, end in regions.code_spans:
-        for index in range(start, end):
-            if out[index] not in "\r\n":
-                out[index] = " "
-    return "".join(out)

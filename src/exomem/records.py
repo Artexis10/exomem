@@ -1609,23 +1609,23 @@ def bulk_upsert_records(
                 operation = "update"
                 before_item_hash = record.source.hash
                 payload_hash = None
-                kept = record_history.plan_entry(
-                    root,
-                    manifest,
-                    item_key=plan.key,
-                    canonical_path=canonical,
-                    prior_values=record.values,
-                    prior_body=record.body,
-                    after_values=plan.values,
-                    after_body=after_body,
-                    operation=operation,
-                    why=plan.rationale,
-                    transition_id=transition,
-                    before_item_hash=record.source.hash,
-                    after_item_hash=item_hash,
+                history_writes.append(
+                    record_history.plan_entry(
+                        root,
+                        manifest,
+                        item_key=plan.key,
+                        canonical_path=canonical,
+                        prior_values=record.values,
+                        prior_body=record.body,
+                        after_values=plan.values,
+                        after_body=after_body,
+                        operation=operation,
+                        why=plan.rationale,
+                        transition_id=transition,
+                        before_item_hash=record.source.hash,
+                        after_item_hash=item_hash,
+                    )
                 )
-                if kept is not None:
-                    history_writes.append(kept)
             audit_bodies.append(
                 _audit_body(
                     transition_id=transition,
@@ -1992,7 +1992,7 @@ def update_record(
                 vault.PlannedWrite(canonical_path, after_text, guard=source_guard),
                 vault.PlannedWrite(root / manifest.path, after_manifest_text, guard=manifest_guard),
                 *log_plan.writes,
-                *((kept,) if kept is not None else ()),
+                kept,
             ],
             required_guards=(
                 *directory_guards,

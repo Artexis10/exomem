@@ -628,19 +628,27 @@ def _parent_with_origin(vault: Path, *, configured: bool) -> tuple[object, str]:
     return created, rationale
 
 
-@pytest.mark.parametrize("input_change", ["withheld", "deleted"])
+@pytest.mark.parametrize("input_change", ["withheld", "deleted", "stray-opener"])
 def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
     vault: Path, input_change: str
 ) -> None:
-    """An unreleased or unavailable input hides its whole carrier, never the released claim."""
+    """An unreleased or unavailable input hides its whole carrier, never the released claim.
+
+    A hand edit that leaves a literal `<!--` above the carrier must not hide
+    the reserved opener inside an ordinary comment span.
+    """
     from test_episode_recovery import _write_source_rule
 
     from exomem import commands
 
     created, rationale = _parent_with_origin(vault, configured=True)
     parent = vault / created.path
+    if input_change == "stray-opener":
+        text = parent.read_text(encoding="utf-8")
+        end = text.index("\n---\n", 4) + 5
+        parent.write_text(text[:end] + "HTML comments open with <!-- in markup.\n" + text[end:])
     canonical = parent.read_bytes()
-    if input_change == "withheld":
+    if input_change in {"withheld", "stray-opener"}:
         _write_source_rule(vault, ceiling=0)
     else:
         (vault / _PATH).unlink()

@@ -108,6 +108,8 @@ def test_a_retry_or_unchanged_update_keeps_no_history(vault: Path, owner) -> Non
     history = _history(vault, key)
     assert history["retained"] == 1
     assert _temperatures(history) == [41]
+    # The unchanged update is accounted for, not reported as lost history.
+    assert history["status"] == "complete" and "unavailable" not in history
 
 
 def test_a_row_corrected_before_retention_reports_unavailable_legacy(vault: Path, owner) -> None:
@@ -179,7 +181,10 @@ def test_history_is_withheld_exactly_when_its_row_is(vault: Path) -> None:
     kept_relative = kept_file.relative_to(vault).as_posix()
 
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
-        assert _temperatures(_history(vault, visible)) == [41]
+        released = _history(vault, visible)
+        assert _temperatures(released) == [41]
+        # Who corrected the row is the owner's business, not another audience's.
+        assert [revision["actor"] for revision in released["revisions"]] == [{"surface": "mcp"}]
         missing = _refusal(lambda: _history(vault, "0" * 32))
         assert _refusal(lambda: _history(vault, hidden)) == missing
         # The public dispatcher every surface shares serves no kept file directly.
@@ -189,6 +194,41 @@ def test_history_is_withheld_exactly_when_its_row_is(vault: Path) -> None:
             assert _refusal(
                 lambda command=command: writer_lease.invoke_command(command, vault, path=kept_relative)
             ) == _refusal(lambda command=command: writer_lease.invoke_command(command, vault, path=absent))
+
+
+def test_history_hides_an_origin_whose_input_the_reader_can_no_longer_see(vault: Path) -> None:
+    from test_episode_records_leaf import _origin_reading_body
+    from test_episode_recovery import _write_source_rule
+
+    from exomem import records
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    _write_source_rule(vault, ceiling=6)
+    reader = RequestPrincipal(audience_id="client-a", surface="mcp")
+    with request_scope(reader):
+        key = _append(vault)
+        records.update_record(
+            vault, COLLECTION, item_key=key, changes={}, body=body,
+            expected_container_hash=_container(vault),
+            expected_item_version=hashlib.sha256(_entry(vault, key).read_bytes()).hexdigest(),
+            why="Attach the reading's origin.",
+        )
+        records.update_record(
+            vault, COLLECTION, item_key=key, changes={}, body="- [finding] Corrected. ^reading\n",
+            expected_container_hash=_container(vault),
+            expected_item_version=hashlib.sha256(_entry(vault, key).read_bytes()).hexdigest(),
+            why="Drop the origin.",
+        )
+        assert "exomem-origin" in _history(vault, key)["revisions"][0]["prior"]["body"]
+    _write_source_rule(vault, ceiling=0)
+
+    with request_scope(reader):
+        history = _history(vault, key)
+    (newest, _oldest) = history["revisions"]
+    assert "exomem-origin" not in newest["prior"]["body"]
+    assert "The vat reading was retained." in newest["prior"]["body"]
+    assert history["status"] == "complete"
 
 
 # Two hundred guarded corrections dominate this case; the bound it pins is the read.

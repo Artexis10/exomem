@@ -402,7 +402,7 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 
 #### Scenario: Reserved openers outside code are carriers
 
-- **WHEN** a reserved origin opener appears anywhere outside Markdown code and is not backslash-escaped, including inside HTML attributes, raw text or a link title
+- **WHEN** a reserved origin opener appears anywhere outside Markdown code and is not backslash-escaped, including inside HTML attributes, raw text, a link title or an earlier unterminated comment
 - **THEN** reading treats it as a removable carrier running to its first terminator or the end of the text, so it is withheld rather than disclosed as prose
 - **AND** writing accepts only exactly one valid designated block and refuses every other reserved carrier with a typed `ORIGIN_METADATA_INVALID`
 - **AND** fenced, indented and inline code examples remain literal at their original offsets

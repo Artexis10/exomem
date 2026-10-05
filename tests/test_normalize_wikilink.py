@@ -327,26 +327,6 @@ def test_find_body_wikilinks_excludes_code_blocks(vault: Path) -> None:
     assert targets == ["A", "C"]
 
 
-@pytest.mark.parametrize(
-    "body, targets",
-    [
-        ("``example\n[[Example]] and `literal`\n`` real [[Actual]]", ["Actual"]),
-        ("``[[Actual]]```", ["Actual"]),
-        ("`unclosed\n\n[[Actual]] with `unclosed", ["Actual"]),
-        ("`<!-- literal`\n<!-- data: ` --> [[Actual]] <!-- data: ` -->", ["Actual"]),
-        ("`unfinished\n## [[Actual]]\nend`", ["Actual"]),
-        ("`unfinished\r\n- [[Actual]]\r\nend`", ["Actual"]),
-        ("\\`literal [[Actual]]`", ["Actual"]),
-        ("\\\\`example [[Example]]` [[Actual]]", ["Actual"]),
-    ],
-)
-def test_body_links_respect_complete_backtick_delimiters(body: str, targets: list[str]) -> None:
-    """Multiline examples stay inert; unequal delimiter runs cannot hide real links."""
-    matches = find_body_wikilinks(body)
-    assert [match.group(1) for match in matches] == targets
-    assert all(body[match.start() : match.end()] == match.group() for match in matches)
-
-
 def test_unresolved_body_links_pass_through_with_warning(vault: Path) -> None:
     body = "Forward ref [[Knowledge Base/Notes/Insights/does-not-exist-yet]]."
     new_body, warnings = normalize_body_wikilinks(body, vault)

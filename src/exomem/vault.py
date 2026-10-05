@@ -7126,15 +7126,7 @@ def _mask_code_spans(text: str) -> str:
     Result is the same length as input; positions of non-code characters are
     unchanged. Used so wikilink scanners can ignore `[[X]]` inside code while
     still reporting accurate offsets into the original text.
-
-    Only a page carrying a reserved origin opener pays for the CommonMark
-    parse, whose code ownership the origin scanner shares; every other page
-    keeps the line-regex masker (see design: regex fence parsers remain).
     """
-    if "<!--" in text and "exomem-origin" in text.lower():
-        from .markdown_regions import mask_code
-
-        return mask_code(text)
     out = list(text)
     # Fenced code blocks (``` or ~~~), allowing up to 3 leading spaces per CommonMark.
     fence_open = re.compile(r"^( {0,3})(`{3,}|~{3,})[^\n]*$", re.MULTILINE)

@@ -71,8 +71,10 @@ MAX_ORIGIN_BYTES = 16 * 1024
 MAX_ORIGIN_ASSESSMENT_INPUTS = 8
 MAX_ORIGIN_BINDINGS = 32
 _ORIGIN_HASH_RE = re.compile(r"[0-9a-f]{64}")
-_ORIGIN_COMMENT_RE = re.compile(r"<!--(?P<body>.*?)(?P<end>-->|$)", re.DOTALL)
-_ORIGIN_RESERVED_RE = re.compile(r"^\s*exomem-origin(?=[:\s]|$)", re.IGNORECASE)
+_ORIGIN_COMMENT_RE = re.compile(r"<!--(?P<body>.*?)(?P<end>-->|\Z)", re.DOTALL)
+# A reserved opener is found directly, never through another comment's span:
+# a stray `<!--` earlier on the page must not swallow the carrier after it.
+_ORIGIN_OPENER_RE = re.compile(r"<!--(?=\s*exomem-origin(?:[:\s]|-->|\Z))", re.IGNORECASE)
 _ORIGIN_PAYLOAD_RE = re.compile(r"^\s*exomem-origin:v1\s+(.+?)\s*$", re.DOTALL)
 
 
@@ -97,6 +99,16 @@ class OriginDocument:
     def without_metadata(self, content: str) -> str:
         """Remove this document's designated spans from the same source text."""
         return remove_carriers(content, self.spans)
+
+
+def _merged(spans: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
 
 
 def remove_carriers(content: str, spans: Iterable[tuple[int, int]]) -> str:
@@ -473,17 +485,16 @@ def parse_origin(
         return OriginDocument("absent")
     if "<!--" not in content or "exomem-origin" not in content.lower():
         return OriginDocument("absent")
-    from .markdown_regions import MarkdownPositionError, scan_markdown
+    from .markdown_regions import code_spans, outside
 
-    regions = scan_markdown(content)
     blocks = []
-    for start, end in regions.comment_spans:
-        match = _ORIGIN_COMMENT_RE.fullmatch(content, start, end)
-        if match is None:
-            raise MarkdownPositionError("comment carrier has no exact original slice")
-        if _ORIGIN_RESERVED_RE.match(match.group("body")):
-            blocks.append(match)
-    spans = tuple(match.span() for match in blocks)
+    code = code_spans(content)
+    for opener in _ORIGIN_OPENER_RE.finditer(content):
+        if outside(content, opener.start(), code):
+            # Every opener outside code or an escape is a carrier, even one
+            # inside an earlier comment; each runs to its own first `-->`.
+            blocks.append(_ORIGIN_COMMENT_RE.match(content, opener.start()))
+    spans = _merged(match.span() for match in blocks)
     if not blocks:
         return OriginDocument("absent")
     try:

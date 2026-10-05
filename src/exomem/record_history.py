@@ -25,11 +25,16 @@ This module is the logical interface. Store-mode collections keep row content
 in `item_versions`; that backing replaces the file entries without changing
 `read`'s answer, and is a later store slice.
 
-A refresh or retry that leaves the payload unchanged keeps nothing: there is
-no prior meaning to recover. Corrections made before this module existed
-have no entry; `read` reports them as `unavailable_legacy` by matching the
-row's verified audit transitions against the kept entries, never as an empty
-history presented as complete.
+An update that leaves the payload unchanged (a presentation refresh, a
+same-value write) has no prior meaning to keep; it leaves an empty
+`<version>.same` marker instead, so its audit transition is accounted for.
+Corrections made before this module existed have neither; `read` reports
+them as `unavailable_legacy` by matching the row's verified audit transitions
+against the kept names, never as an empty history presented as complete.
+
+A kept body is released through the same origin projection as the live row,
+under the reader's own principal, and who made a correction is shown only to
+the owner or to the audience that made it.
 """
 
 from __future__ import annotations
@@ -51,6 +56,7 @@ ENTRY_VERSION = 1
 PAGE_DEFAULT = 20
 PAGE_MAX = 50
 _SUFFIX = ".json"
+_UNCHANGED = ".same"
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 #: Audit operations that create a row rather than correct one.
 _CREATIONS = frozenset({"append", "create", "plan_add", "plan_create"})
@@ -99,21 +105,23 @@ def plan_entry(
     before_item_hash: str,
     after_item_hash: str,
     binding: Mapping[str, Any] | None = None,
-) -> vault_module.PlannedWrite | None:
-    """The create-only write that keeps one correction's prior payload.
+) -> vault_module.PlannedWrite:
+    """The create-only write that keeps one update's prior payload.
 
-    None when the correction leaves the payload unchanged (a presentation
-    refresh, an idempotent retry): there is no earlier meaning to keep.
+    An update that leaves the payload unchanged keeps an empty marker named
+    for its transition: nothing to recover, but nothing lost either.
     """
     from . import records
     from .governance.principal import effective_principal
 
     before_payload = records._payload_hash(manifest, item_key, prior_values, prior_body or "")
+    moment = dt.datetime.now(dt.UTC)
+    directory = Path(vault_root) / history_dir(manifest.collection_id, item_key)
     if before_payload == records._payload_hash(
         manifest, item_key, after_values, after_body or ""
     ):
-        return None
-    moment = dt.datetime.now(dt.UTC)
+        name = registry_history.version_id(moment, transition_id) + _UNCHANGED
+        return vault_module.PlannedWrite(path=directory / name, content="", create_only=True)
     who = effective_principal()
     entry = {
         "version": ENTRY_VERSION,
@@ -135,9 +143,8 @@ def plan_entry(
         "actor": {"audience": who.audience_id, "surface": who.surface},
     }
     name = registry_history.version_id(moment, transition_id) + _SUFFIX
-    target = Path(vault_root) / history_dir(manifest.collection_id, item_key) / name
     return vault_module.PlannedWrite(
-        path=target,
+        path=directory / name,
         content=json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n",
         create_only=True,
@@ -207,7 +214,8 @@ def read(
     (`unavailable` counts them), and `unverified` when the chain itself
     cannot be verified.
     """
-    from . import record_formats, record_governance, records
+    from . import origin_bindings, record_formats, record_governance, records
+    from .governance.principal import OWNER_AUDIENCE, effective_principal
 
     root = Path(vault_root)
     page_size, after = _page_bounds(limit, continuation)
@@ -235,16 +243,27 @@ def read(
             raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
         relative = history_dir(manifest.collection_id, item_key)
         names = registry_history.kept_names(root, relative, suffix=_SUFFIX) or []
+        unchanged = registry_history.kept_names(root, relative, suffix=_UNCHANGED) or []
         versions = [name[: -len(_SUFFIX)] for name in names]
         older = [version for version in versions if after is None or version < after]
         page = older[:page_size]
-        revisions = [
-            _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)
-            for version in page
-        ]
+        reader = effective_principal().audience_id
+        revisions = []
+        for version in page:
+            revision = _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)
+            prior = revision.get("prior")
+            if isinstance(prior, dict) and isinstance(prior.get("body"), str):
+                # The reader's own principal decides what of a kept origin it sees.
+                prior["body"] = origin_bindings.project_origin_text(root, prior["body"])
+            actor = revision.get("actor")
+            if isinstance(actor, dict) and reader not in {OWNER_AUDIENCE, actor.get("audience")}:
+                revision["actor"] = {k: v for k, v in actor.items() if k != "audience"}
+            revisions.append(revision)
         chain = records._inspect_audit_chain(root, manifest, authorize_path=authorize)
         egress.emit_boundary_receipt(collector)
-    kept_tags = {version.rsplit("-", 1)[-1] for version in versions}
+    kept_tags = {
+        name.rsplit("-", 1)[-1].split(".", 1)[0] for name in (*names, *unchanged)
+    }
     corrections = [
         event["transition_id"]
         for event in chain.events
