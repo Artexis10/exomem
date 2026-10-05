@@ -7,11 +7,13 @@ Three pieces already exist and are not connected to each other.
 docstring says so and its implementation splits the anchor off, canonicalizes the
 path, and re-appends it.
 
-**The fragment is then discarded.** `epistemic_graph._build_relation_edges`
-passes that canonical form to `_with_md`, whose second line is
-`cleaned.split("|", 1)[0].split("#", 1)[0]`. The page is what reaches `_file_key`.
-No warning is emitted, because from `_with_md`'s point of view nothing went
-wrong.
+**The fragment is then discarded.** Two sites in `epistemic_graph` turn an
+authored relation target into an edge. A note-level `## Relations` bullet goes
+through `_relation_line_edges`, and a rich-unit `- relations:` row through
+`_edges_for_page`. Both end in `_with_md`, whose second line is
+`cleaned.split("|", 1)[0].split("#", 1)[0]`, and the rich-unit site splits the
+`#` off before it even normalizes. The page is what reaches `_file_key`. No
+warning is emitted, because from `_with_md`'s point of view nothing went wrong.
 
 **The destination it should have used is already indexed.** `graph_nodes` carries
 `unit_ref` with `idx_graph_nodes_unit_ref`, a unit node's key is
@@ -44,10 +46,39 @@ author.** The edge is page-level either way. The diagnostic distinguishes them,
 because the remedies differ: a missing fragment is a typo or a moved unit, an
 ambiguous one needs the target page to give its units distinct identity.
 
-**Reuse `_current_unit_status`, do not write a second resolver.** A relation
-target and a reference target ask the same question, and the failure mode of two
-resolvers is that they disagree on `ambiguous`. Its `work_exhausted` path already
-returns `stale`, which maps onto the page-level fallback.
+**One resolver owner, with the per-page read extracted from it.**
+`_current_unit_status` resolves a unit reference to its parent paths, and its
+per-page body (read the page's current bytes, parse, resolve the unit exactly)
+is now `_current_page_unit`, which it and the relation edge builder both call.
+The question is the same one -- does this page carry exactly one unit by that
+name -- and two resolvers would disagree on `ambiguous`. A fragment goes through
+`SemanticUnitDocument.resolve_fragment`, which builds the exact reference and
+calls `resolve_unit`, so an authored anchor or a `unit-<fingerprint>` identity
+resolves and nothing else does: no title, case or similarity matching.
+
+**Resolve from the target's bytes, not the sidecar.** `_edges_for_page` has no
+connection, and `graph_parent_refs` can be unpopulated mid-rebuild, so the
+fragment is resolved from disk exactly as `_current_unit_parent_paths` already
+does. Only the page's own bytes decide whether the fragment names one unit, and
+the destination key is derived from the same parse that produced the node.
+
+**A target edit re-derives its fragment dependants.** A unit destination is a
+function of the target page's bytes: a rich unit's key hashes its body, and an
+edit can add, remove or duplicate an anchor. Drain and the topology refresh
+already widen to every page whose body links a changed page, through
+`_dependency_sources_for_keys`. The live incremental refresh widened only when
+resolver topology moved, so it now also widens to pages whose raw dependencies
+carry a `#fragment` on a changed page, from the same persisted dependency rows.
+
+**The author is told through the census and the edge.** An edge whose fragment
+did not resolve carries `fragment_resolution` (`missing` or `ambiguous`) and the
+authored `target_fragment`, beside the existing `target_resolution`. The
+relation census counts them as `unresolved_fragment_edges` and
+`ambiguous_fragment_edges` beside `unresolved_target_edges`. A write-response
+advisory is not part of this change.
+
+**The graph schema version bumps.** Edges already stored for `[[T#Unit]]` are
+page-level; only a rebuild re-derives them, so `SCHEMA_VERSION` moves to 12.
 
 **The contract version bumps.** The relation grammar gains a documented target
 form, so `semantic_authoring`'s contract version and digest move, and with them

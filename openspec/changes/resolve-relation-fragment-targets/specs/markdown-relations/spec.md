@@ -15,7 +15,7 @@ The existing semantic-block metadata syntax (`- relations: kind: [[Target]]`) SH
 #### Scenario: A fragment that resolves to no unit or to several
 - **WHEN** a relation target's `#fragment` matches no addressable unit on the target page, or matches more than one
 - **THEN** the relation still produces the page-level edge it produces today
-- **AND** the write reports the unresolvable or ambiguous fragment to the author rather than discarding it silently
+- **AND** the graph reports the unresolvable or ambiguous fragment to the author, as distinct outcomes, rather than discarding it silently
 
 #### Scenario: A target with no fragment is unaffected
 - **WHEN** a relation target carries no `#fragment`
