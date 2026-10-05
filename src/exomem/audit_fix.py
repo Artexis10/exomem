@@ -39,7 +39,7 @@ Risky categories (proposed only):
 - `orphan_entity` — deletion is too big.
 - `unprocessed_source` — compilation is a thinking task.
 - `tag_inconsistency` — renames can break user mental models.
-- `frontmatter_compliance: tenant set without the expected project` — might be
+- `frontmatter_compliance: tenant set on a project not declared tenant_scoped` — might be
   a deliberate edge case, so it stays propose-only.
 - `source` missing `source_type` — folder→type inference is brittle.
 

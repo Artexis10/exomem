@@ -80,6 +80,25 @@ def test_collisions_and_incomplete_semantics_are_stable_findings() -> None:
     ]
 
 
+def test_extension_family_must_equal_its_parents_core_family() -> None:
+    owns_family = relation_registry.core_registry().core["owns"].family
+    assert owns_family != "association"
+
+    def load(**definition):
+        return relation_registry.load_registry(
+            proposal=_proposal(
+                **{"science.holds": {"parent": "owns", "description": "Holds it", **definition}}
+            )
+        )
+
+    assert load().definition("science.holds").family == owns_family
+    assert load(family=owns_family).findings == ()
+    refused = load(family="association").findings
+    assert [(item["code"], item["path"]) for item in refused] == [
+        ("family_mismatch", "extensions.science.holds.family")
+    ]
+
+
 def test_proposal_treats_whitespace_semantics_as_incomplete() -> None:
     result = relation_registry.propose_extension(
         relation_registry.core_registry(),

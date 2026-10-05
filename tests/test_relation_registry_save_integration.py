@@ -208,3 +208,71 @@ def test_public_delta_save_projects_graph_outcome_and_replays_without_recommit(
     assert replay == first
     assert registry_path.read_bytes() == committed_bytes
     assert registry_batches == 1
+
+
+def _vault_with_a_mismatched_extension(vault_root: Path) -> str:
+    """A registry saved before the family rule: ownership declared as `association`."""
+    path = relation_registry.extension_registry_path(vault_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "vault.holds_site": {
+                        "parent": "owns",
+                        "family": "association",
+                        "description": "Holds a site.",
+                        "direction": "directed",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return relation_registry.load_registry(vault_root).extension_hash
+
+
+def _save(vault_root: Path, delta: dict[str, object], expected_hash: str) -> None:
+    commands.op_schema_memory(
+        vault_root,
+        subject="relations",
+        operation="save-relations",
+        proposal=delta,
+        expected_hash=expected_hash,
+        why="repair a registry saved before the family rule",
+    )
+
+
+def test_a_saved_family_mismatch_is_an_advisory_that_blocks_no_save(vault: Path) -> None:
+    current = _vault_with_a_mismatched_extension(vault)
+    loaded = relation_registry.load_registry(vault)
+    assert [(item["code"], item["severity"]) for item in loaded.findings] == [
+        ("family_mismatch", "warning")
+    ]
+
+    _save(vault, _delta(), current)
+    after = relation_registry.load_registry(vault)
+    assert {"vault.applies_to", "vault.holds_site"} <= set(after.extensions)
+
+    _save(vault, {"deprecate": {"vault.holds_site": "owns"}}, after.extension_hash)
+    assert relation_registry.load_registry(vault).extensions["vault.holds_site"].status == "deprecated"
+
+
+def test_a_new_mismatched_extension_is_still_refused_beside_a_grandfathered_one(
+    vault: Path,
+) -> None:
+    current = _vault_with_a_mismatched_extension(vault)
+    delta = {
+        "upsert": {
+            "vault.runs_site": {
+                "parent": "owns",
+                "family": "association",
+                "description": "Runs a site.",
+                "direction": "directed",
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="family_mismatch"):
+        _save(vault, delta, current)
+    assert "vault.runs_site" not in relation_registry.load_registry(vault).extensions
