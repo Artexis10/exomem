@@ -248,10 +248,15 @@ def _mcp_identity_claims() -> tuple[dict[str, Any] | None, str | None]:
         return None, None
     if not headers:
         # A request containing only excluded headers also produces {}.
-        # Only absence of an HTTP binding proves the stdio fallback.
+        # Only absence of an HTTP binding, or the stdio transport's own
+        # header-less request, proves the stdio fallback.
         try:
-            get_http_request()
+            request = get_http_request()
         except (LookupError, RuntimeError):
+            return None, None
+        from .authorization_transport import is_stdio_request
+
+        if is_stdio_request(request):
             return None, None
         return None, "authenticated"
     authorization = str(headers.get("authorization", "")).strip()

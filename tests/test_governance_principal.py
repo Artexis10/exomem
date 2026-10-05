@@ -120,6 +120,24 @@ def test_http_request_with_only_excluded_headers_is_not_stdio_owner() -> None:
     assert resolve_mcp_principal().issuer_family == "mcp-local-stdio"
 
 
+def test_stdio_authorization_request_stays_the_local_owner() -> None:
+    """The stdio transport binds its own header-less request; that is not HTTP."""
+    from fastmcp.server.dependencies import _current_http_request
+
+    from exomem.governance import authorization_transport
+
+    request = authorization_transport._StdioAuthorizationRequest(
+        authorization_transport.CredentialCarrier.absent()
+    )
+    token = _current_http_request.set(request)
+    try:
+        local = resolve_mcp_principal()
+    finally:
+        _current_http_request.reset(token)
+    assert local.resolved is True
+    assert local.issuer_family == "mcp-local-stdio"
+
+
 def test_mcp_unresolved_but_expected_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
