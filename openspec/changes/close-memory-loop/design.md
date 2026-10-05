@@ -587,6 +587,19 @@ anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
 on turns that would have returned an empty packet.
 
+*Amended by Hugo's ruling of 2026-10-05.* "No anchor was named" is false when the
+turn names the carried page by its own title, so such a page is reported `resolved`:
+the anchor rule's name contact (two or more shared authored title terms) is applied
+to the carried page's title, and when it holds the page carries `lexical_overlap`
+beside `retrieval`, which the existing soundness rule resolves. Admission is the
+carry's, unchanged; no evidence kind or status clause is added, and a page named
+only by a body phrase or one title word stays `retrieval_carried`. Beside the
+carried pages, an anchor row linked to or from one of them and named by a unit it
+served is listed `partial` on `carried_link`, at most two per page, never resolved;
+its `via` names the page, so the egress guard removes it with that page and the
+every-anchor-withheld rule still holds. A path or URL quoted in a turn is one
+reference rather than words, so its directories never reach subject evidence.
+
 Within that existing title fallback, a complete current title stated in one
 sentence qualifies only its own occurrence, provided it contains an already
 admissible distinctive-word pair. Retain token positions through the shared
