@@ -279,3 +279,47 @@ async def test_a_cell_id_with_a_trailing_newline_is_skipped_when_the_row_is_read
 
     rows = await db.select_all_rows(_Connection())
     assert [row.cell_id for row in rows] == ["aaaaaaaaaaaaaaaa"]
+
+
+async def test_capacity_snapshot_is_atomic_and_serializes_cutover_with_admission(cell_db: CellDatabase, monkeypatch) -> None:
+    import asyncio
+
+    from cellctl.capacity import NodeCapacity
+
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    admission = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    reader = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    now = datetime.now(UTC)
+    try:
+        await db.write_capacity_snapshot(controller, capacities={"old": NodeCapacity(3, 0, True)}, observed_at=now)
+        first_written = asyncio.Event()
+        finish = asyncio.Event()
+        original = db.write_capacity
+
+        async def pause_after_write(*args, **kwargs):
+            await original(*args, **kwargs)
+            first_written.set()
+            await finish.wait()
+
+        monkeypatch.setattr(db, "write_capacity", pause_after_write)
+        publication = asyncio.create_task(db.write_capacity_snapshot(controller, capacities={"new": NodeCapacity(3, 0, True)}, observed_at=now))
+        await first_written.wait()
+        assert await reader.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 3
+        finish.set()
+        await publication
+        assert await reader.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 3
+        assert await reader.fetchval("SELECT cell_slots FROM exomem_cloud_capacity WHERE node = 'old'") == 0
+
+        # A redemption that got the lock first must commit before the zero
+        # snapshot returns, and therefore before the caller reads inventory.
+        async with admission.transaction():
+            await admission.execute("SELECT pg_advisory_xact_lock(hashtext('exomem-cloud-capacity'))")
+            cutover = asyncio.create_task(db.write_capacity_snapshot(controller, capacities={}, observed_at=now))
+            await asyncio.sleep(0.05)
+            assert not cutover.done()
+        await cutover
+        assert await reader.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 0
+    finally:
+        await controller.close()
+        await admission.close()
+        await reader.close()

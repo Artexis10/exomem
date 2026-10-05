@@ -122,6 +122,7 @@ class CellManifestSpec:
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     model_env: dict[str, str] = field(default_factory=dict)
     dedicated_node: bool = False
+    placement: dict = field(default_factory=dict)
 
     # Secret material (D7). cellctl renders these from the row and its master
     # keys on every pass; it never reads the Secret back.
@@ -528,14 +529,16 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     return env
 
 
-def _dedicated_placement(spec: CellManifestSpec) -> dict:
-    if not spec.dedicated_node:
-        return {}
+def dedicated_placement(cell_id: str) -> dict:
     return {
-        "nodeSelector": {"exomem.io/dedicated-cell": spec.cell_id},
+        "nodeSelector": {"exomem.io/dedicated-cell": cell_id},
         "tolerations": [{"key": "exomem.io/dedicated-cell", "operator": "Equal",
-                         "value": spec.cell_id, "effect": "NoSchedule"}],
+                         "value": cell_id, "effect": "NoSchedule"}],
     }
+
+
+def _dedicated_placement(spec: CellManifestSpec) -> dict:
+    return spec.placement or (dedicated_placement(spec.cell_id) if spec.dedicated_node else {})
 
 
 def render_statefulset(spec: CellManifestSpec) -> dict:

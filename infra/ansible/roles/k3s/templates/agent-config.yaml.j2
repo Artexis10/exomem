@@ -9,8 +9,18 @@ node-label:
   - {{ k3s_agent_node_label | to_json }}
 {% if k3s_agent_dedicated_cell %}
   - {{ ("exomem.io/dedicated-cell=" ~ k3s_agent_dedicated_cell) | to_json }}
+{% endif %}
+{% if k3s_agent_shared_profile %}
+  - {{ ("exomem.io/shared-profile=" ~ k3s_agent_shared_profile) | to_json }}
+{% endif %}
+{% if k3s_agent_dedicated_cell or k3s_agent_shared_profile %}
 node-taint:
+{% endif %}
+{% if k3s_agent_dedicated_cell %}
   - {{ ("exomem.io/dedicated-cell=" ~ k3s_agent_dedicated_cell ~ ":NoSchedule") | to_json }}
+{% endif %}
+{% if k3s_agent_shared_profile %}
+  - {{ ("exomem.io/shared-profile=" ~ k3s_agent_shared_profile ~ ":NoSchedule") | to_json }}
 {% endif %}
 protect-kernel-defaults: true
 kubelet-arg:

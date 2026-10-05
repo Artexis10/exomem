@@ -107,9 +107,12 @@
     k3s_agent_node: "{{ k3s_agent_node_result.stdout | from_json }}"
     k3s_agent_reserved_taints: >-
       {{ ((k3s_agent_node_result.stdout | from_json).spec.taints | default([])
-          | rejectattr('key', 'equalto', 'exomem.io/dedicated-cell') | list)
+          | rejectattr('key', 'equalto', 'exomem.io/dedicated-cell')
+          | rejectattr('key', 'equalto', 'exomem.io/shared-profile') | list)
          + ([{'key': 'exomem.io/dedicated-cell', 'value': k3s_agent_dedicated_cell,
-              'effect': 'NoSchedule'}] if k3s_agent_dedicated_cell else []) }}
+              'effect': 'NoSchedule'}] if k3s_agent_dedicated_cell else [])
+         + ([{'key': 'exomem.io/shared-profile', 'value': k3s_agent_shared_profile,
+              'effect': 'NoSchedule'}] if k3s_agent_shared_profile else []) }}
 
 - name: Converge the agent reservation
   ansible.builtin.command:
@@ -123,13 +126,16 @@
       - -p
       - >-
         {{ {'metadata': {'resourceVersion': k3s_agent_node.metadata.resourceVersion,
-                         'labels': {'exomem.io/dedicated-cell': k3s_agent_dedicated_cell or none}},
+                         'labels': {'exomem.io/dedicated-cell': k3s_agent_dedicated_cell or none,
+                                    'exomem.io/shared-profile': k3s_agent_shared_profile or none}},
             'spec': {'taints': k3s_agent_reserved_taints}} | to_json }}
   delegate_to: "{{ k3s_server_host }}"
   changed_when: true
   when: >-
     (k3s_agent_node.metadata.labels | default({})).get('exomem.io/dedicated-cell')
       != (k3s_agent_dedicated_cell or none)
+    or (k3s_agent_node.metadata.labels | default({})).get('exomem.io/shared-profile')
+      != (k3s_agent_shared_profile or none)
     or (k3s_agent_node.spec.taints | default([])) != k3s_agent_reserved_taints
 
 # A --limit or partial run can leave a peer without this node's rules, which

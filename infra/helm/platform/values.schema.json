@@ -223,6 +223,108 @@
       "additionalProperties": false,
       "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
+        "sharedWorker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "selected",
+                "all-shared"
+              ]
+            },
+            "cell_ids": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z2-7]{16}$"
+              }
+            },
+            "profile": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+            },
+            "topology_key": {
+              "type": "string",
+              "pattern": "^(?:[a-z0-9.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$",
+              "not": {
+                "pattern": "^exomem.io/"
+              }
+            },
+            "topology_value": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"
+            },
+            "occupancy": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cpu_request",
+                "cpu_limit",
+                "memory_request",
+                "memory_limit"
+              ],
+              "properties": {
+                "cpu_request": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "memory_request": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "cpu_limit": {
+                  "const": "2"
+                },
+                "memory_limit": {
+                  "const": "3Gi"
+                }
+              }
+            },
+            "reserve_cpu": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reserve_memory": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "off"
+              }
+            }
+          },
+          "then": {
+            "maxProperties": 1
+          },
+          "else": {
+            "required": [
+              "mode",
+              "cell_ids",
+              "profile",
+              "topology_key",
+              "topology_value",
+              "occupancy",
+              "resources",
+              "reserve_cpu",
+              "reserve_memory"
+            ]
+          }
+        },
         "dedicatedCellIds": {
           "type": "array", "maxItems": 1024, "uniqueItems": true,
           "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}

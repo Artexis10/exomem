@@ -361,3 +361,22 @@ run "rejects_malformed_reservation" {
   }
   expect_failures = [var.nodes]
 }
+
+run "shared_profile_reaches_inventory_output" {
+  command = plan
+  variables {
+    nodes = { "01" = { private_ip = "10.50.1.31", server_type = "cpx42", shared_profile = "qualified-test" } }
+  }
+  assert {
+    condition     = output.nodes["01"].shared_profile == "qualified-test"
+    error_message = "The agent map must carry the shared profile to inventory."
+  }
+}
+
+run "shared_profile_cannot_overlap_dedicated_reservation" {
+  command = plan
+  variables {
+    nodes = { "01" = { private_ip = "10.50.1.31", server_type = "cpx42", shared_profile = "qualified-test", dedicated_cell_id = "aaaaaaaaaaaaaaaa" } }
+  }
+  expect_failures = [var.nodes]
+}

@@ -15,6 +15,7 @@ from datetime import datetime
 
 import asyncpg
 
+from .capacity import NodeCapacity
 from .state import CellRow, RolloutRow
 
 logger = logging.getLogger("cellctl")
@@ -292,3 +293,15 @@ async def zero_absent_capacity(connection: asyncpg.Connection, *, present_nodes:
         present_nodes,
         observed_at,
     )
+
+
+async def write_capacity_snapshot(
+    connection: asyncpg.Connection, *, capacities: dict[str, NodeCapacity], observed_at: datetime,
+) -> None:
+    """Publish one complete pass under the same lock as invite redemption."""
+    async with connection.transaction():
+        await connection.execute("SELECT pg_advisory_xact_lock(hashtext('exomem-cloud-capacity'))")
+        for node, capacity in capacities.items():
+            await write_capacity(connection, node=node, cell_slots=capacity.cell_slots,
+                                 attachments_used=capacity.attachments_used, observed_at=observed_at)
+        await zero_absent_capacity(connection, present_nodes=list(capacities), observed_at=observed_at)

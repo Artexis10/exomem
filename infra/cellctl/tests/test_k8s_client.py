@@ -268,7 +268,8 @@ def test_capacity_inputs_read_a_csinode_whose_drivers_are_null() -> None:
         ]
     )
 
-    allocatable, attachments_used, non_cell, reserved_nodes = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    allocatable, attachments_used, non_cell, reserved_nodes = inputs.allocatable, inputs.attachments_used, inputs.non_cell_attachments, inputs.reserved_nodes
 
     assert reserved_nodes == set()
     assert allocatable == {"k3s-node": None, "hetzner-node": 16}
@@ -467,8 +468,8 @@ def test_capacity_reads_reservation_without_hiding_attached_volumes(labels, tain
         spec=NS(attacher="csi.hetzner.cloud", node_name="reserved", source=NS(persistent_volume_name="pv")),
         status=NS(attached=True))])
     inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
-    assert inputs[:3] == ({"reserved": 16}, {"reserved": 1}, {"reserved": 1})
-    assert len(inputs) == 4 and inputs[3] == {"reserved"}
+    assert (inputs.allocatable, inputs.attachments_used, inputs.non_cell_attachments) == ({"reserved": 16}, {"reserved": 1}, {"reserved": 1})
+    assert inputs.reserved_nodes == {"reserved"}
 
 
 @pytest.mark.parametrize("appears", [True, False])
@@ -487,7 +488,7 @@ def test_capacity_does_not_admit_a_node_missing_from_its_observation(appears) ->
 
     client._storage.list_csi_node = observe_csi
     inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
-    assert "joining" in inputs[3]
+    assert "joining" in inputs.reserved_nodes
 
 
 def test_capacity_excludes_an_unobserved_attachment_only_node() -> None:
@@ -499,8 +500,8 @@ def test_capacity_excludes_an_unobserved_attachment_only_node() -> None:
         spec=NS(attacher="csi.hetzner.cloud", node_name="joining", source=NS(persistent_volume_name="pv")),
         status=NS(attached=True))])
     inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
-    assert inputs[1] == {"joining": 1}
-    assert inputs[3] == {"joining"}
+    assert inputs.attachments_used == {"joining": 1}
+    assert inputs.reserved_nodes == {"joining"}
 
 
 @pytest.mark.parametrize("unavailable", ["not-ready", "cordoned", "tainted"])
@@ -528,11 +529,149 @@ def test_capacity_defers_new_cells_until_the_worker_is_available(unavailable: st
         status=NS(attached=True))])
 
     unavailable_inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
-    assert unavailable_inputs[:3] == ({"worker": 16}, {"worker": 1}, {"worker": 1})
-    assert unavailable_inputs[3] == {"worker"}
+    assert (unavailable_inputs.allocatable, unavailable_inputs.attachments_used, unavailable_inputs.non_cell_attachments) == ({"worker": 16}, {"worker": 1}, {"worker": 1})
+    assert unavailable_inputs.reserved_nodes == {"worker"}
 
     # The next ordinary observation restores admission; no human unlock is needed.
     node.status.conditions[0].status = "True"
     node.spec.unschedulable = False
     node.spec.taints = []
-    assert client.capacity_inputs(csi_driver="csi.hetzner.cloud")[3] == set()
+    assert client.capacity_inputs(csi_driver="csi.hetzner.cloud").reserved_nodes == set()
+
+
+@pytest.fixture
+def shared_capacity_client():
+    from kubernetes import client as k8s
+
+    from cellctl.capacity import SharedWorkerPolicy
+    from cellctl.manifests import ResourceSettings
+
+    policy = SharedWorkerPolicy(mode="all-shared", profile="test", topology_key="topology.kubernetes.io/zone",
+                                topology_value="test-zone", occupancy=2, resources=ResourceSettings(cpu_request="1", memory_request="2Gi"),
+                                reserve_cpu="0", reserve_memory="0")
+    api = k8s.ApiClient()
+    node = api._ApiClient__deserialize({"metadata": {"name": "worker", "labels": {
+        "kubernetes.io/hostname": "worker", "exomem.io/shared-profile": "test", policy.topology_key: policy.topology_value}},
+        "spec": {"taints": [{"key": "exomem.io/shared-profile", "value": "test", "effect": "NoSchedule"}]},
+        "status": {"allocatable": {"cpu": "4", "memory": "8Gi"}, "conditions": [
+            {"type": "Ready", "status": "True"}, {"type": "MemoryPressure", "status": "False"},
+            {"type": "DiskPressure", "status": "False"}, {"type": "PIDPressure", "status": "False"}]}}, "V1Node")
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = _CoreWithoutVolumes()
+    client._core.list_node = lambda: NS(items=[node])
+    client._core.list_pod_for_all_namespaces = lambda: NS(items=[])
+    client._storage = _StorageWithNullDrivers([{"metadata": {"name": "worker"}, "spec": {"drivers": [
+        {"name": "csi.hetzner.cloud", "topologyKeys": [policy.topology_key], "allocatable": {"count": 16}}]}}])
+    return client, policy, node
+
+
+def test_shared_capacity_observes_scheduler_requests_and_csi_topology(shared_capacity_client) -> None:
+    from decimal import Decimal
+
+    from kubernetes import client as k8s
+
+    client, policy, _ = shared_capacity_client
+    api = k8s.ApiClient()
+    # A restartable init remains resident during both the subsequent ordinary
+    # init and the app. max(init + sidecar, app + sidecar) plus overhead.
+    pod = api._ApiClient__deserialize({"metadata": {"namespace": NAMESPACE}, "status": {"phase": "Pending"},
+        "spec": {"containers": [{"name": "app", "resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}],
+                 "initContainers": [{"name": "sidecar", "restartPolicy": "Always", "resources": {"requests": {"cpu": "250m", "memory": "128Mi"}}},
+                                    {"name": "init", "resources": {"requests": {"cpu": "2", "memory": "512Mi"}}}],
+                 "overhead": {"cpu": "100m", "memory": "64Mi"},
+                 "tolerations": [{"key": "exomem.io/shared-profile", "operator": "Exists", "effect": "NoSchedule"}]}}, "V1Pod")
+    client._core.list_pod_for_all_namespaces = lambda: NS(items=[pod])
+    observation = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
+    assert observation.nodes["worker"].cpu == 4
+    assert observation.nodes["worker"].memory == 8 * 1024**3
+    assert observation.pods[0].cpu == Decimal("2.35")
+    assert observation.pods[0].memory == 1216 * 1024**2
+    assert observation.pods[0].node is None
+    assert observation.pods[0].cell_id == CELL_ID
+    # A resource downsize has not released the scheduler allocation yet.
+    pod.status.container_statuses = [k8s.V1ContainerStatus(
+        name="app", image="test", image_id="test", ready=False, restart_count=0,
+        allocated_resources={"cpu": "3", "memory": "1Gi"})]
+    resized = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
+    assert resized.pods[0].cpu == Decimal("3.35")
+    pod.spec.resources = k8s.V1ResourceRequirements(requests={"cpu": "4", "memory": "2Gi"})
+    pod_level = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
+    assert pod_level.pods[0].cpu == Decimal("4.1")
+    assert pod_level.pods[0].memory == 2112 * 1024**2
+    pod.spec.volumes = [k8s.V1Volume(name="data", persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(claim_name="data"))]
+    pending = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
+    assert len(pending.attachments) == 1
+    assert pending.attachments[0].cell_id == CELL_ID
+    assert pending.attachments[0].node == "worker"
+    assert pending.attachments_used == {}  # a commitment is not an actual attachment
+    pv = api._ApiClient__deserialize({"metadata": {"name": "pv"}, "spec": {"capacity": {"storage": "10Gi"},
+        "claimRef": {"namespace": NAMESPACE}, "csi": {"driver": "csi.hetzner.cloud", "volumeHandle": "test"},
+        "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [
+            {"key": policy.topology_key, "operator": "In", "values": ["other-zone"]}]}]}}}}, "V1PersistentVolume")
+    client._core.list_persistent_volume = lambda: NS(items=[pv])
+    assert CELL_ID in client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy).incompatible_cells
+
+
+@pytest.mark.parametrize("placement,eligible", [
+    ({}, True),
+    ({"nodeSelector": {"kubernetes.io/hostname": "other-worker"}}, False),
+    ({"tolerations": []}, False),
+    ({"tolerations": [{"key": "exomem.io/shared-profile", "value": "other"}]}, False),
+    ({"tolerations": [{"key": "other", "operator": "Exists"}]}, False),
+    ({"tolerations": [{"key": "exomem.io/shared-profile", "operator": "Exists", "effect": "NoExecute"}]}, False),
+    ({"tolerations": [{"operator": "Exists"}]}, True),
+    ({"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+        {"matchExpressions": [{"key": "exomem.io/shared-profile", "operator": "In", "values": ["other"]}]}
+    ]}}}}, False),
+    ({"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+        {"matchExpressions": [{"key": "exomem.io/shared-profile", "operator": "In", "values": ["test"]}],
+         "matchFields": [{"key": "metadata.name", "operator": "In", "values": ["other-worker"]}]}
+    ]}}}}, False),
+    ({"nodeSelector": {"kubernetes.io/hostname": "worker"}, "affinity": {"nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+            {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["other-worker"]}]},
+            {"matchExpressions": [{"key": "exomem.io/shared-profile", "operator": "In", "values": ["test"]}],
+             "matchFields": [{"key": "metadata.name", "operator": "In", "values": ["worker"]}]}
+        ]}}}}, True),
+    ({"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{}]}}}}, False),
+    ({"affinity": {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [
+        {"weight": 100, "preference": {"matchExpressions": [
+            {"key": "kubernetes.io/hostname", "operator": "In", "values": ["other-worker"]}]}}
+    ]}}}, True),
+    ({"affinity": {"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+        {"labelSelector": {"matchLabels": {"app": "batch"}}, "topologyKey": "kubernetes.io/hostname"}
+    ]}}}, True),
+    ({"nodeName": "worker", "nodeSelector": {"kubernetes.io/hostname": "other-worker"}, "tolerations": []}, True),
+])
+def test_shared_capacity_charges_only_possible_pending_placements(shared_capacity_client, placement, eligible) -> None:
+    from kubernetes import client as k8s
+
+    from cellctl.capacity import CapacityConfig, compute_shared_capacity
+
+    client, policy, _ = shared_capacity_client
+    pod = k8s.ApiClient()._ApiClient__deserialize({"metadata": {"namespace": "batch"}, "status": {"phase": "Pending"},
+        "spec": {"containers": [{"name": "batch", "resources": {"requests": {"cpu": "4", "memory": "4Gi"}}}],
+                 "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "data"}}],
+                 "tolerations": [{"key": "exomem.io/shared-profile", "value": "test"}], **placement}}, "V1Pod")
+    client._core.list_pod_for_all_namespaces = lambda: NS(items=[pod])
+    observation = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
+    assert bool(observation.pods) is eligible
+    assert bool(observation.attachments) is eligible
+    capacity = compute_shared_capacity(observation, policy=policy, config=CapacityConfig(), committed=set())
+    assert capacity["worker"].cell_slots == (0 if eligible else 2)
+
+
+@pytest.mark.parametrize("tolerated", [False, True])
+def test_shared_pending_reservations_respect_noexecute_taints(shared_capacity_client, tolerated) -> None:
+    from kubernetes import client as k8s
+
+    client, policy, node = shared_capacity_client
+    node.spec.taints.append(k8s.V1Taint(key="maintenance", effect="NoExecute"))
+    pod = k8s.V1Pod(metadata=k8s.V1ObjectMeta(namespace="batch"), spec=k8s.V1PodSpec(
+        containers=[k8s.V1Container(name="batch")],
+        volumes=[k8s.V1Volume(name="data", persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(claim_name="data"))],
+        tolerations=[k8s.V1Toleration(operator="Exists", effect=None if tolerated else "NoSchedule")]))
+    client._core.list_pod_for_all_namespaces = lambda: NS(items=[pod])
+    observation = client.capacity_inputs(csi_driver="csi.hetzner.cloud", shared_policy=policy)
+    assert bool(observation.pods) is tolerated
+    assert bool(observation.attachments) is tolerated

@@ -207,13 +207,24 @@ variable "k3s_agent_nodes" {
   # or removing an entry is the whole Terraform change; the module validates
   # addresses against the subnet and the two reserved node addresses. Run
   # infra/ansible/remove-agent.yml BEFORE removing an entry.
-  description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type, optional dedicated_cell_id }."
+  description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type, optional dedicated_cell_id, optional shared_profile }."
   type = map(object({
     private_ip        = string
     server_type       = string
     dedicated_cell_id = optional(string, "")
+    shared_profile    = optional(string, "")
   }))
   default = {}
+  validation {
+    condition = alltrue([
+      for node in values(var.k3s_agent_nodes) :
+      node.shared_profile == "" ||
+      (node.dedicated_cell_id == "" && length(node.shared_profile) <= 63 &&
+      can(regex("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", node.shared_profile)))
+    ])
+    error_message = "shared_profile must be an empty value or a DNS label on a non-dedicated agent."
+  }
+
   validation {
     condition = alltrue([
       for node in values(var.k3s_agent_nodes) :

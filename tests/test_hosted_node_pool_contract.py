@@ -209,6 +209,7 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
                             "name": "exomem-agent-01",
                             "ipv4": "192.0.2.31",
                             "private_ip": "10.50.1.31",
+                            "shared_profile": "qualified-test",
                         },
                         "02": {
                             "name": "exomem-agent-02",
@@ -246,6 +247,7 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
             "ansible_host": "192.0.2.31",
             "ansible_user": "ops",
             "private_node_ip": "10.50.1.31",
+            "k3s_agent_shared_profile": "qualified-test",
         },
         "exomem-agent-02": {
             "ansible_host": "192.0.2.32",
@@ -633,11 +635,11 @@ def test_agent_module_terraform_tests_pass_offline() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("key", ["exomem.io/dedicated-cell", "exomem.io/shared-profile"])
 @pytest.mark.parametrize("reserved_by", ["label", "taint", "selected-template"])
-def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Path, reserved_by: str) -> None:
+def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Path, reserved_by: str, key: str) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
-    key = "exomem.io/dedicated-cell"
     nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
               "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
              for name in ("target", "shared", "reserved")]
@@ -674,8 +676,8 @@ def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Pa
         assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("cell_id", ["", "aaaaaaaaaaaaaaaa"])
-def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: Path, cell_id: str) -> None:
+@pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])
+def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: Path, cell_id: str, profile: str) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
     key = "exomem.io/dedicated-cell"
@@ -683,11 +685,12 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
     node = {"metadata": {"resourceVersion": "12", "labels": {"other": "keep", key: "bbbbbbbbbbbbbbbb"}},
             "spec": {"taints": [unrelated, {"key": key, "value": "bbbbbbbbbbbbbbbb", "effect": "NoSchedule"}]}}
     expected = [unrelated] + ([{"key": key, "value": cell_id, "effect": "NoSchedule"}] if cell_id else [])
+    expected += ([{"key": "exomem.io/shared-profile", "value": profile, "effect": "NoSchedule"}] if profile else [])
     tasks = {task["name"]: task for task in _yaml(K3S_ROLE / "tasks/agent.yml")}
     rendered = tmp_path / "agent.yaml"
     play = tmp_path / "reservation.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
-        "k3s_agent_dedicated_cell": cell_id, "k3s_node_role": "agent",
+        "k3s_agent_dedicated_cell": cell_id, "k3s_node_role": "agent", "k3s_agent_shared_profile": profile,
         "k3s_agent_node_result": {"stdout": json.dumps(node)},
         "k3s_server_private_ip": "10.0.0.1", "k3s_agent_join_token": "test-token",
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
@@ -701,7 +704,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
          "register": "patch"},
         {"ansible.builtin.assert": {"that": [
             "(patch.msg | from_json).spec.taints == expected_taints",
-            "(patch.msg | from_json).metadata.labels == {'exomem.io/dedicated-cell': k3s_agent_dedicated_cell or none}",
+            "(patch.msg | from_json).metadata.labels == {'exomem.io/dedicated-cell': k3s_agent_dedicated_cell or none, 'exomem.io/shared-profile': k3s_agent_shared_profile or none}",
             "(patch.msg | from_json).metadata.resourceVersion == '12'",
         ]}},
     ]}]))
@@ -709,8 +712,8 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     config = _yaml(rendered)
-    assert config["node-label"] == ["exomem.io/node-pool=agent"] + ([f"{key}={cell_id}"] if cell_id else [])
-    assert config.get("node-taint", []) == ([f"{key}={cell_id}:NoSchedule"] if cell_id else [])
+    assert config["node-label"] == ["exomem.io/node-pool=agent"] + ([f"{key}={cell_id}"] if cell_id else []) + ([f"exomem.io/shared-profile={profile}"] if profile else [])
+    assert config.get("node-taint", []) == ([f"{key}={cell_id}:NoSchedule"] if cell_id else []) + ([f"exomem.io/shared-profile={profile}:NoSchedule"] if profile else [])
 
 
 @pytest.mark.parametrize("role,cell_id", [("server", "aaaaaaaaaaaaaaaa"), ("agent", "a" * 16 + "\n")])
