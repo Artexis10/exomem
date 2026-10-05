@@ -22,7 +22,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     5,
-    "sha256:626391b593e327c23c78a862b15af3338eca50ec7b7cb99a12d67c2a29ec8a74",
+    "sha256:9df68fa1ea6b4da5e9fb5ebeb24960710632c200c39b38547d99720db44ee332",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -191,9 +191,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "N or shallower; deeper headings remain in its body."
         ),
         "relation_rule": (
-            "Typed unit relations require the rich form. A relation target may end "
-            "`#anchor` to address one unit on the target page; an anchor that names no "
-            "unit or several keeps the page-level edge and is counted in the relation census."
+            "Typed unit relations require the rich form. A `#anchor` target addresses a unit."
         ),
     }
     assert contract["semantic_roles"] == {
