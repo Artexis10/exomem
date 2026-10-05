@@ -669,6 +669,8 @@ class Spike:
         new_volume_id = wait_for(lambda: kube.json("get", "logicalvolume", volume).get("status", {}).get("volumeID"), timeout=120,
                                  interval=2, description="the new LogicalVolume to be created")
         naive = host_lvs()
+        print("[spike] diag readopt " + json.dumps({"old_uid": old_uid, "old_volume_id": old_name, "new_uid": new_uid, "new_volume_id": new_volume_id,
+                                                  "lv_status": lv.get("status", {}), "before": before, "orphaned": orphaned, "naive": naive}), flush=True)
 
         # The operator step: the old volume takes the name the recreated object was given.
         storage.sudo("lvremove", "--yes", f"{storage.VG_NAME}/{new_volume_id}")
