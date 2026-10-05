@@ -299,7 +299,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "relation_rule": (
             "Typed unit relations require the rich form. A relation target may end "
             "`#anchor` to address one unit on the target page; an anchor that names no "
-            "unit or several keeps the page-level edge and is reported."
+            "unit or several keeps the page-level edge and is counted in the relation census."
         ),
     }
     semantic_roles = {
