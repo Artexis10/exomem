@@ -52,7 +52,11 @@ def _paths(packet: dict, status: str) -> set[str]:
 def _carried(packet: dict) -> set[str]:
     """Pages the carry served, `resolved` when the turn named a page's own
     title (the 2026-10-05 ruling) and `retrieval_carried` otherwise."""
-    return {a["path"] for a in packet["anchors"] if a["kind"] == "page"}
+    return {
+        a["path"]
+        for a in packet["anchors"]
+        if a["kind"] == "page" and a["status"] in {"retrieval_carried", "resolved"}
+    }
 
 
 def test_two_pages_named_apart_are_both_carried(domain_vault: Path) -> None:
