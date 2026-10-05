@@ -86,8 +86,15 @@ def test_auth_sessions_lists_local_sessions_by_ingress(
 
 
 def test_revoke_one_and_revoke_all_end_local_sessions(
-    operator: Path, capsys: pytest.CaptureFixture[str]
+    operator: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem.auth_sessions import secrets
+
+    token_urlsafe = secrets.token_urlsafe
+    session_ids = iter(("-synthetic-home-session", "synthetic-codex-session"))
+    monkeypatch.setattr(
+        secrets, "token_urlsafe", lambda n: next(session_ids) if n == 18 else token_urlsafe(n)
+    )
     for client in ("home", "codex"):
         assert main(
             ["auth", "issue-local", "--client", client, "--output", str(operator / client), "--json"]
@@ -96,7 +103,7 @@ def test_revoke_one_and_revoke_all_end_local_sessions(
     home = (operator / "home").read_text().strip()
     codex = (operator / "codex").read_text().strip()
 
-    assert main(["auth", "revoke", home_id]) == 0
+    assert main(["auth", "revoke", "--", home_id]) == 0
     assert _validate(home) is None
     assert _validate(codex) is not None
     assert main(["auth", "revoke", "--all"]) == 0

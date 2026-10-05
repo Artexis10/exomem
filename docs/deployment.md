@@ -1061,7 +1061,7 @@ with the replica that answers.
 
 | Situation | Action |
 |---|---|
-| A remote token may be stolen | `exomem auth revoke <session-id>` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
+| A remote token may be stolen | `exomem auth revoke -- SESSION_ID` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. Put any options before `--`: an opaque session ID can begin with a hyphen. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
 | The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
 
 ### Same-machine clients: the local listener
@@ -1100,7 +1100,7 @@ exomem auth issue-local --client home --output ~/.config/exomem/home.token
 The command needs the same environment as `exomem auth sessions`
 (`EXOMEM_JWT_SIGNING_KEY`, `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME`)
 and prints only the session id. Local tokens do not expire. `exomem auth
-sessions` lists them with `ingress: local`; `exomem auth revoke <session-id>`
+sessions` lists them with `ingress: local`; `exomem auth revoke -- SESSION_ID`
 ends one, and `exomem auth revoke --all` ends them with every other session.
 A request with a local token acts as the owner and is recorded as
 `principal_kind: owner-local`; access log lines carry `ingress=local` and the

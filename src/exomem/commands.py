@@ -1675,6 +1675,10 @@ def op_bootstrap(
             "loop": [
                 "bootstrap",
                 "adopt_vault or browse_memory when first seeing an existing vault",
+                *([
+                    "when recall is warranted and context is not already injected, "
+                    "activate_context with the user's turn before extra recall"
+                ] if not frozen_profile and "activate_context" in active_product_names else []),
                 "ask_memory for cheap product recall",
                 "read_memory or reasoning_lookup for more context",
                 (

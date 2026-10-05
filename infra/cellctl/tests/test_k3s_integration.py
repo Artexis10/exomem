@@ -1251,7 +1251,8 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     print("[3.10] all scenarios passed")
 
 
-def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster) -> None:
+@pytest.mark.parametrize("placement_mode", ["dedicated", "selected", "all-shared"])
+def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster, placement_mode: str) -> None:
     from cellctl.manifests import (
         CellManifestSpec,
         render_backup_job,
@@ -1262,16 +1263,31 @@ def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster) ->
     )
 
     selected_id, other_id = _cell_id(), _cell_id()
+    placement = {}
+    settings = ("--set-json", f'cellctl.dedicatedCellIds=["{selected_id}"]')
+    if placement_mode != "dedicated":
+        from dataclasses import asdict
+
+        from cellctl.capacity import SharedWorkerPolicy
+        from cellctl.manifests import ResourceSettings
+
+        policy = SharedWorkerPolicy(mode=placement_mode, cell_ids=(selected_id,) if placement_mode == "selected" else (),
+                                    profile="qualified-test", topology_key="topology.kubernetes.io/zone",
+                                    topology_value="test-zone", occupancy=2,
+                                    resources=ResourceSettings(cpu_request="1", memory_request="2Gi"), reserve_cpu="0", reserve_memory="0")
+        _, placement = ClusterConfig(object_storage_bucket="test", shared_worker=policy).workload_for_cell(selected_id)
+        settings = ("--set-json", "cellctl.sharedWorker=" + json.dumps(asdict(policy)))
+        if placement_mode == "all-shared":
+            settings += ("--set-json", f'cellctl.dedicatedCellIds=["{other_id}"]')
     documents = _render_platform("templates/cellctl.yaml", settings=(
-        "--set-json", f'cellctl.dedicatedCellIds=["{selected_id}"]',
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        *settings, "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
     selected = CellManifestSpec(cell_id=selected_id, image=STANDIN_REPOSITORY + "@sha256:" + "a" * 64,
-                                replicas=0, read_only=False, dedicated_node=True,
+                                replicas=0, read_only=False, dedicated_node=placement_mode == "dedicated", placement=placement,
                                 hold_started_at="2026-01-01T00:00:00+00:00")
     other = CellManifestSpec(cell_id=other_id, image=selected.image, replicas=0, read_only=False,
-                            dedicated_node=True)
+                            dedicated_node=placement_mode == "dedicated", placement=placement)
     for spec in (selected, other):
         _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
 
@@ -1308,7 +1324,7 @@ def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster) ->
 
     for mutate in (
         lambda pod: pod["nodeSelector"].update({"extra": "value"}),
-        lambda pod: pod["nodeSelector"].update({"exomem.io/dedicated-cell": other_id}),
+        lambda pod: pod["nodeSelector"].update({"exomem.io/dedicated-cell" if placement_mode == "dedicated" else "exomem.io/shared-profile": other_id}),
         lambda pod: pod["tolerations"].append({"operator": "Exists"}),
         lambda pod: pod["tolerations"][0].update(value=other_id),
         lambda pod: pod["tolerations"][0].update(operator="Exists", value=""),

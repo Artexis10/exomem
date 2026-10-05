@@ -8,12 +8,22 @@ library. decide.py never sees it; reconcile.py is the only caller.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 
 from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
 
+from .capacity import (
+    AttachmentReservation,
+    CapacityObservation,
+    NodeObservation,
+    PodReservation,
+    SharedWorkerPolicy,
+    effective_pod_requests,
+    quantity,
+)
 from .manifests import (
     BACKUP_JOB_NAME,
     BACKUP_RETRY_AFTER_ANNOTATION,
@@ -396,29 +406,31 @@ class ClusterClient:
     # -- capacity (D9): Kubernetes-native, never a Hetzner server id --
 
     def capacity_inputs(
-        self, *, csi_driver: str
-    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]:
-        """Returns (allocatable_by_node, attachments_used_by_node,
-        non_cell_attachments_by_node, reserved_nodes), keyed by Kubernetes node name."""
+        self, *, csi_driver: str, shared_policy: SharedWorkerPolicy | None = None
+    ) -> CapacityObservation:
+        """One complete CSI observation, with scheduler resources for shared placement."""
 
         # Read CSINodes as raw JSON: a node with no CSI driver at all (K3s
         # without Hetzner CSI) serves `spec.drivers: null`, which the client's
         # generated model refuses to deserialize.
         allocatable: dict[str, int | None] = {}
+        topology_keys: dict[str, list[str]] = {}
         csi_nodes = json.loads(self._storage.list_csi_node(_preload_content=False).data)
         for csi_node in csi_nodes.get("items") or []:
             allocatable_count = None
             for driver_info in (csi_node.get("spec") or {}).get("drivers") or []:
                 if driver_info.get("name") == csi_driver:
                     allocatable_count = (driver_info.get("allocatable") or {}).get("count")
+                    topology_keys[csi_node["metadata"]["name"]] = driver_info.get("topologyKeys") or []
             allocatable[csi_node["metadata"]["name"]] = allocatable_count
 
         # Observe Nodes after CSI coordinates: registration can otherwise add
         # a reserved CSINode between reads and briefly inflate general slots.
         # Unknown Nodes also contribute zero slots until positively observed
         # unreserved. Existing attachment counts remain visible below.
+        nodes = self._core.list_node().items
         general_nodes = {
-            node.metadata.name for node in self._core.list_node().items
+            node.metadata.name for node in nodes
             if "exomem.io/dedicated-cell" not in (node.metadata.labels or {})
             and not any(taint.key == "exomem.io/dedicated-cell" for taint in (node.spec.taints or []))
             and not node.spec.unschedulable
@@ -429,30 +441,148 @@ class ClusterClient:
         }
 
         pv_namespace: dict[str, str] = {}
-        for pv in self._core.list_persistent_volume().items:
+        pvs = self._core.list_persistent_volume().items
+        for pv in pvs:
             if pv.spec and pv.spec.claim_ref and pv.spec.claim_ref.namespace:
                 pv_namespace[pv.metadata.name] = pv.spec.claim_ref.namespace
 
+        attachments: list[AttachmentReservation] = []
         attachments_used: dict[str, int] = {}
         non_cell_attachments: dict[str, int] = {}
         for attachment in self._storage.list_volume_attachment().items:
             if attachment.spec.attacher != csi_driver:
                 continue
-            if not (attachment.status and attachment.status.attached):
+            attached = bool(attachment.status and attachment.status.attached)
+            if not shared_policy and not attached:
                 continue
             node = attachment.spec.node_name
-            attachments_used[node] = attachments_used.get(node, 0) + 1
+            if attached:
+                attachments_used[node] = attachments_used.get(node, 0) + 1
             pv_name = (
                 attachment.spec.source.persistent_volume_name
                 if attachment.spec and attachment.spec.source
                 else None
             )
             namespace = pv_namespace.get(pv_name) if pv_name else None
+            attachments.append(AttachmentReservation(node=node, volume=pv_name or attachment.metadata.name,
+                                                     cell_id=_capacity_cell_id(namespace)))
             if namespace is None or not namespace.startswith(NAMESPACE_PREFIX):
                 non_cell_attachments[node] = non_cell_attachments.get(node, 0) + 1
 
         reserved_nodes = (set(allocatable) | set(attachments_used)) - general_nodes
-        return allocatable, attachments_used, non_cell_attachments, reserved_nodes
+        observations: dict[str, NodeObservation] = {}
+        pods: list[PodReservation] = []
+        incompatible: set[str] = set()
+        if shared_policy:
+            for node in nodes:
+                status = node.status
+                conditions = {condition.type: condition.status for condition in (status.conditions or [])} if status else {}
+                resources = status.allocatable or {} if status else {}
+                observations[node.metadata.name] = NodeObservation(
+                    name=node.metadata.name,
+                    attachment_limit=allocatable.get(node.metadata.name) if shared_policy.topology_key in topology_keys.get(node.metadata.name, []) else None,
+                    cpu=quantity(resources.get("cpu", "0")), memory=quantity(resources.get("memory", "0")),
+                    labels=node.metadata.labels or {}, ready=conditions.get("Ready") == "True",
+                    schedulable=not node.spec.unschedulable,
+                    pressure=any(conditions.get(name) != "False" for name in ("MemoryPressure", "DiskPressure", "PIDPressure")),
+                    taints=tuple((taint.key, taint.value or "", taint.effect) for taint in node.spec.taints or []))
+            workers = [node for node in nodes if (node.metadata.labels or {}).get("exomem.io/shared-profile") == shared_policy.profile]
+            for pv in pvs:
+                cell_id = _capacity_cell_id(pv_namespace.get(pv.metadata.name))
+                if not cell_id or not shared_policy.selects(cell_id):
+                    continue
+                if (not pv.spec.csi or pv.spec.csi.driver != csi_driver
+                        or not workers or not all(_pv_matches_node(pv, worker) for worker in workers)):
+                    incompatible.add(cell_id)
+            claims = {(pv.spec.claim_ref.namespace, pv.spec.claim_ref.name): pv
+                      for pv in pvs if pv.spec and pv.spec.claim_ref}
+            for pod in self._core.list_pod_for_all_namespaces().items:
+                if pod.status and pod.status.phase in {"Succeeded", "Failed"}:
+                    continue
+                if (not pod.spec.node_name and workers
+                        and not any(_pod_matches_node(pod, worker) for worker in workers)):
+                    continue
+                cpu, memory = effective_pod_requests(pod)
+                pods.append(PodReservation(node=pod.spec.node_name or None,
+                                           cell_id=_capacity_cell_id(pod.metadata.namespace), cpu=cpu, memory=memory))
+                target = pod.spec.node_name or (workers[0].metadata.name if len(workers) == 1 else None)
+                if target:
+                    for volume in pod.spec.volumes or []:
+                        claim = volume.persistent_volume_claim
+                        if not claim:
+                            continue
+                        pv = claims.get((pod.metadata.namespace, claim.claim_name))
+                        if pv and (not pv.spec.csi or pv.spec.csi.driver != csi_driver):
+                            continue
+                        # Pending mounts consume future attachment capacity too.
+                        # A not-yet-bound claim is conservatively one volume.
+                        attachments.append(AttachmentReservation(
+                            node=target, volume=pv.metadata.name if pv else f"pvc:{pod.metadata.namespace}/{claim.claim_name}",
+                            cell_id=_capacity_cell_id(pod.metadata.namespace)))
+        return CapacityObservation(nodes=observations, pods=tuple(pods), attachments=tuple(attachments),
+                                   incompatible_cells=frozenset(incompatible), allocatable=allocatable,
+                                   attachments_used=attachments_used, non_cell_attachments=non_cell_attachments,
+                                   reserved_nodes=frozenset(reserved_nodes))
+
+
+def _capacity_cell_id(namespace: str | None) -> str | None:
+    if namespace and re.fullmatch(r"exo-cell-[a-z2-7]{16}", namespace):
+        return namespace[len(NAMESPACE_PREFIX):]
+    return None
+
+
+def _pv_matches_node(pv, node) -> bool:
+    affinity = pv.spec.node_affinity
+    if not affinity or not affinity.required:
+        return False
+    return _node_selector_matches_node(affinity.required, node)
+
+
+def _pod_matches_node(pod, node) -> bool:
+    labels = node.metadata.labels or {}
+    if any(labels.get(key) != value for key, value in (pod.spec.node_selector or {}).items()):
+        return False
+    affinity = pod.spec.affinity.node_affinity if pod.spec.affinity else None
+    required = affinity.required_during_scheduling_ignored_during_execution if affinity else None
+    if required and not _node_selector_matches_node(required, node, unknown_matches=True):
+        return False
+    # Unmodelled constraints/operators cannot prove incompatibility. Bound
+    # Pods bypass this filter, since their demand is already on the node.
+    return all(any((not item.effect or item.effect == taint.effect)
+                   and (not item.key or item.key == taint.key)
+                   and ((item.operator or "Equal") != "Equal" or (item.value or "") == (taint.value or ""))
+                   for item in pod.spec.tolerations or [])
+               for taint in node.spec.taints or [] if taint.effect in {"NoSchedule", "NoExecute"})
+
+
+def _node_selector_matches_node(selector, node, *, unknown_matches: bool = False) -> bool:
+    labels = node.metadata.labels or {}
+
+    def matches(expression, values) -> bool:
+        value = values.get(expression.key)
+        options = expression.values or []
+        if expression.operator == "In":
+            return value is not None and value in options
+        if expression.operator == "NotIn":
+            return value is None or value not in options
+        if expression.operator == "Exists":
+            return value is not None
+        if expression.operator == "DoesNotExist":
+            return value is None
+        if expression.operator in {"Gt", "Lt"}:
+            if value is None or len(options) != 1:
+                return False
+            try:
+                return int(value) > int(options[0]) if expression.operator == "Gt" else int(value) < int(options[0])
+            except ValueError:
+                return False
+        return unknown_matches
+
+    return any((term.match_expressions or term.match_fields)
+               and all(matches(expression, labels) for expression in term.match_expressions or [])
+               and all((unknown_matches and expression.key != "metadata.name")
+                       or matches(expression, {"metadata.name": node.metadata.name}) for expression in term.match_fields or [])
+               for term in selector.node_selector_terms or [])
 
 
 def _pod_ready(pod) -> bool:

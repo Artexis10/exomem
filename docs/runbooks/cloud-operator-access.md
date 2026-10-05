@@ -635,3 +635,77 @@ preference miss. Roll back through the existing image-pin procedure to a verifie
 legacy Cloud image; additive queue metadata remains compatible and custody stays
 on disk. Do not delete derived state or drain beside the running service. A
 rollback does not close an unresolved preference-preservation incident.
+
+## Qualified shared-worker placement and admission
+
+Shared placement is disabled by default (`cellctl.sharedWorker.mode: "off"`).
+The operator supplies one qualified profile, one CSI topology key/value, the
+qualified occupancy, serving `ResourceSettings`, and additional CPU/memory
+reserves through `cellctl.sharedWorker`. The controller receives that object as
+`CELLCTL_SHARED_WORKER`. Active modes require `mode`, `cell_ids`, `profile`,
+`topology_key`, `topology_value`, `occupancy`, `resources`, `reserve_cpu` and
+`reserve_memory`; the resource keys are `cpu_request`, `cpu_limit`,
+`memory_request` and `memory_limit`. Limits remain `2` CPU and `3Gi` memory.
+Supply measured requests, not historical idle usage. Reserves cover additional
+platform/headroom demand beyond observed Pod requests; do not deduct kubelet
+reservations already removed from Node Allocatable again. Existing init,
+backup and restore budgets stay unchanged and fit within the selected serving
+request footprint. The existing quota and stop/hold lifecycle bound their
+concurrency; any observed excess demand is charged as additional reservation.
+
+The foundation agent map's optional `shared_profile` reaches inventory as
+`k3s_agent_shared_profile`. Apply the existing K3s role to register/converge
+`exomem.io/shared-profile` and its matching `NoSchedule` taint. It cannot overlap
+a dedicated reservation and does not expand the general worker sizing allow-list.
+The CSI node DaemonSet tolerates that fixed taint. Verify its readiness, the
+actual CSINode driver's topology keys, the worker's topology label and every
+existing cell PV's affinity. Initial capacity supports exactly one worker with
+that profile; another profile worker closes shared admission automatically
+until the deployment is returned to the qualified envelope. More workers need
+a packing/admission contract extension and qualification first.
+
+1. Install the default-off controller/chart support. Qualify the intended
+   signed runtime, request values, effective memory controls and occupancy
+   through the resource-policy acceptance procedure before choosing active
+   values. This procedure authorizes no purchase or production activation.
+2. Enter `selected` mode with an empty `cell_ids` list to close general admission
+   without changing any cell placement. Confirm a completed controller pass
+   has published zero `cell_slots` in every capacity row, including old legacy
+   nodes. This publication takes the same exclusive transaction lock as browser
+   and OAuth redemption. Read the migration inventory **after** observing that
+   committed zero snapshot: include every non-dedicated cell except a desired
+   deletion observed as `deleted` at its current generation. A redemption that
+   preceded the barrier is then included. Existing access continues and unused
+   invitations remain retryable.
+3. Migrate each affected existing cell through the ordinary desired-state stop
+   procedure. Let active backup/upgrade/restore holds finish, confirm no serving
+   or Job volume user remains, and verify its current backup and PVC identity.
+   Only then add its ID to `cell_ids`, reconcile the changed resources/placement,
+   resume, and verify the same PVC, canonical writes and durable debt. Do this
+   for **all** affected existing cells, including operator, QA and reviewer cells
+   in their authorized windows, before promotion. Never mutate an active Job's
+   template or change a live cell's placement to shortcut this sequence.
+4. Promote to `all-shared` with the same qualified values after migration.
+   Existing selected cells retain their render digest; new unlisted random IDs
+   now resolve the same serving and maintenance placement. The next complete
+   pass atomically replaces legacy capacity with the qualified shared domain.
+   Each worker's absolute slots are capped by qualified occupancy, allocatable
+   CPU/memory after reservations, and CSI attachment capacity. Ordinary committed
+   cells are counted once by admission; Pending and excess/orphan reservations
+   are additionally accounted where needed. Deletion retains a commitment until
+   controller-confirmed physical cleanup at the current generation.
+5. Verify the fresh capacity snapshot and resolved placement for a prospective
+   ordinary ID before resuming the intended invite cohort. A failed observation
+   does not refresh positive timestamps; unavailable workers contribute zero.
+   Logs identify observation failures or an unavailable shared envelope, and the
+   ordinary next complete reconciliation restores eligibility automatically.
+   There is no separate admission unlock.
+
+Rollback first returns to `selected` while retaining all currently shared IDs,
+and confirms the committed all-zero snapshot. Stop each affected cell, finish
+holds and verify volume-user release before removing its selection and resuming
+legacy placement. Only after this migration is complete return to `off`, allowing
+legacy capacity publication. Preserve the current PVC/data and do not restore
+an older snapshot over newer writes. Remove a shared node only after its selected
+workloads have relocated; shared workers do not count as unrestricted spare
+attachment capacity in the existing removal preflight.

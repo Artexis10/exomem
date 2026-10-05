@@ -15,6 +15,7 @@ import asyncpg
 import pytest
 
 from cellctl import db, reconcile
+from cellctl.capacity import CapacityObservation
 from cellctl.manifests import STORAGE_CLASS, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
@@ -97,7 +98,7 @@ class FakeClusterGateway:
     def capacity_inputs(
         self, *, csi_driver: str
     ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]:
-        return {}, {}, {}, set()
+        return CapacityObservation()
 
 
 def _secrets_config() -> reconcile.SecretsConfig:
@@ -843,7 +844,7 @@ class _RaisingObserveGateway(FakeClusterGateway):
 
     def capacity_inputs(self, *, csi_driver: str):
         self.capacity_written = True
-        return {"node-1": 10}, {"node-1": 2}, {"node-1": 0}, set()
+        return CapacityObservation(allocatable={"node-1": 10}, attachments_used={"node-1": 2}, non_cell_attachments={"node-1": 0})
 
 
 async def test_one_rows_observe_failure_does_not_abort_the_other_rows_or_capacity(
@@ -1039,9 +1040,12 @@ async def test_a_capacity_read_failure_does_not_fail_a_pass_whose_rows_succeeded
     now = datetime(2026, 1, 1, 3, tzinfo=UTC)
 
     try:
+        old = now - timedelta(hours=1)
+        await db.write_capacity(connection, node="worker", cell_slots=2, attachments_used=0, observed_at=old)
         await reconcile.reconcile_once(
             connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
+        assert await connection.fetchrow("SELECT cell_slots, observed_at FROM exomem_cloud_capacity WHERE node = 'worker'") == (2, old)
         rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
         assert rows["cccccccccccccccc"].observed_state == "provisioning"
         assert (namespace_name("cccccccccccccccc"), "StatefulSet", "cell") in cluster.applied
@@ -2171,17 +2175,19 @@ class _CountingHetzner(FakeHetznerVolumeProvider):
         return super().get_volume(volume_id)
 
 
-async def test_a_row_observed_as_deleted_is_not_observed_again(cell_db: CellDatabase) -> None:
+@pytest.mark.parametrize("observed_generation", [1, None, 0])
+async def test_a_row_observed_as_deleted_is_not_observed_again(cell_db: CellDatabase, observed_generation: int | None) -> None:
     cell_id = "aaaaaaaaaaaaaaaa"
     await _seed_cell(cell_db, cell_id, "tenant-a", desired_state="deleted")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = _CountingGateway()
     now = datetime(2026, 1, 1, 12, tzinfo=UTC)
     try:
-        await db.write_observed(connection, cell_id, {"observed_state": "deleted", "observed_generation": 1})
+        await db.write_observed(connection, cell_id, {"observed_state": "deleted", "observed_generation": observed_generation})
         for step in range(3):
             await _pass(connection, cluster, now + timedelta(seconds=5 * step))
-        assert cluster.observed == []
+        assert cluster.observed == ([] if observed_generation == 1 else [cell_id])
+        assert (await db.select_all_rows(connection))[0].observed_generation == 1
     finally:
         await connection.close()
 
@@ -2247,7 +2253,7 @@ class _NodesGateway(FakeClusterGateway):
         self.reserved_nodes: set[str] = set()
 
     def capacity_inputs(self, *, csi_driver: str):
-        return dict(self.allocatable), {node: 1 for node in self.allocatable}, {}, self.reserved_nodes
+        return CapacityObservation(allocatable=dict(self.allocatable), attachments_used={node: 1 for node in self.allocatable}, reserved_nodes=frozenset(self.reserved_nodes))
 
 
 async def test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back(cell_db: CellDatabase) -> None:
@@ -2327,7 +2333,7 @@ class _LeakyGateway(FakeClusterGateway):
     def capacity_inputs(self, *, csi_driver: str):
         if self.where == "capacity":
             raise _leaky_api_exception()
-        return {}, {}, {}, set()
+        return CapacityObservation()
 
     def list_cell_namespaces(self) -> dict[str, str]:
         if self.where == "orphans":
@@ -2817,3 +2823,99 @@ async def test_reserved_node_publishes_zero_general_slots_with_real_attachment_c
             "shared": (16, 1), "reserved": (0, 1)}
     finally:
         await connection.close()
+
+
+def test_shared_selection_preserves_legacy_and_covers_future_ids_with_maintenance() -> None:
+    import dataclasses
+
+    from cellctl.capacity import SharedWorkerPolicy
+    from cellctl.manifests import (
+        CellManifestSpec,
+        ResourceSettings,
+        render_backup_job,
+        render_restore_job,
+        render_statefulset,
+    )
+
+    row = CellRow(cell_id="aaaaaaaaaaaaaaaa", tenant_id=tenant_uuid("tenant-a"), storage_gib=10,
+                  rollout_priority=1, desired_state="running", desired_image=None, generation=1)
+    base = _cluster_config()
+    policy = SharedWorkerPolicy(mode="selected", cell_ids=(row.cell_id,), profile="qualified-test",
+                                topology_key="topology.kubernetes.io/zone", topology_value="test-zone", occupancy=2,
+                                resources=ResourceSettings(cpu_request="1", memory_request="2Gi"), reserve_cpu="0", reserve_memory="0")
+    selected = dataclasses.replace(base, shared_worker=policy)
+    unselected = dataclasses.replace(row, cell_id="bbbbbbbbbbbbbbbb")
+    assert reconcile._compute_render_digest(unselected, selected, _secrets_config()) == reconcile._compute_render_digest(unselected, base, _secrets_config())
+    assert reconcile._compute_render_digest(row, selected, _secrets_config()) != reconcile._compute_render_digest(row, base, _secrets_config())
+    promoted = dataclasses.replace(selected, shared_worker=dataclasses.replace(policy, mode="all-shared"))
+    assert reconcile._compute_render_digest(row, selected, _secrets_config()) == reconcile._compute_render_digest(row, promoted, _secrets_config())
+    resources, placement = promoted.workload_for_cell(unselected.cell_id)
+    assert resources == policy.resources
+    spec = CellManifestSpec(cell_id=unselected.cell_id, image=IMAGE_A, replicas=0, read_only=False,
+                            resources=resources, placement=placement, hold_started_at="2026-01-01T00:00:00+00:00")
+    workloads = [render_statefulset(spec), render_backup_job(spec, bucket_name="test", endpoint=""),
+                 render_restore_job(spec, bucket_name="test", endpoint="", snapshot_id="a" * 64)]
+    for workload in workloads:
+        pod = workload["spec"]["template"]["spec"]
+        assert pod["nodeSelector"] == {"exomem.io/shared-profile": "qualified-test", policy.topology_key: policy.topology_value}
+        assert pod["tolerations"] == [{"key": "exomem.io/shared-profile", "operator": "Equal", "value": "qualified-test", "effect": "NoSchedule"}]
+    assert workloads[1]["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"] == {"cpu": "100m", "memory": "256Mi"}
+    with pytest.raises(ValueError, match="overlap"):
+        dataclasses.replace(selected, dedicated_cell_ids=(row.cell_id,))
+
+
+async def test_selected_cutover_reads_inventory_after_prior_admission_and_promotes_atomically(cell_db: CellDatabase, monkeypatch) -> None:
+    from decimal import Decimal
+
+    from cellctl.capacity import NodeObservation, SharedWorkerPolicy
+    from cellctl.manifests import ResourceSettings
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    admission = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    policy = SharedWorkerPolicy(mode="selected", cell_ids=(cell_id,), profile="test",
+                                topology_key="topology.kubernetes.io/zone", topology_value="test-zone", occupancy=2,
+                                resources=ResourceSettings(cpu_request="1", memory_request="2Gi"), reserve_cpu="0", reserve_memory="0")
+    config = dataclasses.replace(_cluster_config(), shared_worker=policy)
+    cluster = FakeClusterGateway()
+    observation = CapacityObservation(nodes={"worker": NodeObservation(
+        name="worker", attachment_limit=16, cpu=Decimal(4), memory=Decimal(8 * 1024**3),
+        labels={"exomem.io/shared-profile": "test", policy.topology_key: policy.topology_value},
+        ready=True, schedulable=True, pressure=False, taints=(("exomem.io/shared-profile", policy.profile, "NoSchedule"),))})
+    cluster.capacity_inputs = lambda **kwargs: observation
+    original = db.select_all_rows
+    inventoried = []
+
+    async def inventory(connection):
+        # The first selected pass must retire every old positive row before
+        # obtaining the migration inventory, including a redemption in flight.
+        assert await connection.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 0
+        rows = await original(connection)
+        inventoried.extend(row.cell_id for row in rows)
+        return rows
+
+    try:
+        tenant = await insert_tenant(owner, "new-admission")
+        await _set_cell_image(cell_db, IMAGE_A)
+        now = datetime.now(UTC)
+        await db.write_capacity(controller, node="old", cell_slots=10, attachments_used=0, observed_at=now)
+        monkeypatch.setattr(db, "select_all_rows", inventory)
+        async with admission.transaction():
+            await admission.execute("SELECT pg_advisory_xact_lock(hashtext('exomem-cloud-capacity'))")
+            await admission.execute("INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) VALUES ($1, $2, 'stopped')", cell_id, tenant)
+            task = asyncio.create_task(reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), config, now=now))
+            await asyncio.sleep(0.05)
+            assert not task.done() and not inventoried
+        await task
+        assert inventoried == [cell_id]
+        assert await controller.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 0
+        monkeypatch.setattr(db, "select_all_rows", original)
+        promoted = dataclasses.replace(config, shared_worker=dataclasses.replace(policy, mode="all-shared"))
+        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), promoted, now=now)
+        slots = await controller.fetch("SELECT node, cell_slots FROM exomem_cloud_capacity")
+        assert {row["node"]: row["cell_slots"] for row in slots} == {"old": 0, "worker": 2}
+    finally:
+        await controller.close()
+        await admission.close()
+        await owner.close()

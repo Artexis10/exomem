@@ -111,6 +111,14 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
         lambda core: prominence.ACTIVATION_CARRIER_LINE in core["engagement"]["contract"]["recall"]
         or prominence.ASK_MEMORY_CARRIER_LINE in core["engagement"]["contract"]["recall"],
     ),
+    "workflow-activation-before-extra-recall": (
+        CARRYING,
+        lambda core: "activate_context" not in core["active_capabilities"]["available_product_tools"]
+        or any(
+            "activate_context" in step
+            for step in core["workflow"]["loop"][:core["workflow"]["loop"].index("ask_memory for cheap product recall")]
+        ),
+    ),
     "capture-at-every-stepping-stone": (
         CARRYING,
         lambda core: "stepping stone" in core["engagement"]["contract"]["capture"],
