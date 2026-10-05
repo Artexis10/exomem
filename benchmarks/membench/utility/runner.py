@@ -194,6 +194,8 @@ def _usage_from_phase_result(
         input_tokens=None if result.get("unknown_usage_calls") else result.get("input_tokens"),
         output_tokens=None if result.get("unknown_usage_calls") else result.get("output_tokens"),
         turns=result.get("model_calls"),
+        tool_calls=result.get("tool_calls"),
+        failed_model_calls=result.get("failed_model_calls"),
         wall_time_s=result.get("elapsed_seconds"),
         cost_usd=None if result.get("unknown_usage_calls") else result.get("cost_usd"),
         # Reported by the provider when it reports them at all; reasoning is

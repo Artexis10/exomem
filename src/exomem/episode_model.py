@@ -44,7 +44,7 @@ _ROUTE_KINDS = {
     "existing_page": {"edit", "supersede"},
     "semantic_unit": {"edit", "supersede"},
     # The Records leaf is this route's alone, and this route owns nothing else.
-    "records": {curation.RECORDS_STEP_KIND},
+    "records": curation.RECORDS_STEP_KINDS,
 }
 MAX_STATE_BYTES = 256 * 1024
 MAX_INPUT_REVISIONS = 64

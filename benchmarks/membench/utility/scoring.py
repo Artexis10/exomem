@@ -29,6 +29,8 @@ _USAGE_SUM_FIELDS: tuple[str, ...] = (
     "model_time_s",
     "tool_time_s",
     "turns",
+    "tool_calls",
+    "failed_model_calls",
     "cumulative_context_tokens",
     "cost_usd",
 )

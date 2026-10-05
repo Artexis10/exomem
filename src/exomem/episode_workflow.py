@@ -787,7 +787,7 @@ def _refused_for_caller(vault_root: Path, binding: Mapping[str, Any]) -> bool:
         plan = curation.CurationStore(vault_root).load_plan(binding["run_id"])
         step = plan["steps"][binding["ordinal"]]
         item = plan["binding_manifest"][binding["ordinal"]]
-        if step["kind"] == curation.RECORDS_STEP_KIND:
+        if step["kind"] in curation.RECORDS_STEP_KINDS:
             manifest = record_governance.resolve_collection_for_mutation(
                 vault_root, item["prepared"]["manifest_path"]
             )

@@ -65,9 +65,9 @@ def _reconcile_held(
 
     All receipt, approval, plan and witness bytes come from the existing canonical
     curation store.  A receipt gap stays uncertain until that store's executor
-    recovers it.  Historical commits whose postimages changed also stay uncertain:
-    the current episode model cannot express historical commitment separately from
-    current effect coverage.  Neither case becomes permission to retry.
+    recovers it. With `live=True`, a changed postimage also stays uncertain;
+    historical coverage uses `live=False` and verifies the chain tip separately.
+    Neither case becomes permission to retry.
 
     A failed receipt cannot prove noncommit for this episode attempt: the current
     binding does not identify a curation attempt, and an older failure may predate
@@ -171,10 +171,10 @@ def _tip_is_live(
     if after != "absent" and keep is not None and not keep(path):
         return False
     try:
-        if evidence["step"]["kind"] == curation.RECORDS_STEP_KIND:
+        if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
             # A Records item is current only while its Records receipt agrees.
             curation._verify_records_receipt(  # noqa: SLF001
-                vault_root, evidence["binding"], evidence["witness"]
+                vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
             )
         if after == "absent":
             return curation._guarded_absent(vault_root, path)  # noqa: SLF001

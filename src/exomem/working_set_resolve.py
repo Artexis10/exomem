@@ -309,6 +309,9 @@ class TurnAnalysis:
     #: name words spans one (`_name_span`). `tokens_of` drops punctuation, so
     #: the positions are derived from the raw text and `tokens` is unchanged.
     run_breaks: frozenset[int] = frozenset()
+    #: Sentence/semicolon boundaries for request-local material allocation.
+    #: Commas and colons remain inside a request; coordinates are turn-local.
+    request_breaks: frozenset[int] = frozenset()
     #: Does the raw turn's casing say anything? True only for a turn that mixes
     #: capitalised and lower-case words: an all-lower-case turn, an all-caps
     #: one and a headline with every word capitalised carry no signal.
@@ -1051,6 +1054,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         words=embedded_words(tokens, _word_edges(vocabulary)),
         capitalised=_capitalised_terms(turn),
         run_breaks=_run_breaks(text, tokens),
+        request_breaks=_run_breaks(text, tokens, pattern=_REQUEST_BREAK),
         cased_turn=_casing_signal(turn),
         capitalised_anywhere=_capitalised_terms(turn, anywhere=True),
         points_back=pointing,
@@ -1068,12 +1072,15 @@ _CLAUSE_BREAK = re.compile(
     r"[.,:;!?()\[\]\n\r\u2026\u2013\u2014\u3001\u3002\uff01\uff0c\uff0e\uff1a\uff1b\uff1f]+"
     r"|(?:^|\s)-+(?=\s|$)"
 )
+_REQUEST_BREAK = re.compile(r"[.!?;\n\r\u2026\u3002\uff01\uff0e\uff1b\uff1f]+")
 #: The coordinators the tokeniser's stopwords already carry: "X and Y" is two
 #: things, so neither ends up inside one run of name words.
 _RUN_COORDINATORS: frozenset[str] = frozenset({"and", "or"})
 
 
-def _run_breaks(text: str, tokens: Sequence[str]) -> frozenset[int]:
+def _run_breaks(
+    text: str, tokens: Sequence[str], *, pattern: re.Pattern[str] = _CLAUSE_BREAK
+) -> frozenset[int]:
     """Token indices with clause punctuation just before them in `text`.
 
     Tokenises each punctuation-delimited segment with `tokens_of`; when that
@@ -1082,7 +1089,7 @@ def _run_breaks(text: str, tokens: Sequence[str]) -> frozenset[int]:
     """
     breaks: set[int] = set()
     seen: list[str] = []
-    for segment in _CLAUSE_BREAK.split(text):
+    for segment in pattern.split(text):
         if seen:
             breaks.add(len(seen))
         seen.extend(tokens_of(segment))
