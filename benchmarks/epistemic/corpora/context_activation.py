@@ -551,6 +551,12 @@ def _canonical(fixture: FixtureCase) -> dict:
     }
 
 
+#: The pre-registered digest of :data:`FIXTURES`; the one place it is spelled.
+#: Re-pinned when T1 was re-authored for corpus v5 (the v3 and v4 reports record
+#: ``a49d85f4…``). Tests import it rather than copying it.
+FIXTURE_SET_SHA256 = "9d15d155bd61096ba0ff2613d6752a35e03d3fb4078fa189e42b4c1ce2a3bdaa"
+
+
 def fixture_set_digest(fixtures: Iterable[FixtureCase] = FIXTURES) -> str:
     """Stable sha256 over the canonicalized fixture set, ordered by case_id.
 

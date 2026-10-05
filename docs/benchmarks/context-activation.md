@@ -560,8 +560,9 @@ referent and for the `recent_context` block. The earlier session's acts go
 through supported doors (an `anchor` pick, an `episode_memory` record, an
 `edit_memory` commit), then one fresh `activate_context` call is made.
 
-The current group is v3 (digest `8c6eb814…`, pinned in a commit before its
-first run). It keeps v1's cases and gold. Everything a packet serves must
+The current group is v3 (its digest is the `CONTINUITY_SHA256` pin in
+`tests/test_context_activation_continuity.py`, pinned before its first run and
+re-pinned when corpus v5 relabelled the corpus). It keeps v1's cases and gold. Everything a packet serves must
 belong to a referent page: anchors of every status, ambiguity candidates,
 units, pointers and current-state entries. A unit or state entry of the
 referent page is fine; one of any other page fails. The keyless K3 must serve

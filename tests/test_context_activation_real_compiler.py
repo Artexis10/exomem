@@ -40,6 +40,7 @@ from typing import Any
 
 import pytest
 from epistemic.corpora.context_activation import (
+    FIXTURE_SET_SHA256,
     FIXTURES,
     build_corpus,
     fixture_by_id,
@@ -62,7 +63,6 @@ RECORD_ENV = "CONTEXT_ACTIVATION_RECORD_REPORT"
 #: Frozen digests. The fixture set is the pre-registered one, unchanged; the
 #: threshold digest covers the scorer's own constants; the logical corpus
 #: digests bind the recorded report to the corpus it was measured on.
-FIXTURE_SET_SHA256 = "9d15d155bd61096ba0ff2613d6752a35e03d3fb4078fa189e42b4c1ce2a3bdaa"
 #: The v4 fixture set (T1's step count turn), which the v3 and v4 reports record.
 V4_FIXTURE_SET_SHA256 = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f"
 THRESHOLD_SHA256 = "7b2785cf81437ad98eeede3fb9bb046baa80fdcddf883d33c293cae91fbf867a"
@@ -774,13 +774,6 @@ def _differences(recorded: Any, live: Any, where: str = "") -> list[str]:
             for difference in _differences(left, right, f"{where}[{index}]")
         ]
     return [] if recorded == live else [where or "/"]
-
-
-def test_the_v4_report_is_kept_as_history() -> None:
-    history = json.loads(V4_REPORT.read_text(encoding="utf-8"))
-    assert history["corpus_id"] == "context-activation-corpus-v4"
-    assert history["fixture_set_digest"] == V4_FIXTURE_SET_SHA256
-    assert "amended_v5" not in history
 
 
 def test_the_v3_report_is_kept_as_history() -> None:

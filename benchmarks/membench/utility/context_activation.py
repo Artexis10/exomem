@@ -780,9 +780,10 @@ def score_case(
     credited = _credited_superseded_refs(packet) - set(all_bound_projections)
 
     # S1 (v5): a `<page>#unit-` fragment of a bound page is that page in every
-    # channel. Only fragments of pages the frozen map names collapse.
+    # channel. Only fragments of pages the frozen map names collapse. A credited
+    # superseded unit stays its own ref, as in raw: it is excluded, not mapped.
     def page_of(ref: str) -> str:
-        if UNIT_PAGE not in applied or unit_parents is None:
+        if UNIT_PAGE not in applied or unit_parents is None or ref in credited:
             return ref
         parent, separator, fragment = ref.partition("#")
         if separator and fragment.startswith("unit-") and parent in unit_parents:
@@ -853,14 +854,15 @@ def score_case(
             }
 
     # T6 (v5, Hugo 2026-10-05, pre-registered by the spec's hedge scenario): an
-    # unresolved-expected twin whose packet is only `partial` anchors -- abstained
-    # or not -- is the run's hedge. The listed candidates are the hedge itself, so
+    # unresolved-expected twin that abstains with only `partial` anchors is the
+    # run's hedge. The listed candidates are the hedge itself, so
     # they are not poison. Any unit, pointer, current-state entry or ambiguity
     # candidate disqualifies it.
     partial_only_hedge = (
         PARTIAL_ABSTAIN_HEDGE in applied
         and fixture.case_id.startswith("T")
         and fixture.expected_status == "unresolved"
+        and packet.abstained
         and bool(packet.anchors)
         and all(anchor.status == "partial" for anchor in packet.anchors)
         and not (packet.units or packet.pointers or packet.current_state or packet.ambiguity)

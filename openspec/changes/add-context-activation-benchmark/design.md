@@ -185,7 +185,8 @@ in its place, and the recorded report carries both columns.
   marks the case as hedging, so it cannot waive a status mismatch. Superseded
   for twins by the v5 scorer (Hugo, 2026-10-05): a twin expected `unresolved`
   that abstains with only `partial` anchors is the run's one allowed hedge, as the
-  spec pre-registered. The partial candidates it lists are the hedge, not poison.
+  spec pre-registered. A twin that does not abstain is not waived. The partial
+  candidates it lists are the hedge, not poison.
   One hedge is allowed and two exceed the ceiling; any unit, pointer, current-state
   entry or ambiguity candidate disqualifies it. The product's partial-only packet
   abstains and reads `unresolved`, which the raw hedge branch (observed `partial`)

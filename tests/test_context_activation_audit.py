@@ -1933,14 +1933,46 @@ def test_v5_two_abstained_partial_twins_exceed_the_hedge_ceiling() -> None:
     assert audit_passed(report) is False
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
+def test_v5_a_unit_or_pointer_disqualifies_the_hedge() -> None:
+    for extra in (
         {"units": (Unit(ref="c2_grill_equipment_page", role="equipment_profile", text="grill"),)},
         {"pointers": (Pointer(ref="c2_grill_equipment_page"),)},
-    ],
-    ids=["unit", "pointer"],
-)
-def test_v5_a_unit_or_pointer_disqualifies_the_hedge(extra) -> None:
-    scored = _v5(_abstained_partial("c2_grill_equipment_page", **extra), "T6", {})
+    ):
+        scored = _v5(_abstained_partial("c2_grill_equipment_page", **extra), "T6", {})
+        assert scored.hedged is False and not scored.passed, extra
+
+
+def test_v5_does_not_waive_a_partial_only_twin_that_did_not_abstain() -> None:
+    # Hugo ruled on a twin that abstains. A packet that lists partial candidates
+    # without abstaining keeps its poison hit.
+    scored = _v5(ActivationPacket(anchors=_partial("c2_grill_equipment_page")), "T6", {})
+    assert scored.poison_hit == 1 and not scored.passed
+
+
+def test_v5_a_positive_case_with_a_partial_only_packet_never_hedges() -> None:
+    scored = _v5(_abstained_partial("c2_cooking_method_insight"), "C2", {})
     assert scored.hedged is False and not scored.passed
+
+
+def test_v5_leaves_a_credited_superseded_unit_out_of_precision() -> None:
+    # The compiler's marked-ancestor shape: a `<ref>#unit-` fragment of the
+    # superseded page, marked with its successor. Raw credits it; so must v5,
+    # rather than charging the ancestor's page to precision.
+    c8 = fixture_by_id("C8")
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="c8_active_head", title="head", kind="note", status="resolved"),),
+        units=(
+            Unit(ref="c8_active_head", role="current_state", text="version 3"),
+            Unit(
+                ref="page-old#unit-1",
+                role="current_state",
+                text="version 2",
+                lifecycle="superseded",
+                provenance={"superseded_by": "c8_active_head"},
+            ),
+        ),
+    )
+    raw = score_case(packet, c8)
+    scored = _v5(packet, "C8", {"page-old": c8.poison[0]})
+    assert raw.passed and scored.passed, scored.failure_reasons
+    assert (scored.precision, scored.poison_hit) == (raw.precision, 0)

@@ -51,9 +51,6 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-#: The English set's digest. The conversation group must never edit that module.
-ENGLISH_SET_DIGEST = "9d15d155bd61096ba0ff2613d6752a35e03d3fb4078fa189e42b4c1ce2a3bdaa"
-
 #: The pinned digest of this group. Editing any fixture field, gold list
 #: included, changes it, and that voids every run manifest that names the old one.
 CONVERSATION_SET_DIGEST = "f8cad6d57da87d8c29767e76d7d71a968ada27f182594d0fbeb4798a2d56b59b"
@@ -106,7 +103,7 @@ def test_the_set_is_a_sibling_and_leaves_the_english_set_byte_identical() -> Non
     assert FIXTURE_SET_ID != english_set.FIXTURE_SET_ID
     assert CORPUS_ID != english_set.CORPUS_ID
     assert set(CASE_IDS).isdisjoint(english_set.CASE_IDS + english_set.TWIN_IDS)
-    assert english_set.fixture_set_digest() == ENGLISH_SET_DIGEST
+    assert english_set.fixture_set_digest() == english_set.FIXTURE_SET_SHA256
     assert len(english_set.FIXTURES) == 18
 
 
