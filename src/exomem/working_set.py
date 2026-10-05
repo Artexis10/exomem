@@ -13,7 +13,8 @@ Three properties are load-bearing and each is tested directly:
 * **Bounded.** Per-role caps and one global `max_chars`. Text that does not
   fit becomes a POINTER, never a truncated half-claim, so an agent that needs it
   can fetch it and one that does not pays a ref.
-* **Ordered.** Units before pages, roles in registry priority order. A packet
+* **Ordered.** Material's combined unit/pointer order runs at its role priority.
+  Between material roles, units lead pages in registry priority order. A packet
   that has to be cut keeps the most specific material at the highest-priority
   lens.
 * **Honest about lifecycle.** A superseded unit is dropped when its successor is
@@ -444,15 +445,29 @@ def build_packet(
     order = _role_order(roles)
     material_roles = {str(role["id"]) for role in roles if role.get("lane") == "material"}
     present_paths = {item.path for item in items if item.path}
+    material_positions = {
+        promoted: {order[item.role] for item in items
+            if item.role in material_roles and item.promoted == promoted
+            and not _redundant_superseded(item, present_paths)}
+        for promoted in (False, True)
+    }
+
+    def _group_order(item: LaneItem) -> int:
+        # Each present material role separates two unit-first categorical portions.
+        earlier = sum(position < order.get(item.role, len(order))
+            for position in material_positions[item.promoted])
+        return 2 * earlier + (item.role in material_roles)
 
     def _sort_key(item: LaneItem) -> tuple:
         return (
             1 if item.promoted else 0,
-            0 if item.level == "unit" else 1,
+            _group_order(item),
+            0 if item.level == "unit" or item.role in material_roles else 1,
             order.get(item.role, len(order)),
             1 if item.provenance.get("carried") else 0,
             0 if item.provenance.get("standing") else 1,
             item.relevance_order,
+            0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
             _lifecycle_rank(item.lifecycle),
             -_date_rank(item.updated),
@@ -513,6 +528,38 @@ def build_packet(
     # material did not exist.
     starved: dict[str, None] = {}
     capped_material: dict[str, None] = {}
+
+    def _budget_pointer(item: LaneItem, reason: str) -> None:
+        nonlocal used, promoted_used
+        if item.role in material_roles and (
+            sum(per_role.get(role, 0) for role in material_roles) >= MAX_ITEMS_PER_ROLE
+        ):
+            capped_material.setdefault(item.role, None)
+            return
+        if len(pointers) >= MAX_POINTERS:
+            starved.setdefault(item.role, None)
+            return
+        pointer = _pointer(item, reason)
+        cost = (
+            working_set_conversation.prose_chars(pointer, role_ids=role_ids)
+            if conversation_inferred else len(pointer["title"]) + len(pointer["why"])
+        )
+        if used + cost > material_limit or item.promoted and promoted_used + cost > promoted_share:
+            starved.setdefault(item.role, None)
+            return
+        pointers.append(pointer)
+        if item.role in material_roles:
+            per_role[item.role] = per_role.get(item.role, 0) + 1
+        used += cost
+        if item.promoted:
+            promoted_used += cost
+
+    def _defer(item: LaneItem, reason: str) -> None:
+        if item.role in material_roles:
+            _budget_pointer(item, reason)
+        else:
+            deferred.append((item, reason))
+
     # Own material spends first. All promoted blocks share one allowance;
     # overflow cannot return prose a unit or state could not afford.
     for promoted in (False, True):
@@ -546,11 +593,18 @@ def build_packet(
             if promoted:
                 promoted_used += cost
 
+        previous_group = None
         for item in ordered:
             if item.promoted != promoted or _redundant_superseded(item, present_paths):
                 continue
+            group = _group_order(item)
+            if group != previous_group:
+                for deferred_item, reason in deferred:
+                    _budget_pointer(deferred_item, reason)
+                deferred.clear()
+                previous_group = group
             if item.role in material_roles and item.level == "page":
-                deferred.append((item, "requires_read"))
+                _defer(item, "requires_read")
                 continue
             text = bounded_text(item.text)
             standing = bool(item.provenance.get("standing"))
@@ -558,7 +612,7 @@ def build_packet(
             # project, relevant or not, so it gets no allowance past the size a
             # unit is designed to fit.
             if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
-                deferred.append((item, "unit_too_long"))
+                _defer(item, "unit_too_long")
                 continue
             unit = {
                 "ref": item.ref,
@@ -578,15 +632,15 @@ def build_packet(
                 item.role in material_roles
                 and sum(per_role.get(role, 0) for role in material_roles) >= MAX_ITEMS_PER_ROLE
             ):
-                deferred.append((item, "role_cap"))
+                _defer(item, "role_cap")
                 continue
             if used + cost > material_limit or not text:
-                deferred.append((item, "budget"))
+                _defer(item, "budget")
                 continue
             if item.lifecycle in working_set_currency.HISTORY_LIFECYCLES:
                 unit["history"] = True
             if promoted and promoted_used + cost > promoted_share:
-                deferred.append((item, "budget"))
+                _defer(item, "budget")
                 continue
             if promoted:
                 promoted_used += cost
@@ -595,30 +649,8 @@ def build_packet(
             per_role[item.role] = role_count + 1
 
         for item, reason in deferred:
-            if item.promoted != promoted:
-                continue
-            if item.role in material_roles and (
-                sum(per_role.get(role, 0) for role in material_roles) >= MAX_ITEMS_PER_ROLE
-            ):
-                capped_material.setdefault(item.role, None)
-                continue
-            if len(pointers) >= MAX_POINTERS:
-                starved.setdefault(item.role, None)
-                continue
-            pointer = _pointer(item, reason)
-            cost = (
-                working_set_conversation.prose_chars(pointer, role_ids=role_ids)
-                if conversation_inferred else len(pointer["title"]) + len(pointer["why"])
-            )
-            if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
-                starved.setdefault(item.role, None)
-                continue
-            pointers.append(pointer)
-            if item.role in material_roles:
-                per_role[item.role] = per_role.get(item.role, 0) + 1
-            used += cost
-            if promoted:
-                promoted_used += cost
+            _budget_pointer(item, reason)
+        deferred.clear()
 
     packet: dict[str, Any] = {
         "recent_context": recent_entries,
@@ -796,6 +828,7 @@ def run_lanes(
     reached: dict[str, set[str]] | None = None,
     analysis: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
+    request_anchors: Sequence[Any] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
@@ -824,8 +857,11 @@ def run_lanes(
     root = Path(vault_root)
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
+    material_scopes: dict[str, frozenset[str]] = {}
     if neighbourhood is None:
-        neighbourhood = _neighbourhood_paths(root, anchors, reached=reached)
+        neighbourhood = _neighbourhood_paths(
+            root, anchors, reached=reached, material_scopes=material_scopes,
+        )
     if visible is not None:
         neighbourhood = frozenset(path for path in neighbourhood if visible(path))
     for role in roles:
@@ -862,6 +898,8 @@ def run_lanes(
                     analysis=analysis,
                     registry=registry,
                     admit=admit,
+                    material_scopes=material_scopes,
+                    request_anchors=request_anchors,
                 )
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
@@ -1007,7 +1045,8 @@ def reach_precedents(
 
 
 def _neighbourhood_paths(
-    vault_root: Path, anchors: Sequence[Any], *, reached: dict[str, set[str]] | None = None
+    vault_root: Path, anchors: Sequence[Any], *, reached: dict[str, set[str]] | None = None,
+    material_scopes: dict[str, frozenset[str]] | None = None,
 ) -> frozenset[str]:
     """Anchor paths plus their typed neighbours, at the depth each status allows."""
     paths: set[str] = set()
@@ -1021,6 +1060,8 @@ def _neighbourhood_paths(
         if depth >= 2:
             mine.update(_graph_neighbours(vault_root, path, depth=depth))
         paths.update(mine)
+        if material_scopes is not None:
+            material_scopes[working_set_state._anchor_ref(anchor)] = frozenset(mine)
         if reached is not None:
             reached.setdefault(working_set_state._anchor_ref(anchor), set()).update(mine)
     return frozenset(paths)
@@ -1065,6 +1106,8 @@ def _lane(
     analysis: Any = None,
     registry: context_roles.RoleRegistry | None = None,
     admit: Callable[[str, Any], bool] | None = None,
+    material_scopes: Mapping[str, frozenset[str]] | None = None,
+    request_anchors: Sequence[Any] | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1085,7 +1128,7 @@ def _lane(
         return _material_lane(
             vault_root, role, anchors=anchors, neighbourhood=neighbourhood,
             registry=registry, analysis=analysis, freshness_snapshot=freshness_snapshot,
-            admit=admit,
+            admit=admit, material_scopes=material_scopes, request_anchors=request_anchors,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1196,6 +1239,8 @@ def _material_lane(
     analysis: Any,
     freshness_snapshot: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
+    material_scopes: Mapping[str, frozenset[str]] | None = None,
+    request_anchors: Sequence[Any] | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     from . import (
@@ -1248,10 +1293,12 @@ def _material_lane(
         })
     store = lexstore.get_store(vault_root)
     term_budget = working_set_runtime.material_term_budget()
+    retained_query_units: list = []
     result = store.search_semantic_units_result(
         [], UNIT_LANE_LIMIT + 1, (), (), "kb", fresh,
         allowed_parent_paths=set(neighbourhood), excluded_categories_by_parent=excluded,
         query_units=query_units, term_budget=term_budget,
+        retained_query_units=retained_query_units,
         recall_checkpoint=checkpoint, allow_delta=False,
     )
     if not result.readiness.complete:
@@ -1273,7 +1320,7 @@ def _material_lane(
     ]
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    items = [replace(item, relevance_order=rank) for rank, item in enumerate(_unit_items(role, hits))]
+    items = list(_unit_items(role, hits))
     pages = store.search_bm25_result(
         [], MAX_ITEMS_PER_ROLE + 1, "kb", fresh, set(neighbourhood),
         query_units=query_units, term_budget=term_budget, recall_checkpoint=checkpoint,
@@ -1285,7 +1332,38 @@ def _material_lane(
     truncated |= len(pointers) > MAX_ITEMS_PER_ROLE
     pointer_hashes = store.page_content_hashes([path for path, _score in pointers[:MAX_ITEMS_PER_ROLE]])
     relations = relation_registry.load_registry(vault_root)
-    wanted = {stem for unit in query_units for stem in unit.stems}
+    wanted = {stem for unit in retained_query_units for stem in unit.stems}
+    # Only a resolved name in this turn can associate a sentence's retained
+    # query words with its base reach. Focus and conversation spans use other
+    # coordinates; neither can allocate a current-turn request.
+    named = [
+        (anchor, anchor.name_spans or ((anchor.name_span,) if anchor.name_span else ()))
+        for anchor in (request_anchors if request_anchors is not None else anchors)
+        if getattr(anchor, "name_span_segment", "turn") == "turn"
+        and set(anchor.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
+    ]
+    breaks = sorted({0, len(analysis.tokens), *(
+        index for index in analysis.request_breaks
+        if not any(start < index < end for _anchor, spans in named for start, end in spans)
+    )})
+    requests: dict[tuple[str, frozenset[tuple[str, ...]]], tuple[frozenset[str], frozenset[str]]] = {}
+    for start, end in zip(breaks, breaks[1:]):
+        associated = [anchor for anchor, spans in named
+            if any(start <= left < right <= end for left, right in spans)]
+        if len(associated) != 1 or getattr(associated[0], "status", "") != "resolved":
+            continue
+        anchor_ref = working_set_state._anchor_ref(associated[0])
+        scope = (material_scopes or {}).get(anchor_ref, frozenset()) & neighbourhood
+        local = set(working_set_runtime.content_stems(" ".join(analysis.tokens[start:end]))) - ignored
+        retained = frozenset(
+            tuple(stem for stem in unit.stems if stem in local)
+            for unit in retained_query_units if local.intersection(unit.stems)
+        )
+        if scope and retained:
+            requests[(anchor_ref, retained)] = (scope, frozenset(
+                stem for unit in retained for stem in unit
+            ))
+    content = [frozenset(bm25.tokenize(item.text)) for item in items] if requests else []
     for rank, (path, _score) in enumerate(pointers[:MAX_ITEMS_PER_ROLE]):
         if admit is not None and not admit(path, None):
             continue
@@ -1305,7 +1383,8 @@ def _material_lane(
         for unit in sorted(document.units, key=lambda unit: unit.span.start_offset, reverse=True):
             prose = prose[:unit.span.start_offset] + "\n" + prose[unit.span.end_offset:]
         prose = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith("#"))
-        if not wanted.intersection(bm25.tokenize(prose)):
+        prose_stems = frozenset(bm25.tokenize(prose))
+        if not wanted.intersection(prose_stems):
             continue
         items.append(LaneItem(
             role=role.id, level="page", ref=path, path=path, title=page.title,
@@ -1313,8 +1392,29 @@ def _material_lane(
             anchor=path, why="Relevant authored prose; read the page for its content.",
             relevance_order=rank,
         ))
+        if requests:
+            content.append(prose_stems)
+    if not requests:
+        return LaneResult(tuple(
+            replace(item, relevance_order=rank)
+            for rank, item in enumerate(items[:MAX_ITEMS_PER_ROLE])
+        ), truncated or len(items) > MAX_ITEMS_PER_ROLE)
+    coverage = [frozenset(
+        request for request, (scope, terms) in enumerate(requests.values())
+        if item.path in scope and terms.intersection(stems)
+    ) for item, stems in zip(items, content)]
+    # Among equal coverage, compiled units keep their existing preference and
+    # corpus rank. Spare slots use that same order without reserving a pointer.
+    remaining = list(range(len(items)))
+    represented: set[int] = set()
+    selected: list[LaneItem] = []
+    while remaining and len(selected) < MAX_ITEMS_PER_ROLE:
+        chosen = max(remaining, key=lambda index: len(coverage[index] - represented))
+        remaining.remove(chosen)
+        represented.update(coverage[chosen])
+        selected.append(replace(items[chosen], relevance_order=len(selected)))
     truncated |= len(items) > MAX_ITEMS_PER_ROLE
-    return LaneResult(tuple(items[:MAX_ITEMS_PER_ROLE]), truncated)
+    return LaneResult(tuple(selected), truncated)
 
 
 def _records_lane(
@@ -3532,6 +3632,7 @@ def _compile_packet(
         visible=visible,
         reached=reached,
         analysis=analysis,
+        request_anchors=resolution.anchors,
     )
     missing = (
         *missing,

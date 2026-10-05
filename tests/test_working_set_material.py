@@ -177,6 +177,115 @@ def test_long_turn_keeps_useful_material_for_separate_topics(material_vault: Pat
         assert len(paths) <= 3
 
 
+def _allocation_material(root: Path, *, compiled_harvest: bool = False):
+    _note(root, "worksheet-procedure", "\n".join((
+        "- [observation] Violet worksheet calibration uses amber gauges. ^instrument",
+        "- [observation] Violet worksheet calibration starts with a zero-reference reading. ^zero",
+        "- [observation] Violet worksheet calibration records the ambient temperature. ^ambient",
+    )))
+    prose = "Shaded crates protect the orchard harvest against heat damage."
+    harvest = _note(root, "harvest-handling",
+        f"- [observation] {prose} ^harvest" if compiled_harvest else prose,
+        project="orchard-survey")
+    rival = _note(root, "orchard-calibration",
+        "Violet worksheet calibration at the orchard uses a separate inspection bench.",
+        project="orchard-survey")
+    _note(root, "calibration-archive", "Violet worksheet calibration has archived background essays.")
+    lexstore.ensure_fresh(root)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    return harvest, rival
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_distinct_named_requests_keep_compiled_claims_and_relevant_prose(
+    material_vault: Path, reverse: bool,
+):
+    # Three distinct useful claims must not crowd out the other request's prose.
+    harvest, rival = _allocation_material(material_vault)
+    requests = (
+        "In harbor-study, what guides violet worksheet calibration?",
+        "In orchard-survey: what guides shaded crates against heat damage?",
+    )
+    packet = working_set.compile_packet(material_vault,
+        turn=" ".join(requests[::-1] if reverse else requests))
+    units = [unit for unit in packet["units"] if unit["role"] == "material"]
+    pointers = [pointer for pointer in packet["pointers"] if pointer["role"] == "material"]
+    assert len(units) == 2
+    assert all("worksheet-procedure.md" in unit["ref"] for unit in units)
+    assert [pointer["ref"] for pointer in pointers] == [harvest]
+    assert rival not in [pointer["ref"] for pointer in pointers]
+
+
+@pytest.mark.parametrize("turn", [
+    "In harbor-study, what guides violet worksheet calibration?",
+    "In harbor-study, what guides violet worksheet calibration? orchard-survey",
+    "In harbor-study and orchard-survey, what guides violet worksheet calibration "
+    "and shaded crates against heat damage?",
+])
+def test_a_single_request_keeps_three_claims_without_a_reserved_pointer(
+    material_vault: Path, turn: str,
+):
+    # Bare names and a segment naming two contexts earn no separate request slot.
+    _allocation_material(material_vault)
+    packet = working_set.compile_packet(material_vault, turn=turn)
+    units = [unit for unit in packet["units"] if unit["role"] == "material"]
+    assert len(units) == 3
+    assert all("worksheet-procedure.md" in unit["ref"] for unit in units)
+    assert not [pointer for pointer in packet["pointers"] if pointer["role"] == "material"]
+
+
+def test_a_literal_name_keeps_its_internal_request_separator(material_vault: Path):
+    # The semicolon in an admitted title must not detach its request's query words.
+    _write(material_vault, "Knowledge Base/_Schema/project-keys.yaml", yaml.safe_dump({"projects": {
+        "harbor-study": {"folder": "Harbor; Study", "category": "research"},
+        "orchard-survey": {"folder": "Orchard Survey", "category": "research"},
+    }}))
+    harvest, _rival = _allocation_material(material_vault)
+    packet = working_set.compile_packet(material_vault, turn=(
+        "In harbor-study (Harbor; Study), what guides violet worksheet calibration? "
+        "In orchard-survey, what guides shaded crates against heat damage?"))
+    assert len([unit for unit in packet["units"] if unit["role"] == "material"]) == 2
+    assert [pointer["ref"] for pointer in packet["pointers"]
+        if pointer["role"] == "material"] == [harvest]
+
+
+def test_a_compiled_claim_can_cover_the_second_request(material_vault: Path):
+    # Coverage prefers a compiled answer; it does not reserve a prose pointer.
+    harvest, _rival = _allocation_material(material_vault, compiled_harvest=True)
+    packet = working_set.compile_packet(material_vault, turn=(
+        "In harbor-study, what guides violet worksheet calibration; "
+        "in orchard-survey, what guides shaded crates against heat damage?"))
+    units = [unit for unit in packet["units"] if unit["role"] == "material"]
+    assert len(units) == 3
+    assert harvest in [unit["provenance"]["path"] for unit in units]
+    assert not [pointer for pointer in packet["pointers"] if pointer["role"] == "material"]
+
+
+def test_repeated_named_request_has_no_extra_allocation_weight(material_vault: Path):
+    # Repeating the first need cannot consume the second need's slot.
+    harvest, _rival = _allocation_material(material_vault)
+    first = "In harbor-study, what guides violet worksheet calibration? "
+    packet = working_set.compile_packet(material_vault, turn=first * 3 +
+        "In orchard-survey, what guides shaded crates against heat damage?")
+    assert len([unit for unit in packet["units"] if unit["role"] == "material"]) == 2
+    assert [pointer["ref"] for pointer in packet["pointers"]
+        if pointer["role"] == "material"] == [harvest]
+
+
+def test_focus_name_offsets_cannot_allocate_a_current_turn_request(material_vault: Path):
+    # Focus token zero must not borrow the turn's calibration query for its context.
+    _allocation_material(material_vault)
+    packet = working_set.compile_packet(material_vault,
+        turn="In harbor-study, what guides violet worksheet calibration?",
+        conversation=working_set.working_set_conversation.Conversation(
+            focus="orchard-survey", state="applied"))
+    units = [unit for unit in packet["units"] if unit["role"] == "material"]
+    assert len(units) == 3
+    assert all("worksheet-procedure.md" in unit["ref"] for unit in units)
+    assert not [pointer for pointer in packet["pointers"] if pointer["role"] == "material"]
+
+
 def test_wider_material_query_still_filters_common_background(material_vault: Path):
     # Expanding the allowance must not turn off existing common-word filtering.
     common = (
@@ -305,7 +414,7 @@ def test_material_overflow_from_separate_contexts_is_reported(separate_role: boo
     packet = working_set.build_packet(
         items=tuple(working_set.LaneItem(
             role="other_material" if separate_role and i >= 2 else "material",
-            level="unit" if i < 2 else "page", ref=f"page-{i}",
+            level="unit" if i < 2 else "page", ref=f"{'z' if i < 2 else 'a'}-page-{i}",
             path=f"page-{i}", title=f"Page {i}", text="A relevant claim." if i < 2 else "",
             lifecycle="active", updated="", anchor=f"page-{i}",
         ) for i in range(4)),
@@ -313,6 +422,87 @@ def test_material_overflow_from_separate_contexts_is_reported(separate_role: boo
             for role in ("material", "other_material") if separate_role or role == "material"),
         current_state=(), ambiguity=(), missing=(), max_chars=4000, generation={}, status="resolved",
     )
+    assert len(packet["units"]) == 2
+    assert len(packet["pointers"]) == 1
     assert len(packet["units"]) + len(packet["pointers"]) == 3
     assert {"role": "other_material" if separate_role else "material",
         "reason": "lane_truncated"} in packet["missing"]
+
+
+@pytest.mark.parametrize("level", ["page", "unit"])
+def test_ranked_material_pointer_spends_its_slot_before_later_claims(level: str):
+    # Both authored prose and a downgraded claim retain the allocation they won.
+    packet = working_set.build_packet(
+        items=(working_set.LaneItem(
+            role="material", level=level, ref="ranked", path="ranked", title="Ranked page",
+            text="Long claim " * 100 if level == "unit" else "", lifecycle="active",
+            updated="", anchor="ranked", relevance_order=0,
+        ), *(working_set.LaneItem(
+            role="material", level="unit", ref=f"claim-{i}", path=f"claim-{i}",
+            title=f"Claim {i}", text=f"Useful claim {i}.", lifecycle="active", updated="",
+            anchor=f"claim-{i}", relevance_order=i,
+        ) for i in range(1, 4))),
+        anchors=(), roles=({"id": "material", "lane": "material"},), current_state=(),
+        ambiguity=(), missing=(), max_chars=4000, generation={}, status="resolved",
+    )
+    assert [unit["ref"] for unit in packet["units"]] == ["claim-1", "claim-2"]
+    assert [pointer["ref"] for pointer in packet["pointers"]] == ["ranked"]
+    assert packet["pointers"][0]["reason"] == ("requires_read" if level == "page" else "unit_too_long")
+
+
+def test_ranked_material_pointer_spends_chars_before_a_later_claim():
+    # A lower-ranked claim must not spend characters already allocated to a pointer.
+    packet = working_set.build_packet(
+        items=(working_set.LaneItem(
+            role="material", level="page", ref="ranked", path="ranked", title="Ranked page",
+            text="", lifecycle="active", updated="", anchor="ranked", relevance_order=0,
+            why="Relevant authored prose; read the page for its content.",
+        ), *(working_set.LaneItem(
+            role="material", level="unit", ref=f"claim-{i}", path=f"claim-{i}",
+            title=f"Claim {i}", text="x" * length, lifecycle="active", updated="",
+            anchor=f"claim-{i}", relevance_order=i,
+        ) for i, length in ((1, 260), (2, 200)))),
+        anchors=(), roles=({"id": "material", "lane": "material"},), current_state=(),
+        ambiguity=(), missing=(), max_chars=500, generation={}, status="resolved",
+    )
+    assert [unit["ref"] for unit in packet["units"]] == ["claim-1"]
+    assert "ranked" in [pointer["ref"] for pointer in packet["pointers"]]
+    assert packet["budget"]["used_chars"] <= 500
+
+
+@pytest.mark.parametrize("role", ["constraints", "identity", "methods"])
+def test_material_pointer_respects_role_priority(role: str):
+    # Protect both deferred constraints and identity pages not yet processed
+    # when a lower-priority material pointer competes for the remaining budget.
+    constraint = role == "constraints"
+    material_first = role == "methods"
+    roles = ({"id": role, "lane": "entity" if role == "identity" else "units"},
+        {"id": "material", "lane": "material"})
+    packet = working_set.build_packet(
+        items=(working_set.LaneItem(
+            role=role, level="page" if role == "identity" else "unit",
+            ref="earlier", path="earlier", title="Handling constraint" if constraint else "Context identity",
+            text="Scope-qualified handling requirement. " * 35 if constraint else "A" * 50,
+            lifecycle="active", updated="", anchor="earlier",
+            provenance={"source": "profile"} if role == "identity" else {},
+        ), working_set.LaneItem(
+            role="material", level="page", ref="prose", path="prose", title="Field worksheet",
+            text="", lifecycle="active", updated="", anchor="prose",
+            why="Read the field worksheet.",
+        )),
+        anchors=(), roles=tuple(reversed(roles)) if material_first else roles,
+        current_state=({"path": "state-one", "statement": "x" * 220},
+            {"path": "state-two", "statement": "y" * 220}),
+        ambiguity=(), missing=(), max_chars=500, generation={}, status="resolved",
+    )
+    if material_first:
+        assert packet["units"] == []
+        assert [(p["ref"], p["reason"]) for p in packet["pointers"]] == [("prose", "requires_read")]
+    elif constraint:
+        assert packet["units"] == []
+        assert [(p["ref"], p["reason"]) for p in packet["pointers"]] == [("earlier", "unit_too_long")]
+    else:
+        assert [(u["ref"], u["text"]) for u in packet["units"]] == [("earlier", "A" * 50)]
+        assert packet["pointers"] == []
+    assert packet["missing"] == [{"role": role if material_first else "material", "reason": "budget"}]
+    assert packet["budget"]["used_chars"] <= 500

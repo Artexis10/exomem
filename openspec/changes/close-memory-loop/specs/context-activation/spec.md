@@ -196,6 +196,52 @@ truncated and budget-limited outcomes SHALL remain distinct, including carried p
 - **THEN** the existing selector stays within both finite bounds, ordinary resolution
   retains its own budget, and no fallback broadens the admitted contexts or packet
 
+### Requirement: Explicit named requests share bounded material capacity
+Within the existing admitted and caller-visible candidate pool, material SHALL
+prefer representing unrepresented current-turn requests that name exactly one
+resolved anchor and retain non-name query evidence in a sentence or semicolon
+segment. Separators inside an admitted literal name SHALL NOT split that request.
+Equivalent repeated requests SHALL NOT gain allocation weight. Bare names,
+multi-anchor segments and focus-only contact SHALL retain the existing fallback.
+
+Coverage SHALL require matching retained query evidence in actual unit content
+or uncovered authored prose within that anchor's base material neighbourhood.
+Titles, covered unit text and later role reach SHALL NOT substitute for that
+evidence. Equivalent matches SHALL prefer compiled units; remaining capacity
+SHALL use existing material preference and rank. Packet assembly SHALL preserve
+the combined selected order of units and pointers within existing role priority,
+slot and character budgets. Earlier categorical roles, including their pages
+and downgraded pointers, SHALL spend before a material group at its declared
+registry position; later roles SHALL follow. Categorical portions SHALL retain
+unit-first ordering, and packets without material SHALL retain the old ordering.
+Own/promoted tiers and current-state/Planning precedence SHALL remain unchanged.
+It SHALL NOT add searches, traversals, model calls,
+context admission or capacity, or claim recovery beyond the candidate window.
+
+#### Scenario: Distinct claims do not consume a second named question's slot
+- **WHEN** one admitted topic has three distinct matching units and a separately
+  named question has matching uncovered prose in another admitted topic
+- **THEN** material can represent both requests within three items in either
+  question order, without selecting the second topic's unrelated prose merely
+  because it repeats words from the first question
+
+#### Scenario: A bare name or focus offset does not reserve capacity
+- **WHEN** another anchor is only named without non-name request evidence, or its
+  contact occurs only in focus at coordinates shared with the current turn
+- **THEN** it gains no request-allocation entitlement and existing relevance,
+  admission and fallback behaviour remain unchanged
+
+#### Scenario: One topic retains the full material allowance
+- **WHEN** one named request has three relevant distinct compiled units
+- **THEN** all three remain eligible without a reserved pointer slot, and missing
+  or truncated evidence is not represented as a complete answer
+
+#### Scenario: Earlier categorical context survives a tight budget
+- **WHEN** a tight packet can afford either earlier identity or constraint
+  context, including a downgraded pointer, or lower-priority material
+- **THEN** the earlier role retains capacity, while later categorical units do
+  not jump ahead of the combined material group solely because they are units
+
 ### Requirement: Project configuration participates in activation freshness
 A project-registry-only edit SHALL be visible to ordinary writer validation and
 invalidate affected warm activation state without a release or restart. Managed

@@ -1114,6 +1114,40 @@ Cross-client activity is retained as the later task-10 follow-on, after the exis
 
 Each implementation packet gets current-state verification, a narrow owner, independent review proportional to its boundary, affected tests while iterating and full required checks at the finished tranche. This session remains the programme orchestrator; delegation supplies bounded implementation or independent review, not a parallel architecture authority.
 
+## Explicit named-request allocation in material
+
+Material allocation operates on the existing caller-visible candidate pool, not
+on inferred semantic tasks. A current-turn sentence or semicolon segment that
+names exactly one resolved anchor and retains non-name query evidence may form
+a request. Commas and colons do not split that request; separators inside an
+admitted literal name do not split it either. Repeated equivalent requests do
+not gain weight. Bare names, shared multi-anchor segments and focus-only contact
+retain the existing fallback rather than reserving a slot.
+
+Each request uses only terms retained by the shared material query selector and
+the corresponding anchor's base material neighbourhood from the existing graph
+walk. Actual unit content or uncovered authored prose must match that evidence;
+titles, covered unit text and another anchor's later role reach cannot lend a
+prose pointer relevance. Selection first represents requests that have eligible
+evidence, then fills the remaining slots by the existing preference and rank.
+Compiled units win equivalent matches, but packet assembly honours this combined
+order for units and pointers instead of deferring every pointer behind units.
+The combined material group sits at its declared registry priority: earlier
+categorical roles, including pages and downgraded pointers, spend before it;
+later roles follow. Categorical portions retain their unit-first ordering, and
+packets without material retain the old ordering. This explicit boundary avoids
+the cycle between global unit-first ordering and mixed material ordering without
+letting material displace earlier identity or constraint context. Own/promoted
+tiers, current-state/Planning precedence and the shared material cap remain.
+
+This adds no search, traversal, model call, context admission or packet capacity.
+The 200-unit/three-pointer candidate bounds and three served material items stay
+unchanged. Missing candidates and truncation remain visible; representation is
+not a claim of complete answers. Verify distinct-claim competition, reversed
+question order, bare-name and focus negatives, single-topic capacity, existing
+ownership/egress/continuity controls and matched latency before delivery. This
+does not close the original client incident without its actual request and packet.
+
 ## Risks / Trade-offs
 
 - Decomposition can overcapture: require supported evidence, explicit uncertainty, incidental-name negatives and no quota for entities/edges.
