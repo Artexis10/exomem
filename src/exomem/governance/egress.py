@@ -3147,7 +3147,7 @@ def guard_working_set(
 #: under every existing reading, and withholding its item if none exists.
 #: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
 #: and only on an item that ALSO carries one of these (T2).
-_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor")
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via")
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
@@ -3716,6 +3716,10 @@ def _guarded_anchor(
         # `guard_working_set` -- so it is checked by exact match here instead.
         or anchor.get("path") in invalid_refs
         or anchor.get("ref") in invalid_refs
+        # An anchor listed through a carried page (`via`) was reached only
+        # through that page: it goes wherever the page goes.
+        or _names_withheld(anchor.get("via"), withheld)
+        or anchor.get("via") in invalid_refs
     ):
         return None
     anchor_ref = str(anchor.get("ref") or "")

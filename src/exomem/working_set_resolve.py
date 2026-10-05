@@ -54,6 +54,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "continuity",
     "conversation",
     "agent_choice",
+    "carried_link",
 )
 
 #: `RARE_TERM_MAX_ANCHORS` lives in `working_set_index` (re-exported here):
@@ -531,9 +532,12 @@ class ResolvedAnchor:
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
+    #: The carried page this anchor is listed through (`carried_link`), or
+    #: `""`. Served, so the egress guard removes the anchor with that page.
+    via: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "ref": self.ref or self.path or self.anchor_id,
             "path": self.path,
             "title": self.title,
@@ -542,6 +546,9 @@ class ResolvedAnchor:
             "status": self.status,
             "evidence": list(self.evidence),
         }
+        if self.via:
+            out["via"] = self.via
+        return out
 
 
 @dataclass(frozen=True, slots=True)

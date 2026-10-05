@@ -2403,6 +2403,7 @@ def _carried_packet(
         evidence=evidence,
         visible=visible,
         contacts=contacts,
+        list_linked=True,
     )
     if carried_anchors:
         generation = {**generation, "carried_by": carried_by}
@@ -2535,6 +2536,7 @@ def _carried_material(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     selected_roles: Sequence[Mapping[str, str]] = (),
+    list_linked: bool = False,
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
     tuple[LaneItem, ...],
@@ -2550,6 +2552,11 @@ def _carried_material(
     their material shares the packet's item cap. Empty items means
     none of them read anything. Titles and lifecycles are taken as
     `_carried_packet` documents.
+
+    With `list_linked`, where the carried pages are the packet's only anchors,
+    each page that served units also lists the anchors those units name
+    through its links (`_carried_links`), after every carried page and
+    within the ordinary anchor allowance.
     """
     anchors: list[working_set_resolve.ResolvedAnchor] = []
     items: list[LaneItem] = []
@@ -2557,6 +2564,7 @@ def _carried_material(
     states: list[Mapping[str, Any]] = []
     page_roles: dict[str, tuple[str, tuple[dict[str, str], ...]]] = {}
     candidates: dict[str, dict[str, str]] = {}
+    served: dict[str, tuple[str, ...]] = {}
     admit = _carry_admission(vault_root, paths, analysis, index=index,
         contacts=contacts, visible=visible) if evidence == ("retrieval",) else None
     for path in paths:
@@ -2640,10 +2648,83 @@ def _carried_material(
                 break
         if got or admit is None or admit(path, None):
             anchors.append(carried)
+            served[path] = tuple(item.text for item in got if item.path == path)
         items.extend(got)
         states.extend(current_state)
         missing.extend(gap for gap in gaps if gap not in missing)
+    if list_linked and index is not None:
+        listed = {anchor.path for anchor in anchors}
+        for path, texts in served.items():
+            room = working_set_resolve.MAX_ANCHORS - len(anchors)
+            for linked in _carried_links(index, path, texts, visible=visible)[: max(0, room)]:
+                if linked.path not in listed:
+                    listed.add(linked.path)
+                    anchors.append(linked)
     return tuple(anchors), tuple(items), tuple(missing), tuple(states), tuple(used_roles.values())
+
+
+#: How many anchors one carried page may list beside itself (`_carried_links`).
+CARRIED_LINK_MAX_PER_PAGE = 2
+
+
+def _carried_links(
+    index: working_set_index.WorkingSetIndex,
+    path: str,
+    served: Sequence[str],
+    *,
+    visible: Callable[[str], bool] | None,
+) -> tuple[working_set_resolve.ResolvedAnchor, ...]:
+    """Anchors linked to or from carried page `path` that its served units name.
+
+    A carried note about a person often names that person in its unit and
+    links their page, while the turn that carried it never said the name.
+    Such a row is listed `partial` on `carried_link` and never resolves: no
+    lane reads it, and the token never carries it forward. A row the page
+    links without naming it in what it served stays out, and so does a row
+    the reader may not see. `via` names the page, so the egress guard
+    removes the row whenever it removes the page.
+    """
+    if not served:
+        return ()
+    texts = tuple(working_set_index.tokens_of(working_set_index.normalize(text)) for text in served)
+    out: list[working_set_resolve.ResolvedAnchor] = []
+    for row in index.anchors():
+        if not row.path or row.path == path:
+            continue
+        if path not in row.neighbourhood and path not in row.linked_by:
+            continue
+        if visible is not None and not working_set_resolve.anchor_visible(row, visible):
+            continue
+        names = tuple(
+            phrase
+            for phrase in (
+                working_set_index.tokens_of(working_set_index.normalize(name))
+                for name in (row.title, *row.aliases)
+            )
+            if phrase
+        )
+        if not any(
+            working_set_resolve._phrase_spans(tokens, phrase) for tokens in texts for phrase in names
+        ):
+            continue
+        out.append(
+            working_set_resolve.ResolvedAnchor(
+                anchor_id=row.anchor_id,
+                path=row.path,
+                ref=row.ref,
+                title=row.title,
+                kind=row.kind,
+                lifecycle=row.lifecycle,
+                status="partial",
+                evidence=("carried_link",),
+                categories=(),
+                neighbourhood=frozenset({path}),
+                via=path,
+            )
+        )
+        if len(out) == CARRIED_LINK_MAX_PER_PAGE:
+            break
+    return tuple(out)
 
 
 def _follow_up_packet(
