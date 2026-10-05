@@ -31,8 +31,6 @@ STORAGE_CLASS = "exomem-cloud-encrypted"
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
 JOB_KIND_LABEL = "exomem.io/cell-job"
-# On every object a cell renders, including its pods and its Jobs' pods.
-CELL_ID_LABEL = "exomem.io/cell"
 INIT_CONTAINER_NAME = "cell-init"
 POD_SECURITY_VERSION = "v1.35"
 
@@ -183,14 +181,14 @@ def _labels(spec: CellManifestSpec) -> dict[str, str]:
     return {
         "app.kubernetes.io/name": "exomem-cell",
         "app.kubernetes.io/part-of": "exomem-cloud",
-        CELL_ID_LABEL: spec.cell_id,
+        "exomem.io/cell": spec.cell_id,
     }
 
 
 def _selector_labels(spec: CellManifestSpec) -> dict[str, str]:
     return {
         "app.kubernetes.io/name": "exomem-cell",
-        CELL_ID_LABEL: spec.cell_id,
+        "exomem.io/cell": spec.cell_id,
     }
 
 

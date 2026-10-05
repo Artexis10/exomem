@@ -28,7 +28,6 @@ from .manifests import (
     BACKUP_JOB_NAME,
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
-    CELL_ID_LABEL,
     HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
@@ -179,29 +178,18 @@ class ClusterClient:
     # -- observation (D4: pods/events/namespaces get+list only) --
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
-        """One cell, read object by object. A pass observes the whole fleet
-        through observe_cells(), which must report exactly what this does."""
-
-        namespace_obj = self._get_namespace(namespace)
-        if namespace_obj is None:
-            return ClusterObservation()
-        pvc = self._get_pvc(namespace, "cell-data")
-        pv_name = pvc.spec.volume_name if pvc and pvc.spec else None
-        return self._observation(
-            namespace,
-            namespace_obj,
-            pvc,
-            self._get_pv(pv_name) if pv_name else None,
-            self._get_statefulset(namespace, "cell"),
-            self._list_cell_pods(namespace),
-        )
+        result = self.observe_cells({cell_id: namespace})[cell_id]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def observe_cells(self, cells: dict[str, str]) -> dict[str, ClusterObservation | Exception]:
         """Every cell in `cells` (cell id -> namespace) from one list per kind,
         so a pass costs the same few requests however many cells there are
-        (D4 API budget). Objects are matched to a cell by namespace and name,
-        exactly as observe() reads them; cellctl's ClusterRole already lists
-        each kind cluster-wide. A list that fails raises for the whole pass;
+        (D4 API budget). Objects are attributed to a cell only by its exact
+        namespace (and, within it, by the name the cell renders); cellctl's
+        ClusterRole already lists each kind cluster-wide. A list that fails
+        raises for the whole pass;
         a cell whose own objects cannot be read is returned as its error."""
 
         namespaces = {ns.metadata.name: ns for ns in self._core.list_namespace().items}
@@ -216,10 +204,14 @@ class ClusterClient:
             sts.metadata.namespace: sts
             for sts in self._apps.list_stateful_set_for_all_namespaces(field_selector="metadata.name=cell").items
         }
-        # Every pod cellctl causes in a cell namespace carries the cell label
-        # (the StatefulSet's selector and the Jobs' templates both set it).
+        # Backup/restore Job pods run in the same namespace (labelled with
+        # JOB_KIND_LABEL) and must never be mistaken for the StatefulSet's own
+        # replica, or a backup hold can never clear once its Job's pod exists
+        # (found live in 3.10). Every other pod in the namespace counts as
+        # holding the RWO volume, labelled or not: an operator's owner-restore
+        # pod (docs/runbooks/cloud-operator-import.md) carries no cell label.
         pods: dict[str, list] = {}
-        for pod in self._core.list_pod_for_all_namespaces(label_selector=f"{CELL_ID_LABEL},!{JOB_KIND_LABEL}").items:
+        for pod in self._core.list_pod_for_all_namespaces(label_selector=f"!{JOB_KIND_LABEL}").items:
             pods.setdefault(pod.metadata.namespace, []).append(pod)
 
         observations: dict[str, ClusterObservation | Exception] = {}
@@ -294,13 +286,6 @@ class ClusterClient:
             row_generation_raw = annotations.get(ROW_GENERATION_ANNOTATION)
             row_generation = int(row_generation_raw) if row_generation_raw and row_generation_raw.isdigit() else None
 
-        # Backup/restore Jobs run their own pods in this same namespace
-        # (labelled with JOB_KIND_LABEL); those must never be mistaken for
-        # the StatefulSet's own replica when deciding whether the cell pod
-        # still holds the RWO volume, or a backup hold can never clear once
-        # its Job's pod exists (found live in 3.10: the hold got stuck
-        # forever because a completed backup Job's pod is not garbage
-        # collected on its own).
         pod_exists = len(pods) > 0
         live_pods = [pod for pod in pods if pod.metadata.deletion_timestamp is None]
         pod_terminating = len(live_pods) < len(pods)
@@ -402,38 +387,6 @@ class ClusterClient:
             if _not_found(error):
                 return None
             raise
-
-    def _get_pvc(self, namespace: str, name: str):
-        try:
-            return self._core.read_namespaced_persistent_volume_claim(name, namespace)
-        except ApiException as error:
-            if _not_found(error):
-                return None
-            raise
-
-    def _get_pv(self, name: str):
-        try:
-            return self._core.read_persistent_volume(name)
-        except ApiException as error:
-            if _not_found(error):
-                return None
-            raise
-
-    def _get_statefulset(self, namespace: str, name: str):
-        try:
-            return self._apps.read_namespaced_stateful_set(name, namespace)
-        except ApiException as error:
-            if _not_found(error):
-                return None
-            raise
-
-    def _list_cell_pods(self, namespace: str) -> list:
-        """Pods belonging to the cell's own StatefulSet, excluding any
-        backup/restore Job pod running in the same namespace."""
-
-        return self._core.list_namespaced_pod(
-            namespace, label_selector=f"!{JOB_KIND_LABEL}"
-        ).items
 
     def _get_job(self, namespace: str, name: str):
         try:

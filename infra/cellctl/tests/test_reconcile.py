@@ -2264,6 +2264,35 @@ async def test_a_converged_rows_unchanged_observation_writes_nothing(cell_db: Ce
         await connection.close()
 
 
+async def test_a_settled_rows_observed_at_is_refreshed_once_it_is_five_minutes_old(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    # Operators read observed_at as "last observed": a healthy cell must not
+    # show "observed days ago", and the refresh must not make the pass fast.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge(connection, cluster, cell_id, now)
+        writes: list[dict[str, object]] = []
+        real_write = db.write_observed
+
+        async def recording_write(connection, row_cell_id, updates):
+            writes.append(dict(updates))
+            await real_write(connection, row_cell_id, updates)
+
+        monkeypatch.setattr(db, "write_observed", recording_write)
+        later = now + timedelta(minutes=5, seconds=1)
+        fast = await reconcile.reconcile_once(
+            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=later
+        )
+        assert (writes, fast) == ([{"observed_at": later}], False)
+    finally:
+        await connection.close()
+
+
 # --- D9: a node no longer in the cluster offers no slots ----------------------
 
 
@@ -2828,10 +2857,6 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
 
         monkeypatch.setattr(db, "write_observed", recording_write)
         applies_before = cluster.applies
-        # Unchanged: nothing is written.
-        await _pass(connection, cluster, now + timedelta(seconds=5))
-        assert writes == []
-
         cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=False, ready_pod_image=None)
         writes.clear()
         for step in range(3):

@@ -68,6 +68,10 @@ logger = logging.getLogger("cellctl")
 # the fleet has settled. A NOTIFY wakes the loop at once either way.
 FAST_POLL_INTERVAL_SECONDS = 5.0
 IDLE_POLL_INTERVAL_SECONDS = 30.0
+# D4 amendment: observed_at is written with an observed change, and on its
+# own once the stored value is this old, so it reads as "last observed, at
+# most about this stale" without a write per cell per pass.
+OBSERVED_AT_REFRESH = timedelta(minutes=5)
 RECONNECT_BACKOFF_INITIAL_SECONDS = 1.0
 RECONNECT_BACKOFF_MAX_SECONDS = 30.0
 DEFAULT_HEARTBEAT_PATH = "/tmp/cellctl-heartbeat"
@@ -1006,14 +1010,18 @@ def _in_transition(row: CellRow, observation: ClusterObservation, refusal_parked
     return row.is_dirty(refusal_parked=refusal_parked)
 
 
-async def _write_observed(connection: asyncpg.Connection, cell_id: str, updates: dict[str, object], now: datetime) -> bool:
-    """D4 amendment: observed_at records the last observed change, so it is
-    written with a change and never alone. Returns whether anything was."""
+async def _write_observed(connection: asyncpg.Connection, row: CellRow, updates: dict[str, object], now: datetime) -> bool:
+    """D4 amendment: observed_at is written with every observed change, and
+    alone once the row's stored value is OBSERVED_AT_REFRESH old. Returns
+    whether an observed column changed; a refresh alone is not a change and
+    never makes the next pass fast."""
 
-    if not updates:
-        return False
-    await db.write_observed(connection, cell_id, {**updates, "observed_at": now})
-    return True
+    if updates:
+        await db.write_observed(connection, row.cell_id, {**updates, "observed_at": now})
+        return True
+    if row.observed_at is None or now - row.observed_at >= OBSERVED_AT_REFRESH:
+        await db.write_observed(connection, row.cell_id, {"observed_at": now})
+    return False
 
 
 async def _publish_parked_canary(
@@ -1093,12 +1101,13 @@ async def _reconcile_row(
     )
     if readiness_only:
         changed = {"ready": observation.pod_ready} if row.ready != observation.pod_ready else {}
-        return await _write_observed(connection, row.cell_id, changed, now)
+        return await _write_observed(connection, row, changed, now)
     # A parked refused row is not dirty, but it still goes through decide(),
     # which applies nothing while it is parked and observes it this pass.
     if not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start:
-        # D4 amendment: an observation that finds nothing changed writes nothing.
-        return False
+        # D4 amendment: an observation that finds nothing changed writes only
+        # a due observed_at refresh.
+        return await _write_observed(connection, row, {}, now)
 
     if row.desired_state == "deleted":
         observation = _augment_deletion_observation(
@@ -1262,7 +1271,7 @@ async def _reconcile_row(
             # converged. A refused hold start is retried on the backoff too.
             _record_refusal(memory, row.cell_id, refusal_key, now, statefulset_blocked=True)
             changed = {"last_error_code": MANIFEST_IMMUTABLE} if row.last_error_code != MANIFEST_IMMUTABLE else {}
-            return await _write_observed(connection, row.cell_id, changed, now)
+            return await _write_observed(connection, row, changed, now)
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
@@ -1319,7 +1328,7 @@ async def _reconcile_row(
         row_updates["last_error_code"] = None
     # Bounded writes: a column whose value is unchanged is not written again.
     row_updates = {column: value for column, value in row_updates.items() if getattr(row, column) != value}
-    changed = await _write_observed(connection, row.cell_id, row_updates, now)
+    changed = await _write_observed(connection, row, row_updates, now)
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
