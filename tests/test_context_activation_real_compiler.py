@@ -113,26 +113,24 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
     ),
-    "C4": (
-        "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.50 below the 0.9 floor",
-    ),
+    # The failure note is named by its own title, so it resolves (the
+    # 2026-10-05 ruling), and its unit names the colleague it links, who is
+    # listed partial (`carried_link`). Raw precision does not map the note's
+    # unit fragment to its page, so it reads 0.50.
+    "C4": ("precision 0.50 below the 0.8 floor",),
     # Scoped carry omits unrelated settings, but the ordinary unresolved menu
     # retains the partial equipment candidate, which the scorer counts as poison.
     "T6": ("1 poison anchor(s) surfaced",),
-    # The carried page now serves its current-state unit (a carried page is
-    # read through the lenses its own units answer), so the gold page arrives
-    # and the required fact is present; the raw score still reads a carried
-    # page as `unresolved` (R1, amendment A8).
-    "C8": (
-        "expected status 'resolved', observed 'unresolved'",
-        "precision 0.00 below the 0.8 floor",
-    ),
-    # A page named by its title with one distinctive word is carried, and a
-    # twin's unit fragment is outside its own gold (D9).
+    # The carried page serves its current-state unit (a carried page is read
+    # through the lenses its own units answer) and, named by its own title, is
+    # resolved (the 2026-10-05 ruling); raw precision still reads the page's
+    # own unit fragment as a second ref (amendment A8 maps it).
+    "C8": ("precision 0.50 below the 0.8 floor",),
+    # A page named by its title is carried and resolved, and a twin's unit
+    # fragment is outside its own gold (D9).
     "T8": (
-        "expected status 'resolved', observed 'unresolved'",
         "twin surfaced a ref outside its own gold",
+        "precision 0.50 below the 0.8 floor",
     ),
     # As C2, on the padded tree (R3).
     "C9": (
@@ -152,8 +150,9 @@ AMENDED_PASSING_TODAY = PASSING_TODAY
 A7_PASSING_TODAY = PASSING_TODAY
 
 #: The same packets under amendment A8 alone (a carried gold page with its
-#: units satisfies the status, and its units count in precision).
-A8_PASSING_TODAY = PASSING_TODAY | {"C8"}
+#: units satisfies the status, and its units count in precision). C4 joins C8
+#: once its failure note lists the colleague its unit names (`carried_link`).
+A8_PASSING_TODAY = PASSING_TODAY | {"C8", "C4"}
 
 #: The same packets under amendment A9 alone (agent-choice scoring, digest
 #: pinned before this first run). Every red positive still misses a gold
@@ -161,7 +160,8 @@ A8_PASSING_TODAY = PASSING_TODAY | {"C8"}
 #: activation-quality runtime either. With the recall-breadth round C8's gold
 #: note is reached as a carried page, which agent-choice scoring counts, so C8
 #: passes under A9 (raw still fails it: raw precision does not count a carry).
-A9_PASSING_TODAY = PASSING_TODAY | {"C8"}
+#: C4 joins it once its failure note resolves and lists the colleague it links.
+A9_PASSING_TODAY = PASSING_TODAY | {"C8", "C4"}
 
 #: Negative controls whose pre-registered mechanism does not change their
 #: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming
