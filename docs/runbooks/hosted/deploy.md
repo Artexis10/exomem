@@ -21,6 +21,26 @@ Runtime releases use the governed expand/canary/contract workflow in
 [`runtime-upgrades.md`](runtime-upgrades.md). The deployment sections below are its
 effectors, not a release checklist; do not edit their release values by hand.
 
+## Administration access
+
+Hosts have no public SSH. Ansible and operators reach them over the company
+NetBird, using the managed SSH profile with its existing key and host pin; the
+shared NetBird role admits 22/tcp on `wt0`. Keep a private JSON file outside
+the repository that maps each inventory host name (`exomem-alpha`,
+`substrate-control-01`, `exomem-agent-<key>`) to its NetBird IP, and pass it to
+the inventory generator with `--admin-addresses`. Hosts it omits keep their
+public IPv4, which is closed. The base role refuses to run with no public SSH
+CIDR unless the host has `wt0` and UFW admits 22/tcp on it.
+
+Break-glass is the Hetzner console or rescue system. A disposable host with
+public inbound closed at both the Hetzner firewall and UFW returned over
+NetBird after a soft reboot and a hard reset, and stayed publicly unreachable,
+with console access confirmed (2026-10-05). If network access is still
+needed, set one CIDR in `admin_ssh_cidrs` (Terraform) and
+`base_admin_ssh_cidrs` (Ansible), apply both, and revert both to `[]`
+afterwards. The next Ansible run deletes the reverted UFW rule; it never
+touches rules with another comment, including NetBird's.
+
 ## First rollout of fresh-storage binding
 
 The first release that emits `gpi1:binding`, `gpi1:registering` and
@@ -154,7 +174,8 @@ trap 'rm -rf -- "${deploy_work_dir}"' EXIT
 terraform -chdir=infra/terraform/foundation output -json \
   | jq '{server_ipv4, private_node_ip}' > "${deploy_work_dir}/foundation-output.json"
 infra/scripts/generate_ansible_inventory.py \
-  "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json"
+  "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json" \
+  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}"
 infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inventory.json" \
   --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
   --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \

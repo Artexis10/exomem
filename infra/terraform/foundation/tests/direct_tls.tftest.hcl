@@ -61,7 +61,7 @@ run "gateway_terminates_tls_on_the_fleet_node" {
   }
 }
 
-run "fleet_firewall_admits_only_admin_ssh_and_public_tls" {
+run "firewalls_admit_ssh_only_from_explicit_admin_cidrs" {
   command = plan
 
   assert {
@@ -81,9 +81,53 @@ run "fleet_firewall_admits_only_admin_ssh_and_public_tls" {
 
   assert {
     condition = length([
+      for rule in hcloud_firewall.control.rule : rule
+      if rule.port == "22" && toset(rule.source_ips) == toset(["192.0.2.10/32"])
+    ]) == 1
+    error_message = "A break-glass CIDR must open SSH on the control database server too."
+  }
+
+  assert {
+    condition = length([
       for rule in hcloud_firewall.alpha.rule : rule
       if rule.port == "443" && toset(rule.source_ips) == toset(["0.0.0.0/0", "::/0"])
     ]) == 1
     error_message = "Only TLS on port 443 may be public; HTTP and the Kubernetes API stay closed."
   }
+}
+
+# Administration runs over the company NetBird; with no break-glass CIDR the
+# provider firewalls carry no public SSH rule at all.
+run "empty_admin_cidrs_close_public_ssh" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = []
+  }
+
+  assert {
+    condition = (
+      length([for rule in hcloud_firewall.alpha.rule : rule if rule.port == "22"]) == 0 &&
+      length([for rule in hcloud_firewall.control.rule : rule if rule.port == "22"]) == 0
+    )
+    error_message = "An empty administrator CIDR set must leave no public SSH rule."
+  }
+
+  assert {
+    condition = (
+      length(hcloud_firewall.alpha.rule) == 1 &&
+      length(hcloud_firewall.control.rule) == 1
+    )
+    error_message = "Closing SSH must keep each firewall's public service rule."
+  }
+}
+
+run "rejects_a_global_admin_ssh_cidr" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = ["::/0"]
+  }
+
+  expect_failures = [var.admin_ssh_cidrs]
 }

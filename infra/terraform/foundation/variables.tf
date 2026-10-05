@@ -59,13 +59,9 @@ variable "gateway_hostname" {
 }
 
 variable "admin_ssh_cidrs" {
-  description = "Explicit operator IPv4/IPv6 CIDRs allowed to reach SSH."
+  description = "Temporary break-glass CIDRs allowed to reach public SSH; empty (administration over NetBird) closes it."
   type        = set(string)
-
-  validation {
-    condition     = length(var.admin_ssh_cidrs) > 0
-    error_message = "At least one explicit administrator CIDR is required."
-  }
+  default     = []
 
   validation {
     condition = alltrue([

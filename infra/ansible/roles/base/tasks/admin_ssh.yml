@@ -1,0 +1,46 @@
+---
+# Routine administration arrives over the company NetBird, whose shared role
+# admits 22/tcp on its interface. base_admin_ssh_cidrs is only a temporary
+# break-glass window; this file adds those rules and retires every public SSH
+# rule the role added earlier that the current list no longer names. Rules
+# with any other comment, or none, are never touched.
+- name: Read the UFW rules already added
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: base_ufw_added
+  changed_when: false
+  check_mode: false
+
+# Prevents: locking the operator out of a host with no NetBird route when the
+# role closes public SSH. Costs when it fires wrongly: the operator enrolls the
+# host in NetBird first, or passes a temporary break-glass CIDR for the run.
+# Paid by: the operator.
+- name: Refuse to close public SSH without a NetBird administration route
+  ansible.builtin.assert:
+    that:
+      - base_netbird_interface in ansible_facts.interfaces
+      - base_ufw_added.stdout | admits_ssh_on_interface(base_netbird_interface)
+    fail_msg: >-
+      No public SSH CIDR is set, but {{ base_netbird_interface }} is missing or
+      UFW does not admit 22/tcp on it. Enroll the host in NetBird first, or pass
+      a temporary break-glass CIDR.
+  when: base_admin_ssh_cidrs | length == 0
+
+- name: Allow SSH from break-glass administrator networks
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    src: "{{ item }}"
+    comment: Exomem administrator SSH
+  loop: "{{ base_admin_ssh_cidrs }}"
+
+- name: Retire public SSH rules no longer in the administrator networks
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    src: "{{ item }}"
+    comment: Exomem administrator SSH
+    delete: true
+  loop: "{{ base_ufw_added.stdout | retired_admin_ssh_sources(base_admin_ssh_cidrs) }}"

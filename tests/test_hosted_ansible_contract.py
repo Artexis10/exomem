@@ -686,6 +686,57 @@ def test_inventory_generator_optionally_emits_the_control_database_host(
     }
 
 
+def test_inventory_generator_addresses_hosts_by_their_administration_address(
+    tmp_path: Path,
+) -> None:
+    generator = ROOT / "infra/scripts/generate_ansible_inventory.py"
+    terraform_output = tmp_path / "foundation.json"
+    terraform_output.write_text(
+        json.dumps(
+            {
+                "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
+                "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
+                "control_db_server_ipv4": {"sensitive": False, "value": "192.0.2.20"},
+                "control_db_private_ip": {"sensitive": False, "value": "10.50.1.20"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    terraform_output.chmod(0o600)
+    addresses = tmp_path / "admin-addresses.json"
+
+    # One private map serves every flow, including ones whose inventory omits
+    # some of the hosts it names.
+    addresses.write_text(
+        json.dumps({"exomem-alpha": "100.64.0.10", "exomem-agent-01": "100.64.0.31"}),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "python3",
+            str(generator),
+            str(terraform_output),
+            str(tmp_path / "inventory.json"),
+            "--admin-addresses",
+            str(addresses),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    children = json.loads((tmp_path / "inventory.json").read_text(encoding="utf-8"))[
+        "all"
+    ]["children"]
+    assert children["hosted_nodes"]["hosts"]["exomem-alpha"]["ansible_host"] == "100.64.0.10"
+    # A host the mapping does not name keeps its public address.
+    assert (
+        children["control_nodes"]["hosts"]["substrate-control-01"]["ansible_host"]
+        == "192.0.2.20"
+    )
+
+
 def test_ansible_syntax_with_pinned_binary() -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN to run pinned Ansible syntax validation")

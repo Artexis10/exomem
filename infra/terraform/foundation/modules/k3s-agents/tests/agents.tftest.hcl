@@ -319,6 +319,22 @@ run "rejects_a_key_that_is_not_a_dns_label" {
   expect_failures = [var.nodes]
 }
 
+run "empty_admin_cidrs_close_public_ssh" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = []
+  }
+
+  assert {
+    condition = (
+      length(hcloud_firewall.agents.rule) == 1 &&
+      one(hcloud_firewall.agents.rule).port == "443"
+    )
+    error_message = "An empty administrator CIDR set must leave only public TLS on agents."
+  }
+}
+
 run "rejects_a_global_admin_ssh_cidr" {
   command = plan
 

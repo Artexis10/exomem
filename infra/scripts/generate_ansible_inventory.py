@@ -18,7 +18,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("terraform_output", type=Path)
     parser.add_argument("inventory", type=Path)
     parser.add_argument("--user", default="root")
+    parser.add_argument(
+        "--admin-addresses",
+        type=Path,
+        help=(
+            "Private JSON object mapping inventory host names to the address the "
+            "operator administers them on (their NetBird IP). Hosts it does not "
+            "name keep their public IPv4."
+        ),
+    )
     return parser
+
+
+def _admin_addresses(path: Path) -> dict[str, str]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or not all(
+        isinstance(name, str) and isinstance(address, str) for name, address in document.items()
+    ):
+        raise ValueError("administration addresses must map host names to addresses")
+    return {name: str(ipaddress.ip_address(address)) for name, address in document.items()}
 
 
 def _public_output(document: dict[str, Any], name: str) -> str:
@@ -102,6 +120,9 @@ def main() -> int:
         if control_private_ip is not None:
             control_private_ip = str(ipaddress.ip_address(control_private_ip))
         agents = _agent_hosts(document, args.user)
+        admin_addresses = (
+            _admin_addresses(args.admin_addresses) if args.admin_addresses else {}
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
@@ -136,6 +157,19 @@ def main() -> int:
                 }
             }
         }
+
+    # Administration runs over the company NetBird; the operator's own SSH
+    # arguments supply any proxy, so the inventory carries only the address.
+    # One map serves every runbook flow, so names absent from this inventory
+    # are ignored.
+    hosts: dict[str, dict[str, str]] = {
+        **children["hosted_nodes"]["hosts"],
+        **agents,
+        **children.get("control_nodes", {}).get("hosts", {}),
+    }
+    for name, host in hosts.items():
+        if name in admin_addresses:
+            host["ansible_host"] = admin_addresses[name]
 
     inventory = {"all": {"children": children}}
 

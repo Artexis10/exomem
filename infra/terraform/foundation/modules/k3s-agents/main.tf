@@ -2,22 +2,28 @@ locals {
   agent_labels = merge(var.labels, { role = "k3s-agent" })
 }
 
-# Public exposure of an agent is exactly 443 and administrator SSH. Cluster
+# Public exposure of an agent is 443, plus administrator SSH only during a
+# break-glass window; routine administration uses the company NetBird. Cluster
 # traffic (K3s API, Flannel VXLAN, kubelet) uses the private network, which
 # Hetzner firewalls do not filter; the k3s role's host firewall admits it only
-# from the other K3s nodes' declared private addresses. SSH stays direct
-# because the base role forbids TCP forwarding, so the server cannot act as a
-# jump host.
+# from the other K3s nodes' declared private addresses. The base role forbids
+# TCP forwarding, so the server cannot act as a jump host.
 resource "hcloud_firewall" "agents" {
   name   = "${var.name_prefix}s"
   labels = local.agent_labels
 
-  rule {
-    description = "Restricted administrator SSH"
-    direction   = "in"
-    protocol    = "tcp"
-    port        = "22"
-    source_ips  = var.admin_ssh_cidrs
+  # Administration runs over the company NetBird, so public SSH is normally
+  # closed. A non-empty set opens a temporary break-glass window.
+  dynamic "rule" {
+    for_each = length(var.admin_ssh_cidrs) > 0 ? [var.admin_ssh_cidrs] : []
+
+    content {
+      description = "Restricted administrator SSH"
+      direction   = "in"
+      protocol    = "tcp"
+      port        = "22"
+      source_ips  = rule.value
+    }
   }
 
   rule {

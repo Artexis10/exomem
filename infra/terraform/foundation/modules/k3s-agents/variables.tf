@@ -106,11 +106,11 @@ variable "ssh_key_ids" {
 }
 
 variable "admin_ssh_cidrs" {
-  description = "Explicit operator CIDRs allowed to reach SSH."
+  description = "Temporary break-glass CIDRs allowed to reach public SSH; empty closes it."
   type        = set(string)
 
   validation {
-    condition = length(var.admin_ssh_cidrs) > 0 && alltrue([
+    condition = alltrue([
       for cidr in var.admin_ssh_cidrs :
       can(cidrnetmask(cidr)) && cidr != "0.0.0.0/0" && cidr != "::/0"
     ])
