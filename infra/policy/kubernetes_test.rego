@@ -23,12 +23,12 @@ test_privileged_container_beside_null_init_containers_is_denied if {
   "Deployment/x uses a privileged container" in deny with input as doc
 }
 
-test_mutable_image_beside_null_init_containers_is_denied if {
+test_privileged_init_container_beside_null_containers_is_denied if {
   doc := {"kind": "Deployment", "metadata": {"name": "x"}, "spec": {"template": {"spec": {
-    "initContainers": null,
-    "containers": [{"name": "c", "image": "registry.example/app:1"}],
+    "initContainers": [{"name": "i", "image": pinned, "securityContext": {"privileged": true}}],
+    "containers": null,
   }}}}
-  "Deployment/x uses a mutable image" in deny with input as doc
+  "Deployment/x uses a privileged container" in deny with input as doc
 }
 
 test_named_hcloud_csi_driver_may_be_privileged if {
@@ -42,5 +42,21 @@ test_named_hcloud_csi_driver_may_be_privileged if {
 
 test_another_container_of_the_hcloud_node_cannot_be_privileged if {
   doc := hcloud_node([{"name": "csi-node-driver-registrar", "image": pinned, "securityContext": {"privileged": true}}])
+  "DaemonSet/exomem-platform-hcloud-csi-node uses a privileged container" in deny with input as doc
+}
+
+test_the_hcloud_driver_name_elsewhere_cannot_be_privileged if {
+  doc := {"kind": "Deployment", "metadata": {"name": "x", "namespace": "exomem-platform"}, "spec": {"template": {"spec": {
+    "containers": [{
+      "name": "hcloud-csi-driver",
+      "image": "docker.io/hetznercloud/hcloud-csi-driver:v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f",
+      "securityContext": {"privileged": true},
+    }],
+  }}}}
+  "Deployment/x uses a privileged container" in deny with input as doc
+}
+
+test_the_hcloud_node_driver_from_another_image_cannot_be_privileged if {
+  doc := hcloud_node([{"name": "hcloud-csi-driver", "image": pinned, "securityContext": {"privileged": true}}])
   "DaemonSet/exomem-platform-hcloud-csi-node uses a privileged container" in deny with input as doc
 }

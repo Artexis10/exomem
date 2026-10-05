@@ -93,7 +93,7 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
   --include-crds > "${render_dir}/platform.yaml"
 "${kubeconform_bin}" -strict -summary -ignore-missing-schemas "${render_dir}/platform.yaml"
 "${conftest_bin}" verify --policy "${infra_dir}/policy"
-"${conftest_bin}" test --policy "${infra_dir}/policy" "${render_dir}/platform.yaml"
+"${conftest_bin}" test --show-builtin-errors --policy "${infra_dir}/policy" "${render_dir}/platform.yaml"
 
 for values in values.validation.yaml values.initialize.yaml; do
   "${helm_bin}" lint "${infra_dir}/helm/cell" --strict \
@@ -102,7 +102,7 @@ for values in values.validation.yaml values.initialize.yaml; do
     --namespace cell-alpha-test \
     --values "${infra_dir}/helm/cell/${values}" > "${render_dir}/cell-${values}"
   "${kubeconform_bin}" -strict -summary -ignore-missing-schemas "${render_dir}/cell-${values}"
-  "${conftest_bin}" test --policy "${infra_dir}/policy" "${render_dir}/cell-${values}"
+  "${conftest_bin}" test --show-builtin-errors --policy "${infra_dir}/policy" "${render_dir}/cell-${values}"
 done
 
 "${script_dir}/validate_sops_ciphertext.py"
