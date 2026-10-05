@@ -398,6 +398,9 @@ def apply(
                 merged[item.anchor_id] = replace(
                     existing,
                     evidence=existing.evidence | worded,
+                    exact_alias_from_focus=existing.exact_alias_from_focus or (
+                        "exact_alias" in worded and "exact_alias" not in existing.evidence
+                    ),
                     exact_alias_phrases=existing.exact_alias_phrases | item.exact_alias_phrases,
                 )
                 origins[item.anchor_id] = (
@@ -440,7 +443,7 @@ def apply(
             merged[anchor_id], evidence=merged[anchor_id].evidence | {"conversation"}
         )
     ordered = sorted(merged.values(), key=resolve_module._candidate_order)
-    return tuple(ordered[: resolve_module.MAX_CANDIDATES]), origins, entry_candidates
+    return tuple(ordered), origins, entry_candidates
 
 
 def may_carry(analysis: Any, *, subject_title: str = "") -> bool:

@@ -87,9 +87,7 @@ CONTINUITY_ABSENT = "absent"
 #: bounded before any work is spent on it. The length bound matches the hook's
 #: own (`_ACTIVATION_TOKEN_MAX_CHARS`) and is checked before the base64 decode,
 #: so a megabytes-long argument costs a comparison instead of a megabytes-long
-#: allocation on the request thread. The ref and role ceilings sit far above
-#: anything a real packet produces — `working_set.MAX_ANCHORS` is 6 — so they
-#: refuse the absurd without ever refusing the legitimate.
+#: allocation on the request thread. Minting observes these same bounds.
 CONTINUITY_MAX_CHARS = 8192
 CONTINUITY_MAX_REFS = 32
 CONTINUITY_MAX_ROLES = 32
@@ -637,7 +635,7 @@ def mint_continuity(
     # cost the turn its token and nothing else: a packet the caller has earned
     # must not be lost to the encoding of a ref.
     try:
-        return encode_continuity(
+        token = encode_continuity(
             identity=identity,
             roles_hash=str(generation.get("roles_hash") or ""),
             conventions_hash=str(generation.get("conventions_hash") or ""),
@@ -652,6 +650,7 @@ def mint_continuity(
             thread_ns=thread_ns,
             salt=salt,
         )
+        return token if decode_continuity(token) is not None else ""
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)
         return ""

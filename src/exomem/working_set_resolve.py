@@ -20,6 +20,7 @@ import math
 import re
 import statistics
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
@@ -154,8 +155,9 @@ ANCHOR_STATUSES: tuple[str, ...] = (
 )
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
 
-MAX_CANDIDATES = 24
 MAX_ANCHORS = 6
+MAX_EXPLICIT_ANCHORS = 24
+MAX_AMBIGUITY_CHOICES = 24
 MAX_NGRAM = 4
 
 #: An evidence cue must be at least this many characters long
@@ -484,6 +486,7 @@ class CandidateFacts:
     #: Span coordinates are local to this segment, not to concatenated text.
     #: Focus-only candidates are partitioned by the conversation projection.
     name_span_segment: str = "turn"
+    exact_alias_from_focus: bool = False
     entity_type: str = ""
     #: Did the turn capitalise a shared name word away from a sentence start
     #: (`TurnAnalysis.capitalised`)? Never serialised.
@@ -523,6 +526,7 @@ class ResolvedAnchor:
     name_span: tuple[int, int] | None = None
     name_spans: tuple[tuple[int, int], ...] | None = None
     name_span_segment: str = "turn"
+    exact_alias_from_focus: bool = False
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
@@ -549,6 +553,7 @@ class Resolution:
     #: `conversation` when an ambiguous turn was settled by exactly one
     #: competitor the earlier conversation had named; empty otherwise.
     disambiguated_by: str = ""
+    truncated: bool = False
 
     @property
     def resolved_anchors(self) -> tuple[ResolvedAnchor, ...]:
@@ -1557,18 +1562,8 @@ def candidates_for(
             )
         )
     out.sort(key=_candidate_order)
-    if analysis.referential:
-        # The hot candidates survive the cut on a referential turn. Only they
-        # can resolve it, and they carry no contact kind, so the ordinary
-        # order ranks them behind every recall hit the turn's filler words
-        # happened to reach — six of those were enough to drop the referent
-        # before `resolve()` ever saw it. Bounded by `hot_paths`, which the
-        # caller cuts at `working_set.HOT_PROFILE_K`; every other turn is cut
-        # exactly as before.
-        hot = [item for item in out if "recency" in item.evidence][:MAX_CANDIDATES]
-        rest = [item for item in out if "recency" not in item.evidence]
-        return tuple(sorted([*hot, *rest[: MAX_CANDIDATES - len(hot)]], key=_candidate_order))
-    return tuple(out[:MAX_CANDIDATES])
+    # The maintained index bounds this set. Competing senses must see it whole.
+    return tuple(out)
 
 
 
@@ -2008,16 +2003,20 @@ def add_graph_corroboration(
     `retrieval_paths` is accepted so that intent is explicit at the call site.
     """
     del retrieval_paths  # deliberately unused: see the docstring.
-    corroborated: set[str] = set()
+    named_paths: dict[str, set[str]] = {}
+    named_neighbours: dict[str, set[str]] = {}
     for item in candidates:
-        for other in candidates:
-            if other.anchor_id == item.anchor_id:
-                continue
-            linked = (other.path and other.path in item.neighbourhood) or (
-                item.path and item.path in other.neighbourhood
-            )
-            if linked and (other.evidence & WORDED_CONTACT_KINDS):
-                corroborated.add(item.anchor_id)
+        if not item.evidence & WORDED_CONTACT_KINDS:
+            continue
+        if item.path:
+            named_paths.setdefault(item.path, set()).add(item.anchor_id)
+        for path in item.neighbourhood:
+            named_neighbours.setdefault(path, set()).add(item.anchor_id)
+    corroborated = {
+        item.anchor_id for item in candidates
+        if (item.path and named_neighbours.get(item.path, set()) - {item.anchor_id})
+        or any(named_paths.get(path, set()) - {item.anchor_id} for path in item.neighbourhood)
+    }
     return tuple(
         replace(item, evidence=item.evidence | {"graph_corroboration"})
         if item.anchor_id in corroborated
@@ -2154,9 +2153,8 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
     the agent IS the decider) sorts before every anchor that does not, ahead
     of the existing keys. Without this, `-len(deciding_kinds)` alone could
     sort several weak two-kind candidates ahead of the one anchor the turn
-    actually named, and `candidates_for`'s MAX_CANDIDATES / `resolve`'s
-    MAX_ANCHORS truncation — both keyed by this SAME function — could drop
-    it. `usage_prior` appears here and ONLY here — it orders otherwise-equal
+    actually named, and admission could drop it. `usage_prior` appears
+    here and ONLY here — it orders otherwise-equal
     candidates and never changes a status.
     """
     return (
@@ -2398,6 +2396,13 @@ def _demote_subsumed_same_kind_aliases(
     """
     result = list(anchors)
     resolved_indices = [i for i, anchor in enumerate(result) if anchor.status == "resolved"]
+    phrases_by_kind: dict[str, dict[frozenset[str], int]] = {}
+    for i in resolved_indices:
+        if result[i].exact_alias_phrases:
+            phrases = result[i].exact_alias_phrases
+            phrases_by_kind.setdefault(result[i].kind, {})[phrases] = max(
+                len(phrase.split()) for phrase in phrases
+            )
     for i in resolved_indices:
         candidate = result[i]
         if not candidate.exact_alias_phrases:
@@ -2405,23 +2410,21 @@ def _demote_subsumed_same_kind_aliases(
         without_alias = frozenset(candidate.evidence) - {"exact_alias"}
         if _status_for_evidence(without_alias) == "resolved":
             continue
-        for j in resolved_indices:
-            if i == j:
-                continue
-            other = result[j]
-            if other.kind != candidate.kind or not other.exact_alias_phrases:
+        length = phrases_by_kind[candidate.kind][candidate.exact_alias_phrases]
+        for other_phrases, other_length in phrases_by_kind[candidate.kind].items():
+            if other_length <= length:
                 continue
             subsumed = all(
                 any(
                     _is_strict_subphrase(phrase, longer)
-                    for longer in other.exact_alias_phrases
+                    for longer in other_phrases
                 )
                 for phrase in candidate.exact_alias_phrases
             )
             if not subsumed:
                 continue
             if turn_tokens and _has_free_standing_mention(
-                candidate.exact_alias_phrases, other.exact_alias_phrases, turn_tokens
+                candidate.exact_alias_phrases, other_phrases, turn_tokens
             ):
                 continue
             result[i] = replace(result[i], status="partial")
@@ -2486,6 +2489,7 @@ def resolve(
                 name_span=candidate.name_span,
                 name_spans=candidate.name_spans,
                 name_span_segment=candidate.name_span_segment,
+                exact_alias_from_focus=candidate.exact_alias_from_focus,
                 entity_type=candidate.entity_type,
                 name_capitalised=candidate.name_capitalised,
                 name_lower_case=candidate.name_lower_case,
@@ -2498,7 +2502,6 @@ def resolve(
         # anchors go first — stably, so each group keeps its order. Every
         # other resolution is cut exactly as before.
         anchors.sort(key=lambda item: 0 if item.status == "resolved" else 1)
-    anchors = anchors[:MAX_ANCHORS]
     anchors = demote_scoped_bands(anchors, property_scopes)
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     anchors = _narrowed_by_qualifier(anchors)
@@ -2545,20 +2548,29 @@ def resolve(
             for anchor in anchors
         )
         resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
-    if ambiguity:
-        return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(ambiguity))
-    if resolved:
-        return Resolution(
-            status="resolved", anchors=tuple(anchors), disambiguated_by=disambiguated_by
-        )
-    bare = [
-        entry
-        for kind, group in _bare_name_groups(anchors)
-        for entry in _ambiguity_dicts(kind, group)
-    ]
-    if bare:
-        return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(bare))
-    return Resolution(status="unresolved", anchors=tuple(anchors))
+    if not resolved and not ambiguity:
+        ambiguity = [entry for kind, group in _bare_name_groups(anchors)
+            for entry in _ambiguity_dicts(kind, group)]
+    status = "ambiguous" if ambiguity else "resolved" if resolved else "unresolved"
+    # Partial leads cannot displace the contexts that established the verdict.
+    anchors = sorted(anchors, key=lambda item: item.status != "resolved")
+    # Explicit current-turn names consume the ordinary allowance first. Other
+    # contact, including focus-only names, cannot spend the extra allowance.
+    explicit = [item for item in anchors if item.status == "resolved" and (
+        "agent_choice" in item.evidence
+        or "exact_alias" in item.evidence and item.name_span_segment == "turn"
+        and not item.exact_alias_from_focus
+    )]
+    admitted = {item.anchor_id for item in explicit[:MAX_EXPLICIT_ANCHORS]}
+    for item in anchors:
+        if len(admitted) >= MAX_ANCHORS:
+            break
+        admitted.add(item.anchor_id)
+    return Resolution(
+        status=status, anchors=tuple(item for item in anchors if item.anchor_id in admitted),
+        ambiguity=tuple(ambiguity), disambiguated_by=disambiguated_by,
+        truncated=len(admitted) < len(anchors),
+    )
 
 
 def _span_inside(inner: tuple[int, int] | None, outer: tuple[int, int] | None) -> bool:
@@ -2616,18 +2628,20 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
         if anchor.status == "resolved" and anchor.name_span is not None
     ]
     narrowed: dict[str, set[str]] = {}
-    chosen: dict[str, list[ResolvedAnchor]] = {}
+    chosen: dict[str, dict[str, ResolvedAnchor]] = {}
+    wider_by_span: dict[tuple, bool] = {}
     for anchor in resolved:
         if DECIDING_ALONE_KINDS & set(anchor.evidence):
             continue
-        wider = [
-            other
-            for other in resolved
-            if other.kind == anchor.kind and _all_name_spans_inside(anchor, other)
-        ]
-        if wider:
+        key = (anchor.kind, anchor.name_span_segment, anchor.name_span, anchor.name_spans)
+        if key not in wider_by_span:
+            wider = [other for other in resolved
+                if other.kind == anchor.kind and _all_name_spans_inside(anchor, other)]
+            wider_by_span[key] = bool(wider)
+            if wider:
+                chosen.setdefault(anchor.kind, {}).update((item.anchor_id, item) for item in wider)
+        if wider_by_span[key]:
             narrowed.setdefault(anchor.kind, set()).add(anchor.anchor_id)
-            chosen.setdefault(anchor.kind, []).extend(wider)
     if not narrowed:
         return tuple(anchors)
 
@@ -2640,7 +2654,7 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
         return (
             anchor.status == "partial"
             and not set(anchor.evidence) & (CONTACT_KINDS - {"rare_term", "lexical_overlap"})
-            and any(_all_name_spans_inside(anchor, wide) for wide in chosen[anchor.kind])
+            and any(_all_name_spans_inside(anchor, wide) for wide in chosen[anchor.kind].values())
         )
 
     return tuple(anchor for anchor in anchors if not dropped(anchor))
@@ -2751,22 +2765,23 @@ def _competing_groups(
         )
         if len(group) < 2:
             continue
-        # At most MAX_ANCHORS nodes; a bounded structural connectivity check.
+        # Shared paths and anchor neighbours are the same connectivity edges
+        # as pairwise intersection, visited once per membership bucket.
+        memberships: dict[str, set[int]] = {}
+        empty_neighbour = any("" in anchor.anchor_neighbourhood for anchor in group)
+        for index, anchor in enumerate(group):
+            for path in anchor.anchor_neighbourhood | (
+                {anchor.path} if anchor.path or empty_neighbour else set()
+            ):
+                memberships.setdefault(path, set()).add(index)
         reached = {0}
         pending = [0]
         while pending:
             anchor = group[pending.pop()]
-            for index, other in enumerate(group):
-                if index in reached:
-                    continue
-                if (
-                    (anchor.path and anchor.path == other.path)
-                    or (anchor.anchor_neighbourhood & other.anchor_neighbourhood)
-                    or other.path in anchor.anchor_neighbourhood
-                    or anchor.path in other.anchor_neighbourhood
-                ):
-                    reached.add(index)
-                    pending.append(index)
+            for path in anchor.anchor_neighbourhood | {anchor.path}:
+                unseen = memberships.pop(path, set()) - reached
+                reached.update(unseen)
+                pending.extend(unseen)
         if len(reached) != len(group):
             groups.append((kind, tuple(group)))
     return tuple(groups)
@@ -2794,13 +2809,11 @@ def _without_named_apart(group: Sequence[ResolvedAnchor]) -> list[ResolvedAnchor
     rollout", "tide model research") still compete.
     """
     spelled = [_spelled_tokens(anchor) for anchor in group]
+    counts = Counter(token for tokens in spelled for token in tokens)
+    all_spelled = all(spelled)
     kept: list[ResolvedAnchor] = []
     for index, anchor in enumerate(group):
-        apart = bool(spelled[index]) and all(
-            other and not spelled[index] & other
-            for other_index, other in enumerate(spelled)
-            if other_index != index
-        )
+        apart = all_spelled and all(counts[token] == 1 for token in spelled[index])
         if not apart:
             kept.append(anchor)
     return kept
