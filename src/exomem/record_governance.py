@@ -1720,22 +1720,24 @@ def _inventory_coverage(
     writer = selected_writer(root, manifest)
     if writer is not None:
         limited = False
-        try:
-            release = writer._operation.summary_release(manifest.collection_id)
-        except collections.CollectionError as error:
-            if error.code != RELEASE_LIMIT:
-                raise
-            release, limited = None, True
-        if limited:
-            # Row policy varies past the release bound: the counts are unknown, not zero.
-            committed = held = None
-        elif release is not None:
-            # Summary counts come from the store without reading a row.
-            committed = release.released
-            held = sum(decision.level >= 6 for _subject, decision in release.held)
-        else:
-            items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
-            committed, held = len(items), len(held_ids)
+        # One snapshot and the caller's authorization for this collection's counts.
+        with writer.read_snapshot():
+            try:
+                release = writer._operation.summary_release(manifest.collection_id)
+            except collections.CollectionError as error:
+                if error.code != RELEASE_LIMIT:
+                    raise
+                release, limited = None, True
+            if limited:
+                # Row policy varies past the release bound: the counts are unknown, not zero.
+                committed = held = None
+            elif release is not None:
+                # Summary counts come from the store without reading a row.
+                committed = release.released
+                held = sum(decision.level >= 6 for _subject, decision in release.held)
+            else:
+                items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
+                committed, held = len(items), len(held_ids)
         observations = due_state.collection_observation_coverage(
             root, str(manifest.path), authorize_path=authorize
         )
@@ -1783,6 +1785,33 @@ def _presentation_inspection(
 
 
 @canonical_read
+def _unserved_store_collections(
+    root: Path,
+    discovered: tuple[collections.CollectionManifest, ...],
+    unreadable: tuple[collections.UnreadableManifest, ...],
+    semantic_profile: str,
+) -> tuple[tuple[collections.CollectionManifest, ...], tuple[collections.UnreadableManifest, ...]]:
+    """Without the store bound, a collection the vault's marker routes to it is unread.
+
+    Its manifest under the vault is a generated view, never a file collection, so its
+    view files must not be counted as rows. It is named as unreadable instead.
+    """
+    from .collection_store import authority
+
+    raw = authority.read_marker(root)
+    if raw is None:
+        return discovered, unreadable
+    marker = authority.parse_marker(root, raw)
+    routed = [m for m in discovered if authority.selected_entry(root, marker, m) is not None]
+    return tuple(m for m in discovered if m not in routed), (*unreadable, *(
+        collections.UnreadableManifest(
+            m.path, "COLLECTION_STORE_UNAVAILABLE",
+            "this collection lives in the collection store, which only the running Exomem service serves",
+        )
+        for m in routed if m.semantic_profile == semantic_profile
+    ))
+
+
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1805,6 +1834,10 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         discovered, unreadable = collections.discover_collections_with_errors(
             root, authorize_path=authorize
         )
+        if bound_writer(root) is None:
+            discovered, unreadable = _unserved_store_collections(
+                root, discovered, unreadable, semantic_profile
+            )
         manifests = [
             manifest
             for manifest in discovered

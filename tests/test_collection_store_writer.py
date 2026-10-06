@@ -353,19 +353,6 @@ def test_two_process_writers_natural_key_race_is_serialized(store):
         output.close()
 
 
-def test_writer_is_dark_without_preview_flag(tmp_path, monkeypatch):
-    from exomem.collection_store.writer import CollectionWriter
-
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
-    with connection.open_writer(
-        tmp_path / "collections.sqlite", lease_check=lambda: True
-    ) as handle:
-        with pytest.raises(
-            connection.CollectionStoreError, match="COLLECTION_STORE_PREVIEW_REQUIRED"
-        ):
-            CollectionWriter(tmp_path, handle)
-
-
 def test_builtin_store_writer_is_available():
     import importlib.util
 

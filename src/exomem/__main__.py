@@ -2051,7 +2051,19 @@ def _collections_main(argv: list[str]) -> int:
         help="reconcile step only: mark evidence whose changes cannot be held as reconciled, "
         "recording the skipped changes by id and reason",
     )
-    for command in (backup, adopt):
+    create = subcommands.add_parser(
+        "create",
+        help="create a NEW store collection from a manifest file, enrolling this vault's store "
+        "with the coordinator if needed; run with the service stopped and the operator credential",
+    )
+    create.add_argument("--manifest-path", required=True, help="vault-relative path of the new manifest")
+    create.add_argument("--manifest-file", type=Path, required=True, help="file holding the manifest text")
+    create.add_argument("--why", required=True, help="reason recorded with the creation")
+    create.add_argument(
+        "--request-id", help="identity of this create; a retry with the same one completes it once "
+        "(default: derived from the manifest path and text)",
+    )
+    for command in (backup, adopt, create):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2073,6 +2085,16 @@ def _collections_main(argv: list[str]) -> int:
                 Path(args.vault), destination=args.to, stream=sys.stdout.buffer if args.stdout else None
             )
             print(json.dumps(result, sort_keys=True), file=sys.stderr if args.stdout else sys.stdout)
+        elif args.command == "create":
+            import hashlib
+
+            text = args.manifest_file.read_text(encoding="utf-8")
+            request_id = args.request_id or "create:" + hashlib.sha256(
+                f"{args.manifest_path}\0{text}".encode()).hexdigest()[:32]
+            with library_scope():
+                result = admission.create_route(Path(args.vault), args.manifest_path, text, why=args.why,
+                                                request_id=request_id)
+            print(json.dumps(result, sort_keys=True))
         else:
             with library_scope():
                 result = admission.adopt_local_route(Path(args.vault), why=args.why, preview_id=args.preview_id,

@@ -58,10 +58,10 @@ async def test_store_fence_proves_support_and_atomically_cuts_legacy_authority(
         base_url="https://coordinator.example",
         headers={"Authorization": "Bearer lease"},
     ) as client:
-        for method in ("GET", "PUT"):
-            denied = await client.request(method, fence_path, json=target)
-            assert denied.status_code == 401
-        probe = await client.get(fence_path, headers=operator)
+        # The writer bearer reads the fence a serving store opens against; only the operator moves it.
+        assert (await client.put(fence_path, json=target)).status_code == 401
+        assert (await client.get(fence_path, headers={"Authorization": "Bearer other"})).status_code == 401
+        probe = await client.get(fence_path)
         assert probe.json() == {
             "capability": STORE_CAPABILITY,
             "enrolled": False,

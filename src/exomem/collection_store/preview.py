@@ -1,12 +1,12 @@
-"""Explicit per-vault preview binding for built-in facade contract tests.
+"""Explicit per-vault store binding for the facades.
 
-The environment flag alone never changes file-mode routing. A trusted caller
-must bind the already lease-owned connection; GA mode resolution is a later slice.
+A trusted caller binds an already lease-owned connection: the service's store thread
+for a store-routed request (``runtime.StoreServer``), or a caller that owns its writer.
+Nothing else, and no environment flag, changes file-mode routing.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,7 +20,9 @@ from .connection import CollectionStoreError, WriterConnection
 if TYPE_CHECKING:
     from .writer import CollectionWriter
 
-_BOUND: ContextVar[tuple[Path, CollectionWriter] | None] = ContextVar(
+# (vault root, writer, served by a production session): only a production session's
+# routes answer to the release's capabilities.
+_BOUND: ContextVar[tuple[Path, CollectionWriter, bool] | None] = ContextVar(
     "collection_store_preview", default=None
 )
 
@@ -32,14 +34,16 @@ def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[Collec
     from .runtime import CollectionStoreRuntime, borrowed_writer
 
     root = Path(vault_root).resolve()
+    production = False
     if isinstance(handle, CollectionStoreRuntime):
         if root != handle.root:
             raise CollectionStoreError("COLLECTION_STORE_VAULT_MISMATCH", "foreign preview runtime")
+        production = handle._session is not None and handle._session.production
         checkout = handle.checkout()
     else:
         checkout = borrowed_writer(root, handle, active_manager())
     with checkout as writer:
-        token = _BOUND.set((root, writer))
+        token = _BOUND.set((root, writer, production))
         try:
             yield writer
         finally:
@@ -130,10 +134,10 @@ def dispatch(
     binding = _BOUND.get()
     if binding is None or binding[0] != Path(vault_root).resolve():
         return False, None
-    if os.environ.get("EXOMEM_COLLECTION_STORE_PREVIEW") != "1":
-        raise CollectionStoreError(
-            "COLLECTION_STORE_PREVIEW_REQUIRED", "collection store writers are dark"
-        )
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, binding[1], action, values)
     writer = binding[1]
     args = {name: value for name, value in values.items() if value is not None}
     from . import authority
@@ -141,6 +145,12 @@ def dispatch(
     marker = authority.routing_marker(writer)
     if marker is not None:
         selector = args.get("collection", args.get("manifest_path"))
+        if action == "create" and binding[2]:
+            from .runtime import served_create
+
+            created = served_create(vault_root, args)
+            if created is not None:
+                return True, created
         if selector is None or selected_writer(vault_root, selector) is None:
             return False, None
         if action == "create":

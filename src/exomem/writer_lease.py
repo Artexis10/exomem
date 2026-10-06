@@ -6587,9 +6587,27 @@ def _request_prominence_context(func):
     return wrapped
 
 
+def _collection_store_thread(func):
+    """Run a store-routed collection request on the store thread of the service serving its
+    vault, in the caller's context (``collection_store.runtime.route``)."""
+
+    @wraps(func)
+    def wrapped(command, *injected, **kwargs):
+        if injected and isinstance(injected[0], (str, os.PathLike)):
+            from .collection_store import runtime as store_runtime
+
+            server = store_runtime.route(command.name, injected[0], kwargs)
+            if server is not None:
+                return server.call(lambda: func(command, *injected, **kwargs))
+        return func(command, *injected, **kwargs)
+
+    return wrapped
+
+
 @_foreground_command_activity
 @_fixed_projected_command_completion
 @_request_prominence_context
+@_collection_store_thread
 def invoke_command(
     command: Any,
     *injected: Any,
@@ -6757,6 +6775,14 @@ def start_server_lifecycle() -> LeaseManager:
             pass
     manager.start_renewer()
     atexit.register(manager.close)
+    try:
+        from .collection_store import runtime as store_runtime
+        from .vault import resolve_vault
+
+        # The vault's collection store, if its marker routes any collection to one (S1).
+        store_runtime.serve(resolve_vault(), manager)
+    except Exception:  # noqa: BLE001 - file collections serve regardless; store routes refuse
+        logger.warning("collection store serving did not start", exc_info=True)
     return manager
 
 

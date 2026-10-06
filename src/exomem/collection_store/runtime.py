@@ -14,8 +14,9 @@ import sqlite3
 import threading
 import time
 import weakref
+from collections import deque
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, closing, contextmanager
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, suppress
 from functools import wraps
 from pathlib import Path
 
@@ -524,8 +525,9 @@ class CollectionStoreRuntime:
                     try:
                         yield writer
                     finally:
-                        # Read while still a borrower: the handle cannot be retired yet.
-                        changed = handle.connection.total_changes != before
+                        # Read while still a borrower: the handle cannot be retired yet, unless
+                        # this borrower lent the store to its producer (``StoreServer.lent``).
+                        changed = not handle._closed and handle.connection.total_changes != before
             finally:
                 if changed and self._publisher is not None:
                     self._publisher.note_commit()
@@ -605,3 +607,339 @@ class CollectionStoreRuntime:
                     "COLLECTION_STORE_FLUSH_PENDING", "publication did not reach the committed head"
                 )
             return head
+
+
+# --- the service's store thread (S1) ----------------------------------------------------
+
+#: The facades whose collection selectors the vault's marker can route to the store.
+_STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
+#: How long the idle store thread waits for a request before it looks for import jobs again.
+IMPORT_IDLE_SECONDS = 1.0
+#: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
+IMPORT_RETRY_SECONDS = 30.0
+#: How often it retries a vault whose store it could not open.
+OPEN_RETRY_SECONDS = 30.0
+_SERVERS: dict[Path, StoreServer] = {}
+_SERVED: dict[Path, object] = {}  # vault root -> the lease manager of the service serving it
+_SERVERS_LOCK = threading.Lock()
+
+
+def serve(vault_root, manager):
+    """Serve a vault's collection store from this service, through its own store thread.
+
+    Called at service startup and standby promotion. A vault that routes nothing to a
+    store starts its thread at its first store-routed request instead.
+    """
+    from . import authority
+
+    root = Path(vault_root).resolve()
+    with _SERVERS_LOCK:
+        _SERVED[root] = manager
+    if authority.read_marker(root) is not None:
+        _server(root)
+
+
+def route(command, vault_root, arguments):
+    """The store thread a request must run on, or None when file collections answer it.
+
+    A selector the vault's marker routes to the store, a NEW summary collection's create
+    and the Records inventory run on the store thread of the service serving this vault;
+    a caller that bound its own writer keeps it. Without that service a routed selector
+    refuses (C never falls back to its views), a summary create on a vault with no store
+    refuses as the owner's enrolment step, and the inventory names C as unreadable.
+    """
+    from ..cli_ops import OpError
+    from . import admission, authority, capability
+    from .preview import bound_writer
+
+    root = Path(vault_root).resolve()
+    if command not in _STORE_COMMANDS or bound_writer(root) is not None:
+        return None
+    selector = arguments.get("collection", arguments.get("manifest_path"))
+    raw = authority.read_marker(root)
+    if command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments):
+        if raw is None:
+            capability.require_records_summary()
+            raise admission.enrollment_required()
+    elif command == "record_memory" and arguments.get("action") == "inspect" and selector is None:
+        server = None if raw is None else _server(root)
+        return server if server is not None and server.runtime is not None else None
+    elif selector is None or raw is None or authority.selected_entry(
+            root, authority.parse_marker(root, raw), selector) is None:
+        return None
+    server = _server(root)
+    if server is None:
+        raise OpError(
+            "COLLECTION_STORE_UNAVAILABLE",
+            "this collection lives in the collection store, which only the running Exomem service serves",
+            "Send the request to the service that serves this vault.",
+        )
+    return server
+
+
+def summary_create(root, arguments):
+    """Whether a create's manifest is a NEW summary collection (records-summary-v1).
+
+    Only classifies: a manifest that does not parse keeps its existing route, whose own
+    validation reports it.
+    """
+    from .. import structured_collections as collections
+
+    path, text = arguments.get("manifest_path"), arguments.get("manifest_text")
+    if not isinstance(path, str) or not isinstance(text, str):
+        return False
+    try:
+        return collections.parse_manifest_bytes(Path(root), path, text.encode()).view_mode == "summary"
+    except Exception:  # noqa: BLE001 - classification only
+        return False
+
+
+def served_create(vault_root, arguments):
+    """Create a NEW summary collection on the serving session, or None for any other manifest.
+
+    It runs on the store thread under the request principal, through the producer's own
+    create (``admission.create_new``), which a vault already enrolled in this store
+    completes with writer authority. Enrolling a vault is the owner's offline step.
+    """
+    from .. import writer_lease
+    from . import admission, capability
+
+    root = Path(vault_root).resolve()
+    if not summary_create(root, arguments):
+        return None
+    capability.require_records_summary()
+    server = _SERVERS.get(root)
+    if server is None or server.session is None or server.thread is not threading.current_thread():
+        raise connection.CollectionStoreError(
+            "COLLECTION_STORE_UNAVAILABLE", "only the service serving this vault creates a summary collection")
+    session = server.session
+    if not session.fence_client.collection_store_fence().enrolled:
+        raise admission.enrollment_required()
+    with server.lent():
+        return admission.create_new(
+            session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
+            why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
+            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True))
+
+
+def _server(root):
+    with _SERVERS_LOCK:
+        server, manager = _SERVERS.get(root), _SERVED.get(root)
+        if server is None and manager is not None and not manager._stop.is_set():
+            server = _SERVERS[root] = StoreServer(root, manager)
+        return server
+
+
+class _Call:
+    """One request handed to the store thread, run in a copy of the caller's context."""
+
+    def __init__(self, work):
+        import contextvars
+
+        self.context = contextvars.copy_context()
+        self.work = work
+        self.taken = False
+        self.done = threading.Event()
+        self.result = self.error = None
+
+
+class StoreServer:
+    """The service's store thread for one store-routed vault (S1).
+
+    It opens the production session (custody, lease, coordinator fence and takeover),
+    which registers the runtime in ``_SERVING``, and so owns the store writer. Every
+    store-routed request runs on it in turn, with the caller's context and principal and
+    the writer bound. Between requests, while this release enables records-summary-v1,
+    it advances running import jobs one batch at a time; each batch runs under its job's
+    own bound principal, never the service's. A request it cannot take within the
+    mutation timeout refuses as retryable, so a running batch never holds an
+    acknowledgement past that timeout. A vault it cannot open refuses store-routed
+    requests with the reason and retries; file collections never wait on it.
+    """
+
+    def __init__(self, root, manager):
+        self.root, self.manager = root, manager
+        self.session = self.runtime = None
+        self.refusal = ("COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
+        self._stack = self._scope = None
+        self._retry_at = 0.0
+        self._next_tick = 0.0
+        self._requests = deque()
+        self._closed = False
+        self._condition = threading.Condition()
+        self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
+        self.thread.start()
+
+    def call(self, work):
+        """Run ``work`` on the store thread and return its result or raise its error."""
+        from ..cli_ops import OpError
+
+        request = _Call(work)
+        with self._condition:
+            if not self._closed:
+                self._requests.append(request)
+                self._condition.notify_all()
+            deadline = time.monotonic() + self.manager._mutation_timeout_seconds
+            while not request.taken:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._closed:
+                    if request in self._requests:
+                        self._requests.remove(request)
+                    raise OpError(
+                        "COLLECTION_STORE_BUSY",
+                        "the collection store did not take this request within the mutation timeout",
+                        "Retry shortly.",
+                        details={"status": "retryable", "committed": False},
+                    )
+                self._condition.wait(remaining)
+        request.done.wait()
+        if request.error is not None:
+            raise request.error
+        return request.result
+
+    def _stopping(self):
+        return self.manager._stop.is_set() or self.manager._store_closed
+
+    def _run(self):
+        try:
+            while not self._stopping():
+                now = time.monotonic()
+                if self.runtime is None and now >= self._retry_at:
+                    self._open()
+                request = self._take(max(0.0, min(self._next_tick, now + IMPORT_IDLE_SECONDS) - now))
+                if request is not None:
+                    self._serve(request)
+                    # The request may have started or continued a job.
+                    self._next_tick = 0.0
+                elif time.monotonic() >= self._next_tick:
+                    self._next_tick = time.monotonic() + self._import_tick()
+        finally:
+            self._close()
+
+    def _take(self, timeout):
+        with self._condition:
+            if not self._requests and timeout > 0:
+                self._condition.wait(timeout)
+            if not self._requests:
+                return None
+            request = self._requests.popleft()
+            request.taken = True
+            self._condition.notify_all()
+            return request
+
+    def _open(self):
+        from ..cli_ops import OpError
+        from . import admission
+
+        stack = ExitStack()
+        try:
+            session = stack.enter_context(admission.production_session(self.root))
+            # The writer credential reads the coordinator's fence; moving it is the operator's.
+            fence_client = self.manager.client
+            if fence_client is None:
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
+            try:
+                admission.open_store(session, self.manager, fence_client=fence_client)
+            except (OpError, connection.CollectionStoreError):
+                if self.manager._collection_store is None:
+                    raise
+                # Bound and registered: its checkout resolves the takeover once the lease allows.
+                logger.info("collection store takeover is pending", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - store-routed requests refuse with the reason
+            stack.close()
+            self.refusal = (getattr(error, "code", "COLLECTION_STORE_UNAVAILABLE"), str(error))
+            self._retry_at = time.monotonic() + OPEN_RETRY_SECONDS
+            logger.warning("the collection store could not be served; retrying", exc_info=True)
+            return
+        self._stack, self.session, self.runtime = stack, session, self.manager._collection_store
+
+    def _serve(self, request):
+        from ..cli_ops import OpError
+        from .preview import preview_store
+
+        def bound():
+            with ExitStack() as scope:
+                scope.enter_context(preview_store(self.root, self.runtime))
+                self._scope = scope
+                try:
+                    return request.work()
+                finally:
+                    self._scope = None
+
+        try:
+            if self.runtime is None:
+                code, message = self.refusal
+                raise OpError(code, message, "Retry once the service serves the collection store.")
+            request.result = request.context.run(bound)
+        except BaseException as error:  # noqa: BLE001 - raised again on the caller's thread
+            request.error = error
+        finally:
+            request.done.set()
+
+    @contextmanager
+    def lent(self):
+        """Step the current request's checkout aside while the serving producer writes.
+
+        The producer opens its own writer, which retires the one this request borrowed, so
+        the rest of the request is bound to a fresh checkout. Its mutation boundary and
+        active mutation stay held throughout, so no release or publication runs meanwhile.
+        """
+        from .preview import preview_store
+
+        manager, thread = self.manager, threading.get_ident()
+        with manager._lock:
+            held = manager._store_borrowers.pop(thread, 0)
+
+        def resume():
+            with manager._lock:
+                manager._store_borrowers[thread] = manager._store_borrowers.get(thread, 0) + held
+            self._scope.enter_context(preview_store(self.root, self.runtime))
+
+        try:
+            yield
+        except BaseException:
+            with suppress(Exception):
+                resume()
+            raise
+        resume()
+
+    def _import_tick(self):
+        """Advance running import jobs by one batch; returns the seconds until the next tick."""
+        from . import capability, importer
+        from .preview import preview_store
+
+        if self.runtime is None or not capability.records_summary_enabled():
+            return IMPORT_IDLE_SECONDS
+        try:
+            # A plain read first: an idle store takes no lease and no checkout.
+            with closing(connection.open_reader(self.runtime.path)) as reader:
+                if reader.execute("SELECT 1 FROM import_jobs WHERE state='running' LIMIT 1").fetchone() is None:
+                    return IMPORT_IDLE_SECONDS
+            with preview_store(self.root, self.runtime):
+                done = importer.run_jobs(self.root, max_batches=1, deadline=time.monotonic()
+                                         + self.manager._mutation_timeout_seconds / 2)
+        except Exception:  # noqa: BLE001 - a refused tick leaves its jobs for a later one
+            logger.warning("import jobs could not advance; retrying later", exc_info=True)
+            return IMPORT_RETRY_SECONDS
+        return 0.0 if done["batches"] else IMPORT_RETRY_SECONDS
+
+    def _close(self):
+        from ..cli_ops import OpError
+
+        with self._condition:
+            self._closed = True
+            for request in self._requests:
+                request.taken = True
+                request.error = OpError("COLLECTION_STORE_BUSY", "the collection store is shutting down",
+                                        "Retry shortly.", details={"status": "retryable", "committed": False})
+                request.done.set()
+            self._requests.clear()
+            self._condition.notify_all()
+        with _SERVERS_LOCK:
+            if _SERVERS.get(self.root) is self:
+                del _SERVERS[self.root]
+        if self.runtime is not None:
+            self.runtime.retire_idle_handle()
+        if self._stack is not None:
+            self._stack.close()
