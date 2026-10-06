@@ -1354,17 +1354,6 @@ def _is_canonical_pending_shape(
     )
 
 
-def _is_valid_completed_sidecar(
-    content: str,
-    *,
-    media_type: str,
-    provenance: _BinaryProvenance,
-) -> bool:
-    return _completed_provenance_state(
-        content, media_type=media_type, provenance=provenance
-    ) == "valid"
-
-
 def _completed_provenance_state(
     content: str,
     *,

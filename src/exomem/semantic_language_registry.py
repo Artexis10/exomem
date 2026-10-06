@@ -383,6 +383,8 @@ def for_attached_projects(
 
 
 def normalize_label(raw: str) -> str:
+    # semantic_blocks.normalize_label is the older lower()-only form that stored
+    # keys use; see the note there before unifying the two.
     label = str(raw or "").strip().rstrip(":").strip()
     normalized = unicodedata.normalize("NFKC", label).casefold()
     return _SEPARATORS_RE.sub("_", normalized).strip("_")
