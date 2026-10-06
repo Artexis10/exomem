@@ -153,15 +153,14 @@ infra/scripts/generate_ansible_inventory.py /run/user/$UID/foundation.json \
   infra/ansible/inventory.yml --user exomem-admin \
   --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
   --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
-infra/scripts/ansible_with_sops.sh \
-  --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/k3s-agent-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json \
-  --vars infra/secrets/ansible/tang-keys.v1.sops.json \
-  --vars infra/secrets/ansible/recovery-passphrase-exomem-agent-dx1.v1.sops.json
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
+
+`active_ansible_vars.py` passes the newest version of every hosted-node
+Ansible variable in the secret matrix: the tokens, the etcd keys, the Tang keys
+and each dedicated host's passphrase.
 
 The first run fixes the thin pool's geometry: 64 KiB chunks, and 64 bytes of
 metadata per chunk computed from the pool's size. Above about 15.8 TiB of pool,
@@ -210,7 +209,7 @@ existing binding keeps working, and nothing is rebound.
 If the Tang keys themselves are lost:
 
 1. Escrow a new key set as the next version, as in Preconditions, with `--version v2`.
-2. Run `site.yml` with `--vars infra/secrets/ansible/tang-keys.v2.sops.json`.
+2. Run `site.yml` as in Add the host. `active_ansible_vars.py` now passes `tang-keys.v2`.
 3. On each dedicated host, list the bindings: `sudo clevis luks list -d /dev/md/exomem-cells`.
 4. Remove the binding the role replaced: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
 
@@ -225,7 +224,7 @@ answers recovery requests with it. Old bindings therefore keep unlocking until
 you delete those files.
 
 1. Escrow a new key set as the next version, as in Preconditions, with `--version v2`.
-2. Run `site.yml` with `--vars infra/secrets/ansible/tang-keys.v2.sops.json`.
+2. Run `site.yml` as in Add the host. `active_ansible_vars.py` now passes `tang-keys.v2`.
 3. Compute the new signing key's thumbprint on your machine. Only the thumbprint is printed:
 
    ```bash

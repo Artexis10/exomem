@@ -327,8 +327,8 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
   --source stdin
 ```
 
-Once it exists, add `--vars infra/secrets/ansible/k3s-agent-token.v1.sops.json`
-to every wrapper invocation below (see `node-pool.md`).
+Once it exists, `active_ansible_vars.py hosted-node` passes it to every
+wrapper invocation below (see `node-pool.md`).
 
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.
@@ -367,19 +367,20 @@ pool into a supported endpoint.
 ## Run Ansible with SOPS vars on tmpfs
 
 Keep the non-secret generated host variables in the normal ignored
-`group_vars/hosted_nodes.yml`. Pass the three encrypted bootstrap values through
-the executable wrapper; it refuses a non-tmpfs workspace, writes mode `0600`
-plaintext only inside a private tmpfs directory, and removes it on exit:
+`group_vars/hosted_nodes.yml`. Pass the encrypted values through the
+executable wrapper; it refuses a non-tmpfs workspace, writes mode `0600`
+plaintext only inside a private tmpfs directory, and removes it on exit.
+`active_ansible_vars.py` names the newest version of every hosted-node Ansible
+variable in the secret matrix, so a rotated value is used as soon as its new
+version exists:
 
 ```bash
 export EXOMEM_SECRET_TMPFS_DIR="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
 export SOPS_AGE_KEY_FILE=/secure/operator/exomem-hosted.agekey
 
-infra/scripts/ansible_with_sops.sh \
-  --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
 
 The wrapper validates `tmpfs`/`ramfs` with `findmnt`, suppresses SOPS output,

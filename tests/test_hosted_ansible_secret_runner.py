@@ -159,7 +159,8 @@ assert os.statvfs(local).f_fsid == os.statvfs(os.environ['TEST_TMPFS_ROOT']).f_f
 (local / 'ansible-local-1' / 'content').write_text(os.environ['TEST_SENTINEL'])
 pathlib.Path(os.environ['TEST_MARKER']).write_text(
     json.dumps({'args': sys.argv[1:], 'values': [json.loads(path.read_text()) for path in paths],
-                'local_temp': str(local), 'config': os.environ.get('ANSIBLE_CONFIG')})
+                'local_temp': str(local), 'config': os.environ.get('ANSIBLE_CONFIG'),
+                'inject': os.environ.get('ANSIBLE_INJECT_FACT_VARS')})
 )
 """,
     )
@@ -183,6 +184,7 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
         env={
             **os.environ,
             "ANSIBLE_PLAYBOOK_BIN": str(fake_ansible),
+            "ANSIBLE_INJECT_FACT_VARS": "True",
             "EXOMEM_SECRET_TMPFS_DIR": "/dev/shm",
             "SOPS_BIN": str(fake_sops),
             "TEST_DECRYPTED_PATHS": str(decrypted_paths),
@@ -202,4 +204,42 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     # Run from any directory, the repository's configuration still applies; it
     # keeps module-returned facts from shadowing inventory variables.
     assert invocation["config"] == str(ROOT / "infra" / "ansible" / "ansible.cfg")
+    # An operator's environment cannot switch fact injection back on.
+    assert invocation["inject"] is None
     assert stat.S_IMODE(RUNNER.stat().st_mode) & stat.S_IXUSR
+
+
+def test_active_ansible_vars_are_the_newest_version_of_each_group_destination(
+    tmp_path: Path,
+) -> None:
+    # After a rotation a stale version handed to site.yml re-installs retired
+    # material; for Tang it re-advertises the old keys and hides the new ones.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "active_ansible_vars", ROOT / "infra" / "scripts" / "active_ansible_vars.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def destination(name: str) -> dict:
+        return {"kind": "sops_ansible_vars", "target": f"infra/secrets/ansible/{name}.{{version}}.sops.json"}
+
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(json.dumps({"schema_version": 1, "secrets": {
+        "tang": {"destinations": {"ansible.hosted-node.tang-keys.active": destination("tang-keys")}},
+        "server": {"destinations": {"ansible.hosted-node.k3s-server-token.active": destination("k3s-server-token")}},
+        "unused": {"destinations": {"ansible.hosted-node.k3s-agent-token.active": destination("k3s-agent-token")}},
+        "control": {"destinations": {"ansible.control-node.db-password.active": destination("db-password")}},
+    }}), encoding="utf-8")
+    secrets = tmp_path / "infra" / "secrets" / "ansible"
+    secrets.mkdir(parents=True)
+    for name in ("tang-keys.v1", "tang-keys.v2", "tang-keys.v10", "k3s-server-token.v1",
+                 "db-password.v1", "tang-keys.v3.sops.json.bak"):
+        (secrets / f"{name}.sops.json" if not name.endswith(".bak") else secrets / name).write_text("{}")
+
+    assert module.active_files("hosted-node", matrix, tmp_path) == [
+        secrets / "tang-keys.v10.sops.json",
+        secrets / "k3s-server-token.v1.sops.json",
+    ]

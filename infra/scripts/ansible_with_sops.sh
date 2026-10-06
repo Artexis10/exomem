@@ -93,6 +93,9 @@ trap cleanup EXIT HUP INT TERM
 # this from; among other things it keeps module-returned facts from shadowing
 # inventory variables.
 export ANSIBLE_CONFIG="${repo_root}/infra/ansible/ansible.cfg"
+# An environment variable would outrank the file, so drop the one that could
+# switch fact injection back on.
+unset ANSIBLE_INJECT_FACT_VARS
 
 # Ansible writes controller-side temp files (copy content, module payloads
 # with their arguments) that carry these secrets; keep them on the same tmpfs.

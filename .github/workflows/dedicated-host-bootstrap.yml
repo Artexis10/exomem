@@ -51,7 +51,7 @@ jobs:
           "$RUNNER_TEMP/ansible/bin/ansible-galaxy" collection install -r infra/ansible/collections/requirements.yml
       - name: Install the tools that stand in for the operator and the disks
         timeout-minutes: 8
-        run: scripts/ci-apt-install.sh jose jq ufw e2fsprogs
+        run: scripts/ci-apt-install.sh jose jq ufw e2fsprogs clevis
       - name: Create two blank data disks and one holding a filesystem
         run: |
           sudo install -d -m 0700 /var/tmp/w8-disks
@@ -87,6 +87,18 @@ jobs:
             'sudo vgs --noheadings -o vg_uuid cells' \
             'sudo lvs --noheadings -o lv_uuid cells/pool0' > "$RUNNER_TEMP/identities.sh"
           chmod +x "$RUNNER_TEMP/identities.sh"
+          # task-result.sh LOG TASK RESULT: whether TASK's block in an Ansible
+          # log has a line starting with RESULT, such as "changed: [host]".
+          # ansible-core prints an error excerpt between a header and "fatal:".
+          cat > "$RUNNER_TEMP/task-result.sh" <<'SH'
+          #!/bin/bash
+          awk -v task="TASK [$2]" -v result="$3" '
+            index($0, task) == 1 { inside = 1; next }
+            /^TASK \[/ { inside = 0 }
+            inside && index($0, result) == 1 { found = 1 }
+            END { exit !found }' "$1"
+          SH
+          chmod +x "$RUNNER_TEMP/task-result.sh"
       - name: Refuse a named disk that holds a filesystem
         timeout-minutes: 15
         working-directory: infra/ansible
@@ -99,7 +111,58 @@ jobs:
           sudo blkid --probe --output export "$DECOY" | grep -x 'TYPE=ext4'
           sudo e2fsck -fn "$DECOY"
           if sudo blkid --probe "$DATA0"; then echo "the blank disk beside the decoy was written"; exit 1; fi
-      - name: First run builds RAID1, LUKS, Clevis, the volume group and the pool
+      # A Tang that answers every advertisement request with its own, separately
+      # generated keys. On fresh disks, the role pointed at it must build the
+      # array and LUKS, then refuse to bind: its pin is the escrowed signing
+      # key. With -y in clevis.yml the bind would succeed and add a keyslot.
+      # The real first run then resumes from that half-built host.
+      - name: A fresh host refuses a Tang that cannot show the pinned signing key
+        timeout-minutes: 15
+        working-directory: infra/ansible
+        run: |
+          fake="$(mktemp -d)"
+          jose jwk gen -i '{"alg":"ES512"}' -o "$fake/sig.jwk"
+          jose jwk gen -i '{"alg":"ECMR"}' -o "$fake/exc.jwk"
+          jose jwk pub -s -i "$fake/sig.jwk" -i "$fake/exc.jwk" -o "$fake/pub.jwks"
+          jose jws sig -I "$fake/pub.jwks" -k "$fake/sig.jwk" -s '{"protected":{"cty":"jwk-set+json"}}' \
+            -o "$fake/adv.jws"
+          python3 - "$fake/adv.jws" <<'PY' &
+          import http.server, sys
+          body = open(sys.argv[1], "rb").read()
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  ok = self.path.startswith("/adv")
+                  self.send_response(200 if ok else 404)
+                  self.send_header("Content-Type", "application/jose+json")
+                  self.end_headers()
+                  if ok:
+                      self.wfile.write(body)
+              def log_message(self, *args):
+                  pass
+          http.server.HTTPServer(("127.0.0.1", 7600), Handler).serve_forever()
+          PY
+          server=$!
+          trap 'kill "$server"' EXIT
+          for _ in $(seq 20); do curl -sf http://127.0.0.1:7600/adv/probe > /dev/null && break; sleep 0.5; done
+          curl -sf http://127.0.0.1:7600/adv/probe > /dev/null || { echo "the fake Tang never answered"; exit 1; }
+          # Positive control: trusted without a pin, the fake's advertisement is
+          # valid, so a later refusal can only come from the pin.
+          clevis encrypt tang '{"url":"http://127.0.0.1:7600"}' -y <<< x > /dev/null
+          slots() { sudo cryptsetup luksDump /dev/md/exomem-cells | grep -cE '^  [0-9]+: luks2$'; }
+          rc=0
+          ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+            -e dedicated_host_tang_url=http://127.0.0.1:7600 ci-dedicated-host.yml > "$RUNNER_TEMP/fake-tang.log" 2>&1 || rc=$?
+          after=$(slots || true)
+          # The evidence, whatever the outcome: the bind task is no_log.
+          echo "playbook rc=$rc; LUKS keyslots after=$after (the recovery passphrase is 1)"
+          sudo clevis luks list -d /dev/md/exomem-cells || true
+          grep -E '^(TASK|fatal|failed|ok|changed|skipping)' "$RUNNER_TEMP/fake-tang.log" | tail -n 80
+          if [ "$rc" = 0 ]; then echo "the role bound to a Tang it could not verify"; exit 1; fi
+          test "$after" = 1 || { echo "a keyslot was added against the rogue Tang"; exit 1; }
+          "$RUNNER_TEMP/task-result.sh" "$RUNNER_TEMP/fake-tang.log" \
+            'dedicated_host : Bind the array to Tang, pinned to the escrowed signing key' 'fatal: [exomem-agent-ci]' \
+            || { echo "the run failed somewhere other than the pinned bind"; exit 1; }
+      - name: The first real run resumes, binds Clevis and builds the volume group and pool
         timeout-minutes: 15
         working-directory: infra/ansible
         run: ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" ci-dedicated-host.yml
@@ -131,52 +194,6 @@ jobs:
           grep -E '^(exomem-alpha|exomem-agent-ci) +: ok=' "$RUNNER_TEMP/second.log"
           if grep -E ' changed=[1-9]' "$RUNNER_TEMP/second.log"; then echo "the second run changed something"; exit 1; fi
       # The role binds with -f, never -y, so the Tang pin compares thp.
-      # A Tang that answers every advertisement request with its own, separately
-      # generated keys. The role, pointed at it, must refuse to bind: its pin is
-      # the escrowed signing key. With -y in clevis.yml the bind would succeed
-      # and add a keyslot.
-      - name: The role refuses a Tang that cannot show the pinned signing key
-        timeout-minutes: 10
-        working-directory: infra/ansible
-        run: |
-          fake="$(mktemp -d)"
-          jose jwk gen -i '{"alg":"ES512"}' -o "$fake/sig.jwk"
-          jose jwk gen -i '{"alg":"ECMR"}' -o "$fake/exc.jwk"
-          jose jwk pub -s -i "$fake/sig.jwk" -i "$fake/exc.jwk" -o "$fake/pub.jwks"
-          jose jws sig -I "$fake/pub.jwks" -k "$fake/sig.jwk" -s '{"protected":{"cty":"jwk-set+json"}}' \
-            -o "$fake/adv.jws"
-          python3 - "$fake/adv.jws" <<'PY' &
-          import http.server, sys
-          body = open(sys.argv[1], "rb").read()
-          class Handler(http.server.BaseHTTPRequestHandler):
-              def do_GET(self):
-                  ok = self.path.startswith("/adv")
-                  self.send_response(200 if ok else 404)
-                  self.send_header("Content-Type", "application/jose+json")
-                  self.end_headers()
-                  if ok:
-                      self.wfile.write(body)
-              def log_message(self, *args):
-                  pass
-          http.server.HTTPServer(("127.0.0.1", 7600), Handler).serve_forever()
-          PY
-          server=$!
-          trap 'kill "$server"' EXIT
-          for _ in $(seq 20); do curl -sf http://127.0.0.1:7600/adv/probe > /dev/null && break; sleep 0.5; done
-          slots() { sudo cryptsetup luksDump /dev/md/exomem-cells | grep -cE '^  [0-9]+: luks2$'; }
-          before=$(slots)
-          rc=0
-          ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
-            -e dedicated_host_tang_url=http://127.0.0.1:7600 ci-dedicated-host.yml > "$RUNNER_TEMP/fake-tang.log" 2>&1 || rc=$?
-          after=$(slots)
-          # The evidence, whatever the outcome: the bind task is no_log.
-          echo "playbook rc=$rc; LUKS keyslots before=$before after=$after"
-          sudo clevis luks list -d /dev/md/exomem-cells || true
-          grep -E '^(TASK|fatal|failed|ok|changed|skipping)' "$RUNNER_TEMP/fake-tang.log" | tail -n 80
-          if [ "$rc" = 0 ]; then echo "the role bound to a Tang it could not verify"; exit 1; fi
-          test "$after" = "$before" || { echo "a keyslot was added against the rogue Tang"; exit 1; }
-          grep -A3 -F 'TASK [dedicated_host : Bind the array to Tang, pinned to the escrowed signing key]' \
-            "$RUNNER_TEMP/fake-tang.log" | grep -F 'fatal: [exomem-agent-ci]'
       - name: Clevis unlocks the closed array from Tang alone
         run: |
           sudo vgchange --activate n cells
@@ -237,8 +254,8 @@ jobs:
           if test -e /dev/md/exomem-cells; then echo "udev reassembled the array before the role ran"; exit 1; fi
           ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
             ci-dedicated-host.yml | tee "$RUNNER_TEMP/stopped.log"
-          grep -A2 -F 'TASK [dedicated_host : Assemble the existing array]' "$RUNNER_TEMP/stopped.log" \
-            | grep -F 'changed: [exomem-agent-ci]'
+          "$RUNNER_TEMP/task-result.sh" "$RUNNER_TEMP/stopped.log" \
+            'dedicated_host : Assemble the existing array' 'changed: [exomem-agent-ci]'
           "$RUNNER_TEMP/identities.sh" | diff "$RUNNER_TEMP/identities.before" -
       # remove-agent.yml's stop tasks, run on the agent as the playbook runs
       # them. While the volume group is active its mapping is in use, so the

@@ -230,21 +230,28 @@ infra/scripts/generate_ansible_inventory.py \
   "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json" \
   --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
   --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
-# Without the agent token the server configuration loses it; without the Tang
-# keys or a passphrase a dedicated host's play refuses. Pass each that exists.
-convergence_vars=(
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
-)
-for secret in infra/secrets/ansible/k3s-agent-token.v1.sops.json \
-  infra/secrets/ansible/tang-keys.v1.sops.json \
-  infra/secrets/ansible/recovery-passphrase-*.v1.sops.json; do
-  if [[ -f "$secret" ]]; then convergence_vars+=(--vars "$secret"); fi
-done
+# The newest version of every hosted-node Ansible variable in the secret
+# matrix: server and agent tokens, etcd keys, Tang keys and passphrases.
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
 infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inventory.json" \
-  "${convergence_vars[@]}"
+  "${fleet_vars[@]}"
 ```
+
+The gate needs every inventoried K3s node reachable, and fails closed if one
+is not. It removes nothing on the way: the firewall, WireGuard and Tang read
+their peers from the inventory's groups, not from the hosts a run reaches.
+
+- For a node that is down on purpose, append `-- --limit '!<node>'` to the
+  gate. The excluded node keeps its firewall rules, WireGuard peer and Tang
+  access on every other node.
+- The run still stops, with nothing removed, where a task needs that node.
+  With any WireGuard host in the inventory, every node's private-link check
+  needs every peer's key. A joining agent checks that every other node admits
+  it.
+- A node that stays down for longer leaves the inventory through
+  [node-pool.md](node-pool.md#remove-a-node) or
+  [dedicated-host.md](dedicated-host.md#remove-the-host) before the next gate.
 
 Prepare one private Helm-values file from exactly one canonical pair member.
 Choose `expand` for D1 expansion and only choose `contract` after the drain

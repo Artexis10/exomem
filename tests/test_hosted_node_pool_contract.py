@@ -576,8 +576,10 @@ def test_private_link_and_storage_defaults_follow_the_inventory(
                 " == expected[inventory_hostname]",
             ]}},
         ]}]))
-    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
-                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    # --limit leaves a node out of the run, never out of its peers' firewall,
+    # WireGuard or Tang configuration: they read the inventory's groups.
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), "--limit", "!exomem-agent-01",
+                             str(play)], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

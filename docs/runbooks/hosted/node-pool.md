@@ -61,20 +61,18 @@ infra/scripts/generate_ansible_inventory.py /run/user/$UID/foundation.json \
   infra/ansible/inventory.yml --user exomem-admin \
   --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
   --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
-infra/scripts/ansible_with_sops.sh \
-  --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/k3s-agent-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
 
 The inventory always carries every node. `EXOMEM_DEDICATED_HOSTS` is the
 private host list from [dedicated-host.md](dedicated-host.md), or a file
 holding `{}` when there are none. An inventory without a dedicated host makes
 `site.yml` remove that host's WireGuard link, firewall rules and Tang access
-on every other node. While dedicated hosts exist, also pass the Tang keys and
-each host's passphrase, as dedicated-host.md shows.
+on every other node. `active_ansible_vars.py` passes the newest version of
+every hosted-node Ansible variable in the secret matrix, including the Tang
+keys and each dedicated host's passphrase once they exist.
 
 ## Reserve an agent for one selected cell
 
@@ -163,11 +161,9 @@ host, run `kubectl uncordon <node>`, and converge with `site.yml`.
 kubectl get nodes -L exomem.io/node-pool
 kubectl get csinode -o custom-columns=NODE:.metadata.name,LIMIT:.spec.drivers[0].allocatable.count
 psql "$EXOMEM_CELLCTL_DSN" -c 'select node, cell_slots, attachments_used from exomem_cloud_capacity'
-infra/scripts/verify_ansible_convergence.py --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/k3s-agent-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/verify_ansible_convergence.py --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
 
 A new agent is Ready, labelled `exomem.io/node-pool=agent`, and publishes a
