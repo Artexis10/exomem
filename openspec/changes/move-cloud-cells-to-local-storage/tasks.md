@@ -127,6 +127,7 @@
 - [ ] 7.4 Migrate the remaining cells one at a time with the same acceptance.
 - [ ] 7.5 Update `docs/runbooks/cloud-operator-import.md`, which still cites the nightly 02:00–05:00 UTC backup window.
 - [ ] 7.6 Before the cutover (7.2), pin the Hetzner CSI controller to the server node, as the TopoLVM and snapshot controllers are: its token can attach any volume to any node. This moves a live production pod, so it ships on its own. Evidence: the controller pod's node, and a volume attach after the move.
+- [ ] 7.7 Before local storage is enabled in production (6.2, 7.2), rehearse the coexistence configuration end to end: TopoLVM installed, `cellStorage.local.enabled` true, the domain still the Hetzner class, Hetzner-class cells provisioned, backed up and deleted. Neither the P3 rehearsal (local storage off, as production today) nor the drill (local domain) covers it. Evidence: a full P3 run in that configuration.
 
 ## 8. Retire Hetzner volumes
 
