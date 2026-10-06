@@ -17,7 +17,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from exomem.init import init_vault
+
+# The backup Job only ever runs under Linux sh; the command embeds POSIX paths.
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="the backup Job runs under Linux sh")
 
 BACKUP_SOURCE = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "backup_source.py"
 
