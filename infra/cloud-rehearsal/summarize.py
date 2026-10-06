@@ -9,6 +9,9 @@ import sys
 def main(path: str) -> None:
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
+    if report.get("schema") == "exomem-local-storage-drill-report-v1":
+        drill(report)
+        return
     outcome = report["outcome"]
     print("## Exomem Cloud P3 rehearsal\n")
     print(f"- valid rehearsal: **{report['valid_rehearsal']}** {'; '.join(report['invalid_reasons'])}")
@@ -36,6 +39,20 @@ def main(path: str) -> None:
         print("\n### Cross-lane defects\n")
         for defect in report["cross_lane_defects"]:
             print(f"- step {defect.get('step')}: {defect.get('owner')} -- {defect.get('summary') or defect.get('message')}")
+
+
+def drill(report: dict) -> None:
+    print("## Local-storage node-loss drill\n")
+    print(f"- all checks passed: **{report['outcome']['all_checks_passed']}** ({report['outcome']['checks']})")
+    for name, stage in report["stages"].items():
+        if isinstance(stage, dict) and "failure" in stage:
+            print(f"- **stage {name} failed:** {stage['failure'].get('message', '')[:600]}")
+    print("\n| # | check | status | seconds | failure |\n|---|---|---|---|---|")
+    for check in report["checks"]:
+        failure = (check.get("failure") or {}).get("message", "").replace("|", "\\|").replace("\n", " ")[:300]
+        print(f"| {check['number']} | {check['name']} | {check['status']} | {check['seconds']} | {failure} |")
+    for name, value in report["measurements"].items():
+        print(f"\n**{name}**\n\n```json\n{json.dumps(value, indent=2)}\n```")
 
 
 if __name__ == "__main__":

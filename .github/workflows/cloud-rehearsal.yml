@@ -9,6 +9,12 @@ on:
   # after any change to cellctl, the platform chart, the cell image or the
   # pinned Substrate commit.
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "full: the P3 rehearsal. local-storage-drill: the node-loss drill of move-cloud-cells-to-local-storage on a three-node K3s with TopoLVM."
+        type: choice
+        options: [full, local-storage-drill]
+        default: full
 
 permissions:
   contents: read
@@ -46,6 +52,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -100,5 +107,57 @@ jobs:
           path: |
             ${{ runner.temp }}/cloud-rehearsal-report.json
             ${{ runner.temp }}/rehearsal-diagnostics
+          if-no-files-found: warn
+          retention-days: 30
+
+  local-storage-drill:
+    name: Local-storage node-loss drill on disposable K3s
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'local-storage-drill'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      # The cell image goes into Docker and both agents' containerd.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # Exit 1 is a recorded product finding, 2 a harness failure; both fail
+      # the job. Loop devices and the device-mapper module need sudo.
+      - name: Run the drill
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 140
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/drill-diagnostics
+        run: |
+          uv run --frozen exomem-cloud-rehearsal local-storage-drill --report "${RUNNER_TEMP}/local-storage-drill-report.json"
+      - name: Summarize the report
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/local-storage-drill-report.json"
+          if test -f "$report"; then
+            python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: local-storage-drill-report
+          path: |
+            ${{ runner.temp }}/local-storage-drill-report.json
+            ${{ runner.temp }}/drill-diagnostics
           if-no-files-found: warn
           retention-days: 30

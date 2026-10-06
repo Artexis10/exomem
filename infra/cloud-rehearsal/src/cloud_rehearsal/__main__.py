@@ -18,19 +18,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import datetime as dt
 import json
 import os
 import secrets
 import shutil
 import sys
-import time
 from pathlib import Path
 
-from . import build, images, infra, platform, substrate, tls
+from . import build, drill, images, infra, platform, substrate, tls
 from .http import Resolver
-from .report import Report, failure_record
+from .report import Report, StageFailed, failure_record, guarded, stage
 from .scenarios import Context, close_clients, post_checks, ready_matches_pods, run_steps
 from .shell import run, wait_for
 
@@ -66,11 +64,20 @@ def _parser() -> argparse.ArgumentParser:
         help="exit 0 whenever the rehearsal itself worked, even if it recorded product findings "
         "(pull-request CI); without it, only a report that gates the node exits 0",
     )
+    drill_parser = sub.add_parser(
+        "local-storage-drill",
+        help="the node-loss drill of move-cloud-cells-to-local-storage on a three-node K3s with TopoLVM",
+    )
+    drill_parser.add_argument("--report", type=Path, default=Path("local-storage-drill-report.json"))
+    drill_parser.add_argument("--workdir", type=Path, default=None, help="scratch directory (default: a new temporary one)")
+    drill_parser.add_argument("--keep", action="store_true", help="leave the cluster running for inspection")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "local-storage-drill":
+        return asyncio.run(drill.run_drill(args))
     return asyncio.run(_run(args))
 
 
@@ -110,17 +117,17 @@ async def _run(args: argparse.Namespace) -> int:
     stack: infra.Stack | None = None
     code = 1
     try:
-        with _stage(report, "substrate_source"):
+        with stage(report, "substrate_source"):
             source = substrate.fetch_source(args.cache, args.substrate_commit)
             substrate.build_source(source)
-        with _stage(report, "images"):
+        with stage(report, "images"):
             v1, v2, broken = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
-        with _stage(report, "infrastructure"):
+        with stage(report, "infrastructure"):
             stack = infra.create_stack(run_id, workdir)
             report.adaptations.extend(stack.adaptations)
-        with _stage(report, "images_into_k3s"):
+        with stage(report, "images_into_k3s"):
             built = build.BuiltImages(
                 cell_v1=build.load_into_k3s(stack.k3s.container, v1),
                 cell_v2=build.load_into_k3s(stack.k3s.container, v2),
@@ -137,18 +144,18 @@ async def _run(args: argparse.Namespace) -> int:
                 "cell_v1": built.cell_v1, "cell_v2": built.cell_v2, "cell_broken": built.cell_broken,
                 "gateway": built.gateway, "cellctl": built.cellctl, "ingress_traefik": traefik,
             }
-        with _stage(report, "control_database"):
+        with stage(report, "control_database"):
             await substrate.bootstrap_database(stack)
             report.stages["control_database"]["migrate_tail"] = substrate.migrate(stack, source)[-800:]
         pki = tls.make_pki(workdir)
-        with _stage(report, "substrate"):
+        with stage(report, "substrate"):
             control = substrate.start(stack, source, pki, build.CELL_REPOSITORY)
             resolver = Resolver(pki.ca_path, {tls.SUBSTRATE_HOST: control.edge_host_port, tls.MCP_HOST: stack.k3s.ingress_host_port})
             _wait_json(resolver, f"{substrate.PUBLIC_BASE_URL}/.well-known/oauth-authorization-server/api/exomem/oauth", "Substrate")
             report.stages["substrate"]["egress_sealed"] = substrate.sealed_egress_refused(control)
             if not report.stages["substrate"]["egress_sealed"]:
                 raise RuntimeError("Substrate's network is not sealed: a TEST-NET address did not fail with no route")
-        with _stage(report, "platform"):
+        with stage(report, "platform"):
             hour = dt.datetime.now(dt.UTC).hour
             # Closed until step 11 opens it, so no nightly backup lands mid-scenario.
             closed_window = f"{(hour + 6) % 24}-{(hour + 7) % 24}"
@@ -160,9 +167,10 @@ async def _run(args: argparse.Namespace) -> int:
                     public_base_url=substrate.PUBLIC_BASE_URL, mcp_path=substrate.MCP_PATH,
                     trusted_ingress_source_value=control.secrets.ingress_source_value,
                 ),
-                s3_access_key=stack.object_store.access_key,
-                s3_secret_key=stack.object_store.secret_key,
-                cellctl_secrets=_cellctl_secrets(stack, control),
+                cellctl_secrets=platform.cellctl_secrets(
+                    stack, cell_token_key=control.secrets.cell_token_key,
+                    control_plane_key=control.secrets.control_plane_key,
+                ),
                 pki=pki,
                 ingress_source_value=control.secrets.ingress_source_value,
                 ingress_image=traefik,
@@ -173,7 +181,7 @@ async def _run(args: argparse.Namespace) -> int:
             platform.wait_rollout(stack, platform.EDGE_NAMESPACE, "rehearsal-traefik")
             _wait_json(resolver, f"https://{tls.MCP_HOST}/.well-known/oauth-protected-resource{substrate.MCP_PATH}", "the gateway through ingress")
         ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report)
-        with _stage(report, "release"):
+        with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
             await ctx.admin_release({"cellImage": built.cell_v1})
             capacity = await ctx.fetchrow("SELECT sum(cell_slots) AS slots FROM exomem_cloud_capacity")
@@ -209,7 +217,7 @@ async def _run(args: argparse.Namespace) -> int:
             code = 0
         else:
             code = 1
-    except _StageFailed:
+    except StageFailed:
         code = 2
     except Exception as error:  # noqa: BLE001 - recorded in the report
         report.stages.setdefault("harness", {})["failure"] = failure_record(error)
@@ -218,9 +226,9 @@ async def _run(args: argparse.Namespace) -> int:
         # Each cleanup stands alone, so one failing never strands the stack
         # or loses the report.
         if stack is not None and not args.keep:
-            _guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
-        _guarded(report, "report", lambda: report.write(args.report))
-        _guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep))
+            guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
+        guarded(report, "report", lambda: report.write(args.report))
+        guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep))
         if not args.keep:
             # This run's own image tags; base images stay cached.
             tags = run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], check=False).stdout.split()
@@ -231,18 +239,6 @@ async def _run(args: argparse.Namespace) -> int:
             shutil.rmtree(workdir, ignore_errors=True)
     _print_summary(report, args.report)
     return code
-
-
-class _StageFailed(Exception):
-    pass
-
-
-def _guarded(report: Report, what: str, action) -> None:  # noqa: ANN001 - a zero-argument callable
-    try:
-        action()
-    except Exception as error:  # noqa: BLE001 - cleanup must continue
-        report.notes.append(f"cleanup step {what} failed: {type(error).__name__}: {str(error)[:300]}")
-        print(f"[rehearsal] cleanup {what} failed: {error}", flush=True)
 
 
 def _compare_with_known_findings(report: Report, path: Path, only: set[int] | None) -> dict[str, object]:
@@ -275,28 +271,6 @@ def _compare_with_known_findings(report: Report, path: Path, only: set[int] | No
     return {"known_findings": {str(k): v for k, v in known.items()}, "unexpected": unexpected, "resolved_known_findings": resolved}
 
 
-class _stage:  # noqa: N801 - used as a context manager
-    def __init__(self, report: Report, name: str) -> None:
-        self.report, self.name = report, name
-
-    def __enter__(self) -> None:
-        print(f"[rehearsal] stage {self.name}: start", flush=True)
-        self.started = time.monotonic()
-        self.report.stages[self.name] = {"status": "running"}
-
-    def __exit__(self, kind, error, _tb) -> bool:  # noqa: ANN001
-        record = self.report.stages[self.name]
-        record["seconds"] = round(time.monotonic() - self.started, 1)
-        if error is None:
-            record["status"] = "passed"
-            print(f"[rehearsal] stage {self.name}: done in {record['seconds']}s", flush=True)
-            return False
-        record["status"] = "failed"
-        record["failure"] = failure_record(error)
-        print(f"[rehearsal] stage {self.name}: FAILED -- {str(error)[:1500]}", flush=True)
-        raise _StageFailed from error
-
-
 def _wait_json(resolver: Resolver, url: str, what: str) -> None:
     def probe() -> bool:
         with resolver.client() as client:
@@ -304,24 +278,6 @@ def _wait_json(resolver: Resolver, url: str, what: str) -> None:
             return response.status_code == 200 and isinstance(response.json(), dict)
 
     wait_for(probe, timeout=300, interval=3, description=f"{what} to answer {url}")
-
-
-def _cellctl_secrets(stack: infra.Stack, control: substrate.Substrate) -> dict[str, dict[str, str]]:
-    key = control.secrets.cell_token_key
-    return {
-        "exomem-cellctl-database-dsn": {"dsn": stack.postgres.dsn("exomem_cellctl", from_host=False)},
-        "exomem-cloud-gateway-database": {"url": stack.postgres.dsn("exomem_gateway", from_host=False)},
-        # D7: 64 hex characters, read by both cellctl and the gateway.
-        "exomem-cloud-cell-token-key": {"current": key.hex(), "currentVersion": "1"},
-        "exomem-cloud-gateway-control-plane-key": {"key": control.secrets.control_plane_key},
-        "exomem-cloud-backup-master-key": {
-            "keys": json.dumps({"1": base64.b64encode(secrets.token_bytes(32)).decode()}),
-            "currentVersion": "1",
-        },
-        # Doubled in rehearsal_cellctl; present only because the chart requires them.
-        "exomem-cloud-b2-key-management": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
-        "exomem-cloud-hetzner-read-token": {"token": "rehearsal-double"},
-    }
 
 
 def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
