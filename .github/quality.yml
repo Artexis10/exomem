@@ -185,6 +185,11 @@ duplicates:
     - "infra/cloud-rehearsal/src"
   ignore: ["**/_sample_vault/**", "**/_scaffold/**"]
 
+# ShellCheck gate: warnings and errors on the shell scripts a pull request adds or changes.
+# CI's own ShellCheck run covers only infra/scripts/*.sh; this covers the install, service
+# and upgrade scripts and the plugin hooks when they change. The action skips templates.
+shellcheck: {}
+
 test_jobs:
   - "core tests (py3.13, shard 1/12)"
   - "core tests (py3.13, shard 2/12)"
