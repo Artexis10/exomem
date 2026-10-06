@@ -25,6 +25,14 @@ def row_hold_kind(kind: str | None) -> str | None:
 
     return "backup" if kind == SNAPSHOT_BACKUP else kind
 
+# move-cloud-cells-to-local-storage D10: what one measured hourly backup found.
+# GROWTH_NO_ROOM and GROWTH_AT_CAP each raise the storage-growth alert: the
+# cell is past 80% use and cannot grow.
+GROWTH_PLANNED = "grow"
+GROWTH_NO_ROOM = "no-room"
+GROWTH_AT_CAP = "at-cap"
+GROWTH_NOT_NEEDED = "fits"
+
 IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
 INIT_DEADLINE_EXCEEDED = "INIT_DEADLINE_EXCEEDED"
 BACKUP_FAILED = "BACKUP_FAILED"
@@ -84,8 +92,20 @@ class CellRow:
     b2_key_version: int | None = None
     hold_kind: str | None = None
     hold_started_at: datetime | None = None
+    # move-cloud-cells-to-local-storage D10: the size cellctl grew the cell's
+    # local volume to, or None while it has never grown.
+    grown_storage_gib: int | None = None
     # Read only: a cell never backed up ages its backup alert from here.
     created_at: datetime | None = None
+
+    @property
+    def size_gib(self) -> int:
+        """D10: the cell's size, the larger of what Substrate asked for and
+        what cellctl grew it to. A local cell's claim and quota render at this,
+        so a later pass never renders a smaller claim, and capacity charges it
+        (D6). A claim on a Hetzner volume renders storage_gib."""
+
+        return max(self.storage_gib, self.grown_storage_gib or 0)
 
     def is_dirty(self, *, refusal_parked: bool = False) -> bool:
         # D4: a refused row (MANIFEST_IMMUTABLE) is dirty unless cellctl holds
@@ -163,6 +183,8 @@ class ClusterObservation:
     statefulset_backup_outcome: str | None = None
     # D4: a restore hold that relocates the cell off the volume with this id.
     statefulset_relocation_volume: str | None = None
+    # D10: the size an hourly hold's backup planned to grow the cell to.
+    statefulset_grow_storage_gib: int | None = None
     statefulset_render_digest_applied_at: datetime | None = None
     statefulset_row_generation: int | None = None
 
@@ -189,6 +211,10 @@ class ClusterObservation:
     backup_job_succeeded: bool = False
     backup_job_failed: bool = False
     backup_job_snapshot_id: str | None = None
+    # D10: the backed-up filesystem's used and total bytes, as the finished
+    # backup Job reported them. None when it reported none.
+    backup_job_used_bytes: int | None = None
+    backup_job_total_bytes: int | None = None
 
     # D3: the current hourly hold's VolumeSnapshot and its clone claim.
     snapshot_exists: bool = False
@@ -255,6 +281,11 @@ class Decision:
     relocation_volume: str | None = None
     retain_volume: str | None = None
     delete_claim: bool = False
+
+    # D10: the size this hourly hold grows the cell to once its clone is gone,
+    # and what this pass's measured backup found (one of the GROWTH_ values).
+    grow_storage_gib: int | None = None
+    storage_growth: str | None = None
 
     row_updates: dict[str, object] = field(default_factory=dict)
     rollout_updates: dict[str, object] = field(default_factory=dict)

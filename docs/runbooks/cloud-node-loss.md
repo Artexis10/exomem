@@ -183,5 +183,16 @@ The usual cause on Hetzner is an etcd restore that drops a cell created after th
 3. If the row records the claim's volume and the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the empty claim as in step 4.3, mark the row's `volume_id` lost as in step 5, then resume cellctl. Expect cellctl to relocate the cell from its backup.
 
    If the row records no volume, cellctl cannot relocate the cell: it relocates only a recorded volume. Re-adopt the real volume as in step 2.
+4. If the row records no volume and the real volume is gone, record the claim's volume on the row. The refusal proves that volume empty, so recording it loses nothing. As the control database owner, run `UPDATE exomem_cloud_cells SET volume_id = '<claim volume>' WHERE cell_id = '<cell id>' AND volume_id IS NULL;`. Expect `UPDATE 1`.
+5. Follow step 3 for that volume. Expect cellctl to relocate the cell from its backup.
 
 Never clear the backup record to get past this refusal: the cell would then serve an empty vault as if it were the tenant's.
+
+`MANIFEST_IMMUTABLE` on a local cell that grew: cellctl renders a local cell's claim at the larger of `storage_gib` and `grown_storage_gib`. Restoring the control database to before a growth, or rolling cellctl back past the release that grows cells, renders a claim smaller than the volume. Kubernetes refuses a smaller claim, and the cell's hourly backups then fail.
+
+1. Read the claim's actual size: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data --output=jsonpath='{.spec.resources.requests.storage}'`. Expect whole GiB, such as `14Gi`.
+2. After a control-database restore, set the row's grown size to that number, as the control database owner: `UPDATE exomem_cloud_cells SET grown_storage_gib = 14 WHERE cell_id = '<cell id>';`. It must report `UPDATE 1`.
+3. After a cellctl rollback, roll cellctl forward again. A cellctl from before this change ignores `grown_storage_gib`.
+4. If cellctl must stay rolled back, set the row's `storage_gib` to that number, as the control database owner. The cell restarts once.
+5. Check that the row's error code clears within an hour. The refusal stays parked until its backoff passes, because `grown_storage_gib` does not change the render digest.
+6. Check that the next hourly backup records a new `last_backup_at`.

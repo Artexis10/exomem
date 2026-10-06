@@ -44,6 +44,8 @@ OBSERVED_COLUMNS = (
     "b2_key_version",
     "hold_kind",
     "hold_started_at",
+    # move-cloud-cells-to-local-storage D10, Substrate migration 0059.
+    "grown_storage_gib",
 )
 
 ROLLOUT_COLUMNS = ("paused", "error_code", "held_cell_id", "last_good_image")
