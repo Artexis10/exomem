@@ -360,22 +360,6 @@ class RecoveryPanel(Vertical):
             self.post_message(self.Chosen(self, event.option_id))
 
 
-class EmptyState(Static):
-    """A deliberate nothing-here line plus the doctrine that explains it."""
-
-    def __init__(self, message: str, hint: str = "", **kwargs):
-        super().__init__(**kwargs)
-        self._message = message
-        self._hint = hint
-
-    def on_mount(self) -> None:
-        skin: Skin = self.app.skin
-        text = Text(self._message, style=skin.text)
-        if self._hint:
-            text.append(f"\n{self._hint}", style=skin.dim)
-        self.update(text)
-
-
 # --------------------------------------------------------------------------- #
 # Modals
 # --------------------------------------------------------------------------- #

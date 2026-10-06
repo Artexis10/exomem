@@ -189,10 +189,6 @@ class Resolution:
     close_match: str | None = None
 
     @property
-    def is_registered(self) -> bool:
-        return self.status in {"builtin", "alias", "registered", "deprecated"}
-
-    @property
     def requires_url(self) -> bool:
         return bool(self.definition and self.definition.requires_url)
 

@@ -7,6 +7,10 @@ node-ip: {{ private_node_ip | to_json }}
 flannel-iface: {{ k3s_resolved_private_interface | to_json }}
 node-label:
   - {{ k3s_agent_node_label | to_json }}
+{% if inventory_hostname in (groups['dedicated_hosts'] | default([])) %}
+  # Not a Hetzner Cloud server: the hcloud CSI node plugin's affinity skips it.
+  - "instance.hetzner.cloud/provided-by=robot"
+{% endif %}
 {% if k3s_agent_dedicated_cell %}
   - {{ ("exomem.io/dedicated-cell=" ~ k3s_agent_dedicated_cell) | to_json }}
 {% endif %}

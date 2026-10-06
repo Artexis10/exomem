@@ -1,0 +1,8 @@
+{
+  "destinations": {
+    "ansible.hosted-node.k3s-server-token.active": "v1",
+    "ansible.hosted-node.etcd-s3-access-key.active": "v1",
+    "ansible.hosted-node.etcd-s3-secret-key.active": "v1"
+  },
+  "schema_version": 1
+}

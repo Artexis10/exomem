@@ -23,10 +23,9 @@ lifecycle mutation.
 ## Verify
 
 ```bash
-infra/scripts/verify_ansible_convergence.py --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/verify_ansible_convergence.py --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 kubectl get nodes,pv
 ```
 

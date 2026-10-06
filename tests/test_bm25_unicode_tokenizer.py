@@ -414,7 +414,7 @@ def test_the_token_character_class_is_letters_numbers_and_marks_on_this_interpre
         character = chr(code_point)
         category = unicodedata.category(character)
         assert bool(word.match(character)) == (category[0] in "LN"), hex(code_point)
-        if category[0] in "MS" and not bm25._in_mark_planes(code_point):
+        if category[0] in "MS" and not text_scripts.in_mark_planes(code_point):
             marks_outside_scanned_planes.append(hex(code_point))
     assert marks_outside_scanned_planes == []
     for code_point in (0x0301, 0x093F, 0x0E34, 0x3099, 0xFE0F, 0xE0100):

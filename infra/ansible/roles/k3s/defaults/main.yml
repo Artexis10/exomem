@@ -33,6 +33,18 @@ k3s_agent_require_csi_capacity: true
 k3s_csi_driver: csi.hetzner.cloud
 k3s_join_retries: 60
 k3s_join_delay: 5
+# An agent Terraform does not create keeps its cells on node-local storage
+# (move-cloud-cells-to-local-storage D1): its join completes once TopoLVM
+# publishes the node's pool for this device class, not an attachment limit.
+k3s_agent_local_storage: "{{ inventory_hostname in (groups['dedicated_hosts'] | default([])) }}"
+k3s_topolvm_driver: topolvm.io
+k3s_topolvm_device_class: thin
+# TopoLVM's privileged node plugin runs only on nodes with this label. The
+# server applies it: NodeRestriction stops a kubelet from setting labels under
+# node-restriction.kubernetes.io/ on its own Node, so a compromised agent cannot
+# draw the plugin and its service-account token onto itself. Never put it in
+# node-label, where the kubelet's registration would be refused.
+k3s_topolvm_node_label: node-restriction.kubernetes.io/exomem-local-storage=true
 
 # Every K3s node in the inventory; the host firewall admits inter-node
 # traffic only from their declared private addresses.
@@ -42,9 +54,41 @@ k3s_firewall_peer_ips: >-
      | map('extract', hostvars, 'private_node_ip') | select('defined') | list }}
 k3s_firewall_comment: Exomem K3s inter-node
 
+# A node outside the Hetzner network joins over WireGuard (D8): it peers with
+# every other node, and every other node peers with it. No dash: Ansible's
+# per-interface facts rewrite dashes, which the private-interface lookup
+# would then miss.
+k3s_wireguard_interface: wgexomem
+k3s_wireguard_port: 51820
+k3s_wireguard_hosts: >-
+  {{ groups['hosted_nodes'] | default([]) | map('extract', hostvars)
+     | selectattr('k3s_private_link', 'defined') | selectattr('k3s_private_link', 'equalto', 'wireguard')
+     | map(attribute='inventory_hostname') | list }}
+k3s_wireguard_peers: >-
+  {{ ((groups['hosted_nodes'] | default([])) if inventory_hostname in k3s_wireguard_hosts
+      else k3s_wireguard_hosts) | difference([inventory_hostname]) }}
+# The interface each peer's private address arrives on: WireGuard for a peer
+# that joined over it, this node's private interface otherwise (on a WireGuard
+# node that is the WireGuard interface too). Firewall rules name it.
+k3s_peer_interfaces: >-
+  {%- set mapping = {} -%}
+  {%- for peer in k3s_cluster_hosts | difference([inventory_hostname])
+      if hostvars[peer].private_node_ip is defined -%}
+    {%- set _ = mapping.update({hostvars[peer].private_node_ip:
+          k3s_wireguard_interface if peer in k3s_wireguard_hosts else k3s_resolved_private_interface}) -%}
+  {%- endfor -%}
+  {{ mapping }}
+# A dedicated Hetzner server's vSwitch VLAN hangs off its default-route NIC
+# unless this names another.
+k3s_vswitch_parent_interface: ""
+
 # Removal (remove-agent.yml). The headroom mirrors the platform chart's
 # capacity.headroom, so the preflight counts slots exactly as cellctl does.
 k3s_cell_namespace_prefix: exo-cell-
+# TopoLVM's own driver and topology key: a cell's local volume is pinned to
+# one node by its PV's node affinity on this key.
+k3s_local_storage_driver: topolvm.io
+k3s_local_storage_topology_key: topology.topolvm.io/node
 k3s_remove_headroom: 5
 k3s_remove_pod_procs_argv:
   - /usr/bin/find

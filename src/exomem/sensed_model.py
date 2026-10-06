@@ -331,7 +331,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str) -> PageFacts | None:
     supersession: set[str] = set()
     for other, relation in graph.execute(
         "SELECT n.path, e.relation_type FROM graph_edges e "
-        "JOIN graph_nodes n ON n.node_key = e.dst_key "
+        "JOIN graph_nodes n ON n.node_key = e.dst_page_key "
         "WHERE e.source_path = ? AND n.kind = 'file'",
         (rel_path,),
     ):
@@ -345,7 +345,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str) -> PageFacts | None:
     ).fetchone()
     if file_key is not None:
         for other, relation in graph.execute(
-            "SELECT e.source_path, e.relation_type FROM graph_edges e WHERE e.dst_key = ?",
+            "SELECT e.source_path, e.relation_type FROM graph_edges e WHERE e.dst_page_key = ?",
             (file_key[0],),
         ):
             other = str(other)

@@ -7,11 +7,15 @@ Add or remove an Exomem Cloud K3s agent node (openspec
 server. cellctl needs no change: it counts a node once the node's CSINode
 publishes a volume-attachment limit, and zeroes it once the Node is deleted.
 Reserved agents publish zero general cell slots, retaining actual attachment counts.
+For an agent Terraform does not create (a dedicated, auction or other-provider
+server with encrypted local cell storage), follow
+[dedicated-host.md](dedicated-host.md) instead.
 
 ## Preconditions
 
-- The agent token exists (once, before the first agent): write
-  `k3s_agent_token` with `infra/scripts/secret_handoff.py` as described in
+- The agent token exists and is active (once, before the first agent): write
+  `k3s_agent_token` with `infra/scripts/secret_handoff.py`, then select its v1
+  in `infra/contracts/active-ansible-selection-v1.json`, as described in
   `secrets.md`. It must differ from `k3s_server_token`.
 - The first run that introduces the agent token restarts the K3s server once.
   Schedule it in a maintenance window; running cells ride through the restart.
@@ -56,14 +60,22 @@ terraform -chdir=infra/terraform/foundation output -json > /run/user/$UID/founda
 chmod 0600 /run/user/$UID/foundation.json
 infra/scripts/generate_ansible_inventory.py /run/user/$UID/foundation.json \
   infra/ansible/inventory.yml --user exomem-admin \
-  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}"
-infra/scripts/ansible_with_sops.sh \
-  --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/k3s-agent-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
+  --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
+
+The inventory always carries every node. `EXOMEM_DEDICATED_HOSTS` is the
+private host list from [dedicated-host.md](dedicated-host.md), or a file
+holding `{}` when there are none. An inventory without a dedicated host makes
+`site.yml` remove that host's WireGuard link, firewall rules and Tang access
+on every other node. `active_ansible_vars.py` passes the version of each
+hosted-node Ansible variable that `infra/contracts/active-ansible-selection-v1.json`
+selects, including the Tang keys and each dedicated host's passphrase once they
+are selected. Escrowing a new version changes nothing until a reviewed commit
+selects it.
 
 ## Reserve an agent for one selected cell
 
@@ -113,11 +125,15 @@ manual host reservation that can drift from that declaration.
 ## Remove a node
 
 Run the removal playbook first, while the entry and its inventory host still
-exist. It refuses while any cell holds a maintenance hold, and when the cluster's
-cell volumes would not fit the remaining nodes' slots (add a node first). It
-also refuses while any desired cell template selects the target reservation,
-including a stopped cell; relocate and clear that selection first. It
-cordons, drains without force, stops K3s and every container, deletes the Node,
+exist. It refuses while a cell whose volume is on the target holds a
+maintenance hold, and when the cluster's cell volumes would not fit the
+remaining nodes' slots (add a node first). It also refuses while any desired
+cell template selects the target reservation, including a stopped cell;
+relocate and clear that selection first. On an agent with local storage, it
+refuses while a cell's live volume is still on the target; relocate those cells
+first ([node loss](../cloud-node-loss.md)). Until the playbook relocates them
+itself, that means stopping the agent and relocating as for a lost node, which
+loses each cell's writes since its last hourly backup. It cordons, drains without force, stops K3s and every container, deletes the Node,
 and revokes the node's inter-node firewall rules. Remove nodes when no
 invitations are pending: rows admitted during the drain are not yet visible as
 volumes.
@@ -141,6 +157,9 @@ infra/scripts/apply_saved_plan.sh foundation /run/user/$UID/foundation-agents.tf
   --allow-destructive 'module.k3s_agents.hcloud_server.agent["01"]'
 ```
 
+A removed agent with a `cells` volume group ends with that device erased
+([erase a removed agent's cells device](../cloud-node-loss.md#erase-a-removed-agents-cells-device)).
+
 Regenerate the inventory afterwards. A removed host carries
 `/etc/rancher/k3s/removed`, and `site.yml` skips it, with a warning, rather than
 rejoin it. To abandon a half-finished removal instead, delete that marker on the
@@ -152,11 +171,9 @@ host, run `kubectl uncordon <node>`, and converge with `site.yml`.
 kubectl get nodes -L exomem.io/node-pool
 kubectl get csinode -o custom-columns=NODE:.metadata.name,LIMIT:.spec.drivers[0].allocatable.count
 psql "$EXOMEM_CELLCTL_DSN" -c 'select node, cell_slots, attachments_used from exomem_cloud_capacity'
-infra/scripts/verify_ansible_convergence.py --inventory infra/ansible/inventory.yml \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/k3s-agent-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
+mapfile -t fleet_vars <<< "${fleet_vars_text}"
+infra/scripts/verify_ansible_convergence.py --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
 
 A new agent is Ready, labelled `exomem.io/node-pool=agent`, and publishes a

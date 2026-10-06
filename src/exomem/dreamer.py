@@ -164,28 +164,14 @@ def write_setting(value: str) -> Path:
     Every other key in that shared file is preserved. Raises on an unknown
     value and on an unwritable file.
     """
-    import json
-
     from . import mode
 
     value = str(value or "").strip().lower()
     if value not in policy.SETTINGS:
         raise ValueError(f"unknown dreamer setting: {value!r} (expected one of {policy.SETTINGS})")
-    path = mode.config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = mode.read_config()
     data[CONFIG_KEY] = value
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=2), "utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    return path
+    return mode.write_config(data)
 
 
 def note_disposition(cid: str, fingerprint: str) -> None:

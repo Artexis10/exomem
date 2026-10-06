@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.108.0](https://github.com/Artexis10/exomem/compare/v0.107.0...v0.108.0) (2026-10-06)
+
+
+### Features
+
+* **context:** retain independently requested context coverage ([#1576](https://github.com/Artexis10/exomem/issues/1576)) ([95cd4c6](https://github.com/Artexis10/exomem/commit/95cd4c6f8132d6be56ef70dece0c7bd4d37fd847))
+* **infra:** administer Exomem hosts over NetBird with no public SSH ([#1588](https://github.com/Artexis10/exomem/issues/1588)) ([bfbeeaf](https://github.com/Artexis10/exomem/commit/bfbeeaf1654a525108085501badbc1f9f7cf08bf))
+
+
+### Bug Fixes
+
+* share one tokeniser and one frontmatter grammar; consolidate lifecycle fsync ([#1589](https://github.com/Artexis10/exomem/issues/1589)) ([d81e669](https://github.com/Artexis10/exomem/commit/d81e669a8ad71c7d63993a66dda5537cb27d1f7e))
+
+
+### Performance
+
+* **cloud:** cut idle cell CPU and memory ([#1584](https://github.com/Artexis10/exomem/issues/1584)) ([38798c7](https://github.com/Artexis10/exomem/commit/38798c7b701792525885f42e3ddbe57bd58fbcd1))
+* **context:** keep the conversation qualifier scan cheap over a whole candidate set ([#1591](https://github.com/Artexis10/exomem/issues/1591)) ([b65d5c9](https://github.com/Artexis10/exomem/commit/b65d5c9c2812064b05d9d22c19c79299f4cb120b))
+
 ## [0.107.0](https://github.com/Artexis10/exomem/compare/v0.106.0...v0.107.0) (2026-10-05)
 
 

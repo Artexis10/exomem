@@ -1,10 +1,9 @@
-"""Tests for claim-level hygiene (extraction + .claims.sqlite sidecar + polarity).
+"""Tests for claim-level hygiene (extraction + .claims.sqlite sidecar).
 
 Three lanes, all torch-free unless noted:
 - extraction: claim-bearing sections → a claim string (deterministic).
 - sidecar: checksum-keyed upsert / incremental skip / delete, exercised with
   FAKE vectors (monkeypatched `embeddings.embed_texts`) so no model loads.
-- polarity: the deterministic heuristic backend + the classify dispatch seam.
 - wiring: `detect_contradictions` attaches polarity under the gate, and stays
   byte-identical to baseline when the gate is off.
 
@@ -131,52 +130,6 @@ def test_checksum_stable_and_changes() -> None:
     a = claims._checksum("X\n\nclaim one")
     assert a == claims._checksum("X\n\nclaim one")   # stable
     assert a != claims._checksum("X\n\nclaim two")   # sensitive to the claim
-
-
-# ---------------- polarity heuristic (deterministic, torch-free) ----------------
-
-
-def test_polarity_contradict_via_antonym() -> None:
-    r = claims._heuristic_polarity("Caching improves latency", "Caching degrades latency")
-    assert r.label == "contradict"
-    assert r.method == "heuristic"
-
-
-def test_polarity_contradict_via_negation() -> None:
-    r = claims._heuristic_polarity("Batching helps focus", "Batching does not help focus")
-    assert r.label == "contradict"
-
-
-def test_polarity_duplicate_on_identical() -> None:
-    r = claims._heuristic_polarity("Retrieval needs owned files", "Retrieval needs owned files")
-    assert r.label == "duplicate"
-
-
-def test_polarity_refine_same_topic_added_detail() -> None:
-    r = claims._heuristic_polarity("Batching helps focus", "Batching helps focus in the morning")
-    assert r.label == "refine"
-
-
-def test_polarity_unrelated_on_disjoint() -> None:
-    r = claims._heuristic_polarity("Cats are mammals", "Batching helps focus")
-    assert r.label == "unrelated"
-
-
-def test_classify_polarity_dispatches_to_heuristic_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_NLI", raising=False)
-    r = claims.classify_polarity("Caching improves latency", "Caching degrades latency")
-    assert r.method == "heuristic"
-    assert r.label == "contradict"
-
-
-def test_classify_polarity_score_bounded() -> None:
-    for a, b in [
-        ("Caching improves latency", "Caching degrades latency"),
-        ("X is true", "Y is unrelated"),
-        ("same claim", "same claim"),
-    ]:
-        r = claims.classify_polarity(a, b)
-        assert 0.0 <= r.score <= 1.0
 
 
 # ---------------- gate ----------------

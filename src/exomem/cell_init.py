@@ -45,6 +45,14 @@ from .vault import _is_vault
 #: there is nothing for a fixed name to help two concurrent runs coordinate on.
 _STAGING_PREFIX = ".vault-init-"
 
+#: Where Kubernetes reads a container's termination message (its default
+#: `terminationMessagePath`), writable even under a read-only root filesystem.
+TERMINATION_LOG = Path("/dev/termination-log")
+
+#: Design D5: a cell whose volume is empty although the cell has a recorded
+#: backup. Value-free, so cellctl can copy it onto the cell's row as is.
+EMPTY_VOLUME_REFUSED = "CELL_INIT_EMPTY_VOLUME_REFUSED"
+
 
 class CellInitError(RuntimeError):
     """Raised for a cell-init failure with a stable code and failing step."""
@@ -126,11 +134,22 @@ def _remove_stale_staging(vault_root: Path) -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
-def _ensure_vault(vault_root: Path) -> bool:
+def _ensure_vault(vault_root: Path, *, backed_up: bool) -> bool:
     """Initialize the vault atomically when the volume is empty. Idempotent."""
 
     if _is_vault(vault_root):
         return False
+
+    if backed_up:
+        # Design D5: this cell's data exists in its backups, so an empty
+        # volume here is a lost or recreated one. Serving a blank vault would
+        # let the tenant write a second history over the real one; the cell
+        # stays down until an operator restores it.
+        raise CellInitError(
+            EMPTY_VOLUME_REFUSED,
+            "vault_init",
+            "the cell has a recorded backup but its volume holds no vault",
+        )
 
     _remove_stale_staging(vault_root)
 
@@ -198,13 +217,30 @@ def _ensure_state_migrated(vault_root: Path) -> None:
         ) from error
 
 
-def run_cell_init(vault_root: Path, *, host_root: Path | None = None) -> CellInitResult:
+def report_refusal(code: str) -> None:
+    """Write a refusal code as the container's termination message.
+
+    Only the fixed code is written, never a path or a message. Outside a pod
+    there is no termination log, and the JSON failure line still reports it.
+    """
+    try:
+        TERMINATION_LOG.write_text(code, encoding="ascii")
+    except OSError:
+        pass
+
+
+def run_cell_init(
+    vault_root: Path, *, host_root: Path | None = None, backed_up: bool = False
+) -> CellInitResult:
     """Run the idempotent cell-init sequence against `vault_root`.
 
     `host_root`, when given, is enforced to mode `0700` alongside the vault
     path (design D3.1, `/data/host`). It is optional so a caller that has no
     stake in a host root -- every test here, and any future caller that only
     cares about the vault -- never touches one that was not asked for.
+
+    `backed_up` says the cell has a recorded backup (design D5): an empty
+    volume is then refused instead of initialised.
     """
 
     root = Path(vault_root)
@@ -216,6 +252,6 @@ def run_cell_init(vault_root: Path, *, host_root: Path | None = None) -> CellIni
         raise CellInitError(
             "CELL_INIT_DIRECTORY_FAILED", "prepare_directories", str(error)
         ) from error
-    vault_created = _ensure_vault(root)
+    vault_created = _ensure_vault(root, backed_up=backed_up)
     _ensure_state_migrated(root)
     return CellInitResult(vault_created=vault_created)

@@ -225,14 +225,6 @@ class DerivedBatchPath:
                 maximum=_MAX_REF,
             )
 
-    @property
-    def before_absent(self) -> bool:
-        return self.before_hash is None
-
-    @property
-    def after_tombstone(self) -> bool:
-        return self.after_hash is None
-
 
 @dataclass(frozen=True, slots=True)
 class DerivedComponentStatus:

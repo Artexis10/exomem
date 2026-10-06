@@ -337,9 +337,9 @@ def test_cell_init_cli_never_touches_a_host_root_outside_cloud_mode(
     real_run = cell_init.run_cell_init
     captured: dict[str, object] = {}
 
-    def spy(vault_root, *, host_root=None):
+    def spy(vault_root, *, host_root=None, **kwargs):
         captured["host_root"] = host_root
-        return real_run(vault_root, host_root=host_root)
+        return real_run(vault_root, host_root=host_root, **kwargs)
 
     monkeypatch.setattr(cell_init, "run_cell_init", spy)
 
@@ -377,9 +377,9 @@ def test_cell_init_cli_enforces_the_passwd_home_root_in_cloud_mode(
     real_run = cell_init.run_cell_init
     captured: dict[str, object] = {}
 
-    def spy(vault_root, *, host_root=None):
+    def spy(vault_root, *, host_root=None, **kwargs):
         captured["host_root"] = host_root
-        return real_run(vault_root, host_root=host_root)
+        return real_run(vault_root, host_root=host_root, **kwargs)
 
     monkeypatch.setattr(cell_init, "run_cell_init", spy)
 
@@ -410,3 +410,49 @@ def test_cell_init_refuses_a_symlinked_directory_without_touching_its_target(
 
     assert caught.value.code == "CELL_INIT_DIRECTORY_FAILED"
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o755
+
+
+# --- move-cloud-cells-to-local-storage D5: the empty-vault guard -------------
+
+
+def test_a_backed_up_cell_refuses_to_initialise_an_empty_volume(tmp_path: Path) -> None:
+    """A recreated claim after a node loss is empty; serving a blank vault
+    there would hide the tenant's backed-up data behind a new history."""
+
+    vault = tmp_path / "recreated-volume" / "vault"
+
+    with pytest.raises(cell_init.CellInitError) as refused:
+        cell_init.run_cell_init(vault, backed_up=True)
+
+    assert refused.value.code == "CELL_INIT_EMPTY_VOLUME_REFUSED"
+    assert list(vault.parent.iterdir()) == [vault]
+    assert not any(vault.iterdir())
+
+
+def test_a_backed_up_cell_still_starts_on_its_own_vault(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    cell_init.run_cell_init(vault)
+
+    result = cell_init.run_cell_init(vault, backed_up=True)
+
+    assert result.vault_created is False
+
+
+def test_the_cli_reports_the_refusal_code_and_nothing_else_as_its_termination_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """cellctl reads this message to put the reason on the cell's row at once."""
+
+    termination_log = tmp_path / "termination-log"
+    termination_log.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cell_init, "TERMINATION_LOG", termination_log)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_BACKED_UP", "true")
+    vault = tmp_path / "some-specific-absolute-path" / "vault"
+
+    code = _cell_init_main(["--vault", str(vault), "--json"])
+
+    assert code == 1
+    assert termination_log.read_text(encoding="utf-8") == "CELL_INIT_EMPTY_VOLUME_REFUSED"
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False, "step": "vault_init", "error_code": "CELL_INIT_EMPTY_VOLUME_REFUSED",
+    }
