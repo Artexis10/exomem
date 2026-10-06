@@ -1,0 +1,24 @@
+# Managed by the k3s role (move-cloud-cells-to-local-storage D8). Routes carry
+# this node's private address as their source, so each peer's AllowedIPs, which
+# name only that address, accept the traffic.
+[Interface]
+ListenPort = {{ k3s_wireguard_port }}
+PostUp = wg set %i private-key /etc/wireguard/{{ k3s_wireguard_interface }}.key
+{% if inventory_hostname in k3s_wireguard_hosts %}
+Address = {{ private_node_ip }}/32
+{% endif %}
+Table = off
+{% for peer in k3s_wireguard_peers %}
+PostUp = ip route replace {{ hostvars[peer].private_node_ip }}/32 dev %i src {{ private_node_ip }}
+{% endfor %}
+{% for peer in k3s_wireguard_peers %}
+
+[Peer]
+# {{ peer }}
+PublicKey = {{ hostvars[peer].k3s_wireguard_public_key }}
+AllowedIPs = {{ hostvars[peer].private_node_ip }}/32
+{% if peer in k3s_wireguard_hosts %}
+Endpoint = {{ hostvars[peer].public_ipv4 }}:{{ k3s_wireguard_port }}
+{% endif %}
+PersistentKeepalive = 25
+{% endfor %}
