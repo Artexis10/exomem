@@ -1306,6 +1306,45 @@ def test_a_backup_refuses_a_volume_that_holds_no_vault_before_restic_reads_it(tm
     assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
 
 
+def test_a_vault_check_that_cannot_run_is_reported_apart_from_a_volume_with_no_vault(tmp_path) -> None:
+    # An image whose exomem.vault cannot answer (renamed, missing, crashing)
+    # must not read as an emptied volume: the operator would look for lost
+    # data instead of a broken check. The rendered script runs under sh, with
+    # restic stubbed and exomem.vault stubbed without its check.
+    import os
+    import subprocess
+
+    from cellctl.manifests import CellManifestSpec, render_backup_job
+
+    from .test_k8s_client import CELL_ID, CURRENT_HOLD
+
+    bin_dir, data, stubs = tmp_path / "bin", tmp_path / "data", tmp_path / "stubs" / "exomem"
+    bin_dir.mkdir()
+    (data / "vault").mkdir(parents=True)
+    (data / "host").mkdir()
+    stubs.mkdir(parents=True)
+    (stubs / "__init__.py").write_text("", encoding="utf-8")
+    (stubs / "vault.py").write_text("", encoding="utf-8")
+    calls = tmp_path / "restic-calls"
+    restic = bin_dir / "restic"
+    restic.write_text(f"#!/bin/sh\necho \"$1\" >> {calls}\n", encoding="utf-8")
+    restic.chmod(0o755)
+    spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
+                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
+    shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
+                                            retention=None)["spec"]["template"]["spec"]["containers"][0]["command"]
+    for path, moved in (("/dev/termination-log", tmp_path / "termination-log"),
+                        ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
+        script = script.replace(path, str(moved))
+
+    result = subprocess.run([shell, flag, script], env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(stubs.parent)})
+
+    assert result.returncode != 0
+    assert (tmp_path / "termination-log").read_text(encoding="utf-8") == "BACKUP_VAULT_CHECK_FAILED"
+    assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
+
+
 def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     # The Job and cellctl must agree on the termination message, or no cell
     # ever grows. This runs the rendered command under sh, with restic stubbed

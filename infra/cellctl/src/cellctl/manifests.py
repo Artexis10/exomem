@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from .backup_source import VAULT_CHECK_COMMAND
 from .storage_config import LEGACY_CLASS
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
@@ -811,17 +812,7 @@ HOURLY_RETENTION_ARGS = ["--keep-hourly", "24", *RETENTION_ARGS]
 # D8: what a backup covers and a restore rewrites. The volume root, including
 # lost+found, is never in scope.
 BACKUP_PATHS = ("/data/vault", "/data/host")
-# D5: a backup refuses a source that holds no vault. A served cell restarted
-# onto an emptied volume leaves cell-init refusing over an empty /data/vault
-# and /data/host; backed up, they would replace the last good restore point.
-# The rule is the cell image's own, so it never drifts from cell-init's. The
-# Job then fails, the hold records BACKUP_FAILED and the backup-age alert follows.
-BACKUP_SOURCE_NOT_A_VAULT = "BACKUP_SOURCE_NOT_A_VAULT"
-VAULT_CHECK_COMMAND = (
-    "python3 -c 'import sys; from pathlib import Path; from exomem.vault import _is_vault; "
-    "sys.exit(0 if _is_vault(Path(\"/data/vault\")) else 1)' "
-    f"|| {{ printf '%s' {BACKUP_SOURCE_NOT_A_VAULT} > /dev/termination-log; exit 1; }}"
-)
+
 # move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
 # total bytes, appended to the termination message after the snapshot id. Every
 # cell image is a Python image; statvfs needs no privilege and no tool whose
@@ -1000,6 +991,10 @@ def render_backup_job(
     # Job) directly on either a non-zero `restic backup` or an id that does
     # not match a real 64-hex-character snapshot id.
     commands = [
+        # D5: no backup of a source that holds no vault (backup_source.py).
+        # The Job fails, the hold records BACKUP_FAILED, and cellctl logs the
+        # Job's code. An emptied volume's cell then leaves serving, and its
+        # row shows cell-init's refusal.
         VAULT_CHECK_COMMAND,
         "restic snapshots || restic init",
         f"restic backup --json {' '.join(BACKUP_PATHS)} > /tmp/backup.json || exit 1",
