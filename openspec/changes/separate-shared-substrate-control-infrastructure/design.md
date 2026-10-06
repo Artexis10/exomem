@@ -10,7 +10,7 @@ PR1513 changed the intended host label to `substrate-control-01`; its live renam
 
 **Goals:** Establish `substrate-systems/substrate-infra` and fixed shared foundation/durability workspaces; transfer existing management; preserve operating dependencies and recovery; make Exomem a consumer.
 
-**Non-Goals:** Hetzner project transfer, server replacement or reboot, changing database endpoints or credentials, moving product migrations, applying the pending rename, Kimai migration, tenant-fleet changes or Cloud releases. Provider transfer requires an independently designed maintenance/connectivity plan: Hetzner requires detaching assigned Primary IPs before moving a server between projects.
+**Non-Goals of the ownership handover (tasks 1-4):** Hetzner project transfer, server replacement or reboot, changing database endpoints or credentials, moving product migrations, applying the pending rename, Kimai migration, tenant-fleet changes or Cloud releases. The project relocation is a separate later phase (decision 10, tasks 5), with its own maintenance/connectivity plan: Hetzner requires detaching assigned Primary IPs before moving a server between projects.
 
 ## Decisions
 
@@ -38,6 +38,8 @@ The company netstack instance uses IPv4 overlay addresses to match that loopback
 The existing Bitwarden peer topology carries the selected workstation endpoints, original verified host keys and optional local SOCKS port. Generic peer wiring opts only that machine's existing key into loopback ingress, requires the enrolled host pin and gives the enrolled transport precedence over ambient SSH defaults. This completes the shared listener and infrastructure policy without duplicating VPN enrollment or replacing SSH identity.
 
 Native mobile clients receive primary DNS through a separate opt-in owner DNS group managed by the shared Terraform source. This enables NetBird's private peer-name resolver; ordinary public queries use the selected upstream resolvers. DNS membership grants no network access. Concurrent WSL clients retain DNS disabled, preserving client-owned resolution. Verify named SSH from the actual phone and retain its old Tailscale entry until that connection passes.
+
+10. **Relocate the control host to its own Hetzner project after the handover (owner decision, 2026-10-06).** The shared database must not live in the Exomem Cloud project, where Exomem's in-cluster Hetzner tokens and Terraform can reach it. Move the control host and its durability resources to a dedicated Substrate project once tasks 1-4 have made `substrate-infra` their only owner. Hetzner private networks cannot span projects, so Exomem's cellctl and gateway stop using the private address (10.50.1.20) and reach the database at its public address over TLS, as Substrate on Vercel already does, admitted by the database firewall's source allowlist. Connect consumers through a DNS name, not a literal IP, so the address the transfer may change moves in one place. Because the Primary IPs must be detached for the transfer, the move is a short announced database outage; rehearse it on a disposable server with a Primary IP and a network attachment before the production window. The relocation costs nothing extra: the same account pays for the target project. The project the host leaves is renamed Exomem Cloud.
 
 ## Migration Plan
 
