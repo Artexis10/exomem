@@ -936,6 +936,8 @@ class CollectionManifest:
     claims: Mapping[str, tuple[str, ...]] | None = None
     #: `claims.match`: frontmatter predicates that declare membership outright.
     claim_match: Mapping[str, tuple[str, ...]] | None = None
+    #: `items` (default) renders a view per row; `summary` keeps rows store-only.
+    view_mode: str = "items"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1716,6 +1718,8 @@ def _manifest_from_frontmatter(
     links = _parse_links(frontmatter.get("links", {}), schema)
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
+    view_mode = _parse_view_mode(frontmatter.get("view_mode", "items"), profile, storage,
+                                 presentation or item_filename or item_presentation, links)
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1739,7 +1743,37 @@ def _manifest_from_frontmatter(
         item_presentation=item_presentation,
         claims=claims,
         claim_match=claim_match,
+        view_mode=view_mode,
     )
+
+
+def _parse_view_mode(
+    value: object, profile: str, storage: StorageSpec, per_item_recipe: object, links: CollectionLinks
+) -> str:
+    """`items` keeps a view per row; `summary` has no per-row view or recipe to render.
+
+    A summary collection carries no planning join: each joined write would load
+    every summary row to find its partners. Joins are designed after S1.
+    """
+    if value not in ("items", "summary"):
+        raise CollectionError(
+            "INVALID_VIEW_MODE", "view_mode must be items or summary",
+            {"field": "view_mode", "received": value, "allowed": ["items", "summary"],
+             "example": "view_mode: summary"},
+        )
+    if value == "summary" and (profile != "records" or storage.strategy != "markdown-items" or per_item_recipe):
+        raise CollectionError(
+            "UNSUPPORTED_VIEW_MODE",
+            "summary view mode needs a Records markdown-items collection without per-item presentation",
+            {"field": "view_mode", "received": value},
+        )
+    joined = next((index for index, plan in enumerate(links.plans) if plan.join), None)
+    if value == "summary" and joined is not None:
+        raise CollectionError(
+            "UNSUPPORTED_VIEW_MODE", "a summary collection cannot carry a planning join",
+            {"field": f"links.plans[{joined}].join", "received": value},
+        )
+    return value
 
 
 def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:

@@ -30,8 +30,15 @@ from ..governance import (
     store,
 )
 from ..governance.decisions import Decision, decide
-from ..governance.principal import RequestPrincipal, effective_principal
-from . import types
+from ..governance.principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
+from . import tokens, types
+
+#: A summary collection's subjects: released to the owner alone, whatever configured rules say,
+#: until field release governs summary rows (S1.5b). A non-owner sees no rows, pages or counts.
+OWNER_ONLY = "owner-only"
+#: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
+MAX_SUMMARY_ROW_DECISIONS = 100_000
+RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
 
 
 def _json(value: Any) -> str:
@@ -81,6 +88,12 @@ def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], 
     return row_metadata(schema, attempted, metadata)
 
 
+def _pass_release_limit(error: collections.CollectionError) -> None:
+    """Re-raise the typed summary release limit, which a generic not-found refusal would hide."""
+    if error.code == RELEASE_LIMIT:
+        raise error
+
+
 def _metadata(raw: str) -> dict[str, list[str]]:
     data = json.loads(raw)
     if not isinstance(data, dict) or set(data) != {"projects", "tags", "classes"}:
@@ -124,6 +137,23 @@ class CanonicalSubject:
     collection_id: str
     row_id: int | str | None
     basis: CanonicalGrantBasis
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryRelease:
+    """A summary collection's release for one operation, decided without holding its row subjects."""
+
+    manifest: CanonicalSubject
+    decision: Decision
+    row_prefix: str
+    rows: int
+    released: int
+    held: tuple[tuple[CanonicalSubject, Decision], ...]
+    snapshot: str
+
+    @property
+    def complete(self) -> bool:
+        return self.released == self.rows and all(decision.level >= 6 for _subject, decision in self.held)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +255,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         raise ValueError("canonical subject lookup must have one selector")
     row = conn.execute(
         "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,m.manifest_hash,m.governance_json,"
-        "c.type_name,c.type_version,t.declaration_hash,t.declaration_json,ct.builtin "
+        "c.type_name,c.type_version,t.declaration_hash,t.declaration_json,ct.builtin,c.view_mode "
         "FROM collections c JOIN collection_manifests m "
         "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version "
         "JOIN collection_type_versions t ON t.name=c.type_name AND t.version=c.type_version "
@@ -234,11 +264,16 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     store_identity = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
     if row is None or store_identity is None or not store_identity[0]:
         raise ValueError("canonical subject is unavailable")
-    path, source_path, layout, version, content_hash, metadata, name, type_version, declaration_hash, declaration, builtin = row
+    (path, source_path, layout, version, content_hash, metadata, name, type_version, declaration_hash,
+     declaration, builtin, view_mode) = row
     declared = types.parse_declaration(json.loads(declaration), builtin=bool(builtin))
     if (declared.name, declared.version) != (name, type_version):
         raise ValueError("canonical type identity differs")
     manifest_meta = _metadata(metadata)
+    # Summary rows have no view file: they take the manifest's subject, and stay
+    # owner-only until field release governs them (S1.5b).
+    summary = view_mode == "summary"
+    audience = OWNER_ONLY if summary else declared.default_audience
 
     def make(ref, row_id, policy_path, item_type, raw_metadata, row_version, payload, domain):
         meta = _metadata(raw_metadata)
@@ -247,7 +282,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
             (item_type.lower(),), tuple(meta["classes"]),
         )
         basis = CanonicalGrantBasis(logical_vault_id, store_identity[0], ref, row_version, payload,
-                                    subject, declared.default_audience, version, content_hash,
+                                    subject, audience, version, content_hash,
                                     name, type_version, declaration_hash, domain)
         return CanonicalSubject(cid, row_id, basis)
 
@@ -276,7 +311,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                 meta = _metadata(raw_metadata)
                 if meta["projects"] != manifest_meta["projects"]:
                     raise ValueError("canonical row project differs from its manifest")
-                policy_path = source_path if layout == "markdown-log" else view_path
+                policy_path = path if summary else source_path if layout == "markdown-log" else view_path
                 yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
                            declared.item_type, raw_metadata, row_version, payload, "row")
     if not include_held:
@@ -298,12 +333,20 @@ def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject
     return replace(subject, basis=replace(subject.basis, logical_vault_id=logical_vault_id))
 
 
+#: Row subjects the writer's release cache keeps across collections before shedding them.
+_MAX_CACHED_SUBJECTS = 65536
+_MAX_CACHED_STATES = 8
+
+
 @dataclass(slots=True)
 class _CollectionState:
     epoch: tuple
     subjects: dict[str, CanonicalSubject]
     summaries: OrderedDict
     occupied_path_keys: Counter[str]
+    #: False once eviction shed the row subjects; the manifest subject, the
+    #: per-dependency release summaries and the item path keys stay current.
+    complete: bool = True
 
 
 class ReleaseCache:
@@ -370,9 +413,11 @@ class ReleaseCache:
     def prepare(self):
         self.check()
         if not self.unmanaged and self.conn.total_changes == self.accounted:
+            # Only a cached state takes committed deltas; an uncached collection needs none.
             self.prepared = {cid: {identity: next(iter(subjects(self.conn, cid, "unbound", identity=identity)), None)
                                   for identity in identities if identity is not None}
-                             for cid, identities in self.pending.items() if None not in identities}
+                             for cid, identities in self.pending.items()
+                             if None not in identities and (cid in self.replacements or cid in self.states)}
         self.prepared_stamp = self._stamp()
 
     def finish(self, committed):
@@ -389,23 +434,27 @@ class ReleaseCache:
                         self._remember_state(cid, state)
                 else:
                     for identity, current in self.prepared.get(cid, {}).items():
-                        previous = state.subjects.get(identity)
-                        if previous is not None and isinstance(previous.row_id, int):
-                            key = collections._portable_path_key(previous.basis.subject.path)
-                            state.occupied_path_keys[key] -= 1
-                            if not state.occupied_path_keys[key]:
-                                del state.occupied_path_keys[key]
-                        if current is not None:
-                            state.subjects[identity] = current
-                            if isinstance(current.row_id, int):
-                                state.occupied_path_keys[collections._portable_path_key(current.basis.subject.path)] += 1
-                        else:
-                            state.subjects.pop(identity, None)
+                        if state.complete:
+                            previous = state.subjects.get(identity)
+                            if previous is not None and isinstance(previous.row_id, int):
+                                key = collections._portable_path_key(previous.basis.subject.path)
+                                state.occupied_path_keys[key] -= 1
+                                if not state.occupied_path_keys[key]:
+                                    del state.occupied_path_keys[key]
+                            if current is not None:
+                                state.subjects[identity] = current
+                                if isinstance(current.row_id, int):
+                                    state.occupied_path_keys[collections._portable_path_key(current.basis.subject.path)] += 1
+                            else:
+                                state.subjects.pop(identity, None)
+                        elif current is not None and isinstance(current.row_id, int):
+                            # Items are never deleted and keep their view path, so a
+                            # shed state only needs each new row's path key.
+                            key = collections._portable_path_key(current.basis.subject.path)
+                            state.occupied_path_keys[key] = state.occupied_path_keys[key] or 1
                         for _denied, dirty in state.summaries.values():
-                            dirty.add(identity)
-            while self.states and sum(len(state.subjects) for state in self.states.values()) > 65536:
-                cid, _ = self.states.popitem(last=False)
-                self.inspections.discard(cid)
+                            dirty[identity] = current
+            self._evict()
         elif changed or self.unmanaged:
             self.inspections.clear()
             self.states.clear()
@@ -429,14 +478,33 @@ class ReleaseCache:
     def _remember_state(self, cid, state):
         self.states[cid] = state
         self.states.move_to_end(cid)
-        while self.states and (len(self.states) > 8 or sum(len(value.subjects) for value in self.states.values()) > 65536):
+        self._evict(keep=cid)
+
+    def _evict(self, keep=None):
+        """Shed least-recent row subjects before whole states, never a state's release summaries.
+
+        A write past the cap keeps the manifest subject and complete-release
+        summary it needs next, so it re-evaluates only its changed subjects.
+        The caller still holding ``keep`` sees it whole until the next boundary.
+        """
+        total = sum(len(state.subjects) for state in self.states.values())
+        for cid, state in self.states.items():
+            if total <= _MAX_CACHED_SUBJECTS:
+                break
+            if cid == keep or not state.complete:
+                continue
+            total -= len(state.subjects) - 1
+            state.subjects = {state.epoch[0]: state.subjects[state.epoch[0]]}
+            state.complete = False
+            self.inspections.discard(cid)
+        while len(self.states) > _MAX_CACHED_STATES:
             evicted, _ = self.states.popitem(last=False)
             self.inspections.discard(evicted)
 
     def epoch(self, cid):
         row = self.conn.execute(
             "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,c.type_name,c.type_version,"
-            "m.manifest_hash,m.governance_json,t.declaration_hash,t.declaration_json,ct.builtin "
+            "m.manifest_hash,m.governance_json,t.declaration_hash,t.declaration_json,ct.builtin,c.view_mode "
             "FROM collections c JOIN collection_manifests m ON m.collection_id=c.collection_id "
             "AND m.manifest_version=c.manifest_version JOIN collection_type_versions t "
             "ON t.name=c.type_name AND t.version=c.type_version JOIN collection_types ct ON ct.name=c.type_name "
@@ -446,10 +514,15 @@ class ReleaseCache:
             raise ValueError("canonical subject is unavailable")
         return row
 
-    def state(self, cid):
+    def state(self, cid, *, full=False):
+        """The collection's release state; ``full`` callers also need every row subject."""
         self.check()
         epoch = self.epoch(cid)
         current = self.replacements.get(cid) or self.states.get(cid)
+        if full and current is not None and not current.complete:
+            # Streaming recomputation of shed subjects replaces the shed state.
+            self.states.pop(cid, None)
+            current = None
         unexplained = self.pending is not None and self.unmanaged
         if current is None or current.epoch != epoch or unexplained:
             self.inspections.discard(cid)
@@ -457,6 +530,9 @@ class ReleaseCache:
             occupied = Counter(collections._portable_path_key(subject.basis.subject.path)
                                for subject in entries.values() if isinstance(subject.row_id, int))
             current = _CollectionState(epoch, entries, OrderedDict(), occupied)
+            if epoch[11] == "summary":
+                # Summary release never needs row subjects; a residual caller's state is not retained.
+                return current
             if self.pending is not None and (self.pending or self.unmanaged
                                             or self.conn.total_changes != self.observed[0]):
                 self.replacements[cid] = current
@@ -509,6 +585,7 @@ class OperationAuthorization:
         self.catalogs = {}
         self.file_decisions = {}
         self.points = {}
+        self.summary_memo = {}
         self.grants_loaded = False
         self.failed = self.context is not None and not isinstance(
             self.context, authorization_session_lifecycle.AuthorizationSessionContext
@@ -554,7 +631,7 @@ class OperationAuthorization:
 
     def canonical_subjects(self, cid: str) -> tuple[CanonicalSubject, ...]:
         """Immutable unbound bases; only named grants need a session binding."""
-        state = self.cache.state(cid)
+        state = self.cache.state(cid, full=True)
         overlay = self.cache.overlay(cid)
         current = state.subjects
         if overlay:
@@ -609,6 +686,9 @@ class OperationAuthorization:
         path = basis.subject.path
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
+        if basis.default_audience == OWNER_ONLY and not (self.who.resolved
+                                                         and self.who.audience_id == OWNER_AUDIENCE):
+            return Decision(0)
         if self.tombstones and (lifecycle.is_tombstoned_in(self.tombstones, path)
                                or lifecycle.is_tombstoned_in(self.tombstones, basis.identity)):
             return Decision(0)
@@ -632,7 +712,7 @@ class OperationAuthorization:
                 grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
                                                    grant.audience, grant.ceiling))
         effective = self.policy
-        if basis.default_audience == "owner":
+        if basis.default_audience in {"owner", OWNER_ONLY}:
             scopes = {key: replace(scope, default_deny=True) for key, scope in effective.scopes.items()}
             if not scope_ids:
                 default = f"collection-type-default:{basis.type_name}:{basis.type_version}"
@@ -649,22 +729,127 @@ class OperationAuthorization:
         return (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
                 self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation)
 
-    def _release_selection(self, cid: str):
-        """Reuse base policy work, then overlay this operation's fresh grants."""
-        state = self.cache.state(cid)
+    def uniform_release(self) -> bool:
+        """No row-varying policy, grant, exclusion, tombstone or session: one decision per path and audience."""
+        return (self.policy.empty and not self.policy.scopes and not self.policy.rules
+                and not self.policy.grants and not self.tombstones and not self.access["excluded"]
+                and not (self.mutation and self.access["readonly"])
+                and self.context is None and not self.failed)
+
+    def summary_release(self, cid: str) -> SummaryRelease | None:
+        """Decide a summary collection without a row-subject state; None for an items collection.
+
+        Summary rows share the manifest's path, projects and owner-only
+        audience. Unless a scope selects by identity, tag or class, a session
+        grant names a row or a tombstone names one, a single row's decision is
+        every row's, so time and memory stay independent of the row count.
+        Otherwise one stream decides each row, keeps no subject, and refuses
+        past ``MAX_SUMMARY_ROW_DECISIONS`` instead of answering partially.
+        Held candidates keep their own view paths and are decided one by one.
+        """
+        memo = (cid, self.conn.total_changes)
+        if memo in self.summary_memo:
+            return self.summary_memo[memo]
+        head = self.summary_manifest(cid)
+        if head is None:
+            return None
+        manifest, decision = head
+        if decision.level < 6:
+            self.refuse()
+        generation, audit_head, declaration, builtin = self.conn.execute(
+            "SELECT c.generation,c.audit_head,t.declaration_json,ct.builtin FROM collections c "
+            "JOIN collection_type_versions t ON t.name=c.type_name AND t.version=c.type_version "
+            "JOIN collection_types ct ON ct.name=c.type_name WHERE c.collection_id=?", (cid,),
+        ).fetchone()
+        item_type = types.parse_declaration(json.loads(declaration), builtin=bool(builtin)).item_type
+        held = []
+        for (held_id,) in self.conn.execute(
+                "SELECT held_id FROM held_candidates WHERE collection_id=? ORDER BY held_id", (cid,)).fetchall():
+            for subject in subjects(self.conn, cid, self.logical_vault_id,
+                                    identity=f"exomem://collection-held/{cid}/{held_id}"):
+                held.append((subject, self.decision(subject)))
+        rows = self.conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]
+        container = tokens.container_hash(cid, generation, audit_head)
+        visible = hashlib.sha256(b"exomem.collection-summary-visible.v1\0" + manifest.basis.fingerprint.encode())
+        prefix = f"exomem://{item_type}/{cid}/"
+        varies = (self._summary_rows_vary(cid, prefix)
+                  or any(identity.startswith(prefix) for identity in self.grants)
+                  or any(cid in tombstone.casefold() for tombstone in self.tombstones))
+        if not varies:
+            released = 0
+            if rows:
+                key = self.conn.execute("SELECT item_key FROM items WHERE collection_id=? ORDER BY row_id LIMIT 1",
+                                        (cid,)).fetchone()[0]
+                sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + key)))
+                released = rows if self.decision(sample).level >= 6 else 0
+        else:
+            released = visited = 0
+            with closing(iter_subjects(self.conn, cid, self.logical_vault_id, identity=None, view_path=None,
+                                       include_held=False)) as stream:
+                for subject in stream:
+                    if subject.row_id is None:
+                        continue
+                    visited += 1
+                    if visited > MAX_SUMMARY_ROW_DECISIONS:
+                        raise collections.CollectionError(
+                            RELEASE_LIMIT, "summary rows vary by row-level policy past the bound",
+                            {"max_row_decisions": MAX_SUMMARY_ROW_DECISIONS})
+                    if self.decision(_bound(subject, self.logical_vault_id)).level >= 6:
+                        released += 1
+                        visible.update(f"{subject.row_id}:{subject.basis.version}\n".encode())
+        if released == rows:
+            visible.update(container.encode())
+        release = SummaryRelease(manifest, decision, prefix, rows, released, tuple(held), "")
+        release = replace(release, snapshot=container if release.complete else visible.hexdigest())
+        self.summary_memo = {memo: release}
+        return release
+
+    def _summary_rows_vary(self, cid: str, prefix: str) -> bool:
+        """Whether a configured scope can select some summary rows and not others.
+
+        Rows share the manifest's path, projects and type. They differ only by
+        their own ref, and by tags or classes taken from a declared ``tags`` or
+        ``classes`` field (``row_metadata``), so a tag or class selector varies
+        only where some manifest version of this collection declared one.
+        """
+        scopes = self.policy.scopes.values()
+        if any(ref.startswith(prefix) for scope in scopes for ref in (*scope.refs, *scope.exclude_refs)):
+            return True
+        if not any(scope.tags or scope.classes or scope.exclude_tags or scope.exclude_classes for scope in scopes):
+            return False
+        return self.conn.execute(
+            "SELECT 1 FROM collection_manifests WHERE collection_id=? AND (json_type(schema_json,'$.fields.tags') "
+            "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
+        ).fetchone() is not None
+
+    def summary_manifest(self, cid: str) -> tuple[CanonicalSubject, Decision] | None:
+        """A summary collection's manifest subject and decision from one point read; None for items."""
+        found = self.conn.execute(
+            "SELECT manifest_path FROM collections WHERE collection_id=? AND view_mode='summary'", (cid,),
+        ).fetchone()
+        if found is None:
+            return None
         self._load_grants()
+        manifest = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=found[0])))
+        return manifest, self.decision(manifest)
+
+    def _release_selection(self, cid: str, *, full=False):
+        """Reuse base policy work, then overlay this operation's fresh grants."""
+        state = self.cache.state(cid, full=full)
+        self._load_grants()
+        dependency = self._release_dependency()
+        if dependency not in state.summaries and not state.complete:
+            state = self.cache.state(cid, full=True)
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
         manifest_decision = self.decision(manifest)
         if manifest_decision.level < 6:
             self.refuse()
-        dependency = self._release_dependency()
         if dependency not in state.summaries:
             denied = {identity for identity, subject in state.subjects.items() if subject.row_id is not None
                       and self.decision(subject, session=False).level < 6}
-            self.cache._remember(state.summaries, dependency, (denied, set()), 16)
+            self.cache._remember(state.summaries, dependency, (denied, {}), 16)
         denied, dirty = state.summaries[dependency]
-        for identity in dirty:
-            subject = state.subjects.get(identity)
+        for identity, subject in dirty.items():
             if subject is not None and self.decision(subject, session=False).level < 6:
                 denied.add(identity)
             else:
@@ -672,7 +857,26 @@ class OperationAuthorization:
         dirty.clear()
         return state, denied, self.cache.overlay(cid), manifest, manifest_decision
 
+    def _subject(self, cid, state, overlay, identity):
+        """A grant-named subject of this collection, from the overlay, the state or the store."""
+        if identity in overlay or identity in state.subjects or state.complete:
+            return overlay.get(identity, state.subjects.get(identity))
+        subject = self.cache.point(identity)
+        return subject if subject is not None and subject.collection_id == cid else None
+
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
+        try:
+            head = self.summary_manifest(cid)
+            if head is not None:
+                if head[1].level < 6 or (complete and not self.summary_release(cid).complete):
+                    self.refuse()
+                return ()
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
+        except (ValueError, TypeError, StopIteration, sqlite3.Error,
+                authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            self.refuse()
         if complete:
             try:
                 state, denied, overlay, _manifest, _decision = self._release_selection(cid)
@@ -683,7 +887,7 @@ class OperationAuthorization:
                         count += 1
                 # Session authority is fresh and can alter only its named subjects.
                 for identity in self.grants:
-                    subject = overlay.get(identity, state.subjects.get(identity))
+                    subject = self._subject(cid, state, overlay, identity)
                     if subject is None or subject.row_id is None:
                         continue
                     subject = _bound(subject, self.logical_vault_id)
@@ -704,7 +908,7 @@ class OperationAuthorization:
     def released_subjects(self, cid: str) -> tuple[CanonicalSubject, ...]:
         """Current released identities, without loading payloads or rebinding every row."""
         try:
-            state, denied, overlay, _manifest, _decision = self._release_selection(cid)
+            state, denied, overlay, _manifest, _decision = self._release_selection(cid, full=True)
             return self._released_subjects(state, denied, overlay)[1]
         except (ValueError, TypeError, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
@@ -750,7 +954,15 @@ class OperationAuthorization:
 
     def inspection_selection(self, cid: str, *, notices=False) -> _ReleaseSelection:
         try:
-            state, denied, overlay, manifest, manifest_decision = self._release_selection(cid)
+            release = self.summary_release(cid)
+            if release is not None:
+                catalog = (release.manifest, *(subject for subject, _decision in release.held))
+                released = tuple(subject for subject, decision in release.held if decision.level >= 6)
+                return _ReleaseSelection(
+                    catalog, released, release.manifest, None, {}, release.snapshot, released,
+                    (release.decision, *(decision for _subject, decision in release.held)) if notices else None,
+                )
+            state, denied, overlay, manifest, manifest_decision = self._release_selection(cid, full=True)
             grant_decisions = {}
             current, released = self._released_subjects(state, denied, overlay, grant_decisions)
             catalog = tuple(current.values())
@@ -780,7 +992,10 @@ class OperationAuthorization:
                 catalog, released, manifest, basis, grant_decisions,
                 self.visible_snapshot(cid, released), released, notice_decisions,
             )
-        except (ValueError, TypeError, sqlite3.Error,
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
+        except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
 
@@ -826,14 +1041,12 @@ class OperationAuthorization:
             self.refuse()
 
     def visible_snapshot(self, cid: str, allowed: tuple[CanonicalSubject, ...]) -> str:
-        state = self.cache.state(cid)
+        state = self.cache.state(cid, full=True)
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
         current_count = len(state.subjects) - 1
         for identity, subject in self.cache.overlay(cid).items():
             current_count += (subject is not None) - (identity in state.subjects)
         if self.policy.empty and len(allowed) == current_count:
-            from . import tokens
-
             generation, audit_head = self.conn.execute(
                 "SELECT generation,audit_head FROM collections WHERE collection_id=?", (cid,),
             ).fetchone()
@@ -1034,6 +1247,16 @@ class OperationAuthorization:
 
     def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
         """Decode only released rows; the manifest is an independent L6 gate."""
+        try:
+            release = self.summary_release(cid)
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
+        except (ValueError, TypeError, StopIteration, sqlite3.Error,
+                authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            self.refuse()
+        if release is not None:
+            return self._summary_rows(cid, release)
         allowed = self.released_subjects(cid)
         rows = []
         row_ids = [subject.row_id for subject in allowed if isinstance(subject.row_id, int)]
@@ -1045,10 +1268,49 @@ class OperationAuthorization:
         from .typed_storage import hydrate
 
         hydrate(self.conn, rows)
-        rows.sort(key=lambda row: row["view_path"])
+        rows.sort(key=lambda row: (row["view_path"] or "", row["item_key"]))
         return rows, self.visible_snapshot(cid, allowed), {
             subject.row_id for subject in allowed if isinstance(subject.row_id, str)
         }
+
+
+    def _summary_rows(self, cid: str, release: SummaryRelease) -> tuple[list[dict[str, Any]], str, set[str]]:
+        """A whole summary snapshot only within the interactive visit and deadline bounds.
+
+        Larger reads page through a collection query with its continuation;
+        this never returns some of the rows as if they were all of them.
+        """
+        from ..query_engine.runtime import QueryLimits
+        from .typed_storage import hydrate
+
+        limits = QueryLimits()
+        if release.released > limits.max_row_visits:
+            raise collections.CollectionError(
+                "QUERY_COST_LIMIT", "summary rows exceed one bounded read; page them with a collection query",
+                {"released_rows": release.released, "max_row_visits": limits.max_row_visits})
+        deadline = time.monotonic() + limits.timeout_ms / 1000
+        rows = []
+        if release.released:
+            uniform = release.released == release.rows
+            with closing(self.conn.execute("SELECT * FROM items WHERE collection_id=? ORDER BY row_id", (cid,))) as cursor:
+                names = [column[0] for column in cursor.description]
+                while batch := cursor.fetchmany(512):
+                    if time.monotonic() > deadline:
+                        raise collections.CollectionError(
+                            "QUERY_TIMEOUT", "summary rows exceed one bounded read; page them with a collection query",
+                            {"timeout_ms": limits.timeout_ms})
+                    batch = [dict(zip(names, row, strict=True)) for row in batch]
+                    if not uniform:
+                        batch = [row for row in batch if self._summary_row_released(release, row)]
+                    rows.extend(hydrate(self.conn, batch))
+        rows.sort(key=lambda row: row["item_key"])
+        held = {subject.row_id for subject, decision in release.held if decision.level >= 6}
+        return rows, release.snapshot, held
+
+    def _summary_row_released(self, release: SummaryRelease, row: Mapping[str, Any]) -> bool:
+        found = subjects(self.conn, release.manifest.collection_id, self.logical_vault_id,
+                         identity=release.row_prefix + row["item_key"])
+        return bool(found) and self.decision(found[0]).level >= 6
 
 
 def resolve_bound_membership(root: Path, identity: str, candidate: policy.Policy,

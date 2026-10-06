@@ -295,11 +295,9 @@ class ReadSession:
                 if manifest.collection_id != collection_id or manifest.manifest_version.hash != subject.basis.manifest_hash:
                     raise QueryError("COLLECTION_NOT_FOUND")
                 # An admitted manifest proves uniformity only without any
-                # row-varying policy, grant, exclusion or session context.
-                uniform = (operation.policy.empty and not operation.policy.scopes
-                           and not operation.policy.rules and not operation.policy.grants
-                           and not operation.tombstones and not operation.access["excluded"]
-                           and operation.context is None and not operation.failed)
+                # row-varying policy, grant, exclusion or session context, or
+                # for a summary collection by its one representative decision.
+                uniform = operation.uniform_release() or _summary_released(operation, collection_id)
                 yield manifest, subject.basis, subjects, uniform
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
@@ -308,6 +306,21 @@ class ReadSession:
         from .typed_rows import admit_query
 
         return admit_query(self, query, as_of=as_of)
+
+
+def _summary_released(operation, collection_id: str) -> bool:
+    """Whether every row of a summary collection is released, decided without row subjects.
+
+    Past the summary release bound the typed limit is the answer, not a longer
+    admission stream over the same row decisions.
+    """
+    try:
+        release = operation.summary_release(collection_id)
+    except collections.CollectionError as error:
+        if error.code == governance.RELEASE_LIMIT:
+            raise QueryError(error.code, "summary rows vary by row-level policy past the bound") from error
+        raise
+    return release is not None and release.complete
 
 
 @contextmanager

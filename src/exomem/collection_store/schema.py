@@ -38,7 +38,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -579,9 +579,42 @@ def _migrate_to_5(conn: sqlite3.Connection) -> None:
                      f"ON typed_encoding_mappings(collection_id) WHERE state='{state}'")
 
 
+_PROJECTION_COLUMNS = ("path,collection_id,row_id,kind,published_row_version,published_sha256,"
+                       "pending_row_version,pending_sha256,stat_identity,state,install_json")
+
+
+def _migrate_to_6(conn: sqlite3.Connection) -> None:
+    """Record each collection's view mode and admit summary-page projections.
+
+    Existing collections are items mode. Summary pages are collection-level
+    projections, so ``projection_state`` is rebuilt with the ``summary`` kind.
+    """
+    conn.execute("ALTER TABLE collections ADD COLUMN view_mode TEXT NOT NULL DEFAULT 'items' "
+                 "CHECK (view_mode IN ('items', 'summary'))")
+    conn.execute("""CREATE TABLE projection_state_v6(
+      path TEXT PRIMARY KEY,
+      collection_id TEXT REFERENCES collections(collection_id),
+      row_id INTEGER REFERENCES items(row_id),
+      kind TEXT NOT NULL
+        CHECK (kind IN ('manifest', 'item', 'log', 'held', 'history', 'type', 'summary')),
+      published_row_version INTEGER,
+      published_sha256 TEXT,
+      pending_row_version INTEGER,
+      pending_sha256 TEXT,
+      stat_identity TEXT,
+      state TEXT NOT NULL CHECK (state IN ('current', 'pending', 'held')),
+      install_json TEXT
+    ) STRICT""")
+    conn.execute(f"INSERT INTO projection_state_v6({_PROJECTION_COLUMNS}) "
+                 f"SELECT {_PROJECTION_COLUMNS} FROM projection_state")
+    conn.execute("DROP TABLE projection_state")
+    conn.execute("ALTER TABLE projection_state_v6 RENAME TO projection_state")
+
+
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5,
+    6: _migrate_to_6,
 }
 
 

@@ -1718,11 +1718,27 @@ def _inventory_coverage(
 
     writer = selected_writer(root, manifest)
     if writer is not None:
-        items, _, held = writer._operation.authorized_rows(manifest.collection_id)
+        limited = False
+        try:
+            release = writer._operation.summary_release(manifest.collection_id)
+        except collections.CollectionError as error:
+            if error.code != "COLLECTION_RELEASE_LIMIT":
+                raise
+            release, limited = None, True
+        if limited:
+            # Row policy varies past the release bound: the counts are unknown, not zero.
+            committed = held = None
+        elif release is not None:
+            # Summary counts come from the store without reading a row.
+            committed = release.released
+            held = sum(decision.level >= 6 for _subject, decision in release.held)
+        else:
+            items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
+            committed, held = len(items), len(held_ids)
         observations = due_state.collection_observation_coverage(
             root, str(manifest.path), authorize_path=authorize
         )
-        return {"committed": len(items), "held": len(held),
+        return {"committed": committed, "held": held,
                 "unreflected": len(observations["unreflected"])}
     try:
         snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()

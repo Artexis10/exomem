@@ -10,6 +10,13 @@ from .. import record_formats
 from .. import structured_collections as collections
 
 
+def row_source(manifest: collections.CollectionManifest, item: Mapping[str, Any]) -> str:
+    """A row's source: its view file, the log, or a summary row's collection manifest."""
+    if manifest.storage.strategy == "markdown-log":
+        return manifest.storage.source
+    return manifest.path if manifest.view_mode == "summary" else item["view_path"]
+
+
 class StoreAdapter:
     mutable = True
 
@@ -43,10 +50,7 @@ class StoreAdapter:
             fields.append(grammar.note_field)
         records = []
         for item in items:
-            source = collections.SourceVersion(
-                manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
-                self.writer._version(item),
-            )
+            source = collections.SourceVersion(row_source(manifest, item), self.writer._version(item))
             stored = json.loads(item["values_json"])
             values = {name: stored[name] for name in fields if name in stored}
             records.append(record_formats.Record(
@@ -54,7 +58,7 @@ class StoreAdapter:
                 values if self.project_values is None else self.project_values(values),
                 source, record_formats.SourceSpan(0, 0), body=item["body"],
             ))
-            if manifest.storage.strategy == "markdown-items":
+            if manifest.storage.strategy == "markdown-items" and manifest.view_mode == "items":
                 versions.append(source)
         return record_formats.AdapterSnapshot(
             records=tuple(records), snapshot=snapshot, data_snapshot=snapshot,
