@@ -165,13 +165,18 @@ jobs:
           for _ in $(seq 20); do curl -sf http://127.0.0.1:7600/adv/probe > /dev/null && break; sleep 0.5; done
           slots() { sudo cryptsetup luksDump /dev/md/exomem-cells | grep -cE '^  [0-9]+: luks2$'; }
           before=$(slots)
-          if ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
-               -e dedicated_host_tang_url=http://127.0.0.1:7600 ci-dedicated-host.yml > "$RUNNER_TEMP/fake-tang.log" 2>&1; then
-            cat "$RUNNER_TEMP/fake-tang.log"; echo "the role bound to a Tang it could not verify"; exit 1
-          fi
+          rc=0
+          ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+            -e dedicated_host_tang_url=http://127.0.0.1:7600 ci-dedicated-host.yml > "$RUNNER_TEMP/fake-tang.log" 2>&1 || rc=$?
+          after=$(slots)
+          # The evidence, whatever the outcome: the bind task is no_log.
+          echo "playbook rc=$rc; LUKS keyslots before=$before after=$after"
+          sudo clevis luks list -d /dev/md/exomem-cells || true
+          grep -E '^(TASK|fatal|failed|ok|changed|skipping)' "$RUNNER_TEMP/fake-tang.log" | tail -n 80
+          if [ "$rc" = 0 ]; then echo "the role bound to a Tang it could not verify"; exit 1; fi
+          test "$after" = "$before" || { echo "a keyslot was added against the rogue Tang"; exit 1; }
           grep -A3 -F 'TASK [dedicated_host : Bind the array to Tang, pinned to the escrowed signing key]' \
             "$RUNNER_TEMP/fake-tang.log" | grep -F 'fatal: [exomem-agent-ci]'
-          test "$(slots)" = "$before"
       - name: Clevis unlocks the closed array from Tang alone
         run: |
           sudo vgchange --activate n cells
@@ -274,7 +279,8 @@ jobs:
           systemctl status --no-pager systemd-cryptsetup@exomem_cells.service exomem-cells-ready.service \
             k3s-agent.service clevis-luks-askpass.path clevis-luks-askpass.service || true
           sudo journalctl --no-pager -b -u systemd-cryptsetup@exomem_cells.service -u exomem-cells-ready.service \
-            -u clevis-luks-askpass.service -u tangd.socket | tail -n 200 || true
+            -u clevis-luks-askpass.service -u tangd.socket -u 'tangd@*' | tail -n 200 || true
+          sudo clevis luks list -d /dev/md/exomem-cells || true
           sudo dmsetup ls || true
           lsblk || true
       - name: Summarize
