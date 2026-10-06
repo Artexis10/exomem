@@ -259,10 +259,10 @@ Three compiler changes and no fixture, threshold or scorer line:
 - **E1.** An entity that a carried page's served unit names, and that the page
   links, is listed `partial` on `carried_link` with `via` naming the page. It never
   resolves. Each page lists at most two, first named first; a row the caller may
-  not see takes no slot.
+  not see, or one an earlier carried page listed, takes no slot.
 - **E2.** A path, URL or remote in the turn contributes no words to subject
-  evidence; a relative path keeps only its file name. Slash-joined words without
-  a file extension stay prose.
+  evidence; a `./` or `../` path keeps only its file name. Any other slash run,
+  such as `records/staging/prod` or `Node.js/React`, stays prose.
 
 | Case | Raw | A8 | v5 | Change |
 |------|-----|----|----|--------|
