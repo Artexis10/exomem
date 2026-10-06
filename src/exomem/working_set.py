@@ -1995,6 +1995,7 @@ def _carry_by_retrieval(
     timings: Any = None,
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[tuple[str, float], ...]:
     """The pages this turn NAMED, scored, current, and not raw material.
 
@@ -2042,7 +2043,15 @@ def _carry_by_retrieval(
         )
     if state != "available":
         return ()
-    return hits[: working_set_resolve.MAX_ANCHORS]
+    # A page the caller may not see is never counted: as a rival it would turn
+    # the page it may see into a question, which tells it the other exists.
+    return _visible_hits(hits, visible)[: working_set_resolve.MAX_ANCHORS]
+
+
+def _visible_hits(
+    hits: Sequence[tuple[str, float]], visible: Callable[[str], bool] | None
+) -> tuple[tuple[str, float], ...]:
+    return tuple(hit for hit in hits if visible is None or visible(hit[0]))
 
 
 def _carry_groups_by_retrieval(
@@ -2054,6 +2063,7 @@ def _carry_groups_by_retrieval(
     lexical_seconds: float = 0.0,
     skip_terms: str = "",
     contacts: dict[str, set[tuple[int, int]]] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[tuple[tuple[str, float], ...], ...]:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
@@ -2087,7 +2097,7 @@ def _carry_groups_by_retrieval(
         )
     if state != "available":
         return ()
-    return groups
+    return tuple(group for group in (_visible_hits(group, visible) for group in groups) if group)
 
 
 def named_domains(
@@ -3423,6 +3433,7 @@ def _compile_packet(
                 timings=timings,
                 freshness_snapshot=freshness_snapshot,
                 lexical_seconds=lexical_seconds,
+                visible=visible,
             )
         )
         if rival is not None and rival[0] not in band_paths:
@@ -3531,6 +3542,7 @@ def _compile_packet(
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
             contacts=contacts,
+            visible=visible,
         )
         domains, _contested = named_domains(groups)
         every: dict[str, float] = {}
@@ -3865,6 +3877,7 @@ def _named_beside(
         lexical_seconds=lexical_seconds,
         skip_terms=" ".join(sorted(consumed)),
         contacts=contacts,
+        visible=visible,
     )
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:
