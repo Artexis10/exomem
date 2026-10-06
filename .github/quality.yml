@@ -1,0 +1,94 @@
+# Engineering-practices quality check: https://github.com/Artexis10/engineering-practices
+# Read by the `quality` job in .github/workflows/ci.yml. Patterns are globs on
+# repository-relative paths; `*` also matches `/`. A file takes the first class
+# that matches, in the order listed.
+
+classes:
+  fixtures:
+    - "tests/fixtures/*"
+    - "tests/golden/*"
+    - "tests/hook_transcripts/*"
+    - "tests/privacy_fixtures/*"
+    - "tests/tui/__snapshots__/*"
+    - "infra/*/tests/fixtures/*"
+    - "fixture-vault/*"
+  tests:
+    - "tests/*"
+    - "infra/*/tests/*"
+    - ".test_durations.json"
+  eval:
+    - "benchmarks/*"
+  scripts:
+    - "scripts/*"
+    - "infra/scripts/*"
+    - ".github/*"
+  specs:
+    - "openspec/*"
+  # Before docs, so plugin skill text and shipped sample content count as product.
+  product:
+    - "src/*"
+    - "plugins/*"
+    - "infra/*"
+    - "sidecar/*"
+    - "deploy/*"
+    - "contracts/*"
+    - ".claude-plugin/*"
+    - "pyproject.toml"
+    - "uv.lock"
+    - "Dockerfile"
+    - "compose*.yaml"
+    - "server.json"
+  docs:
+    - "docs/*"
+    - "examples/*"
+    - "*.md"
+
+# vulture: Python definitions nothing references, reported on added lines only.
+python:
+  roots:
+    - "src"
+    - "infra/provisioner/src"
+    - "infra/cellctl/src"
+    - "infra/cloud-rehearsal/src"
+  # Textual calls these handlers by name; pydantic reads model_config.
+  ignore_names: ["on_*", "action_*", "watch_*", "model_config"]
+  # Registered with the MCP server, FastAPI or pydantic rather than called.
+  ignore_decorators:
+    - "@mcp_app.custom_route"
+    - "@mcp.resource"
+    - "@mcp.prompt"
+    - "@mcp.tool"
+    - "@app.*"
+    - "@field_validator"
+    - "@model_validator"
+    - "@override"
+
+# jscpd: exact token clones in product code.
+duplicates:
+  paths:
+    - "src"
+    - "infra/provisioner/src"
+    - "infra/cellctl/src"
+    - "infra/cloud-rehearsal/src"
+  ignore: ["**/_sample_vault/**", "**/_scaffold/**"]
+
+test_jobs:
+  - "core tests (py3.13, shard 1/12)"
+  - "core tests (py3.13, shard 2/12)"
+  - "core tests (py3.13, shard 3/12)"
+  - "core tests (py3.13, shard 4/12)"
+  - "core tests (py3.13, shard 5/12)"
+  - "core tests (py3.13, shard 6/12)"
+  - "core tests (py3.13, shard 7/12)"
+  - "core tests (py3.13, shard 8/12)"
+  - "core tests (py3.13, shard 9/12)"
+  - "core tests (py3.13, shard 10/12)"
+  - "core tests (py3.13, shard 11/12)"
+  - "core tests (py3.13, shard 12/12)"
+  - "harness tests (py3.13, shard 1/4)"
+  - "harness tests (py3.13, shard 2/4)"
+  - "harness tests (py3.13, shard 3/4)"
+  - "harness tests (py3.13, shard 4/4)"
+  - "Windows held filesystem (native NTFS)"
+  - "terminal UI (textual, headless + snapshots)"
+  - "product E2E (installed wheel, stdio + HTTP)"
