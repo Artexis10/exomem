@@ -16,7 +16,7 @@ import pytest
 from test_collection_store_legacy_import import CONTEXT, _capture, _connection, _items
 from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_collection_store_writer import store as store
-from test_governance_egress import _external, write_rule, write_scope
+from test_governance_egress import _external, _gov_dir, write_rule, write_scope
 from test_records_bulk_upsert import EVIDENCE, _evidence
 
 from exomem import get_page, mutation_terminal, record_formats, records, vault
@@ -475,3 +475,53 @@ def test_summary_inspection_and_guards_read_no_rows(store, monkeypatch):
                         expected_container_hash=described["lifecycle_guards"]["expected_container_hash"],
                         expected_item_version=_item_version(store, key))
     assert streams == []
+
+
+def test_policy_that_cannot_split_summary_rows_keeps_the_owner_on_one_decision(store, monkeypatch):
+    """A configured scope that cannot tell summary rows apart (a tag selector on a collection with no
+    tags field) put on a per-row decision stream, so the owner's write, inspection or query admission
+    refuses or times out at 100,000 rows."""
+    # A per-row stream would hit this bound long before 100,000 rows; one decision never does.
+    monkeypatch.setattr(governance, "MAX_SUMMARY_ROW_DECISIONS", 1000)
+    write_scope(store.root, paths="Notes/**")
+    scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
+    scope.write_text(scope.read_text() + "tags: [unrelated-tag]\n")
+    write_rule(store.root, ceiling=0)
+    create(store)
+    _seed(store, CID, ITEMS_CAP - 1)
+    store.append_record(CID, item={"title": "The hundred-thousandth"}, why="observe")
+    assert store.inspect_collection(CID)["coverage"]["committed"] == ITEMS_CAP
+    with runtime.read_session(store.root, store.handle.path) as session:
+        assert session.admit(CID).visible_count == ITEMS_CAP
+
+
+def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(store, monkeypatch):
+    """A row-varying summary policy past the decision bound reported as a missing collection, so the
+    owner cannot tell a bounded refusal from a lost collection."""
+    monkeypatch.setattr(governance, "MAX_SUMMARY_ROW_DECISIONS", 10)
+    create(store)
+    bulk(store, [{"title": f"Row {n}"} for n in range(20)])
+    key = store.connection.execute("SELECT item_key FROM items ORDER BY row_id LIMIT 1").fetchone()[0]
+    write_scope(store.root, paths="Notes/**")
+    scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{key}]\n")
+    with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):
+        store.inspect_collection(CID)
+    with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):
+        store.append_record(CID, item={"title": "One more"}, why="observe")
+    with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):
+        with store.read_collection(CID) as manifest:
+            StoreAdapter(store, manifest, None)._read(manifest)
+    with runtime.read_session(store.root, store.handle.path) as session:
+        with pytest.raises(runtime.QueryError, match="COLLECTION_RELEASE_LIMIT"):
+            session.admit(CID)
+
+
+def test_summary_collection_refuses_a_planning_join(store):
+    """A planning join accepted on a summary collection, so every joined planning write loads all of
+    its rows to find partners."""
+    joined = summary_text().replace("lifecycle: active\n", "lifecycle: active\nlinks:\n  plans:\n"
+                                    "    - reference: plan-ref\n      query: {}\n      join: {title: title}\n")
+    with pytest.raises(collections.CollectionError, match="UNSUPPORTED_VIEW_MODE") as refused:
+        store.create_collection(manifest_path(), joined, why="create", scaffold=False)
+    assert refused.value.details["field"] == "links.plans[0].join"

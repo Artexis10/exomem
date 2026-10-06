@@ -38,6 +38,7 @@ from . import tokens, types
 OWNER_ONLY = "owner-only"
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
+RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
 
 
 def _json(value: Any) -> str:
@@ -85,6 +86,12 @@ def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], 
         for name in candidate.get("delete_fields", ()):
             attempted.pop(name, None)
     return row_metadata(schema, attempted, metadata)
+
+
+def _pass_release_limit(error: collections.CollectionError) -> None:
+    """Re-raise the typed summary release limit, which a generic not-found refusal would hide."""
+    if error.code == RELEASE_LIMIT:
+        raise error
 
 
 def _metadata(raw: str) -> dict[str, list[str]]:
@@ -765,8 +772,7 @@ class OperationAuthorization:
         container = tokens.container_hash(cid, generation, audit_head)
         visible = hashlib.sha256(b"exomem.collection-summary-visible.v1\0" + manifest.basis.fingerprint.encode())
         prefix = f"exomem://{item_type}/{cid}/"
-        varies = (any(scope.refs or scope.tags or scope.classes or scope.exclude_refs or scope.exclude_tags
-                      or scope.exclude_classes for scope in self.policy.scopes.values())
+        varies = (self._summary_rows_vary(cid, prefix)
                   or any(identity.startswith(prefix) for identity in self.grants)
                   or any(cid in tombstone.casefold() for tombstone in self.tombstones))
         if not varies:
@@ -786,7 +792,7 @@ class OperationAuthorization:
                     visited += 1
                     if visited > MAX_SUMMARY_ROW_DECISIONS:
                         raise collections.CollectionError(
-                            "COLLECTION_RELEASE_LIMIT", "summary rows vary by row-level policy past the bound",
+                            RELEASE_LIMIT, "summary rows vary by row-level policy past the bound",
                             {"max_row_decisions": MAX_SUMMARY_ROW_DECISIONS})
                     if self.decision(_bound(subject, self.logical_vault_id)).level >= 6:
                         released += 1
@@ -797,6 +803,24 @@ class OperationAuthorization:
         release = replace(release, snapshot=container if release.complete else visible.hexdigest())
         self.summary_memo = {memo: release}
         return release
+
+    def _summary_rows_vary(self, cid: str, prefix: str) -> bool:
+        """Whether a configured scope can select some summary rows and not others.
+
+        Rows share the manifest's path, projects and type. They differ only by
+        their own ref, and by tags or classes taken from a declared ``tags`` or
+        ``classes`` field (``row_metadata``), so a tag or class selector varies
+        only where some manifest version of this collection declared one.
+        """
+        scopes = self.policy.scopes.values()
+        if any(ref.startswith(prefix) for scope in scopes for ref in (*scope.refs, *scope.exclude_refs)):
+            return True
+        if not any(scope.tags or scope.classes or scope.exclude_tags or scope.exclude_classes for scope in scopes):
+            return False
+        return self.conn.execute(
+            "SELECT 1 FROM collection_manifests WHERE collection_id=? AND (json_type(schema_json,'$.fields.tags') "
+            "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
+        ).fetchone() is not None
 
     def summary_manifest(self, cid: str) -> tuple[CanonicalSubject, Decision] | None:
         """A summary collection's manifest subject and decision from one point read; None for items."""
@@ -847,6 +871,9 @@ class OperationAuthorization:
                 if head[1].level < 6 or (complete and not self.summary_release(cid).complete):
                     self.refuse()
                 return ()
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
@@ -965,6 +992,9 @@ class OperationAuthorization:
                 catalog, released, manifest, basis, grant_decisions,
                 self.visible_snapshot(cid, released), released, notice_decisions,
             )
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
@@ -1219,6 +1249,9 @@ class OperationAuthorization:
         """Decode only released rows; the manifest is an independent L6 gate."""
         try:
             release = self.summary_release(cid)
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()

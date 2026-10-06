@@ -1719,7 +1719,7 @@ def _manifest_from_frontmatter(
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
     view_mode = _parse_view_mode(frontmatter.get("view_mode", "items"), profile, storage,
-                                 presentation or item_filename or item_presentation)
+                                 presentation or item_filename or item_presentation, links)
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1747,8 +1747,14 @@ def _manifest_from_frontmatter(
     )
 
 
-def _parse_view_mode(value: object, profile: str, storage: StorageSpec, per_item_recipe: object) -> str:
-    """`items` keeps a view per row; `summary` has no per-row view or recipe to render."""
+def _parse_view_mode(
+    value: object, profile: str, storage: StorageSpec, per_item_recipe: object, links: CollectionLinks
+) -> str:
+    """`items` keeps a view per row; `summary` has no per-row view or recipe to render.
+
+    A summary collection carries no planning join: each joined write would load
+    every summary row to find its partners. Joins are designed after S1.
+    """
     if value not in ("items", "summary"):
         raise CollectionError(
             "INVALID_VIEW_MODE", "view_mode must be items or summary",
@@ -1760,6 +1766,12 @@ def _parse_view_mode(value: object, profile: str, storage: StorageSpec, per_item
             "UNSUPPORTED_VIEW_MODE",
             "summary view mode needs a Records markdown-items collection without per-item presentation",
             {"field": "view_mode", "received": value},
+        )
+    joined = next((index for index, plan in enumerate(links.plans) if plan.join), None)
+    if value == "summary" and joined is not None:
+        raise CollectionError(
+            "UNSUPPORTED_VIEW_MODE", "a summary collection cannot carry a planning join",
+            {"field": f"links.plans[{joined}].join", "received": value},
         )
     return value
 

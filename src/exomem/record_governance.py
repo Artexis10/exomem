@@ -1718,8 +1718,17 @@ def _inventory_coverage(
 
     writer = selected_writer(root, manifest)
     if writer is not None:
-        release = writer._operation.summary_release(manifest.collection_id)
-        if release is not None:
+        limited = False
+        try:
+            release = writer._operation.summary_release(manifest.collection_id)
+        except collections.CollectionError as error:
+            if error.code != "COLLECTION_RELEASE_LIMIT":
+                raise
+            release, limited = None, True
+        if limited:
+            # Row policy varies past the release bound: the counts are unknown, not zero.
+            committed = held = None
+        elif release is not None:
             # Summary counts come from the store without reading a row.
             committed = release.released
             held = sum(decision.level >= 6 for _subject, decision in release.held)
