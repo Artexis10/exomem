@@ -12,6 +12,7 @@ delivery timing and order included.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import dreamer_fixture as fx
@@ -198,3 +199,57 @@ def test_a_withheld_source_that_merges_two_origins_reads_as_absent(tmp_path: Pat
     )
     assert owner["fingerprint"] == stored["fingerprint"]
     assert caller["fingerprint"] != stored["fingerprint"]
+
+
+def test_an_owner_session_start_recomputes_no_fold_or_profile_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing can be withheld from the owner, so its session start is served the
+    stored fold and profile rows; only a restricted caller has them recomputed.
+    The request-path ceiling suite plants a hydration row only, so it cannot
+    see this cost."""
+    # Two recaps and two referrers of two origins link the entity: one fold and
+    # one profile row, under a policy that withholds a folder neither row uses.
+    vault = _build(tmp_path, {})
+    recomputed: list[str] = []
+
+    def counting(family: dreamer_families.Family) -> dreamer_families.Family:
+        def release(ctx, row, keep):
+            recomputed.append(row["kind"])
+            return family.release(ctx, row, keep)
+
+        return dataclasses.replace(family, release=release)
+
+    monkeypatch.setattr(
+        dreamer_families,
+        "REGISTRY",
+        [
+            counting(family)
+            if family in (dreamer_families.FOLD, dreamer_families.PROFILE)
+            else family
+            for family in dreamer_families.REGISTRY
+        ],
+    )
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+    monkeypatch.setattr(upkeep, "_wall", lambda: LATER + 7200)
+
+    def session_start(principal, session: str) -> list[str]:
+        packet = {
+            "recent_context": [{"path": fx.ENTITY, "title": "Orbit Pump", "why": "edited"}],
+            "anchors": [],
+            "budget": {"limit_chars": 4000, "used_chars": 0},
+            "abstention": {"reason": "unresolved"},
+        }
+        with request_scope(principal):
+            upkeep.for_packet(vault, packet, session=session)
+        return [item["kind"] for item in (packet.get("upkeep") or {}).get("items") or ()]
+
+    owner_items = session_start(owner_principal(), "owner")
+    owner_recomputed = list(recomputed)
+    recomputed.clear()
+    _reset_caches()
+    caller_items = session_start(_external(), "external")
+
+    assert owner_recomputed == []
+    assert sorted(recomputed) == sorted([dreamer_families.FOLD_KIND, dreamer_families.PROFILE_KIND])
+    assert owner_items == caller_items == [dreamer_families.FOLD_KIND]
