@@ -227,9 +227,12 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
     """Every item that unreconciled foreign evidence changed after its common ancestor (§15 item 5).
 
     Returns the sealed preview and the full items, with the foreign values to hold. Every
-    effect kind counts as a change, a foreign hold included. Items equal to this store's
-    row carry nothing to decide and are only counted, as are changes already held
-    (``already_held``), so a repeat with nothing new applies nothing. ``reconciled`` names the evidence
+    effect kind counts as a change, a foreign hold included. Several evidence files from
+    one foreign instance collapse to its latest change per item, by the commit that made
+    it, so an older change never supersedes a newer hold. Items equal to this
+    store's row carry nothing to decide and are only counted, as are changes already held
+    (``already_held``) on the same local base, so a repeat with nothing new applies
+    nothing; a changed local base re-holds. ``reconciled`` names the evidence
     that applying marks done: only files whose every changed item becomes a hold. A
     change that cannot be held here is listed in ``skipped`` with its code and reason, and
     its file stays unreconciled until the owner acknowledges the skipped changes.
@@ -237,7 +240,7 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
     root = Path(vault_root).resolve()
     meta = dict(local.execute("SELECT key,value FROM store_meta"))
     done = set(json.loads(meta.get(schema.META_RECONCILED_FOREIGN) or "[]"))
-    sources, skipped, items, unchanged, already_held = [], [], [], 0, 0
+    sources, skipped, latest = [], [], {}
     scratch = connection.store_path(root).parent
     for path in sorted(replica.replica_path(root).parent.glob(_FOREIGN_PREFIX + "*")):
         with _evidence(path, scratch) as (digest, conn, foreign):
@@ -250,8 +253,8 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
             ancestor = _common_ancestor(local, conn)
             sources.append({"leaf": path.name, "sha256": digest, **_head(foreign),
                             "common_ancestor_commit_seq": ancestor})
-            for cid, key, effects in conn.execute(
-                "SELECT t.collection_id,e.item_key,group_concat(DISTINCT e.effect) FROM audit_effects e "
+            for cid, key, effects, changed_at in conn.execute(
+                "SELECT t.collection_id,e.item_key,group_concat(DISTINCT e.effect),max(t.commit_seq) FROM audit_effects e "
                 "JOIN txns t ON t.txn_id=e.txn_id WHERE t.commit_seq>? AND e.item_key IS NOT NULL "
                 "GROUP BY 1,2 ORDER BY 1,2",
                 (ancestor,),
@@ -265,25 +268,32 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
                 if row is None:
                     skipped.append({**where, **_SKIPPED["no_committed_row"]})
                     continue
-                mine = local.execute("SELECT row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?",
-                                     (cid, key)).fetchone()
-                if mine is not None and mine[1] == row[3]:
-                    unchanged += 1
-                    continue
                 held_id = hashlib.sha256(
                     f"store-delta\0{foreign[schema.META_INSTANCE_ID]}\0{cid}\0{key}".encode()).hexdigest()[:24]
-                held = local.execute("SELECT diagnostics_json FROM held_candidates WHERE held_id=?",
-                                     (held_id,)).fetchone()
-                if held is not None and _held_change(held[0]) == (row[1], row[3], None if mine is None else mine[0]):
-                    already_held += 1
-                    continue
-                items.append({"collection_id": cid, "item_key": key, "held_id": held_id, "evidence_leaf": path.name,
-                              "evidence_sha256": digest, "foreign_instance_id": foreign[schema.META_INSTANCE_ID],
-                              "foreign_commit_seq": int(foreign[schema.META_COMMIT_SEQ]),
-                              "common_ancestor_commit_seq": ancestor, "foreign_effects": sorted(effects.split(",")),
-                              "foreign_row_version": row[1], "foreign_payload_hash": row[3],
-                              "local_row_version": None if mine is None else mine[0],
-                              "values": typed_storage.item_values(conn, row[0]), "body": row[2]})
+                found = {"collection_id": cid, "item_key": key, "held_id": held_id, "evidence_leaf": path.name,
+                         "evidence_sha256": digest, "foreign_instance_id": foreign[schema.META_INSTANCE_ID],
+                         "foreign_commit_seq": int(foreign[schema.META_COMMIT_SEQ]), "foreign_change_commit_seq": changed_at,
+                         "common_ancestor_commit_seq": ancestor, "foreign_effects": sorted(effects.split(",")),
+                         "foreign_row_version": row[1], "foreign_payload_hash": row[3]}
+                if held_id not in latest or _change_order(found) > _change_order(latest[held_id]):
+                    latest[held_id] = {**found, "values": typed_storage.item_values(conn, row[0]), "body": row[2]}
+    items, unchanged, already_held = [], 0, 0
+    for held_id, item in sorted(latest.items()):
+        mine = local.execute("SELECT row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?",
+                             (item["collection_id"], item["item_key"])).fetchone()
+        if mine is not None and mine[1] == item["foreign_payload_hash"]:
+            unchanged += 1
+            continue
+        item["local_row_version"] = None if mine is None else mine[0]
+        held = local.execute("SELECT diagnostics_json FROM held_candidates WHERE held_id=?", (held_id,)).fetchone()
+        if held is not None:
+            current = json.loads(held[0])[0]
+            if _change_order(current) > _change_order(item) or (
+                    _change_order(current) == _change_order(item)
+                    and current.get("local_row_version") == item["local_row_version"]):
+                already_held += 1
+                continue
+        items.append(item)
     unresolved = {entry["sha256"] for entry in skipped}
     reconciled = [source["sha256"] for source in sources if source["sha256"] not in unresolved]
     shown = [{name: value for name, value in item.items() if name not in {"values", "body"}} for item in items]
@@ -291,7 +301,6 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
                     "already_held": already_held, "reconciled": reconciled}), items
 
 
-def _held_change(diagnostics):
-    """The foreign row version and payload, and this store's base, a store-delta hold was made for."""
-    found = json.loads(diagnostics)[0]
-    return found.get("foreign_row_version"), found.get("foreign_payload_hash"), found.get("local_row_version")
+def _change_order(change):
+    """A foreign change's place in its instance's history: the commit that last changed the item."""
+    return change.get("foreign_change_commit_seq", -1)

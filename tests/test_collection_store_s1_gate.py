@@ -38,6 +38,7 @@ from exomem.collection_store import (
     schema,
     snapshot,
     takeover,
+    tokens,
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.preview import preview_store
@@ -682,7 +683,7 @@ def test_steady_writes_reach_the_replica_off_ack_at_most_once_per_window(abc, mo
     calls = _counted_publications(monkeypatch)
     for index in range(5):
         abc.write_c(str(uuid.uuid4()), f"steady {index}")
-    assert not calls  # publication stays off the acknowledgement path
+    assert not calls  # no publication runs inside a write; the coalesced one follows the burst
     _published(abc)
     assert len(calls) == 1
 
@@ -1056,10 +1057,26 @@ def _write_and_create_on_the_copy(found):
     found.release()
 
 
-def _write_again_on_the_copy(found):
+def _change_later_on_the_copy(found):
     assert found.open() == {"status": "admitted"}
-    found.write_c(str(uuid.uuid4()), "Second from the other host")
+    with preview_store(found.root, found.manager._collection_store) as writer:
+        with found.manager.mutation_guard(found.root):
+            with writer._authorization():
+                container = writer._container(writer._collection(CID)[0])
+            row_version, payload_hash = writer.connection.execute(
+                "SELECT row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?", (CID, LATER)).fetchone()
+            version = tokens.item_version(CID, LATER, row_version, payload_hash)
+            writer.update_record(CID, item_key=LATER, changes={"title": "Changed again on the other host"},
+                                 expected_container_hash=container, expected_item_version=version, why="gate write")
     found.release()
+
+
+def _held_later(found):
+    """The foreign row version of each LATER hold: one hold, at the newest change delivered."""
+    with closing(connection.open_reader(found.session.path)) as reader:
+        rows = reader.execute("SELECT candidate_json,diagnostics_json FROM held_candidates").fetchall()
+    return [json.loads(diagnostics)[0]["foreign_row_version"]
+            for candidate, diagnostics in rows if json.loads(candidate)["item_key"] == LATER]
 
 
 def _deliver_and_adopt(found, copy, why):
@@ -1092,24 +1109,22 @@ def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(
     assert plan["preview"]["reconciled"] == []
     first = admission.reconcile_store(abc.session, abc.manager, why="hold", preview_id=plan["preview_id"],
                                       fence_client=abc.operator)
-    run_host(tmp_path, tmp_path / "state-b", "host-b", _write_again_on_the_copy, **elsewhere)
+    assert _held_later(abc) == [1]
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _change_later_on_the_copy, **elsewhere)
     _deliver_and_adopt(abc, copy, "keep A over the second delivery")
     plan = admission.reconcile_store(abc.session, abc.manager, why="hold again", fence_client=abc.operator)
     assert len(plan["preview"]["sources"]) == 2 and plan["preview"]["reconciled"] == []
-    assert plan["preview"]["already_held"] == 2  # LATER, unchanged, in both files
     second = admission.reconcile_store(abc.session, abc.manager, why="hold again", preview_id=plan["preview_id"],
                                        fence_client=abc.operator)
-    assert len(second["held_ids"]) == 1 and first["held_ids"][0] not in second["held_ids"]
-    with closing(connection.open_reader(abc.session.path)) as reader:
-        held = [json.loads(candidate)["item_key"]
-                for (candidate,) in reader.execute("SELECT candidate_json FROM held_candidates")]
-    assert len(held) == 2 and held.count(LATER) == 1
-    plan = admission.reconcile_store(abc.session, abc.manager, why="nothing new", fence_client=abc.operator)
+    assert (second["held_ids"], second["superseded"]) == (first["held_ids"], 1)
+    assert _held_later(abc) == [2]
     sequence = abc.meta()[schema.META_COMMIT_SEQ]
-    repeat = admission.reconcile_store(abc.session, abc.manager, why="nothing new", preview_id=plan["preview_id"],
-                                       fence_client=abc.operator)
-    assert (plan["preview"]["items"], repeat["held_ids"], repeat["transitions"]) == ([], [], [])
-    assert abc.meta()[schema.META_COMMIT_SEQ] == sequence
+    for _ in range(2):  # both files stay unreconciled; neither the older change nor a repeat moves the hold
+        plan = admission.reconcile_store(abc.session, abc.manager, why="nothing new", fence_client=abc.operator)
+        repeat = admission.reconcile_store(abc.session, abc.manager, why="nothing new",
+                                           preview_id=plan["preview_id"], fence_client=abc.operator)
+        assert (plan["preview"]["items"], repeat["held_ids"], repeat["transitions"]) == ([], [], [])
+        assert (abc.meta()[schema.META_COMMIT_SEQ], _held_later(abc)) == (sequence, [2])
     _lease_environment(abc, monkeypatch)
     assert cli._collections_main(["adopt-local", "--vault", str(abc.root), "--why", "the copy-only collection is gone",
                                   "--preview-id", plan["preview_id"], "--acknowledge-skipped"]) == 0

@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .. import held_fs, reserved_paths
+from ..cli_ops import OpError
 from ..kbdir import kb_dirname
 from . import connection, schema, snapshot, tokens
 
@@ -817,6 +818,10 @@ def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, 
             return PublicationResult("retry_pending", reason=error.code)
         except (TimeoutError, held_fs.HeldFsError, OSError, sqlite3.OperationalError) as error:
             return PublicationResult("retry_pending", reason=str(error))
+    except OpError as error:
+        # Either step's authority check: the lease manager fenced this token or could not
+        # reach the coordinator. The copy is abandoned like a lost lease; the next window retries.
+        return PublicationResult("retry_pending", reason=str(error))
     finally:
         serial.lock.release()
 

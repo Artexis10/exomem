@@ -1055,9 +1055,9 @@ class CollectionWriter:
 
         No canonical row changes. Each item another store instance changed after the
         common ancestor is held as a view correction carrying that store's latest values
-        and diagnostics for an owner decision under the plan's ``held_id``; a later change
-        by the same instance to the same item supersedes that hold. The plan leaves out a
-        change already held, so a repeat with nothing new records nothing.
+        and diagnostics for an owner decision under the plan's ``held_id``, superseding an
+        older hold. The plan carries one latest change per held id and leaves out a change
+        already held, so a repeat with nothing new records nothing.
         The ``reconciled`` evidence digests are marked, a view-stamp divergence is cleared,
         and the reconciliation is recorded as one content-free control transition per
         affected collection. ``acknowledged`` are the preview's skipped changes the owner
@@ -1068,15 +1068,11 @@ class CollectionWriter:
         for entry in acknowledged:
             ref = entry["sha256"] if "item_key" not in entry else f"{entry['collection_id']}:{entry['item_key']}"
             skipped.setdefault(f"skipped_{entry['code']}", []).append(ref)
-        latest = {}
-        for item in items:
-            identity = (item["foreign_instance_id"], item["collection_id"], item["item_key"])
-            if identity not in latest or item["foreign_commit_seq"] > latest[identity]["foreign_commit_seq"]:
-                latest[identity] = item
         with self._mutation(reconcile=True):
             self._publication.bind(result)
             touched = {}
-            for (_instance, cid, key), item in sorted(latest.items()):
+            for item in items:
+                cid, key = item["collection_id"], item["item_key"]
                 _, manifest, _ = self._collection(cid)
                 reference = item["held_id"]
                 path = f"{records._held_directory(manifest)}/{reference}.md"
