@@ -4011,14 +4011,28 @@ def _attach_raw_content(
     return out
 
 
+def projects_origin(vault_root: Path, policy: Policy, principal: RequestPrincipal) -> bool:
+    """Whether a read withholds origin carriers from `principal`.
+
+    With no configured audience nothing is projected, and nothing is ever
+    withheld from the owner, so the owner reads every page as written.
+    """
+    return not _file_policy_empty(vault_root, policy) and not (
+        principal.resolved and principal.audience_id == OWNER_AUDIENCE
+    )
+
+
 def _project_page_origin(
     vault_root: Path,
     page: dict[str, Any],
     *,
+    policy: Policy,
     principal: RequestPrincipal,
     purpose: str | None,
     snapshot_content: str | bytes | None,
 ) -> tuple[dict[str, Any], bool]:
+    if not projects_origin(vault_root, policy, principal):
+        return page, False
     text = snapshot_content if snapshot_content is not None else page.get("body")
     if isinstance(text, bytes):
         try:
@@ -4264,7 +4278,12 @@ def annotate_page(
         )
 
     page, origin_redacted = _project_page_origin(
-        vault_root, page, principal=who, purpose=declared_purpose, snapshot_content=snapshot_content
+        vault_root,
+        page,
+        policy=policy,
+        principal=who,
+        purpose=declared_purpose,
+        snapshot_content=snapshot_content,
     )
     # L5/L6: the page is released. Its own provenance must still not name a
     # sub-notice item (D3 applies the strip at EVERY level, not just below

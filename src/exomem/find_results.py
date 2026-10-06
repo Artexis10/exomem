@@ -158,7 +158,7 @@ def semantic_excerpt(
     keyword_excerpt: str | None,
 ) -> str:
     """Prefer the matching chunk text, then fall back to the keyword excerpt."""
-    if provenance.origin_prose(page.body, owner_path=page.rel_path) != page.body:
+    if page.search_body != page.body:
         # A stored chunk may start inside a carrier, without its opening marker.
         return make_excerpt(page, query_norm) or stem_anchored_excerpt(page, query_norm)
     if best_chunk:

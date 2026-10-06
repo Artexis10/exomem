@@ -7,7 +7,7 @@ import pytest
 
 from exomem import origin_bindings, provenance, semantic_index, source_closure
 from exomem.governance import egress
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.vault import PlannedWrite, batch_atomic_write
 
 _ID = "12345678-1234-5678-1234-567812345678"
@@ -711,16 +711,66 @@ def test_stale_or_unconfigured_origin_stays_readable_as_written(
     assert "Public claim" in json.dumps(unit, default=str)
 
 
-def test_search_never_matches_text_that_lives_only_in_an_origin_carrier(vault: Path) -> None:
-    """A carrier is attribution, not prose: matching it would make search an oracle for it."""
+@pytest.mark.parametrize(
+    "prefix", ["", "```\n", "Para.\n\n    "], ids=["prose", "unclosed-fence", "indented-into-code"]
+)
+def test_search_never_matches_text_that_lives_only_in_an_origin_carrier(
+    vault: Path, prefix: str
+) -> None:
+    """A carrier is attribution, not prose: matching it would make search an oracle for it.
+
+    Every audience searches the same fields, so a hand edit that pushes the
+    carrier into code must not turn its payload into searchable text.
+    """
     from exomem import commands
 
-    created, _rationale = _parent_with_origin(vault, configured=True)
+    created, rationale = _parent_with_origin(vault, configured=True)
+    _hand_edit_above_carrier(vault / created.path, prefix)
     with request_scope(RequestPrincipal(audience_id="client-a")):
-        found = commands.op_find(vault, query="rationale authorized reader fixture-agent")
-        claim = commands.op_find(vault, query="Public claim")
+        found = commands.op_find(
+            vault, query="rationale authorized reader fixture-agent", mode="keyword"
+        )
+        claim = commands.op_find(vault, query="Public claim", mode="keyword")
     assert created.path not in json.dumps(found, default=str)
-    assert created.path in json.dumps(claim, default=str)
+    claim_wire = json.dumps(claim, default=str)
+    assert created.path in claim_wire
+    assert rationale not in claim_wire and "fixture-agent" not in claim_wire
+
+
+def test_a_restricted_pack_never_ledes_with_a_carrier_pushed_into_code(vault: Path) -> None:
+    """A packed page's lede is prose for every audience, never an indented carrier."""
+    from exomem import commands
+
+    created, rationale = _parent_with_origin(vault, configured=True)
+    _hand_edit_above_carrier(vault / created.path, "    ")
+    with request_scope(RequestPrincipal(audience_id="client-a")):
+        packed = commands.op_find(vault, query="Public claim", mode="keyword", pack=True)
+    assert created.path in packed["pack"]["packed_paths"]
+    wire = json.dumps(packed, default=str)
+    assert rationale not in wire and "fixture-agent" not in wire
+
+
+def test_the_owner_reads_a_fenced_carrier_example_as_written_in_a_configured_vault(
+    vault: Path,
+) -> None:
+    """Nothing is withheld from the owner, so a documented example stays literal."""
+    from test_episode_recovery import _write_source_rule
+
+    from exomem import commands, note
+
+    _write_source_rule(vault, ceiling=6)
+    example = "```\n<!-- exomem-origin:v1 {\"example\":true} -->\n```\n"
+    with request_scope(owner_principal(surface="mcp")):
+        created = note.note(
+            vault,
+            content="How a carrier looks:\n\n" + example,
+            note_type="insight",
+            title="Documented carrier example",
+            status="draft",
+        )
+        read = commands.op_get(vault, path=created.path, include_raw=True)
+    assert example in read["body"]
+    assert read["content"] == (vault / created.path).read_text(encoding="utf-8")
 
 
 def test_an_excerpt_never_starts_with_released_origin_metadata(vault: Path) -> None:

@@ -174,10 +174,14 @@ class ParsedPage:
 
     @cached_property
     def search_body(self) -> str:
-        """The body every search field reads: origin carriers are not prose."""
+        """The body every search field reads: origin carriers are not prose.
+
+        Every audience is served from these fields, so a carrier a hand edit
+        pushed into code is withheld too (`provenance.withheld_prose`).
+        """
         from . import provenance
 
-        return provenance.origin_prose(self.body, owner_path=self.rel_path)
+        return provenance.withheld_prose(self.body, owner_path=self.rel_path)
 
     @cached_property
     def body_stripped(self) -> str:

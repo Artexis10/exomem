@@ -550,11 +550,12 @@ def parse_page(
     display_frontmatter = frontmatter
     authored_title = frontmatter.get("title")
     if authored_title is not None:
-        display_title = provenance.origin_prose(str(authored_title), owner_path=rel_path)
+        # Titles are search fields every audience reads, like `search_body`.
+        display_title = provenance.withheld_prose(str(authored_title), owner_path=rel_path)
         if display_title != str(authored_title):
             display_frontmatter = {**frontmatter, "title": display_title}
     title = resolve_display_title(
-        display_frontmatter, provenance.origin_prose(body, owner_path=rel_path), path
+        display_frontmatter, provenance.withheld_prose(body, owner_path=rel_path), path
     )
 
     return ParsedPage(

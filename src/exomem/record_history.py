@@ -247,9 +247,10 @@ def read(
         versions = [name[: -len(_SUFFIX)] for name in names]
         older = [version for version in versions if after is None or version < after]
         page = older[:page_size]
-        reader = effective_principal().audience_id
-        # The live row's gate: with no configured audience nothing is projected.
-        project = not egress._file_policy_empty(root, policy)  # noqa: SLF001
+        principal = effective_principal()
+        reader = principal.audience_id
+        # The live row's gate: no configured audience, or the owner, sees it as kept.
+        project = egress.projects_origin(root, policy, principal)
         revisions = []
         for version in page:
             revision = _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)

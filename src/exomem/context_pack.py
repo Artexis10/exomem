@@ -235,7 +235,8 @@ def _outline(lines: list[str]) -> list[str]:
 
 
 def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS) -> dict:
-    lines = _strip_fences(provenance.origin_prose(page.body, owner_path=page.rel_path))
+    # Packs serve every audience: a carrier pushed into code is withheld too.
+    lines = _strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path))
     return {
         "title": page.title,
         "type": page.page_type,
@@ -531,7 +532,7 @@ def _neighborhood(
         lede = (
             _cap(
                 _first_sentence(
-                    _lede(_strip_fences(provenance.origin_prose(page.body, owner_path=page.rel_path)))
+                    _lede(_strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path)))
                 ),
                 _NEIGHBOR_LEDE_CHARS,
             )
