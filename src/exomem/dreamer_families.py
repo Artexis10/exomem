@@ -318,6 +318,10 @@ class Family:
     #: members that caller may see, or None when the family's minimum does not
     #: hold on them. Families without it are served from the stored row.
     release: Callable[[Context, dict[str, Any], Any], dict[str, Any] | None] | None = None
+    #: The stored row is `release` with nothing withheld, so a caller who can be
+    #: withheld nothing is served it as stored. Alias and convention store a
+    #: superset row instead, recomputed for every caller.
+    stores_whole_view: bool = False
 
 
 def _status(page: Any) -> str:
@@ -1981,6 +1985,7 @@ def _subject_family(
         revalidate=revalidate,
         propose=propose,
         release=release,
+        stores_whole_view=True,
     )
 
 
@@ -2026,17 +2031,34 @@ def tick_start(ctx: Context) -> None:
         ctx.store.set_meta(ctx.conn, _REGISTRY_META, registry.content_hash)
 
 
-def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
-    """One stored row as a caller whose release predicate is `keep` may see it.
+def served_per_caller(row: dict[str, Any], *, withheld: bool) -> bool:
+    """Whether `row` is recomputed for a caller, rather than served as stored.
 
-    A family without per-item egress is served from its stored row. A family
-    with a `release` hook (alias, convention, fold and profile) recomputes the
-    row from the pages and Sources that caller may see, so a withheld page
-    equals an absent one in every served field, count and fingerprint. None when the family's minimum does not hold on them, or the
-    sidecar cannot be read without waiting.
+    `withheld` says whether any page can be withheld from that caller. Alias
+    and convention rows are always recomputed. Fold and profile rows are
+    recomputed only when something can be withheld: otherwise the stored row
+    is that caller's exact view.
     """
     family = family_for(str(row.get("family") or ""))
     if family is None or family.release is None:
+        return False
+    return withheld or not family.stores_whole_view
+
+
+def release(
+    ctx: Context, row: dict[str, Any], keep, *, withheld: bool = True
+) -> dict[str, Any] | None:
+    """One stored row as a caller whose release predicate is `keep` may see it.
+
+    A row that `served_per_caller` does not recompute is served as stored.
+    The others (alias and convention always, fold and profile when a page can
+    be withheld from the caller) are recomputed from the pages and Sources
+    that caller may see. A withheld page then equals an absent one in every
+    served field, count and fingerprint. None when the family's minimum does
+    not hold on them, or the sidecar cannot be read without waiting.
+    """
+    family = family_for(str(row.get("family") or ""))
+    if family is None or family.release is None or not served_per_caller(row, withheld=withheld):
         return row
     try:
         return family.release(ctx, row, keep)

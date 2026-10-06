@@ -178,14 +178,23 @@ def test_a_withheld_source_that_merges_two_origins_reads_as_absent(tmp_path: Pat
         assert all(result.stop_reason != "error" for result in results), results
     _reset_caches()
 
-    def profile_why() -> str:
+    def profile_item() -> dict:
         items = upkeep.review(vault, limit=50)["items"]
-        return next(item["why"] for item in items if item["kind"] == dreamer_families.PROFILE_KIND)
+        return next(item for item in items if item["kind"] == dreamer_families.PROFILE_KIND)
 
     with request_scope(owner_principal()):
-        owner = profile_why()
+        owner = profile_item()
     _reset_caches()
     with request_scope(_external()):
-        caller = profile_why()
-    assert owner.startswith("pages from 2 independent sources"), owner
-    assert caller.startswith("pages from 3 independent sources"), caller
+        caller = profile_item()
+    assert owner["why"].startswith("pages from 2 independent sources"), owner["why"]
+    assert caller["why"].startswith("pages from 3 independent sources"), caller["why"]
+    # The owner is served the stored row, so its dismissals and the delivery
+    # ledger bind to the fingerprint the worker stored.
+    stored = next(
+        row
+        for row in dreamer_store.read_view(vault).candidates
+        if row["kind"] == dreamer_families.PROFILE_KIND
+    )
+    assert owner["fingerprint"] == stored["fingerprint"]
+    assert caller["fingerprint"] != stored["fingerprint"]
