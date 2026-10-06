@@ -2905,56 +2905,64 @@ def guard_working_set(
     }
 
     decisions: dict[str, Decision | None] = {}
-    if not _file_policy_empty(vault_root, policy):
+    policy_decides = not _file_policy_empty(vault_root, policy)
+    if policy_decides:
         grants_hash = _grants_hash(policy)
         declared_purpose = _declared_purpose(vault_root, who, purpose)
-        for rel_path in sorted(path for path in named_paths if path):
-            decision = _decide_path(
-                vault_root,
-                rel_path,
-                policy=policy,
-                audience=who.audience_id,
-                purpose=declared_purpose,
-                grants_hash=grants_hash,
-                authorization_session=who.authorization_session_id,
-                authorization_context=who.verified_authorization_session,
-            )
-            decisions[rel_path] = decision
-            if decision is not None:
-                if decision.level < RELEASE_FLOOR:
-                    withheld.add(rel_path)
-            elif rel_path in tombstoned or (vault_root / rel_path).exists():
-                # `_decide_path` returns `None` for BOTH a genuinely
-                # tombstoned/unreadable/unclassifiable EXISTING path and a
-                # path that simply does not exist. The latter is expected
-                # for a PHANTOM interpretation reading (R3): `named_paths`
-                # is the union of every candidate's readings
-                # (`_interpretations_for`), and an ambiguous candidate's
-                # non-real readings are validated as safe relative paths
-                # (`_is_safe_relative_path`) but never claimed to exist.
-                # Adding a phantom reading to `withheld` corrupts
-                # `frozen`'s canonical-key comparisons (`_names_withheld`)
-                # against every OTHER field in the packet -- and a phantom
-                # reading is frequently IDENTICAL to the candidate's own
-                # original text (`path.md#current`'s literal-reading IS
-                # `ref` itself), so it falsely matched its own item, as
-                # though a real withheld page shared that exact spelling --
-                # dropping a unit under a policy scoped to an entirely
-                # different folder. Only an existing-but-undecidable path is
-                # withheld here; the invalid_refs computation below makes
-                # the identical existence check for the phantom-vs-denied
-                # distinction, against `decisions`/`tombstoned`/the
-                # filesystem.
+
+    def decide(rel_path: str) -> None:
+        """Decide `rel_path` for this caller, record the outcome, and add it to
+        `withheld` when it may not be released. Only with a file policy."""
+        decision = _decide_path(
+            vault_root,
+            rel_path,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+            authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
+        )
+        decisions[rel_path] = decision
+        if decision is not None:
+            if decision.level < RELEASE_FLOOR:
                 withheld.add(rel_path)
-            _outcome_for_decision(
-                vault_root,
-                rel_path,
-                decision=decision,
-                policy=policy,
-                audience=who.audience_id,
-                outcome="withheld" if rel_path in withheld else "released",
-                purpose=declared_purpose,
-            )
+        elif rel_path in tombstoned or (vault_root / rel_path).exists():
+            # `_decide_path` returns `None` for BOTH a genuinely
+            # tombstoned/unreadable/unclassifiable EXISTING path and a
+            # path that simply does not exist. The latter is expected
+            # for a PHANTOM interpretation reading (R3): `named_paths`
+            # is the union of every candidate's readings
+            # (`_interpretations_for`), and an ambiguous candidate's
+            # non-real readings are validated as safe relative paths
+            # (`_is_safe_relative_path`) but never claimed to exist.
+            # Adding a phantom reading to `withheld` corrupts
+            # `frozen`'s canonical-key comparisons (`_names_withheld`)
+            # against every OTHER field in the packet -- and a phantom
+            # reading is frequently IDENTICAL to the candidate's own
+            # original text (`path.md#current`'s literal-reading IS
+            # `ref` itself), so it falsely matched its own item, as
+            # though a real withheld page shared that exact spelling --
+            # dropping a unit under a policy scoped to an entirely
+            # different folder. Only an existing-but-undecidable path is
+            # withheld here; the invalid_refs computation below makes
+            # the identical existence check for the phantom-vs-denied
+            # distinction, against `decisions`/`tombstoned`/the
+            # filesystem.
+            withheld.add(rel_path)
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=who.audience_id,
+            outcome="withheld" if rel_path in withheld else "released",
+            purpose=declared_purpose,
+        )
+
+    if policy_decides:
+        for rel_path in sorted(path for path in named_paths if path):
+            decide(rel_path)
 
     # A candidate the guard could not resolve to a single real page has
     # a SET of interpretations instead (R3): a plain string containing `#`
@@ -3081,6 +3089,17 @@ def guard_working_set(
         relisted = working_set.relist_carried_links(
             vault_root, guarded["anchors"], guarded["units"], purpose=purpose
         )
+        # A relisted row may be one this packet never named, so nothing above
+        # decided it. It is decided here for this caller, like every named path,
+        # rather than trusted to the compiler's own view of the reader.
+        for entry in relisted:
+            rel_path = str(entry.get("path") or "")
+            if not rel_path or rel_path in decisions or rel_path in withheld:
+                continue
+            if lifecycle.is_tombstoned(vault_root, rel_path):
+                withheld.add(rel_path)
+            elif policy_decides:
+                decide(rel_path)
         guarded["anchors"] = [
             anchor
             for anchor in guarded["anchors"]
@@ -3088,7 +3107,9 @@ def guard_working_set(
         ] + [
             anchor
             for anchor in (
-                _guarded_anchor(entry, frozen, decisions, invalid_refs) for entry in relisted
+                _guarded_anchor(entry, frozen, decisions, invalid_refs)
+                for entry in relisted
+                if str(entry.get("path") or "") not in withheld
             )
             if anchor is not None
         ]
