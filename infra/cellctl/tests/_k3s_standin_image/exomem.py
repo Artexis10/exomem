@@ -6,8 +6,10 @@ was not yet available when this test was written (see the delivery report).
 It implements just enough of the D5 contract manifests.py assumes to
 exercise cellctl end-to-end against a real cluster:
 
-- `exomem cell-init --vault <path>`: creates the vault directory (what the
-  real cell-init container is assumed to do) and exits 0.
+- `exomem cell-init --vault <path>`: creates the vault directory with a
+  vault sentinel (what the real cell-init container is assumed to do) and
+  exits 0. vault.py, installed as exomem.vault, finds that sentinel for the
+  backup Job.
 - `exomem --transport http --host <h> --port <p>`: serves /health and
   /health/ready (used by the StatefulSet's liveness/readiness probes) plus
   two test-only endpoints, POST /write and GET /read, that round-trip an
@@ -41,6 +43,10 @@ def cell_init() -> None:
     if "--vault" in args:
         vault = args[args.index("--vault") + 1]
     _mkdir_owner_only(vault)
+    # D5: the vault's sentinel, which the backup Job checks for (vault.py).
+    sentinel = os.path.join(vault, ".exomem", "schema", "SKILL.md")
+    _mkdir_owner_only(os.path.dirname(sentinel))
+    os.close(os.open(sentinel, os.O_WRONLY | os.O_CREAT, 0o600))
     # D2: /data/host is the unmanaged host-scope directory the backup Job
     # also backs up (manifests.py's render_backup_job). --json is accepted
     # and ignored, matching D3's exact contract command; this stand-in has

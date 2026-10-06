@@ -271,7 +271,7 @@ cellctl SHALL grow a running cell's local volume online when its filesystem pass
 
 ### Requirement: A cell never initializes an empty vault over a lost volume
 
-While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for it; a missing claim SHALL leave the cell stopped with a reason on its row, except when the cell is relocated from its backup. A cell whose Secret records that it has a completed backup SHALL refuse to initialise an empty vault on an empty volume. It SHALL remain not ready, and SHALL report a value-free reason that reaches the cell's row. Recording the backup SHALL NOT change the cell's pod template. A cell with no recorded backup SHALL initialise an empty vault as before.
+While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for it; a missing claim SHALL leave the cell stopped with a reason on its row, except when the cell is relocated from its backup. A cell whose Secret records that it has a completed backup SHALL refuse to initialise an empty vault on an empty volume. It SHALL remain not ready, and SHALL report a value-free reason that reaches the cell's row. Recording the backup SHALL NOT change the cell's pod template. A cell with no recorded backup SHALL initialise an empty vault as before. A backup SHALL refuse a source that holds no vault and fail with a value-free reason, so an empty volume never replaces the cell's last restore point.
 
 #### Scenario: Volume recreated after a node loss
 
@@ -287,6 +287,11 @@ While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for 
 
 - **WHEN** a new cell with no recorded backup starts on an empty volume
 - **THEN** it initialises an empty vault and becomes ready
+
+#### Scenario: Backup of a volume that holds no vault
+
+- **WHEN** a cell's backup runs over a volume that holds no vault, such as one emptied under a serving cell
+- **THEN** the backup fails before it reads the volume, the cell's last backup stays as it was, and its row shows the backup failure
 
 #### Scenario: First backup recorded
 

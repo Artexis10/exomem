@@ -1267,11 +1267,51 @@ def _measure(observation: ClusterObservation, row: CellRow | None = None, *, sto
                   cell_image=IMAGE_A, start_upgrade=False, storage=storage, storage_room=room)
 
 
+def test_a_backup_refuses_a_volume_that_holds_no_vault_before_restic_reads_it(tmp_path) -> None:
+    # A served cell restarted onto an emptied volume: cell-init refuses, but
+    # leaves /data/vault and /data/host empty. Backed up, they would become the
+    # cell's last restore point. The rendered script runs under sh, with
+    # restic stubbed and the cell image's exomem.vault stubbed to find no vault.
+    import os
+    import subprocess
+
+    from cellctl.manifests import CellManifestSpec, render_backup_job
+
+    from .test_k8s_client import CELL_ID, CURRENT_HOLD
+
+    bin_dir, data, stubs = tmp_path / "bin", tmp_path / "data", tmp_path / "stubs" / "exomem"
+    bin_dir.mkdir()
+    (data / "vault").mkdir(parents=True)
+    (data / "host").mkdir()
+    stubs.mkdir(parents=True)
+    (stubs / "__init__.py").write_text("", encoding="utf-8")
+    (stubs / "vault.py").write_text("def _is_vault(path):\n    return False\n", encoding="utf-8")
+    calls = tmp_path / "restic-calls"
+    restic = bin_dir / "restic"
+    restic.write_text(f"#!/bin/sh\necho \"$1\" >> {calls}\n", encoding="utf-8")
+    restic.chmod(0o755)
+    spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
+                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
+    shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
+                                            retention=None)["spec"]["template"]["spec"]["containers"][0]["command"]
+    for path, moved in (("/dev/termination-log", tmp_path / "termination-log"),
+                        ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
+        script = script.replace(path, str(moved))
+
+    result = subprocess.run([shell, flag, script], env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(stubs.parent)})
+
+    assert result.returncode != 0
+    assert (tmp_path / "termination-log").read_text(encoding="utf-8") == "BACKUP_SOURCE_NOT_A_VAULT"
+    assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
+
+
 def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     # The Job and cellctl must agree on the termination message, or no cell
     # ever grows. This runs the rendered command under sh, with restic stubbed
     # and the Job's paths moved under tmp_path, and reads the message back as
-    # ClusterClient.observe() does.
+    # ClusterClient.observe() does. The cell image's exomem.vault is stubbed
+    # to find the vault.
     import os
     import subprocess
 
@@ -1279,10 +1319,13 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
 
     from .test_k8s_client import CELL_ID, CURRENT_HOLD, NAMESPACE, _client, _job, _job_pod
 
-    bin_dir, data = tmp_path / "bin", tmp_path / "data"
+    bin_dir, data, stubs = tmp_path / "bin", tmp_path / "data", tmp_path / "stubs" / "exomem"
     bin_dir.mkdir()
     (data / "vault").mkdir(parents=True)
     (data / "host").mkdir()
+    stubs.mkdir(parents=True)
+    (stubs / "__init__.py").write_text("", encoding="utf-8")
+    (stubs / "vault.py").write_text("def _is_vault(path):\n    return True\n", encoding="utf-8")
     restic = bin_dir / "restic"
     restic.write_text(
         "#!/bin/sh\n"
@@ -1298,7 +1341,8 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
                         ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
         script = script.replace(path, str(moved))
 
-    subprocess.run([shell, flag, script], check=True, env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    subprocess.run([shell, flag, script], check=True, env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(stubs.parent)})
 
     backup = hold_job_name("cell-backup", CURRENT_HOLD)
     message = (tmp_path / "termination-log").read_text(encoding="utf-8")
