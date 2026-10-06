@@ -180,6 +180,8 @@ The usual cause on Hetzner is an etcd restore that drops a cell created after th
 
 1. Find the claim's volume: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data`.
 2. Check whether the row's `volume_id` matches it. If not, the cell's real volume may still exist: look for it as for `VOLUME_MISSING`, and re-adopt it.
-3. If the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the empty claim as in step 4.3, mark the volume lost as in step 5, then resume cellctl.
+3. If the row records the claim's volume and the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the empty claim as in step 4.3, mark the row's `volume_id` lost as in step 5, then resume cellctl. Expect cellctl to relocate the cell from its backup.
+
+   If the row records no volume, cellctl cannot relocate the cell: it relocates only a recorded volume. Re-adopt the real volume as in step 2.
 
 Never clear the backup record to get past this refusal: the cell would then serve an empty vault as if it were the tenant's.
