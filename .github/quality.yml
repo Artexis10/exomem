@@ -13,7 +13,8 @@ classes:
     - "infra/*/tests/fixtures/*"
     - "fixture-vault/*"
     - "plugins/hosted/*fixture*.json"
-  # Proof outside tests/ and benchmarks/ is named by file, so a new script defaults to product.
+  # Directories that never ship keep a glob; scripts/ mixes product and proof, so its proof
+  # files are named and a new script defaults to product.
   tests:
     - "tests/*"
     - "infra/*/tests/*"
@@ -116,8 +117,19 @@ classes:
     - "infra/scripts/validate_sops_ciphertext.py"
     - "infra/scripts/verify_hcp_backend.py"
     - "infra/scripts/verify_hosted_release.py"
+  # CI configuration by name: release-please, the provisioner publish and the hosted
+  # infrastructure workflows publish or run against production, so they stay product.
   tooling:
-    - ".github/*"
+    - ".github/quality.yml"
+    - ".github/workflows/ci.yml"
+    - ".github/workflows/cell-memory-profile.yml"
+    - ".github/workflows/cloud-cellctl.yml"
+    - ".github/workflows/cloud-rehearsal.yml"
+    - ".github/workflows/cross-platform.yml"
+    - ".github/workflows/frozen-verifier.yml"
+    - ".github/workflows/heavy-media.yml"
+    - ".github/workflows/pr-title.yml"
+    - ".github/workflows/release-evidence-automation.yml"
   specs:
     - "openspec/*"
   docs:
