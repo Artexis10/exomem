@@ -218,6 +218,11 @@ At request time, an edge SHALL be dropped when either page's live signature diff
 - **WHEN** every edge of a page is dropped at request time, because its partner moved or its instrument key is no longer active
 - **THEN** the status carries zero counts and `evidence_complete: false`, and no items
 
+#### Scenario: A projection rebuilt from empty serves nothing until it is whole
+
+- **WHEN** the projection is rebuilt from empty, after an upgrade, a deletion or corruption, and a page is read before every page the dreamer had seen when the rebuild began has been projected
+- **THEN** the read carries no sensed status
+
 #### Scenario: A stale projection is not served as complete
 
 - **WHEN** the page that contradicted this page is edited so that it no longer contradicts, and this page is read before the next tick

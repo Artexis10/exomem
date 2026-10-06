@@ -600,6 +600,127 @@ def test_a_new_encoder_fingerprint_re_proposes_cosine_pairs(tmp_path: Path, monk
     assert sf.edges(vault) == [], "vectors of another encoder propose nothing"
 
 
+def test_pages_in_one_tick_find_the_cosine_pairs_separate_ticks_find(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Pages processed in one tick meet each other in memory, not through the
+    stored vectors. Both routes must find the same pairs with the same cosines,
+    a pair whose float32 score falls just under θ but rounds to it included."""
+    vault = tmp_path / "vault"
+    paths = [f"{sf.KB}/Notes/Insights/c{i}.md" for i in range(6)]
+    for i, path in enumerate(paths):
+        fx.write(vault, path, sf.note(f"C{i}", f"2026-0{i + 1}-01", f"Alpha variant {i}.",
+                                      extra=f"- [finding] Beta variant {i}.\n"))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    rng = np.random.default_rng(7)
+    vectors = [v / np.linalg.norm(v) for v in rng.standard_normal((12, 3)).astype(np.float32)]
+    angle = np.arccos(np.float64(0.71999976))
+    vectors[0] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    vectors[2] = np.array([np.cos(angle), np.sin(angle), 0.0], dtype=np.float32)
+    unit_vectors = iter(vectors)
+    conn = fx.epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    table: dict = {}
+    for path in paths:
+        for ref, text in conn.execute(
+            "SELECT unit_ref, text FROM graph_nodes WHERE path=? AND unit_ref IS NOT NULL "
+            "ORDER BY unit_ref", (path,)
+        ):
+            digest = sensing.text_sha256(sensing.extract_text(text))
+            table.setdefault(path, {})[ref] = (digest, next(unit_vectors))
+    conn.close()
+    sf.enable(monkeypatch, vectors=table)
+
+    def cosine_pairs() -> list[tuple]:
+        conn = sensed_model.open_readonly(vault)
+        rows = conn.execute("SELECT pair_key, cosine FROM pairs ORDER BY pair_key").fetchall()
+        conn.close()
+        return rows
+
+    monkeypatch.setattr(sensed_model, "PAGES_PER_TICK", 1)
+    sf.settle(vault, rounds=10)
+    apart = cosine_pairs()
+    sensed_model.ProjectionStore(vault).wipe()
+    monkeypatch.setattr(sensed_model, "PAGES_PER_TICK", 16)
+    sf.settle(vault)
+    assert cosine_pairs() == apart
+    assert 0.72 in {cosine for _key, cosine in apart}
+
+
+def _requeue_every_page(vault: Path) -> dict[str, str]:
+    """Mark every projected page changed, and return the dreamer's `seen` map."""
+    from exomem import dreamer_store
+
+    conn = sqlite3.connect(sensed_model.projection_path(vault), isolation_level=None)
+    conn.execute("UPDATE pages SET sig=NULL")
+    conn.close()
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        return store.seen_map(conn)
+    finally:
+        conn.close()
+
+
+def test_a_budget_spent_by_the_pass_still_applies_the_pages_it_was_read_for(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Catches a livelock: if a tick's budget stop discarded the pages after
+    their shared pass, every tick over the bound would read every vector, apply
+    nothing and repeat."""
+    vault, paths = _cosine_vault(tmp_path, 4)
+    same = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    sf.enable(monkeypatch, vectors=_vector_table(vault, paths, [same, same, same, same]))
+    sf.settle(vault)
+    monkeypatch.setattr(sensed_model, "MAX_COSINE_UNITS", 1)
+    seen = _requeue_every_page(vault)
+    reads: list[int] = []
+    read_blocks = sensed_model._read_blocks
+    monkeypatch.setattr(
+        sensed_model, "_read_blocks", lambda conn: (reads.append(1), read_blocks(conn))[1]
+    )
+    report = sensed_model.run_tick(vault, seen=seen, halt=lambda: "cpu" if reads else None)
+    assert len(reads) == 1 and report.stop is None
+    conn = sensed_model.open_readonly(vault)
+    projected = dict(conn.execute("SELECT path, sig FROM pages").fetchall())
+    conn.close()
+    assert projected == {path: seen[path] for path in paths}
+    assert len(sf.edges(vault)) == 6
+
+
+def test_a_rebuilt_projection_serves_nothing_until_every_page_is_projected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A projection rebuilt from empty, here after an upgrade from schema 2,
+    never serves a partial status. Rebuilt a page per tick, the seal note used
+    to read "refined by 1 later note" with complete evidence while the page
+    that contradicts it was not projected yet."""
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    # Named so the rebuild projects the seal note between its two partners.
+    seal = f"{sf.KB}/Notes/Insights/b-seal.md"
+    fx.write(vault, f"{sf.KB}/Notes/Insights/a-winter.md",
+             sf.note("Winter", "2026-05-01", sf.WINTER_TEXT, links="On [[Notes/Insights/b-seal]]."))
+    fx.write(vault, seal, sf.note("Seal wear", "2026-04-01", sf.SEAL_TEXT))
+    fx.write(vault, f"{sf.KB}/Notes/Insights/c-denial.md",
+             sf.note("Denial", "2026-05-02", sf.DENIAL_TEXT, links="On [[Notes/Insights/b-seal]]."))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    whole = sensed_model.status_for(vault, seal)
+    assert whole["line"] == "refined by 1 later note; 1 open contradiction"
+    conn = sqlite3.connect(sensed_model.projection_path(vault), isolation_level=None)
+    conn.execute("UPDATE meta SET value='2' WHERE key='schema'")
+    conn.close()
+    one_page = dreamer.Budget(pages=1, cpu=120.0, wall=120.0)
+    served = []
+    for _tick in range(5):
+        dreamer.run_once(vault, budget=one_page)
+        served.append(sensed_model.status_for(vault, seal))
+    assert all(status in (None, whole) for status in served), served
+    assert served[-1] == whole
+
+
 def test_a_replaced_ledger_is_reprojected(tmp_path: Path, monkeypatch) -> None:
     """LOW 9: the projection follows the ledger's identity, not only its length."""
     sf.enable(monkeypatch)

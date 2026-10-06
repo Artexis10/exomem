@@ -108,6 +108,7 @@ _TABLES = (
     )
     """,
     "CREATE TABLE IF NOT EXISTS links (key TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (key, path))",
+    "CREATE TABLE IF NOT EXISTS seeding (path TEXT PRIMARY KEY)",
     "CREATE INDEX IF NOT EXISTS links_path ON links(path)",
     """
     CREATE TABLE IF NOT EXISTS pairs (
@@ -191,10 +192,12 @@ class ProjectionStore:
             conn.execute("BEGIN IMMEDIATE")
             for statement in _TABLES:
                 conn.execute(statement)
-            conn.execute(
+            fresh = conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
-            )
+            ).rowcount
             conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
+            if fresh:
+                _set_meta(conn, "seeding", "start")
             conn.execute("COMMIT")
         except sqlite3.DatabaseError:
             conn.close()
@@ -205,6 +208,7 @@ class ProjectionStore:
                 conn.execute(statement)
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
             conn.execute("INSERT INTO meta(key, value) VALUES ('generation', '0')")
+            _set_meta(conn, "seeding", "start")
         return conn
 
     def _open(self) -> sqlite3.Connection:
@@ -535,18 +539,29 @@ def _cosine_matrix(
 def _read_blocks(conn: sqlite3.Connection) -> Iterator[tuple[list[str], list[str], Any]]:
     """The projection's stored vectors, `MAX_COSINE_UNITS` rows at a time.
 
-    One call is one full pass. Only one block is held at once, and nothing is
-    cached.
+    One call is one full pass, and nothing is cached. Each block is filled row
+    by row into one array and let go before the next is started, so a pass
+    holds one block. That holds only if the caller drops each block before
+    asking for the next (`_cosine_hits`).
     """
     import numpy as np
 
-    cursor = conn.execute(
+    block: Any = None
+    refs: list[str] = []
+    paths: list[str] = []
+    for path, ref, blob in conn.execute(
         "SELECT path, unit_ref, vector FROM units WHERE vector IS NOT NULL ORDER BY path, unit_ref"
-    )
-    while rows := cursor.fetchmany(MAX_COSINE_UNITS):
-        matrix = np.frombuffer(b"".join(row[2] for row in rows), dtype=np.float32)
-        refs, paths = [str(row[1]) for row in rows], [str(row[0]) for row in rows]
-        yield refs, paths, matrix.reshape(len(rows), -1)
+    ):
+        if block is None:
+            block = np.empty((MAX_COSINE_UNITS, len(blob) // 4), dtype=np.float32)
+        block[len(refs)] = np.frombuffer(blob, dtype=np.float32)
+        refs.append(str(ref))
+        paths.append(str(path))
+        if len(refs) == MAX_COSINE_UNITS:
+            yield refs, paths, block
+            block, refs, paths = None, [], []
+    if block is not None:
+        yield refs, paths, block[: len(refs)]
 
 
 def _vector_blocks(
@@ -579,6 +594,27 @@ def _exact_cosine(a: Any, b: Any) -> float:
 _Hits = dict[str, dict[str, list[tuple[str, str, float]]]]
 
 
+def _hits_in(
+    refs: list[str], paths: list[str], matrix: Any, mine_paths: list[str], mine: Any, theta: float
+) -> Iterator[tuple[int, str, str, float]]:
+    """`(column, other page, other unit ref, cosine)` for every row of `matrix`
+    at or above θ against a column of `mine`, rows of that column's own page aside.
+
+    The fast float32 product runs on this thread alone (`einsum`, not the BLAS
+    pool), so the tick's CPU clock sees all of it. Only scores within
+    `COSINE_PREFILTER` of θ or above are judged again, on the exact cosine.
+    """
+    import numpy as np
+
+    scores = np.einsum("ij,kj->ik", matrix, mine)
+    for row, col in zip(*np.nonzero(scores >= theta - COSINE_PREFILTER), strict=True):
+        if paths[int(row)] == mine_paths[int(col)]:
+            continue
+        cosine = _exact_cosine(matrix[int(row)], mine[int(col)])
+        if cosine >= theta:
+            yield int(col), paths[int(row)], refs[int(row)], cosine
+
+
 def _cosine_hits(
     conn: sqlite3.Connection, store_key: str, own: Mapping[str, Mapping[str, Any]], theta: float
 ) -> _Hits:
@@ -586,9 +622,7 @@ def _cosine_hits(
 
     `own` holds the current vectors of the pages one tick processes. The pass
     is shared by all of them, so a tick over the bound reads the stored vectors
-    once, not once per page. The fast product runs on this thread alone, so the
-    tick's CPU clock sees all of it, and each hit is then judged on its exact
-    cosine.
+    once, not once per page (`_hits_in`).
     """
     import numpy as np
 
@@ -597,16 +631,15 @@ def _cosine_hits(
     if not keys:
         return hits
     mine = np.stack([np.asarray(own[path][ref], dtype=np.float32) for path, ref in keys])
+    mine_paths = [path for path, _ref in keys]
     for refs, paths, matrix in _vector_blocks(conn, store_key):
-        # einsum, not BLAS: one thread, the caller's, whatever the native thread count.
-        scores = np.einsum("ij,kj->ik", matrix, mine)
-        for row, col in zip(*np.nonzero(scores >= theta - COSINE_PREFILTER), strict=True):
-            path, ref = keys[int(col)]
-            if paths[int(row)] == path:
-                continue
-            cosine = _exact_cosine(matrix[int(row)], mine[int(col)])
-            if cosine >= theta:
-                hits[path].setdefault(ref, []).append((paths[int(row)], refs[int(row)], cosine))
+        for col, other_path, other_ref, cosine in _hits_in(
+            refs, paths, matrix, mine_paths, mine, theta
+        ):
+            path, ref = keys[col]
+            hits[path].setdefault(ref, []).append((other_path, other_ref, cosine))
+        # Let this block go before the next is read: a pass holds one block.
+        del refs, paths, matrix
     return hits
 
 
@@ -918,6 +951,7 @@ def run_tick(
             vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now,
             cosine,
         )
+        _follow_seeding(store, conn, seen)
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
         log.warning("sensed model: tick failed", exc_info=True)
         report.stop = "error"
@@ -945,6 +979,39 @@ def _follow_ledger(store, conn, ledger) -> None:
         # after the rows it has seen.
         _set_meta(conn, "ledger_seq", 0 if ledger is None else sensing_ledger.max_seq(ledger))
         _set_meta(conn, "reproject_after", "")
+
+
+def _follow_seeding(store, conn, seen: Mapping[str, str]) -> None:
+    """End the window in which a projection rebuilt from empty serves nothing.
+
+    Every projection is created `seeding`: after an upgrade, a deletion or
+    corruption alike. At the end of its first tick it takes a watermark, the
+    pages `seen` holds that it has not yet projected at their signature. A page
+    leaves the watermark once it is projected at the signature `seen` has for
+    it, or once it leaves `seen`. Seeding ends when the watermark is empty, and
+    never merely because a tick found nothing to do, which a steady stream of
+    writes could put off for ever. Pages that change after the watermark follow
+    the ordinary paths (`_View`).
+    """
+    state = _get_meta(conn, "seeding")
+    if state is None:
+        return
+    with store.write(conn):
+        if state == "start":
+            conn.executemany(
+                "INSERT OR IGNORE INTO seeding(path) VALUES (?)", ((path,) for path in sorted(seen))
+            )
+            _set_meta(conn, "seeding", "watermarked")
+        done = [
+            str(path)
+            for path, sig in conn.execute(
+                "SELECT s.path, p.sig FROM seeding s LEFT JOIN pages p ON p.path = s.path"
+            )
+            if path not in seen or sig == seen[path]
+        ]
+        conn.executemany("DELETE FROM seeding WHERE path=?", ((path,) for path in done))
+        if conn.execute("SELECT 1 FROM seeding LIMIT 1").fetchone() is None:
+            _set_meta(conn, "seeding", None)
 
 
 def _follow_cosine(vault_root: Path, store, conn) -> tuple[str | None, float | None]:
@@ -1156,12 +1223,22 @@ def _as_applied(
     dropped and its new vectors are compared here instead.
     """
     out = {ref: [hit for hit in stored.get(ref, ()) if hit[0] not in applied] for ref in vectors}
-    for other in sorted(applied):
-        for ref, vector in vectors.items():
-            for other_ref, other_vector in sorted(applied[other].items()):
-                cosine = _exact_cosine(vector, other_vector)
-                if cosine >= theta:
-                    out[ref].append((other, other_ref, cosine))
+    rows = [
+        (other, other_ref, vector)
+        for other in sorted(applied)
+        for other_ref, vector in sorted(applied[other].items())
+    ]
+    if rows and vectors:
+        import numpy as np
+
+        mine_refs = sorted(vectors)
+        mine = np.stack([np.asarray(vectors[ref], dtype=np.float32) for ref in mine_refs])
+        matrix = np.stack([np.asarray(vector, dtype=np.float32) for _o, _r, vector in rows])
+        for col, other, other_ref, cosine in _hits_in(
+            [row[1] for row in rows], [row[0] for row in rows], matrix,
+            [rel] * len(mine_refs), mine, theta,
+        ):
+            out[mine_refs[col]].append((other, other_ref, cosine))
     return out
 
 
@@ -1621,12 +1698,16 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
 
 
 def _open_view(vault_root: Path) -> tuple[sqlite3.Connection, _View] | None:
-    """The caller's view, or None when sensing is off or there is no projection.
-    Sensing off reads no file."""
+    """The caller's view, or None when sensing is off, there is no projection,
+    or it is still being rebuilt from empty (`_follow_seeding`): a reader then
+    sees no status, never a partial one. Sensing off reads no file."""
     if not sensing.enabled():
         return None
     conn = open_readonly(Path(vault_root))
     if conn is None:
+        return None
+    if _get_meta(conn, "seeding") is not None:
+        conn.close()
         return None
     return conn, _View(Path(vault_root), conn, _keep(Path(vault_root)), _current_key())
 
