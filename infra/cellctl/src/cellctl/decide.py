@@ -745,7 +745,9 @@ def _continue_snapshot_backup(
     outcome = observation.statefulset_backup_outcome
     if outcome is not None:
         if observation.snapshot_exists or observation.clone_exists:
-            return step(backup_outcome=outcome, delete_snapshot_backup=True)
+            # Once the outcome is on the StatefulSet the Job has served: its
+            # finished pod would hold the clone's claim until the Job's TTL.
+            return step(backup_outcome=outcome, delete_snapshot_backup=True, delete_backup_job=True)
         decision = step()
         decision.hold_kind = None
         decision.row_updates = {**decision.row_updates, "hold_kind": None, "hold_started_at": None}

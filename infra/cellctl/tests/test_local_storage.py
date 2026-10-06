@@ -403,6 +403,18 @@ def test_an_hourly_backup_reads_a_clone_of_its_snapshot_and_ends_once_both_are_g
     assert (finished.hold_kind, finished.row_updates["hold_kind"], finished.replicas) == (None, None, 1)
 
 
+def test_a_finished_hourly_backup_deletes_its_job_so_its_clone_can_go() -> None:
+    # Kubernetes keeps a claim while any pod mounting it exists, a finished
+    # one included. Left alone, the backup Job's pod held the clone, and so
+    # the hold, until the Job's five-minute TTL (local-storage drill, task 4.1).
+    row = _row(hold_kind="backup", hold_started_at=STARTED, last_backup_at=NOW, last_backup_snapshot=SNAPSHOT_ID)
+
+    cleaning = _step(_in_hold(statefulset_backup_outcome=SNAPSHOT_ID, clone_exists=True), row)
+
+    assert (cleaning.delete_backup_job, cleaning.delete_snapshot_backup, cleaning.hold_kind) == (
+        True, True, "snapshot-backup")
+
+
 def test_a_failed_hourly_backup_backs_off_and_still_removes_its_clone_and_snapshot() -> None:
     late = STARTED.replace(hour=12, minute=20)  # past the 15-minute backup deadline
 
