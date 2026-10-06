@@ -108,6 +108,10 @@ def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
         },
         "cloudIngress": {"enabled": False},
         "cert-manager": {"enabled": False},
+        # As production today: Hetzner-class cells only. values.validation.yaml
+        # enables local storage to render its templates, but P3 installs no
+        # TopoLVM; the local-storage drill rehearses that domain.
+        "cellStorage": {"local": {"enabled": False}},
     }
     show_only = (
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
