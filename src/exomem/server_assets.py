@@ -221,9 +221,9 @@ def register_health_routes(
     # readiness workers, and a client that gave up still left its proof queued, so a 30 s
     # stall replayed 30 proofs back to back. Each flight carries the cache token
     # taken before its proof started.
-    readiness_flights: dict[object, tuple[asyncio.Future, tuple[int, int]]] = {}
-    # The last ready proof, by digest: the token it was proved under, when it
-    # was kept, and the payload. Only a ready proof is kept, and only while no
+    readiness_flights: dict[object, tuple[asyncio.Future, tuple[int, int], float]] = {}
+    # The last ready proof, by digest: the token it was proved under, when its
+    # measurement began, and the payload. Only a ready proof is kept, and only while no
     # transition this process made could have outdated it.
     ready_proofs: dict[object, tuple[tuple[int, int], float, dict]] = {}
 
@@ -249,22 +249,29 @@ def register_health_routes(
             return None
         return snapshot, age
 
-    def _keep_if_reusable(digest: object, token: tuple[int, int], snapshot: object) -> None:
+    def _keep_if_reusable(
+        digest: object, token: tuple[int, int], started: float, snapshot: object
+    ) -> None:
         if not _reusable(snapshot):
             return
         if token != runtime_readiness_module.cached_readiness_token():
             return
         kept = ready_proofs.get(digest)
         if kept is None or kept[2] is not snapshot:
-            ready_proofs[digest] = (token, time.monotonic(), snapshot)
+            ready_proofs[digest] = (token, started, snapshot)
 
-    def _readiness_flight(digest: object, traffic: dict) -> tuple[asyncio.Future, tuple[int, int]]:
+    def _readiness_flight(
+        digest: object, traffic: dict
+    ) -> tuple[asyncio.Future, tuple[int, int], float]:
         current = readiness_flights.get(digest)
         if current is not None and not current[0].done():
             return current
         # Taken before the proof starts: a transition that lands while it runs
         # leaves its answer unservable to the next probe.
         token = runtime_readiness_module.cached_readiness_token()
+        # The answer's age counts from here, so a slow proof is not reported
+        # younger than its measurement.
+        started = time.monotonic()
         # The proof runs on the readiness workers, apart from anyio's default
         # limiter that every synchronous tool call shares.
         flight = asyncio.get_running_loop().run_in_executor(
@@ -275,7 +282,7 @@ def register_health_routes(
                 traffic=traffic,
             ),
         )
-        readiness_flights[digest] = (flight, token)
+        readiness_flights[digest] = (flight, token, started)
 
         def _forget(done: asyncio.Future) -> None:
             current = readiness_flights.get(digest)
@@ -283,7 +290,7 @@ def register_health_routes(
                 del readiness_flights[digest]
 
         flight.add_done_callback(_forget)
-        return flight, token
+        return flight, token, started
 
     def _record_health_probe() -> dict:
         try:
@@ -354,13 +361,13 @@ def register_health_routes(
             # held the loop 5.8 s on one at the 0.96.0 promotion, timing out the
             # liveness polls queued behind it. Shielded: one caller going away
             # must not cancel the proof the others are waiting on.
-            flight, token = _readiness_flight(digest, traffic)
+            flight, token, started = _readiness_flight(digest, traffic)
             snapshot = await asyncio.shield(flight)
-            age = 0.0
+            age = time.monotonic() - started
             # Kept here rather than in a done callback: an executor future can
             # be done when it is created, and then its callbacks run only after
             # this handler has already answered.
-            _keep_if_reusable(digest, token, snapshot)
+            _keep_if_reusable(digest, token, started, snapshot)
         payload = dict(snapshot)
         # This probe's own counters, whichever proof answers it.
         if "traffic" in payload:

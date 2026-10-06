@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -61,6 +62,7 @@ def test_a_ready_proof_answers_the_next_probe_and_says_how_old_it_is(monkeypatch
 
     def ready(**_kwargs):
         proofs.append("proof")
+        time.sleep(0.1)  # a proof takes time; its answer is as old as its start
         return {"status": "ready", "service": "exomem"}
 
     monkeypatch.setattr(runtime_readiness_module, "runtime_readiness", ready)
@@ -70,9 +72,9 @@ def test_a_ready_proof_answers_the_next_probe_and_says_how_old_it_is(monkeypatch
 
     assert [first.status_code, second.status_code] == [200, 200]
     assert proofs == ["proof"], "every readiness probe re-ran the whole proof"
-    # A reused answer must not pass itself off as a fresh measurement.
-    assert first.json()["proof_age_seconds"] == 0.0
-    assert second.json()["proof_age_seconds"] >= 0.05
+    # An answer must not pass itself off as younger than its measurement.
+    assert first.json()["proof_age_seconds"] >= 0.1
+    assert second.json()["proof_age_seconds"] >= 0.15
 
 
 def test_a_not_ready_proof_is_never_reused_so_readiness_lands_on_the_next_probe(

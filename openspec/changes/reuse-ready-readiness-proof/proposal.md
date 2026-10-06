@@ -5,8 +5,8 @@ Every Exomem Cloud cell answers a kubelet readiness probe every 5 seconds, and e
 ## What Changes
 
 - `/health/ready` may answer from a ready proof for up to 30 seconds. A not-ready or failed proof is never reused, and a standby's answer is never reused.
-- A reused answer is void as soon as the process records an admission change (warming, an unready mark from recall or the lexical store, re-admission) or promotes a standby.
-- The response reports `proof_age_seconds`, so a reused answer says how old it is.
+- A reused answer is void as soon as the process records a retrieval admission change (warming, an unready mark from recall or the lexical store, re-admission) or promotes a standby. Nothing else voids it: the coordination role, session-store state and observability fields of a reused answer may be up to 30 seconds old.
+- The response reports `proof_age_seconds`, counted from when the measurement began, so a reused answer says how old it is.
 - A change that only a fresh proof can detect, such as another process advancing a projection, now reaches readiness within 30 seconds instead of on the next probe.
 
 ## Impact

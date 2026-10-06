@@ -4,7 +4,7 @@
 
 Local health surfaces SHALL distinguish process/transport liveness from retrieval admission. Retrieval SHALL be reported ready only when both required recall projections are live and both maintained catalogue checkpoints are proven exactly equal to those projections. A previously ready bit SHALL be revoked when that equality no longer holds. A process whose transport responds but whose projection/catalogue is warming or unavailable MUST NOT be reported as fully ready.
 
-The readiness surface MAY answer from a ready proof for at most 30 seconds. It SHALL NOT reuse a not-ready or failed proof, or a standby's proof. A reused proof SHALL be void once the process records an admission change or promotes a standby, and the answer SHALL report the proof's age.
+The readiness surface MAY answer from a ready proof for at most 30 seconds. It SHALL NOT reuse a not-ready or failed proof, or a standby's proof. A reused proof SHALL be void once the process records a retrieval admission change or promotes a standby. Nothing else voids it, so the other fields of a reused answer, such as the coordination role, the session-store state and the observability block, may be up to 30 seconds old. The answer SHALL report the proof's age, counted from when its measurement began.
 
 #### Scenario: Live transport with warming recall is not fully ready
 
