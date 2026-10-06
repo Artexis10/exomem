@@ -311,6 +311,40 @@ def test_pages_of_two_origins_linking_a_page_without_a_summary_make_one_profile_
     }
 
 
+def test_a_relation_to_one_of_the_pages_units_counts_as_linking_the_page(
+    tmp_path: Path,
+) -> None:
+    """A relation target `[[P#unit]]` lands on the unit; it still links P."""
+    vault = fx.build(tmp_path)
+    fx.edit(
+        vault,
+        fx.ENTITY,
+        fx.entity(
+            extra="\n## Observations\n\n- [finding] Runs at 40 litres a minute. ^pump-flow\n"
+        ),
+    )
+    fx.edit(
+        vault,
+        fx.SEAL_WEAR,
+        fx.insight("Pump seal wear", sources=["field-report-two"], updated="2026-05-02"),
+    )
+    _quiet(vault)
+    assert _open(vault, dreamer_families.PROFILE_KIND) is None
+    fx.edit(
+        vault,
+        fx.SEAL_WEAR,
+        fx.insight(
+            "Pump seal wear",
+            sources=["field-report-two"],
+            updated="2026-05-02",
+            extra="\n## Relations\n\n- supports [[Notes/Entities/orbit-pump#pump-flow]]\n",
+        ),
+    )
+    _quiet(vault)
+    row = _open(vault, dreamer_families.PROFILE_KIND)
+    assert row is not None and row["measures"]["origins"] == 2
+
+
 def test_one_source_fanned_out_is_one_origin_for_profile(tmp_path: Path) -> None:
     vault = fx.build(tmp_path)
     fx.edit(

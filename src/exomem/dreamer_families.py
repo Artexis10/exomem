@@ -1645,7 +1645,7 @@ _LINKER_ROW_LIMIT = 64
 
 _LINKED_SUBJECTS_SQL = (
     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
-    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+    "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
     "WHERE e.source_path = ? AND d.path <> ? AND d.review_eligible = 1 "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     "ORDER BY d.path LIMIT ?"
@@ -1657,12 +1657,12 @@ _RECAPS_SQL = (
     "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_key = ? AND substr(e.source_path, 1, ?) = ? "
+    "WHERE e.dst_page_key = ? AND substr(e.source_path, 1, ?) = ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     f"AND {_NEWER_THAN} "
     f"AND COALESCE(f.lifecycle_status, '') NOT IN ({','.join('?' for _ in _INACTIVE_STATUSES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
-    "AND b.dst_key = ('file:' || e.source_path)) "
+    "AND b.dst_page_key = ('file:' || e.source_path)) "
     "ORDER BY e.source_path"
 )
 
@@ -1670,7 +1670,7 @@ _RECAPS_SQL = (
 _REFERRERS_SQL = (
     "SELECT DISTINCT e.source_path FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_key = ? AND e.source_path <> ? AND f.review_eligible = 1 "
+    "WHERE e.dst_page_key = ? AND e.source_path <> ? AND f.review_eligible = 1 "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     "ORDER BY e.source_path"
 )
@@ -1727,7 +1727,7 @@ def subject_rows_touched(ctx: Context, paths: list[str]) -> set[str]:
                 str(row[0])
                 for row in ctx.graph().execute(
                     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
-                    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+                    "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
                     f"WHERE e.source_path IN ({marks}) AND d.review_eligible = 1",
                     paths,
                 )
@@ -1879,14 +1879,14 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     # declaring only the Sources it may see, as on a vault without that Source.
     sources: dict[str, set[str]] = {path: set() for path in referrers}
     marks = ",".join("?" for _ in referrers)
-    for src_key, dst_key in graph.execute(
-        f"SELECT src_key, dst_key FROM graph_edges WHERE src_key IN ({marks}) "
+    for src_key, source_key in graph.execute(
+        f"SELECT src_key, dst_page_key FROM graph_edges WHERE src_key IN ({marks}) "
         "AND origin = 'frontmatter' AND source_anchor = 'sources' "
         "AND relation_type = 'derived_from'",
         [f"file:{path}" for path in referrers],
     ):
-        if _visible(keep, str(dst_key).removeprefix("file:")):
-            sources[str(src_key).removeprefix("file:")].add(str(dst_key))
+        if _visible(keep, str(source_key).removeprefix("file:")):
+            sources[str(src_key).removeprefix("file:")].add(str(source_key))
     unsourced = {path: _UNSOURCED_ORIGIN for path, declared in sources.items() if not declared}
     origins = provenance.origin_keys(sources, fallback=unsourced)
     if len(set(origins.values())) < PROFILE_MIN_ORIGINS:
