@@ -230,8 +230,9 @@ infra/scripts/generate_ansible_inventory.py \
   "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json" \
   --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
   --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
-# The newest version of every hosted-node Ansible variable in the secret
-# matrix: server and agent tokens, etcd keys, Tang keys and passphrases.
+# The version of each hosted-node Ansible variable that
+# infra/contracts/active-ansible-selection-v1.json selects: server and agent
+# tokens, etcd keys, Tang keys and passphrases.
 fleet_vars_text="$(infra/scripts/active_ansible_vars.py hosted-node)"
 mapfile -t fleet_vars <<< "${fleet_vars_text}"
 infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inventory.json" \
@@ -243,12 +244,20 @@ is not. It removes nothing on the way: the firewall, WireGuard and Tang read
 their peers from the inventory's groups, not from the hosts a run reaches.
 
 - For a node that is down on purpose, append `-- --limit '!<node>'` to the
-  gate. The excluded node keeps its firewall rules, WireGuard peer and Tang
-  access on every other node.
-- The run still stops, with nothing removed, where a task needs that node.
-  With any WireGuard host in the inventory, every node's private-link check
-  needs every peer's key. A joining agent checks that every other node admits
-  it.
+  gate. This passes only when the excluded node is the sole K3s agent and no
+  WireGuard host is inventoried. The excluded node keeps its firewall rules,
+  WireGuard peer and Tang access on every other node.
+- Every agent's run reads the inter-node rules on every other K3s node ("Read
+  every other K3s node's inter-node rules" in
+  `infra/ansible/roles/k3s/tasks/agent.yml`). With a second agent, or with the
+  server excluded, that read needs the excluded node, and the run stops with
+  nothing removed.
+- With any WireGuard host in the inventory, every node's private-link check
+  needs every peer's public key, which only a run on that peer reads. The run
+  stops in the same way.
+- Without a WireGuard host, a gate run with `--limit` set to the server needs
+  no agent to be reachable. It is unproven until OpenSpec
+  `move-cloud-cells-to-local-storage` task 6.6 runs it.
 - A node that stays down for longer leaves the inventory through
   [node-pool.md](node-pool.md#remove-a-node) or
   [dedicated-host.md](dedicated-host.md#remove-the-host) before the next gate.

@@ -209,11 +209,7 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     assert stat.S_IMODE(RUNNER.stat().st_mode) & stat.S_IXUSR
 
 
-def test_active_ansible_vars_are_the_newest_version_of_each_group_destination(
-    tmp_path: Path,
-) -> None:
-    # After a rotation a stale version handed to site.yml re-installs retired
-    # material; for Tang it re-advertises the old keys and hides the new ones.
+def _load_active_ansible_vars():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -222,24 +218,40 @@ def test_active_ansible_vars_are_the_newest_version_of_each_group_destination(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
 
-    def destination(name: str) -> dict:
-        return {"kind": "sops_ansible_vars", "target": f"infra/secrets/ansible/{name}.{{version}}.sops.json"}
 
+@pytest.mark.parametrize(
+    "selected,expected,refusal",
+    [
+        # Escrowing v2 activates nothing: the selection still says v1.
+        ({"ansible.hosted-node.tang-keys.active": "v1"}, ["tang-keys.v1.sops.json"], None),
+        ({"ansible.hosted-node.tang-keys.active": "v3"}, None, "the selected v3 file is missing"),
+        ({"ansible.hosted-node.tang-key.active": "v1"}, None, "not an Ansible destination"),
+    ],
+)
+def test_active_ansible_vars_follow_the_selection_not_the_newest_file(
+    tmp_path: Path, selected: dict, expected: list | None, refusal: str | None
+) -> None:
+    module = _load_active_ansible_vars()
     matrix = tmp_path / "matrix.json"
-    matrix.write_text(json.dumps({"schema_version": 1, "secrets": {
-        "tang": {"destinations": {"ansible.hosted-node.tang-keys.active": destination("tang-keys")}},
-        "server": {"destinations": {"ansible.hosted-node.k3s-server-token.active": destination("k3s-server-token")}},
-        "unused": {"destinations": {"ansible.hosted-node.k3s-agent-token.active": destination("k3s-agent-token")}},
-        "control": {"destinations": {"ansible.control-node.db-password.active": destination("db-password")}},
-    }}), encoding="utf-8")
+    matrix.write_text(json.dumps({"schema_version": 1, "secrets": {"tang": {"destinations": {
+        "ansible.hosted-node.tang-keys.active": {
+            "kind": "sops_ansible_vars",
+            "target": "infra/secrets/ansible/tang-keys.{version}.sops.json",
+        },
+    }}}}), encoding="utf-8")
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({"schema_version": 1, "destinations": selected}), encoding="utf-8")
     secrets = tmp_path / "infra" / "secrets" / "ansible"
     secrets.mkdir(parents=True)
-    for name in ("tang-keys.v1", "tang-keys.v2", "tang-keys.v10", "k3s-server-token.v1",
-                 "db-password.v1", "tang-keys.v3.sops.json.bak"):
-        (secrets / f"{name}.sops.json" if not name.endswith(".bak") else secrets / name).write_text("{}")
+    for version in ("v1", "v2"):
+        (secrets / f"tang-keys.{version}.sops.json").write_text("{}", encoding="utf-8")
 
-    assert module.active_files("hosted-node", matrix, tmp_path) == [
-        secrets / "tang-keys.v10.sops.json",
-        secrets / "k3s-server-token.v1.sops.json",
-    ]
+    if refusal is None:
+        assert module.active_files("hosted-node", matrix, selection, tmp_path) == [
+            secrets / name for name in expected
+        ]
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            module.active_files("hosted-node", matrix, selection, tmp_path)

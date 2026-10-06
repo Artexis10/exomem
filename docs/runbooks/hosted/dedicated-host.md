@@ -35,6 +35,10 @@ Terraform-created agents keep [node-pool.md](node-pool.md).
         --destination escrow.tang-keys.active --source stdin
   ```
 
+  Escrowing activates nothing. Activate the key set in a reviewed commit that
+  adds `"ansible.hosted-node.tang-keys.active": "v1"` to the `destinations` of
+  `infra/contracts/active-ansible-selection-v1.json`.
+
 - Each host has its own recovery passphrase, so each host has its own entry in
   `infra/contracts/secret-destinations-v1.json`. Add it in the change that adds
   the host, using the host name with every `-` written as `_` in the variable:
@@ -66,6 +70,10 @@ Terraform-created agents keep [node-pool.md](node-pool.md).
     --destination ansible.hosted-node.recovery-passphrase-exomem-agent-dx1.active \
     --destination escrow.recovery-passphrase-exomem-agent-dx1.active --source stdin
   ```
+
+  In the same change, activate it: add
+  `"ansible.hosted-node.recovery-passphrase-exomem-agent-dx1.active": "v1"` to
+  `infra/contracts/active-ansible-selection-v1.json`.
 
 ## Install the OS
 
@@ -158,9 +166,11 @@ mapfile -t fleet_vars <<< "${fleet_vars_text}"
 infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}"
 ```
 
-`active_ansible_vars.py` passes the newest version of every hosted-node
-Ansible variable in the secret matrix: the tokens, the etcd keys, the Tang keys
-and each dedicated host's passphrase.
+`active_ansible_vars.py` passes the version of each hosted-node Ansible
+variable that `infra/contracts/active-ansible-selection-v1.json` selects: the
+tokens, the etcd keys, the Tang keys and each dedicated host's passphrase. It
+refuses when a selected version's file is missing. A version that is escrowed
+but not selected is never passed.
 
 The first run fixes the thin pool's geometry: 64 KiB chunks, and 64 bytes of
 metadata per chunk computed from the pool's size. Above about 15.8 TiB of pool,
@@ -209,12 +219,13 @@ existing binding keeps working, and nothing is rebound.
 If the Tang keys themselves are lost:
 
 1. Escrow a new key set as the next version, as in Preconditions, with `--version v2`.
-2. Run `site.yml` as in Add the host. `active_ansible_vars.py` now passes `tang-keys.v2`.
-3. On each dedicated host, list the bindings: `sudo clevis luks list -d /dev/md/exomem-cells`.
-4. Remove the binding the role replaced: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
+2. In a reviewed commit, set `ansible.hosted-node.tang-keys.active` to `v2` in `infra/contracts/active-ansible-selection-v1.json`.
+3. Run `site.yml` as in Add the host.
+4. On each dedicated host, list the bindings: `sudo clevis luks list -d /dev/md/exomem-cells`.
+5. Remove the binding the role replaced: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
 
 Expected result: each host lists one `tang` binding, and `site.yml` reports no
-change. In step 2, each host's role finds that its binding no longer unlocks,
+change. In step 3, each host's role finds that its binding no longer unlocks,
 and binds again with its passphrase.
 
 ## Rotate the Tang keys
@@ -224,16 +235,17 @@ answers recovery requests with it. Old bindings therefore keep unlocking until
 you delete those files.
 
 1. Escrow a new key set as the next version, as in Preconditions, with `--version v2`.
-2. Run `site.yml` as in Add the host. `active_ansible_vars.py` now passes `tang-keys.v2`.
-3. Compute the new signing key's thumbprint on your machine. Only the thumbprint is printed:
+2. In a reviewed commit, set `ansible.hosted-node.tang-keys.active` to `v2` in `infra/contracts/active-ansible-selection-v1.json`.
+3. Run `site.yml` as in Add the host. The server now advertises the v2 keys.
+4. Compute the new signing key's thumbprint on your machine. Only the thumbprint is printed:
 
    ```bash
    thp=$(sops decrypt --extract '["jwks"]' infra/secrets/escrow/tang-keys.v2.sops.json \
      | jq -c '.keys[] | select(.alg == "ES512")' | jose jwk thp -i- -a S256)
    ```
 
-4. On each dedicated host, note the current Tang slot: `sudo clevis luks list -d /dev/md/exomem-cells`.
-5. Bind a new slot pinned to the new key. The passphrase travels from SOPS over SSH:
+5. On each dedicated host, note the current Tang slot: `sudo clevis luks list -d /dev/md/exomem-cells`.
+6. Bind a new slot pinned to the new key. The passphrase travels from SOPS over SSH:
 
    ```bash
    sops decrypt --extract '["passphrase"]' \
@@ -242,12 +254,12 @@ you delete those files.
        "sudo clevis luks bind -f -d /dev/md/exomem-cells -k - tang '{\"url\":\"http://10.50.1.10:7500\",\"thp\":\"$thp\"}'"
    ```
 
-6. Remove the slot you noted in step 4: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
-7. When every host is rebound, delete the hidden keys on the server: `sudo find /var/lib/tang -name '.*.jwk' -delete`.
-8. Run `site.yml` again.
+7. Remove the slot you noted in step 5: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
+8. When every host is rebound, delete the hidden keys on the server: `sudo find /var/lib/tang -name '.*.jwk' -delete`.
+9. Run `site.yml` again.
 
-Expected result: step 8 reports no change on any dedicated host. A host you
-missed fails its Tang test in step 8, and binds again from its passphrase.
+Expected result: step 9 reports no change on any dedicated host. A host you
+missed fails its Tang test in step 9, and binds again from its passphrase.
 Until then, it needs a manual unlock after a reboot. If the key directory is
 not `/var/lib/tang`, `systemctl cat tangd@.service` shows it.
 
@@ -304,7 +316,7 @@ cells.
 5. If the disks are NVMe, wipe each whole disk: `nvme format --ses=1 /dev/nvme0n1`, then `/dev/nvme1n1`.
 6. If they are not NVMe, wipe each whole disk with `blkdiscard -f /dev/<disk>`.
 7. Remove the host's peer from NetBird.
-8. Remove the host's passphrase entry from the secret matrix, and delete its SOPS files.
+8. In one reviewed commit, remove the host's passphrase entry from the secret matrix and from `infra/contracts/active-ansible-selection-v1.json`, and delete its SOPS files.
 
 Expected result: after step 3, every node has dropped the host's WireGuard
 peer, inter-node rules and Tang rule. If it was the last WireGuard host, every

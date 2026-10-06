@@ -13,8 +13,9 @@ server with encrypted local cell storage), follow
 
 ## Preconditions
 
-- The agent token exists (once, before the first agent): write
-  `k3s_agent_token` with `infra/scripts/secret_handoff.py` as described in
+- The agent token exists and is active (once, before the first agent): write
+  `k3s_agent_token` with `infra/scripts/secret_handoff.py`, then select its v1
+  in `infra/contracts/active-ansible-selection-v1.json`, as described in
   `secrets.md`. It must differ from `k3s_server_token`.
 - The first run that introduces the agent token restarts the K3s server once.
   Schedule it in a maintenance window; running cells ride through the restart.
@@ -70,9 +71,11 @@ The inventory always carries every node. `EXOMEM_DEDICATED_HOSTS` is the
 private host list from [dedicated-host.md](dedicated-host.md), or a file
 holding `{}` when there are none. An inventory without a dedicated host makes
 `site.yml` remove that host's WireGuard link, firewall rules and Tang access
-on every other node. `active_ansible_vars.py` passes the newest version of
-every hosted-node Ansible variable in the secret matrix, including the Tang
-keys and each dedicated host's passphrase once they exist.
+on every other node. `active_ansible_vars.py` passes the version of each
+hosted-node Ansible variable that `infra/contracts/active-ansible-selection-v1.json`
+selects, including the Tang keys and each dedicated host's passphrase once they
+are selected. Escrowing a new version changes nothing until a reviewed commit
+selects it.
 
 ## Reserve an agent for one selected cell
 
