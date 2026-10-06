@@ -1455,7 +1455,7 @@ def carry_named_groups(
                     for path, _score in hits:
                         page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
                         if page is not None:
-                            found = frozenset(content_stems(page.title + " " + page.body))
+                            found = frozenset(content_stems(page.title + " " + page.search_body))
                             contacts.setdefault(path, set()).update(
                                 (left, right) for left, right, pair in occurrences
                                 if pair in component and set(pair) <= found

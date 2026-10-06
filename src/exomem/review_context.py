@@ -18,7 +18,7 @@ from . import (
     vault,
 )
 from . import find as find_module
-from . import provenance as provenance_module
+from .governance import egress
 
 _SAFE_FRONTMATTER = frozenset(
     {
@@ -106,7 +106,7 @@ def assemble(
     parsed = find_module._CACHE.get(vault_root / page_result.path, vault_root)
     if parsed is None:
         raise ValueError(f"NOT_FOUND: no readable page at {page_result.path}")
-    parsed = _prose_page(page_result, parsed)
+    parsed = _prose_page(vault_root, page_result, parsed)
 
     ref_resolver = _ReferenceResolver(vault_root)
     truncation: list[str] = []
@@ -336,9 +336,11 @@ def _unavailable_graph(reason: str) -> dict[str, Any]:
     }
 
 
-def _prose_page(result: get_page.GetResult, parsed: find_module.ParsedPage) -> find_module.ParsedPage:
-    """Project complete held text before bounding; retain canonical snapshot identity."""
-    source = provenance_module.origin_prose(result.content, owner_path=result.path)
+def _prose_page(
+    vault_root: Path, result: get_page.GetResult, parsed: find_module.ParsedPage
+) -> find_module.ParsedPage:
+    """Project complete held text for this caller before bounding; keep snapshot identity."""
+    source = egress.prose_for_caller(vault_root, result.content, owner_path=result.path)
     if source == result.content:
         frontmatter, body = result.frontmatter, result.body
     else:
@@ -388,7 +390,7 @@ def _related_section(
         parsed = find_module._CACHE.get(vault_root / result.path, vault_root)
         if parsed is None:
             continue
-        parsed = _prose_page(result, parsed)
+        parsed = _prose_page(vault_root, result, parsed)
         excerpt = " ".join(parsed.body.split())[:320]
         rows.append(
             {

@@ -15,9 +15,13 @@ EXCERPT_MAX_LEN = 220
 def prose_units(
     page: ParsedPage, units: tuple[SemanticUnit, ...]
 ) -> tuple[SemanticUnit, ...]:
-    """Keep canonical identities, omitting units whose fields overlap managed metadata."""
-    metadata = provenance.parse_owned_origin(page.body, owner_path=page.rel_path)
-    if not metadata.spans:
+    """Keep canonical identities, omitting units whose fields overlap managed metadata.
+
+    Units are shared by every audience, so a carrier that a hand edit moved
+    into a unit's code withholds that unit too (`provenance.withheld_spans`).
+    """
+    spans = provenance.withheld_spans(page.body, owner_path=page.rel_path)
+    if not spans:
         return units
     return tuple(
         unit
@@ -25,7 +29,7 @@ def prose_units(
         if page.body[unit.span.start_offset:unit.span.end_offset] == unit.span.text
         and not any(
             start < unit.span.end_offset and unit.span.start_offset < end
-            for start, end in metadata.spans
+            for start, end in spans
         )
     )
 

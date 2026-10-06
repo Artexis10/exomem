@@ -3396,7 +3396,8 @@ def op_suggest_links(
         suggestions = corpus_aware_module.suggest_related(
             vault_root,
             title=page.title,
-            body=page.body,
+            # The query is built from prose: a carrier's words never steer it.
+            body=egress_module.prose_for_caller(vault_root, page.body, owner_path=page.rel_path),
             self_path=page.rel_path,
             existing_links=existing_links,
             limit=limit,

@@ -4022,6 +4022,31 @@ def projects_origin(vault_root: Path, policy: Policy, principal: RequestPrincipa
     )
 
 
+def prose_for_caller(
+    vault_root: Path,
+    text: str,
+    *,
+    owner_path: str,
+    principal: RequestPrincipal | None = None,
+) -> str:
+    """Page prose for the current caller; an origin carrier is never prose.
+
+    The one helper every door that serves page prose to one caller uses. The
+    owner, and every caller of a vault with no configured audience, keeps the
+    code exemption, so a fenced carrier example stays literal. Every other
+    caller gets `provenance.withheld_prose`: each reserved opener is withheld
+    wherever it sits, code and escapes included. Prose every audience shares is
+    computed once, before any caller is known, and uses `withheld_prose`
+    directly (search fields, units, packs, graph fields).
+    """
+    from .. import provenance
+
+    who = principal if principal is not None else effective_principal()
+    if projects_origin(vault_root, policy_module.load(vault_root), who):
+        return provenance.withheld_prose(text, owner_path=owner_path)
+    return provenance.origin_prose(text, owner_path=owner_path)
+
+
 def _project_page_origin(
     vault_root: Path,
     page: dict[str, Any],

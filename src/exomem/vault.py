@@ -6501,10 +6501,14 @@ def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
 
     Shared by the full-vault build and the per-file patch so the two stay in
     lockstep — a patched file's entries are byte-identical to what a fresh
-    full rebuild would produce for that same file content.
+    full rebuild would produce for that same file content. An origin carrier
+    is attribution, not a link: its line never becomes a context any reader
+    of the target is shown (`provenance.without_carriers`).
     """
+    from . import provenance
+
     out: list[tuple[int, str, str]] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(provenance.without_carriers(text).splitlines(), start=1):
         for m in _WIKILINK_PATTERN.finditer(line):
             out.append((lineno, line.strip()[:240], m.group(1).strip()))
     return out

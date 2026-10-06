@@ -275,7 +275,17 @@ Fields that every audience shares withhold the same spans for everyone: search
 fields and titles (BM25, lexstore, embedding chunks, find excerpts), context
 pack ledes, excerpts, projected search fields and bridge abstractions. A fenced
 example of a carrier is over-hidden there, which costs nothing worth keeping.
-Owner review context and semantic units keep the code exemption. Reading over-hides
+Prose served to one caller passes one choke point, `egress.prose_for_caller`:
+withheld for a reader whose origin is projected, the code-exempt classification
+for the owner. Review context, graph-context documents, link suggestions,
+upkeep and adoption excerpts, entity ledes and outbound links use it. Fields
+built once for every caller withhold for everyone: graph node and edge text,
+titles and metadata (at emission, so a stored graph needs no rebuild), find
+units (a unit overlapping a withheld span is dropped), category excerpts and
+activation's ranking text. The provenance report and the inbound-link index
+drop each carrier's characters and keep its line breaks: a carrier is never a
+provenance tag or a link. Semantic units keep the code exemption, so the write
+side keeps code examples literal. Reading over-hides
 a literal that HTML would not treat as a comment, which costs nothing; writing
 accepts exactly one designated block and refuses anything else (malformed,
 unterminated or more than one) with a typed `ORIGIN_METADATA_INVALID`. Origin

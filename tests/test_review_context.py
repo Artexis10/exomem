@@ -282,3 +282,37 @@ def test_review_context_resolves_each_reference_path_once_per_assembly(
     review_context.assemble(vault, ref=item.ref)
 
     assert len(calls) == len(set(calls)), calls
+
+
+@pytest.mark.parametrize("audience", ["client-a", "owner"])
+def test_review_context_withholds_a_code_pushed_carrier_only_from_a_restricted_reader(
+    review_item_vault: tuple[Path, object], audience: str
+) -> None:
+    """A restricted reader never gets a carrier's payload; the owner reads its code as written."""
+    from test_episode_recovery import _write_source_rule
+
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    vault, _item = review_item_vault
+    carrier = "<!-- exomem-origin:v1 PRIVATE-ASSESSMENT -->"
+    content = (vault / TARGET).read_text(encoding="utf-8")
+    _write(vault, TARGET, content.replace("# Review target\n\n", f"# Review target\n\nPara.\n\n    {carrier}\n\n", 1))
+    _write_source_rule(vault, ceiling=0)  # a configured policy makes client-a a restricted audience
+    find_module.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    item = next(c for c in attention.activation(vault, limit=0).items if c.path == TARGET)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "review_item_context")
+    who = (
+        owner_principal(surface="mcp")
+        if audience == "owner"
+        else RequestPrincipal(audience_id=audience, surface="mcp")
+    )
+
+    with request_scope(who):
+        result = writer_lease.invoke_command(command, vault, ref=item.ref)
+
+    assert "Review target" in result["target"]["body"]
+    assert (carrier in result["target"]["body"]) is (audience == "owner")
+    if audience != "owner":
+        assert "PRIVATE-ASSESSMENT" not in json.dumps(result, default=str)

@@ -572,6 +572,21 @@ def withheld_prose(content: str, *, owner_path: str) -> str:
     return remove_carriers(content, withheld_spans(content, owner_path=owner_path))
 
 
+def without_carriers(content: str) -> str:
+    """Drop every reserved origin span's characters, keeping its line breaks.
+
+    For line-addressed scans that serve every audience (provenance tags, the
+    inbound-link index): a carrier is never a tag or a link, and every other
+    line keeps its number.
+    """
+    pieces, cursor = [], 0
+    for start, end in reserved_spans(content):
+        pieces.append(content[cursor:start])
+        pieces.append(re.sub(r"[^\r\n]", "", content[start:end]))
+        cursor = end
+    return "".join(pieces) + content[cursor:]
+
+
 # A key:value token inside a comment. Value runs to the next whitespace.
 _TAG_RE = re.compile(r"([A-Za-z][\w-]*)\s*:\s*([^\s]+)")
 
@@ -613,6 +628,9 @@ def _resolve_filter(
 def _scan_body(
     rel_path: str, body: str, key_f: str | None, value_f: str | None
 ) -> list[ProvenanceFinding]:
+    # An origin carrier is attribution, not a provenance tag: neither its
+    # payload nor its line is ever a finding, wherever it sits.
+    body = without_carriers(body)
     if "<!--" not in body:
         return []
     from .markdown_regions import scan_markdown
