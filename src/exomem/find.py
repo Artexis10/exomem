@@ -1485,6 +1485,7 @@ def find(
                 _relation_key(relations, relation_of, relation_direction),
                 prefer_active,
                 resolved_config,
+                _origin_view(vault_root),
             )
             unit_cache_key = (unit_request_key, unit_fresh)
             with _span(timings, "cache_lookup", source=find_types.SOURCE_CACHE):
@@ -1605,6 +1606,7 @@ def find(
             widen_outside_kb,
             snapshot.projection_is_lagging("vault") if widen_outside_kb else False,
             resolved_config,
+            _origin_view(vault_root),
         )
         with _span(timings, "freshness"):
             fresh = _freshness_key(
@@ -2093,7 +2095,7 @@ def _eligible_unit_records(
             )
             continue
         page_value = structured_filters.page_view(page)
-        prose_units = find_results.prose_units(page, state.document.units)
+        prose_units = find_results.prose_units(vault_root, page, state.document.units)
         for source_order, unit in enumerate(state.document.units):
             if unit.unit_ref is None:
                 continue
@@ -2106,6 +2108,14 @@ def _eligible_unit_records(
             ):
                 eligible[unit.unit_ref] = (page, unit, source_order)
     return eligible
+
+
+def _origin_view(vault_root: Path) -> bool:
+    """The caller's origin view, part of every cached result key: units are
+    filtered on the carriers this caller is never shown (`prose_units`)."""
+    from .governance import egress
+
+    return egress.projects_origin_for_caller(vault_root)
 
 
 def _hydrate_indexed_unit_records(
@@ -2158,7 +2168,7 @@ def _hydrate_indexed_unit_records(
                     stale_out.append(hit.unit_ref)
                 parents[hit.parent_path] = None
                 continue
-            parent = (page, state, find_results.prose_units(page, state.document.units))
+            parent = (page, state, find_results.prose_units(vault_root, page, state.document.units))
             parents[hit.parent_path] = parent
         if parent is None:
             continue
@@ -2929,7 +2939,7 @@ def _annotate_matched_units(
         page_value = structured_filters.page_view(page)
         matched = [
             unit
-            for unit in find_results.prose_units(page, state.document.units)
+            for unit in find_results.prose_units(vault_root, page, state.document.units)
             if structured_filters.evaluate_filter(
                 plan,
                 page=page_value,

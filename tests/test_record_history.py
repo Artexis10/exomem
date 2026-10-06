@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from test_episode_records_leaf import COLLECTION, READING, _collection, _container, _entries
 
-from exomem import commands, record_history, registry_history, writer_lease
+from exomem import commands, graph_sync, record_history, registry_history, writer_lease
 from exomem import hosted_portability as portability
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.vault import parse_frontmatter
@@ -284,6 +284,8 @@ def test_export_and_restore_carry_history(tmp_path: Path, monkeypatch: pytest.Mo
         _correct(source, key, 14, "The probe read the wrong vat.")
         _correct(source, key, 15, "Recalibrated probe.")
         before = _history(source, key)
+    # Export takes a quiesced vault: the writes' background graph rebuild must land first.
+    assert graph_sync.drain_active_rebuilds()
     exported = portability.export_quiesced_vault(
         source,
         tmp_path / "artifacts",

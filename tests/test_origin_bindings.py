@@ -964,3 +964,55 @@ def test_a_move_rewrites_the_prose_link_but_never_the_carrier(vault: Path) -> No
     text = referrer.read_text(encoding="utf-8")
     assert block in text
     assert "See [[Knowledge Base/Notes/Insights/renamed-disclosure]]." in text
+
+
+_DOC_TARGET = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation"
+
+
+def _doc_note(vault: Path) -> Path:
+    """A page documenting the carrier format: an opener in inline code, no carrier."""
+    from exomem import find as find_module
+
+    doc = vault / "Knowledge Base" / "Notes" / "Insights" / "carrier-format-notes.md"
+    doc.write_text(
+        "---\ntype: insight\nstatus: draft\ncreated: 2026-10-01\nupdated: 2026-10-01\n---\n\n"
+        "# Carrier format notes\n\nA carrier starts with `<!-- exomem-origin` and stays hidden.\n\n"
+        f"See [[{_DOC_TARGET}]] for the disclosure rule.\n\nThe quokkafact lives in this later paragraph.\n",
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+    return doc
+
+
+def test_the_owner_finds_prose_after_a_documented_opener(vault: Path) -> None:
+    from exomem import commands
+
+    doc = _doc_note(vault)
+
+    with request_scope(owner_principal(surface="mcp")):
+        found = commands.op_find(vault, query="quokkafact", mode="keyword")
+
+    assert doc.name in json.dumps(found, default=str)
+
+
+def test_a_link_after_a_documented_opener_stays_inbound(vault: Path) -> None:
+    from exomem import commands
+
+    _doc_note(vault)
+
+    with request_scope(owner_principal(surface="mcp")):
+        read = commands.op_read_memory(vault, path=_DOC_TARGET + ".md", links=True)
+
+    assert "carrier-format-notes" in json.dumps(read["links"]["inbound"], default=str)
+
+
+def test_a_move_retargets_a_link_after_a_documented_opener(vault: Path) -> None:
+    from exomem import move_file
+
+    doc = _doc_note(vault)
+
+    move_file.move_file(
+        vault, old_path=_DOC_TARGET + ".md", new_path="Knowledge Base/Notes/Insights/renamed-disclosure.md"
+    )
+
+    assert "See [[Knowledge Base/Notes/Insights/renamed-disclosure]] for" in doc.read_text(encoding="utf-8")

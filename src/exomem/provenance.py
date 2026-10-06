@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -542,13 +543,45 @@ def reserved_spans(content: str) -> tuple[tuple[int, int], ...]:
     reader is shown fails closed instead: an unclosed fence or an indent above
     a carrier must not turn its payload into displayed code. Over-hiding a
     fenced example of a carrier is the accepted cost.
+
+    An opener inside code that has no `-->` before its code ends is a mention,
+    not a carrier: its span ends with that code, so the prose and links after a
+    documented opener stay readable. The one exception keeps a carrier that code
+    swallowed whole: when its `-->` follows with no blank line between (a
+    multi-line carrier under an indented first line, or inline code closed by a
+    backtick inside the payload), the span still runs to that `-->`.
     """
     if "<!--" not in content or "exomem-origin" not in content.lower():
         return ()
-    return _merged(
-        _ORIGIN_COMMENT_RE.match(content, opener.start()).span()
-        for opener in _WITHHELD_OPENER_RE.finditer(content)
-    )
+    code = _code_regions(content)
+    starts = [start for start, _end in code]
+    spans = []
+    for opener in _WITHHELD_OPENER_RE.finditer(content):
+        start = opener.start()
+        closer = content.find("-->", start + 4)
+        end = len(content) if closer < 0 else closer + 3
+        owner = bisect_right(starts, start) - 1
+        code_end = code[owner][1] if owner >= 0 else start
+        if start < code_end < end and (
+            closer < 0 or _BLANK_LINE_RE.search(content, code_end - 1, end) is not None
+        ):
+            end = code_end
+        spans.append((start, end))
+    return _merged(spans)
+
+
+_BLANK_LINE_RE = re.compile(r"(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)")
+
+
+def _code_regions(content: str) -> tuple[tuple[int, int], ...]:
+    """Code regions for clipping a mention; none when they cannot be located,
+    which leaves every span running to its `-->` (the fail-closed reading)."""
+    from . import markdown_regions
+
+    try:
+        return markdown_regions.code_spans(content)
+    except markdown_regions.MarkdownPositionError:
+        return ()
 
 
 def withheld_spans(content: str, *, owner_path: str) -> tuple[tuple[int, int], ...]:

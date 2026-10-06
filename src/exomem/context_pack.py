@@ -840,7 +840,7 @@ def assemble_pack(
         plans: list[_UnitPackPlan] = []
         for page in packed_pages:
             document = semantic_states[page.rel_path].document
-            units = find_results.prose_units(page, document.units)
+            units = find_results.prose_units(vault_root, page, document.units)
             by_ref = {
                 unit.unit_ref: unit for unit in units if unit.unit_ref is not None
             }

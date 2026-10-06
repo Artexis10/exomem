@@ -41,7 +41,6 @@ def _doors(path: str, unit_ref: str) -> list[tuple[str, str, dict]]:
     doors = [
         ("read_memory", "read_memory", {"path": path}),
         ("read_memory raw", "read_memory", {"path": path, "include_raw": True}),
-        ("read_memory frontmatter", "read_memory", {"path": path, "frontmatter_only": True}),
         ("read_memory unit", "read_memory", {"path": path, "unit_ref": unit_ref}),
         ("read_memory links", "read_memory", {"path": path, "links": True}),
         ("read_memory history", "read_memory", {"path": path, "include_history": True}),
@@ -72,9 +71,6 @@ def _doors(path: str, unit_ref: str) -> list[tuple[str, str, dict]]:
     doors += [
         ("review_memory evolution", "review_memory", {"mode": "evolution", "path": path}),
         ("review_memory provenance", "review_memory", {"mode": "provenance"}),
-        ("review_memory provenance key", "review_memory", {"mode": "provenance", "key": "exomem"}),
-        ("review_memory provenance tag", "review_memory", {"mode": "provenance", "tag": "exomem-origin"}),
-        ("review_memory provenance path", "review_memory", {"mode": "provenance", "path": path}),
     ]
     return doors
 

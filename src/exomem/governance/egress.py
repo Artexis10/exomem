@@ -4122,10 +4122,38 @@ def prose_for_caller(
     """
     from .. import provenance
 
-    who = principal if principal is not None else effective_principal()
-    if projects_origin(vault_root, policy_module.load(vault_root), who):
+    if projects_origin_for_caller(vault_root, principal):
         return provenance.withheld_prose(text, owner_path=owner_path)
     return provenance.origin_prose(text, owner_path=owner_path)
+
+
+def carrier_spans_for_caller(
+    vault_root: Path,
+    text: str,
+    *,
+    owner_path: str,
+    principal: RequestPrincipal | None = None,
+) -> tuple[tuple[int, int], ...]:
+    """The carrier spans this caller is never shown: `prose_for_caller`'s rule as spans.
+
+    For units, which keep their offsets: a projected reader loses every reserved
+    span (`provenance.withheld_spans`), and the owner loses only the page's own
+    carrier, so a carrier example in a unit's code stays literal for them.
+    """
+    from .. import provenance
+
+    if projects_origin_for_caller(vault_root, principal):
+        return provenance.withheld_spans(text, owner_path=owner_path)
+    return provenance.parse_owned_origin(text, owner_path=owner_path).spans
+
+
+def projects_origin_for_caller(
+    vault_root: Path, principal: RequestPrincipal | None = None
+) -> bool:
+    """Whether this caller reads origin projected (`projects_origin`). A cache
+    of anything `prose_for_caller` or `carrier_spans_for_caller` shaped keys on it."""
+    who = principal if principal is not None else effective_principal()
+    return projects_origin(vault_root, policy_module.load(vault_root), who)
 
 
 def _project_page_origin(

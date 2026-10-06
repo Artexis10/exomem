@@ -269,7 +269,11 @@ exemption governs classification and writing only. A read that projects origin
 fails closed: unless the page's one valid carrier outside code is released to
 the reader, every reserved opener is withheld wherever it sits, code and
 escapes included, so an unclosed fence or an indent above a carrier cannot
-display its payload as code. Nothing is withheld from the owner, and with no
+display its payload as code. An opener inside code with no `-->` before that
+code ends is a mention, not a carrier: its span ends with the code, so prose
+and links after a documented opener stay readable for everyone. The span still
+runs to the `-->` when that follows with no blank line between, which keeps a
+carrier that code swallowed whole. Nothing is withheld from the owner, and with no
 configured audience nothing is projected, so both read every page as written.
 Fields that every audience shares withhold the same spans for everyone: search
 fields and titles (BM25, lexstore, embedding chunks, find excerpts), context
@@ -280,16 +284,17 @@ withheld for a reader whose origin is projected, the code-exempt classification
 for the owner. Review context, graph-context documents, link suggestions,
 upkeep and adoption excerpts, entity ledes and outbound links use it. Fields
 built once for every caller withhold for everyone: graph node and edge text,
-titles and metadata (at emission, so a stored graph needs no rebuild), find
-units (a unit overlapping a withheld span is dropped), category excerpts and
-activation's ranking text. The provenance report, the inbound-link index and
+titles and metadata (at emission, so a stored graph needs no rebuild),
+category excerpts, claims, anchor signatures and activation's ranking text.
+Find and pack units drop a unit that overlaps a carrier this caller is never
+shown (`egress.carrier_spans_for_caller`), and cached find results key on that
+view, so the owner keeps a carrier example in a unit's code literal. The provenance report, the inbound-link index and
 the activation index's link edges drop each carrier's characters and keep its
 line breaks: a carrier is never a provenance tag or a link, so a carried page
 never lists a person only its carrier links. A writer never rewrites a link
 inside a carrier, in link normalization or on a move, so a carrier keeps the
 bytes it recorded. Semantic units keep the code exemption, so the write side
-keeps code examples literal. Reading over-hides
-a literal that HTML would not treat as a comment, which costs nothing; writing
+keeps code examples literal. Reading over-hides a literal that HTML would not treat as a comment, which costs nothing; writing
 accepts exactly one designated block and refuses anything else (malformed,
 unterminated or more than one) with a typed `ORIGIN_METADATA_INVALID`. Origin
 JSON is decoded from original slices, and an unmappable offset fails the

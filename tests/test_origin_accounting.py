@@ -176,3 +176,55 @@ def test_reserved_carrier_offsets_survive_unicode_crlf_and_repeated_container_te
         (len(before), len(before) + len(block)),
         (body.index("<!-- exomem-origin:v2"), len(body)),
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "Starts with `<!-- exomem-origin` and hides.\n\nSee [[Target]].\n\nLater quokka.\n",
+            id="inline-code",
+        ),
+        pytest.param(
+            "```html\n<!-- exomem-origin:v1 {}\n```\n\nSee [[Target]].\n\nLater quokka.\n",
+            id="fence-without-a-closer",
+        ),
+        pytest.param(
+            "```html\n<!-- exomem-origin:v1 {}\n```\n\nSee [[Target]].\n\nLater quokka. -->\n",
+            id="closer-after-the-fence",
+        ),
+    ],
+)
+def test_an_opener_shown_in_code_ends_with_its_code(text: str) -> None:
+    """A documented opener hides only its code, never the prose and links after it."""
+    kept = provenance.without_carriers(text)
+
+    assert "exomem-origin" not in kept
+    assert "See [[Target]]." in kept and "Later quokka." in kept
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            'Para.\n\n```\n<!-- exomem-origin:v1 {"reason":"SECRET"}\nTail.\n', id="unclosed-fence"
+        ),
+        pytest.param(
+            'Para.\n\n    <!-- exomem-origin:v1 {"reason":"SECRET"} -->\n\nTail.\n', id="indented-line"
+        ),
+        pytest.param(
+            'Para.\n\n    <!-- exomem-origin:v1\n{\n  "reason": "SECRET"\n}\n-->\n\nTail.\n',
+            id="indented-first-line-of-a-multiline-carrier",
+        ),
+        pytest.param(
+            'Para `<!-- exomem-origin:v1 {"reason":"a`SECRET"} -->\n\nTail.\n',
+            id="inline-code-closed-inside-the-payload",
+        ),
+    ],
+)
+def test_a_carrier_pushed_into_code_is_withheld_to_its_own_end(text: str) -> None:
+    """Code that swallowed a carrier's opener never cuts its payload short."""
+    kept = provenance.without_carriers(text)
+
+    assert "SECRET" not in kept
+    assert "Para" in kept

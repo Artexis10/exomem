@@ -256,10 +256,14 @@ def extract_claim_text(
 
 
 def extract_claim_for_page(page) -> str | None:
-    """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type)."""
+    """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type).
+
+    Claims feed a shared sidecar, so they read the withheld search body: an
+    origin carrier is never a claim, nor the lead-paragraph fallback.
+    """
     return extract_claim_text(
         page.title,
-        page.body,
+        page.search_body,
         page_type=page.page_type,
         entity_type=page.frontmatter.get("entity_type"),
     )

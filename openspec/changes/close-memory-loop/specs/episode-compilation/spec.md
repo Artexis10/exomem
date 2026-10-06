@@ -412,6 +412,7 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 
 - **WHEN** an unclosed fence or an indent above a carrier makes it code, and its bound input is not released to the reader
 - **THEN** reading withholds every reserved opener on the page, in code and escapes included, to its first terminator or the end of the text
+- **AND** an opener inside code with no terminator before that code ends is withheld only to the end of the code, unless its terminator follows with no blank line between, so prose and links after a documented opener stay readable and linkable
 - **AND** search fields, context packs and excerpts never match or show its payload for any audience
 - **AND** no door that reader can call shows its payload: page, unit and link reads, find at every level, activation, graph context, review context, suggestions or the provenance report
 - **AND** classification and writing still treat only openers outside code as carriers, and the owner reads the page as written

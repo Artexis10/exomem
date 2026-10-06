@@ -932,7 +932,13 @@ def _sections(body: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _signature(title: str, body: str, *, extra: Iterable[str] = ()) -> str:
+def _signature(title: str, body: str, *, owner_path: str = "", extra: Iterable[str] = ()) -> str:
+    """Title, lede and headline sections. A signature is shared by every caller,
+    so a page body is read withheld: an origin carrier is never its lede."""
+    if body:
+        from . import provenance
+
+        body = provenance.withheld_prose(body, owner_path=owner_path)
     parts = [title.strip(), lede(body), *_sections(body), *extra]
     return "\n".join(part for part in parts if part)[:SIGNATURE_MAX_CHARS]
 
@@ -1305,7 +1311,7 @@ def _finalize_anchor_aliases(
                 title=title,
                 kind=entry["kind"],
                 lifecycle=entry["lifecycle"],
-                signature=_signature(title, entry["body"]),
+                signature=_signature(title, entry["body"], owner_path=entry["path"]),
                 aliases=aliases,
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
                 categories=_categories(sections, tags, semantic_registry=semantic_registry),

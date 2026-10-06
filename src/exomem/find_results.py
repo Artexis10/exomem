@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from . import provenance
 from .find_types import ParsedPage
 from .semantic_units import SemanticUnit
 
@@ -13,14 +13,18 @@ EXCERPT_MAX_LEN = 220
 
 
 def prose_units(
-    page: ParsedPage, units: tuple[SemanticUnit, ...]
+    vault_root: Path, page: ParsedPage, units: tuple[SemanticUnit, ...]
 ) -> tuple[SemanticUnit, ...]:
-    """Keep canonical identities, omitting units whose fields overlap managed metadata.
+    """Keep canonical identities, omitting units whose fields overlap a carrier.
 
-    Units are shared by every audience, so a carrier that a hand edit moved
-    into a unit's code withholds that unit too (`provenance.withheld_spans`).
+    The carriers are the ones this caller is never shown
+    (`egress.carrier_spans_for_caller`): for a projected reader a carrier that
+    a hand edit moved into a unit's code withholds that unit, and for the owner
+    a carrier example in a unit's code stays a literal unit.
     """
-    spans = provenance.withheld_spans(page.body, owner_path=page.rel_path)
+    from .governance import egress
+
+    spans = egress.carrier_spans_for_caller(vault_root, page.body, owner_path=page.rel_path)
     if not spans:
         return units
     return tuple(
