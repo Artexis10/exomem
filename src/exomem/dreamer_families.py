@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_store, find_corpus
+from . import dreamer_store, episode_capture, find_corpus
 from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
@@ -597,6 +597,13 @@ _ENTITY_TARGETS_SQL = (
     "ORDER BY d.path LIMIT ?"
 )
 
+#: A graph file node `f` dated after the bound date, as `_date` reads its
+#: dates. In SQL, so a row limit applies to qualifying rows only: a page that
+#: many older pages link is still reached by the newer ones.
+_NEWER_THAN = (
+    "substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) > ?"
+)
+
 _CONTRIBUTORS_SQL = (
     "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id, "
     "f.title "
@@ -604,6 +611,7 @@ _CONTRIBUTORS_SQL = (
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_key = ? AND e.source_path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    f"AND {_NEWER_THAN} "
     f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
     f"AND COALESCE(f.lifecycle_status, '') NOT IN "
     f"({','.join('?' for _ in _INACTIVE_STATUSES)}) "
@@ -671,6 +679,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
         (
             f"file:{entity}",
             entity,
+            entity_date,
             *_HYDRATION_TYPES,
             *sorted(_INACTIVE_STATUSES),
             entity,
@@ -678,11 +687,8 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
         ),
     ).fetchall()
     contributors: dict[str, dict[str, Any]] = {}
-    for path, src_key, updated, origin, exomem_id, title in rows:
+    for path, src_key, _updated, _origin, exomem_id, title in rows:
         path = str(path)
-        fact_date = _date(updated, origin)
-        if not fact_date or fact_date <= entity_date:
-            continue
         entry = contributors.setdefault(
             path,
             {"exomem_id": exomem_id, "title": title, "units": set(), "page_level": False},
@@ -915,7 +921,7 @@ def _released(view: dict[str, Any] | None, row: dict[str, Any]) -> dict[str, Any
         return None
     released = {**row, **view}
     released["evidence"] = sorted(view["evidence"], key=lambda item: str(item.get("path") or ""))
-    released["fingerprint"] = dreamer_store.proposal_fingerprint(
+    released["fingerprint"] = view.get("fingerprint") or dreamer_store.proposal_fingerprint(
         family=view["family"],
         subject_ref=view["subject_ref"],
         signal_version=view["signal_version"],
@@ -1645,13 +1651,15 @@ _LINKED_SUBJECTS_SQL = (
     "ORDER BY d.path LIMIT ?"
 )
 
-#: Live episode recaps that link the subject and that it neither links nor cites.
+#: Live episode recaps recorded after the subject's date that link the subject
+#: and that it neither links nor cites.
 _RECAPS_SQL = (
     "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_key = ? AND substr(e.source_path, 1, ?) = ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    f"AND {_NEWER_THAN} "
     f"AND COALESCE(f.lifecycle_status, '') NOT IN ({','.join('?' for _ in _INACTIVE_STATUSES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
     "AND b.dst_key = ('file:' || e.source_path)) "
@@ -1667,8 +1675,10 @@ _REFERRERS_SQL = (
     "ORDER BY e.source_path"
 )
 
-#: The `## Summary` section the entity page shape carries (`link.py`).
+#: The `## Summary` section the entity page shape carries (`link.py`), and
+#: the next heading of its level or above, which ends it.
 _SUMMARY_SECTION = re.compile(r"^##[ \t]+summary[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_SECTION_END = re.compile(r"^#{1,2}[ \t]", re.MULTILINE)
 
 
 def _episodes_prefix() -> str:
@@ -1696,6 +1706,39 @@ def _subject_node(ctx: Context, subject: str, keep) -> tuple[Any, ...] | None:
 
 def _visible(keep, path: str) -> bool:
     return keep is None or bool(keep(path))
+
+
+def _basis_fingerprint(family: str, subject_ref: str, signal: str) -> str:
+    """A proposal's fingerprint over its subject and signal alone, not its
+    evidence paths, which move without the proposal changing."""
+    return dreamer_store.proposal_fingerprint(
+        family=family, subject_ref=subject_ref, signal_version=signal, evidence=[]
+    )
+
+
+def subject_rows_touched(ctx: Context, paths: list[str]) -> set[str]:
+    """Fold and profile rows the given pages may be members of, by candidate id:
+    the rows on each page and on each governed page it links. A superset."""
+    linked: set[str] = set()
+    if paths:
+        marks = ",".join("?" for _ in paths)
+        try:
+            linked = {
+                str(row[0])
+                for row in ctx.graph().execute(
+                    "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
+                    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+                    f"WHERE e.source_path IN ({marks}) AND d.review_eligible = 1",
+                    paths,
+                )
+            }
+        except (sqlite3.Error, Deferred):
+            linked = set()
+    return {
+        dreamer_store.candidate_id(kind, subject, "")
+        for subject in {*paths, *linked}
+        for kind in (FOLD_KIND, PROFILE_KIND)
+    }
 
 
 def _released_rows(cursor, keep) -> list[tuple[Any, ...]]:
@@ -1740,29 +1783,34 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
                 f"file:{subject}",
                 len(prefix),
                 prefix,
+                since,
                 *sorted(_INACTIVE_STATUSES),
                 subject,
             ),
         ),
         keep,
     )
-    episodes: dict[str, tuple[str, str]] = {}
+    episodes: dict[str, tuple[str, str, str]] = {}
     for path, updated, origin in rows:
-        recorded = _date(updated, origin)
-        if not recorded or recorded <= since:
-            continue
-        page = ctx.page(str(path))
+        path = str(path)
+        page = ctx.page(path)
         frontmatter = page.frontmatter if page is not None else {}
         key = frontmatter.get("episode") if isinstance(frontmatter, dict) else None
         origin_key = review_state_digest(["episode", key if isinstance(key, str) else path])
-        # The newest revision speaks for its episode.
-        if origin_key not in episodes or (recorded, str(path)) > episodes[origin_key]:
-            episodes[origin_key] = (recorded, str(path))
+        # The newest revision speaks for its episode: the recorder's order
+        # token in the filename decides among revisions of one day.
+        parts = episode_capture.filename_parts(Path(path).name)
+        newer = (_date(updated, origin), parts[1] if parts else "", path)
+        if origin_key not in episodes or newer > episodes[origin_key]:
+            episodes[origin_key] = newer
     if len(episodes) < FOLD_MIN_ORIGINS:
         return None
-    chosen = sorted((path, origin) for origin, (_at, path) in episodes.items())
+    chosen = sorted((path, origin) for origin, (_d, _o, path) in episodes.items())
     chosen = chosen[:_OTHER_MEMBERS]
     subject_entry = _member_entry(ctx, subject, "subject")
+    # Bound to the episodes, not to their revisions' paths: a new revision of
+    # a counted episode neither reopens a dismissal nor restarts delivery.
+    signal = review_state_digest([subject, sorted(episodes)])
     return {
         "family": FOLD_FAMILY,
         "kind": FOLD_KIND,
@@ -1783,18 +1831,27 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
             },
         },
         "reason_code": "recaps_newer_than_page",
-        "signal_version": review_state_digest([subject, since, sorted(episodes)]),
+        "signal_version": signal,
+        "fingerprint": _basis_fingerprint(FOLD_FAMILY, subject_entry["ref"], signal),
         "measures": {"episodes": len(episodes)},
     }
 
 
 def _self_described(page: Any) -> bool:
-    """True when the page says what it is: a `summary` field or a `## Summary` section."""
+    """True when the page says what it is: a `summary` field, or a `## Summary`
+    section with text outside code."""
+    from .vault import _mask_code_spans
+
     frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
     value = frontmatter.get("summary")
     if isinstance(value, str) and value.strip():
         return True
-    return bool(_SUMMARY_SECTION.search(str(getattr(page, "body", "") or "")))
+    masked = _mask_code_spans(str(getattr(page, "body", "") or ""))
+    heading = _SUMMARY_SECTION.search(masked)
+    if heading is None:
+        return False
+    following = _SECTION_END.search(masked, heading.end())
+    return bool(masked[heading.end() : following.start() if following else None].strip())
 
 
 def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
@@ -1839,6 +1896,8 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
         firsts.setdefault(origins[path], path)
     chosen = sorted(firsts.values())[:_OTHER_MEMBERS]
     subject_entry = _member_entry(ctx, subject, "subject")
+    # Bound to the origins: a new referrer of a counted origin changes nothing.
+    signal = review_state_digest([subject, sorted(set(origins.values()))])
     return {
         "family": PROFILE_FAMILY,
         "kind": PROFILE_KIND,
@@ -1858,7 +1917,8 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
             },
         },
         "reason_code": "linked_without_summary",
-        "signal_version": review_state_digest([subject, sorted(set(origins.values()))]),
+        "signal_version": signal,
+        "fingerprint": _basis_fingerprint(PROFILE_FAMILY, subject_entry["ref"], signal),
         "measures": {"origins": len(set(origins.values())), "referrers": len(referrers)},
     }
 

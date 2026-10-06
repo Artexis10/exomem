@@ -369,9 +369,9 @@ def review(
 
 
 def _order_time(row: dict[str, Any]) -> float:
-    """The time a row sorts by. A global family's stored clocks move with
+    """The time a row sorts by. A per-caller row's stored clocks move with
     withheld members, so its rows sort by rank and id alone."""
-    if _global(row):
+    if _per_caller(row):
         return 0.0
     return float(row.get("settled_at") or row.get("refreshed_at") or 0.0)
 
@@ -442,9 +442,13 @@ def _per_key(row: dict[str, Any]) -> bool:
     return row.get("kind") in {dreamer_families.ALIAS_KIND, dreamer_families.TAG_KIND}
 
 
-def _global(row: dict[str, Any]) -> bool:
-    """A row whose delivery is judged per caller from released evidence."""
-    return str(row.get("family") or "") in dreamer_store.GLOBAL_FAMILIES
+def _per_caller(row: dict[str, Any]) -> bool:
+    """A row served per caller: its family recomputes it from the members that
+    caller may see (`release`). The worker's stored settle clock, `deliverable`
+    flag and order move with withheld members, so the carrier reads none of
+    them for these rows and judges delivery on the released row instead."""
+    family = dreamer_families.family_for(str(row.get("family") or ""))
+    return family is not None and family.release is not None
 
 
 def _subject_visible(row: dict[str, Any], keep) -> bool:
@@ -602,7 +606,7 @@ def deliverable_rows(vault_root: Path, view: dreamer_store.StoreView) -> list[di
     for row in view.candidates:
         if row.get("state") != "open":
             continue
-        if _global(row):
+        if _per_caller(row):
             # Judged per caller in `_choose`, on released evidence only: the
             # worker's `deliverable` and settle clock move with withheld
             # members. Nothing while the family's membership is incomplete.
@@ -815,8 +819,8 @@ def _signatures_live(vault_root: Path, row: dict[str, Any]) -> tuple[bool, float
     return fresh, newest / 1e9
 
 
-def _global_open(vault_root: Path, row: dict[str, Any]) -> bool:
-    """A global row's decision, family disposition and in-process disposal,
+def _released_decision_open(vault_root: Path, row: dict[str, Any]) -> bool:
+    """A per-caller row's decision, family disposition and in-process disposal,
     all on the fingerprint this caller is served."""
     from . import dreamer
 
@@ -937,15 +941,17 @@ def _choose(
             return released[cid]
 
         # The recent-page boost reads the pages this caller is served. A
-        # per-key row is released for it only when a recent page is among its
-        # members at all (one keyed lookup), so the boost costs no scan.
+        # per-caller row is released for it only when a recent page may be
+        # among its members (keyed lookups, no scan), and is boosted on its
+        # released paths alone.
         touched = _recent_members(ctx, recent) if recent else set()
 
         def boosted(stored: dict[str, Any]) -> bool:
             if not recent:
                 return False
-            if _per_key(stored):
-                row = view_of(stored) if str(stored["id"]) in touched else None
+            if _per_caller(stored):
+                maybe = str(stored["id"]) in touched or bool(recent & _row_paths(stored))
+                row = view_of(stored) if maybe else None
                 return row is not None and bool(recent & _row_paths(row))
             return bool(recent & _row_paths(stored))
 
@@ -967,8 +973,8 @@ def _choose(
             if row is None:
                 continue
             tried += 1
-            if _global(stored):
-                if not _global_open(vault_root, row):
+            if _per_caller(stored):
+                if not _released_decision_open(vault_root, row):
                     continue
             elif not _released_open(vault_root, stored, row):
                 continue
@@ -982,9 +988,9 @@ def _choose(
             fresh, newest = _signatures_live(vault_root, row)
             if not fresh:
                 continue
-            # A global row settles on its released evidence: an hour after the
+            # A per-caller row settles on its released evidence: an hour after the
             # newest released page changed, whatever a withheld one did.
-            if _global(stored) and wall < newest + dreamer_families.SETTLE_SECONDS:
+            if _per_caller(stored) and wall < newest + dreamer_families.SETTLE_SECONDS:
                 continue
             item = serve(row, keep=keep, delivered_before=len(earlier))
             if item is None:
@@ -997,8 +1003,14 @@ def _choose(
 
 
 def _recent_members(ctx: dreamer_families.Context, recent: set[str]) -> set[str]:
-    """The per-key rows a recent page is a member of, by candidate id."""
+    """The per-caller rows a recent page may be a member of, by candidate id.
+
+    A superset: each is then decided on its released row. Rows of the
+    per-subject families come from the graph, the rest from the sidecar's
+    page contributions.
+    """
     paths = sorted(recent)
+    subjects = dreamer_families.subject_rows_touched(ctx, paths)
     marks = ",".join("?" for _ in paths)
     try:
         conn = ctx.members_conn()
@@ -1016,7 +1028,9 @@ def _recent_members(ctx: dreamer_families.Context, recent: set[str]) -> set[str]
             )
         }
     except (sqlite3.Error, dreamer_families.Deferred):
-        return set()
-    return {dreamer_families.alias_id(key) for key in names} | {
-        dreamer_store.candidate_id(dreamer_families.TAG_KIND, "", key) for key in tags
-    }
+        return subjects
+    return (
+        subjects
+        | {dreamer_families.alias_id(key) for key in names}
+        | {dreamer_store.candidate_id(dreamer_families.TAG_KIND, "", key) for key in tags}
+    )

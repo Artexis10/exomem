@@ -68,6 +68,28 @@ def test_two_independent_newer_unit_links_make_a_candidate(tmp_path: Path) -> No
     assert _candidate(vault, state="resolved") is not None
 
 
+def test_an_entity_linked_by_many_older_pages_still_hydrates(tmp_path: Path) -> None:
+    """Pages dated before the entity are no contributors, so 64 of them ahead
+    in path order do not hide the two newer origins."""
+    vault = fx.build(tmp_path, with_graph=False)
+    for index in range(64):
+        fx.write(
+            vault,
+            f"{fx.KB}/Notes/Insights/a-old-{index:02d}.md",
+            fx.insight(
+                f"Old note {index:02d}",
+                sources=["field-report-three"],
+                updated="2026-01-05",
+                links="Checked the [[Notes/Entities/orbit-pump]].",
+            ),
+        )
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    results = fx.run_to_quiet(vault, limit=200)
+    assert all(result.stop_reason != "error" for result in results), results
+    assert _candidate(vault)["measures"]["origins"] == 2
+
+
 def test_one_source_fanned_out_counts_once(tmp_path: Path) -> None:
     vault = fx.build(tmp_path)
     fx.edit(

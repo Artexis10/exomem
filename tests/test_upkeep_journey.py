@@ -75,8 +75,15 @@ def _observed(vault: Path, *paths: str) -> None:
 def _journey_vault(tmp_path: Path) -> Path:
     """Positives: the cavitation/inlet pair shares a source (a link).
     Negatives: the entity has newer facts from one origin only (no hydration),
-    and seal wear shares no source with anything (no link)."""
+    and seal wear shares no source with anything (no link). The entity carries
+    a summary, so these link and hydration journeys meet no profile item,
+    which settles on page times rather than on the ticks' clock."""
     vault = fx.build(tmp_path)
+    fx.edit(
+        vault,
+        fx.ENTITY,
+        fx.entity().replace("status: active\n", "status: active\nsummary: The rig's pump.\n"),
+    )
     fx.edit(
         vault,
         fx.SEAL_WEAR,
@@ -517,5 +524,8 @@ def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
         _quiet(vault, start + 6 * HOUR + 60)
         ledger = dreamer_store.read_view(vault).deliveries
         assert len({(cid, caller) for cid, _fp, caller, _at in ledger}) == 3, ledger
+        # Duplicates from the test's ticks racing the worker's flush are
+        # identical rows; a real second delivery is not.
+        assert len(set(ledger)) == 3, ledger
     finally:
         dreamer.stop()

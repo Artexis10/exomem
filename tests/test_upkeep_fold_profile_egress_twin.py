@@ -5,7 +5,9 @@ episode and a referrer of a third origin are withheld from an external caller;
 in the second they do not exist. The owner's views differ (three origins
 against two), yet everything that caller can observe through item, context,
 triage, the explicit list and the activation carrier is identical, served
-fingerprints and counts included.
+fingerprints and counts included. Editing only a withheld member, which moves
+the owner row's stored settle clock, changes nothing the caller sees either,
+delivery timing and order included.
 """
 
 from __future__ import annotations
@@ -105,11 +107,25 @@ def _observe(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     return seen
 
 
+#: An edit to one withheld member only: its text changes, its links do not.
+EDITS = {
+    "recap": (f"{fx.EPISODES}/aa-restricted-session.md", "next year", "next quarter"),
+    "referrer": (f"{fx.KB}/Notes/A-Restricted/test-rig.md", "Runs the", "Drives the"),
+}
+
+
+@pytest.mark.parametrize("edited", [None, *EDITS])
 def test_a_withheld_recap_or_referrer_equals_an_absent_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edited: str | None
 ) -> None:
     withheld = _build(tmp_path / "withheld", WITHHELD)
     absent = _build(tmp_path / "absent", {})
+    if edited is not None:
+        rel, old, new = EDITS[edited]
+        fx.edit(withheld, rel, WITHHELD[rel].replace(old, new))
+        for vault in (withheld, absent):
+            results = fx.run_to_quiet(vault, now=LATER + 7200)
+            assert all(result.stop_reason != "error" for result in results), results
     # Not vacuous: the owner's view of the withheld twin counts the third origin.
     owner = {
         row["kind"]: row["measures"]
