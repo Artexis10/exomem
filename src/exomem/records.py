@@ -3815,16 +3815,6 @@ def _safe_audit_path(value: Any) -> bool:
     )
 
 
-def _resolve_outside(
-    root: Path, collection: str | Path | collections.CollectionManifest
-) -> collections.CollectionManifest:
-    return (
-        collection
-        if isinstance(collection, collections.CollectionManifest)
-        else collections.resolve_collection(root, collection)
-    )
-
-
 def _load_guarded_manifest(
     root: Path, collection: str | Path | collections.CollectionManifest
 ) -> tuple[collections.CollectionManifest, str, vault.PathGuard]:
@@ -4998,21 +4988,6 @@ def _new_item_path(
     return target, (source_guard,)
 
 
-def _item_directory_guards(
-    root: Path,
-    manifest: collections.CollectionManifest,
-    snapshot: record_formats.AdapterSnapshot,
-) -> tuple[vault.DirectoryCensusGuard, ...]:
-    directories = {manifest.storage.source}
-    directories.update(
-        path for path, kind, _digest in snapshot.source_inventory if kind == "directory"
-    )
-    return tuple(
-        vault.DirectoryCensusGuard.capture(root, directory, max_entries=_MAX_ITEM_FILES)
-        for directory in sorted(directories)
-    )
-
-
 def _casefold_alias(path: Path) -> bool:
     if not path.parent.is_dir():
         return False
@@ -5291,27 +5266,6 @@ def _absent_source_container_hash(manifest: collections.CollectionManifest) -> s
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
-
-
-def _item_snapshot_guards(
-    root: Path,
-    manifest: collections.CollectionManifest,
-    snapshot: record_formats.AdapterSnapshot,
-    *,
-    exclude_path: str | None = None,
-) -> tuple[vault.PathGuard, ...]:
-    if manifest.storage.strategy != "markdown-items":
-        return ()
-    return tuple(
-        vault.PathGuard.capture(
-            root,
-            version.path,
-            leaf_policy="content",
-            expected_content_hash=version.hash,
-        )
-        for version in snapshot.source_versions[1:]
-        if version.path != exclude_path
-    )
 
 
 def _due_state_carrier(

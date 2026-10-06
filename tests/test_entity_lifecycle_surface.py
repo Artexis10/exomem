@@ -900,11 +900,10 @@ def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
     for path in (
         # The intent-router restructure moved the cadence bullet out of SKILL.md
         # into the engagement reference the router points at; operations.md still
-        # carries the operation detail. Both distributions ship both files.
+        # carries the operation detail. The plugin copy is pinned byte-identical
+        # by test_plugin_sync.
         Path("src/exomem/_scaffold/_Schema/references/engagement.md"),
-        Path("plugins/claude-code/skills/exomem/references/engagement.md"),
         Path("src/exomem/_scaffold/_Schema/references/operations.md"),
-        Path("plugins/claude-code/skills/exomem/references/operations.md"),
     ):
         block = _lifecycle_block(path)
         folded = block.casefold()
@@ -915,11 +914,7 @@ def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
 
 
 def test_portable_skill_and_operation_reference_carry_the_same_lifecycle() -> None:
-    roots = (
-        Path("src/exomem/_scaffold/_Schema"),
-        Path("plugins/claude-code/skills/exomem"),
-    )
-    for root in roots:
+    for root in (Path("src/exomem/_scaffold/_Schema"),):
         # Same move as above: the engagement reference now carries what the
         # router used to state inline.
         engagement = (root / "references/engagement.md").read_text(encoding="utf-8")

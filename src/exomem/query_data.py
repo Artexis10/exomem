@@ -166,14 +166,6 @@ def _infer_columns(rows: list[dict]) -> list[str]:
     return cols
 
 
-def load_rows(
-    abs_path: Path, record_path: str | None = None
-) -> tuple[str, list[dict], list[str], list[str]]:
-    suffix = abs_path.suffix.lower()
-    data = read_dataset_bytes(abs_path)
-    return load_rows_bytes(data, suffix, record_path)
-
-
 def load_generic_rows(
     vault_root: Path,
     relative_path: str,
@@ -197,23 +189,6 @@ def load_generic_rows(
             raise QueryDataError("NOT_FOUND", "dataset could not be read") from None
         raise QueryDataError("UNREADABLE", "dataset could not be read safely") from None
     return load_rows_bytes(snapshot.data, suffix, record_path, provenance=provenance)
-
-
-def read_dataset_bytes(abs_path: Path) -> bytes:
-    """Read at most the dataset cap plus one byte to avoid unbounded allocation."""
-    try:
-        if abs_path.stat().st_size > MAX_FILE_BYTES:
-            raise QueryDataError(
-                "TOO_LARGE",
-                f"dataset exceeds the {MAX_FILE_BYTES} byte limit; pre-split or filter upstream",
-            )
-        with abs_path.open("rb") as handle:
-            data = handle.read(MAX_FILE_BYTES + 1)
-    except OSError as error:
-        raise QueryDataError("NOT_FOUND", "dataset could not be read") from error
-    if len(data) > MAX_FILE_BYTES:
-        raise QueryDataError("TOO_LARGE", "dataset exceeds the byte limit")
-    return data
 
 
 def load_rows_bytes(

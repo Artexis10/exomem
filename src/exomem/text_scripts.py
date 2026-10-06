@@ -4,6 +4,8 @@ One table in one module: which code points belong to a script written without
 spaces between words (scriptio continua), and which letters belong to the
 scripts the lexical tokenizer stems or accent-folds. It is data about scripts,
 declared as Unicode block ranges, never a word list or a language detector.
+`character_tables` adds the combining marks, symbols and variation selectors
+the tokenizer reads from the running interpreter's Unicode data.
 
 `bm25.tokenize` reads it to decide where an unspaced run starts and which
 Snowball stemmer, if any, a spaced word gets. Any other rule that needs to know
@@ -14,6 +16,7 @@ unspaced paragraphs) should read the same table rather than declare its own.
 from __future__ import annotations
 
 import bisect
+import re
 import unicodedata
 from functools import lru_cache
 
@@ -168,6 +171,71 @@ def vocabulary_words(text: str) -> list[str]:
             parts.append([kind, character])
     close()
     return words
+
+
+#: Unicode planes searched when the character tables are built. Every
+#: combining mark, symbol and variation selector in Unicode sits in the Basic
+#: or Supplementary Multilingual Plane or in plane 14.
+MARK_PLANES = ((0x0000, 0x1FFFF), (0xE0000, 0xEFFFF))
+
+#: Variation selectors choose a glyph (text or emoji presentation, an
+#: ideographic variant); they carry no letter, so they are dropped before
+#: tokenizing rather than kept as marks that would glue a keycap to its digit.
+VARIATION_SELECTORS = ((0x180B, 0x180D), (0x180F, 0x180F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
+
+
+def in_mark_planes(code_point: int) -> bool:
+    return any(start <= code_point <= end for start, end in MARK_PLANES)
+
+
+@lru_cache(maxsize=1)
+def character_tables() -> tuple[str, dict[int, str | None]]:
+    """(regex class body of every combining mark, raw-text translation table).
+
+    The table runs before NFKC on non-ASCII text. It maps every non-ASCII
+    symbol (S*) and enclosing mark (Me) to a space, so NFKC can never turn one
+    into letters that join the word beside it ("Zorblex™" would otherwise
+    become `zorblextm`, "20℃" `20c`), and it deletes variation selectors.
+    Built once, from the running interpreter's Unicode data.
+    """
+    ranges: list[list[int]] = []
+    table: dict[int, str | None] = {}
+    for start, end in MARK_PLANES:
+        for code_point in range(start, end + 1):
+            category = unicodedata.category(chr(code_point))
+            if category[0] == "M":
+                if ranges and ranges[-1][1] == code_point - 1:
+                    ranges[-1][1] = code_point
+                else:
+                    ranges.append([code_point, code_point])
+                if category == "Me":
+                    table[code_point] = " "
+            elif category[0] == "S" and code_point > 0x7F:
+                table[code_point] = " "
+    for low, high in VARIATION_SELECTORS:
+        for code_point in range(low, high + 1):
+            table[code_point] = None
+    marks = "".join(f"\\U{low:08x}-\\U{high:08x}" for low, high in ranges)
+    return marks, table
+
+
+_ASCII_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def comparison_words(text: str) -> list[str]:
+    """The unstemmed words of `text`, for matching labels against labels.
+
+    ASCII text reads as `[a-z0-9]+` over its lowercase, exactly as these
+    comparisons always have. Other text goes through the raw-text table of
+    `character_tables` (symbols separate, so "Zorblex™" stays `zorblex`), NFKC
+    and casefolding, then `vocabulary_words`, so a Cyrillic, Greek or Japanese
+    label yields its words instead of nothing. Search ranking stems; use
+    `bm25.tokenize` there instead.
+    """
+    if text.isascii():
+        return _ASCII_WORD_RE.findall(text.lower())
+    table = character_tables()[1]
+    return vocabulary_words(unicodedata.normalize("NFKC", text.translate(table)).casefold())
 
 
 def continua_character_class() -> str:

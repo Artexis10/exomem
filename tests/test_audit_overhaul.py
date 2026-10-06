@@ -129,6 +129,38 @@ def test_audit_frontmatter_compliance_flags_tenant_on_unexpected_project(vault: 
     assert matches, [f.as_dict() for f in report.findings]
 
 
+def test_audit_tenant_field_follows_the_registry_not_a_project_name(vault: Path) -> None:
+    """`tenant:` is clean exactly on projects the registry declares `tenant_scoped`.
+    No project key is special: a key named `q` is flagged like any other."""
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    registry.write_text(
+        "projects:\n"
+        "  project-alpha: {folder: Project Alpha, category: product}\n"
+        "  project-beta: {folder: Project Beta, category: product, tenant_scoped: true}\n"
+        "  q: {folder: Q, category: product}\n",
+        encoding="utf-8",
+    )
+    for project in ("project-beta", "project-alpha", "q"):
+        _seed(
+            vault / "Knowledge Base" / "Notes" / "Research" / "Tenants" / f"{project}.md",
+            f"---\ntype: research-note\nproject: {project}\ntenant: acme\n"
+            "status: active\ncreated: 2026-05-15\nupdated: 2026-05-15\n"
+            f"tags: []\n---\n\n# Tenant on {project}\n\nBody.\n",
+        )
+    for name, projects in (("list-accepted", "[project-alpha, project-beta]"), ("list-flagged", "[project-alpha]")):
+        _seed(
+            vault / "Knowledge Base" / "Notes" / "Insights" / f"{name}.md",
+            f"---\ntype: insight\nprojects: {projects}\ntenant: acme\n"
+            "status: active\ncreated: 2026-05-15\nupdated: 2026-05-15\n"
+            f"tags: []\n---\n\n# Tenant on {name}\n\nBody.\n",
+        )
+    report = audit_module.audit(vault, categories=["frontmatter_compliance"])
+    flagged = {Path(f.path).stem: f.detail for f in report.findings if "`tenant:" in f.detail}
+    assert set(flagged) == {"project-alpha", "q", "list-flagged"}, flagged
+    # The detail names the projects the page declares, also when it only has `projects:`.
+    assert "None" not in flagged["list-flagged"] and "project-alpha" in flagged["list-flagged"]
+
+
 def test_audit_frontmatter_compliance_flags_singular_project_on_pattern(vault: Path) -> None:
     """Pattern using `project:` (singular) instead of `projects:` is flagged."""
     _seed(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 
 from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
@@ -178,30 +178,79 @@ class ClusterClient:
     # -- observation (D4: pods/events/namespaces get+list only) --
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
-        namespace_obj = self._get_namespace(namespace)
-        if namespace_obj is None:
-            return ClusterObservation()
+        result = self.observe_cells({cell_id: namespace})[cell_id]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
+    def observe_cells(self, cells: dict[str, str]) -> dict[str, ClusterObservation | Exception]:
+        """Every cell in `cells` (cell id -> namespace) from one list per kind,
+        so a pass costs the same few requests however many cells there are
+        (D4 API budget). Objects are attributed to a cell only by its exact
+        namespace (and, within it, by the name the cell renders); cellctl's
+        ClusterRole already lists each kind cluster-wide. A list that fails
+        raises for the whole pass;
+        a cell whose own objects cannot be read is returned as its error."""
+
+        namespaces = {ns.metadata.name: ns for ns in self._core.list_namespace().items}
+        pvcs = {
+            pvc.metadata.namespace: pvc
+            for pvc in self._core.list_persistent_volume_claim_for_all_namespaces(
+                field_selector="metadata.name=cell-data"
+            ).items
+        }
+        pvs = {pv.metadata.name: pv for pv in self._core.list_persistent_volume().items}
+        statefulsets = {
+            sts.metadata.namespace: sts
+            for sts in self._apps.list_stateful_set_for_all_namespaces(field_selector="metadata.name=cell").items
+        }
+        # Backup/restore Job pods run in the same namespace (labelled with
+        # JOB_KIND_LABEL) and must never be mistaken for the StatefulSet's own
+        # replica, or a backup hold can never clear once its Job's pod exists
+        # (found live in 3.10). Every other pod in the namespace counts as
+        # holding the RWO volume, labelled or not: an operator's owner-restore
+        # pod (docs/runbooks/cloud-operator-import.md) carries no cell label.
+        pods: dict[str, list] = {}
+        for pod in self._core.list_pod_for_all_namespaces(label_selector=f"!{JOB_KIND_LABEL}").items:
+            pods.setdefault(pod.metadata.namespace, []).append(pod)
+
+        observations: dict[str, ClusterObservation | Exception] = {}
+        for cell_id, namespace in cells.items():
+            namespace_obj = namespaces.get(namespace)
+            if namespace_obj is None:
+                observations[cell_id] = ClusterObservation()
+                continue
+            pvc = pvcs.get(namespace)
+            pv_name = pvc.spec.volume_name if pvc and pvc.spec else None
+            try:
+                observations[cell_id] = self._observation(
+                    namespace,
+                    namespace_obj,
+                    pvc,
+                    pvs.get(pv_name) if pv_name else None,
+                    statefulsets.get(namespace),
+                    pods.get(namespace, []),
+                )
+            except Exception as error:  # noqa: BLE001 - H4: one cell's failure is that cell's alone
+                observations[cell_id] = error
+        return observations
+
+    def _observation(self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
 
-        pvc = self._get_pvc(namespace, "cell-data")
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
-        pv_name = pvc.spec.volume_name if pvc and pvc.spec else None
         pvc_volume_id = None  # the underlying Hetzner volume id (PV spec.csi.volumeHandle), not the PV's own K8s name
         pv_claim_ref_uid = None
         pv_storage_class = None
-        if pv_name:
-            pv = self._get_pv(pv_name)
-            if pv is not None:
-                if pv.spec and pv.spec.claim_ref:
-                    pv_claim_ref_uid = pv.spec.claim_ref.uid
-                if pv.spec:
-                    pv_storage_class = pv.spec.storage_class_name
-                if pv.spec and pv.spec.csi:
-                    pvc_volume_id = pv.spec.csi.volume_handle
+        if pv is not None:
+            if pv.spec and pv.spec.claim_ref:
+                pv_claim_ref_uid = pv.spec.claim_ref.uid
+            if pv.spec:
+                pv_storage_class = pv.spec.storage_class_name
+            if pv.spec and pv.spec.csi:
+                pvc_volume_id = pv.spec.csi.volume_handle
 
-        statefulset = self._get_statefulset(namespace, "cell")
         statefulset_exists = statefulset is not None
         statefulset_image = None
         statefulset_replicas = None
@@ -237,14 +286,6 @@ class ClusterClient:
             row_generation_raw = annotations.get(ROW_GENERATION_ANNOTATION)
             row_generation = int(row_generation_raw) if row_generation_raw and row_generation_raw.isdigit() else None
 
-        # Backup/restore Jobs run their own pods in this same namespace
-        # (labelled with JOB_KIND_LABEL); those must never be mistaken for
-        # the StatefulSet's own replica when deciding whether the cell pod
-        # still holds the RWO volume, or a backup hold can never clear once
-        # its Job's pod exists (found live in 3.10: the hold got stuck
-        # forever because a completed backup Job's pod is not garbage
-        # collected on its own).
-        pods = self._list_cell_pods(namespace)
         pod_exists = len(pods) > 0
         live_pods = [pod for pod in pods if pod.metadata.deletion_timestamp is None]
         pod_terminating = len(live_pods) < len(pods)
@@ -346,38 +387,6 @@ class ClusterClient:
             if _not_found(error):
                 return None
             raise
-
-    def _get_pvc(self, namespace: str, name: str):
-        try:
-            return self._core.read_namespaced_persistent_volume_claim(name, namespace)
-        except ApiException as error:
-            if _not_found(error):
-                return None
-            raise
-
-    def _get_pv(self, name: str):
-        try:
-            return self._core.read_persistent_volume(name)
-        except ApiException as error:
-            if _not_found(error):
-                return None
-            raise
-
-    def _get_statefulset(self, namespace: str, name: str):
-        try:
-            return self._apps.read_namespaced_stateful_set(name, namespace)
-        except ApiException as error:
-            if _not_found(error):
-                return None
-            raise
-
-    def _list_cell_pods(self, namespace: str) -> list:
-        """Pods belonging to the cell's own StatefulSet, excluding any
-        backup/restore Job pod running in the same namespace."""
-
-        return self._core.list_namespaced_pod(
-            namespace, label_selector=f"!{JOB_KIND_LABEL}"
-        ).items
 
     def _get_job(self, namespace: str, name: str):
         try:
@@ -646,7 +655,3 @@ def _job_observation(job, *, prefix: str, snapshot_id: str | None = None) -> dic
         result["backup_job_snapshot_id"] = snapshot_id if succeeded else None
         result["backup_job_started_at"] = job.status.start_time
     return result
-
-
-def now_utc() -> datetime:
-    return datetime.now(UTC)

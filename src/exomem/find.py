@@ -2108,43 +2108,6 @@ def _eligible_unit_records(
     return eligible
 
 
-def _indexed_unit_constraints(
-    plan: structured_filters.FilterPlan,
-) -> tuple[list[str] | None, list[str] | None]:
-    """Extract safe conjunctive category/kind constraints for SQL pushdown."""
-    values: dict[str, set[str] | None] = {"unit.category": None, "unit.kind": None}
-
-    def visit(node: structured_filters.FilterNode | None) -> None:
-        if node is None:
-            return
-        if isinstance(node, structured_filters.AllOf):
-            for child in node.children:
-                visit(child)
-            return
-        if not isinstance(node, structured_filters.Predicate):
-            return
-        field = node.field.name
-        if field not in values:
-            return
-        for operator, operand in node.operators:
-            if operator == "$eq":
-                candidates = {str(operand.value)}
-            elif operator == "$in":
-                candidates = {str(item.value) for item in operand}
-            else:
-                continue
-            current = values[field]
-            values[field] = candidates if current is None else current & candidates
-
-    visit(plan.root)
-    categories = values["unit.category"]
-    kinds = values["unit.kind"]
-    return (
-        sorted(categories) if categories else None,
-        sorted(kinds) if kinds else None,
-    )
-
-
 def _hydrate_indexed_unit_records(
     vault_root: Path,
     indexed: list[Any],
@@ -5236,10 +5199,6 @@ def _apply_temporal_boost(
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
     return find_policy.apply_temporal_boost(fused, query, _page_of(vault_root), config)
-
-
-def _recency_ranking(candidate_paths: list[str], vault_root: Path, cap: int) -> list[str]:
-    return find_policy.recency_ranking(candidate_paths, _page_of(vault_root), cap)
 
 
 def _keyword_match_paths(

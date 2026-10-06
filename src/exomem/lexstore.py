@@ -4301,16 +4301,6 @@ class LexicalStore:
         ).fetchone()
         return int(row[0]), int(row[1])
 
-    def _meta_triple(self, conn: sqlite3.Connection, scope: str) -> tuple | None:
-        row = conn.execute("SELECT value FROM meta WHERE key = ?", (f"triple:{scope}",)).fetchone()
-        if row is None:
-            return None
-        try:
-            val = ast.literal_eval(row[0])
-            return tuple(val) if isinstance(val, list | tuple) else None
-        except (ValueError, SyntaxError):
-            return None
-
     def _meta_catalog_identity(self, conn: sqlite3.Connection) -> str | None:
         row = conn.execute(
             "SELECT value FROM meta WHERE key = 'catalog_identity'"
@@ -4367,14 +4357,6 @@ class LexicalStore:
             "INSERT INTO meta(key, value) VALUES(?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (f"recall_checkpoint:{scope}", repr(tuple(checkpoint))),
-        )
-
-    def _store_checkpoint(self, conn: sqlite3.Connection, scope: str) -> None:
-        """Store the current projected recall checkpoint for `scope`."""
-        from . import freshness as freshness_module
-
-        self._write_checkpoint(
-            conn, scope, freshness_module.recall_checkpoint(self.vault_root, scope)
         )
 
     def published_recall_checkpoint(self, scope: str):
