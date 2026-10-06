@@ -187,5 +187,7 @@ Never clear the backup record to get past this refusal: the cell would then serv
 
 1. Read the claim's actual size: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data --output=jsonpath='{.spec.resources.requests.storage}'`. Expect whole GiB, such as `14Gi`.
 2. After a control-database restore, set the row's grown size to that number, as the control database owner: `UPDATE exomem_cloud_cells SET grown_storage_gib = 14 WHERE cell_id = '<cell id>';`. It must report `UPDATE 1`.
-3. After a cellctl rollback, roll cellctl forward again. A cellctl from before this change ignores `grown_storage_gib`, so step 2 does not help it. If cellctl must stay rolled back, set `storage_gib` to that number instead; that restarts the cell once.
-4. Check that the next pass clears the row's error code, and that the next hourly backup records a new `last_backup_at`.
+3. After a cellctl rollback, roll cellctl forward again. A cellctl from before this change ignores `grown_storage_gib`.
+4. If cellctl must stay rolled back, set the row's `storage_gib` to that number, as the control database owner. The cell restarts once.
+5. Check that the row's error code clears within an hour. The refusal stays parked until its backoff passes, because `grown_storage_gib` does not change the render digest.
+6. Check that the next hourly backup records a new `last_backup_at`.
