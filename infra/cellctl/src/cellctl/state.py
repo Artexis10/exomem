@@ -38,6 +38,11 @@ CANARY_PARKED = "CANARY_PARKED"
 # move-cloud-cells-to-local-storage D4: a cell on a node confirmed stopped has
 # no backup to relocate from, so it stays where it is for the operator.
 RELOCATION_NO_BACKUP = "RELOCATION_NO_BACKUP"
+# The row records a volume, but the cell has no claim. cellctl never creates a
+# fresh one then: it would be empty, and a cell without the D5 guard would
+# initialise a blank vault over the tenant's. The operator re-adopts the volume
+# or marks it lost (docs/runbooks/cloud-node-loss.md).
+VOLUME_MISSING = "VOLUME_MISSING"
 # move-cloud-cells-to-local-storage D5: cell-init's own value-free refusal,
 # read from its termination message. Only these codes ever reach the row.
 EMPTY_VOLUME_REFUSED = "CELL_INIT_EMPTY_VOLUME_REFUSED"
@@ -111,6 +116,9 @@ class ClusterObservation:
 
     namespace_exists: bool = False
     namespace_cell_label: str | None = None
+    # D4: the operator's `exomem.io/volume-lost` mark on the namespace, naming
+    # the recorded volume that no disk holds, so the cell is relocated.
+    namespace_volume_lost: str | None = None
 
     pvc_bound: bool = False
     pvc_volume_id: str | None = None
@@ -125,9 +133,9 @@ class ClusterObservation:
     # A local volume's node, from its PV's node affinity on the configured
     # topology key. None for a volume that is not node-local.
     pv_node: str | None = None
-    # D4: that node is confirmed stopped: the operator tainted it out of
-    # service by the node-removal rule, and it is not Ready.
-    pv_node_stop_confirmed: bool = False
+    # D4: that node is lost: the operator tainted it out of service by the
+    # node-removal rule and it is not Ready, or it is gone from the API.
+    pv_node_lost: bool = False
 
     statefulset_exists: bool = False
     statefulset_image: str | None = None
@@ -176,6 +184,8 @@ class ClusterObservation:
     # D3: the current hourly hold's VolumeSnapshot and its clone claim.
     snapshot_exists: bool = False
     snapshot_ready: bool = False
+    # The instant the snapshot holds the volume as of: what its backup is worth.
+    snapshot_created_at: datetime | None = None
     clone_exists: bool = False
     clone_bound: bool = False
 

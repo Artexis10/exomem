@@ -474,6 +474,29 @@
         }
       }
     },
+    "topolvm": {
+      "type": "object",
+      "properties": {
+        "lvmd": {
+          "type": "object",
+          "properties": {
+            "deviceClasses": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "thin-pool": {
+                    "type": "object",
+                    "required": ["overprovision-ratio"],
+                    "properties": {"overprovision-ratio": {"const": 1.0}}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "edge": {
       "type": "object",
       "additionalProperties": false,

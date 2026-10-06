@@ -36,9 +36,11 @@ from .capacity import (
 from .decide import (
     DEFAULT_RECONCILE_CONFIG,
     ReconcileConfig,
+    can_relocate,
     decide,
     hourly_backup_due,
     nightly_backup_due,
+    relocation_volume,
 )
 from .manifests import (
     BACKUP_JOB_NAME,
@@ -60,11 +62,18 @@ from .manifests import (
     render_restore_job,
     render_volume_snapshot,
 )
-from .rollout import current_image, initial_image, parked_canary, select_upgrade_candidate
+from .rollout import (
+    current_image,
+    initial_image,
+    owner_cell,
+    parked_canary,
+    select_upgrade_candidate,
+)
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
     CANARY_PARKED,
     MANIFEST_IMMUTABLE,
+    RESTORE_FAILED,
     SNAPSHOT_BACKUP,
     TARGET_REJECTED,
     CellRow,
@@ -224,9 +233,11 @@ class LoopMemory:
     object_storage_keys_verified: set[str] = field(default_factory=set)
     object_storage_key_checked_at: dict[str, datetime] = field(default_factory=dict)
     # Task 2.8: the backup-age alert state last delivered (None: nothing yet
-    # this process) and the stale cells last logged.
+    # this process), the stale cells last logged, and when a failed delivery
+    # may be tried again.
     backup_alert_delivered: bool | None = None
     stale_backups: list[str] = field(default_factory=list)
+    backup_alert_retry_at: datetime | None = None
 
 
 def _record_refusal(
@@ -745,9 +756,9 @@ def _compute_render_digest(
     return hashlib.sha256(blob).hexdigest()
 
 
-def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation) -> str:
+def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False) -> str:
     storage = cluster_config.storage
-    if observation.statefulset_relocation_volume and storage.local is not None:
+    if (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
         # D4: a relocated cell's new claim is local, whatever the domain.
         return storage.local.class_name
     return storage.claim_class(observation.pvc_storage_class)
@@ -818,22 +829,38 @@ def _select_backup_candidates(
     return chosen | {row.cell_id for row in due[:slots]}
 
 
-def _select_relocation_candidate(
-    rows: list[CellRow], observations: dict[str, ClusterObservation], storage: StorageConfig
-) -> str | None:
-    """D4: the next cell to relocate off a node the operator confirmed
-    stopped: the owner's first, then by rollout priority, one a pass. A cell
-    with no backup to restore from is never a candidate."""
+def _select_relocation_candidates(
+    rows: list[CellRow], observations: dict[str, ClusterObservation], storage: StorageConfig, config: ReconcileConfig
+) -> set[str]:
+    """D4: the relocations to start this pass. The owner's cell relocates
+    alone, and the rest wait until its restore has ended; then up to
+    `relocation_concurrency` run at once, by rollout priority. A cell with no
+    backup to restore from is never a candidate. A relocation whose restore
+    failed no longer counts as in flight: it waits for the operator, and the
+    rest of the fleet does not wait with it."""
 
-    lost = [
-        row
-        for row in rows
-        if observations[row.cell_id].pv_node_stop_confirmed
-        and storage.is_local(observations[row.cell_id].pv_storage_class)
-        and _active_hold(row, observations[row.cell_id]) in (None, SNAPSHOT_BACKUP)
-        and row.last_backup_snapshot is not None
-    ]
-    return min(lost, key=lambda row: (row.rollout_priority, row.cell_id)).cell_id if lost else None
+    if not rows:
+        return set()
+
+    def in_flight(row: CellRow) -> bool:
+        observation = observations[row.cell_id]
+        return (
+            _active_hold(row, observation) == "restore"
+            and observation.statefulset_relocation_volume is not None
+            and row.last_error_code != RESTORE_FAILED
+        )
+
+    due = sorted(
+        (row for row in rows if relocation_volume(row, observations[row.cell_id], storage) and can_relocate(row)),
+        key=lambda row: (row.rollout_priority, row.cell_id),
+    )
+    owner = owner_cell(rows)
+    if owner in due:
+        return {owner.cell_id}
+    if in_flight(owner):
+        return set()
+    room = config.relocation_concurrency - sum(1 for row in rows if in_flight(row))
+    return {row.cell_id for row in due[: max(0, room)]}
 
 
 def _select_render_digest_candidate(
@@ -973,7 +1000,7 @@ async def reconcile_once(
     # upgrade or digest re-apply. Backups go on: its row's own backup hold
     # still counts as an occupied slot.
     unobserved_rows = [row for row in rows if row.cell_id not in observations and row.desired_state != "deleted"]
-    _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
+    await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
 
@@ -1011,7 +1038,7 @@ async def reconcile_once(
     statefulset_blocked = frozenset(cell_id for cell_id in parked if refusal_records[cell_id].statefulset_blocked)
 
     upgrade_candidate: str | None = None
-    relocation_candidate = _select_relocation_candidate(non_deleted_rows, observations, cluster_config.storage)
+    relocation_candidates = _select_relocation_candidates(non_deleted_rows, observations, cluster_config.storage, config)
     backup_candidates: set[str] = set()
     render_digest_candidate: str | None = None
     backup_candidates = _select_backup_candidates(
@@ -1044,7 +1071,7 @@ async def reconcile_once(
     fast = (
         fleet_unobserved
         or upgrade_candidate is not None
-        or relocation_candidate is not None
+        or bool(relocation_candidates)
         or bool(backup_candidates)
         or render_digest_candidate is not None
         or any(_in_transition(row, observations[row.cell_id], row.cell_id in parked) for row in rows)
@@ -1067,7 +1094,7 @@ async def reconcile_once(
                 render_digests[row.cell_id],
                 start_upgrade=row.cell_id == upgrade_candidate,
                 start_backup=row.cell_id in backup_candidates,
-                start_relocation=row.cell_id == relocation_candidate,
+                start_relocation=row.cell_id in relocation_candidates,
                 is_render_digest_candidate=row.cell_id == render_digest_candidate,
                 refusal_parked=row.cell_id in parked,
                 memory=memory,
@@ -1130,7 +1157,11 @@ async def reconcile_once(
     return fast
 
 
-def _backup_age_alert(
+# A receiver that is down is asked again at most this often, not every pass.
+BACKUP_ALERT_RETRY = timedelta(minutes=1)
+
+
+async def _backup_age_alert(
     cluster: ClusterGateway,
     cluster_config: ClusterConfig,
     rows: list[CellRow],
@@ -1140,7 +1171,8 @@ def _backup_age_alert(
 ) -> None:
     """Task 2.8: one platform alert while any serving cell's backup is older
     than its schedule allows. An alert, never a gate: a failure here is logged
-    and retried next pass, and changes nothing else the pass does."""
+    and retried a minute later, and changes nothing else the pass does. The
+    POST runs on a worker thread, so a slow receiver never stalls the loop."""
 
     stale = alerts.stale_backups(rows, observations, now, storage=cluster_config.storage)
     if stale != memory.stale_backups:
@@ -1153,11 +1185,16 @@ def _backup_age_alert(
     firing = bool(stale)
     if cluster_config.alert_delivery_secret is None or memory.backup_alert_delivered == firing:
         return
-    try:
-        alerts.deliver(cluster.read_secret_value(*cluster_config.alert_delivery_secret), active=firing, observed_at=now)
-    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
-        logger.error("cellctl: backup-age alert delivery failed; retrying next pass: %s", _describe_error(error))
+    if memory.backup_alert_retry_at is not None and now < memory.backup_alert_retry_at:
         return
+    try:
+        webhook_url = cluster.read_secret_value(*cluster_config.alert_delivery_secret)
+        await asyncio.to_thread(alerts.deliver, webhook_url, active=firing, observed_at=now)
+    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
+        memory.backup_alert_retry_at = now + BACKUP_ALERT_RETRY
+        logger.error("cellctl: backup-age alert delivery failed; retrying in a minute: %s", _describe_error(error))
+        return
+    memory.backup_alert_retry_at = None
     memory.backup_alert_delivered = firing
 
 
@@ -1245,9 +1282,9 @@ async def _reconcile_row(
         and not backup_due
         and not start_upgrade
         and not is_render_digest_candidate
-        # D4: a converged cell whose node the operator confirmed stopped
-        # still has its relocation to start.
-        and not observation.pv_node_stop_confirmed
+        # D4: a converged cell whose volume is lost still has its relocation
+        # to start.
+        and relocation_volume(row, observation, cluster_config.storage) is None
     )
     # D4: ready is an observation, never a memory. A served, converged row
     # whose only change is its pod's readiness is observed, not re-applied:
@@ -1342,7 +1379,7 @@ async def _reconcile_row(
         # pass creates them, so the applied digest is computed from the
         # versions this pass resolved; hashing the row as read would change
         # the digest on the next pass and restart the pod for nothing.
-        storage_class = _claim_class(cluster_config, observation)
+        storage_class = _claim_class(cluster_config, observation, relocating=decision.relocation_volume is not None)
         render_digest = _compute_render_digest(
             dataclass_replace(row, backup_key_version=backup_key_version, b2_key_version=b2_key_version),
             cluster_config,

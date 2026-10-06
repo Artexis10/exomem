@@ -4,10 +4,10 @@
 (`move-cloud-cells-to-local-storage`). The values ship off.
 
 - **TopoLVM:** the official chart `17.2.0` from `https://topolvm.github.io/topolvm`,
-  resolved into `Chart.lock`. Its default image reference is already
+  resolved into `Chart.lock`. `values.yaml` pins its image as `topolvm.image.reference`:
   `ghcr.io/topolvm/topolvm-with-sidecar:0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc`,
-  which also carries the CSI sidecars. `infra/policy/kubernetes.rego` names its two privileged
-  DaemonSets at this chart version and release name.
+  which also carries the CSI sidecars. `infra/policy/kubernetes.rego` admits its two privileged
+  DaemonSets only at this chart version, release name and exact image reference.
 - **Snapshot CRDs:** `files/external-snapshotter/` holds the three
   `snapshot.storage.k8s.io` CRDs from
   [kubernetes-csi/external-snapshotter](https://github.com/kubernetes-csi/external-snapshotter)
@@ -27,5 +27,8 @@ To bump any of them:
 
 1. Copy the three CRDs from the new tag's `client/config/crd/`.
 2. Regenerate `SHA256SUMS.txt` from that upstream directory.
-3. Update the controller image digest from the registry.
-4. Run the rehearsal's storage spike. Expect the snapshot and clone round trip to pass.
+3. Update the snapshot controller image digest from the registry.
+4. For a TopoLVM bump, update the chart version in `Chart.yaml`, `topolvm.image.reference` in
+   `values.yaml`, and `approved_topolvm_chart` and `approved_topolvm_image` in
+   `infra/policy/kubernetes.rego` together. Expect `conftest test` of the rendered chart to pass.
+5. Run the node-loss drill (task 4.1). Expect the snapshot and clone round trip to pass.

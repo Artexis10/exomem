@@ -162,4 +162,100 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+---
+{{- $nodeAgent := printf "system:serviceaccount:%s:%s-node" .Release.Namespace .Values.topolvm.fullnameOverride }}
+# D1: TopoLVM's node agent runs on every storage agent, and its chart grants it
+# write access to every Node and every LogicalVolume in the cluster. These two
+# policies confine each agent's token to its own node, which the API server
+# binds into the token as the node-name extra.
+# Prevents: one compromised agent deleting another node's LogicalVolume, which
+# makes that node's agent destroy a cell's data, or rewriting another Node's
+# labels, taints or capacity. Costs when it fires wrongly: that agent cannot
+# report capacity or finish a volume, so new and relocated cells wait for an
+# operator; running cells keep serving. The operator pays.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-topolvm-node-volumes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["topolvm.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["logicalvolumes", "logicalvolumes/status"]
+  matchConditions:
+    - name: topolvm-node-agent
+      expression: request.userInfo.username == '{{ $nodeAgent }}'
+  variables:
+    - name: nodeName
+      expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.?extra.orValue({}) &&
+        size(request.userInfo.extra['authentication.kubernetes.io/node-name']) == 1
+        ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''
+  validations:
+    - expression: variables.nodeName != ''
+      message: TopoLVM's node agent writes only with a token bound to its node.
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).spec.nodeName == variables.nodeName &&
+        (request.operation != 'UPDATE' || oldObject.spec.nodeName == variables.nodeName)
+      message: TopoLVM's node agent writes only the LogicalVolumes of its own node.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-topolvm-node-volumes
+spec:
+  policyName: exomem-topolvm-node-volumes
+  validationActions: [Deny]
+---
+# The agent's one Node write: its capacity annotations and TopoLVM's finalizer,
+# on its own Node. Status is not writable through this resource.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-topolvm-node-self
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["nodes"]
+  matchConditions:
+    - name: topolvm-node-agent
+      expression: request.userInfo.username == '{{ $nodeAgent }}'
+  variables:
+    - name: nodeName
+      expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.?extra.orValue({}) &&
+        size(request.userInfo.extra['authentication.kubernetes.io/node-name']) == 1
+        ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''
+    - name: oldAnnotations
+      expression: oldObject.metadata.?annotations.orValue({})
+    - name: newAnnotations
+      expression: object.metadata.?annotations.orValue({})
+  validations:
+    - expression: variables.nodeName != '' && request.name == variables.nodeName
+      message: TopoLVM's node agent writes only its own Node.
+    - expression: >-
+        object.spec == oldObject.spec &&
+        object.metadata.?labels == oldObject.metadata.?labels &&
+        object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences &&
+        variables.newAnnotations.all(key, key.startsWith('capacity.topolvm.io/') ||
+          (key in variables.oldAnnotations && variables.oldAnnotations[key] == variables.newAnnotations[key])) &&
+        variables.oldAnnotations.all(key, key.startsWith('capacity.topolvm.io/') || key in variables.newAnnotations) &&
+        object.metadata.?finalizers.orValue([]).filter(name, name != 'topolvm.io/node') ==
+          oldObject.metadata.?finalizers.orValue([]).filter(name, name != 'topolvm.io/node')
+      message: TopoLVM's node agent changes only its Node's capacity.topolvm.io/ annotations and the topolvm.io/node finalizer.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-topolvm-node-self
+spec:
+  policyName: exomem-topolvm-node-self
+  validationActions: [Deny]
 {{- end }}

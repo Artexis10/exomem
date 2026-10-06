@@ -717,6 +717,7 @@ spec:
           object.spec.persistentVolumeReclaimPolicy == 'Retain' &&
           object.spec.?claimRef == oldObject.spec.?claimRef &&
           object.spec.?capacity == oldObject.spec.?capacity &&
+          object.spec.?csi == oldObject.spec.?csi &&
           object.spec.?accessModes == oldObject.spec.?accessModes &&
           object.spec.?mountOptions == oldObject.spec.?mountOptions &&
           object.spec.?nodeAffinity == oldObject.spec.?nodeAffinity &&

@@ -10,7 +10,7 @@
   - thin-pool metadata use across a day of hourly snapshot churn;
   - incremental backup time per cell, which sets per-node backup concurrency;
   - that an existing logical volume can be re-adopted by recreating its LogicalVolume object and PV.
-  - Evidence: Cloud rehearsal run 37382385459 (`storage-spike` mode, commit 4cb5301d1); results are in design D1, D3, D4, D6 and D9.
+  - Evidence: Cloud rehearsal run 37382385459 (`storage-spike` mode, commit 4cb5301d1); results are in design D1, D3, D4, D6 and D9. The spike's code and its separate TopoLVM values were removed once it had run; they remain in that commit.
 - [x] 1.2 Check that the node plugin's privileged container and hostPaths can run under a named exception without widening `infra/policy/kubernetes.rego` for any other workload. Evidence: `conftest test` of the rendered TopoLVM 17.2.0 chart passes 231 checks with the exception, and fails on its two DaemonSets' privileged containers and hostPaths without it; `conftest verify` passes the 5 policy tests, which deny an unnamed privileged pod, the same name in another namespace, another hostPath and a second privileged container.
 
 ## 2. cellctl and runtime (red-first)
@@ -77,7 +77,7 @@
 
 ## 4. Node-loss drill on disposable infrastructure (no hardware)
 
-- [ ] 4.1 In the rehearsal cluster:
+- [ ] 4.1 In the rehearsal cluster, with TopoLVM installed from the platform chart's values:
   - seed a cell and let hourly backups run;
   - write once more;
   - destroy its agent;

@@ -1233,7 +1233,7 @@ def test_cellctl_is_told_only_classes_the_chart_renders_on_a_device_class_lvmd_s
         assert storage_class["parameters"][f"{local.driver}/device-class"] == local.device_class
     snapshot_class = _find(documents, "VolumeSnapshotClass", local.snapshot_class)
     assert (snapshot_class["driver"], snapshot_class["deletionPolicy"]) == (local.driver, "Delete")
-    lvmd = yaml.safe_load(_find(documents, "ConfigMap", "platform-header-test-topolvm-lvmd-0")["data"]["lvmd.yaml"])
+    lvmd = yaml.safe_load(_find(documents, "ConfigMap", "exomem-platform-topolvm-lvmd-0")["data"]["lvmd.yaml"])
     assert local.device_class in {device["name"] for device in lvmd["device-classes"]}
     for crd in ("volumesnapshots", "volumesnapshotcontents", "volumesnapshotclasses"):
         _find(documents, "CustomResourceDefinition", f"{crd}.snapshot.storage.k8s.io")

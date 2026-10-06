@@ -27,6 +27,7 @@ from .state import (
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
     UPGRADE_STALLED,
+    VOLUME_MISSING,
     CellRow,
     ClusterObservation,
     Decision,
@@ -70,6 +71,9 @@ class ReconcileConfig:
     # D4: a digest-only re-apply holds the next one back only while it is in
     # flight -- on the current digest, not Ready, and applied this recently.
     render_digest_in_flight: timedelta = timedelta(minutes=10)
+    # move-cloud-cells-to-local-storage D4: relocations in flight at once,
+    # after the owner's. Sized against the 4 h fleet RTO (design D4).
+    relocation_concurrency: int = 4
 
 
 DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -146,21 +150,24 @@ def decide(
         or observation.statefulset_render_digest != render_digest
     )
 
-    # D4: the operator confirmed the node holding this cell's local volume
-    # stopped. reconcile.py starts one relocation a pass, owner first.
-    lost = (
-        observation.pv_node_stop_confirmed
-        and storage.is_local(observation.pv_storage_class)
-        and active_hold in (None, SNAPSHOT_BACKUP)
-    )
-    if lost and not _valid_snapshot_id(row.last_backup_snapshot):
+    # D4: the volume a relocation would replace. reconcile.py starts them
+    # owner first, then a bounded number at a time.
+    lost_volume = relocation_volume(row, observation, storage)
+    if lost_volume is not None and not can_relocate(row):
         # Nothing to restore from, and an empty volume must never stand in
         # for the tenant's: the cell stays where it is for the operator.
         decision = Decision(row_updates={"last_error_code": RELOCATION_NO_BACKUP, "ready": False})
-    elif lost and start_relocation:
-        decision = _start_relocation(row, observation, now)
+    elif lost_volume is not None and start_relocation:
+        decision = _start_relocation(row, observation, now, lost_volume)
     elif active_hold == "restore" and observation.statefulset_relocation_volume:
         decision = _continue_relocation(row, observation, now, config)
+    elif _claim_missing(observation) and row.volume_id is not None:
+        # A fresh claim would be a new, empty volume. Only a relocation, above,
+        # creates one for a cell that has had a volume.
+        decision = Decision(row_updates={
+            "observed_state": "failed", "ready": False, "last_error_code": VOLUME_MISSING,
+            "observed_generation": row.generation,
+        })
     elif active_hold == SNAPSHOT_BACKUP:
         decision = _continue_snapshot_backup(row, rollout, observation, now, config, cell_image, changes_live)
     elif active_hold == "upgrade":
@@ -747,8 +754,11 @@ def _continue_snapshot_backup(
     snapshot_id = observation.backup_job_snapshot_id
     if observation.backup_job_succeeded and _valid_snapshot_id(snapshot_id):
         decision = step(backup_outcome=snapshot_id, clear_backup_retry_after=True, delete_snapshot_backup=True)
+        # The backup holds the volume as of its snapshot, not the upload's end.
+        # A snapshot that reports no time is dated by its hold, which began first.
         decision.row_updates = {
-            **decision.row_updates, "last_backup_at": now, "last_backup_snapshot": snapshot_id, "last_error_code": None,
+            **decision.row_updates, "last_backup_at": observation.snapshot_created_at or hold_started_at,
+            "last_backup_snapshot": snapshot_id, "last_error_code": None,
         }
         return decision
     if observation.backup_job_failed or observation.backup_job_succeeded or now - hold_started_at > config.backup_deadline:
@@ -996,10 +1006,41 @@ def _restore_step(
     )
 
 
-def _start_relocation(row: CellRow, observation: ClusterObservation, now: datetime) -> Decision:
-    """D4: the cell's volume is on a node the operator confirmed stopped.
-    Recreate it elsewhere from the last backup, as a restore hold that starts
-    the cell only once the restore succeeds."""
+def _claim_missing(observation: ClusterObservation) -> bool:
+    return not observation.pvc_exists and not observation.pvc_bound
+
+
+def relocation_volume(row: CellRow, observation: ClusterObservation, storage: StorageConfig) -> str | None:
+    """D4: the volume a relocation from backup would replace, or None.
+
+    Either the node holding the cell's local volume is lost (stopped by the
+    node-removal rule, or gone from the API), or the cell has no claim and the
+    operator marked its recorded volume lost after finding it on no disk. A
+    mark naming any other volume is stale. Only a cell not already in an
+    upgrade, backup or restore hold is relocated; an hourly backup on a lost
+    node can never finish, so it yields."""
+
+    if storage.local is None:
+        return None
+    if observation.statefulset_exists and observation.statefulset_hold_kind not in (None, SNAPSHOT_BACKUP):
+        return None
+    if observation.pv_node_lost and storage.is_local(observation.pv_storage_class):
+        return observation.pvc_volume_id
+    if _claim_missing(observation) and row.volume_id is not None and observation.namespace_volume_lost == row.volume_id:
+        return row.volume_id
+    return None
+
+
+def can_relocate(row: CellRow) -> bool:
+    """A relocation restores the last backup; without a real one there is
+    nothing to restore and the cell stays where it is."""
+
+    return _valid_snapshot_id(row.last_backup_snapshot)
+
+
+def _start_relocation(row: CellRow, observation: ClusterObservation, now: datetime, lost_volume: str) -> Decision:
+    """D4: recreate the cell elsewhere from its last backup, as a restore hold
+    that starts the cell only once the restore succeeds."""
 
     image = current_image(row, observation)
     return Decision(
@@ -1011,7 +1052,7 @@ def _start_relocation(row: CellRow, observation: ClusterObservation, now: dateti
         hold_started_at=now,
         previous_image=image,
         pre_upgrade_snapshot=row.last_backup_snapshot,
-        relocation_volume=observation.pvc_volume_id,
+        relocation_volume=lost_volume,
         # An hourly hold on the lost node can never finish; its clone and
         # snapshot go with it.
         delete_snapshot_backup=observation.statefulset_hold_kind == SNAPSHOT_BACKUP,

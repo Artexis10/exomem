@@ -21,7 +21,12 @@ def replace_text(path: Path, text: str, *, encoding: str = "utf-8", newline: str
 
     The rename is durable only once the directory is synced too; a caller
     that needs that (governance `durable_json`) syncs it after this returns.
+    On Windows a reader holding `path` open refuses the rename for as long as
+    it holds it, so the rename waits that out as every vault write does.
     """
+
+    # Imported here: vault imports modules that write through this one.
+    from .vault import replace_tolerating_transient_sharing
 
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -29,7 +34,7 @@ def replace_text(path: Path, text: str, *, encoding: str = "utf-8", newline: str
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_tolerating_transient_sharing(lambda: os.replace(temporary, path))
     except BaseException:
         with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)

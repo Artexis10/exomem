@@ -46,6 +46,14 @@ test_a_named_daemonset_cannot_mount_another_host_path if {
   "DaemonSet/exomem-platform-topolvm-node uses an unexpected TopoLVM hostPath" in deny with input as extra
 }
 
+test_the_named_daemonset_on_another_image_is_denied if {
+  container := object.union(topolvm_node({}).spec.template.spec.containers[0], {
+    "image": "ghcr.io/topolvm/topolvm-with-sidecar:0.41.1@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  })
+  other := topolvm_node({"spec": {"template": {"spec": {"containers": [container]}}}})
+  "DaemonSet/exomem-platform-topolvm-node uses a privileged container" in deny with input as other
+}
+
 test_a_second_privileged_container_in_the_named_daemonset_is_denied if {
   sidecar := {"name": "sidecar", "image": "example.invalid/x@sha256:00", "securityContext": {"privileged": true}}
   two := topolvm_node({"spec": {"template": {"spec": {"containers": [

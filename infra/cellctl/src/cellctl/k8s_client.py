@@ -279,13 +279,11 @@ class ClusterClient:
         pods: dict[str, list] = {}
         for pod in self._core.list_pod_for_all_namespaces(label_selector=f"!{JOB_KIND_LABEL}").items:
             pods.setdefault(pod.metadata.namespace, []).append(pod)
-        # D4: nodes the operator confirmed stopped, only read once local
-        # storage is configured, since only a local volume is relocated.
-        stopped_nodes = (
-            frozenset(node.metadata.name for node in self._core.list_node().items if _stop_confirmed(node))
-            if self._storage_config.local is not None
-            else frozenset()
-        )
+        # D4: lost nodes, only read once local storage is configured, since
+        # only a local volume is relocated: those the operator confirmed
+        # stopped, and any a local volume names that the API no longer has.
+        nodes = self._core.list_node().items if self._storage_config.local is not None else None
+        lost_node = _lost_node_check(nodes)
 
         observations: dict[str, ClusterObservation | Exception] = {}
         for cell_id, namespace in cells.items():
@@ -303,16 +301,17 @@ class ClusterClient:
                     pvs.get(pv_name) if pv_name else None,
                     statefulsets.get(namespace),
                     pods.get(namespace, []),
-                    stopped_nodes,
+                    lost_node,
                 )
             except Exception as error:  # noqa: BLE001 - H4: one cell's failure is that cell's alone
                 observations[cell_id] = error
         return observations
 
     def _observation(
-        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, stopped_nodes: frozenset[str] = frozenset()
+        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, lost_node=lambda node: False
     ) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
+        namespace_volume_lost = (getattr(namespace_obj.metadata, "annotations", None) or {}).get(VOLUME_LOST_ANNOTATION)
 
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
@@ -431,7 +430,8 @@ class ClusterClient:
             pv_name=pv_name,
             pv_reclaim_policy=pv_reclaim_policy,
             pv_node=pv_node,
-            pv_node_stop_confirmed=pv_node is not None and pv_node in stopped_nodes,
+            pv_node_lost=pv_node is not None and lost_node(pv_node),
+            namespace_volume_lost=namespace_volume_lost,
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,
@@ -464,7 +464,7 @@ class ClusterClient:
             **snapshot_steps,
         )
 
-    def _snapshot_steps(self, namespace: str, started_raw: str) -> dict[str, bool]:
+    def _snapshot_steps(self, namespace: str, started_raw: str) -> dict[str, object]:
         """D3: the current hourly hold's snapshot and clone, by the names its
         start gave them; an earlier hold's never answer."""
 
@@ -485,6 +485,7 @@ class ClusterClient:
         return {
             "snapshot_exists": snapshot is not None,
             "snapshot_ready": bool(snapshot and (snapshot.get("status") or {}).get("readyToUse")),
+            "snapshot_created_at": _parse_timestamp(((snapshot or {}).get("status") or {}).get("creationTime")),
             "clone_exists": clone is not None,
             "clone_bound": bool(clone and clone.status and clone.status.phase == "Bound"),
         }
@@ -698,7 +699,8 @@ class ClusterClient:
         nodes = self._core.list_node().items
         claimed = tuple(
             (pv.spec.claim_ref.namespace,
-             _pinned_node(pv, local.topology_key) if pv.spec.storage_class_name == local.class_name else None)
+             _pinned_node(pv, local.topology_key) if pv.spec.storage_class_name == local.class_name else None,
+             pv.spec.csi.volume_handle if pv.spec.csi else None)
             for pv in self._core.list_persistent_volume().items
             if pv.spec and pv.spec.claim_ref
         )
@@ -722,11 +724,26 @@ class ClusterClient:
             claimed_pvs=claimed,
             snapshot_contents=contents,
             volumes=volumes,
-            live_nodes=frozenset(node.metadata.name for node in nodes if not _stop_confirmed(node)),
+            present_nodes=frozenset(node.metadata.name for node in nodes),
         )
 
 
 OUT_OF_SERVICE_TAINT = "node.kubernetes.io/out-of-service"
+# D4: set by the operator on a cell's namespace, naming the recorded volume
+# that no disk holds, so cellctl relocates the cell from its backup.
+VOLUME_LOST_ANNOTATION = "exomem.io/volume-lost"
+
+
+def _lost_node_check(nodes):
+    """D4: a node is lost once the operator confirmed it stopped (out of
+    service and not Ready), or once it is gone from the API. With no node
+    list read, no node is lost."""
+
+    if nodes is None:
+        return lambda node: False
+    present = {node.metadata.name for node in nodes}
+    stopped = {node.metadata.name for node in nodes if _stop_confirmed(node)}
+    return lambda node: node in stopped or node not in present
 
 
 def _stop_confirmed(node) -> bool:

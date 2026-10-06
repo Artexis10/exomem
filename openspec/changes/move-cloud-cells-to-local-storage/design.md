@@ -48,10 +48,12 @@ Each cell gets one logical volume with its own ext4 filesystem, provisioned by T
 - **Isolation:** a cell that fills its volume fails its own writes and cannot touch a neighbour or the node's root disk.
 - **Thin pool:** this gives CSI snapshots and clones, which D3 needs.
 - **No overcommit:** with ratio 1.0, the virtual size of every volume, snapshot and clone can never exceed the pool, so one tenant's backup can't take the whole pool down. A snapshot and its clone are each full-size thin volumes for this accounting.
+- **Ratio pinned:** D6 computes the pool as published free bytes plus the node's volume sizes. That holds only at ratio 1.0, where TopoLVM publishes the pool less every virtual size. At any other ratio the published bytes are scaled, and slots would be miscounted. The chart's values schema therefore accepts no other ratio.
 - **ext4, pinned:** a clone of a dirty filesystem must mount read-only on the same node. XFS needs `nouuid` for that and refuses some dirty logs read-only. ext4's default `auto_da_alloc` also makes write-to-temp-then-rename survive a power cut in practice (D9).
-- **Metadata:** snapshot churn does not grow it. In spike 1.1, an empty 24 GiB pool at 64 KiB chunks used 10.1% of a 128 MiB metadata volume, data at 5.4% added 0.4 points, and 24 rounds of snapshot, clone and delete left it flat (peak 10.52%). The metadata volume takes LVM's default size for its pool and chunk size, and an alert fires at 80% use.
+- **Metadata:** the pool uses 64 KiB chunks, set when it is created, because a chunk size never changes afterwards and LVM's own policy would choose larger chunks for a large pool. Its metadata volume holds 64 bytes per chunk, which is LVM's own default size for that chunk size. It is computed from the pool's size and capped at LVM's 15.81 GiB limit. The volume group keeps twice the metadata size free, so the metadata and its spare can grow. An alert at 80% data or metadata use is a tracked task.
 - **Capacity and resize:** TopoLVM publishes free capacity per node and supports online resize, so the import runbook's `storage_gib` increase still works.
-- **Operational weight:** one pinned subchart. Its webhook uses the cert-manager already installed.
+- **Operational weight:** one pinned subchart. It runs no webhook here: its pod-mutating webhook stays disabled, so it needs no certificate.
+- **Node agent confined:** the node agent and lvmd run privileged, only on nodes labelled `node-restriction.kubernetes.io/exomem-local-storage=true`, which the server sets at join and a kubelet cannot set on itself. Policy admits those containers only with the pinned image reference. The chart lets the node agent write every Node and LogicalVolume; two admission policies confine each agent's token to its own node's LogicalVolumes, and to its own Node's capacity annotations and TopoLVM finalizer.
 
 Rejected alternatives:
 
@@ -113,16 +115,28 @@ Each hourly backup is a new hold kind, `snapshot-backup`, that does not stop the
 
 ### D4. Node-loss recovery is an operator-triggered, fenced relocation
 
-cellctl gains a relocation path for a cell whose node is gone. It runs only after the operator confirms the old node's stop, by the same rule as node removal: a reachable host shows no cell process, mount or open storage mapping, or the operator confirms the server is destroyed. Then it:
+cellctl gains a relocation path for a cell whose node is gone. It runs only after the operator confirms the old node's stop, by the same rule as node removal: a reachable host shows no cell process, mount or open storage mapping, or the operator confirms the server is destroyed. The operator records that with Kubernetes' out-of-service taint, which cellctl honours only while the node is not Ready. A node gone from the API counts as lost too: only node removal deletes a Node, after the same confirmation. Then cellctl:
 
-1. force-deletes the cell's pod on the dead node;
+1. waits for Kubernetes to delete the cell's pod, which the out-of-service taint makes it do;
 2. sets the old PV to Retain;
 3. deletes the claim and recreates it on available capacity;
 4. runs the restore Job from the cell's last backup snapshot;
 5. records the new volume identity;
 6. starts the cell only after the restore Job succeeds.
 
-Setting Retain before the claim delete means deleting a claim never deletes data. cellctl's ClusterRole gains `patch` on PVs for this, and admission confines it to setting the reclaim policy to Retain on PVs claimed from a cell namespace, so the new verb cannot touch platform volumes or any other field. The retained PV and its logical volume count as absent for the deletion proof once their node is confirmed destroyed. A later cleanup removes the PV object.
+Setting Retain before the claim delete means deleting a claim never deletes data. cellctl's ClusterRole gains `patch` on PVs for this, and admission confines it to setting the reclaim policy to Retain on PVs claimed from a cell namespace, so the new verb cannot touch platform volumes or any other field.
+
+TopoLVM's controller would delete every claim on a deleted Node when it finalizes that Node. That deletes the claims before cellctl can set Retain, and leaves no claim to show the cell was lost, so the platform skips that step (`controller.nodeFinalize.skipped`). A Node gone from the API therefore still leaves its PVs pinned to it, and cellctl relocates their cells.
+
+**When a lost node's volume counts as gone:** the retained PV and its logical volume count as absent for a deleted cell's deletion proof only once their node is gone from the API. A stopped node still in the API counts as live, because it could rejoin with the volume. The proof follows every PV the cell's namespace still claims, not only the row's recorded volume, so a volume released during a relocation is still checked. Two runbook rules keep "gone" true: a stop-confirmed agent never rejoins with its `cells` volume group, and removing a reachable agent ends with its cells device erased. A later cleanup removes the PV objects.
+
+**No fresh claim over a recorded volume:** while a row records a volume, cellctl never creates a fresh claim for it, on any storage class. A missing claim then sets the row to `VOLUME_MISSING`, and the cell stays stopped until an operator acts. The one exception is relocation, which restores into its new claim before the cell starts. An operator who has found a volume lost, for example after an etcd restore, marks the cell's namespace with `exomem.io/volume-lost=<volume id>`; a missing claim with that mark relocates the cell from its backup. The empty-vault guard (D5) stays as the second line: it covers a claim that exists over an empty volume.
+
+**The removal refusal while a cell's volume is on the target:** until the removal playbook relocates cells itself (task 6.4), `remove-agent.yml` refuses while a local cell PV is still pinned to the target and bound. A retained PV left by a finished relocation does not block it. Maintenance holds block a removal only on cells whose volume is on the target.
+
+- **What it prevents:** deleting the Node of an agent that still holds a cell's only current volume. cellctl would then relocate that cell from its last backup and lose up to an hour of its writes, although the node may have been healthy.
+- **Cost when it fires wrongly:** the removal waits until the cell is relocated, or its volume released.
+- **Who pays:** the operator. Tenants are not affected.
 
 **Recovery order after a node loss:**
 
@@ -139,7 +153,9 @@ Setting Retain before the claim delete means deleting a claim never deletes data
    - one matching no row is reported and released only by an operator on the host;
    - a row whose volume can't be re-adopted is relocated from backup. The identity check is never skipped to clear a mismatch.
 3. Ensure replacement capacity: a surviving agent or a new one.
-4. Relocate cells: the owner cell first, then in `rollout_priority` order.
+4. Relocate cells. The owner's cell relocates alone, and the rest wait until its restore has ended. Then the others relocate by `rollout_priority`, at most four at a time. A restore that failed stops counting as in flight, so one failed cell does not hold back the fleet.
+
+**Why four at a time fits the 4 h fleet RTO:** a lost RAID1 node holds at most about 43 cells at 10 GiB (D6). Allow an hour for the operator's confirmation and for replacement capacity. Four at a time then needs 11 rounds in three hours, so each round may take about 16 minutes. One at a time would leave about four minutes per cell. Downloading a full 10 GiB vault from B2 can take that long by itself. The drill measures the real per-cell time (task 4.1), and the bound is revisited if it exceeds 16 minutes.
 
 The trigger is deliberately an operator action, not automatic. Node health on a cloud API is eventually consistent, and automatically relocating cells off a node that is only partitioned would restore older data over newer writes. The cost is human latency inside the RTO budget, paid by the affected tenants. The drill measures it.
 

@@ -387,13 +387,27 @@ cellStorage:
     image: registry.k8s.io/sig-storage/snapshot-controller:v8.6.0@sha256:81e79f205083f105e573ba2ebfe5964ede7f69a154e8627f53ebbbccd3ed9f70
 
 # TopoLVM 17.2.0 (installed with cellStorage.local.enabled): one thin device
-# class at overprovision ratio 1.0 on the `cells` volume group, as rehearsed
-# (infra/cloud-rehearsal/storage/topolvm-values.yaml). The chart's own image
-# reference is already tag@digest. Its node plugin and lvmd run only on agents
-# labelled exomem.io/local-storage=true, the ones with that volume group, and
-# tolerate every taint, as the Hetzner CSI node plugin does, so dedicated and
-# shared agents are served too. The platform renders the classes itself.
+# class at overprovision ratio 1.0 on the `cells` volume group, as the storage
+# spike rehearsed it (task 1.1). This is the only TopoLVM configuration: a drill
+# installs TopoLVM from these values. Its image is pinned here,
+# not left to the chart's default, and infra/policy/kubernetes.rego admits the
+# privileged node plugin and lvmd only with this exact reference. Its node
+# plugin and lvmd run only on agents labelled
+# node-restriction.kubernetes.io/exomem-local-storage=true, the ones with that
+# volume group. The server applies that label at join; a kubelet cannot set a
+# node-restriction.kubernetes.io/ label on itself, so a compromised agent cannot
+# draw the privileged pods onto itself. They tolerate every taint, as the
+# Hetzner CSI node plugin does, so dedicated and shared agents are served too.
+# The controller keeps a deleted Node's volumes and claims (nodeFinalize
+# skipped): cellctl relocates a cell off a lost node itself, retaining its old
+# volume first (D4). The platform renders the classes itself. The fixed full
+# name keeps the node agent's service account, which
+# templates/cell-local-storage.yaml confines to its own node, the same under
+# any release name.
 topolvm:
+  fullnameOverride: exomem-platform-topolvm
+  image:
+    reference: 0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc
   lvmd:
     managed: true
     deviceClasses:
@@ -405,14 +419,17 @@ topolvm:
           name: pool0
           overprovision-ratio: 1.0
     nodeSelector:
-      exomem.io/local-storage: "true"
+      node-restriction.kubernetes.io/exomem-local-storage: "true"
     tolerations:
       - operator: Exists
   node:
     nodeSelector:
-      exomem.io/local-storage: "true"
+      node-restriction.kubernetes.io/exomem-local-storage: "true"
     tolerations:
       - operator: Exists
+  controller:
+    nodeFinalize:
+      skipped: true
   storageClasses: []
 
 cloudIngress:

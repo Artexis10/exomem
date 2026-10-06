@@ -55,6 +55,10 @@ deny contains message if {
 # workload, another container of these DaemonSets, or another path is still denied.
 approved_topolvm_chart := "topolvm-17.2.0"
 
+# The one image either privileged container may run: the reference the
+# platform chart pins in values.yaml (`topolvm.image.reference`).
+approved_topolvm_image := "ghcr.io/topolvm/topolvm-with-sidecar:0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc"
+
 approved_topolvm_daemonsets := {
   "exomem-platform-topolvm-node": {
     "container": "topolvm-node",
@@ -83,7 +87,7 @@ approved_topolvm_node if {
 approved_topolvm_privileged(container) if {
   approved_topolvm_node
   container.name == approved_topolvm_daemonsets[input.metadata.name].container
-  startswith(container.image, "ghcr.io/topolvm/topolvm-with-sidecar:")
+  container.image == approved_topolvm_image
 }
 
 deny contains message if {

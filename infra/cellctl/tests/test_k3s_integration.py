@@ -2163,3 +2163,58 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     assert under_delete.returncode != 0 and RETAINED_DELETE_POLICY_NAME in under_delete.stderr, under_delete.stderr
     _kubectl(k3s.name, ["patch", "persistentvolume", cell_volume, "--type=merge", f"--patch={json.dumps(retain)}"])
     _wait_for(lambda: delete_claim().returncode == 0, timeout=30, description="the claim delete once its volume is retained")
+
+
+def test_topolvm_node_agent_writes_only_its_own_node_and_volumes(k3s: K3sCluster) -> None:
+    # TopoLVM's chart lets its node agent write every Node and LogicalVolume;
+    # the platform's admission confines each agent's token to its own node.
+    documents = _render_platform(
+        "charts/topolvm/templates/crds/topolvm.io_logicalvolumes.yaml",
+        "charts/topolvm/templates/node/clusterrole.yaml",
+        "charts/topolvm/templates/node/clusterrolebinding.yaml",
+        "templates/cell-local-storage.yaml",
+    )
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] in {
+        "CustomResourceDefinition", "ClusterRole", "ClusterRoleBinding",
+        "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}])
+    (agent,) = [subject for doc in documents if doc["kind"] == "ClusterRoleBinding"
+                for subject in doc["subjects"] if subject["name"].endswith("-topolvm-node")]
+    node = _kubectl(k3s.name, ["get", "nodes", "-o=jsonpath={.items[0].metadata.name}"]).stdout.strip()
+
+    def as_agent_on(token_node: str, *args: str, document: dict | None = None) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, [
+            *args, "--dry-run=server", f"--as=system:serviceaccount:{agent['namespace']}:{agent['name']}",
+            f"--as-user-extra=authentication.kubernetes.io/node-name={token_node}",
+        ], documents=None if document is None else [document], check=False)
+
+    def volume(node_name: str) -> dict:
+        return {"apiVersion": "topolvm.io/v1", "kind": "LogicalVolume", "metadata": {"name": "cell-volume"},
+                "spec": {"name": "cell-volume", "nodeName": node_name, "size": "1Gi", "deviceClass": "thin"}}
+
+    def annotate_capacity(token_node: str) -> subprocess.CompletedProcess[str]:
+        return as_agent_on(token_node, "patch", "node", node, "--type=merge",
+                           '--patch={"metadata":{"annotations":{"capacity.topolvm.io/thin":"1073741824"}}}')
+
+    def policies_ready() -> bool:
+        for name in ("exomem-topolvm-node-volumes", "exomem-topolvm-node-self"):
+            policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy", name, "-o=json"]).stdout)
+            status = policy.get("status", {})
+            if status.get("observedGeneration") != policy["metadata"]["generation"]:
+                return False
+            assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        refused = as_agent_on("another-node", "create", "--filename=-", document=volume(node))
+        return refused.returncode != 0 and "exomem-topolvm-node-volumes" in refused.stderr
+
+    _wait_for(policies_ready, timeout=60, description="the TopoLVM node agent policies")
+
+    own_volume = as_agent_on(node, "create", "--filename=-", document=volume(node))
+    assert own_volume.returncode == 0, own_volume.stderr
+    other_volume = as_agent_on(node, "create", "--filename=-", document=volume("another-node"))
+    assert other_volume.returncode != 0 and "exomem-topolvm-node-volumes" in other_volume.stderr, other_volume.stderr
+
+    own_node = annotate_capacity(node)
+    assert own_node.returncode == 0, own_node.stderr
+    other_node = annotate_capacity("another-node")
+    assert other_node.returncode != 0 and "exomem-topolvm-node-self" in other_node.stderr, other_node.stderr
+    relabel = as_agent_on(node, "label", "node", node, "node-restriction.kubernetes.io/exomem-local-storage=true")
+    assert relabel.returncode != 0 and "exomem-topolvm-node-self" in relabel.stderr, relabel.stderr
