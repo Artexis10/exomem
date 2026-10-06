@@ -795,6 +795,8 @@ relay-throttling rationale, not deleted.
 
 Local health surfaces SHALL distinguish process/transport liveness from retrieval admission. Retrieval SHALL be reported ready only when both required recall projections are live and both maintained catalogue checkpoints are proven exactly equal to those projections. A previously ready bit SHALL be revoked when that equality no longer holds. A process whose transport responds but whose projection/catalogue is warming or unavailable MUST NOT be reported as fully ready.
 
+The readiness surface MAY answer from a ready proof for at most 30 seconds. It SHALL NOT reuse a not-ready or failed proof, or a standby's proof. A reused proof SHALL be void once the process records a retrieval admission change or promotes a standby. Nothing else voids it, so the other fields of a reused answer, such as the coordination role, the session-store state and the observability block, may be up to 30 seconds old. The answer SHALL report the proof's age, counted from when its measurement began.
+
 #### Scenario: Live transport with warming recall is not fully ready
 
 - **WHEN** the service responds to health probes while required recall projection or catalogue proof is incomplete
@@ -810,8 +812,19 @@ Local health surfaces SHALL distinguish process/transport liveness from retrieva
 #### Scenario: Stale catalogue proof revokes readiness
 
 - **WHEN** either live projection advances beyond the maintained catalogue checkpoint after admission
-- **THEN** health reports retrieval as warming or unavailable with `admitted=false`
+- **THEN** health reports retrieval as warming or unavailable with `admitted=false`, at once when this process recorded the change and within 30 seconds otherwise
 - **AND** background repair must prove the new equality before readiness returns
+
+#### Scenario: A ready proof answers the next probes
+
+- **WHEN** readiness proved ready less than 30 seconds ago and the process has recorded no admission change since
+- **THEN** the next probe answers from that proof without proving again
+- **AND** the answer reports `proof_age_seconds` as the proof's age
+
+#### Scenario: A not-ready proof is never reused
+
+- **WHEN** the last proof was not ready or failed
+- **THEN** the next probe proves again
 
 ### Requirement: ASR accelerator readiness binds the runtime actually used
 Media installation and doctor checks SHALL distinguish the ASR runtime from unrelated model frameworks. Accelerator readiness SHALL bind `ctranslate2>=4.6.3,<5`, `nvidia-cublas-cu12>=12.8.4.1,<13`, `nvidia-cuda-runtime-cu12>=12.8.90,<13`, and `nvidia-cudnn-cu12>=9.5.0.50,<10`, Exomem's conservative computation policy, the device capability reported by that ASR engine, and a real model-execution probe when an explicit probe is requested. Engine capability reporting alone SHALL NOT override Exomem's known-safe computation policy. Wheel-owned CUDA libraries SHALL be placed on the loader path before the ASR child process starts; mutating `LD_LIBRARY_PATH` after process startup SHALL NOT be treated as readiness.

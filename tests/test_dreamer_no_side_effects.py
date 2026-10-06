@@ -218,9 +218,29 @@ def test_no_review_state_write(tmp_path: Path, monkeypatch) -> None:
         assert before.read_bytes() == snapshot
 
 
-def test_vocabulary_families_have_no_side_effects(tmp_path: Path, monkeypatch) -> None:
-    """Alias and convention upkeep, over a vault that has all three shapes."""
-    vault = fx.build_vocabulary(tmp_path)
+def _build_recaps(root: Path) -> Path:
+    """The base vault plus two episodes' recaps that link the entity."""
+    vault = fx.build(root, with_graph=False)
+    for episode, day in (("ep-" + "a1" * 16, "02"), ("ep-" + "b2" * 16, "03")):
+        fx.write(vault, *fx.entity_recap(episode, day))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    return vault
+
+
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        (fx.build_vocabulary, {"anchor.alias", "convention.tag", "convention.category"}),
+        (_build_recaps, {"episode.fold", "profile.summary"}),
+    ],
+    ids=["alias_convention", "fold_profile"],
+)
+def test_structural_families_have_no_side_effects(
+    tmp_path: Path, monkeypatch, build, expected
+) -> None:
+    """Each family that needs its own vault shape, over a vault that has it."""
+    vault = build(tmp_path)
     before = fx.tree_state(vault)
     state = review_state.state_path(vault)
     existed = state.exists()
@@ -235,7 +255,7 @@ def test_vocabulary_families_have_no_side_effects(tmp_path: Path, monkeypatch) -
     kinds = {
         row["kind"] for row in dreamer_store.read_view(vault).candidates if row["state"] == "open"
     }
-    assert kinds >= {"anchor.alias", "convention.tag", "convention.category"}
+    assert kinds >= expected
 
 
 def _command(name: str):

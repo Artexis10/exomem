@@ -74,7 +74,11 @@ def _vault(tmp_path: Path) -> Path:
         assert all(result.stop_reason != "error" for result in results), results
     view = dreamer_store.read_view(vault)
     families = {row["family"] for row in view.candidates if row["state"] == "open"}
-    assert families == {dreamer_families.LINK_FAMILY, dreamer_families.HYDRATION_FAMILY}
+    assert families == {
+        dreamer_families.LINK_FAMILY,
+        dreamer_families.HYDRATION_FAMILY,
+        dreamer_families.PROFILE_FAMILY,
+    }
     return vault
 
 
