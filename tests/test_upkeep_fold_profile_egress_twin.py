@@ -30,7 +30,7 @@ from test_upkeep_vocabulary_egress_twin import (
 )
 
 from exomem import dreamer, dreamer_families, dreamer_store, freshness, upkeep
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.writer_lease import invoke_command
 
 REFS = {
@@ -253,3 +253,60 @@ def test_an_owner_session_start_recomputes_no_fold_or_profile_row(
     assert owner_recomputed == []
     assert sorted(recomputed) == sorted([dreamer_families.FOLD_KIND, dreamer_families.PROFILE_KIND])
     assert owner_items == caller_items == [dreamer_families.FOLD_KIND]
+
+
+def test_a_remote_owner_session_start_recomputes_no_fold_or_profile_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner ruling: the owner is the owner on any surface, so the owner's OAuth
+    connector is served the stored fold and profile rows at session start, as
+    the local owner is, and recomputes neither. A guest, the positive control,
+    still has both recomputed."""
+    vault = _build(tmp_path, {})
+    recomputed: list[str] = []
+
+    def counting(family: dreamer_families.Family) -> dreamer_families.Family:
+        def release(ctx, row, keep):
+            recomputed.append(row["kind"])
+            return family.release(ctx, row, keep)
+
+        return dataclasses.replace(family, release=release)
+
+    monkeypatch.setattr(
+        dreamer_families,
+        "REGISTRY",
+        [
+            counting(family)
+            if family in (dreamer_families.FOLD, dreamer_families.PROFILE)
+            else family
+            for family in dreamer_families.REGISTRY
+        ],
+    )
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+    monkeypatch.setattr(upkeep, "_wall", lambda: LATER + 7200)
+
+    def session_start(principal, session: str) -> list[str]:
+        packet = {
+            "recent_context": [{"path": fx.ENTITY, "title": "Orbit Pump", "why": "edited"}],
+            "anchors": [],
+            "budget": {"limit_chars": 4000, "used_chars": 0},
+            "abstention": {"reason": "unresolved"},
+        }
+        with request_scope(principal):
+            upkeep.for_packet(vault, packet, session=session)
+        return [item["kind"] for item in (packet.get("upkeep") or {}).get("items") or ()]
+
+    connector = RequestPrincipal(
+        audience_id="owner", surface="mcp", resolved=True,
+        issuer_family="mcp-oauth:" + "c" * 64, remote_owner=True,
+    )
+    owner_items = session_start(owner_principal(), "owner")
+    _reset_caches()
+    connector_items = session_start(connector, "connector")
+    connector_recomputed = list(recomputed)
+    _reset_caches()
+    session_start(_external(), "external")
+
+    assert connector_recomputed == []
+    assert connector_items == owner_items == [dreamer_families.FOLD_KIND]
+    assert sorted(recomputed) == sorted([dreamer_families.FOLD_KIND, dreamer_families.PROFILE_KIND])
