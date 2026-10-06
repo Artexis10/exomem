@@ -2973,6 +2973,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "curation": False,
             # Preview unless `apply=true`, like structured-files.
             "tag-variants": True,
+            "collections-store-adopt-local": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}

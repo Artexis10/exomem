@@ -27,8 +27,9 @@ from . import authority, chain, connection, replica, schema, snapshot
 
 RECHECK_SECONDS = 10.0
 ATTENTION_SECONDS = 15 * 60.0
-REMEDY = ("wait for vault sync to deliver Knowledge Base/_Collections/collections.sqlite, "
-          "or run `exomem collections adopt-local` to continue from this host's copy")
+REMEDY = ("wait for vault sync to deliver Knowledge Base/_Collections/collections.sqlite, or "
+          "continue from this host's copy with adopt-local: maintain_memory(mode=\"collections-store-adopt-local\") "
+          "while the service runs, `exomem collections adopt-local` once it is stopped")
 SYNC_PENDING = "COLLECTION_STORE_SYNC_PENDING"
 DIVERGED = "COLLECTION_STORE_DIVERGED"
 # Transient: the store was borrowed or changed while the takeover settled; rechecked next use.

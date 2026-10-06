@@ -2387,6 +2387,70 @@ def valid_collection_receipt(value: Any) -> bool:
     return valid_record_receipt(value) or valid_planning_receipt(value)
 
 
+#: Content-free control transitions a collection-store txn may record. Each changes no
+#: item, manifest or container hash, and its receipt carries counts and ids only.
+CONTROL_OPERATIONS = frozenset({"store_reconcile"})
+CONTROL_RECEIPT_MARKER = "exomem.collection-control"
+#: Identifiers one control receipt may carry; a larger transition is recorded in parts.
+CONTROL_RECEIPT_MAX_IDS = 4096
+_CONTROL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_CONTROL_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:-]{0,127}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_ITEM_REF = re.compile(f"{_UUID}:{_UUID}")  # collection id, then item key
+#: The id names a control receipt may carry, each with the only shape its ids may take.
+#: A caller reusing the API registers its own names here.
+CONTROL_ID_PATTERNS = {
+    "held_ids": re.compile(r"[0-9a-f]{24}"),
+    "evidence_sha256": _HEX64,
+    "skipped_unreadable": _HEX64,
+    "skipped_another_store": _HEX64,
+    "skipped_collection_absent": _ITEM_REF,
+    "skipped_no_committed_row": _ITEM_REF,
+}
+
+
+def valid_control_receipt(value: Any) -> bool:
+    """Whether *value* is one closed, content-free control-transition receipt.
+
+    ``counts`` maps names to non-negative integers. ``ids`` maps registered names
+    (``CONTROL_ID_PATTERNS``) to lists of identifiers of that name's exact shape, so
+    neither can carry an item value, free text or a secret-shaped string.
+    """
+    if not isinstance(value, Mapping) or set(value) != {
+        "_control_receipt", "receipt_version", "operation", "collection_id", "transition_id",
+        "commit_seq", "counts", "ids", "outcome",
+    }:
+        return False
+    counts, ids = value.get("counts"), value.get("ids")
+    return (
+        value.get("_control_receipt") == CONTROL_RECEIPT_MARKER
+        and type(value.get("receipt_version")) is int
+        and value.get("receipt_version") == 1
+        and value.get("operation") in CONTROL_OPERATIONS
+        and _normalized_uuid(value.get("collection_id"))
+        and isinstance(value.get("transition_id"), str)
+        and _CONTROL_ID.fullmatch(value["transition_id"]) is not None
+        and type(value.get("commit_seq")) is int
+        and value["commit_seq"] > 0
+        and value.get("outcome") == "committed"
+        and isinstance(counts, Mapping)
+        and len(counts) <= 16
+        and all(
+            isinstance(name, str) and _CONTROL_NAME.fullmatch(name) and type(count) is int and count >= 0
+            for name, count in counts.items()
+        )
+        and isinstance(ids, Mapping)
+        and len(ids) <= 16
+        and sum(len(found) for found in ids.values() if isinstance(found, list)) <= CONTROL_RECEIPT_MAX_IDS
+        and all(
+            name in CONTROL_ID_PATTERNS and isinstance(found, list)
+            and all(isinstance(item, str) and CONTROL_ID_PATTERNS[name].fullmatch(item) for item in found)
+            for name, found in ids.items()
+        )
+    )
+
+
 def valid_structured_files_receipt(value: Any) -> bool:
     """Whether *value* is one bounded terminal structured-file receipt."""
     if not isinstance(value, Mapping) or set(value) != {

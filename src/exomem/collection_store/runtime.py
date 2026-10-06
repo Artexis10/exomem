@@ -7,14 +7,178 @@ routes and launcher support remain closed.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import sqlite3
 import threading
+import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from functools import wraps
 from pathlib import Path
 
 from . import connection, replica, schema
+
+logger = logging.getLogger(__name__)
+
+#: A9/N4: steady writes publish the replica at most once per interval, outside the write path.
+PUBLISH_INTERVAL_SECONDS = 60.0
+#: A burst of commits shares one publication once writes pause this long.
+PUBLISH_SETTLE_SECONDS = 1.0
+#: The `_Collections/` watch (A4): stat the replica every tick; hash it only when that changes.
+WATCH_SECONDS = 1.0
+_BUSY_RETRY_SECONDS = 0.05
+# Producer-bound runtimes by vault: the export flush and the in-service owner route find them.
+_SERVING = weakref.WeakValueDictionary()
+
+
+class _Publisher:
+    """Coalesced replica publication and the `_Collections/` watch for one admitted store.
+
+    Publication copies a pinned snapshot outside the vault-wide mutation boundary, so
+    writes, file-collection writes included, proceed during the copy. Only its two
+    brief steps hold the boundary, each taken at an idle instant: recording the intent,
+    and verifying and swapping the copy; a write arriving during one waits for it. The watch
+    hashes the replica against the digest this instance last published when its stat
+    signature changes. A foreign rewrite that keeps inode, size and mtime is found by
+    the next publication's check-then-swap, which records the divergence and preserves
+    the foreign bytes; the watch decides nothing.
+    """
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.condition = threading.Condition()
+        self.dirty = None  # (first, latest) unpublished commit, monotonic
+        self.published = None  # last coalesced publication, monotonic
+        self.foreign = False
+        self.retry = None
+        self.signature = None
+        threading.Thread(target=self.run, name="exomem-collection-replica", daemon=True).start()
+
+    def note_commit(self):
+        with self.condition:
+            now = time.monotonic()
+            self.dirty = (now if self.dirty is None else self.dirty[0], now)
+            self.condition.notify()
+
+    def due(self, now):
+        due = None
+        if self.dirty is not None:
+            first, latest = self.dirty
+            due = min(latest + PUBLISH_SETTLE_SECONDS, first + PUBLISH_INTERVAL_SECONDS)
+            if self.published is not None:
+                due = max(due, self.published + PUBLISH_INTERVAL_SECONDS)
+        if self.foreign:
+            due = now
+        if due is not None and self.retry is not None:
+            due = max(due, self.retry)
+        return due
+
+    def run(self):
+        manager = self.runtime.manager
+        while True:
+            with self.condition:
+                now = time.monotonic()
+                due = self.due(now)
+                wait = WATCH_SECONDS if due is None else min(WATCH_SECONDS, due - now)
+                if wait > 0:
+                    self.condition.wait(wait)
+            if manager._stop.is_set() or manager._store_closed:
+                return
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001 - a failed publication retries after one interval
+                logger.warning("collection store replica publication remains pending", exc_info=True)
+                with self.condition:
+                    self.published, self.foreign = time.monotonic(), False
+
+    def tick(self):
+        runtime, manager = self.runtime, self.runtime.manager
+        token = manager._fencing_token
+        # Release already flushed and an unadmitted takeover rechecks the replica itself:
+        # neither has anything to publish.
+        if token is None or not runtime.reporting_ready(token):
+            with self.condition:
+                self.dirty, self.foreign = None, False
+            return
+        self.watch()
+        now = time.monotonic()
+        with self.condition:
+            due = self.due(now)
+            if due is None or due > now:
+                return
+            dirty, foreign = self.dirty, self.foreign
+        # A diverged store waits for the owner; the store is read only when something is due.
+        if runtime._meta(schema.META_REPLICA_DIVERGENCE) != [None]:
+            with self.condition:
+                self.dirty, self.foreign = None, False
+            return
+        if not foreign and runtime.replica_current():
+            with self.condition:
+                if self.dirty == dirty:
+                    self.dirty = None
+            return
+        head = manager._publish_collection_store(token, deadline=now + 30)
+        with self.condition:
+            if head is None:
+                self.retry = time.monotonic() + _BUSY_RETRY_SECONDS
+                return
+            self.published, self.foreign, self.retry = now, False, None
+            self.dirty = None if self.dirty == dirty else (now, self.dirty[1])
+
+    def watch(self):
+        from .takeover import replica_signature
+
+        signature = replica_signature(self.runtime.root)
+        if signature == self.signature:
+            return
+        self.signature = signature
+        if not self.runtime.replica_matches():
+            with self.condition:
+                self.foreign = True
+
+
+def flush_for_export(vault_root, *, timeout=30.0):
+    """Synchronously publish the replica of an admitted store this process serves.
+
+    Returns the flushed head, or None when no flush runs here and the replica already
+    carries the live head. When this process cannot flush (no admitted store, a lost
+    lease or lost custody) and the live store is ahead of the head it last published,
+    it refuses FLUSH_PENDING rather than let an export drop acknowledged rows.
+    """
+    root = Path(vault_root).resolve()
+    runtime = _SERVING.get(root)
+    token = None if runtime is None else runtime.manager._fencing_token
+    if token is not None and runtime.reporting_ready(token):
+        head = runtime.manager._release_collection_store(
+            token, deadline=time.monotonic() + timeout, release=False)
+        if not head:
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_FLUSH_PENDING", "the replica could not be flushed before export")
+        return head
+    path = connection.store_path(root)
+    if path.exists() and not _replica_carries_live_head(path):
+        raise connection.CollectionStoreError(
+            "COLLECTION_STORE_FLUSH_PENDING",
+            "the live store is ahead of its published replica and this process cannot flush it")
+    return None
+
+
+def _replica_carries_live_head(path):
+    """Whether the replica this store last published carries its committed head."""
+    with closing(connection.open_reader(path)) as reader:
+        reader.execute("BEGIN")
+        meta = dict(reader.execute("SELECT key,value FROM store_meta"))
+    sequence, head = int(meta[schema.META_COMMIT_SEQ]), meta.get(schema.META_STORE_HEAD_HASH)
+    published = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
+    if published is not None:
+        return (published["commit_seq"], published["head_hash"]) == (sequence, head)
+    # A tenure adopted at this head has published nothing new since the replica it adopted.
+    entry = json.loads(meta[schema.META_LINEAGE])[-1]
+    return sequence == 0 or (meta.get(schema.META_LAST_PUBLISHED_REPLICA_SHA256) is not None
+                             and entry["adopted_from"] is not None and entry["adopted_at_commit_seq"] == sequence)
 
 
 class _Scope:
@@ -136,8 +300,11 @@ class CollectionStoreRuntime:
         self._takeover = None
         # A producer re-derives custody for each publication, which writes into the vault.
         self._publication_custody = None
+        # The producer session that bound this runtime, if any (the in-service owner route).
+        self._session = None
         # The last admitted token published its head when it released the lease.
         self._handed_off = False
+        self._publisher = None
         if not (_bootstrap and not self.path.exists()):
             # Only a producer adopting a copied vault starts before its live store exists.
             initial = self.sample_head()
@@ -156,6 +323,37 @@ class CollectionStoreRuntime:
         self._admitted_token = token
         self._takeover = None
         self._handed_off = False
+        if self._publisher is None:
+            self._publisher = _Publisher(self)
+
+    def _meta(self, *keys):
+        with closing(connection.open_reader(self.path)) as reader:
+            found = dict(reader.execute(
+                f"SELECT key,value FROM store_meta WHERE key IN ({','.join('?' * len(keys))})", keys))
+        return [found.get(key) for key in keys]
+
+    def replica_current(self):
+        """Whether the replica already carries the live committed head (a spurious commit note)."""
+        head = self.sample_head()
+        (published,) = self._meta(schema.META_PUBLISHED_REPLICA_HEAD)
+        return published is not None and (
+            json.loads(published)["commit_seq"], json.loads(published)["head_hash"]
+        ) == (head.commit_seq, head.head_hash)
+
+    def replica_matches(self):
+        """Whether the vault replica holds exactly the bytes this instance last published.
+
+        An unresolved publication intent owns its target, so it never reads as foreign.
+        """
+        digest, pending = self._meta(schema.META_LAST_PUBLISHED_REPLICA_SHA256,
+                                     schema.META_PENDING_REPLICA_PUBLICATION)
+        if pending is not None:
+            return True
+        try:
+            with open(replica.replica_path(self.root), "rb") as file:
+                return hashlib.file_digest(file, "sha256").hexdigest() == digest
+        except FileNotFoundError:
+            return digest is None
 
     def releases_without_head(self, token):
         """Whether an unadmitted producer token can hand the lease back without a head.
@@ -175,9 +373,14 @@ class CollectionStoreRuntime:
             return authority.pending_create(reader) is None
 
     def status(self):
-        """Operator view of admission; an unresolved takeover reports its attention state."""
+        """Operator view of admission; an unresolved takeover or divergence reports attention."""
         token = self.manager._fencing_token
         if token is not None and self.reporting_ready(token):
+            divergence, view = self._meta(schema.META_REPLICA_DIVERGENCE, schema.META_VIEW_DIVERGED)
+            if divergence is not None or view is not None:
+                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True,
+                        "reason": json.loads(divergence)["reason"] if divergence is not None
+                        else "a view carries another store instance's stamp"}
             return {"status": "admitted"}
         return self._takeover.status() if self._takeover is not None else {"status": "unadmitted"}
 
@@ -235,11 +438,37 @@ class CollectionStoreRuntime:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_HEAD_INVALID", "committed metadata and tail disagree"
                 )
-            if self._identity is not None and self._identity != (head.store_id, head.instance_id):
-                raise connection.CollectionStoreError(
-                    "COLLECTION_STORE_IDENTITY_CHANGED", "the enrolled store identity changed"
-                )
-            return head
+        if self._identity is not None and self._identity != (head.store_id, head.instance_id):
+            self._accept_descendant(head, json.loads(metadata[schema.META_LINEAGE]))
+        return head
+
+    def _accept_descendant(self, head, lineage):
+        """Take the identity an owner adopt-local continued this store under, applied elsewhere.
+
+        The CLI, or the route while this service's lease was idle-released, may continue
+        the store as a new instance. It is accepted only with the same store id, a lineage
+        that descends from the cached instance and the coordinator recording the new
+        instance; custody is then re-verified. Anything else refuses IDENTITY_CHANGED.
+        """
+        refused = connection.CollectionStoreError(
+            "COLLECTION_STORE_IDENTITY_CHANGED", "the enrolled store identity changed"
+        )
+        store_id, ancestor = self._identity
+        parents = {entry["instance_id"]: entry["adopted_from"] for entry in lineage}
+        found, seen = head.instance_id, set()
+        while found is not None and found != ancestor and found not in seen:
+            seen.add(found)
+            found = parents.get(found)
+        if head.store_id != store_id or found != ancestor or not self.manager.config.enabled:
+            raise refused
+        recorded = self.manager.client.status().collection_store_head
+        if recorded is None or (recorded.store_id, recorded.instance_id) != (head.store_id, head.instance_id):
+            raise refused
+        if self._session is not None and not self._session.verify_custody():
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_CUSTODY_UNVERIFIED", "single-host custody no longer verifies"
+            )
+        self._identity = (head.store_id, head.instance_id)
 
     def _admit(self, token, *, reads=False):
         if self.manager.config.enabled:
@@ -288,11 +517,21 @@ class CollectionStoreRuntime:
                             )
                             opening[0] = False
                             self._writer_token = lease.fencing_token
-            with borrowed_writer(self.root, self._handle, self.manager) as writer:
-                yield writer
+            handle, changed = self._handle, False
+            before = handle.connection.total_changes
+            try:
+                with borrowed_writer(self.root, handle, self.manager) as writer:
+                    try:
+                        yield writer
+                    finally:
+                        # Read while still a borrower: the handle cannot be retired yet.
+                        changed = handle.connection.total_changes != before
+            finally:
+                if changed and self._publisher is not None:
+                    self._publisher.note_commit()
 
-    def flush(self, token, *, deadline, cancelled=None):
-        """Called only after admission stops, drainage and boundary acquisition."""
+    def _publication_writer(self, token):
+        """This store's writer for a publication step; the caller holds the boundary."""
         if not self._authority(token, progress=True):
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_LEASE_REQUIRED", "publication authority is unavailable"
@@ -305,9 +544,53 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
             )
-        with connection.open_writer(
-            self.path, lease_check=lambda: self._authority(token, progress=True)
-        ) as writer:
+        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True))
+
+    def publish(self, token, *, deadline):
+        """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
+
+        Each boundary step is brief and taken at an idle instant. The swap step first
+        renews the lease with the coordinator, so a host that lost it while copying
+        abandons the swap. Returns the published head (possibly older than the live
+        one), or None when the store was busy before anything was recorded.
+        """
+        from ..cli_ops import OpError
+        from ..writer_lease import CollectionStoreHead
+
+        manager = self.manager
+
+        @contextmanager
+        def step(patience, cancelled):
+            if patience:
+                try:
+                    manager._renew_collection_store(token)
+                except OpError as error:
+                    raise connection.CollectionStoreError(
+                        "COLLECTION_STORE_LEASE_REQUIRED", "the writer lease was lost during the copy"
+                    ) from error
+            with manager._store_publication_window(token, patience=patience, cancelled=cancelled):
+                with self._publication_writer(token) as writer:
+                    yield writer, lambda: self._authority(token, progress=True)
+
+        try:
+            result = replica.publish_replica_concurrently(
+                self.root, step=step, deadline=deadline, patience=manager._mutation_timeout_seconds,
+                cancelled=lambda: manager._fencing_token != token or manager._store_closed,
+            )
+        except connection.CollectionStoreError as error:
+            if error.code == "COLLECTION_STORE_BUSY":
+                return None
+            raise
+        if result.status != "published":
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_FLUSH_PENDING", result.reason or result.status
+            )
+        head = self.sample_head()
+        return CollectionStoreHead(head.store_id, head.instance_id, result.commit_seq, result.head_hash)
+
+    def flush(self, token, *, deadline, cancelled=None):
+        """Called only after admission stops, drainage and boundary acquisition."""
+        with self._publication_writer(token) as writer:
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,

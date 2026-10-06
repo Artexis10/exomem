@@ -8,6 +8,7 @@ reference for which rows carry a source-local day and which are flagged.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -22,7 +23,7 @@ from test_authorization_session_authority import NOW
 from test_collection_store_governance import session
 from test_collection_store_s1_gate import ab as ab
 from test_collection_store_s1_gate import abc as abc
-from test_collection_store_s1_gate import requires_fork, run_host
+from test_collection_store_s1_gate import run_host
 from test_collection_store_writer import CID as GATE_CID
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
@@ -599,7 +600,32 @@ def test_host_takeover_reproves_the_bound_source_hash(store, monkeypatch, change
             assert count(handle.connection) == len(valid(iter_exercises()))
 
 
-@requires_fork
+def _on(found, work):
+    with (
+        request_scope(_external()),
+        preview_store(found.root, found.manager._collection_store),
+        found.manager.mutation_guard(found.root),
+    ):
+        return work()
+
+
+def _import_request(found, **body):
+    return _on(
+        found,
+        lambda: record_memory(found.root, action="import", collection=GATE_CID, import_request=body),
+    )
+
+
+def _finish_on_host_b(found, continuation, rows):
+    # A spawned host: the parent's monkeypatch does not reach it, so set the batch size here.
+    importer().MAX_BATCH_ROWS = rows
+    admitted = found.open()
+    _on(found, lambda: importer().run_jobs(found.root))
+    result = _import_request(found, mode="status", continuation=continuation)
+    tenures = len(json.loads(found.meta()[schema.META_LINEAGE]))
+    return admitted, tenures, result["state"], result["rows"]["imported"]
+
+
 def test_a_job_continues_on_the_host_that_takes_over_its_store(abc, tmp_path, monkeypatch):
     """A job bound to the store's exact lineage stalls once a takeover appends a tenure."""
     source = "Knowledge Base/Evidence/gate/export/rows.ndjson"
@@ -607,40 +633,17 @@ def test_a_job_continues_on_the_host_that_takes_over_its_store(abc, tmp_path, mo
         abc.root, ndjson({"title": f"Imported {i}", "count": i} for i in range(30)), source
     )
     small(monkeypatch, rows=10)
-
-    def on(found, work):
-        with (
-            request_scope(_external()),
-            preview_store(found.root, found.manager._collection_store),
-            found.manager.mutation_guard(found.root),
-        ):
-            return work()
-
-    def request(found, **body):
-        return on(
-            found,
-            lambda: record_memory(
-                found.root, action="import", collection=GATE_CID, import_request=body
-            ),
-        )
-
-    job = request(
+    job = _import_request(
         abc,
         mode="start",
         source_ref=source,
         format="ndjson",
         mapping={"fields": {"title": "title", "count": "count"}},
     )
-    on(abc, lambda: importer().run_jobs(abc.root, max_batches=1))
+    _on(abc, lambda: importer().run_jobs(abc.root, max_batches=1))
     abc.release()
 
-    def host_b(found):
-        admitted = found.open()
-        on(found, lambda: importer().run_jobs(found.root))
-        result = request(found, mode="status", continuation=job["continuation"])
-        tenures = len(json.loads(found.meta()[schema.META_LINEAGE]))
-        return admitted, tenures, result["state"], result["rows"]["imported"]
-
+    host_b = functools.partial(_finish_on_host_b, continuation=job["continuation"], rows=10)
     assert run_host(tmp_path, tmp_path / "state-b", "host-b", host_b) == (
         {"status": "admitted"},
         2,

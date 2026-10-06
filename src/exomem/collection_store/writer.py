@@ -39,6 +39,7 @@ from . import (
     governance,
     index_migrations,
     rollups,
+    schema,
     summary,
     tokens,
     typed_storage,
@@ -158,7 +159,7 @@ class CollectionWriter:
         try:
             with self.handle.transaction(), self._authorization():
                 if not reconcile and self.connection.execute(
-                    "SELECT 1 FROM store_meta WHERE key='diverged' AND value='1'"
+                    "SELECT 1 FROM store_meta WHERE key=? AND value='1'", (schema.META_VIEW_DIVERGED,)
                 ).fetchone():
                     raise connection.CollectionStoreError(
                         "COLLECTION_STORE_DIVERGED", "collection store requires reconciliation"
@@ -175,7 +176,7 @@ class CollectionWriter:
                 for guard, publication in tuple(batch.guards.values()):
                     self._recheck_guard(guard, publication=publication)
                 if not reconcile and not recovery_only and (batch.foreign_discovered or self.connection.execute(
-                    "SELECT 1 FROM store_meta WHERE key='diverged' AND value='1'"
+                    "SELECT 1 FROM store_meta WHERE key=? AND value='1'", (schema.META_VIEW_DIVERGED,)
                 ).fetchone()):
                     raise connection.CollectionStoreError(
                         "COLLECTION_STORE_DIVERGED", "foreign view discovery requires reconciliation"
@@ -200,7 +201,7 @@ class CollectionWriter:
             self._publication.capture_previous(path)
         if self._publication.foreign_discovered:
             if not self._publication.business_started and self.connection.execute(
-                "SELECT 1 FROM store_meta WHERE key='diverged' AND value='1'"
+                "SELECT 1 FROM store_meta WHERE key=? AND value='1'", (schema.META_VIEW_DIVERGED,)
             ).fetchone():
                 raise _RecoveryOnly
             raise connection.CollectionStoreError(
@@ -677,7 +678,9 @@ class CollectionWriter:
         request_hash: str,
         *,
         effects: Any = None,
+        control: bool = False,
     ):
+        """One chained txn; a ``control`` txn keeps the collection's generation and manifest."""
         self._publication.business_started = True
         seq, previous = chain.recorded_head(self.connection)
         txn_id = self.connection.execute(
@@ -686,6 +689,8 @@ class CollectionWriter:
         generation = 0 if row is None else row["generation"]
         before_manifest = None if row is None else row["manifest_version"]
         after_manifest = 1 if row is None else before_manifest + (operation == "revise")
+        if control:
+            after_manifest = before_manifest
         transition = records._transition_id()
         committed_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         event = {
@@ -693,7 +698,7 @@ class CollectionWriter:
             "collection_id": manifest.collection_id,
             "operation": operation,
             "generation_before": generation,
-            "generation_after": generation + 1,
+            "generation_after": generation + (not control),
             "manifest_version_before": before_manifest,
             "manifest_version_after": after_manifest,
             "manifest_hash": manifest.manifest_version.hash,
@@ -712,10 +717,10 @@ class CollectionWriter:
             "collection_id": manifest.collection_id,
             "operation": operation,
             "profile_operation": f"plan_{'add' if operation == 'append' else operation}"
-            if manifest.semantic_profile == "planning"
+            if manifest.semantic_profile == "planning" and not control
             else None,
             "generation_before": generation,
-            "generation_after": generation + 1,
+            "generation_after": generation + (not control),
             "manifest_version_before": before_manifest,
             "manifest_version_after": after_manifest,
             "actor": effective_principal().audience_id,
@@ -732,7 +737,15 @@ class CollectionWriter:
 
     def _insert_txn(self, txn: dict[str, Any], receipt: dict[str, Any]) -> None:
         valid = mutation_terminal.valid_collection_receipt(receipt)
-        if txn["operation"] == "bulk_upsert":
+        if txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
+            valid = (
+                mutation_terminal.valid_control_receipt(receipt)
+                and receipt["operation"] == txn["operation"]
+                and (receipt["collection_id"], receipt["transition_id"], receipt["commit_seq"])
+                == (txn["collection_id"], txn["transition_id"], txn["commit_seq"])
+                and txn["generation_before"] == txn["generation_after"]
+            )
+        elif txn["operation"] == "bulk_upsert":
             valid = (
                 receipt["operation"] == "bulk_upsert" and receipt["committed"] is True
                 and receipt["collection_id"] == txn["collection_id"]
@@ -748,7 +761,7 @@ class CollectionWriter:
             f"INSERT INTO txns ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
             tuple(data.values()),
         )
-        if self._publication.deferred_create is None:
+        if self._publication.deferred_create is None and txn["operation"] not in mutation_terminal.CONTROL_OPERATIONS:
             self._publication.bind(receipt)
 
     def _advance(self, txn: Mapping[str, Any]) -> str:
@@ -910,7 +923,7 @@ class CollectionWriter:
         self.handle.release_cache.touch(projection["collection_id"],
                                        f"exomem://collection-held/{projection['collection_id']}/{reference}")
         if code == "VIEW_FOREIGN":
-            self._execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES ('diverged','1')")
+            self._execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,'1')", (schema.META_VIEW_DIVERGED,))
         self._precommit(manifest)
         return True
 
@@ -1048,6 +1061,137 @@ class CollectionWriter:
                 except (held_fs.HeldFsError, OSError, connection.CollectionStoreError):
                     batch.pending = True
                 self._precommit(manifest)
+        return result
+
+    def record_control_transition(self, operation, transitions, *, why):
+        """Record a content-free control transition: one chained txn per affected collection.
+
+        ``transitions`` maps each collection id to ``{"counts": {name: int}, "ids":
+        {name: [id, ...]}}``: counts and identifiers only, never item values. Each txn
+        advances ``commit_seq`` and the store head, so the next replica publication and
+        an orderly release carry it, and leaves the collection's generation, manifest and
+        container hash unchanged. Inside an open writer mutation it joins that SQLite
+        transaction; otherwise it opens its own. Returns the receipts in collection order.
+
+        A collection whose ids exceed ``CONTROL_RECEIPT_MAX_IDS`` is recorded as
+        successive txns that split the ids in order; each of those receipts repeats the
+        counts and adds ``part`` and ``parts`` (1-based).
+        """
+        if operation not in mutation_terminal.CONTROL_OPERATIONS:
+            raise ValueError(f"unknown control operation {operation!r}")
+        if not isinstance(why, str) or not why.strip():
+            raise ValueError("a control transition needs a reason")
+        if self._publication is None:
+            with self._mutation():
+                return self.record_control_transition(operation, transitions, why=why)
+        limit, receipts = mutation_terminal.CONTROL_RECEIPT_MAX_IDS, []
+        for cid in sorted(transitions):
+            row, manifest, _ = self._collection(cid)
+            counts = dict(transitions[cid].get("counts", {}))
+            flat = [(name, found) for name, ids in transitions[cid].get("ids", {}).items() for found in ids]
+            slices = [flat[start:start + limit] for start in range(0, len(flat), limit)] or [[]]
+            for part, chunk in enumerate(slices, 1):
+                ids = {name: [] for name in transitions[cid].get("ids", {})}
+                for name, found in chunk:
+                    ids[name].append(found)
+                facts = {"counts": counts if len(slices) == 1 else {**counts, "part": part, "parts": len(slices)},
+                         "ids": ids}
+                txn = self._txn(row, manifest, operation, why, None, None, effects=facts, control=True)
+                receipt = {"_control_receipt": mutation_terminal.CONTROL_RECEIPT_MARKER, "receipt_version": 1,
+                           "operation": operation, "collection_id": cid, "transition_id": txn["transition_id"],
+                           "commit_seq": txn["commit_seq"], **facts, "outcome": "committed"}
+                self._insert_txn(txn, receipt)
+                receipts.append(receipt)
+            self._precommit(manifest)
+        return receipts
+
+    def hold_store_delta(self, items, *, reconciled, why, acknowledged=()):
+        """Divergence reconciliation (design §15 item 5): each foreign change becomes a held correction.
+
+        No canonical row changes. Each item another store instance changed after the
+        common ancestor is held as a view correction carrying that store's latest values
+        and diagnostics for an owner decision under the plan's ``held_id``, superseding an
+        older hold. The plan carries one latest change per held id and leaves out a change
+        already held, so a repeat with nothing new records nothing.
+        The ``reconciled`` evidence digests are marked, a view-stamp divergence is cleared,
+        and the reconciliation is recorded as one content-free control transition per
+        affected collection. ``acknowledged`` are the preview's skipped changes the owner
+        accepted; their ids are recorded by skip code.
+        """
+        result = {"held_ids": [], "superseded": 0, "why": why}
+        skipped = {}
+        for entry in acknowledged:
+            ref = entry["sha256"] if "item_key" not in entry else f"{entry['collection_id']}:{entry['item_key']}"
+            skipped.setdefault(f"skipped_{entry['code']}", []).append(ref)
+        with self._mutation(reconcile=True):
+            self._publication.bind(result)
+            touched = {}
+            for item in items:
+                cid, key = item["collection_id"], item["item_key"]
+                _, manifest, _ = self._collection(cid)
+                reference = item["held_id"]
+                path = f"{records._held_directory(manifest)}/{reference}.md"
+                self._preflight_views([path])
+                raw = _json({"item_key": key, "values": item["values"], "body": item["body"]}).encode()
+                metadata = self.connection.execute(
+                    "SELECT m.governance_json FROM collection_manifests m JOIN collections c ON "
+                    "c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+                    (cid,),
+                ).fetchone()[0]
+                try:
+                    held_metadata = governance.row_metadata(manifest.schema, item["values"], metadata)
+                except (ValueError, collections.CollectionError):
+                    held_metadata = _json({**governance._metadata(metadata), "tags": [], "classes": []})
+                diagnostics = _json([{"code": "COLLECTION_STORE_DIVERGED", **{
+                    name: value for name, value in item.items() if name not in {"values", "body"}}}])
+                now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                superseded = self.connection.execute(
+                    "SELECT 1 FROM held_candidates WHERE held_id=?", (reference,)).fetchone() is not None
+                self._execute(
+                    "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
+                    "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash) "
+                    "VALUES (?,?,'view-correction','COLLECTION_STORE_DIVERGED',?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(held_id) DO UPDATE SET candidate_json=excluded.candidate_json,"
+                    "held_bytes=excluded.held_bytes,diagnostics_json=excluded.diagnostics_json,"
+                    "base_row_version=excluded.base_row_version,updated_at=excluded.updated_at,"
+                    "governance_json=excluded.governance_json,governance_hash=excluded.governance_hash",
+                    (reference, cid, _json({"action": "store-delta", "item_key": key}), raw, diagnostics, path,
+                     item["local_row_version"], now, held_metadata, hashlib.sha256(raw).hexdigest()),
+                )
+                text = views.held_view({
+                    "collection_id": cid, "held_id": reference, "updated_at": now, "kind": "view-correction",
+                    "held_bytes": raw, "diagnostics_json": diagnostics, "governance_json": held_metadata,
+                }, self._publication.identity)
+                self._pending(path, cid, "held", 1, text, manifest=manifest)
+                self.handle.release_cache.touch(cid, f"exomem://collection-held/{cid}/{reference}")
+                self._precommit(manifest)
+                facts = touched.setdefault(cid, {"held": [], "superseded": 0})
+                facts["held"].append(reference)
+                facts["superseded"] += superseded
+                result["held_ids"].append(reference)
+                result["superseded"] += superseded
+            meta = dict(self.connection.execute(
+                "SELECT key,value FROM store_meta WHERE key IN (?,?)",
+                (schema.META_RECONCILED_FOREIGN, schema.META_VIEW_DIVERGED)))
+            done = json.loads(meta.get(schema.META_RECONCILED_FOREIGN) or "[]")
+            marked = sorted(set(reconciled) - set(done))
+            cleared = schema.META_VIEW_DIVERGED in meta
+            if marked:
+                self._execute("INSERT INTO store_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET "
+                              "value=excluded.value", (schema.META_RECONCILED_FOREIGN, _json(sorted({*done, *marked}))))
+            if cleared:
+                self._execute("DELETE FROM store_meta WHERE key=?", (schema.META_VIEW_DIVERGED,))
+            result.update(reconciled=marked, view_divergence_cleared=cleared, transitions=[])
+            if touched or marked or cleared:
+                # Store-wide marks without a hold touch every collection's history.
+                affected = touched or {cid: {"held": [], "superseded": 0} for (cid,) in self.connection.execute(
+                    "SELECT collection_id FROM collections ORDER BY collection_id").fetchall()}
+                result["transitions"] = self.record_control_transition("store_reconcile", {
+                    cid: {"counts": {"held": len(facts["held"]), "superseded": facts["superseded"],
+                                     "evidence_reconciled": len(marked), "view_divergence_cleared": int(cleared),
+                                     "skipped_acknowledged": len(acknowledged)},
+                          "ids": {"held_ids": facts["held"], "evidence_sha256": marked, **skipped}}
+                    for cid, facts in affected.items()}, why=why)
         return result
 
     def backfill_query_indexes(self, collection, *, limit=128) -> bool:
