@@ -618,7 +618,13 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     # API check, not a stampede.
     assert _workflow_text().count("release-please--branches--main") == 1
 
-    fast_jobs = set(jobs) - FULL_CI_JOBS - {"gate", "release-evidence", "release-evidence-landed"}
+    # quality is the shared engineering-practices check, kept out of the required gate so the
+    # required checks stay unchanged; the merge guard reads it.
+    fast_jobs = (
+        set(jobs)
+        - FULL_CI_JOBS
+        - {"gate", "release-evidence", "release-evidence-landed", "quality"}
+    )
     assert fast_jobs
     assert all("if" not in jobs[name] for name in fast_jobs)
 
@@ -681,7 +687,13 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> No
     assert gate["name"] == "required CI gate"
     assert gate["if"] == "${{ !cancelled() }}"
     # release-evidence-landed runs after the gate and depends on it.
-    assert set(gate["needs"]) == set(workflow["jobs"]) - {"gate", "release-evidence-landed"}
+    # quality is the shared engineering-practices check, kept out of the required gate so the
+    # required checks stay unchanged; the merge guard reads it.
+    assert set(gate["needs"]) == set(workflow["jobs"]) - {
+        "gate",
+        "release-evidence-landed",
+        "quality",
+    }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
     assert "test" not in gate["needs"]
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ join(needs.*.result, ' ') }}"
