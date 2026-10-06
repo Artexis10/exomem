@@ -59,6 +59,7 @@ test_the_hcloud_driver_name_elsewhere_cannot_be_privileged if {
 test_the_hcloud_node_driver_from_another_image_cannot_be_privileged if {
   doc := hcloud_node([{"name": "hcloud-csi-driver", "image": pinned, "securityContext": {"privileged": true}}])
   "DaemonSet/exomem-platform-hcloud-csi-node uses a privileged container" in deny with input as doc
+}
 
 topolvm_node(overrides) := object.union({
   "kind": "DaemonSet",
