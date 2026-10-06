@@ -190,7 +190,11 @@ jobs:
           sudo systemctl daemon-reload
           sudo systemctl stop exomem-cells-ready.service
           sudo vgchange --activate n cells
-          sudo cryptsetup close exomem_cells
+          # Close through the crypttab unit, so systemd does not still count it
+          # started and treat the start below as a no-op.
+          sudo systemctl stop systemd-cryptsetup@exomem_cells.service
+          if [ -e /dev/mapper/exomem_cells ]; then sudo cryptsetup close exomem_cells; fi
+          test ! -e /dev/mapper/exomem_cells
           sudo systemctl start --no-block k3s-agent.service
           sleep 10
           test "$(systemctl is-active exomem-cells-ready.service)" = activating
@@ -264,6 +268,15 @@ jobs:
           grep -F 'Only one named data disk belongs to exomem-cells' "$RUNNER_TEMP/partial.log"
           sudo mdadm --examine "$DATA0" | grep -F 'exomem-cells'
           if sudo blkid --probe "$DATA1"; then echo "the role wrote to the blank disk"; exit 1; fi
+      - name: Show the unlock path after a failure
+        if: failure()
+        run: |
+          systemctl status --no-pager systemd-cryptsetup@exomem_cells.service exomem-cells-ready.service \
+            k3s-agent.service clevis-luks-askpass.path clevis-luks-askpass.service || true
+          sudo journalctl --no-pager -b -u systemd-cryptsetup@exomem_cells.service -u exomem-cells-ready.service \
+            -u clevis-luks-askpass.service -u tangd.socket | tail -n 200 || true
+          sudo dmsetup ls || true
+          lsblk || true
       - name: Summarize
         if: success()
         run: |
