@@ -133,7 +133,8 @@ class CellManifestSpec:
     image: str
     replicas: int
     read_only: bool
-    # The cell's size (CellRow.size_gib): its claim and quota render at it.
+    # The size the claim and quota render at: CellRow.size_gib for a local
+    # claim, storage_gib for a Hetzner one (reconcile.py).
     storage_gib: int = 10
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     model_env: dict[str, str] = field(default_factory=dict)

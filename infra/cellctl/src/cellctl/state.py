@@ -26,7 +26,8 @@ def row_hold_kind(kind: str | None) -> str | None:
     return "backup" if kind == SNAPSHOT_BACKUP else kind
 
 # move-cloud-cells-to-local-storage D10: what one measured hourly backup found.
-# GROWTH_NO_ROOM raises the platform's storage-growth alert.
+# GROWTH_NO_ROOM and GROWTH_AT_CAP each raise the storage-growth alert: the
+# cell is past 80% use and cannot grow.
 GROWTH_PLANNED = "grow"
 GROWTH_NO_ROOM = "no-room"
 GROWTH_AT_CAP = "at-cap"
@@ -100,8 +101,9 @@ class CellRow:
     @property
     def size_gib(self) -> int:
         """D10: the cell's size, the larger of what Substrate asked for and
-        what cellctl grew it to. Its claim and quota render at this, so a later
-        pass never renders a smaller claim, and capacity charges it (D6)."""
+        what cellctl grew it to. A local cell's claim and quota render at this,
+        so a later pass never renders a smaller claim, and capacity charges it
+        (D6). A claim on a Hetzner volume renders storage_gib."""
 
         return max(self.storage_gib, self.grown_storage_gib or 0)
 

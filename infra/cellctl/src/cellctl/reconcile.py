@@ -1299,9 +1299,13 @@ async def _growth_alert(
     memory: LoopMemory,
 ) -> None:
     """D10: one platform alert while a serving local cell past 80% use cannot
-    grow because its node has no room. Unknown, after a restart, until every
-    serving local cell has been measured again; nothing is sent while unknown."""
+    grow: its node has no room, or it is at its cap. Nothing is sent while
+    the answer is unknown (alerts.growth_blocked), nor where local storage is
+    not configured: there a first "resolved" would email an operator about an
+    alert that never fired."""
 
+    if cluster_config.storage.local is None:
+        return
     known = {row.cell_id for row in rows}
     memory.growth_verdicts = {cell: verdict for cell, verdict in memory.growth_verdicts.items() if cell in known}
     firing = alerts.growth_blocked(rows, observations, memory.growth_verdicts, storage=cluster_config.storage)
@@ -1563,17 +1567,21 @@ async def _reconcile_row(
             retry_after = observation.statefulset_backup_retry_after
             retry_minutes = observation.statefulset_backup_retry_minutes
         resources, placement = cluster_config.workload_for_cell(row.cell_id)
+        local_volume = cluster_config.storage.is_local(storage_class)
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
             replicas=decision.replicas,
             read_only=decision.read_only,
-            storage_gib=row.size_gib,
+            # D10: only a local claim grows. A cell back on its retained
+            # Hetzner volume (a D7 rollback) renders storage_gib, that
+            # volume's own size, so its claim still binds and never grows it.
+            storage_gib=row.size_gib if local_volume else row.storage_gib,
             resources=resources,
             model_env=cluster_config.model_env or {},
             placement=placement,
             storage_class=storage_class,
-            local_volume=cluster_config.storage.is_local(storage_class),
+            local_volume=local_volume,
             # D5: a backup this decision records counts at once, so the hold's
             # own exit writes the key.
             backed_up=row.last_backup_at is not None or "last_backup_at" in decision.row_updates,

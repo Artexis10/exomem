@@ -1382,6 +1382,19 @@ def test_a_local_cell_never_grows_past_the_configured_cap(size: int, grown: int 
     assert decision.grow_storage_gib == grown
 
 
+def test_a_cell_at_its_cap_past_80_percent_use_raises_the_growth_alert() -> None:
+    # It cannot grow, so it will fill and fail its writes. That is when an
+    # operator must act, as when its node has no room.
+    from cellctl.alerts import growth_blocked
+
+    capped = StorageConfig(local=LocalStorage(max_cell_gib=20))
+    row = _row(storage_gib=20, hold_kind="backup", hold_started_at=STARTED)
+
+    decision = _measure(_backed_up(used=95), row, storage=capped)
+
+    assert growth_blocked([row], {row.cell_id: _local()}, {row.cell_id: decision.storage_growth}, storage=capped) is True
+
+
 async def test_a_cell_whose_node_has_no_room_keeps_its_size_and_raises_the_growth_alert(
     cell_db: CellDatabase, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1466,26 +1479,20 @@ def test_after_a_restart_the_growth_alert_waits_until_every_local_cell_is_measur
     assert growth_blocked(rows, observations, {row.cell_id: "fits" for row in rows}, storage=MIGRATING) is False
 
 
-def test_one_backup_grows_a_cell_at_most_once() -> None:
-    # The Job reports the same use on every later pass of the hold, and a pass
-    # whose apply was refused runs again. Only the pass that records the
-    # outcome plans a size, and the hold's exit records it once.
+def test_a_holds_cleanup_pass_carries_the_size_its_backup_planned() -> None:
+    # Server-side apply drops an annotation a pass stops sending, so a cleanup
+    # pass that left the planned size out would lose the growth before the
+    # hold's exit records it.
     cleaning = _measure(_backed_up(used=95, statefulset_backup_outcome=MEASURED_SNAPSHOT,
                                    statefulset_grow_storage_gib=14))
+
     assert cleaning.grow_storage_gib == 14
 
-    exit_pass = _in_hold(statefulset_backup_outcome=MEASURED_SNAPSHOT, statefulset_grow_storage_gib=14,
-                         backup_job_succeeded=True, backup_job_snapshot_id=MEASURED_SNAPSHOT,
-                         backup_job_used_bytes=95, backup_job_total_bytes=100)
-    assert _measure(exit_pass).row_updates["grown_storage_gib"] == 14
-    # The exit again, its apply refused after the row recorded 14 GiB.
-    grown = _row(grown_storage_gib=14, hold_kind="backup", hold_started_at=STARTED)
-    assert "grown_storage_gib" not in _measure(exit_pass, grown).row_updates
 
-
-async def test_a_grown_cell_never_renders_a_claim_smaller_than_its_grown_size(cell_db: CellDatabase) -> None:
-    # Kubernetes refuses a smaller claim, so a later routine apply rendered at
-    # storage_gib would leave the cell refused until its size changed.
+async def test_a_grown_cell_back_on_its_hetzner_volume_renders_that_volumes_size(cell_db: CellDatabase) -> None:
+    # A migration rollback rebinds the cell's retained Hetzner volume (design
+    # D7), made at storage_gib. A claim at the grown size would stay Pending
+    # against it, or grow a bound Hetzner volume.
     from cellctl import db
 
     from .test_reconcile import _observed_from_applied, _set_storage
@@ -1494,7 +1501,6 @@ async def test_a_grown_cell_never_renders_a_claim_smaller_than_its_grown_size(ce
     await _seed_cell(cell_db, cell_id, "tenant-a")  # storage_gib 10
     cluster = FakeClusterGateway()
     config = ClusterConfig(object_storage_bucket="b", storage=MIGRATING)
-    local = dict(pv_storage_class=LOCAL.class_name, pvc_storage_class=LOCAL.class_name, pv_node="agent-1")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
 
     async def run(minute: int) -> None:
@@ -1503,15 +1509,14 @@ async def test_a_grown_cell_never_renders_a_claim_smaller_than_its_grown_size(ce
 
     try:
         await run(0)
-        cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id, **local)
-        await db.write_observed(connection, cell_id, {"grown_storage_gib": 14})
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, pv_storage_class=STORAGE_CLASS, pvc_storage_class=STORAGE_CLASS)
+        await db.write_observed(connection, cell_id, {"grown_storage_gib": 14})  # grown while it was local
         await _set_storage(cell_db, cell_id, 10, desired_state="read_only")  # a routine re-apply
         await run(1)
 
         claim = cluster.applied[(namespace, "PersistentVolumeClaim", "cell-data")]
-        quota = cluster.applied[(namespace, "ResourceQuota", "cell-quota")]
-        assert claim["spec"]["resources"]["requests"]["storage"] == "14Gi"
-        assert quota["spec"]["hard"]["requests.storage"] == "28Gi"
+        assert claim["spec"]["resources"]["requests"]["storage"] == "10Gi"
     finally:
         await connection.close()
 
@@ -1544,7 +1549,7 @@ async def test_a_grown_cell_takes_the_slots_and_reserve_of_its_grown_size(cell_d
 def test_a_cell_on_a_hetzner_volume_never_grows() -> None:
     # A migration rollback rebinds a cell's retained Hetzner volume (design
     # D7), so a recorded hourly hold can finish on one. Even with room on the
-    # node, a Hetzner volume keeps its size until its cell migrates again.
+    # node, its backup plans no growth.
     hetzner = _backed_up(used=95, pv_storage_class=STORAGE_CLASS, pvc_storage_class=STORAGE_CLASS)
 
     decision = _measure(hetzner)

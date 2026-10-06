@@ -197,7 +197,7 @@ and a cell larger than the default consumes `ceil(size / default)` slots of it.
   - cellctl counts local slots in the local default, which is configuration.
   - A cell's size is its row's `storage_gib`, which Substrate owns (column default 10). New cells take 4 GiB when the cutover (task 7.2) changes Substrate's default for new cells.
   - A migrating cell keeps its row's size unless the operator lowers it before the restore, never below what the cell uses.
-  - A cell grows online through TopoLVM expansion: a larger `storage_gib` expands its claim without a restart. D10 makes that automatic.
+  - A larger `storage_gib` expands a cell's claim through TopoLVM's online expansion, and also restarts the cell once. `storage_gib` is part of the render digest, which the pod template carries, so cellctl re-applies the cell as a digest change (D4). D10's automatic growth leaves the digest as it is and does not restart the cell.
 - **Snapshot reserve:** 2 × the largest cell's size × the node's backup concurrency. In spike 1.1, a snapshot and its clone of a 4 GiB volume each took the full 4 GiB from published free capacity.
 - **Scheduler backstop:** the scheduler refuses a claim larger than a node's published free capacity ("did not have enough free storage"), and the capacity object followed the node within half a second in the spike. A miscount in this term therefore stops a cell from scheduling; it does not overfill a pool.
 - **Published slots:** the minimum of the qualified occupancy, CPU, memory and storage terms.
@@ -269,7 +269,7 @@ The promise is therefore a consistent state no newer than the snapshot, not the 
 A 4 GiB default only holds if a cell that fills grows without an operator. cellctl therefore expands a local cell's claim when its filesystem passes 80% use.
 
 - **Observed use:** the hourly backup Job already mounts the cell's filesystem, as the clone. It reports the filesystem's used and total bytes in its termination message, value-free, and cellctl reads them from the finished Job. This needs no new privilege; kubelet volume statistics would need `nodes/proxy`, which reaches every pod on the node.
-- **Step and cap:** each growth adds one default cell size (4 GiB), up to a configured cap per cell. One growth runs per cell per hourly backup, so a cell never grows faster than its use is observed.
+- **Step and cap:** each growth adds one default cell size (4 GiB), up to a configured cap per cell. One growth runs per cell per hourly backup, so a cell never grows faster than its use is observed. A cell past 80% use at its cap cannot grow and will fill, so it raises the same alert as a node without room.
 - **Room first:** cellctl grows a cell only while its node's published free bytes cover the step and the larger snapshot reserve that the new size implies (D6). Otherwise it raises an alert through the alert receiver, the same path as the backup-age alert, and leaves the size as it is.
 - **Recorded on the row:** cellctl records the grown size on the cell's row, in a column it owns, and renders the claim at the larger of that and `storage_gib`. A later pass therefore never renders a smaller claim, which Kubernetes refuses. The column needs a Substrate migration.
 - **Capacity:** a grown cell consumes `ceil(size / default)` slots, as any larger cell does (D6), so admission sees the growth on the next capacity pass.

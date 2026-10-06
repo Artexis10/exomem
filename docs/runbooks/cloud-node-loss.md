@@ -182,3 +182,10 @@ The usual cause on Hetzner is an etcd restore that drops a cell created after th
 3. If the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the empty claim as in step 4.3, mark the volume lost as in step 5, then resume cellctl.
 
 Never clear the backup record to get past this refusal: the cell would then serve an empty vault as if it were the tenant's.
+
+`MANIFEST_IMMUTABLE` on a local cell that grew: cellctl renders a local cell's claim at the larger of `storage_gib` and `grown_storage_gib`. Restoring the control database to before a growth, or rolling cellctl back past the release that grows cells, renders a claim smaller than the volume. Kubernetes refuses a smaller claim, and the cell's hourly backups then fail.
+
+1. Read the claim's actual size: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data --output=jsonpath='{.spec.resources.requests.storage}'`. Expect whole GiB, such as `14Gi`.
+2. After a control-database restore, set the row's grown size to that number, as the control database owner: `UPDATE exomem_cloud_cells SET grown_storage_gib = 14 WHERE cell_id = '<cell id>';`. It must report `UPDATE 1`.
+3. After a cellctl rollback, roll cellctl forward again. A cellctl from before this change ignores `grown_storage_gib`, so step 2 does not help it. If cellctl must stay rolled back, set `storage_gib` to that number instead; that restarts the cell once.
+4. Check that the next pass clears the row's error code, and that the next hourly backup records a new `last_backup_at`.

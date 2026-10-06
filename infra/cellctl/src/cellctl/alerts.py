@@ -1,8 +1,8 @@
 """The platform alerts cellctl raises (move-cloud-cells-to-local-storage).
 
 One alert fires while a running cell's last successful backup is older than
-its schedule allows (task 2.8), and one while a local cell past 80% use has no
-room on its node to grow (D10). Each goes through the existing alert receiver
+its schedule allows (task 2.8), and one while a local cell past 80% use cannot
+grow, because its node has no room or it is at its cap (D10). Each goes through the existing alert receiver
 as the same content-free transition the hosted scheduler evaluator sends
 (`infra/helm/platform/files/scheduler_runtime.py`). Substrate's receiver
 (`alert-receiver.ts`) is the contract both senders follow: it accepts exactly
@@ -24,13 +24,15 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
-from .state import GROWTH_NO_ROOM, CellRow, ClusterObservation
+from .state import GROWTH_AT_CAP, GROWTH_NO_ROOM, CellRow, ClusterObservation
 from .storage_config import StorageConfig
 
 JOB = "exomem-cloud-cells"
 BACKUP_ALERT = "backup-stale"
-# move-cloud-cells-to-local-storage D10.
+# move-cloud-cells-to-local-storage D10: a local cell past 80% use that cannot
+# grow, because its node has no room or it is at its cap.
 GROWTH_ALERT = "storage-growth-blocked"
+GROWTH_BLOCKED = frozenset({GROWTH_NO_ROOM, GROWTH_AT_CAP})
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
@@ -71,15 +73,20 @@ def growth_blocked(
     *,
     storage: StorageConfig,
 ) -> bool | None:
-    """D10: whether a serving cell past 80% use cannot grow because its node
-    has no room. `verdicts` holds what each local cell's latest measured
-    backup found, and lives only in cellctl's memory. After a restart the
-    answer is unknown (None), not "resolved", until every serving local cell
-    has been measured again; a cell that could not be observed this pass may
-    be local, so it counts as unmeasured unless it has a verdict."""
+    """D10: whether a serving cell past 80% use cannot grow, because its
+    node has no room or it is at its cap. `verdicts` holds what each local
+    cell's latest measured backup found, and lives only in cellctl's memory.
+
+    The answer is unknown (None), never "resolved", while any serving local
+    cell has no verdict: after a restart until each has been measured again,
+    and for as long as one is never measured, such as a cell stuck in its
+    init or whose backups keep failing. So no RESOLVED is sent while such a
+    cell exists; the backup-age alert is what fires for it. A cell that could
+    not be observed this pass may be local, so it counts as unmeasured unless
+    it has a verdict."""
 
     serving = [row for row in rows if row.desired_state in SERVING_STATES]
-    if any(verdicts.get(row.cell_id) == GROWTH_NO_ROOM for row in serving):
+    if any(verdicts.get(row.cell_id) in GROWTH_BLOCKED for row in serving):
         return True
     unmeasured = [
         row for row in serving

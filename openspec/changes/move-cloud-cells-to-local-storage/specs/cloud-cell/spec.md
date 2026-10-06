@@ -252,7 +252,7 @@ A node-loss drill SHALL be run on disposable infrastructure before any tenant ce
 
 ### Requirement: A local cell grows online before it fills
 
-cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
+cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A cell past 80% use at its cap SHALL raise the same alert. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
 
 #### Scenario: Cell passes 80% use
 
@@ -263,6 +263,11 @@ cellctl SHALL grow a running cell's local volume online when its filesystem pass
 
 - **WHEN** a local cell passes 80% use, but its node's free bytes do not cover the step and the larger reserve
 - **THEN** cellctl raises an alert and leaves the cell's size unchanged
+
+#### Scenario: Cell at its cap passes 80% use
+
+- **WHEN** a local cell at its configured cap reports more than 80% filesystem use
+- **THEN** cellctl leaves its size unchanged and raises the same alert as for a node without room
 
 ### Requirement: A cell never initializes an empty vault over a lost volume
 
