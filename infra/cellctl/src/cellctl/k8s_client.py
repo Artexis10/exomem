@@ -16,6 +16,7 @@ from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
 
+from .backup_source import FAILURE_CODES as BACKUP_FAILURE_CODES
 from .capacity import (
     AttachmentReservation,
     CapacityObservation,
@@ -408,7 +409,7 @@ class ClusterClient:
         # different name until its TTL expires and is never read as this
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
-        backup_snapshot_id = backup_used_bytes = backup_total_bytes = None
+        backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
         snapshot_steps: dict[str, bool] = {}
         if started_raw and hold_kind == SNAPSHOT_BACKUP:
             snapshot_steps = self._snapshot_steps(namespace, started_raw)
@@ -419,6 +420,9 @@ class ClusterClient:
             if backup_job is not None and bool(backup_job.status.succeeded):
                 backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(
                     self._job_pod_termination_message(namespace, backup_name))
+            elif backup_job is not None and bool(backup_job.status.failed):
+                message = self._job_pod_termination_message(namespace, backup_name, succeeded=False)
+                backup_failure_code = message if message in BACKUP_FAILURE_CODES else None
 
         return ClusterObservation(
             namespace_exists=True,
@@ -468,6 +472,7 @@ class ClusterClient:
             **_job_observation(backup_job, prefix="backup_job", snapshot_id=backup_snapshot_id),
             backup_job_used_bytes=backup_used_bytes,
             backup_job_total_bytes=backup_total_bytes,
+            backup_job_failure_code=backup_failure_code,
             **_job_observation(restore_job, prefix="restore_job"),
             **snapshot_steps,
         )
@@ -498,12 +503,14 @@ class ClusterClient:
             "clone_bound": bool(clone and clone.status and clone.status.phase == "Bound"),
         }
 
-    def _job_pod_termination_message(self, namespace: str, job_name: str) -> str | None:
+    def _job_pod_termination_message(self, namespace: str, job_name: str, *, succeeded: bool = True) -> str | None:
         """D8 amendment: the backup Job has no ServiceAccount token, so it
         writes the real restic snapshot id it produced to its own
         termination message; this reads it back from the pod status rather
         than trusting a hardcoded "latest". Scoped to this Job's own pods, so
-        a lingering pod from an earlier hold's backup cannot answer."""
+        a lingering pod from an earlier hold's backup cannot answer. With
+        `succeeded` False it reads a failed container's message instead, for
+        the D5 vault check's code."""
 
         pods = self._core.list_namespaced_pod(
             namespace, label_selector=f"batch.kubernetes.io/job-name={job_name}"
@@ -511,7 +518,7 @@ class ClusterClient:
         for pod in pods:
             for status in pod.status.container_statuses or []:
                 terminated = status.state.terminated if status.state else None
-                if terminated and terminated.exit_code == 0 and terminated.message:
+                if terminated and (terminated.exit_code == 0) == succeeded and terminated.message:
                     return terminated.message
         return None
 

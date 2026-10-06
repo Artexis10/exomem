@@ -8,6 +8,7 @@ import asyncio
 import base64
 import contextlib
 import dataclasses
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -1640,6 +1641,34 @@ def test_a_refused_row_starts_no_upgrade_but_is_backed_up_unless_its_statefulset
     config = dataclasses.replace(reconcile.DEFAULT_RECONCILE_CONFIG, backup_concurrency=3)
     assert parked in reconcile._select_backup_candidates(rows, observations, now, config)
     assert parked not in reconcile._select_backup_candidates(rows, observations, now, config, frozenset({parked}))
+
+
+async def test_a_failed_backups_own_code_is_logged_with_its_cell(cell_db: CellDatabase, caplog) -> None:
+    # D5: the vault check's code is the operator's only clue to why a backup
+    # failed, and cellctl deletes the failed Job a pass later.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    window = datetime(2026, 1, 1, 2, tzinfo=UTC)
+    try:
+        for _ in range(3):
+            await _pass(connection, cluster, window - timedelta(hours=3))
+            cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
+        await _pass(connection, cluster, window)
+        assert (await db.select_all_rows(connection))[0].hold_kind == "backup"
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, pod_exists=False, pod_uses_volume=False, pod_ready=False,
+            backup_job_failed=True, backup_job_failure_code="BACKUP_SOURCE_NOT_A_VAULT",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cellctl"):
+            await _pass(connection, cluster, window + timedelta(minutes=1))
+
+        assert (await db.select_all_rows(connection))[0].last_error_code == "BACKUP_FAILED"
+        assert f"cell {cell_id}'s backup failed: BACKUP_SOURCE_NOT_A_VAULT" in caplog.text
+    finally:
+        await connection.close()
 
 
 async def test_a_pod_stuck_terminating_cannot_hold_the_only_backup_slot_all_night(cell_db: CellDatabase) -> None:

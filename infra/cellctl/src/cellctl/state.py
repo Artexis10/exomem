@@ -215,6 +215,9 @@ class ClusterObservation:
     # backup Job reported them. None when it reported none.
     backup_job_used_bytes: int | None = None
     backup_job_total_bytes: int | None = None
+    # D5: a failed backup Job's own value-free code (backup_source.py), or
+    # None when it left none.
+    backup_job_failure_code: str | None = None
 
     # D3: the current hourly hold's VolumeSnapshot and its clone claim.
     snapshot_exists: bool = False

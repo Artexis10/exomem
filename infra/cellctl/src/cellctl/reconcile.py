@@ -72,6 +72,7 @@ from .rollout import (
 )
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
+    BACKUP_FAILED,
     CANARY_PARKED,
     GROWTH_NOT_NEEDED,
     MANIFEST_IMMUTABLE,
@@ -1480,6 +1481,9 @@ async def _reconcile_row(
     )
     if decision.storage_growth is not None:
         _note_growth(memory, row, observation, decision)
+    if decision.row_updates.get("last_error_code") == BACKUP_FAILED and observation.backup_job_failure_code:
+        # D5: the failed Job's own code, value-free; the Job goes a pass later.
+        logger.warning("cellctl: cell %s's backup failed: %s", row.cell_id, observation.backup_job_failure_code)
 
     # D6 step 4.1: a pause is written before the apply it accompanies, so a
     # crash between the two leaves the rollout paused and no other cell can
