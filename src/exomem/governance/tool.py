@@ -79,6 +79,7 @@ from .transaction import (
     authorization_row,
     policy_target,
 )
+from .transaction import durable_json as _durable_json
 from .transaction import fsync_directory as _fsync_directory
 
 PENDING_MARKER = ".policy-mutation.pending.json"
@@ -1377,18 +1378,6 @@ def _commit_event_id(
 
 def _marker_path(vault_root: Path) -> Path:
     return policy_target(policy_module.governance_root(vault_root), PENDING_MARKER)
-
-
-def _durable_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-    _fsync_directory(path.parent)
 
 
 def _durable_bytes(path: Path, value: bytes) -> None:

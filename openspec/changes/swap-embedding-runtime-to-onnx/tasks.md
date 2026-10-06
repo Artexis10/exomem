@@ -110,10 +110,21 @@
     The direct probe pair measured 23.5/493.4 ms with prepacking and 27.0/502.9
     ms without it (query/chunk respectively).
 
-- [ ] 5.5 Disable ONNX prepacking for served artifacts in Exomem Cloud cells so
+- [x] 5.5 Disable ONNX prepacking for served artifacts in Exomem Cloud cells so
   independent cell processes share file-backed weights; keep personal and hosted
   servers on the default prepacked path, with an explicit `EXOMEM_ONNX_SHARE_WEIGHTS`
   binary override.
+  - Shipped in #1489. Measured in production on 2026-10-06: two 0.108.0 cells
+    (`xuonhoiy3pvzqom6` and `abs7pee2cpysoumu`, image `sha256:2643e398…`) map the
+    same `bge-m3` `model.onnx.data` file (host inode 3894058, containerd snapshot
+    450334).
+  - Of the 74,106 resident pages of that file, 74,102 (289.5 MiB) are the same
+    physical frames in both processes, read from the pagemap PFNs and
+    `/proc/kpagecount`.
+  - Per process, Rss is 290.1 MiB and Pss is 144.8 MiB for that mapping.
+  - The page cache is charged to `system.slice/k3s.service` (the image unpack), not
+    to either cell. The cells' `memory.stat` `file` values are 18.0 MiB and 4.9 MiB.
+  - Private memory is 225.3 MiB and 224.2 MiB per cell.
 
 ## 6. Verify
 

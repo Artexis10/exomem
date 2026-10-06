@@ -1,0 +1,207 @@
+# Engineering-practices quality check: https://github.com/Artexis10/engineering-practices
+# Read by the `quality` job in .github/workflows/ci.yml. Patterns are globs on
+# repository-relative paths; `*` also matches `/`. A file takes the first class
+# that matches, in the order listed.
+
+classes:
+  fixtures:
+    - "tests/fixtures/*"
+    - "tests/golden/*"
+    - "tests/hook_transcripts/*"
+    - "tests/privacy_fixtures/*"
+    - "tests/tui/__snapshots__/*"
+    - "infra/*/tests/fixtures/*"
+    - "fixture-vault/*"
+    - "plugins/hosted/*fixture*.json"
+  # Directories that never ship keep a glob; scripts/ mixes product and proof, so its proof
+  # files are named and a new script defaults to product.
+  tests:
+    - "tests/*"
+    - "infra/*/tests/*"
+    - ".test_durations.json"
+    - "scripts/e2e_http_server.py"
+    - "scripts/e2e_product_loop.py"
+    - "scripts/smoke-media-pipeline.py"
+    - "scripts/smoke-upload.py"
+    - "scripts/time-to-value.py"
+    - "scripts/verify_studio_install.py"
+    - "scripts/verify-hosted-image.py"
+    - "scripts/live_write_acceptance.py"
+    - "scripts/activation_real_turns.py"
+    - "infra/scripts/accept_hosted_service.py"
+    - "infra/scripts/external_blackbox.py"
+    - "infra/scripts/network_policy_probes.py"
+    - "infra/scripts/smoke_hosted_cell.py"
+  eval:
+    - "benchmarks/*"
+    - "plugins/cloud/evals/*"
+    - "scripts/activation_lexical_latency.py"
+    - "scripts/analyze_tool_surface.py"
+    - "scripts/bootstrap-byte-breakdown.py"
+    - "scripts/category_recall_latency.py"
+    - "scripts/cell_memory_profile.py"
+    - "scripts/context-footprint.py"
+    - "scripts/durable_closure_*.py"
+    - "scripts/graph_concurrent_convergence.py"
+    - "scripts/graph_value_benchmark.py"
+    - "scripts/latency_curve.py"
+    - "scripts/managed_recall.py"
+    - "scripts/measure*.py"
+    - "scripts/product_flow_benchmark.py"
+    - "scripts/recall_latency_gate.py"
+    - "scripts/recall_mask_latency.py"
+    - "scripts/referent_resolution_benchmark.py"
+    - "scripts/relation_review_scale.py"
+    - "scripts/repro_graph_rebuild_hold.py"
+    - "scripts/semantic_write_latency.py"
+    - "scripts/shared_weights_probe.py"
+    - "scripts/startup_benchmark.py"
+    - "scripts/synth_vault.py"
+  # Regenerated plugin output: neither product nor proof.
+  generated:
+    - "plugins/*/generated/*"
+  # Product is whatever ships, is installed or run by users, or runs in a build, deploy or
+  # image. The install and service scripts are listed; the other build, release, deploy and
+  # user-run scripts (infra/scripts apply, handoff and upgrade among them) default to product.
+  product:
+    - "src/*"
+    - "plugins/*"
+    - "sidecar/*"
+    - "deploy/*"
+    - "contracts/*"
+    - ".claude-plugin/*"
+    - "infra/provisioner/*"
+    - "infra/cellctl/*"
+    - "infra/cloud-rehearsal/*"
+    - "infra/helm/*"
+    - "infra/ansible/*"
+    - "infra/terraform/*"
+    - "infra/secrets/*"
+    - "infra/contracts/*"
+    - "infra/operations/*"
+    - "infra/policy/*"
+    - "infra/runbooks/*"
+    - "infra/tool-versions.env"
+    - "scripts/install*"
+    - "scripts/upgrade.*"
+    - "scripts/restart.*"
+    - "scripts/_service-common.*"
+    - "scripts/service-transition-receipt.py"
+    - "scripts/*.service"
+    - "scripts/*.plist"
+    - "scripts/setup-*"
+    - "scripts/deploy.ps1"
+    - "scripts/cold-standby.ps1"
+    - "scripts/set-rest-key.py"
+    - "scripts/set-upload-token.py"
+    - "pyproject.toml"
+    - "Dockerfile"
+    - "compose*.yaml"
+    - "server.json"
+  # Dev, CI and read-only verification scripts. infra/scripts is not globbed: its OWNERSHIP.md
+  # also covers saved-plan apply and secret handoff, which are deploy.
+  scripts:
+    - "scripts/ci-apt-install.sh"
+    - "scripts/check_openspec_archive_discipline.py"
+    - "scripts/check_pr_title.py"
+    - "scripts/codex_task.sh"
+    - "scripts/generate-capabilities.py"
+    - "scripts/generate-public-privacy-fixtures.py"
+    - "scripts/generate_harness_modules.py"
+    - "scripts/refresh_test_durations.py"
+    - "scripts/tui_frames.py"
+    - "scripts/validate-public-artifacts.py"
+    - "infra/scripts/audit_hosted_database_budget.py"
+    - "infra/scripts/validate.sh"
+    - "infra/scripts/validate_sops_ciphertext.py"
+    - "infra/scripts/verify_hosted_release.py"
+  # CI configuration by name: release-please, the provisioner publish and the hosted
+  # infrastructure workflows publish or run against production, so they stay product.
+  tooling:
+    - ".github/quality.yml"
+    - ".github/workflows/ci.yml"
+    - ".github/workflows/cell-memory-profile.yml"
+    - ".github/workflows/cloud-cellctl.yml"
+    - ".github/workflows/cloud-rehearsal.yml"
+    - ".github/workflows/cross-platform.yml"
+    - ".github/workflows/frozen-verifier.yml"
+    - ".github/workflows/heavy-media.yml"
+    - ".github/workflows/pr-title.yml"
+    - ".github/workflows/release-evidence-automation.yml"
+  specs:
+    - "openspec/*"
+  docs:
+    - "docs/*"
+    - "examples/*"
+    - "*.md"
+
+# vulture: Python definitions nothing references, reported on added lines only.
+python:
+  roots:
+    - "src"
+    - "plugins/claude-code/hooks"
+    - "sidecar/diarizer"
+    - "infra/provisioner/src"
+    - "infra/cellctl/src"
+    - "infra/cloud-rehearsal/src"
+  # Called by name from outside the code: Textual event and action handlers (watch_*
+  # included), watchdog file-event handlers, FastMCP middleware, pydantic model_config.
+  ignore_names:
+    - "on_mount"
+    - "on_resize"
+    - "on_screen_resume"
+    - "on_input_*"
+    - "on_option_list_*"
+    - "on_text_area_*"
+    - "on_recovery_panel_chosen"
+    - "on_packs_choice_confirmed"
+    - "on_rewind_request"
+    - "action_*"
+    - "watch_*"
+    - "on_created"
+    - "on_deleted"
+    - "on_modified"
+    - "on_moved"
+    - "on_call_tool"
+    - "model_config"
+  # Registered with the MCP server, FastAPI or pydantic rather than called.
+  ignore_decorators:
+    - "@mcp_app.custom_route"
+    - "@mcp.resource"
+    - "@mcp.prompt"
+    - "@app.*"
+    - "@field_validator"
+    - "@model_validator"
+    - "@override"
+
+# jscpd: exact token clones in product code.
+duplicates:
+  paths:
+    - "src"
+    - "plugins/claude-code/hooks"
+    - "sidecar/diarizer"
+    - "infra/provisioner/src"
+    - "infra/cellctl/src"
+    - "infra/cloud-rehearsal/src"
+  ignore: ["**/_sample_vault/**", "**/_scaffold/**"]
+
+test_jobs:
+  - "core tests (py3.13, shard 1/12)"
+  - "core tests (py3.13, shard 2/12)"
+  - "core tests (py3.13, shard 3/12)"
+  - "core tests (py3.13, shard 4/12)"
+  - "core tests (py3.13, shard 5/12)"
+  - "core tests (py3.13, shard 6/12)"
+  - "core tests (py3.13, shard 7/12)"
+  - "core tests (py3.13, shard 8/12)"
+  - "core tests (py3.13, shard 9/12)"
+  - "core tests (py3.13, shard 10/12)"
+  - "core tests (py3.13, shard 11/12)"
+  - "core tests (py3.13, shard 12/12)"
+  - "harness tests (py3.13, shard 1/4)"
+  - "harness tests (py3.13, shard 2/4)"
+  - "harness tests (py3.13, shard 3/4)"
+  - "harness tests (py3.13, shard 4/4)"
+  - "Windows held filesystem (native NTFS)"
+  - "terminal UI (textual, headless + snapshots)"
+  - "product E2E (installed wheel, stdio + HTTP)"

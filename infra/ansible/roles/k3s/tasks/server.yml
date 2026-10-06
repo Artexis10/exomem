@@ -78,3 +78,34 @@
     owner: root
     group: root
     mode: "0600"
+
+# K3s cannot list the write-only etcd bucket, so it never prunes its records of
+# the snapshots it uploaded; the bucket's lifecycle deletes the snapshots.
+- name: Install the expired etcd snapshot record pruner
+  ansible.builtin.copy:
+    src: exomem-prune-etcd-snapshot-records.py
+    dest: /usr/local/sbin/exomem-prune-etcd-snapshot-records
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the etcd snapshot record pruner units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - exomem-prune-etcd-snapshot-records.service
+    - exomem-prune-etcd-snapshot-records.timer
+  notify: Reload systemd
+
+- name: Apply the pruner unit handlers before enabling its timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the etcd snapshot record pruner
+  ansible.builtin.systemd_service:
+    name: exomem-prune-etcd-snapshot-records.timer
+    enabled: true
+    state: started

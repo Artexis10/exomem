@@ -81,6 +81,7 @@ jobs:
           helm repo add hcloud https://charts.hetzner.cloud
           helm repo add traefik https://traefik.github.io/charts
           helm repo add jetstack https://charts.jetstack.io
+          helm repo add topolvm https://topolvm.github.io/topolvm
           helm dependency build infra/helm/platform
           helm lint infra/helm/platform --strict \
             --namespace exomem-platform \
@@ -198,6 +199,7 @@ jobs:
           helm repo add hcloud https://charts.hetzner.cloud
           helm repo add traefik https://traefik.github.io/charts
           helm repo add jetstack https://charts.jetstack.io
+          helm repo add topolvm https://topolvm.github.io/topolvm
           helm dependency build infra/helm/platform
       # A skip (no Docker, a missing variable) must fail the job, never pass it.
       - name: Live K3s suite

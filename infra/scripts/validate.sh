@@ -72,6 +72,9 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
   -e k3s_remove_node=exomem-agent-validate
 "${ansible_lint_bin}" --profile production "${infra_dir}/ansible"
 
+# The vendored snapshot CRDs are byte copies of external-snapshotter v8.6.0
+# (infra/helm/platform/LOCAL_STORAGE_PROVENANCE.md); a bump updates both.
+(cd "${infra_dir}/helm/platform/files/external-snapshotter" && sha256sum --check --quiet SHA256SUMS.txt)
 "${helm_bin}" repo add hcloud https://charts.hetzner.cloud \
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
@@ -79,6 +82,9 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
 "${helm_bin}" repo add jetstack https://charts.jetstack.io \
+  --repository-config "${helm_repository_config}" \
+  --repository-cache "${helm_repository_cache}"
+"${helm_bin}" repo add topolvm https://topolvm.github.io/topolvm \
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
 "${helm_bin}" dependency build "${infra_dir}/helm/platform" \
@@ -92,7 +98,8 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
   --values "${infra_dir}/helm/platform/values.validation.yaml" \
   --include-crds > "${render_dir}/platform.yaml"
 "${kubeconform_bin}" -strict -summary -ignore-missing-schemas "${render_dir}/platform.yaml"
-"${conftest_bin}" test --policy "${infra_dir}/policy" "${render_dir}/platform.yaml"
+"${conftest_bin}" verify --policy "${infra_dir}/policy"
+"${conftest_bin}" test --show-builtin-errors --policy "${infra_dir}/policy" "${render_dir}/platform.yaml"
 
 for values in values.validation.yaml values.initialize.yaml; do
   "${helm_bin}" lint "${infra_dir}/helm/cell" --strict \
@@ -101,7 +108,7 @@ for values in values.validation.yaml values.initialize.yaml; do
     --namespace cell-alpha-test \
     --values "${infra_dir}/helm/cell/${values}" > "${render_dir}/cell-${values}"
   "${kubeconform_bin}" -strict -summary -ignore-missing-schemas "${render_dir}/cell-${values}"
-  "${conftest_bin}" test --policy "${infra_dir}/policy" "${render_dir}/cell-${values}"
+  "${conftest_bin}" test --show-builtin-errors --policy "${infra_dir}/policy" "${render_dir}/cell-${values}"
 done
 
 "${script_dir}/validate_sops_ciphertext.py"

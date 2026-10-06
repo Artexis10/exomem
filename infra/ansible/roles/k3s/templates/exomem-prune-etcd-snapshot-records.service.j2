@@ -1,0 +1,8 @@
+[Unit]
+Description=Delete K3s records of S3 etcd snapshots the bucket has expired
+After=k3s.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+ExecStart=/usr/bin/python3 /usr/local/sbin/exomem-prune-etcd-snapshot-records --max-age-days {{ k3s_etcd_s3_record_max_age_days | int }}

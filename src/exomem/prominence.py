@@ -55,7 +55,6 @@ session start.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from contextlib import contextmanager
@@ -844,11 +843,6 @@ def write_prominence(value: str) -> Path:
             f"unknown prominence: {value!r} "
             f"(expected one of {CANON} or an alias {tuple(_ALIASES)})"
         )
-    path = mode.config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = mode.read_config()
     data.update(schema=1, prominence=canonical)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), "utf-8")
-    os.replace(tmp, path)  # atomic swap
-    return path
+    return mode.write_config(data)

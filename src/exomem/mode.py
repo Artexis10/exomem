@@ -39,6 +39,8 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import durable_write
+
 log = logging.getLogger(__name__)
 
 CANON = ("quiet", "normal", "performance")
@@ -314,20 +316,22 @@ def write_mode(value: str) -> Path:
         raise ValueError(
             f"unknown mode: {value!r} (expected one of {CANON} or an alias {tuple(_ALIASES)})"
         )
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = read_config()
     data.update(schema=1, mode=canonical)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=2), "utf-8")
-        os.replace(tmp, path)  # atomic swap
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    return write_config(data)
+
+
+def write_config(data: dict) -> Path:
+    """Replace the whole config file with `data`: synced, then renamed into place.
+
+    The one writer of this shared file: `mode`, `prominence`, the dreamer setting
+    and the delegation envelope each read-modify-write it through here, so a
+    power cut leaves the old file or the new one, never a truncated one that
+    `read_config` would read as `{}`.
+    """
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.replace_text(path, json.dumps(data, indent=2))
     return path
 
 

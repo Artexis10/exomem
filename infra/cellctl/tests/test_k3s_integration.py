@@ -285,10 +285,12 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
         pytest.skip("Docker is required for the 3.10 integration test")
 
     suffix = uuid.uuid4().hex[:12]
-    name = f"cellctl-k3s-{suffix}"
-    network = f"cellctl-net-{suffix}"
-    minio_name = f"cellctl-minio-{suffix}"
-    minio_volume = f"cellctl-minio-data-{suffix}"
+    # A parallel session's own prefix keeps its containers apart from others'.
+    prefix = os.environ.get("CELLCTL_K3S_NAME_PREFIX", "cellctl")
+    name = f"{prefix}-k3s-{suffix}"
+    network = f"{prefix}-net-{suffix}"
+    minio_name = f"{prefix}-minio-{suffix}"
+    minio_volume = f"{prefix}-minio-data-{suffix}"
     work = tmp_path_factory.mktemp("cellctl-k3s")
 
     network_args = ["docker", "network", "create"]
@@ -357,6 +359,10 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
             kubeconfig_path = work / "kubeconfig.yaml"
             kubeconfig_path.write_text(raw_kubeconfig, encoding="utf-8")
             kubeconfig_path.chmod(0o600)
+            # Helm installs the platform into its release namespace, so it
+            # always exists in production; the chart puts namespaced objects
+            # there (cellctl's alert-delivery Role and RoleBinding).
+            _run(["docker", "exec", name, "kubectl", "create", "namespace", "exomem-platform"])
             yield K3sCluster(
                 name=name,
                 kubeconfig=kubeconfig_path,
@@ -2070,3 +2076,149 @@ def test_the_operator_access_runbook_on_real_k3s(
     for event in audit:
         assert event["level"] == "Metadata", event
         assert "requestObject" not in event and "responseObject" not in event, event
+
+
+# === move-cloud-cells-to-local-storage 3.2: local storage admission ===
+
+
+def test_local_storage_admission_confines_backup_clones_and_retains_before_a_claim_delete(k3s: K3sCluster) -> None:
+    from cellctl.manifests import (
+        CellManifestSpec,
+        render_clone_claim,
+        render_namespace,
+        render_network_policies,
+        render_pvc,
+        render_resource_quota,
+        render_volume_snapshot,
+    )
+    from cellctl.reconcile import RETAINED_DELETE_POLICY_NAME
+    from cellctl.storage_config import LocalStorage
+
+    local = LocalStorage()
+    cellctl = "--as=system:serviceaccount:exomem-cloud:cellctl"
+    documents = _render_platform("templates/cellctl.yaml", "templates/cell-local-storage.yaml", settings=(
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    # Policies, RBAC and the snapshot CRDs; nothing here needs a workload.
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"
+                                  and doc["metadata"].get("namespace") != "exomem-platform"])
+    spec = CellManifestSpec(cell_id=_cell_id(), image=STANDIN_REPOSITORY + "@sha256:" + "a" * 64, replicas=0,
+                            read_only=False, storage_class=local.class_name, local_volume=True,
+                            hold_started_at="2026-01-01T00:00:00+00:00")
+    _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
+
+    def as_cellctl(*args: str, document: dict | None = None) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, [*args, "--dry-run=server", cellctl],
+                        documents=None if document is None else [document], check=False)
+
+    def create(document: dict) -> subprocess.CompletedProcess[str]:
+        return as_cellctl("create", "--filename=-", document=document)
+
+    def policies_ready() -> bool:
+        for name in ("exomem-cellctl-scope", RETAINED_DELETE_POLICY_NAME):
+            policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy", name, "-o=json"]).stdout)
+            status = policy.get("status", {})
+            if status.get("observedGeneration") != policy["metadata"]["generation"]:
+                return False
+            assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        return create(render_clone_claim(spec, clone_class=local.clone_class)).returncode == 0
+
+    _wait_for(policies_ready, timeout=60, description="local storage admission")
+
+    for admitted in (render_pvc(spec), render_resource_quota(spec),
+                     render_volume_snapshot(spec, snapshot_class=local.snapshot_class)):
+        result = create(admitted)
+        assert result.returncode == 0, result.stderr
+    foreign = render_clone_claim(spec, clone_class=local.clone_class)
+    foreign["spec"]["dataSourceRef"]["name"] = "cell-snapshot-" + "0" * 10
+    unconfigured = render_pvc(spec)
+    unconfigured["spec"]["storageClassName"] = "local-path"
+    for refused in (foreign, unconfigured):
+        result = create(refused)
+        assert result.returncode != 0 and "exomem-cellctl-scope" in result.stderr, result.stderr
+
+    def volume(name: str, claim_namespace: str) -> dict:
+        return {"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": name},
+                "spec": {"capacity": {"storage": "10Gi"}, "accessModes": ["ReadWriteOnce"],
+                         "persistentVolumeReclaimPolicy": "Delete", "storageClassName": local.class_name,
+                         "claimRef": {"namespace": claim_namespace, "name": "cell-data"},
+                         "csi": {"driver": local.driver, "volumeHandle": name}}}
+
+    cell_volume, other_volume = "local-cell-volume", "local-other-volume"
+    _apply_server_side(k3s.name, [volume(cell_volume, spec.namespace), volume(other_volume, "default"),
+                                  render_pvc(spec)])
+
+    def patch(name: str, body: dict) -> subprocess.CompletedProcess[str]:
+        return as_cellctl("patch", "persistentvolume", name, "--type=merge", f"--patch={json.dumps(body)}")
+
+    retain = {"spec": {"persistentVolumeReclaimPolicy": "Retain"}}
+    assert patch(cell_volume, retain).returncode == 0
+    for refused in (
+        patch(other_volume, retain),
+        patch(cell_volume, {"spec": {**retain["spec"], "capacity": {"storage": "20Gi"}}}),
+        patch(cell_volume, {**retain, "metadata": {"labels": {"exomem.io/cell": "other"}}}),
+    ):
+        assert refused.returncode != 0 and "exomem-cellctl-scope" in refused.stderr, refused.stderr
+
+    def delete_claim() -> subprocess.CompletedProcess[str]:
+        return as_cellctl("delete", "persistentvolumeclaim", "cell-data", f"--namespace={spec.namespace}")
+
+    under_delete = delete_claim()
+    assert under_delete.returncode != 0 and RETAINED_DELETE_POLICY_NAME in under_delete.stderr, under_delete.stderr
+    _kubectl(k3s.name, ["patch", "persistentvolume", cell_volume, "--type=merge", f"--patch={json.dumps(retain)}"])
+    _wait_for(lambda: delete_claim().returncode == 0, timeout=30, description="the claim delete once its volume is retained")
+
+
+def test_topolvm_node_agent_writes_only_its_own_node_and_volumes(k3s: K3sCluster) -> None:
+    # TopoLVM's chart lets its node agent write every Node and LogicalVolume;
+    # the platform's admission confines each agent's token to its own node.
+    documents = _render_platform(
+        "charts/topolvm/templates/crds/topolvm.io_logicalvolumes.yaml",
+        "charts/topolvm/templates/node/clusterrole.yaml",
+        "charts/topolvm/templates/node/clusterrolebinding.yaml",
+        "templates/cell-local-storage.yaml",
+    )
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] in {
+        "CustomResourceDefinition", "ClusterRole", "ClusterRoleBinding",
+        "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}])
+    (agent,) = [subject for doc in documents if doc["kind"] == "ClusterRoleBinding"
+                for subject in doc["subjects"] if subject["name"].endswith("-topolvm-node")]
+    node = _kubectl(k3s.name, ["get", "nodes", "-o=jsonpath={.items[0].metadata.name}"]).stdout.strip()
+
+    def as_agent_on(token_node: str, *args: str, document: dict | None = None) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, [
+            *args, "--dry-run=server", f"--as=system:serviceaccount:{agent['namespace']}:{agent['name']}",
+            f"--as-user-extra=authentication.kubernetes.io/node-name={token_node}",
+        ], documents=None if document is None else [document], check=False)
+
+    def volume(node_name: str) -> dict:
+        return {"apiVersion": "topolvm.io/v1", "kind": "LogicalVolume", "metadata": {"name": "cell-volume"},
+                "spec": {"name": "cell-volume", "nodeName": node_name, "size": "1Gi", "deviceClass": "thin"}}
+
+    def annotate_capacity(token_node: str) -> subprocess.CompletedProcess[str]:
+        return as_agent_on(token_node, "patch", "node", node, "--type=merge",
+                           '--patch={"metadata":{"annotations":{"capacity.topolvm.io/thin":"1073741824"}}}')
+
+    def policies_ready() -> bool:
+        for name in ("exomem-topolvm-node-volumes", "exomem-topolvm-node-self"):
+            policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy", name, "-o=json"]).stdout)
+            status = policy.get("status", {})
+            if status.get("observedGeneration") != policy["metadata"]["generation"]:
+                return False
+            assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        refused = as_agent_on("another-node", "create", "--filename=-", document=volume(node))
+        return refused.returncode != 0 and "exomem-topolvm-node-volumes" in refused.stderr
+
+    _wait_for(policies_ready, timeout=60, description="the TopoLVM node agent policies")
+
+    own_volume = as_agent_on(node, "create", "--filename=-", document=volume(node))
+    assert own_volume.returncode == 0, own_volume.stderr
+    other_volume = as_agent_on(node, "create", "--filename=-", document=volume("another-node"))
+    assert other_volume.returncode != 0 and "exomem-topolvm-node-volumes" in other_volume.stderr, other_volume.stderr
+
+    own_node = annotate_capacity(node)
+    assert own_node.returncode == 0, own_node.stderr
+    other_node = annotate_capacity("another-node")
+    assert other_node.returncode != 0 and "exomem-topolvm-node-self" in other_node.stderr, other_node.stderr
+    relabel = as_agent_on(node, "label", "node", node, "node-restriction.kubernetes.io/exomem-local-storage=true")
+    assert relabel.returncode != 0 and "exomem-topolvm-node-self" in relabel.stderr, relabel.stderr

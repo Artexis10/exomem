@@ -19,7 +19,7 @@ When the cell storage driver is installed, the join SHALL complete only once the
 Removing an agent SHALL, in order:
 
 1. refuse unless the target is an agent, and not a server node;
-2. refuse while any stopping cell maintenance hold is present; wait for running hourly backups on the target to finish, and start no new one there;
+2. refuse while a stopping maintenance hold is present on a cell whose volume is on the target; wait for running hourly backups on the target to finish, and start no new one there;
 3. refuse unless every non-deleted cell in the cluster fits the remaining nodes' published slots, computed by storage size as the controller computes them;
 4. when the remaining nodes cannot reach the target's cell volumes, relocate each cell on the target through a fresh stopped backup and a restore, starting it only after the restore succeeds and accepting it before continuing, and keep the target's volumes until every relocated cell is accepted. A target that cannot be reached cannot produce that backup: its cells SHALL first be relocated under the node-loss requirement, and cells already bound elsewhere are skipped;
 5. cordon the agent and, when it is Ready, drain it without force;

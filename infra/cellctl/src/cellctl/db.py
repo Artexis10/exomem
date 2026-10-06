@@ -57,6 +57,7 @@ CELL_COLUMNS = (
     "desired_image",
     "generation",
     *OBSERVED_COLUMNS,
+    "created_at",
 )
 
 NOTIFY_CHANNEL = "exomem_cloud_cells"
