@@ -1294,8 +1294,16 @@ def op_bootstrap(
     # Project the semantic authoring contract ONCE at the selected profile and
     # reuse it everywhere in the payload. A compact bootstrap must stay compact
     # through the whole payload, so the nested authoring_contract projection can
-    # never fall back to the full profile and leak the rich example.
-    semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(profile=profile)
+    # never fall back to the full profile and leak the rich example. A released
+    # profile teaches the contract it was released with, not the live one.
+    authoring_contract = (
+        hosted_legacy_schemas_module.LEGACY_AUTHORING_CONTRACTS[active_descriptor.profile]
+        if frozen_profile
+        else semantic_authoring_module.AUTHORING_CONTRACT
+    )
+    semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
+        authoring_contract, profile=profile
+    )
     if "record_memory" in active_product_names:
         records_contract = {
             "available": True,
@@ -1871,22 +1879,14 @@ def op_bootstrap(
                     if profile == "compact"
                     else semantic_authoring_projection
                 ),
-                "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact["syntax"],
-                "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact["kind"],
-                "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
-                    "relation_rule"
-                ],
+                "compact_syntax": authoring_contract.compact["syntax"],
+                "compact_kind": authoring_contract.compact["kind"],
+                "rich_relation_rule": authoring_contract.rich["relation_rule"],
                 **(
                     {
-                        "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
-                            "category"
-                        ],
-                        "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich[
-                            "heading_syntax"
-                        ],
-                        "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
-                            "single_semantic_unit"
-                        ],
+                        "category_rule": authoring_contract.semantic_roles["category"],
+                        "rich_form": authoring_contract.rich["heading_syntax"],
+                        "mutation_rule": authoring_contract.routes["single_semantic_unit"],
                         "drift_guards": (
                             "update/remove require the current parent content hash and unit fingerprint"
                         ),

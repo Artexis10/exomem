@@ -231,3 +231,31 @@ variable "k3s_agent_nodes" {
   }
 
 }
+
+variable "vswitch" {
+  # Set only once the dedicated server is bought and its vSwitch exists in
+  # Robot. The dedicated server configures its own address in this subnet on
+  # the VLAN (the k3s role does, from the generated inventory).
+  description = "Optional Robot vSwitch coupled to the private network: { id, vlan_id, subnet_cidr }. Null creates nothing."
+  type = object({
+    id          = number
+    vlan_id     = number
+    subnet_cidr = string
+  })
+  default = null
+
+  validation {
+    condition     = var.vswitch == null || try(var.vswitch.vlan_id >= 4000 && var.vswitch.vlan_id <= 4091, false)
+    error_message = "A Hetzner vSwitch VLAN ID is between 4000 and 4091."
+  }
+
+  validation {
+    condition = var.vswitch == null || try(
+      cidrhost(format("%s/%s", cidrhost(var.vswitch.subnet_cidr, 0), split("/", var.private_network_cidr)[1]), 0)
+      == cidrhost(var.private_network_cidr, 0)
+      && tonumber(split("/", var.vswitch.subnet_cidr)[1]) > tonumber(split("/", var.private_network_cidr)[1]),
+      false
+    )
+    error_message = "The vSwitch subnet must sit inside the private network."
+  }
+}

@@ -7,11 +7,13 @@ Three pieces already exist and are not connected to each other.
 docstring says so and its implementation splits the anchor off, canonicalizes the
 path, and re-appends it.
 
-**The fragment is then discarded.** `epistemic_graph._build_relation_edges`
-passes that canonical form to `_with_md`, whose second line is
-`cleaned.split("|", 1)[0].split("#", 1)[0]`. The page is what reaches `_file_key`.
-No warning is emitted, because from `_with_md`'s point of view nothing went
-wrong.
+**The fragment is then discarded.** Two sites in `epistemic_graph` turn an
+authored relation target into an edge. A note-level `## Relations` bullet goes
+through `_relation_line_edges`, and a rich-unit `- relations:` row through
+`_edges_for_page`. Both end in `_with_md`, whose second line is
+`cleaned.split("|", 1)[0].split("#", 1)[0]`, and the rich-unit site splits the
+`#` off before it even normalizes. The page is what reaches `_file_key`. No
+warning is emitted, because from `_with_md`'s point of view nothing went wrong.
 
 **The destination it should have used is already indexed.** `graph_nodes` carries
 `unit_ref` with `idx_graph_nodes_unit_ref`, a unit node's key is
@@ -44,16 +46,94 @@ author.** The edge is page-level either way. The diagnostic distinguishes them,
 because the remedies differ: a missing fragment is a typo or a moved unit, an
 ambiguous one needs the target page to give its units distinct identity.
 
-**Reuse `_current_unit_status`, do not write a second resolver.** A relation
-target and a reference target ask the same question, and the failure mode of two
-resolvers is that they disagree on `ambiguous`. Its `work_exhausted` path already
-returns `stale`, which maps onto the page-level fallback.
+**One resolver owner, with the per-page read extracted from it.**
+`_current_unit_status` resolves a unit reference to its parent paths, and its
+per-page body (read the page's current bytes, parse, resolve the unit exactly)
+is now `_current_page_unit`, which it and the relation edge builder both call.
+The question is the same one -- does this page carry exactly one unit by that
+name -- and two resolvers would disagree on `ambiguous`. A fragment goes through
+`SemanticUnitDocument.resolve_fragment`, which builds the exact reference and
+calls `resolve_unit`, so an authored anchor or a `unit-<fingerprint>` identity
+resolves and nothing else does: no title, case or similarity matching.
+
+**Resolve from the target's bytes, not the sidecar.** `_edges_for_page` has no
+connection, and `graph_parent_refs` can be unpopulated mid-rebuild, so the
+fragment is resolved from disk exactly as `_current_unit_parent_paths` already
+does. Only the page's own bytes decide whether the fragment names one unit, and
+the destination key is derived from the same parse that produced the node.
+
+**A target edit re-derives its fragment dependants.** A unit destination is a
+function of the target page's bytes: a rich unit's key hashes its body, and an
+edit can add, remove or duplicate an anchor. Drain and the topology refresh
+already widen to every page whose body links a changed page, through
+`_dependency_sources_for_keys`. The live incremental refresh widened only when
+resolver topology moved, so it now also widens to pages whose raw dependencies
+carry a `#fragment` on a changed page, from the same persisted dependency rows.
+Like the topology paths it asks `_dependency_index_complete` first and falls
+back to the whole-vault rebuild when the dependency rows cannot be trusted,
+rather than publishing an edge derived from a target that has since changed.
+
+**Four outcomes, and only a mistyped address is `missing`.** A fragment that
+lands on exactly one unit is `unit`. A fragment written the way a unit is
+addressed (`^id`, a bare authored anchor, a `unit-<fingerprint>` identity) that
+names nothing, including a case mismatch, is `missing`; one that names several is
+`ambiguous`. A fragment that is not shaped like a unit address at all, or that
+reads as the text of one of the target page's headings (`#Decision`,
+`#Some words`), is `not_unit`: it is a heading reference, which this graph does
+not resolve, and is not a mistake. Heading text is never turned into a unit
+(that is the title and similarity matching the resolver refuses). `#^id` and
+`#id` are the same fragment: Obsidian's block-reference form is accepted by the
+same resolver. A target page without an `exomem_id` addresses its units through
+its legacy vault reference, so the resolver treats it like any other page.
+
+**The author is told through the census and the edge.** An edge whose fragment
+did not become a unit carries `fragment_resolution` (`missing`, `ambiguous` or
+`not_unit`) and the authored `target_fragment`, beside the existing
+`target_resolution`. The relation census counts them as
+`unresolved_fragment_edges`, `ambiguous_fragment_edges` and
+`not_unit_fragment_edges`, kept apart so a heading reference does not inflate the
+count of typos, and `detail="keys"` lists them: source path, source anchor,
+target page, fragment, outcome, admission-filtered, capped at
+`FRAGMENT_LIST_LIMIT`, with `total` and `truncated` stating what the cap left
+out. A write-response advisory is not part of this change.
+
+**Page-level readers read the owning page, from one stored column.** A unit
+destination is a `unit:`/`block:` key, but the readers that group, rank, lift and
+sweep by page (the unit-relation lift, the batched and single shared-resolution
+candidates, `sensed_model`, `dreamer_families`, `vocabulary_projection`, the
+audit isolation sweep, the acceptance queue's reciprocal check) all ask "which
+page does this edge point at". `graph_edges.dst_page_key` stores that answer
+once, at the one place the destination is derived: it equals `dst_key` for a page
+destination and is the target page's `file:` key for a unit destination. Every
+page-level reader filters and joins on it; `dst_key` stays the precise
+destination for readers that want the unit. Write paths that must find every
+edge pointing at a page (vanished-source detection, row purge, delete, the
+linked-sources widening) use it too, so withdrawing a page reaches the edges that
+land on its units. The column is required, so a sidecar without it takes the
+existing drop-and-rebuild path in `_initialize_graph_schema`, and the schema
+version bump already forces that rebuild. A second mechanism (a join through
+`graph_nodes.path` in each reader) was rejected: it is one more SQL fragment per
+reader to keep in step, and the unit node may not be there mid-rebuild.
+
+**Shared-resolution targets regroup by destination.** Two pages that answer
+different units of the same target page used to share the page and pair; they now
+pair only when they answer the same unit, which is what the candidate means. The
+evidence names the target page, resolved from the unit key. This narrows
+`shared_resolution_target` proposals and is accepted.
+
+**The graph schema version bumps.** Edges already stored for `[[T#Unit]]` are
+page-level; only a rebuild re-derives them, so `SCHEMA_VERSION` moves to 12.
 
 **The contract version bumps.** The relation grammar gains a documented target
 form, so `semantic_authoring`'s contract version and digest move, and with them
 the scaffold skill headers and the pinned tool schemas. This is the change that
 the archived design meant by "owns the schema bump" and it is not separable: an
 authoring form nobody is told about is not an authoring form.
+Released Hosted profiles (`hosted-alpha-agent-v1`..`-v4`) keep teaching the v4
+contract: `src/exomem/hosted_legacy_authoring_contract.json` is a frozen snapshot
+of what each released profile published, never regenerated, and the bootstrap
+serves it to those profiles so their bootstrap and pinned tool descriptions name
+the same contract. A new released profile freezes its own entry.
 
 ## Risks / Trade-offs
 
@@ -68,11 +148,15 @@ clearing it is an operator action against the live connector.
 against an indexed column. The bound has to be measured on the write path, not
 argued: `tests/test_latency_gate.py` at 2k and 8k, reported in this change.
 
-**A unit-level edge changes traversal fan-out.** Consumers that assume every
-edge endpoint is a page — traversal profiles, `graph-find-ranking`, the
-acceptance queue — need checking rather than assuming. The graph already holds
-unit *nodes*, so the shape is not new, but a unit appearing as a *destination*
-is.
+**A unit-level edge changes traversal fan-out.** The graph already holds unit
+*nodes*, but a unit as a *destination* is new. Page-level readers are covered by
+`dst_page_key` above; the rest were checked rather than assumed. The audit
+isolation sweep takes the edge's page from `dst_page_key` and keeps the raw
+`dst_key`; the census reads the raw `dst_key` and resolves a unit key to its admitted
+page. Either way an edge to a unit is attributed to its page and still reports the
+unit it points at. Traversal
+profile priority, find ranking and the acceptance queue's own ordering were not
+exercised on a unit-destination graph (task 9.2).
 
 **`duplicates` between units is a stronger claim than `relates_to` between
 pages.** The existing `shared_open_question` candidate is deliberately weak

@@ -86,6 +86,21 @@
   register: k3s_agent_label
   changed_when: "'not labeled' not in k3s_agent_label.stdout"
 
+- name: Admit TopoLVM's node plugin to an agent with local cell storage
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - label
+      - node
+      - "{{ inventory_hostname }}"
+      - "{{ k3s_topolvm_node_label }}"
+      - --overwrite
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_topolvm_label
+  changed_when: "'not labeled' not in k3s_agent_topolvm_label.stdout"
+  when: k3s_agent_local_storage | bool
+
 # Registration flags do not update existing Nodes. Own only this reservation
 # key; resourceVersion keeps a concurrent taint update from being overwritten.
 - name: Read the agent reservation
@@ -166,14 +181,16 @@
   loop_control:
     label: "{{ item.item }}"
 
-- name: Check whether the Hetzner CSI driver is installed
+# A Hetzner Cloud agent publishes capacity as a CSI attachment limit; an agent
+# with node-local cell storage publishes its TopoLVM pool instead.
+- name: Check whether the agent's cell storage driver is installed
   ansible.builtin.command:
     argv:
       - /usr/local/bin/k3s
       - kubectl
       - get
       - csidriver
-      - "{{ k3s_csi_driver }}"
+      - "{{ k3s_topolvm_driver if k3s_agent_local_storage | bool else k3s_csi_driver }}"
       - --ignore-not-found
       - -o
       - name
@@ -185,8 +202,9 @@
 - name: Report that capacity waits for the platform install
   ansible.builtin.debug:
     msg: >-
-      {{ k3s_csi_driver }} is not installed yet; {{ inventory_hostname }} publishes
-      0 cell slots until the platform chart installs the driver.
+      {{ k3s_topolvm_driver if k3s_agent_local_storage | bool else k3s_csi_driver }} is not
+      installed yet; {{ inventory_hostname }} publishes 0 cell slots until the
+      platform chart installs the driver.
   when:
     - k3s_agent_require_csi_capacity
     - k3s_csi_driver_present.stdout | length == 0
@@ -212,4 +230,29 @@
     and k3s_agent_csinode.stdout | int > 0
   when:
     - k3s_agent_require_csi_capacity
+    - not k3s_agent_local_storage | bool
+    - k3s_csi_driver_present.stdout | length > 0
+
+- name: Wait until TopoLVM publishes the agent's cell pool
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - node
+      - "{{ inventory_hostname }}"
+      - -o
+      - jsonpath={.metadata.annotations.capacity\.topolvm\.io/{{ k3s_topolvm_device_class }}}
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_pool
+  changed_when: false
+  retries: "{{ k3s_join_retries }}"
+  delay: "{{ k3s_join_delay }}"
+  until: >-
+    k3s_agent_pool.rc == 0
+    and k3s_agent_pool.stdout is match('^[0-9]+$')
+    and k3s_agent_pool.stdout | int > 0
+  when:
+    - k3s_agent_require_csi_capacity
+    - k3s_agent_local_storage | bool
     - k3s_csi_driver_present.stdout | length > 0

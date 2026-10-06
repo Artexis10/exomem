@@ -1,0 +1,12 @@
+# Managed by the dedicated_host role. K3s requires this unit, so its agent
+# starts only once Clevis (or an operator) has unlocked the cell storage and
+# its volume group is active: TopoLVM never sees a missing group.
+[Unit]
+Description=Wait for the unlocked Exomem cell storage
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=infinity
+ExecStart=/bin/sh -c 'until [ -b /dev/mapper/{{ dedicated_host_luks_name }} ]; do sleep 5; done'
+ExecStart=/usr/sbin/vgchange --activate y {{ dedicated_host_volume_group }}

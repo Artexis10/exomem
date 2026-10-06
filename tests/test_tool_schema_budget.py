@@ -109,7 +109,7 @@ def test_every_tool_stays_under_its_ceiling(server) -> None:
 
 
 def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) -> None:
-    marker = re.compile(r"Semantic authoring \[exomem\.semantic-authoring:v4 sha256:[0-9a-f]{64}\]")
+    marker = re.compile(r"Semantic authoring \[exomem\.semantic-authoring:v5 sha256:[0-9a-f]{64}\]")
     for wire in _wires(server):
         in_description = len(marker.findall(wire["description"]))
         in_parameters = len(marker.findall(str(wire["inputSchema"])))

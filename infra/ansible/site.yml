@@ -1,4 +1,21 @@
 ---
+# A node outside the Hetzner Cloud network joins over a private link
+# (move-cloud-cells-to-local-storage D8): a vSwitch VLAN or WireGuard. It must
+# be up before any node resolves its private interface below. No serial: each
+# task reaches every node before the next, so every WireGuard key exists before
+# any node lists its peers. Without such a node this changes nothing.
+- name: Bring up the private link to K3s nodes outside the Hetzner network
+  hosts: hosted_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Converge the private link
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: private_link.yml
+
 # Every K3s node first gets the same base hardening and its converged
 # inter-node firewall, so that no agent's join can race a peer that has not
 # admitted it yet (add-cloud-node-provisioning N4/N5).
@@ -42,6 +59,57 @@
 
   roles:
     - k3s
+
+# Tang unlocks the dedicated agents' cell storage (move-cloud-cells-to-local-storage
+# D2). It is installed only while the inventory has a dedicated agent, and its
+# firewall rules converge on every run, so removing the last agent revokes them.
+- name: Run the Tang key server for dedicated agents
+  hosts: hosted_nodes:!k3s_agents
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+
+  tasks:
+    # Public: Tang's rules name each agent's interface from k3s_peer_interfaces.
+    - name: Resolve the K3s private network interface
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: interface.yml
+        public: true
+
+    - name: Run Tang with its escrowed keys
+      ansible.builtin.include_role:
+        name: dedicated_host
+        tasks_from: tang.yml
+
+# Before the agent play: K3s on a dedicated agent waits for this storage.
+# Pipelining keeps the recovery passphrase, which several tasks pass on stdin,
+# out of module files written to the host's unencrypted root disk.
+- name: Encrypt the cell storage of agents Terraform does not create
+  hosts: dedicated_hosts
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    ansible_pipelining: true
+
+  pre_tasks:
+    - name: Look for the K3s agent removal marker
+      ansible.builtin.stat:
+        path: /etc/rancher/k3s/removed
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      register: dedicated_host_removed_marker
+
+    - name: Skip a removed agent until its server is retired
+      ansible.builtin.meta: end_host
+      when: dedicated_host_removed_marker.stat.exists
+
+  roles:
+    - dedicated_host
 
 - name: Join the Exomem K3s agents
   hosts: k3s_agents

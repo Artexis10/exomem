@@ -21,8 +21,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    4,
-    "sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7",
+    5,
+    "sha256:9df68fa1ea6b4da5e9fb5ebeb24960710632c200c39b38547d99720db44ee332",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -69,7 +69,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 4
+    assert contract["version"] == 5
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -190,7 +190,9 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "A heading at level N owns content until the next non-fenced heading at level "
             "N or shallower; deeper headings remain in its body."
         ),
-        "relation_rule": "Typed unit relations require the rich form.",
+        "relation_rule": (
+            "Typed unit relations require the rich form. A `#anchor` target addresses a unit."
+        ),
     }
     assert contract["semantic_roles"] == {
         "category": (
@@ -455,7 +457,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "utf-8"
     )
     assert concise.startswith(
-        "<!-- exomem-semantic-authoring:v4 " + contract.content_digest + " -->\n"
+        "<!-- exomem-semantic-authoring:v5 " + contract.content_digest + " -->\n"
     )
     for required in (
         "`## Observations`",
