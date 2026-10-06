@@ -2884,11 +2884,11 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
         await connection.close()
 
 
-async def test_a_converged_cell_left_scaled_down_without_a_claim_is_applied_again(cell_db: CellDatabase) -> None:
-    # The node-loss runbook's re-adoption stops the cell's pod, retires its
-    # claim and releases the row's volume identity, then says cellctl starts
-    # the pod again when it resumes. The readiness shortcut only observed
-    # such a served row, so the cell stayed down with no claim (drill 4.2).
+async def test_a_converged_cell_left_scaled_down_is_applied_again(cell_db: CellDatabase) -> None:
+    # An operator who scales a served cell down (the node-loss runbook's
+    # step 4.3, or the vault import's swap) relies on cellctl starting it
+    # again when it resumes. The readiness shortcut only observed such a row,
+    # so the cell stayed down with its claim in place (drill 4.2).
     cell_id = "aaaaaaaaaaaaaaaa"
     await _seed_cell(cell_db, cell_id, "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
@@ -2897,9 +2897,8 @@ async def test_a_converged_cell_left_scaled_down_without_a_claim_is_applied_agai
     namespace = namespace_name(cell_id)
     try:
         await _converge(connection, cluster, cell_id, now)
-        del cluster.applied[(namespace, "PersistentVolumeClaim", "cell-data")]
         cluster.observations[cell_id] = dataclasses.replace(
-            cluster.observations[cell_id], pvc_exists=False, pvc_bound=False, statefulset_replicas=0,
+            cluster.observations[cell_id], statefulset_replicas=0,
             pod_exists=False, pod_uses_volume=False, pod_ready=False, ready_pod_image=None,
         )
         events_before = len(cluster.events)
@@ -2907,7 +2906,6 @@ async def test_a_converged_cell_left_scaled_down_without_a_claim_is_applied_agai
         await _pass(connection, cluster, now + timedelta(seconds=10))
 
         assert ("apply_statefulset", namespace, 1) in cluster.events[events_before:]
-        assert (namespace, "PersistentVolumeClaim", "cell-data") in cluster.applied
     finally:
         await connection.close()
 
