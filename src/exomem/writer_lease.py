@@ -5880,6 +5880,11 @@ class LeaseManager:
                 base["graph_sync"] = graph_status
             except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
                 base["graph_sync"] = {"state": "unavailable", "generation": 0}
+        if self._collection_store is not None:
+            try:
+                base["collection_store"] = self._collection_store.status()
+            except Exception:  # noqa: BLE001 - a status probe reports, never raises
+                base["collection_store"] = {"status": "unavailable"}
         if not self.config.enabled:
             return base
         assert self.client is not None
@@ -5972,9 +5977,31 @@ class LeaseManager:
                 self._last_renew_monotonic = time.monotonic()
                 self._record_lease_op("renew", "granted")
 
+    def _release_unadmitted_store(self, token, *, closing):
+        """A token with no store commits to publish has no head to flush and must not hold the lease.
+
+        Releasing without a head keeps the coordinator's recorded head, so the host
+        that owns those commits can take the lease back for every write.
+        """
+        runtime = self._collection_store
+        with self._report_lock:
+            with self._lock:
+                if (self._fencing_token != token or self._store_handoff or self._store_borrowers
+                        or self._active_mutations or not runtime._retire_handle()):
+                    return False
+                self._fencing_token = None
+                self._expires_at = None
+                self._store_closed = closing
+                self._store_released = True
+            self.client.release(token)
+        self._record_lease_op("release", "ok")
+        return True
+
     def _release_collection_store(self, token, *, deadline, cancelled=None, closing=False):
         runtime = self._collection_store
         if not runtime.reporting_ready(token):
+            if self.config.enabled and runtime.releases_without_head(token):
+                return self._release_unadmitted_store(token, closing=closing)
             return False
         with self._lock:
             if self._store_closed:
@@ -6031,6 +6058,7 @@ class LeaseManager:
                         self._expires_at = None
                         self._store_closed = closing
                         self._store_released = True
+                        runtime._handed_off = True
                 self._record_lease_op("release", "ok")
                 return True
         finally:

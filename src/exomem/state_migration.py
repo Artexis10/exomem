@@ -245,12 +245,12 @@ def _require_supported_compatibility(optional: frozenset[str]) -> None:
 
 
 def _require_collection_store_recovery(session, token) -> None:
-    """The allocating dark owner can resume its own complete store state only."""
+    """The custody-holding dark producer can resume its own complete store state only."""
     from .collection_store import authority, chain, connection
-    from .collection_store.admission import _IsolatedSession
+    from .collection_store.admission import _ProducerSession
 
-    if type(session) is not _IsolatedSession or not session.require(token):
-        raise StateMigrationOfflineRequired("isolated collection-store custody is absent")
+    if type(session) is not _ProducerSession or not session.require(token):
+        raise StateMigrationOfflineRequired("collection-store producer custody is absent")
     state_dir = state_paths.vault_state_dir(session.root)
     with _migration_lock(state_dir):
         state_paths.validate_hosted_state_directory(state_dir)
@@ -504,6 +504,17 @@ def require_vault_state_ready(
     with _RESOLUTION_LOCK:
         _RESOLUTION_CACHE[key] = resolution
     return resolution
+
+
+def bootstrap_fresh_state(vault_root: Path) -> bool:
+    """Write the first empty complete manifest when this vault's external state is provably empty.
+
+    The store producer calls this for a copied store-routed vault, which the startup
+    gate refuses until store compatibility is supported; it admits the store itself.
+    """
+
+    vault_root = Path(vault_root)
+    return _bootstrap_fresh_state(vault_root, state_paths.vault_state_dir(vault_root))
 
 
 def _bootstrap_fresh_state(vault_root: Path, state_dir: Path) -> bool:

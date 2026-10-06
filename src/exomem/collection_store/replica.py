@@ -191,8 +191,17 @@ class _Publisher:
             return None, None
         try:
             tokens._hex64(digest, "published replica digest")
+            if raw is None:
+                # Only a tenure adopted at this head knows the replica's exact bytes but
+                # not its own published head; it must republish before reporting one.
+                entry = json.loads(metadata[schema.META_LINEAGE])[-1]
+                if (entry["instance_id"] != metadata[schema.META_INSTANCE_ID]
+                        or entry["adopted_from"] is None
+                        or entry["adopted_at_commit_seq"] != int(metadata[schema.META_COMMIT_SEQ])):
+                    raise ValueError("a published digest needs its published head")
+                return digest, None
             return digest, self.validate_head(json.loads(raw))
-        except (ValueError, TypeError, KeyError, AttributeError) as error:
+        except (ValueError, TypeError, LookupError, AttributeError) as error:
             self.diverge("invalid published replica head")
             raise _Diverged from error
 
