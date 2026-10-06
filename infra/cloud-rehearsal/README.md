@@ -117,7 +117,7 @@ K3s-in-Docker adaptations are detected, applied only where needed, and each one 
 ## Local-storage node-loss drill
 
 `move-cloud-cells-to-local-storage` task 4, with the rehearsal evidence for
-tasks 2.3, 2.4 and 2.9. It needs privileged Docker, loop devices and `sudo`
+tasks 2.3, 2.4, 2.9 and 2.10. It needs privileged Docker, loop devices and `sudo`
 for `losetup` and `modprobe`, so it runs on a GitHub runner: dispatch the
 `Cloud rehearsal` workflow with `mode` set to `local-storage-drill`.
 
@@ -142,6 +142,9 @@ The checks run in order, each on the state the one before leaves:
    retained volumes do not change, and the retried restore serves.
 5. **2.9:** the server is restored from an etcd snapshot older than a second
    cell, which is re-adopted by the runbook's steps.
+6. **2.10:** a filler file beside the first cell's vault takes it past 80% use.
+   Its next backup grows it online from 4 to 8 GiB, the drill's cap. Filled
+   again, it stays at 8 GiB and cellctl raises `storage-growth-blocked`.
 
 The report (`exomem-local-storage-drill-report-v1`) records each check's
 evidence, the measured recovery point and recovery time, and the backup upload

@@ -42,8 +42,10 @@ VOLUME_GROUP = "cells"
 POOL = "pool0"
 GIB = 1024**3
 # Room for the cells, retained volumes, snapshots and clones the drill leaves
-# on one agent. Sparse: only written blocks take runner disk.
-POOL_GIB = 48
+# on one agent, and for D10's growth check: the step and the 8 GiB cell's
+# reserve while that backup's own snapshot and clone still take their space.
+# Sparse: only written blocks take runner disk.
+POOL_GIB = 64
 # Design D1: 64 KiB chunks and 64 bytes of pool metadata per chunk.
 CHUNK_BYTES = 64 * 1024
 METADATA_MIB = math.ceil(POOL_GIB * GIB / CHUNK_BYTES * 64 / 1024**2)

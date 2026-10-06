@@ -36,6 +36,7 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -49,6 +50,7 @@ from typing import Any
 import asyncpg
 import boto3
 from botocore.config import Config
+from cellctl.alerts import GROWTH_ALERT
 from cellctl.k8s_client import OUT_OF_SERVICE_TAINT, VOLUME_LOST_ANNOTATION
 from cellctl.manifests import (
     BACKUP_JOB_NAME,
@@ -61,7 +63,14 @@ from cellctl.manifests import (
     hold_job_name,
     namespace_name,
 )
-from cellctl.state import BACKUP_FAILED, EMPTY_VOLUME_REFUSED, RESTORE_FAILED, SNAPSHOT_BACKUP
+from cellctl.state import (
+    BACKUP_FAILED,
+    EMPTY_VOLUME_REFUSED,
+    GROWTH_AT_CAP,
+    GROWTH_PLANNED,
+    RESTORE_FAILED,
+    SNAPSHOT_BACKUP,
+)
 from cellctl.storage_config import LocalStorage
 
 from . import build, drill_cluster, images, infra, platform, substrate
@@ -97,6 +106,22 @@ MAKE_BACKUP_DUE_SQL = (
     "UPDATE exomem_cloud_cells SET last_backup_at = now() - interval '61 minutes' "
     "WHERE cell_id = $1 AND hold_kind IS NULL"
 )
+# D10: the drill's cap, so one growth from the default size reaches it.
+DRILL_MAX_CELL_GIB = 8
+# Runs in a cell: the filesystem's used and total bytes, as the backup Job
+# measures them. With arguments, it first allocates a filler file beside the
+# vault, which no backup reads, up to that share of the filesystem.
+FILESYSTEM_USE = r"""
+import os, sys
+if len(sys.argv) > 1:
+    s = os.statvfs("/data")
+    target = int(s.f_blocks * s.f_frsize * float(sys.argv[1])) - (s.f_blocks - s.f_bfree) * s.f_frsize
+    fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.posix_fallocate(fd, 0, max(target, 1))
+    os.close(fd)
+s = os.statvfs("/data")
+print((s.f_blocks - s.f_bfree) * s.f_frsize, s.f_blocks * s.f_frsize)
+"""
 
 # Runs inside a cell on its own bearer: MCP over the pod's loopback.
 CELL_PROBE = r'''
@@ -401,6 +426,16 @@ class Drill:
         finally:
             await connection.close()
 
+    async def slots(self, agent: drill_cluster.Agent) -> int | None:
+        """The cell slots cellctl last published for `agent`; None if none."""
+
+        rows = await self.fetch("SELECT cell_slots FROM exomem_cloud_capacity WHERE node = $1", agent.name)
+        return rows[0]["cell_slots"] if rows else None
+
+    def filesystem(self, cell: Cell, *fill: str) -> dict[str, int]:
+        used, total = self.cell_exec(cell, "python3", "-c", FILESYSTEM_USE, *fill).stdout.split()
+        return {"used_bytes": int(used), "total_bytes": int(total)}
+
     async def row(self, cell: Cell) -> dict[str, Any]:
         rows = await self.fetch("SELECT * FROM exomem_cloud_cells WHERE cell_id = $1", cell.cell_id)
         return rows[0]
@@ -440,7 +475,7 @@ def serving(row: dict[str, Any]) -> bool:
 
 def row_summary(row: dict[str, Any]) -> dict[str, Any]:
     keys = ("observed_state", "ready", "hold_kind", "last_error_code", "node", "volume_id", "last_backup_at",
-            "last_backup_snapshot")
+            "last_backup_snapshot", "grown_storage_gib")
     return {key: _iso(row.get(key)) for key in keys}
 
 
@@ -456,6 +491,11 @@ def pinned_node(pv: dict[str, Any]) -> str | None:
         for value in expression.get("values") or []
     }
     return nodes.pop() if len(nodes) == 1 else None
+
+
+def pod_identity(pod: dict[str, Any]) -> dict[str, Any]:
+    return {"uid": pod["metadata"]["uid"], "node": pod["spec"]["nodeName"],
+            "restarts": sum(s.get("restartCount", 0) for s in pod["status"].get("containerStatuses", []))}
 
 
 def pod_ready(pod: dict[str, Any] | None) -> bool:
@@ -517,6 +557,7 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
                 pv = drill.maybe_json("get", "persistentvolume", clone["spec"]["volumeName"])
                 if pv:
                     seen["clone"] = {"claim": clone["metadata"]["name"], "class": clone["spec"].get("storageClassName"),
+                                     "size": clone["spec"]["resources"]["requests"].get("storage"),
                                      "pv": pv["metadata"]["name"], "pv_node": pinned_node(pv),
                                      "volume_id": pv["spec"]["csi"]["volumeHandle"]}
             job_name = hold_job_name(BACKUP_JOB_NAME, started)
@@ -555,9 +596,7 @@ async def check_hourly_backups(drill: Drill, record: StepRecord) -> None:
     x = await drill.add_cell("x", owner=True)
     agent_a = drill.cluster.agents["drill-agent-a"]
     row = await drill.wait_row(x, serving, timeout=900, description="cell X to serve")
-    pod = drill.cell_pod(x)
-    first_pod = {"uid": pod["metadata"]["uid"], "node": pod["spec"]["nodeName"],
-                 "restarts": sum(s.get("restartCount", 0) for s in pod["status"].get("containerStatuses", []))}
+    first_pod = pod_identity(drill.cell_pod(x))
     record.evidence["cell"] = {"id": x.cell_id, "first_pod": first_pod, "volume": drill.claim_volume(x), "row": row_summary(row)}
     drill.write(x, "seed")
 
@@ -584,9 +623,7 @@ async def check_hourly_backups(drill: Drill, record: StepRecord) -> None:
         previous = observed["row"]["last_backup_snapshot"]
     record.evidence["backups"] = backups
 
-    pod = drill.cell_pod(x)
-    last_pod = {"uid": pod["metadata"]["uid"], "node": pod["spec"]["nodeName"],
-                "restarts": sum(s.get("restartCount", 0) for s in pod["status"].get("containerStatuses", []))}
+    last_pod = pod_identity(drill.cell_pod(x))
     record.evidence["last_pod"] = last_pod
     drill.report.measurements["backup_upload"] = [
         {
@@ -983,6 +1020,110 @@ async def check_etcd_restore(drill: Drill, record: StepRecord) -> None:
         raise StepFailure("; ".join(problems))
 
 
+async def check_growth(drill: Drill, record: StepRecord) -> None:
+    """2.10: a local cell that its hourly backup finds past 80% use grows
+    online by one default size: the claim, the filesystem, the quota, the row
+    and the published slots, with the pod kept. At the cap it stays, and
+    cellctl decides to raise storage-growth-blocked. The filler is a file
+    beside the vault, which no backup reads."""
+
+    x = drill.cells["x"]
+    agent_b = drill.cluster.agents["drill-agent-b"]
+    size = (await drill.row(x))["storage_gib"]
+    grown = min(size + LOCAL.default_cell_gib, DRILL_MAX_CELL_GIB)
+    first_pod = pod_identity(drill.cell_pod(x))
+    slots_before = await drill.slots(agent_b)
+    if slots_before is None:
+        raise StepFailure("cellctl published no slots for agent B")
+    polls = {"polls": 0, "not_ready": 0}
+
+    def claim_size() -> str | None:
+        claim = drill.kube_json("get", "persistentvolumeclaim", "cell-data", "--namespace", x.namespace)
+        polls["polls"] += 1
+        polls["not_ready"] += 0 if pod_ready(drill.cell_pod(x)) else 1
+        return ((claim.get("status") or {}).get("capacity") or {}).get("storage")
+
+    def quota_storage() -> str | None:
+        hard = drill.kube_json("get", "resourcequota", "cell-quota", "--namespace", x.namespace)["spec"]["hard"]
+        return hard["requests.storage"] if hard.get("requests.storage") == f"{2 * grown}Gi" else None
+
+    async def fill_and_back_up(label: str) -> dict[str, Any]:
+        filled = drill.filesystem(x, "0.85", f"/data/drill-filler-{label}")
+        previous = (await drill.row(x))["last_backup_snapshot"]
+        status = await drill.sql(MAKE_BACKUP_DUE_SQL, x.cell_id)
+        if status != "UPDATE 1":
+            raise StepFailure(f"moving cell X's last_backup_at back reported {status}")
+        return {"filled": filled, "backup": await observe_backup(drill, x, previous)}
+
+    def cellctl_log() -> dict[str, list[str]]:
+        lines = drill.kubectl("--namespace", platform.CLOUD_NAMESPACE, "logs", "deployment/cellctl", "--since=30m").stdout.splitlines()
+        return {
+            "measured": [line for line in lines if x.cell_id in line and "bytes used at" in line],
+            "grows": [line for line in lines if x.cell_id in line and "grows to" in line],
+            "refused": [line for line in lines if x.cell_id in line and "apply refused" in line],
+            "growth_alert": [line for line in lines if f"{GROWTH_ALERT} alert" in line],
+        }
+
+    # Past 80% at the default size: the backup plans the growth, and the
+    # hold's exit records it and applies the larger claim and quota.
+    growth = await fill_and_back_up("1")
+    hold_ended = time.monotonic()
+    growth["row"] = row_summary(await drill.row(x))
+    growth["claim_capacity"] = wait_for(lambda: claim_size() == f"{grown}Gi" and f"{grown}Gi", timeout=600, interval=3,
+                                        description=f"cell X's claim to report {grown}Gi")
+    growth["claim_expanded_seconds_after_hold"] = round(time.monotonic() - hold_ended, 1)
+    growth["filesystem_after"] = drill.filesystem(x)
+    growth["quota_storage"] = wait_for(quota_storage, timeout=300, interval=5, description="cell X's quota to cover the grown claim")
+    growth["quota_seconds_after_hold"] = round(time.monotonic() - hold_ended, 1)
+    # D6: a grown cell takes its extra slots, and the reserve follows the
+    # largest cell, now this one.
+    expected_drop = (-(-grown // LOCAL.default_cell_gib) - 1) + (
+        2 * (grown - size) * LOCAL.backup_concurrency_per_node // LOCAL.default_cell_gib)
+    deadline = time.monotonic() + 180
+    while (slots_after := await drill.slots(agent_b)) != slots_before - expected_drop and time.monotonic() < deadline:
+        await asyncio.sleep(5)
+    growth["slots"] = {"before": slots_before, "after": slots_after, "expected_drop": expected_drop,
+                       "source": "exomem_cloud_capacity.cell_slots for agent B, as cellctl published it"}
+
+    # At the cap: the next backup measures the grown filesystem, and the
+    # cell stays at its size.
+    at_cap = await fill_and_back_up("2")
+    at_cap["row"] = row_summary(await drill.row(x))
+    at_cap["claim_capacity"] = claim_size()
+    log = wait_for(lambda: (found := cellctl_log())["measured"] and found["measured"][-1].endswith(GROWTH_AT_CAP)
+                   and found["growth_alert"] and found, timeout=240, interval=10,
+                   description="cellctl's at-cap verdict and its growth alert")
+    pattern = re.compile(r"is (?P<used>\d+) of (?P<total>\d+) bytes used at (?P<gib>\d+) GiB: (?P<verdict>\S+)")
+    measured = [match.groupdict() for line in log["measured"] if (match := pattern.search(line))]
+    record.evidence.update({
+        "growth": growth, "at_cap": at_cap,
+        "measured_by_backups": measured,
+        "cellctl_log": {**log, "growth_alert": log["growth_alert"][:2]},
+        "quota_apply": "refused, then applied after its park" if log["refused"] else "applied without a refusal",
+        "pod": {"first": first_pod, "last": pod_identity(drill.cell_pod(x)), **polls},
+    })
+
+    problems = []
+    if record.evidence["pod"]["last"] != first_pod:
+        problems.append(f"the cell's pod restarted: {first_pod} -> {record.evidence['pod']['last']}")
+    if polls["not_ready"] or growth["backup"]["polls_not_ready"] or at_cap["backup"]["polls_not_ready"]:
+        problems.append("the cell read not ready while it grew")
+    if growth["row"]["grown_storage_gib"] != grown or at_cap["row"]["grown_storage_gib"] != grown:
+        problems.append(f"the row records {growth['row']['grown_storage_gib']}, then {at_cap['row']['grown_storage_gib']} GiB")
+    if [m["verdict"] for m in measured[-2:]] != [GROWTH_PLANNED, GROWTH_AT_CAP] or int(measured[-1]["total"]) <= int(measured[-2]["total"]):
+        problems.append(f"the backups measured {measured}, not a growth and then a larger filesystem at the cap")
+    if growth["filesystem_after"]["total_bytes"] <= growth["filled"]["total_bytes"]:
+        problems.append("the filesystem inside the cell did not grow")
+    if (at_cap["backup"].get("clone") or {}).get("size") != f"{grown}Gi":
+        problems.append(f"the next backup's clone is {(at_cap['backup'].get('clone') or {}).get('size')}")
+    if slots_after != slots_before - expected_drop:
+        problems.append(f"the published slots went {slots_before} -> {slots_after}, not down by {expected_drop}")
+    if at_cap["claim_capacity"] != f"{grown}Gi":
+        problems.append(f"the claim at the cap reads {at_cap['claim_capacity']}")
+    if problems:
+        raise StepFailure("; ".join(problems))
+
+
 # --- setup --------------------------------------------------------------------------------
 
 
@@ -1006,7 +1147,7 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
     values = {
         "cellctl": platform.cellctl_values(stack, image=cellctl_image, cell_repository=build.CELL_REPOSITORY),
         "cells": {"jobEgressExcept": [infra.K3S_POD_CIDR, infra.K3S_SERVICE_CIDR]},
-        "cellStorage": {"domain": "local", "local": {"enabled": True}},
+        "cellStorage": {"domain": "local", "local": {"enabled": True, "maxCellGib": DRILL_MAX_CELL_GIB}},
     }
     rendered = platform.render_chart(stack, values, dependencies=True, api_versions=(SNAPSHOT_CLASS_API,))
     documents = [
@@ -1061,6 +1202,8 @@ ADAPTATIONS = (
     "from inside their containers, as a real agent's LVM does on demand",
     "TopoLVM and the snapshot controller are pulled by the nodes from ghcr.io and registry.k8s.io by digest; "
     "agent B pulls TopoLVM's image before the loss",
+    f"the chart's cellStorage.local.maxCellGib is {DRILL_MAX_CELL_GIB}, so one growth from the 4 GiB default "
+    "reaches the cap",
 )
 
 
@@ -1124,6 +1267,7 @@ async def run_drill(args: argparse.Namespace) -> int:
             ("4.2 the empty-vault guard", check_empty_vault_guard),
             ("4.3 an interrupted relocation restore", check_interrupted_restore),
             ("2.9 re-adoption after an older etcd snapshot", check_etcd_restore),
+            ("2.10 online growth, then the cap", check_growth),
         ]
         for number, (name, body) in enumerate(checks, start=1):
             await run_check(drill, number, name, body)
