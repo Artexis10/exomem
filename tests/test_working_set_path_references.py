@@ -5,9 +5,11 @@ A turn that quoted `/home/<user>/handoffs/<file>.md` was read as the words
 exact alias: an unrelated project's preferences were carried into the
 packet. A rooted path (POSIX, `~`, a Windows drive, an environment
 variable), a URL with or without a scheme and an scp-style remote now
-contribute no word to subject evidence. A `./` or `../` path contributes only
-its final segment. Any other slash run is prose, and a vault page path still
-names the page it always named.
+contribute no word to subject evidence. A relative path that ends in a file
+name, or starts `./` or `../`, contributes only its final segment, and a
+`Knowledge Base/` path is one reference up to its file name even with spaces
+in it. Any other slash run is prose, and a vault page path still names the
+page it always named.
 
 Invented names throughout.
 """
@@ -71,7 +73,9 @@ def _reached(packet: dict) -> set[str]:
         "Read ~/records/home-todo.md and pick it up.",
         r"Read C:\Users\example\Records\Home\plan.txt and pick it up.",
         "Read https://example.com/home/records/index.html and pick it up.",
+        "Read Knowledge Base/Records/Home/sync-notes.md and pick it up.",
         "Read ./records/home/sync-notes.md and pick it up.",
+        "Read Projects/Home/plan.md and pick it up.",
         "Read ${HOME}/records/home-todo.md and pick it up.",
         "Pull git@example.com:acme/home.git and pick it up.",
         "Pull deploy@prod:/srv/home/records and pick it up.",
@@ -90,7 +94,9 @@ def _reached(packet: dict) -> set[str]:
         "tilde",
         "windows",
         "url",
+        "relative-directories",
         "dot-relative-directories",
+        "unrooted-to-a-file",
         "environment-variable",
         "scp-style-remote",
         "scp-style-remote-dotless-host",
@@ -123,14 +129,14 @@ def test_the_same_project_named_in_prose_still_resolves(project_vault: Path) -> 
     "turn",
     [
         "Compare the records/staging/prod setups.",
-        "Compare the records/Node.js setups.",
         "Compare the Node.js/records setups.",
     ],
-    ids=["three-words", "ends-in-a-dotted-name", "dotted-name-then-word"],
+    ids=["three-words", "dotted-name-then-word"],
 )
 def test_slash_joined_words_are_prose_not_a_path(project_vault: Path, turn: str) -> None:
-    """Without a root or a leading `./` or `../`, a slash run is prose, and a
-    dotted name such as `Node.js` before a slash is not a host."""
+    """A slash run with no root, no leading `./` or `../` and no file name at
+    its end is prose, and a dotted name such as `Node.js` before a slash is not
+    a host."""
     packet = commands.op_activate_context(project_vault, turn=turn)
 
     assert "project:records" in _reached(packet)
@@ -147,6 +153,9 @@ def test_slash_joined_words_are_prose_not_a_path(project_vault: Path, turn: str)
     ids=["quoted", "relative", "dot-relative", "bare-file-name"],
 )
 def test_a_quoted_vault_page_path_still_names_that_page(project_vault: Path, turn: str) -> None:
+    """The page is named and nothing else is reached: the path's folder names
+    (`Knowledge Base`, `Entities`, `People`) are not words of the turn."""
     packet = commands.op_activate_context(project_vault, turn=turn)
 
-    assert [a["path"] for a in packet["anchors"] if a["status"] == "resolved"] == [MARIT]
+    assert [a["path"] for a in packet["anchors"]] == [MARIT], packet["anchors"]
+    assert packet["anchors"][0]["status"] == "resolved"

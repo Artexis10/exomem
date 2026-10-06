@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+from test_governance_egress import SCOPE_ID, _external, _gov_dir, _reset_caches, write_rule
 from test_working_set_carry import seed_ordinary_notes
 
 from exomem import commands, lexstore, working_set_index, working_set_runtime
@@ -53,8 +53,14 @@ def _note(title: str, units: str, context: str = "") -> str:
     )
 
 
-def _withhold(vault: Path, path: str, ceiling: int) -> None:
-    write_scope(vault, paths=path, name="Withheld")
+def _withhold(vault: Path, *paths: str, ceiling: int) -> None:
+    scope = _gov_dir(vault) / "scopes" / "patterns.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    listed = ", ".join(f'"{path}"' for path in paths)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\npaths: [{listed}]\n",
+        encoding="utf-8",
+    )
     write_rule(vault, ceiling=ceiling)
 
 
@@ -146,6 +152,34 @@ def test_a_slot_the_removed_unit_held_goes_to_the_next_person_named(vault: Path)
 
     assert restricted == clean
     assert [a["path"] for a in clean["anchors"] if "carried_link" in a["evidence"]] == [TALIA]
+
+
+def test_a_person_the_guard_lists_again_is_listed_only_if_visible(vault: Path) -> None:
+    """The guard removes Talia's unit and lists again from the unit left, which
+    names Oren and Pell. Pell is withheld and was never in the packet the guard
+    decided, so the guard must decide him before listing him."""
+    seed_ordinary_notes(vault)
+    for rel, name in ((TALIA, "Talia Verenko"), (OREN, "Oren Haldane"), (PELL, "Pell Mordaunt")):
+        _write(vault, rel, _person(name))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, PELL, ceiling=0)
+    naming = (
+        "- [failure] Talia Verenko's migration stalled on the staging replica last week "
+        "near [[Secret cluster]]. ^r-a"
+    )
+    survivor = (
+        "- [failure] The staging replica migration stalled twice last week; "
+        "Oren Haldane and Pell Mordaunt reran it. ^r-b"
+    )
+    context = "[[Talia Verenko]] [[Oren Haldane]] [[Pell Mordaunt]]"
+    _write(vault, NOTE, _note("Replica migration stall", f"{naming}\n{survivor}", context))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", survivor, context))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [a["path"] for a in clean["anchors"] if "carried_link" in a["evidence"]] == [OREN]
 
 
 def test_a_withheld_person_is_listed_exactly_as_an_absent_one(vault: Path) -> None:
