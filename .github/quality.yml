@@ -27,7 +27,6 @@ classes:
     - "scripts/verify_studio_install.py"
     - "scripts/verify-hosted-image.py"
     - "scripts/live_write_acceptance.py"
-    - "scripts/records_live_acceptance.py"
     - "scripts/activation_real_turns.py"
     - "infra/scripts/accept_hosted_service.py"
     - "infra/scripts/external_blackbox.py"
@@ -115,7 +114,6 @@ classes:
     - "infra/scripts/audit_hosted_database_budget.py"
     - "infra/scripts/validate.sh"
     - "infra/scripts/validate_sops_ciphertext.py"
-    - "infra/scripts/verify_hcp_backend.py"
     - "infra/scripts/verify_hosted_release.py"
   # CI configuration by name: release-please, the provisioner publish and the hosted
   # infrastructure workflows publish or run against production, so they stay product.
