@@ -22,9 +22,9 @@ family. Deleting the file costs a reprojection from the ledger, and the
 reprojection is byte-identical.
 
 The request side (`status_for`, `for_packet`) recomputes everything it serves
-from released edges only. A withheld page equals an absent one. Under a
-governed policy, sensed items are served to owner-bound principals only, because
-the proposal cap and the cosine bound count withheld pages (`_audience_allowed`).
+from released edges only, for every caller. A withheld page equals an absent
+one: whether a pair is proposed, selected or sensed reads its own two pages
+only, so a page the caller may not see cannot move what that caller is served.
 """
 
 from __future__ import annotations
@@ -33,9 +33,10 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,19 +47,24 @@ from .state_paths import vault_state_dir
 log = logging.getLogger(__name__)
 
 #: 2 added each page's content hash and each pair's instrument key, so a request
-#: can tell a projection that no longer describes the live page.
-SCHEMA_VERSION = 2
+#: can tell a projection that no longer describes the live page. 3 caps each
+#: page pair instead of each page, and is rebuilt from the ledger without
+#: re-sensing.
+SCHEMA_VERSION = 3
 FILENAME = "projection.sqlite"
 
-#: Pairs a page may send to sensing. Past it, the page is `capped`: only its
-#: first PAGE_CAP pairs in the fixed order are sensed. The cap counts every
-#: partner, withheld ones included, which is one reason sensed items are served
-#: to owner-bound principals only under a governed policy (`_audience_allowed`).
-PAGE_CAP = 128
-#: In-scope units whose stored vectors the cosine proposer compares. Judged at
-#: each tick on the current count: over it, no page keeps a cosine pair; back
-#: under it, every page with units is proposed again (`_follow_cosine`).
+#: Pairs one page pair may send to sensing: its first PAIR_CAP pairs in the
+#: fixed order (`_Candidate.order_key`). The rank is taken among that page
+#: pair's own candidates, so a third page can never move it.
+PAIR_CAP = 128
+#: Stored vectors the cosine proposer holds at once. At or under it, every
+#: vector is cached in memory; over it, a tick reads them from the projection
+#: in blocks of this size, once for every page it processes (`_cosine_hits`).
+#: Either way the same pairs are proposed: the bound limits memory, never what
+#: is proposed.
 MAX_COSINE_UNITS = 16384
+#: Cosines this close under θ in the fast pass are recomputed exactly.
+COSINE_PREFILTER = 1e-3
 #: The cosine threshold per encoder vector space, keyed by the exact
 #: `EncoderProfile.fingerprint()`: model, pooling, prefixes, sequence limit,
 #: quantisation and the served bytes. It is fixed per pair, never top-k and
@@ -92,9 +98,7 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS pages (
         path TEXT PRIMARY KEY, sig TEXT, knowledge_date TEXT NOT NULL,
-        lifecycle TEXT NOT NULL, supersession_json TEXT NOT NULL,
-        capped INTEGER NOT NULL DEFAULT 0, candidates INTEGER NOT NULL DEFAULT 0,
-        content_hash TEXT
+        lifecycle TEXT NOT NULL, supersession_json TEXT NOT NULL, content_hash TEXT
     )
     """,
     """
@@ -504,11 +508,10 @@ def _cosine_matrix(
 ) -> tuple[list[str], list[str], Any] | None:
     """Every stored in-scope vector: (unit refs, paths, matrix), or None when empty.
 
-    Whether the cosine proposer runs at all is decided once per tick on the
-    current state (`_follow_cosine`), never here mid-tick. Cached per process
+    Only at or under `MAX_COSINE_UNITS` (`_vector_blocks`). Cached per process
     against the projection's unit generation; this process's own writes update
     the cache in place (`_bump_units`), so a reseed does not reload the matrix
-    per page.
+    per tick.
     """
     import numpy as np
 
@@ -527,6 +530,84 @@ def _cosine_matrix(
     refs = sorted(vectors)
     matrix = np.stack([vectors[ref][1] for ref in refs])
     return refs, [vectors[ref][0] for ref in refs], matrix
+
+
+def _read_blocks(conn: sqlite3.Connection) -> Iterator[tuple[list[str], list[str], Any]]:
+    """The projection's stored vectors, `MAX_COSINE_UNITS` rows at a time.
+
+    One call is one full pass. Only one block is held at once, and nothing is
+    cached.
+    """
+    import numpy as np
+
+    cursor = conn.execute(
+        "SELECT path, unit_ref, vector FROM units WHERE vector IS NOT NULL ORDER BY path, unit_ref"
+    )
+    while rows := cursor.fetchmany(MAX_COSINE_UNITS):
+        matrix = np.frombuffer(b"".join(row[2] for row in rows), dtype=np.float32)
+        refs, paths = [str(row[1]) for row in rows], [str(row[0]) for row in rows]
+        yield refs, paths, matrix.reshape(len(rows), -1)
+
+
+def _vector_blocks(
+    conn: sqlite3.Connection, store_key: str
+) -> Iterable[tuple[list[str], list[str], Any]]:
+    """Every stored vector, as blocks: the cached matrix at or under the bound,
+    else one pass over the projection that holds a single block at a time."""
+    count = int(conn.execute("SELECT count(*) FROM units WHERE vector IS NOT NULL").fetchone()[0])
+    if count <= MAX_COSINE_UNITS:
+        matrix = _cosine_matrix(conn, store_key)
+        return [] if matrix is None else [matrix]
+    _VECTORS.clear()
+    return _read_blocks(conn)
+
+
+def _exact_cosine(a: Any, b: Any) -> float:
+    """The rounded cosine of two stored unit vectors, a function of those two alone.
+
+    A float32 product is exact in float64 and `fsum` rounds their sum once, so
+    the value never depends on which other vectors were scored beside them, in
+    which block or by which kernel.
+    """
+    import numpy as np
+
+    products = np.asarray(a, dtype=np.float64) * np.asarray(b, dtype=np.float64)
+    return round(math.fsum(products.tolist()), COSINE_DECIMALS)
+
+
+#: `{page: {unit ref: [(other page, other unit ref, cosine), ...]}}`
+_Hits = dict[str, dict[str, list[tuple[str, str, float]]]]
+
+
+def _cosine_hits(
+    conn: sqlite3.Connection, store_key: str, own: Mapping[str, Mapping[str, Any]], theta: float
+) -> _Hits:
+    """Every stored unit at or above θ against each page's own vectors, in ONE pass.
+
+    `own` holds the current vectors of the pages one tick processes. The pass
+    is shared by all of them, so a tick over the bound reads the stored vectors
+    once, not once per page. The fast product runs on this thread alone, so the
+    tick's CPU clock sees all of it, and each hit is then judged on its exact
+    cosine.
+    """
+    import numpy as np
+
+    keys = [(path, ref) for path in sorted(own) for ref in sorted(own[path])]
+    hits: _Hits = {path: {} for path in own}
+    if not keys:
+        return hits
+    mine = np.stack([np.asarray(own[path][ref], dtype=np.float32) for path, ref in keys])
+    for refs, paths, matrix in _vector_blocks(conn, store_key):
+        # einsum, not BLAS: one thread, the caller's, whatever the native thread count.
+        scores = np.einsum("ij,kj->ik", matrix, mine)
+        for row, col in zip(*np.nonzero(scores >= theta - COSINE_PREFILTER), strict=True):
+            path, ref = keys[int(col)]
+            if paths[int(row)] == path:
+                continue
+            cosine = _exact_cosine(matrix[int(row)], mine[int(col)])
+            if cosine >= theta:
+                hits[path].setdefault(ref, []).append((paths[int(row)], refs[int(row)], cosine))
+    return hits
 
 
 # ----------------------------------------------------------------------
@@ -576,14 +657,13 @@ def _units_of(conn: sqlite3.Connection, paths: Iterable[str]) -> dict[str, list[
 def propose(
     conn: sqlite3.Connection,
     facts: PageFacts,
-    vectors: Mapping[str, Any],
-    theta: float | None,
-    store_key: str = "",
+    cosine_hits: Mapping[str, Iterable[tuple[str, str, float]]] | None = None,
 ) -> dict[str, _Candidate]:
     """Every pair involving this page whose predicate holds, keyed by pair key.
 
     Each predicate reads the two units and their own pages only, so the result
-    for a pair never depends on a third page.
+    for a pair never depends on a third page. `cosine_hits` are this page's
+    units' partners at or above θ (`_cosine_hits`).
     """
     found: dict[str, _Candidate] = {}
 
@@ -627,43 +707,27 @@ def propose(
             for unit in units:
                 for mine in own:
                     offer(_candidate(mine, (path, unit), "temporal", None))
-    if theta is not None and vectors:
-        matrix = _cosine_matrix(conn, store_key)
-        if matrix is not None:
-            import numpy as np
-
-            refs, paths, stacked = matrix
-            by_ref = {unit.unit_ref: unit for unit in facts.units}
-            other_units: dict[str, Unit] = {}
-            for mine_ref in sorted(vectors):
-                unit = by_ref.get(mine_ref)
-                if unit is None:
-                    continue
-                # Rounded first: the recorded cosine and the predicate agree exactly.
-                scores = np.round(
-                    (stacked @ np.asarray(vectors[mine_ref], dtype=np.float32)).astype(np.float64),
-                    COSINE_DECIMALS,
+    hits = cosine_hits or {}
+    by_ref = {unit.unit_ref: unit for unit in facts.units}
+    other_units: dict[tuple[str, str], Unit | None] = {}
+    for mine_ref in sorted(hits):
+        mine_unit = by_ref.get(mine_ref)
+        if mine_unit is None:
+            continue
+        for other_path, other_ref, cosine in hits[mine_ref]:
+            if other_path == facts.path:
+                continue
+            if (other_path, other_ref) not in other_units:
+                row = conn.execute(
+                    "SELECT text, text_sha256 FROM units WHERE path=? AND unit_ref=?",
+                    (other_path, other_ref),
+                ).fetchone()
+                other_units[(other_path, other_ref)] = (
+                    None if row is None else Unit(other_ref, str(row[0]), str(row[1]))
                 )
-                for index in np.nonzero(scores >= theta)[0]:
-                    other_ref, other_path = refs[int(index)], paths[int(index)]
-                    if other_path == facts.path:
-                        continue
-                    if other_ref not in other_units:
-                        row = conn.execute(
-                            "SELECT text, text_sha256 FROM units WHERE path=? AND unit_ref=?",
-                            (other_path, other_ref),
-                        ).fetchone()
-                        if row is None:
-                            continue
-                        other_units[other_ref] = Unit(other_ref, str(row[0]), str(row[1]))
-                    offer(
-                        _candidate(
-                            (facts.path, unit),
-                            (other_path, other_units[other_ref]),
-                            "cosine",
-                            float(scores[int(index)]),
-                        )
-                    )
+            other = other_units[(other_path, other_ref)]
+            if other is not None:
+                offer(_candidate((facts.path, mine_unit), (other_path, other), "cosine", cosine))
     return found
 
 
@@ -780,60 +844,37 @@ def _write_projection(
 
 
 # ----------------------------------------------------------------------
-# selection under the page cap, and the sensing queue
+# selection under the page-pair cap, and the sensing queue
 # ----------------------------------------------------------------------
 
 
-def _refresh_caps(conn: sqlite3.Connection, paths: Iterable[str]) -> set[str]:
-    """Recount candidates for `paths`; return every page whose selection may move."""
-    touched: set[str] = set()
-    for path in sorted(set(paths)):
-        count = int(
-            conn.execute(
-                "SELECT count(*) FROM pairs WHERE path_a=? OR path_b=?", (path, path)
-            ).fetchone()[0]
-        )
-        conn.execute(
-            "UPDATE pages SET candidates=?, capped=? WHERE path=?",
-            (count, 1 if count > PAGE_CAP else 0, path),
-        )
-        touched.add(path)
-    return touched
-
-
-def _top(conn: sqlite3.Connection, path: str, memo: dict[str, set[str] | None]) -> set[str] | None:
-    """A capped page's first PAGE_CAP pairs in the fixed order; None when uncapped."""
-    if path not in memo:
-        row = conn.execute("SELECT capped FROM pages WHERE path=?", (path,)).fetchone()
-        if row is None or not row[0]:
-            memo[path] = None
-        else:
-            memo[path] = {
-                str(key)
-                for (key,) in conn.execute(
-                    "SELECT pair_key FROM pairs WHERE path_a=? OR path_b=? ORDER BY order_key LIMIT ?",
-                    (path, path, PAGE_CAP),
-                )
-            }
-    return memo[path]
-
-
 def _refresh_selection(conn: sqlite3.Connection, paths: Iterable[str]) -> None:
-    memo: dict[str, set[str] | None] = {}
+    """Select and queue every pair of the page pairs `paths` take part in.
+
+    A pair is selected when it is among its page pair's first `PAIR_CAP` pairs
+    in the fixed order. The rank is taken among that page pair's pairs only, so
+    a pair's selection reads its own two pages and nothing else.
+    """
+    done: set[tuple[str, str]] = set()
     for path in sorted(set(paths)):
+        ranks: dict[tuple[str, str], int] = {}
         for key, path_a, path_b, state, missing in conn.execute(
-            "SELECT pair_key, path_a, path_b, state, missing FROM pairs WHERE path_a=? OR path_b=?",
+            "SELECT pair_key, path_a, path_b, state, missing FROM pairs "
+            "WHERE path_a=? OR path_b=? ORDER BY order_key",
             (path, path),
         ).fetchall():
-            selected = all(
-                top is None or key in top
-                for top in (_top(conn, path_a, memo), _top(conn, path_b, memo))
-            )
+            pages = (min(path_a, path_b), max(path_a, path_b))
+            if pages in done:
+                continue
+            rank = ranks.get(pages, 0)
+            ranks[pages] = rank + 1
+            selected = rank < PAIR_CAP
             needs = state in _OPEN_STATES or int(missing or 0) > 0
             conn.execute(
                 "UPDATE pairs SET selected=?, queued=? WHERE pair_key=?",
                 (1 if selected else 0, 1 if selected and needs else 0, key),
             )
+        done.update(ranks)
 
 
 # ----------------------------------------------------------------------
@@ -907,15 +948,13 @@ def _follow_ledger(store, conn, ledger) -> None:
 
 
 def _follow_cosine(vault_root: Path, store, conn) -> tuple[str | None, float | None]:
-    """Decide the cosine proposer for this tick from the current state alone.
+    """The encoder space for this tick: `(fingerprint, theta)`, theta None when
+    the space is not calibrated and the cosine proposer proposes nothing.
 
-    Returns `(fingerprint, theta)`, theta None when it stands down. Proposals
-    never depend on processing history:
-
-    * a changed encoder fingerprint discards every stored vector and cosine
-      pair, and every page with units is proposed again under the new space;
-    * past `MAX_COSINE_UNITS` stored vectors no page keeps a cosine pair, and
-      back under it every page with units is proposed again.
+    A changed encoder fingerprint discards every stored vector and cosine pair,
+    and every page with units is proposed again under the new space. How many
+    vectors are stored never decides whether a pair is proposed
+    (`MAX_COSINE_UNITS`).
     """
     fingerprint = encoder_fingerprint(vault_root)
     theta = theta_for(fingerprint)
@@ -928,16 +967,7 @@ def _follow_cosine(vault_root: Path, store, conn) -> tuple[str | None, float | N
             _set_meta(conn, "cosine_encoder", fingerprint)
             _set_meta(conn, "generation_units", int(_get_meta(conn, "generation_units") or 0) + 1)
         _VECTORS.clear()
-    count = int(conn.execute("SELECT count(*) FROM units WHERE vector IS NOT NULL").fetchone()[0])
-    active = theta is not None and count <= MAX_COSINE_UNITS
-    if bool(_get_meta(conn, "cosine_active")) != active:
-        with store.write(conn):
-            if active:
-                _requeue_pages_with_units(conn)
-            else:
-                _drop_cosine_pairs(conn)
-            _set_meta(conn, "cosine_active", active)
-    return fingerprint, (theta if active else None)
+    return fingerprint, theta
 
 
 def _drop_cosine_pairs(conn: sqlite3.Connection) -> None:
@@ -947,8 +977,7 @@ def _drop_cosine_pairs(conn: sqlite3.Connection) -> None:
         for path in row
     }
     conn.execute("DELETE FROM pairs WHERE proposer='cosine'")
-    touched = _refresh_caps(conn, paths)
-    _refresh_selection(conn, touched)
+    _refresh_selection(conn, paths)
 
 
 def _requeue_pages_with_units(conn: sqlite3.Connection) -> None:
@@ -1022,6 +1051,13 @@ def _ingest(store, conn, ledger, active, label_map_version, report, halt) -> Non
             _refresh_selection(conn, paths)
 
 
+#: Halt reasons that are the tick's own budgets. They stop a tick from reading
+#: more pages, but the pages it has read share one vector pass and are all
+#: applied, so a pass that outruns the budget is never discarded and read
+#: again. Any other reason, a stop or a foreground request, ends the tick at once.
+_BUDGET_STOPS = frozenset({"pages", "cpu", "wall"})
+
+
 def _follow_pages(
     vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now, cosine
 ) -> None:
@@ -1044,54 +1080,99 @@ def _follow_pages(
             with store.write(conn):
                 _drop_page(conn, rel, store_key)
             report.processed += 1
+        # Read this tick's pages first: they share one pass over the stored vectors.
+        batch: list[tuple[str, PageFacts | None, dict[str, Any]]] = []
         for rel in changed[:PAGES_PER_TICK]:
             stop = halt()
             if stop is not None:
                 report.stop = stop
-                return
+                if stop not in _BUDGET_STOPS:
+                    return
+                break
             try:
                 graph = ctx.graph()
             except dreamer_families.Deferred:
                 report.stop = "graph_unavailable"
-                return
+                break
             facts = page_facts(graph, rel)
             vectors = (
                 stored_unit_vectors(vault_root, rel, fingerprint) if facts and facts.units else {}
             )
+            batch.append((rel, facts, _own_vectors(facts, vectors)))
+            report.processed += 1
+        own = {rel: vectors for rel, _facts, vectors in batch if vectors}
+        hits = _cosine_hits(conn, store_key, own, theta) if theta is not None and own else {}
+        applied: dict[str, Mapping[str, Any]] = {}
+        for rel, facts, vectors in batch:
+            stop = halt()
+            if stop is not None and stop not in _BUDGET_STOPS:
+                report.stop = stop
+                return
             with store.write(conn):
                 if facts is None:
                     _drop_page(conn, rel, store_key)
                     conn.execute(
                         "INSERT OR REPLACE INTO pages(path, sig, knowledge_date, lifecycle, "
-                        "supersession_json, capped, candidates) VALUES (?, ?, '', '', '[]', 0, 0)",
+                        "supersession_json) VALUES (?, ?, '', '', '[]')",
                         (rel, seen[rel]),
                     )
                 else:
-                    _apply_page(
-                        conn, ledger, facts, vectors, theta, seen[rel], active, label_map_version,
-                        store_key,
+                    page_hits = (
+                        {} if theta is None
+                        else _as_applied(rel, vectors, hits.get(rel, {}), applied, theta)
                     )
-            report.processed += 1
+                    _apply_page(
+                        conn, ledger, facts, vectors, page_hits, seen[rel], active,
+                        label_map_version, store_key,
+                    )
+            applied[rel] = vectors
     finally:
         ctx.close()
 
 
+def _own_vectors(facts: PageFacts | None, vectors: Mapping[str, Any]) -> dict[str, Any]:
+    """The page's stored unit vectors whose source text is the unit's current text."""
+    if facts is None:
+        return {}
+    out: dict[str, Any] = {}
+    for unit in facts.units:
+        stored = vectors.get(unit.unit_ref)
+        if stored is not None and stored[0] == unit.text_sha256:
+            out[unit.unit_ref] = stored[1]
+    return out
+
+
+def _as_applied(
+    rel: str,
+    vectors: Mapping[str, Any],
+    stored: Mapping[str, list[tuple[str, str, float]]],
+    applied: Mapping[str, Mapping[str, Any]],
+    theta: float,
+) -> dict[str, list[tuple[str, str, float]]]:
+    """`rel`'s cosine partners as the projection stands when it is applied.
+
+    The shared pass read the rows as they were before the tick. A page applied
+    earlier in this tick has replaced its rows since, so its old rows' hits are
+    dropped and its new vectors are compared here instead.
+    """
+    out = {ref: [hit for hit in stored.get(ref, ()) if hit[0] not in applied] for ref in vectors}
+    for other in sorted(applied):
+        for ref, vector in vectors.items():
+            for other_ref, other_vector in sorted(applied[other].items()):
+                cosine = _exact_cosine(vector, other_vector)
+                if cosine >= theta:
+                    out[ref].append((other, other_ref, cosine))
+    return out
+
+
 def _drop_page(conn: sqlite3.Connection, rel: str, store_key: str) -> None:
-    partners = {
-        str(other)
-        for (other,) in conn.execute(
-            "SELECT CASE WHEN path_a=? THEN path_b ELSE path_a END FROM pairs "
-            "WHERE path_a=? OR path_b=?",
-            (rel, rel, rel),
-        )
-    }
+    """Forget a page. Every other page pair's selection is its own, so nothing
+    else moves."""
     conn.execute("DELETE FROM pairs WHERE path_a=? OR path_b=?", (rel, rel))
     conn.execute("DELETE FROM units WHERE path=?", (rel,))
     conn.execute("DELETE FROM links WHERE path=?", (rel,))
     conn.execute("DELETE FROM pages WHERE path=?", (rel,))
     _bump_units(conn, store_key, rel, None)
-    _refresh_caps(conn, partners)
-    _refresh_selection(conn, partners)
 
 
 def _bump_units(
@@ -1111,7 +1192,8 @@ def _bump_units(
 
 
 def _apply_page(
-    conn, ledger, facts: PageFacts, vectors, theta, sig, active, label_map_version, store_key: str
+    conn, ledger, facts: PageFacts, own_vectors: Mapping[str, Any], cosine_hits, sig, active,
+    label_map_version, store_key: str,
 ) -> None:
     rel = facts.path
     before = {
@@ -1121,24 +1203,12 @@ def _apply_page(
             (rel, rel),
         )
     }
-    old_partners = {
-        str(other)
-        for (other,) in conn.execute(
-            "SELECT CASE WHEN path_a=? THEN path_b ELSE path_a END FROM pairs "
-            "WHERE path_a=? OR path_b=?",
-            (rel, rel, rel),
-        )
-    }
     conn.execute("DELETE FROM pairs WHERE path_a=? OR path_b=?", (rel, rel))
     conn.execute("DELETE FROM units WHERE path=?", (rel,))
     conn.execute("DELETE FROM links WHERE path=?", (rel,))
-    own_vectors: dict[str, Any] = {}
     for unit in facts.units:
-        stored = vectors.get(unit.unit_ref)
-        blob = None
-        if stored is not None and stored[0] == unit.text_sha256:
-            own_vectors[unit.unit_ref] = stored[1]
-            blob = stored[1].astype("float32").tobytes()
+        vector = own_vectors.get(unit.unit_ref)
+        blob = None if vector is None else vector.astype("float32").tobytes()
         conn.execute(
             "INSERT INTO units(path, unit_ref, text_sha256, text, vector) VALUES (?, ?, ?, ?, ?)",
             (rel, unit.unit_ref, unit.text_sha256, unit.text, blob),
@@ -1149,7 +1219,7 @@ def _apply_page(
     )
     conn.execute(
         "INSERT OR REPLACE INTO pages(path, sig, knowledge_date, lifecycle, supersession_json, "
-        "capped, candidates, content_hash) VALUES (?, ?, ?, ?, ?, 0, 0, ?)",
+        "content_hash) VALUES (?, ?, ?, ?, ?, ?)",
         (
             rel,
             sig,
@@ -1161,7 +1231,7 @@ def _apply_page(
     )
     _bump_units(conn, store_key, rel, own_vectors)
     instrument_key = _active_key(active, label_map_version)
-    candidates = propose(conn, facts, own_vectors, theta, store_key)
+    candidates = propose(conn, facts, cosine_hits)
     for key in sorted(candidates):
         candidate = candidates[key]
         (path_a, unit_a), (path_b, unit_b) = candidate.a, candidate.b
@@ -1199,9 +1269,7 @@ def _apply_page(
         served_before = prior is not None and prior[0] in _SERVED_STATES
         priority = 0 if (served_before or stale or projected.state == "migrating") else 1
         _write_projection(conn, key, projected, priority, instrument_key)
-    partners = {c.a[0] for c in candidates.values()} | {c.b[0] for c in candidates.values()}
-    touched = _refresh_caps(conn, partners | old_partners | {rel})
-    _refresh_selection(conn, touched)
+    _refresh_selection(conn, {rel})
 
 
 # ----------------------------------------------------------------------
@@ -1258,22 +1326,8 @@ def queue_depth(vault_root: Path) -> int:
 # ----------------------------------------------------------------------
 
 
-def _audience_allowed(vault_root: Path) -> bool:
-    """Whether this request's principal may have sensed items at all.
-
-    Under a non-empty governed policy only an owner-bound principal does, the
-    rule `working_set.band_audience_allowed` applies to the vector band. The
-    proposal cap and the cosine bound both count withheld pages, so for any
-    other caller a withheld page could change what is served (review of slice
-    1, 2026-09-28). An ungoverned vault serves everyone, as an owner. Per-caller
-    serving returns with a cap that keeps the two-page property (task 8.3).
-    """
-    from . import working_set
-
-    return working_set.band_audience_allowed(Path(vault_root))
-
-
 def _keep(vault_root: Path):
+    """This caller's release decision per page (None: every page is released)."""
     from .governance import egress
 
     return egress.release_walk_filter(Path(vault_root))
@@ -1567,11 +1621,9 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
 
 
 def _open_view(vault_root: Path) -> tuple[sqlite3.Connection, _View] | None:
-    """The caller's view, or None when sensing is off, the caller may not have
-    sensed items, or there is no projection. Sensing off reads no file."""
+    """The caller's view, or None when sensing is off or there is no projection.
+    Sensing off reads no file."""
     if not sensing.enabled():
-        return None
-    if not _audience_allowed(Path(vault_root)):
         return None
     conn = open_readonly(Path(vault_root))
     if conn is None:

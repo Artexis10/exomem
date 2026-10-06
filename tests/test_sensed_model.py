@@ -276,6 +276,37 @@ def test_a_third_page_never_adds_or_removes_a_pair(tmp_path: Path, monkeypatch) 
     assert pair <= {row[0] for row in sf.edges(vault)}
 
 
+def test_a_third_page_never_moves_a_pairs_selection(tmp_path: Path, monkeypatch) -> None:
+    """The cap is per page pair. An aside that links only the hub must not move
+    which hub-later pairs are sensed: under the per-page cap its 12 pairs took
+    the hub past 128 and pushed four hub-later pairs out. A page pair past the
+    cap keeps exactly its first PAIR_CAP pairs in the fixed order."""
+    sf.enable(monkeypatch)
+    monkeypatch.setattr(sensed_model, "PAIR_CAP", 100, raising=False)
+    vault = sf.hub_vault(tmp_path, with_page=False)
+    sf.settle(vault)
+
+    def hub_later() -> dict[str, int]:
+        pages = {sf.HUB, sf.LATER}
+        return {row[0]: row[11] for row in sf.edges(vault) if {row[1], row[3]} == pages}
+
+    before = hub_later()
+    assert len(before) == 120
+    fx.edit(vault, sf.ASIDE, sf.aside())
+    sf.settle(vault)
+    assert hub_later() == before
+    conn = sensed_model.open_readonly(vault)
+    first = [key for (key,) in conn.execute(
+        "SELECT pair_key FROM pairs WHERE ? IN (path_a, path_b) AND ? IN (path_a, path_b) "
+        "ORDER BY order_key LIMIT 100", (sf.HUB, sf.LATER))]
+    aside = conn.execute(
+        "SELECT count(*), sum(selected) FROM pairs WHERE ? IN (path_a, path_b)", (sf.ASIDE,)
+    ).fetchone()
+    conn.close()
+    assert {key for key, selected in before.items() if selected} == set(first)
+    assert aside == (12, 12)
+
+
 def test_temporal_pairs_need_two_shared_subjects(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     vault = tmp_path / "vault"
@@ -510,22 +541,51 @@ def test_the_cosine_predicate_compares_the_rounded_cosine(tmp_path: Path, monkey
     assert rows == [("cosine", 0.72)]
 
 
-def test_cosine_proposals_do_not_depend_on_processing_history(tmp_path: Path, monkeypatch) -> None:
-    """The in-scope vector bound is judged on the current state: over it, no page
-    keeps cosine pairs; back under it, every page has them again."""
+def test_over_the_cache_bound_the_same_cosine_pairs_are_proposed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The vector bound limits memory, never proposals. Over it, ticks read the
+    stored vectors in blocks; under the old bound every cosine pair was dropped,
+    so a withheld page's units could take a visible pair away."""
+    vault, paths = _cosine_vault(tmp_path, 4)
+    same = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    sf.enable(monkeypatch, vectors=_vector_table(vault, paths, [same, same, same, same]))
+    monkeypatch.setattr(sensed_model, "MAX_COSINE_UNITS", 1)
+    # Two pages a tick: later ticks meet earlier pages' stored rows.
+    monkeypatch.setattr(sensed_model, "PAGES_PER_TICK", 2)
+    sf.settle(vault)
+    found = {frozenset((row[1], row[3])) for row in sf.edges(vault)}
+    assert found == {frozenset((a, b)) for a in paths for b in paths if a < b}
+
+
+def test_one_pass_over_the_vectors_serves_every_page_of_a_tick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Over the bound, the pages a tick processes share one read of the stored
+    vectors. Catches a per-page rescan regression: a full pass per page is a
+    CPU burst on the owner's desktop that sharing costs a fraction of. The pass
+    predates the tick, so a page applied earlier in it is met by its new
+    vector, never its old row."""
     vault, paths = _cosine_vault(tmp_path, 4)
     same = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     table = _vector_table(vault, paths, [same, same, same, same])
     sf.enable(monkeypatch, vectors=table)
-    monkeypatch.setattr(sensed_model, "MAX_COSINE_UNITS", 3)
+    monkeypatch.setattr(sensed_model, "MAX_COSINE_UNITS", 1)
     sf.settle(vault)
-    over = {row[0] for row in sf.edges(vault)}
-    assert over == set(), "four vectors exceed a bound of three: no cosine pair survives"
-    fx.remove(vault, paths[3])
+    reads: list[int] = []
+    read_blocks = sensed_model._read_blocks
+    monkeypatch.setattr(
+        sensed_model, "_read_blocks", lambda conn: (reads.append(1), read_blocks(conn))[1]
+    )
+    # c0 moves away from the others; c0, c1 and c2 are processed in one tick.
+    (ref, (digest, _vector)), = table[paths[0]].items()
+    table[paths[0]] = {ref: (digest, np.array([0.0, 0.0, 1.0], dtype=np.float32))}
+    for path in paths[:3]:
+        fx.edit(vault, path, (vault / path).read_text(encoding="utf-8") + "\nA later line.\n")
     sf.settle(vault)
+    assert len(reads) == 1, "three pages in one tick, one pass"
     found = {frozenset((row[1], row[3])) for row in sf.edges(vault)}
-    assert found == {frozenset(pair) for pair in ((paths[0], paths[1]), (paths[0], paths[2]),
-                                                  (paths[1], paths[2]))}
+    assert found == {frozenset((a, b)) for a in paths[1:] for b in paths[1:] if a < b}
 
 
 def test_a_new_encoder_fingerprint_re_proposes_cosine_pairs(tmp_path: Path, monkeypatch) -> None:

@@ -125,17 +125,27 @@ The dreamer SHALL propose pairs for sensing from stored data only, and SHALL NOT
 - a graph edge between the two pages;
 - at least two shared authored link targets between two pages with different knowledge dates.
 
-Selection SHALL NOT be top-k or corpus-relative. Only pairs across two pages SHALL be proposed, and identical texts SHALL NOT be paired. A page SHALL propose at most 128 pairs in a fixed deterministic order. A page whose candidates exceed that cap SHALL be marked capped.
+Selection SHALL NOT be top-k or corpus-relative. Only pairs across two pages SHALL be proposed, and identical texts SHALL NOT be paired. Each page pair SHALL send at most 128 pairs to sensing: its first in a fixed deterministic order, ranked among that page pair's own candidates. No bound SHALL make whether a pair is proposed or selected depend on a page other than its own two. A bound on the cosine proposer SHALL limit the memory it holds and the time it takes, never which pairs it proposes.
 
 #### Scenario: A third page cannot create or remove a pair
 
 - **WHEN** a page unrelated to two units is added, edited or withheld
 - **THEN** whether the two units are proposed is unchanged
 
+#### Scenario: A third page cannot move a pair's selection
+
+- **WHEN** a page outside a page pair gains or loses candidates with either of its pages, including a withheld or tombstoned page
+- **THEN** which of that page pair's pairs are sent to sensing is unchanged
+
 #### Scenario: The threshold is per pair
 
 - **WHEN** many units exceed the cosine threshold against one unit
-- **THEN** every such pair is proposed up to the page cap, and none is dropped because of the others' scores
+- **THEN** every such pair is proposed up to each page pair's cap, and none is dropped because of the others' scores
+
+#### Scenario: The cosine bound limits memory, not proposals
+
+- **WHEN** more unit vectors are stored than the cosine proposer holds in memory
+- **THEN** it proposes the same pairs as it would under the bound, reading the stored vectors once per tick for all the pages that tick processes
 
 ### Requirement: Epistemic projections are deterministic and keep uncertainty
 
@@ -184,9 +194,7 @@ Tensions on active or recent work SHALL reach the agent only through the existin
 
 ### Requirement: Sensed items are released per caller
 
-Under a non-empty governed policy, or one that cannot be read, sensed items SHALL be served only to owner-bound principals. That is the audience rule the working-set vector band uses. Every other principal SHALL receive no sensed field on read or activation. An ungoverned vault SHALL serve every caller as an owner.
-
-For a principal that is served, a reading SHALL be consumable only when every input unit's page is released to that principal. Items, counts, chains and components SHALL be recomputed per request from released edges. Under a governed policy, a restricted caller's read and activation SHALL be byte-identical to the same request in a vault where the withheld page does not exist.
+Sensed items SHALL be served to every caller, decided per caller. A reading SHALL be consumable only when every input unit's page is released to that caller. Items, counts, chains and components SHALL be recomputed per request from released edges. Under a governed policy, a restricted caller's read and activation SHALL be byte-identical to the same request in a vault where the withheld page does not exist.
 
 At request time, an edge SHALL be dropped when either page's live signature differs from the one the projection processed, or when its instrument key is not the active key. A page that lost an edge this way SHALL report `evidence_complete: false`. A read SHALL carry a status only when the snapshot it returned is the one the projection modelled. The time at which a pair is sensed MAY depend on the whole queue; what is served SHALL NOT.
 
@@ -200,10 +208,10 @@ At request time, an edge SHALL be dropped when either page's live signature diff
 - **WHEN** a withheld page links two released pages in a contradiction component
 - **THEN** a restricted caller's read of either page is byte-identical to the same read in the absent twin
 
-#### Scenario: A withheld page cannot decide a visible page's cap
+#### Scenario: A withheld page cannot decide a visible page's selection
 
-- **WHEN** a withheld page's pairs push a visible page past its proposal cap
-- **THEN** a restricted caller's read of the visible page is byte-identical to the same read in the absent twin
+- **WHEN** a withheld page linking a visible page adds candidates that would have pushed that page past a per-page cap
+- **THEN** a restricted caller's read of the visible page is byte-identical to the same read in the absent twin, and still serves the visible page's items
 
 #### Scenario: Every edge dropped still reports incomplete evidence
 
