@@ -396,56 +396,49 @@ def terms_of(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens_of(text)))
 
 
-#: A URL with a scheme, anywhere in the turn, up to whitespace, a quote or
-#: a closing bracket.
-_URL = re.compile(r"""[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'`<>()\[\]{}]*""")
-#: A quoted or backticked span, which may hold a path with spaces in it.
-_QUOTED = re.compile(r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d")
+#: What may sit just before a reference: whitespace, the start of the turn,
+#: or one of these (brackets, quotes, backticks, markdown emphasis, `=`, `,`).
+_OPENERS = "([{<\"'`=*_,\u2018\u2019\u201c\u201d"
+#: What may follow a reference without being part of it.
+_CLOSERS = ".,;:!?)]}>\"'`*_\u2018\u2019\u201c\u201d"
+#: A character a reference never contains: whitespace, quotes, backticks,
+#: brackets, angle brackets and commas.
+_REFERENCE_CHAR = r"""[^\s"'`<>()\[\]{},\u2018\u2019\u201c\u201d]"""
+_STARTS_A_REFERENCE = r"(?<![^\s" + re.escape(_OPENERS) + r"])"
+#: A URL with a scheme, anywhere in the turn.
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://" + _REFERENCE_CHAR + "*")
+#: A short list of top-level domains, lowercase as hosts are written. A dotted
+#: name before a slash is a host only with one of these, a `www.` or a port:
+#: `Node.js/React` and `ASP.NET/Core` are prose.
+_HOST_TLDS = "com|org|net|io|dev|ai|app|co|uk|de|eu|info|me|sh|so|gg|xyz"
 #: The start of a reference that names its own place: a URL without a scheme
 #: (`host.tld/...`), an scp-style remote (`user@host:...`), or a path from a
 #: root (`/`, `\`, `~`, a drive letter, or an environment variable).
-_ROOTED = re.compile(
-    r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?/"
-    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)+:"
+_ROOTED = (
+    r"(?:www\.(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+(?::\d+)?"
+    r"|(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:\d+"
+    r"|(?:[A-Za-z0-9-]+\.)+(?:" + _HOST_TLDS + r"))/"
+    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)*:"
     r"|(?:~|[A-Za-z]:|\$\{\w+\}|\$\w+|%\w+%)?[\\/]"
 )
-_DOT_RELATIVE = ("./", "../", ".\\", "..\\")
-_FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
+#: A path relative to the current place, which keeps its final segment.
+_DOT_RELATIVE = r"\.\.?[\\/]"
+_REFERENCE_START = r"(?:(?P<rooted>" + _ROOTED + r")|(?P<relative>" + _DOT_RELATIVE + r"))"
+_REFERENCE = re.compile(_STARTS_A_REFERENCE + _REFERENCE_START + _REFERENCE_CHAR + "*")
+_QUOTED_REFERENCE = re.compile(_REFERENCE_START)
+#: A quoted or backticked span, which may hold a path with spaces in it.
+_QUOTED = re.compile(
+    r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019"
+)
 _SEPARATORS = re.compile(r"[\\/]")
-_RUN = re.compile(r"\S+")
-_OPENERS = "([<'="
-_CLOSERS = ".,;:!?)]>'"
 
 
-def _reference_keeps(text: str) -> str | None:
-    """What a reference keeps of itself as words, or `None` for prose.
-
-    A rooted path or a URL keeps nothing. A relative path keeps its final
-    segment. A slash run is a relative path only when it starts `./` or
-    `../`, or its final segment has a file extension; `dev/staging/prod` and
-    `and/or` are prose.
-    """
-    if _ROOTED.match(text):
+def _kept_words(reference: str, *, relative: bool) -> str:
+    """What a reference keeps of itself as words: a `./` or `../` path its
+    final segment, anything else nothing."""
+    if not relative:
         return ""
-    if not _SEPARATORS.search(text):
-        return None
-    last = _SEPARATORS.split(text.rstrip("\\/"))[-1]
-    if text.startswith(_DOT_RELATIVE) or _FILE_EXTENSION.search(last):
-        return last
-    return None
-
-
-def _without_run_references(text: str) -> str:
-    def run(match: re.Match[str]) -> str:
-        whole = match.group(0)
-        core = whole.lstrip(_OPENERS)
-        lead = whole[: len(whole) - len(core)]
-        stripped = core.rstrip(_CLOSERS)
-        tail = core[len(stripped) :]
-        kept = _reference_keeps(stripped)
-        return whole if kept is None else f"{lead}{kept or ' '}{tail}"
-
-    return _RUN.sub(run, text)
+    return _SEPARATORS.split(reference.rstrip("\\/"))[-1]
 
 
 def subject_text(turn: str) -> str:
@@ -454,27 +447,38 @@ def subject_text(turn: str) -> str:
     A path is a reference to a file, not a sentence: read as words,
     `/home/<user>/handoffs/x.md` says `home`, and `home` named a project of
     that name. A rooted path, an environment-variable path, a URL with or
-    without a scheme, and an scp-style remote are removed whole. A relative
-    path keeps its final segment, so a quoted
-    `Knowledge Base/Entities/People/<Name>.md` still names the page whose
-    title is its file name, exactly as it did when the path was read as
-    words; its directories are removed. A quoted or backticked span is read
-    as one reference, spaces included. An unquoted rooted path with spaces
-    in it is cut at the first space: nothing marks where it ends.
+    without a scheme, and an scp-style remote are removed whole. A path that
+    starts `./` or `../` keeps its final segment, so `./<Name>.md` still names
+    the page whose title is its file name. Any other slash run is prose:
+    `dev/staging/prod`, `and/or` and `TypeScript/Node.js` keep their words, and
+    a vault page path is matched as one by the vault-path lookup. A quoted or
+    backticked span is read as one reference, spaces included. An unquoted
+    rooted path with spaces in it is cut at the first space: nothing marks
+    where it ends.
 
     Text with no reference in it is returned as is.
     """
-    text = _URL.sub(
-        lambda match: " " + match.group(0)[len(match.group(0).rstrip(_CLOSERS)) :],
-        str(turn or ""),
-    )
+
+    def trailing(reference: str) -> str:
+        return reference[len(reference.rstrip(_CLOSERS)) :]
+
+    text = _URL.sub(lambda match: " " + trailing(match.group(0)), str(turn or ""))
 
     def quoted(match: re.Match[str]) -> str:
-        content = next(group for group in match.groups() if group is not None)
-        kept = _reference_keeps(content.strip())
-        return match.group(0) if kept is None else f" {kept} "
+        content = next(group for group in match.groups() if group is not None).strip()
+        found = _QUOTED_REFERENCE.match(content)
+        if found is None:
+            return match.group(0)
+        return f" {_kept_words(content, relative=found.group('relative') is not None)} "
 
-    return _without_run_references(_QUOTED.sub(quoted, text))
+    def reference(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        tail = trailing(whole)
+        core = whole[: len(whole) - len(tail)]
+        kept = _kept_words(core, relative=match.group("relative") is not None)
+        return f"{kept or ' '}{tail}"
+
+    return _REFERENCE.sub(reference, _QUOTED.sub(quoted, text))
 
 
 #: A shared term this rare in the catalogue's title/alias vocabulary is a weak
