@@ -80,13 +80,3 @@ class VolumeInfo:
     volume_id: str
     server_id: str
     labels: dict[str, str]
-
-
-class VolumeProvider(Protocol):
-    """Read-only Hetzner volume listing (D9, D10). cellctl never creates,
-    attaches or deletes a volume directly; that follows from PVC/PV
-    lifecycle through the CSI driver."""
-
-    def list_volumes(self) -> list[VolumeInfo]: ...
-
-    def get_volume(self, volume_id: str) -> VolumeInfo | None: ...

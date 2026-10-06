@@ -21,6 +21,73 @@ Runtime releases use the governed expand/canary/contract workflow in
 [`runtime-upgrades.md`](runtime-upgrades.md). The deployment sections below are its
 effectors, not a release checklist; do not edit their release values by hand.
 
+## Administration access
+
+Hosts have no public SSH. Operators and Ansible reach them over the company
+NetBird with the existing key and host pin; the shared NetBird role admits
+22/tcp on `wt0`. Keep a private JSON file outside the repository that maps each
+inventory host name (`exomem-alpha`, `substrate-control-01`,
+`exomem-agent-<key>`) to its NetBird IP, and pass it to the inventory generator
+with `--admin-addresses`. Hosts it omits keep their public IPv4, which is
+closed. The base role refuses to run with no public SSH CIDR unless the host
+has `wt0` and UFW admits 22/tcp on it.
+
+Ansible uses plain OpenSSH, not `harness ssh`. Route only the NetBird
+addresses through the workstation's NetBird SOCKS listener (the workstation
+default is `127.0.0.1:21080`), with one `~/.ssh/config` block per host that also
+reuses the existing host pin, as the managed desktop aliases do:
+
+```
+Host <NetBird IP>
+  HostKeyAlias <public IPv4>
+  ProxyCommand nc -X 5 -x 127.0.0.1:21080 %h %p
+```
+
+Do not set the proxy globally (`ANSIBLE_SSH_ARGS` or group-level
+`ansible_ssh_common_args`): break-glass and new-agent runs connect to a public
+IPv4, which the SOCKS listener cannot reach. `host_key_checking` stays on.
+
+Break-glass is the Hetzner console or rescue system. A disposable host with
+public inbound closed at both the Hetzner firewall and UFW returned over
+NetBird after a soft reboot and a hard reset, and stayed publicly unreachable,
+with console access confirmed (2026-10-05).
+
+- A fresh host has UFW inactive, so a Terraform window is enough: set one CIDR
+  in `admin_ssh_cidrs` and the same CIDR in `base_admin_ssh_cidrs`, so a base
+  role run keeps admitting it once UFW is enabled.
+- An existing host with NetBird down admits 22/tcp only on `wt0`, so neither
+  Terraform nor Ansible can reach it. From the Hetzner console first run
+  `ufw allow from <ip> to any port 22 proto tcp comment 'Exomem administrator SSH'`,
+  then open the same CIDR in Terraform. The managed comment lets the next
+  Ansible run retire the rule.
+
+Close the window once NetBird SSH works again: revert both lists to `[]`, apply
+Terraform, and run the targeted Ansible command below. It deletes only rules
+carrying the managed comment, never NetBird's or any other.
+
+### Cutover to NetBird-only SSH
+
+Confirm a fresh managed SSH connection over NetBird and console access for each
+host first. Then, with `base_admin_ssh_cidrs: []` in the private group
+variables, converge SSH access alone, one host at a time:
+
+```bash
+cd infra/ansible
+ansible-playbook --inventory inventory.yml site.yml --tags admin_ssh --limit <host>
+```
+
+The tag runs fact gathering and the SSH access tasks only (on the control host
+also the Postgres role's read-only service-mode assert); no package upgrades,
+K3s or Postgres changes. Next, set `admin_ssh_cidrs = []`, review the saved
+foundation plan (in-place rule removal on the alpha, control and agent
+firewalls only), and apply it.
+
+Finally, run `sudo ufw status numbered` on every host and remove any public
+22/tcp rule that remains with `sudo ufw delete <n>`, listing again after each
+deletion. The role deliberately leaves uncommented and hand-written rules
+alone, so these are the operator's to remove. Confirm port 22 is unreachable
+from outside NetBird and a fresh managed connection still works.
+
 ## First rollout of fresh-storage binding
 
 The first release that emits `gpi1:binding`, `gpi1:registering` and
@@ -154,7 +221,8 @@ trap 'rm -rf -- "${deploy_work_dir}"' EXIT
 terraform -chdir=infra/terraform/foundation output -json \
   | jq '{server_ipv4, private_node_ip}' > "${deploy_work_dir}/foundation-output.json"
 infra/scripts/generate_ansible_inventory.py \
-  "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json"
+  "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json" \
+  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}"
 infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inventory.json" \
   --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
   --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \

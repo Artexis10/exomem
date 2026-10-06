@@ -13,7 +13,10 @@ base_packages:
   - unattended-upgrades
   - ufw
 
+# Empty in routine operation: administration arrives over the NetBird
+# interface below. Set a CIDR only for a temporary break-glass window.
 base_admin_ssh_cidrs: []
+base_netbird_interface: wt0
 base_administrator_user: exomem-admin
 base_administrator_authorized_keys: []
 base_k3s_pod_cidr: 10.42.0.0/16

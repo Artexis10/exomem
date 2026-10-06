@@ -50,12 +50,11 @@ def test_foundation_and_durability_are_disjoint_lifecycle_domains() -> None:
     assert 'backend "s3"' not in _all_tf(BOOTSTRAP)
 
 
-def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> None:
+def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_never_global() -> None:
     variables = (FOUNDATION / "variables.tf").read_text(encoding="utf-8")
     compute = (FOUNDATION / "compute.tf").read_text(encoding="utf-8")
     firewall = (FOUNDATION / "firewall.tf").read_text(encoding="utf-8")
 
-    assert re.search(r'variable "admin_ssh_cidrs"\s*{(?:(?!default).)*}', variables, re.S)
     # Pinned to cx33 because Hetzner retired the cx line: no cx type is
     # available or available_for_migration in any datacenter, so this node
     # cannot be resized at all. The fleet is sized to the node instead — see
@@ -67,14 +66,12 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     assert 'default     = "fsn1"' in variables
     assert 'default     = "ubuntu-24.04"' in variables
     assert 'default     = "10.50.1.10"' in variables
-    assert "condition     = length(var.admin_ssh_cidrs) > 0" in variables
     assert 'cidr != "0.0.0.0/0" && cidr != "::/0"' in variables
 
     assert 'port        = "22"' in firewall
     assert 'port        = "443"' in firewall
     for public_port in ('"80"', '"6443"'):
         assert public_port not in firewall
-    assert "source_ips  = var.admin_ssh_cidrs" in firewall
 
     assert len(re.findall(r"delete_protection\s*=\s*true", compute)) >= 2
     assert re.search(r"rebuild_protection\s*=\s*true", compute)
@@ -506,8 +503,6 @@ def test_control_database_server_reuses_the_existing_network_with_its_own_firewa
 
     assert 'resource "hcloud_firewall" "control"' in firewall
     control_firewall = firewall.split('resource "hcloud_firewall" "control"', 1)[1]
-    assert 'port        = "22"' in control_firewall
-    assert "source_ips  = var.admin_ssh_cidrs" in control_firewall
     assert "port        = tostring(var.pgbouncer_public_port)" in control_firewall
     assert 'source_ips  = ["0.0.0.0/0", "::/0"]' in control_firewall
     for other_port in ("80", "443", "6443", "5432"):

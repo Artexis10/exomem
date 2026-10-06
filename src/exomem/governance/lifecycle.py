@@ -26,7 +26,6 @@ from .. import (
     index_paths,
     media_types,
     memory_refs,
-    mutation_lock,
     reserved_paths,
     semantic_index,
 )
@@ -34,6 +33,7 @@ from ..kbdir import kb_dirname
 from ..vault import parse_frontmatter
 from . import membership, receipts
 from . import policy as policy_module
+from .transaction import DirectoryChangedError, fsync_directory
 
 SCHEMA = "governance-lifecycle/v1"
 TOMBSTONE_DIR = "deletion-tombstones"
@@ -365,7 +365,7 @@ def _placement_descriptor(manifest: tuple[ManifestItem, ...], state: str) -> dic
 def _fsync_directory(path: Path) -> None:
     if os.name == "nt":
         try:
-            mutation_lock._windows_flush_directory(path)
+            fsync_directory(path)
         except OSError as exc:
             raise LifecycleError(
                 "LIFECYCLE_PATH_UNSAFE", "lifecycle durable directory fsync failed"
@@ -381,20 +381,12 @@ def _fsync_directory(path: Path) -> None:
         raise LifecycleError(
             "LIFECYCLE_PATH_UNSAFE", "lifecycle directory is not a real directory"
         )
-    fd = os.open(
-        path,
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-    )
     try:
-        if not os.path.samestat(entry, os.fstat(fd)):
-            raise LifecycleError(
-                "LIFECYCLE_PATH_UNSAFE", "lifecycle directory changed during open"
-            )
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        fsync_directory(path, expected=entry)
+    except DirectoryChangedError as exc:
+        raise LifecycleError(
+            "LIFECYCLE_PATH_UNSAFE", "lifecycle directory changed during open"
+        ) from exc
 
 
 def _write_durable_json(

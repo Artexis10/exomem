@@ -347,8 +347,8 @@ def normalize(value: object) -> str:
     than "every working-set comparison key": `collection_claims.
     normalize_text` and `structure_promotion._terms` (used for
     `claims_match` and Records current-state routing) keep their own,
-    separate term splitter (`text_scripts.vocabulary_words` for non-ASCII
-    text) and do not call this function.
+    separate term splitter (`text_scripts.comparison_words`) and do not
+    call this function.
 
     Locale-specific case rules are never applied: `str.casefold()` treats a
     Turkish dotted capital İ and a plain I as different letters, which is

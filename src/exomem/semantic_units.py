@@ -214,24 +214,6 @@ class SemanticUnit:
             "check_by": self.check_by,
         }
 
-    def to_legacy_block_dict(self) -> dict[str, Any] | None:
-        """Return the exact former ``SemanticBlock.to_dict`` shape for rich units."""
-        if self.form != "rich":
-            return None
-        out: dict[str, Any] = {
-            "type": self.kind,
-            "title": self.title,
-            "level": self.level,
-            "line": self.line,
-            "end_line": self.end_line,
-            "body": self.body or "",
-            "metadata": dict(self.metadata),
-            "relations": [relation.to_dict() for relation in self.relations],
-        }
-        if self.anchor:
-            out["id"] = self.anchor
-        return out
-
 
 @dataclass(frozen=True, slots=True)
 class SemanticUnitResolution:

@@ -5,11 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from . import entity_types, relation_vocabulary
+from .text_scripts import comparison_words
 
 _CONTINUATION_VERSION = 1
 _ENTITY_TYPE_LIMIT_MIN = 1
@@ -462,4 +462,4 @@ def _provided(value: str | None) -> bool:
 
 
 def _terms(value: str | None) -> list[str]:
-    return re.findall(r"[a-z0-9]+", entity_types.normalize_entity_token(value or ""))
+    return comparison_words(value or "")
