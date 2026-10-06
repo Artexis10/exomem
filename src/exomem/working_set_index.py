@@ -396,20 +396,56 @@ def terms_of(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens_of(text)))
 
 
-#: What may sit just before a quoted reference: the start, whitespace, or an
-#: opening bracket, quote, backtick or `=`.
-_REFERENCE_OPENER = r"""(?<![^\s(\[{<"'`=])"""
-#: A character a reference never contains: whitespace, quotes, backticks,
-#: angle brackets and the brackets that wrap one in prose or markdown.
-_REFERENCE_CHAR = r"""[^\s"'`<>()\[\]{}]"""
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://" + _REFERENCE_CHAR + "*")
-#: A path from a root: a slash, a backslash, `~` and a slash, or a drive letter and colon.
-_ROOTED_PATH = re.compile(_REFERENCE_OPENER + r"(?:~|[A-Za-z]:)?[\\/]" + _REFERENCE_CHAR + "*")
-_RELATIVE_PATH = re.compile(
-    _REFERENCE_OPENER
-    + r"(?P<dirs>(?:[^\s\"'`<>()\[\]{}\\/]+[\\/])+)(?P<last>[^\s\"'`<>()\[\]{}\\/]*)"
+#: A URL with a scheme, anywhere in the turn, up to whitespace, a quote or
+#: a closing bracket.
+_URL = re.compile(r"""[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'`<>()\[\]{}]*""")
+#: A quoted or backticked span, which may hold a path with spaces in it.
+_QUOTED = re.compile(r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d")
+#: The start of a reference that names its own place: a URL without a scheme
+#: (`host.tld/...`), an scp-style remote (`user@host:...`), or a path from a
+#: root (`/`, `\`, `~`, a drive letter, or an environment variable).
+_ROOTED = re.compile(
+    r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?/"
+    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)+:"
+    r"|(?:~|[A-Za-z]:|\$\{\w+\}|\$\w+|%\w+%)?[\\/]"
 )
+_DOT_RELATIVE = ("./", "../", ".\\", "..\\")
 _FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
+_SEPARATORS = re.compile(r"[\\/]")
+_RUN = re.compile(r"\S+")
+_OPENERS = "([<'="
+_CLOSERS = ".,;:!?)]>'"
+
+
+def _reference_keeps(text: str) -> str | None:
+    """What a reference keeps of itself as words, or `None` for prose.
+
+    A rooted path or a URL keeps nothing. A relative path keeps its final
+    segment. A slash run is a relative path only when it starts `./` or
+    `../`, or its final segment has a file extension; `dev/staging/prod` and
+    `and/or` are prose.
+    """
+    if _ROOTED.match(text):
+        return ""
+    if not _SEPARATORS.search(text):
+        return None
+    last = _SEPARATORS.split(text.rstrip("\\/"))[-1]
+    if text.startswith(_DOT_RELATIVE) or _FILE_EXTENSION.search(last):
+        return last
+    return None
+
+
+def _without_run_references(text: str) -> str:
+    def run(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        core = whole.lstrip(_OPENERS)
+        lead = whole[: len(whole) - len(core)]
+        stripped = core.rstrip(_CLOSERS)
+        tail = core[len(stripped) :]
+        kept = _reference_keeps(stripped)
+        return whole if kept is None else f"{lead}{kept or ' '}{tail}"
+
+    return _RUN.sub(run, text)
 
 
 def subject_text(turn: str) -> str:
@@ -417,30 +453,28 @@ def subject_text(turn: str) -> str:
 
     A path is a reference to a file, not a sentence: read as words,
     `/home/<user>/handoffs/x.md` says `home`, and `home` named a project of
-    that name. A rooted path (`/`, `\\`, `~/`, a drive letter) and a URL are
-    removed whole. A relative path keeps its final segment, so a quoted
+    that name. A rooted path, an environment-variable path, a URL with or
+    without a scheme, and an scp-style remote are removed whole. A relative
+    path keeps its final segment, so a quoted
     `Knowledge Base/Entities/People/<Name>.md` still names the page whose
     title is its file name, exactly as it did when the path was read as
-    words; its directories are removed. A relative run counts as a path only
-    with a letter in it and two separators, or one and a file extension:
-    `and/or` and `10/05/2026` are prose.
+    words; its directories are removed. A quoted or backticked span is read
+    as one reference, spaces included. An unquoted rooted path with spaces
+    in it is cut at the first space: nothing marks where it ends.
 
-    Every removed span becomes one space. What the turn says besides the
-    path is unchanged, and text with no path in it is returned as is.
+    Text with no reference in it is returned as is.
     """
-    text = _URL.sub(" ", str(turn or ""))
-    text = _ROOTED_PATH.sub(" ", text)
+    text = _URL.sub(
+        lambda match: " " + match.group(0)[len(match.group(0).rstrip(_CLOSERS)) :],
+        str(turn or ""),
+    )
 
-    def relative(match: re.Match[str]) -> str:
-        whole, last = match.group(0), match.group("last")
-        separators = whole.count("/") + whole.count("\\")
-        if not any(char.isalpha() for char in whole) or (
-            separators < 2 and not _FILE_EXTENSION.search(last)
-        ):
-            return whole
-        return " " + last
+    def quoted(match: re.Match[str]) -> str:
+        content = next(group for group in match.groups() if group is not None)
+        kept = _reference_keeps(content.strip())
+        return match.group(0) if kept is None else f" {kept} "
 
-    return _RELATIVE_PATH.sub(relative, text)
+    return _without_run_references(_QUOTED.sub(quoted, text))
 
 
 #: A shared term this rare in the catalogue's title/alias vocabulary is a weak
