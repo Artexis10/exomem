@@ -399,3 +399,44 @@ def test_a_withheld_unit_past_the_cap_is_not_reported_as_cut(vault: Path) -> Non
 
     assert restricted == clean
     assert clean["missing"] == []
+
+
+def test_a_withheld_conclusion_takes_no_conclusion_page_slot(vault: Path) -> None:
+    """Past an entity's link cap, its six newest pages holding a conclusion are
+    read. The newest holds only a withheld one, so the seventh newest must be
+    read in its place, as in a vault where the newest page holds no conclusion."""
+    person = f"{PEOPLE}/Ilse Vandermeer.md"
+    _write(vault, person, _person("Ilse Vandermeer"))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    related = "Related: [[Ilse Vandermeer]]"
+    for index in range(45):
+        _write(
+            vault,
+            f"Knowledge Base/Notes/Research/aa-gauge-log-{index:02d}.md",
+            _note(f"Gauge log {index:02d}", f"- [fact] Gauge batch {index:02d} was filed. ^g-{index}", related),
+        )
+
+    def ruling(day: int, units: str) -> str:
+        return (
+            f"---\ntype: note\nstatus: active\nupdated: 2026-09-{day:02d}\n---\n\n"
+            f"# Gauge ruling {day}\n\n## Summary\n\n{units}\n\n## Context\n\n{related}\n"
+        )
+
+    for day in range(1, 8):
+        _write(
+            vault,
+            f"Knowledge Base/Notes/Decisions/zz-ruling-{day}.md",
+            ruling(day, f"- [decision] Gauge ruling {day} keeps the weekly review. ^z-{day}"),
+        )
+    newest = "Knowledge Base/Notes/Decisions/zz-ruling-9.md"
+    _write(vault, newest, ruling(9, "- [decision] Gauge reviews move to the [[Secret cluster]] rota. ^z-9"))
+    turn = "Ilse Vandermeer asked whether the harbour gauges look healthy this week."
+    restricted = _ask(vault, turn)
+
+    _write(vault, newest, ruling(9, ""))
+    clean = _ask(vault, turn)
+
+    assert restricted == clean
+    read = [entry["ref"] for entry in (*clean["units"], *clean["pointers"])]
+    assert any(ref.endswith("zz-ruling-2.md#z-2") for ref in read)
