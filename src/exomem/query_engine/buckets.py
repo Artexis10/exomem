@@ -45,8 +45,11 @@ def instant_order(instant: dt.datetime) -> int:
 
 
 def offset_minutes(value: object) -> int | None:
-    """Minutes east of UTC for a ``±HH:MM`` source offset, else None."""
-    if type(value) is not str:
+    """Minutes east of UTC for a ``±HH:MM`` source offset, else None.
+
+    ``-00:00`` is RFC 3339's "local offset unknown", so it supplies none.
+    """
+    if type(value) is not str or value == "-00:00":
         return None
     minutes = _OFFSETS.get(value)
     if minutes is None and _OFFSET.fullmatch(value):
@@ -87,9 +90,11 @@ class Basis:
     def locate(self, values) -> tuple[dt.date, int] | None:
         """The source-local day and an integer recency key, or None for a flagged time basis.
 
-        A declared offset field, when present, is the record's own UTC offset;
-        otherwise the instant's recorded offset is. An unzoned, unparsable or
-        absent value, or an invalid offset, is flagged rather than guessed.
+        A valid value in the declared offset field is the record's supplied UTC
+        offset. Without one, only an explicit numeric offset in the instant's
+        own text is supplied: where the basis declares an offset field, a ``Z``
+        instant is UTC awaiting that field, not a local day. Unzoned or absent
+        instants, invalid offsets and ``-00:00`` are flagged, never guessed.
         """
         raw = values.get(self.field)
         if type(raw) is not str:
@@ -108,10 +113,12 @@ class Basis:
             return None
         if self.offset is not None and values.get(self.offset) is not None:
             minutes = offset_minutes(values[self.offset])
-            if minutes is None:
-                return None
+        elif raw[-1] in "Zz":
+            minutes = None if self.offset is not None else 0
         else:
-            minutes = 0 if raw[-1] in "Zz" else offset_minutes(raw[-6:])
+            minutes = offset_minutes(raw[-6:])
+        if minutes is None:
+            return None
         return (instant + dt.timedelta(minutes=minutes)).date(), instant_order(instant)
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import random
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -131,6 +132,11 @@ def local_day(record: dict) -> date | None:
     return parsed.date()
 
 
+def _total(values: list) -> int | float:
+    """Exact integer sums; one correctly rounded sum (``math.fsum``) once a float is present."""
+    return sum(values) if all(type(value) is int for value in values) else math.fsum(values)
+
+
 def expected_daily(records: list[dict], metric: str) -> tuple[dict[str, dict], list[str]]:
     """Return ``{local_day: {count, sum, avg}}`` for ``metric`` plus flagged ids.
 
@@ -152,7 +158,7 @@ def expected_daily(records: list[dict], metric: str) -> tuple[dict[str, dict], l
             continue
         buckets.setdefault(day.isoformat(), []).append(value)
     result = {
-        key: {"count": len(values), "sum": sum(values), "avg": sum(values) / len(values)}
+        key: {"count": len(values), "sum": _total(values), "avg": _total(values) / len(values)}
         for key, values in sorted(buckets.items())
     }
     return result, flagged

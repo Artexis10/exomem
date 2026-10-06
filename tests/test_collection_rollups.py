@@ -9,6 +9,7 @@ reference. Each case names the defect only it catches.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 from s1_export_fixture import daily_summaries, expected_daily, iter_exercises
@@ -60,7 +61,9 @@ def exercise(record):
     values = {"id": record["id"], "kind": record["kind"], "status": "recorded",
               "calories": record["metrics"]["calories"], "distance_m": record["metrics"]["distance_m"]}
     if "start_utc" in record:
-        values |= {"start": record["start_utc"], "utc_offset": record["utc_offset"]}
+        values["start"] = record["start_utc"]
+        if "utc_offset" in record:
+            values["utc_offset"] = record["utc_offset"]
     elif "start" in record:
         values["start"] = record["start"]
     return values
@@ -123,10 +126,13 @@ def owner():
 @pytest.mark.parametrize("bucket", ["day", "week"])
 def test_rollup_matches_the_source_local_reference_across_midnight_offsets(store, bucket):
     """A bucket keyed by the UTC or host day instead of each record's own offset, or a flagged
-    time basis guessed into a day; the ISO week starts on the record's local Monday."""
+    time basis guessed into a day, including a UTC instant whose declared offset field is absent;
+    the ISO week starts on the record's local Monday."""
     store.create_collection(manifest_path(), manifest(rollups={"activity": {**DAILY, "bucket": bucket}}),
                             why="create", scaffold=False)
     records = list(iter_exercises(96))
+    unknown = next(n for n, record in enumerate(records) if "start_utc" in record)
+    records[unknown] = {name: value for name, value in records[unknown].items() if name != "utc_offset"}
     load(store, [exercise(record) for record in records])
     daily, flagged = expected_daily(records, "metrics.calories")
     assert flagged, "the fixture must carry flagged time bases"
@@ -134,7 +140,8 @@ def test_rollup_matches_the_source_local_reference_across_midnight_offsets(store
     assert result["plan"]["strategy"] == "rollup" and result["plan"]["rollup"] == "activity"
     assert by_bucket(result) == (daily if bucket == "day" else weekly(daily))
     assert result["flagged_rows"] == len(flagged)
-    assert result["plan"]["basis"] == {"field": "start", "bucket": bucket, "offset": "utc_offset", "kind": "instant"}
+    assert result["plan"]["basis"] == {"field": "start", "bucket": bucket, "offset": "utc_offset", "kind": "instant",
+                                       "from": None, "to": None}
 
 
 def test_date_only_summaries_bucket_on_their_recorded_local_date(store):
@@ -149,7 +156,8 @@ def test_date_only_summaries_bucket_on_their_recorded_local_date(store):
     result = reduce(store, request(field="steps", timestamp="date"))
     assert result["plan"]["strategy"] == "rollup"
     assert by_bucket(result, "date") == daily and result["flagged_rows"] == len(flagged) == 0
-    assert result["plan"]["basis"] == {"field": "date", "bucket": "day", "offset": None, "kind": "date"}
+    assert result["plan"]["basis"] == {"field": "date", "bucket": "day", "offset": None, "kind": "date",
+                                       "from": None, "to": None}
 
 
 NINE = {f"r{n}": DAILY for n in range(9)}
@@ -296,6 +304,23 @@ def test_withheld_member_forces_an_exact_base_reduction_equal_to_its_absent_twin
     assert mixed["flagged_rows"] == twin["flagged_rows"] == 0
 
 
+def test_mixed_release_answers_one_page_and_refuses_an_unbound_continuation(store):
+    """A mixed-release answer longer than one page that issues a cursor no visible-state basis
+    binds, so its pages could silently mix two states."""
+    store.create_collection(manifest_path(), manifest(rollups={"daily": DAILY}, summary=False),
+                            why="create", scaffold=False)
+    for day, key in enumerate((KEY, OTHER, THIRD), start=1):
+        store.append_record(CID, item={"id": key, "start": f"2026-03-0{day}T08:00:00+00:00", "calories": 100},
+                            item_key=key, why="observe")
+    write_scope(store.root, paths=f"Records/Work/Items/{THIRD}.md")
+    write_rule(store.root, ceiling=0)
+    with pytest.raises(runtime.QueryError, match="QUERY_UNSUPPORTED: continuation under mixed release"):
+        reduce(store, {**request(), "page": {"limit": 1}}, principal=_external())
+    whole = reduce(store, {**request(), "page": {"limit": 2}}, principal=_external())
+    assert whole["plan"]["reason"] == "mixed_release" and whole["next_cursor"] is None
+    assert [group["start"] for group in whole["groups"]] == ["2026-03-01", "2026-03-02"]
+
+
 def test_percentile_and_distinct_count_refuse_instead_of_assembling_from_rollups(store):
     """A percentile or distinct count fabricated from count/sum/min/max rollup statistics."""
     store.create_collection(manifest_path(), manifest(rollups={"daily": DAILY}), why="create", scaffold=False)
@@ -305,3 +330,58 @@ def test_percentile_and_distinct_count_refuse_instead_of_assembling_from_rollups
         raw["aggregates"]["other"] = extra
         with pytest.raises(runtime.QueryError, match="QUERY_UNSUPPORTED"):
             reduce(store, raw)
+
+
+SUMMARY_FIELDS = {"date": "{type: date, required: true}", "source": "{type: string}", "steps": "{type: integer}",
+                  "resting_hr": "{type: integer}"}
+STEPS = {"bucket": "day", "timestamp": "date", "values": {"steps": ["count", "sum", "avg"]}}
+
+
+def pages(store, raw):
+    """Every page of ``raw``, following each page's cursor until one comes back complete."""
+    result = [reduce(store, raw)]
+    while result[-1]["next_cursor"] is not None:
+        result.append(reduce(store, {**raw, "page": {**raw["page"], "after": result[-1]["next_cursor"]}}))
+    return result
+
+
+@pytest.mark.parametrize("strategy", ["rollup", "base"])
+def test_daily_answer_longer_than_a_page_is_read_whole_through_cursors(store, strategy):
+    """A daily answer past one page that is unreachable or refused, a page past the 64 KiB result
+    cap, or a continuation that repeats, skips or reorders a group on either execution path."""
+    rollup = {**STEPS, "group_by": ["source"]}
+    store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date",
+                            rollups={"steps": rollup} if strategy == "rollup" else None), why="create", scaffold=False)
+    rows = daily_summaries(400)
+    load(store, [{"date": row["date"], "steps": row["steps"], "source": f"{row['date']} " + "w" * 600}
+                 for row in rows])
+    daily, _ = expected_daily(rows, "steps")
+    read = pages(store, request(field="steps", timestamp="date", groups=("source",)))
+    assert {page["plan"]["strategy"] for page in read} == {strategy}
+    assert all(len(json.dumps(page, separators=(",", ":")).encode()) <= 64 * 1024 for page in read)
+    assert [page["truncation_reason"] for page in read] == ["bytes"] * (len(read) - 1) + [None]
+    groups = [{name: value for name, value in group.items() if name != "source"}
+              for page in read for group in page["groups"]]
+    assert {group.pop("date"): group for group in groups} == daily and len(groups) == len(daily) == 400
+
+
+@pytest.mark.parametrize("bucket,strategy,reason", [
+    ("day", "rollup", "rollup_ready"), ("day", "base", "no_matching_rollup"), ("week", "base", "window_unaligned"),
+])
+def test_local_day_window_returns_exactly_its_days(store, bucket, strategy, reason):
+    """A window that drops or adds an edge day, reads stored buckets past either end, or serves a
+    window that splits a week from whole stored weeks."""
+    declared = {"steps": {**STEPS, "bucket": bucket}} if (bucket, strategy) != ("day", "base") else None
+    store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date", rollups=declared),
+                            why="create", scaffold=False)
+    rows = daily_summaries(400)
+    load(store, rows)
+    start, end = "2026-04-08", "2026-06-06"  # a Wednesday to a Saturday: 60 days
+    daily, _ = expected_daily([row for row in rows if start <= row["date"] <= end], "steps")
+    raw = request(field="steps", timestamp="date", bucket=bucket)
+    raw["group_by"][0] |= {"from": start, "to": end}
+    read = pages(store, {**raw, "page": {"limit": 50}})
+    assert {(page["plan"]["strategy"], page["plan"]["reason"]) for page in read} == {(strategy, reason)}
+    assert [page["truncation_reason"] for page in read] == ["limit"] * (len(read) - 1) + [None]
+    answer = {group.pop("date"): group for page in read for group in page["groups"]}
+    assert answer == (daily if bucket == "day" else weekly(daily))

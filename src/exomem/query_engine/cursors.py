@@ -112,20 +112,25 @@ def _visible(admitted, dependencies):
     return digest.hexdigest()
 
 
-def _binding(admitted: AdmittedQuery):
-    admitted.check()
-    operation = admitted.session._authorization
+def caller_binding(session, query) -> dict[str, str]:
+    """The query, caller, policy and store-lineage digests every continuation binds."""
+    operation = session._authorization
     principal = operation.who
-    dependencies = set(admitted.compiled.dependency_paths) | set(admitted.fields)
-    lineage = admitted.session.connection.execute(
+    lineage = session.connection.execute(
         "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id','lineage','forks') ORDER BY key",
     ).fetchall()
-    return {"query": _hash(replace(admitted.query, page=replace(admitted.query.page, after=None))),
+    return {"query": _hash(replace(query, page=replace(query.page, after=None))),
             "principal": _hash([principal.audience_id, principal.surface, principal.purpose,
                                 principal.authorization_session_id, principal.issuer_family]),
-            "schema": _hash(admitted.schema_identity),
             "authorization": _hash([operation.policy.fingerprint, operation.access_fingerprint, operation.purpose]),
-            "visible": _visible(admitted, dependencies), "lineage": _hash(lineage)}
+            "lineage": _hash(lineage)}
+
+
+def _binding(admitted: AdmittedQuery):
+    admitted.check()
+    dependencies = set(admitted.compiled.dependency_paths) | set(admitted.fields)
+    return {**caller_binding(admitted.session, admitted.query), "schema": _hash(admitted.schema_identity),
+            "visible": _visible(admitted, dependencies)}
 
 
 def _resume(admitted, payload):

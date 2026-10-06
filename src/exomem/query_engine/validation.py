@@ -424,7 +424,7 @@ class _Binder:
         self.reduction_fields = {}
         for i, value in enumerate(_list(groups, "group_by", 4)):
             at = f"group_by[{i}]"
-            raw = _object(value, at, {"field", "bucket"}, {"field"})
+            raw = _object(value, at, {"field", "bucket", "from", "to"}, {"field"})
             field = self.field(raw["field"], f"{at}.field")
             if raw["field"] in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "unique group field path")
@@ -435,10 +435,27 @@ class _Binder:
                 bucket = _choice(raw["bucket"], f"{at}.bucket", {"day", "week", "month"})
                 if field.value_type not in {"date", "datetime"}:
                     _fail("QUERY_VALUE_INVALID", f"{at}.bucket", "declared date or datetime field")
+            window = []
+            for end in ("from", "to"):
+                if end not in raw:
+                    window.append(None)
+                    continue
+                if bucket is None:
+                    _fail("QUERY_KEY_UNKNOWN", f"{at}.{end}", "a local-day window only on a time bucket")
+                day = raw[end]
+                try:
+                    valid = type(day) is str and len(day) == 10 and dt.date.fromisoformat(day).isoformat() == day
+                except ValueError:
+                    valid = False
+                if not valid:
+                    _fail("QUERY_VALUE_INVALID", f"{at}.{end}", "ISO local date YYYY-MM-DD")
+                window.append(day)
+            if None not in window and window[0] > window[1]:
+                _fail("QUERY_VALUE_INVALID", f"{at}.to", "window end on or after its start")
             self.reduction_fields[raw["field"]] = (
                 replace(field, value_type="date") if bucket else field
             )
-            keys.append(GroupKey(field, bucket))
+            keys.append(GroupKey(field, bucket, *window))
         raw_values = _object(
             values, "aggregates", values.keys() if isinstance(values, dict) else ()
         )

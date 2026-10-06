@@ -312,11 +312,19 @@ def definitions(conn, collection_id: str) -> tuple[tuple[int, Rollup, str, int],
                      "WHERE collection_id=? ORDER BY name", (collection_id,)).fetchall())
 
 
-def bucket_states(conn, rollup_id: int, *, limit: int):
-    """Up to ``limit`` stored buckets as (bucket, tagged groups, rows, accumulators, stored bytes)."""
-    for bucket, groups, state in conn.execute(
-            "SELECT bucket,groups,state_json FROM rollup_buckets WHERE rollup_id=? ORDER BY bucket,groups LIMIT ?",
-            (rollup_id, limit)):
-        stored = json.loads(state)
-        yield bucket, tuple(tuple(item) for item in json.loads(groups)), stored["rows"], [
-            Accumulator(field) for field in stored["fields"]], len(state) + len(groups)
+def bucket_states(conn, rollup_id: int, *, first: str | None = None, last: str | None = None):
+    """Stored buckets from ``first`` to ``last`` (inclusive bucket keys) in primary-key order.
+
+    Yields (bucket, group identity text, tagged groups, rows, accumulators,
+    stored bytes); the caller stops reading when its page is full.
+    """
+    cursor = conn.execute(
+        "SELECT bucket,groups,state_json FROM rollup_buckets WHERE rollup_id=? AND bucket>=? AND bucket<=? "
+        "ORDER BY bucket,groups", (rollup_id, first or "", last or "\uffff"))
+    try:
+        for bucket, groups, state in cursor:
+            stored = json.loads(state)
+            yield bucket, groups, tuple(tuple(item) for item in json.loads(groups)), stored["rows"], [
+                Accumulator(field) for field in stored["fields"]], len(state) + len(groups)
+    finally:
+        cursor.close()

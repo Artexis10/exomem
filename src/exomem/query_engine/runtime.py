@@ -332,8 +332,8 @@ class ReadSession:
 
         return admit_query(self, query, as_of=as_of)
 
-    def reduce(self, query, *, as_of: str) -> dict:
-        """Run one grouped reduction to completion under this session's profile, or refuse."""
+    def reduce(self, query, *, as_of: str | None = None) -> dict:
+        """Run one page of a grouped reduction under this session's profile, or refuse."""
         from .reductions import reduce
 
         return reduce(self, query, as_of=as_of)
