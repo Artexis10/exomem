@@ -715,21 +715,9 @@ def test_join_playbook_skips_a_host_that_removal_marked() -> None:
     assert harden[1]["when"] == "k3s_removed_marker.stat.exists"
 
 
-def _kubelet_args(text: str) -> list[str]:
-    block = text.split("kubelet-arg:\n", 1)[1]
-    arguments = []
-    for line in block.splitlines():
-        if not line.startswith("  - "):
-            break
-        arguments.append(line[4:])
-    return arguments
-
-
-def test_agent_kubelet_limits_match_the_server_exactly() -> None:
-    server = _kubelet_args(_read(K3S_ROLE / "templates/config.yaml.j2"))
-    agent = _kubelet_args(_read(K3S_ROLE / "templates/agent-config.yaml.j2"))
-    assert "image-gc-high-threshold=75" in server
-    assert server == agent
+def test_every_node_keeps_the_image_and_log_limits() -> None:
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    assert {"image-gc-high-threshold=75", "container-log-max-size=10Mi"} <= set(defaults["k3s_kubelet_args"])
 
 
 def test_server_gains_a_distinct_agent_token_only_when_set() -> None:
@@ -1027,6 +1015,63 @@ def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Pa
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _local_volume(cell: str, node: str, phase: str) -> dict:
+    return {"metadata": {"name": f"pv-{cell}"},
+            "spec": {"csi": {"driver": "topolvm.io", "volumeHandle": f"lv-{cell}"},
+                     "claimRef": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                     "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [
+                         {"key": "topology.topolvm.io/node", "operator": "In", "values": [node]}]}]}}},
+            "status": {"phase": phase}}
+
+
+@pytest.mark.parametrize(("hold_on", "volume_phase", "refusal"), [
+    # An hourly backup on another node's cell no longer blocks the removal...
+    ("shared", "Bound", None),
+    # ...one on a cell whose volume is on the target still does.
+    ("target", "Released", "maintenance is in flight"),
+    # A cell still living on the target refuses it: deleting the Node would
+    # relocate that cell from its last backup.
+    (None, "Bound", "still holds"),
+    # A volume a relocation retained holds no live cell.
+    (None, "Released", None),
+], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "retained-volume-on-target"])
+def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
+    tmp_path: Path, hold_on: str | None, volume_phase: str, refusal: str | None
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+             for name in ("target", "shared")]
+    held = "aaaaaaaaaaaaaaaa"
+    volumes = [_local_volume(held, hold_on or "target", volume_phase)]
+    statefulsets = [] if hold_on is None else [{
+        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": "snapshot-backup"}},
+        "spec": {"replicas": 1, "template": {"spec": {}}},
+    }]
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        "k3s_local_storage_driver": "topolvm.io", "k3s_local_storage_topology_key": "topology.topolvm.io/node",
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
+            "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
+            for n in nodes]},
+        "k3s_remove_statefulsets_doc": {"items": statefulsets},
+        "k3s_remove_pvs_doc": {"items": volumes},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvcs")},
+    }
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])
 def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: Path, cell_id: str, profile: str) -> None:
     if ANSIBLE_PLAYBOOK is None:
@@ -1046,6 +1091,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
         "k3s_server_private_ip": "10.0.0.1", "k3s_agent_join_token": "test-token",
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
         "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
+        "k3s_kubelet_args": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_kubelet_args"],
     }, "tasks": [
         _yaml(K3S_ROLE / "tasks/validate.yml")[0],
         {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),

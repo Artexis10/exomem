@@ -107,7 +107,7 @@ def select_upgrade_candidate(
     if any_cell_already_upgrading or rollout.paused or not rows:
         return None
 
-    owner = min(rows, key=lambda row: (row.rollout_priority, row.cell_id))
+    owner = owner_cell(rows)
     owner_target = target_image(owner, cell_image)
     if owner_target is not None and current_image(owner, observations[owner.cell_id]) != owner_target:
         if should_attempt_upgrade(
@@ -129,6 +129,13 @@ def select_upgrade_candidate(
     return min(eligible, key=lambda row: (row.rollout_priority, row.cell_id)).cell_id
 
 
+def owner_cell(rows: list[CellRow]) -> CellRow:
+    """D6: the owner's cell -- the non-deleted row with the lowest
+    `rollout_priority`. It goes first in a rollout and in a relocation."""
+
+    return min(rows, key=lambda row: (row.rollout_priority, row.cell_id))
+
+
 def parked_canary(
     rows: list[CellRow],
     observations: dict[str, ClusterObservation],
@@ -140,7 +147,7 @@ def parked_canary(
 
     if not rows:
         return None
-    owner = min(rows, key=lambda row: (row.rollout_priority, row.cell_id))
+    owner = owner_cell(rows)
     owner_target = target_image(owner, cell_image)
     if owner.cell_id not in refused or owner_target is None:
         return None

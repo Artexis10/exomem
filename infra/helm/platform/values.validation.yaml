@@ -32,6 +32,9 @@ cellctl:
   initDeadlineMinutes: 10
   databaseEgressCidrs:
     - 10.0.1.5/32
+cellStorage:
+  local:
+    enabled: true
 cloudGateway:
   enabled: true
   image: ghcr.io/substrate-systems/substrate-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

@@ -28,7 +28,6 @@ node-taint:
 {% endif %}
 protect-kernel-defaults: true
 kubelet-arg:
-  - image-gc-high-threshold=75
-  - image-gc-low-threshold=65
-  - container-log-max-size=10Mi
-  - container-log-max-files=3
+{% for argument in k3s_kubelet_args %}
+  - {{ argument | to_json }}
+{% endfor %}
