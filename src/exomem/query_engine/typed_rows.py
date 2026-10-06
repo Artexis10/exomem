@@ -11,7 +11,6 @@ from ..collection_store import index_migrations
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
 from .runtime import _MAX_DECODE_BYTES, QueryError, ReadSession
-from .selected_values import read_selected_values
 
 _SEAL = object()
 _RESPONSE_RESERVE_BYTES = 8 * 1024
@@ -29,6 +28,7 @@ class AdmittedQuery:
     table: str
     index: str
     membership_sql: str
+    layout: object
     uniform: bool
     released_count: int | None
     estimated_visits: int
@@ -173,7 +173,8 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                                (basis.manifest_hash, basis.type_name, basis.type_version, basis.declaration_hash, schema),
                                manifest.schema.version,
                                tuple(f.path for f in query.select.fields) or fields,
-                               table, index, membership, uniform, count, cost, ordinal, _SEAL)
+                               table, index, membership, session.typed_layout(manifest.collection_id),
+                               uniform, count, cost, ordinal, _SEAL)
         session._queries[ordinal] = result
         return result
 
@@ -201,9 +202,9 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
         try:
             admitted.check()
             maximum = min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes)
-            with conn.blobopen("items", "values_json", row_id, readonly=True) as blob:
-                selected = read_selected_values(blob, (name for name in admitted.fields if name != "item_key"),
-                                                max_bytes=maximum, check=admitted.check)
+            selected = session.selected_values(row_id, admitted.layout,
+                                               (name for name in admitted.fields if name != "item_key"),
+                                               max_bytes=maximum, check=admitted.check)
             if "item_key" in admitted.fields:
                 selected["item_key"] = item_key
             if session._project_values is not None:

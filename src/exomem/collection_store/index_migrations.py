@@ -14,7 +14,7 @@ from ..query_engine.indexes import (
     require_index_dependencies,
 )
 from ..query_engine.scalars import ScalarValueError
-from . import query_freshness
+from . import query_freshness, typed_storage
 from .query_indexes import ProjectionPlan, build_projection_plan
 
 _MAX_CELL_BYTES = 256 * 1024
@@ -146,12 +146,19 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
     last = row[2]
     cursor = conn.execute("SELECT row_id,item_key,row_version,"
                           "CASE WHEN length(CAST(values_json AS BLOB))<=? THEN values_json END,"
-                          "length(CAST(values_json AS BLOB)) FROM items "
+                          "length(CAST(values_json AS BLOB)),encoding FROM items "
                           "WHERE collection_id=? AND row_id>? ORDER BY row_id LIMIT ?",
                           (_MAX_CELL_BYTES, collection_id, last, limit))
+    rows = cursor.fetchall()
+    typed = {row["row_id"]: row["values_json"] for row in typed_storage.hydrate(conn, [
+        {"row_id": row[0], "collection_id": collection_id, "encoding": row[5], "values_json": None}
+        for row in rows if row[5] != typed_storage.JSON_V1])}
     total = 0
     try:
-        for row_id, key, version, values, size in cursor:
+        for row_id, key, version, values, size, _ in rows:
+            if row_id in typed:
+                size = len(typed[row_id].encode())
+                values = typed[row_id] if size <= _MAX_CELL_BYTES else None
             if values is None:
                 _failed(conn, plan)
                 return False

@@ -33,7 +33,7 @@ from .. import (
 from .. import structured_collections as collections
 from ..governance.principal import effective_principal
 from ..query_engine.indexes import IndexDeclarationError
-from . import chain, connection, governance, index_migrations, tokens, types, views
+from . import chain, connection, governance, index_migrations, tokens, typed_storage, types, views
 
 BULK_UPSERT_MAX_ROWS = 500
 
@@ -264,11 +264,12 @@ class CollectionWriter:
         return replace(manifest, audit_head=row["audit_head"]), declared
 
     def _item(self, cid: str, key: str) -> dict[str, Any] | None:
-        return _row(
+        row = _row(
             self.connection.execute(
                 "SELECT * FROM items WHERE collection_id = ? AND item_key = ?", (cid, key)
             )
         )
+        return None if row is None else typed_storage.hydrate(self.connection, [row])[0]
 
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
@@ -338,7 +339,7 @@ class CollectionWriter:
                 "SELECT * FROM items WHERE collection_id=? ORDER BY view_path", (manifest.collection_id,),
             )
             names = [column[0] for column in cursor.description]
-            items = [dict(zip(names, item, strict=True)) for item in cursor]
+            items = typed_storage.hydrate(self.connection, [dict(zip(names, item, strict=True)) for item in cursor])
             return StoreAdapter(self, manifest, None)._snapshot(manifest, items, self._container(row))
 
     def _allows_item(self, selector, key):
@@ -527,12 +528,13 @@ class CollectionWriter:
 
     def _inspection_record(self, manifest, subject):
         cursor = self.connection.execute(
-            "SELECT collection_id,item_key,row_version,payload_hash,view_path,values_json "
+            "SELECT row_id,encoding,collection_id,item_key,row_version,payload_hash,view_path,values_json "
             "FROM items WHERE collection_id=? AND row_id=?", (manifest.collection_id, subject.row_id),
         )
         item = _row(cursor)
         if item is None:
             governance.OperationAuthorization.refuse()
+        typed_storage.hydrate(self.connection, [item])
         version = collections.SourceVersion(
             manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
             self._version(item),
@@ -999,6 +1001,23 @@ class CollectionWriter:
             self._precommit(manifest)
         return complete
 
+    def migrate_typed_encoding(self, collection, *, limit=128) -> str:
+        """Advance this collection's forward typed-v1 encoding migration by one batch.
+
+        Internal maintenance under the writer lease and current authority, not
+        a public route. Logical values, hashes, generations and audit are
+        unchanged; the JSON encoding stays authoritative until the proved
+        cutover commits. Returns ``building``, ``ready`` or ``failed``.
+        """
+        with self._mutation():
+            _, manifest, _ = self._collection(collection)
+            state = typed_storage.migrate_batch(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                manifest.collection_id, tuple(manifest.schema.fields), limit=limit,
+            )
+            self._precommit(manifest)
+        return state
+
     def _manifest(
         self, manifest: collections.CollectionManifest, text: str, version: int, txn_id: int
     ):
@@ -1159,13 +1178,7 @@ class CollectionWriter:
                 planning._require_same_area_side(before, values)
         values = records._validate_values(manifest, values)
         if declared.validators and validate_graph:
-            plans = {
-                k: json.loads(v)
-                for k, v in self.connection.execute(
-                    "SELECT item_key, values_json FROM items WHERE collection_id = ?",
-                    (manifest.collection_id,),
-                )
-            }
+            plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
             plans[key] = values
             for name in declared.validators:
                 types.named_validator(name).validate(manifest, plans)
@@ -1336,22 +1349,27 @@ class CollectionWriter:
             (manifest.collection_id,),
         ).fetchone()[0]
         metadata = governance.row_metadata(manifest.schema, values, manifest_metadata)
+        # The collection is the one encoding authority; json-v1 keeps canonical
+        # JSON, typed-v1 keeps ordinal typed columns and no JSON copy.
+        encoding = typed_storage.collection_encoding(self.connection, manifest.collection_id)
+        stored = _json(values) if encoding == typed_storage.JSON_V1 else None
         if before is None:
             cursor = self._execute(
-                "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn,governance_json,encoding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     manifest.collection_id,
                     key,
                     natural_key,
                     version,
                     manifest.schema.version,
-                    _json(values),
+                    stored,
                     body,
                     payload,
                     path,
                     txn["txn_id"],
                     txn["txn_id"],
                     metadata,
+                    encoding,
                 ),
             )
             row_id = cursor.lastrowid
@@ -1359,12 +1377,21 @@ class CollectionWriter:
             row_id = before["row_id"]
             self._execute(
                 "UPDATE items SET natural_key = ?, row_version = ?, values_json = ?, body = ?, payload_hash = ?, updated_txn = ?,governance_json=? WHERE row_id = ?",
-                (natural_key, version, _json(values), body, payload, txn["txn_id"], metadata, row_id),
+                (natural_key, version, stored, body, payload, txn["txn_id"], metadata, row_id),
             )
-        self._execute(
-            "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
-            (row_id, version, _json(values), body, payload, txn["txn_id"]),
-        )
+        if encoding == typed_storage.JSON_V1:
+            # The JSON payload mints its json-v1 version_identity in the same statement.
+            self._execute(
+                "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
+                (row_id, version, stored, body, payload, txn["txn_id"]),
+            )
+        else:
+            typed_storage.write_version(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                typed_storage.require_layout(self.connection, manifest.collection_id),
+                row_id=row_id, row_version=version, values=values, body=body, payload_hash=payload,
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version,
+            )
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
                                        previous=json.loads(before["values_json"]) if before else None)
@@ -1413,17 +1440,19 @@ class CollectionWriter:
             else f"{'#' * section['level']} {section['title']}\n"
         )
         order = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
-        blocks = self.connection.execute(
-            f"SELECT item_key, values_json, row_version, payload_hash FROM items WHERE collection_id = ? ORDER BY created_txn {order}, row_id {order}",
+        cursor = self.connection.execute(
+            f"SELECT item_key, values_json, row_version, payload_hash, row_id, collection_id, encoding FROM items WHERE collection_id = ? ORDER BY created_txn {order}, row_id {order}",
             (manifest.collection_id,),
         )
+        names = [column[0] for column in cursor.description]
+        blocks = typed_storage.hydrate(self.connection, [dict(zip(names, row, strict=True)) for row in cursor])
         identity = self._publication.identity
         text = frame + "".join(
             record_formats.render_markdown_log_item(
-                manifest, json.loads(v), k, "\n",
-                view_stamp=views.stamp(identity, version, payload),
+                manifest, json.loads(block["values_json"]), block["item_key"], "\n",
+                view_stamp=views.stamp(identity, block["row_version"], block["payload_hash"]),
             )
-            for k, v, version, payload in blocks
+            for block in blocks
         )
         self._pending(manifest.storage.source, manifest.collection_id, "log", txn["generation_after"], text)
 
@@ -2016,12 +2045,8 @@ class CollectionWriter:
             if declared.kind == "intended":
                 planning.require_planning_profile(proposed)
             plans = {
-                key: self._validate(proposed, declared, key, json.loads(values),
-                                    operation="revise", validate_graph=False)
-                for key, values in self.connection.execute(
-                    "SELECT item_key, values_json FROM items WHERE collection_id = ?",
-                    (current.collection_id,),
-                )
+                key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False)
+                for key, values in typed_storage.collection_values(self.connection, current.collection_id)
             }
             for name in declared.validators:
                 types.named_validator(name).validate(proposed, plans)
