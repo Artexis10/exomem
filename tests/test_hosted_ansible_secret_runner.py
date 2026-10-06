@@ -150,8 +150,17 @@ for path in paths:
     assert path.is_file()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert os.statvfs(path).f_fsid == os.statvfs(os.environ['TEST_TMPFS_ROOT']).f_fsid
+# Ansible's controller-side temp files (copy content, module payloads with
+# their arguments) carry the same secrets, so they must stay on tmpfs too.
+local = pathlib.Path(os.environ['ANSIBLE_LOCAL_TEMP'])
+assert stat.S_IMODE(local.stat().st_mode) == 0o700
+assert os.statvfs(local).f_fsid == os.statvfs(os.environ['TEST_TMPFS_ROOT']).f_fsid
+(local / 'ansible-local-1').mkdir()
+(local / 'ansible-local-1' / 'content').write_text(os.environ['TEST_SENTINEL'])
 pathlib.Path(os.environ['TEST_MARKER']).write_text(
-    json.dumps({'args': sys.argv[1:], 'values': [json.loads(path.read_text()) for path in paths]})
+    json.dumps({'args': sys.argv[1:], 'values': [json.loads(path.read_text()) for path in paths],
+                'local_temp': str(local), 'config': os.environ.get('ANSIBLE_CONFIG'),
+                'inject': os.environ.get('ANSIBLE_INJECT_FACT_VARS')})
 )
 """,
     )
@@ -175,6 +184,7 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
         env={
             **os.environ,
             "ANSIBLE_PLAYBOOK_BIN": str(fake_ansible),
+            "ANSIBLE_INJECT_FACT_VARS": "True",
             "EXOMEM_SECRET_TMPFS_DIR": "/dev/shm",
             "SOPS_BIN": str(fake_sops),
             "TEST_DECRYPTED_PATHS": str(decrypted_paths),
@@ -190,4 +200,58 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     assert "--check" in invocation["args"]
     for path in decrypted_paths.read_text(encoding="utf-8").splitlines():
         assert not Path(path).exists()
+    assert not Path(invocation["local_temp"]).exists()
+    # Run from any directory, the repository's configuration still applies; it
+    # keeps module-returned facts from shadowing inventory variables.
+    assert invocation["config"] == str(ROOT / "infra" / "ansible" / "ansible.cfg")
+    # An operator's environment cannot switch fact injection back on.
+    assert invocation["inject"] is None
     assert stat.S_IMODE(RUNNER.stat().st_mode) & stat.S_IXUSR
+
+
+def _load_active_ansible_vars():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "active_ansible_vars", ROOT / "infra" / "scripts" / "active_ansible_vars.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "selected,expected,refusal",
+    [
+        # Escrowing v2 activates nothing: the selection still says v1.
+        ({"ansible.hosted-node.tang-keys.active": "v1"}, ["tang-keys.v1.sops.json"], None),
+        ({"ansible.hosted-node.tang-keys.active": "v3"}, None, "the selected v3 file is missing"),
+        ({"ansible.hosted-node.tang-key.active": "v1"}, None, "not an Ansible destination"),
+    ],
+)
+def test_active_ansible_vars_follow_the_selection_not_the_newest_file(
+    tmp_path: Path, selected: dict, expected: list | None, refusal: str | None
+) -> None:
+    module = _load_active_ansible_vars()
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(json.dumps({"schema_version": 1, "secrets": {"tang": {"destinations": {
+        "ansible.hosted-node.tang-keys.active": {
+            "kind": "sops_ansible_vars",
+            "target": "infra/secrets/ansible/tang-keys.{version}.sops.json",
+        },
+    }}}}), encoding="utf-8")
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({"schema_version": 1, "destinations": selected}), encoding="utf-8")
+    secrets = tmp_path / "infra" / "secrets" / "ansible"
+    secrets.mkdir(parents=True)
+    for version in ("v1", "v2"):
+        (secrets / f"tang-keys.{version}.sops.json").write_text("{}", encoding="utf-8")
+
+    if refusal is None:
+        assert module.active_files("hosted-node", matrix, selection, tmp_path) == [
+            secrets / name for name in expected
+        ]
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            module.active_files("hosted-node", matrix, selection, tmp_path)

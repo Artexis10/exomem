@@ -1,0 +1,101 @@
+---
+# Stored-data guard: the array is built only on named disks that are blank,
+# or that the inventory named for wiping and nothing holds or mounts. A disk
+# that already belongs to this array is assembled, never rebuilt.
+- name: Require each named data disk to be a block device
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: true
+    get_checksum: false
+  loop: "{{ dedicated_host_data_disks }}"
+  register: dedicated_host_disk_stat
+  failed_when: not (dedicated_host_disk_stat.stat.exists and dedicated_host_disk_stat.stat.isblk)
+
+- name: Probe each named data disk for signatures
+  ansible.builtin.command:
+    argv: [/usr/sbin/blkid, --probe, --output, export, "{{ item }}"]
+  loop: "{{ dedicated_host_data_disks }}"
+  register: dedicated_host_disk_blkid
+  changed_when: false
+  failed_when: dedicated_host_disk_blkid.rc not in [0, 2]
+
+- name: List what holds or mounts each named data disk
+  ansible.builtin.command:
+    argv: [/usr/bin/lsblk, --json, --paths, --output, "NAME,PKNAME,TYPE,MOUNTPOINTS", "{{ item }}"]
+  loop: "{{ dedicated_host_data_disks }}"
+  register: dedicated_host_disk_lsblk
+  changed_when: false
+
+# Two partitions of one disk, or one disk under two names, mirror nothing.
+- name: Require the two data devices to sit on different physical disks
+  ansible.builtin.assert:
+    that: dedicated_host_physical_disks | unique | length == 2
+    fail_msg: "{{ dedicated_host_data_disks | join(' and ') }} are on the same physical disk; nothing was changed."
+  vars:
+    dedicated_host_physical_disks: >-
+      {%- set found = [] -%}
+      {%- for result in dedicated_host_disk_lsblk.results -%}
+        {%- set node = (result.stdout | from_json).blockdevices[0] -%}
+        {%- set _ = found.append(node.pkname or node.name) -%}
+      {%- endfor -%}
+      {{ found }}
+
+- name: Decide which named data disks the array may use
+  ansible.builtin.set_fact:
+    dedicated_host_disk_verdicts: >-
+      {%- set probes = [] -%}
+      {%- for blkid, lsblk in dedicated_host_disk_blkid.results | zip(dedicated_host_disk_lsblk.results) -%}
+        {%- set _ = probes.append({'device': blkid.item, 'blkid': blkid.stdout, 'lsblk': lsblk.stdout}) -%}
+      {%- endfor -%}
+      {{ probes | dedicated_disk_verdicts(dedicated_host_wipe_disks, dedicated_host_md_name) }}
+
+- name: Refuse a data disk that is in use or holds data nobody named for wiping
+  ansible.builtin.assert:
+    that: dedicated_host_disk_verdicts | selectattr('verdict', 'equalto', 'refuse') | list | length == 0
+    fail_msg: >-
+      Nothing was changed. {% for disk in dedicated_host_disk_verdicts if disk.verdict == 'refuse' %}{{ disk.device }}
+      {{ disk.reason }}. {% endfor %}
+
+- name: Count the named data disks that already belong to the array
+  ansible.builtin.set_fact:
+    dedicated_host_disks_ours: >-
+      {{ dedicated_host_disk_verdicts | selectattr('verdict', 'equalto', 'ours') | list | length }}
+
+- name: Refuse to rebuild a partial array
+  ansible.builtin.assert:
+    that: dedicated_host_disks_ours | int in [0, 2]
+    fail_msg: >-
+      Only one named data disk belongs to {{ dedicated_host_md_name }}; repair the
+      array by hand (docs/runbooks/hosted/dedicated-host.md) instead of rebuilding it.
+
+- name: Assemble the existing array
+  ansible.builtin.command:
+    argv: "{{ ['/usr/sbin/mdadm', '--assemble', dedicated_host_md_device] + dedicated_host_data_disks }}"
+  when: dedicated_host_disks_ours | int == 2
+  changed_when: true
+
+- name: Erase the signatures the inventory named for wiping
+  ansible.builtin.command:
+    argv: [/usr/sbin/wipefs, --all, "{{ item.device }}"]
+  loop: "{{ dedicated_host_disk_verdicts | selectattr('verdict', 'equalto', 'wipe') | list }}"
+  loop_control:
+    label: "{{ item.device }}"
+  changed_when: true
+
+# No --run: if mdadm still finds something on a disk, it asks, reads no
+# answer, and aborts.
+- name: Create the RAID1 array
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/sbin/mdadm', '--create', dedicated_host_md_device, '--level=1', '--raid-devices=2',
+          '--metadata=1.2', '--name=' ~ dedicated_host_md_name] + dedicated_host_data_disks }}
+  when: dedicated_host_disks_ours | int == 0
+  changed_when: true
+
+# A new array exposes whatever the disks held at its data offset; it holds
+# nothing yet, so clear any stale header before the encryption check reads it.
+- name: Clear stale signatures inside the new array
+  ansible.builtin.command:
+    argv: [/usr/sbin/wipefs, --all, "{{ dedicated_host_md_device }}"]
+  when: dedicated_host_disks_ours | int == 0
+  changed_when: true
