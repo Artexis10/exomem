@@ -769,18 +769,20 @@ async def check_node_loss(drill: Drill, record: StepRecord) -> None:
 
 async def check_empty_vault_guard(drill: Drill, record: StepRecord) -> None:
     """4.2: a backed-up cell started on an empty claim refuses to create a
-    vault, stays not ready, and reports why on its row. The empty claim comes
-    from a re-adoption gone wrong: the claim retired and the identity
-    released, but no PV made for the real volume."""
+    vault, stays not ready, and reports why on its row. Its own volume comes
+    back empty while it is stopped, as a disk replaced under a surviving
+    LogicalVolume would: same claim, same volume ID, so the row still records
+    it and the runbook can relocate the cell (4.3)."""
 
     x = drill.cells["x"]
+    agent_b = drill.cluster.agents["drill-agent-b"]
     row = await drill.row(x)
+    volume = drill.claim_volume(x)
+    if row.get("volume_id") != volume["volume_id"] or volume["node"] != agent_b.name:
+        raise StepFailure(f"cell X's row records volume {row.get('volume_id')}, its claim is on {volume}")
     drill.pause_cellctl()
     drill.stop_cell(x)
-    retained = drill.retire_claim(x)
-    status = await drill.sql(RELEASE_IDENTITY_SQL, x.cell_id, row["volume_id"])
-    if status != "UPDATE 1":
-        raise StepFailure(f"releasing cell X's identity reported {status}")
+    drill_cluster.recreate_empty(agent_b, volume["volume_id"], drill_cluster.thin_volumes(agent_b)[volume["volume_id"]])
     drill.resume_cellctl()
     refused = await drill.wait_row(x, lambda r: r.get("last_error_code") == EMPTY_VOLUME_REFUSED, timeout=600,
                                    description="cell X's row to report the empty-volume refusal")
@@ -798,12 +800,14 @@ async def check_empty_vault_guard(drill: Drill, record: StepRecord) -> None:
         "row": row_summary(refused),
         "cell_init": {"message": terminated.get("message"), "exit_code": terminated.get("exitCode"),
                       "restarts": init.get("restartCount"), "waiting": (init.get("state") or {}).get("waiting", {}).get("reason")},
-        "empty_volume": drill.claim_volume(x),
-        "retained_volume": retained,
+        "volume_before": volume,
+        "volume_after": drill.claim_volume(x),
         "ready_in_the_minute_after": any(ready_seen),
     })
     if any(ready_seen):
         raise StepFailure("the cell read ready on an empty volume after its refusal")
+    if record.evidence["volume_after"]["volume_id"] != volume["volume_id"]:
+        raise StepFailure("the cell refused on a different volume from its own")
     if terminated.get("message") != EMPTY_VOLUME_REFUSED:
         raise StepFailure(f"cell-init's termination message is {terminated.get('message')!r}")
 
@@ -817,6 +821,9 @@ async def check_interrupted_restore(drill: Drill, record: StepRecord) -> None:
     x = drill.cells["x"]
     agent_b = drill.cluster.agents["drill-agent-b"]
     row = await drill.row(x)
+    if row.get("volume_id") is None:
+        # cellctl relocates only a recorded volume; the mark would name none.
+        raise StepFailure("cell X's row records no volume to mark lost")
     drill.pause_cellctl()
     drill.stop_cell(x)
     drill.retire_claim(x)

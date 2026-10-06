@@ -239,6 +239,16 @@ def thin_volumes(agent: Agent) -> dict[str, int]:
     return {row["lv_name"]: int(row["lv_size"]) for row in rows if row.get("pool_lv") == POOL and row["lv_attr"].startswith("V")}
 
 
+def recreate_empty(agent: Agent, name: str, size: int) -> None:
+    """Replace a thin volume with an empty one of the same name and size, as a
+    disk replaced under a surviving LogicalVolume would leave it. The node
+    unmounts the volume shortly after its pod stops, so removal is retried."""
+
+    wait_for(lambda: agent_shell(agent, f'lvremove --yes "{VOLUME_GROUP}/{name}"'), timeout=120, interval=3,
+             description=f"the node to release volume {name} for removal")
+    agent_shell(agent, f'lvcreate --yes --thin --virtualsize {size}b --name "{name}" "{VOLUME_GROUP}/{POOL}"')
+
+
 def destroy_agent(cluster: Cluster, agent: Agent) -> None:
     """The node and its disk are gone: the container and its volumes are
     removed, then its volume group is deactivated (the kernel would
