@@ -424,6 +424,19 @@ def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
     return tuple(out)
 
 
+def served_chars(section: str, entry: Mapping[str, Any]) -> int:
+    """What one served `units`, `pointers` or `current_state` entry costs the
+    budget outside conversation inference: its prose, nothing else. The egress
+    guard refunds exactly this for an entry it removes."""
+    if section == "units":
+        return len(str(entry.get("text") or ""))
+    if section == "pointers":
+        return len(str(entry.get("title") or "")) + len(str(entry.get("why") or ""))
+    if section == "current_state":
+        return len(str(entry.get("statement") or ""))
+    raise ValueError(f"no budget charge for section {section!r}")
+
+
 def build_packet(
     *,
     items: Sequence[LaneItem],
@@ -548,7 +561,7 @@ def build_packet(
         pointer = _pointer(item, reason)
         cost = (
             working_set_conversation.prose_chars(pointer, role_ids=role_ids)
-            if conversation_inferred else len(pointer["title"]) + len(pointer["why"])
+            if conversation_inferred else served_chars("pointers", pointer)
         )
         if used + cost > material_limit or item.promoted and promoted_used + cost > promoted_share:
             starved.setdefault(item.role, None)
@@ -591,7 +604,7 @@ def build_packet(
                 entry.pop(key, None)
             cost = (
                 working_set_conversation.prose_chars(entry, role_ids=role_ids)
-                if conversation_inferred else len(statement)
+                if conversation_inferred else served_chars("current_state", entry)
             )
             if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
                 continue
@@ -631,7 +644,7 @@ def build_packet(
             }
             cost = (
                 working_set_conversation.prose_chars(unit, role_ids=role_ids)
-                if conversation_inferred else len(text)
+                if conversation_inferred else served_chars("units", unit)
             )
             role_count = per_role.get(item.role, 0)
             # No class is exempt: a standing unit takes one of its role's slots.

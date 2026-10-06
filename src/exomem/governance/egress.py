@@ -3065,6 +3065,7 @@ def guard_working_set(
         else:
             guarded["units"].append(unit)
     _note_removal("units", len(original_units), len(guarded["units"]))
+    _charge_back_removed(guarded, "units", original_units, guarded["units"])
     # An anchor listed because a carried page's unit named it (`carried_link`)
     # goes whenever that page loses any unit here: the removed unit may be the
     # one that named it, and the caller must not learn that it existed.
@@ -3092,6 +3093,7 @@ def guard_working_set(
             ]
             if section in ("pointers", "current_state"):
                 _note_removal(section, len(values), len(kept))
+                _charge_back_removed(guarded, section, values, kept)
             guarded[section] = kept
 
     # Appended AFTER the `missing` filter runs, never before: `missing[]` entries
@@ -3801,6 +3803,33 @@ def _charge_back_removed_recent(
 ) -> None:
     """Subtract the removed recent entries' characters from `used_chars`."""
     removed = sum(map(_recent_entry_chars, before)) - sum(map(_recent_entry_chars, after))
+    if removed <= 0:
+        return
+    budget = guarded.get("budget")
+    if isinstance(budget, Mapping):
+        used = budget.get("used_chars")
+        if isinstance(used, int):
+            guarded["budget"] = {**dict(budget), "used_chars": max(0, used - removed)}
+
+
+def _charge_back_removed(
+    guarded: dict[str, Any],
+    section: str,
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+) -> None:
+    """Subtract what the removed `section` entries were charged from `used_chars`.
+
+    The compiler charged each served unit, pointer and state entry against the
+    budget (`working_set.served_chars`), so leaving the charge in place after
+    removing one would tell the caller how long the withheld entry was. A
+    conversation-inferred packet recounts its whole budget at the end instead.
+    """
+    from .. import working_set
+
+    removed = sum(working_set.served_chars(section, entry) for entry in before) - sum(
+        working_set.served_chars(section, entry) for entry in after
+    )
     if removed <= 0:
         return
     budget = guarded.get("budget")
