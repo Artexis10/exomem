@@ -13,6 +13,11 @@ concurrency:
   # New pushes supersede PR feedback, but main/release evidence must finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # The store-blind release the collection-store gate runs as an actual older
+  # interpreter (tests/test_collection_store_s1_gate.py fails without it).
+  EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
+
 jobs:
   # The PR suite runs as two independently sharded tiers so each job stays
   # under ~6 minutes of predicted execution while total PR job count stays
@@ -78,6 +83,12 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
+      - name: Install the pinned older reader for the collection-store gate
+        timeout-minutes: 5
+        run: |
+          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env:
           # The suite runs without the embeddings/media extras; these mirror the
