@@ -6228,11 +6228,12 @@ class ReaderView:
     """A restricted caller's view of the vault, for the working-set compiler.
 
     Called with a path, it answers `visible_page_filter`. `units` answers, for
-    a batch of would-be packet units, which ones `guard_working_set` keeps for
-    this caller. The compiler asks both before it chooses lenses, slots,
-    pointers or abstention, so a unit the guard would remove is absent from the
-    compile, as in a vault without it. The served packet still crosses the
-    guard.
+    a batch of would-be packet units, which ones the compile may use. The
+    compiler asks both before it chooses lenses, slots, pointers or abstention,
+    so a unit `guard_working_set` would remove silently (L0) is absent from the
+    compile, as in a vault without it. A unit whose removal the guard reports
+    (`missing[] {role: "units", reason: "withheld"}`, a notice level) stays in
+    the compile, and the guard removes and reports it from the served packet.
     """
 
     def __init__(
@@ -6252,16 +6253,33 @@ class ReaderView:
         return self._pages(rel_path)
 
     def units(self, units: Sequence[Mapping[str, Any]]) -> list[bool]:
-        """Whether the guard keeps each unit, by its `ref` and `text`.
+        """For each unit, by its `ref` and `text`: False when the guard would
+        remove it without a marker, True otherwise.
 
         Decided without receipts (`record=False`): nothing is disclosed here.
+        A removal the guard marks is decided again for that unit alone, because
+        the guard marks a section when anything in the packet was noticed.
         """
         if not units:
             return []
+        guarded = self._guarded(units)
+        if guarded is None:
+            return [False] * len(units)
+        kept = {(unit.get("ref"), unit.get("text")) for unit in guarded.get("units") or ()}
+        verdicts = [(unit.get("ref"), unit.get("text")) in kept for unit in units]
+        if not _marks_withheld_units(guarded):
+            return verdicts
+        for index, unit in enumerate(units):
+            if not verdicts[index]:
+                alone = self._guarded((unit,))
+                verdicts[index] = alone is not None and _marks_withheld_units(alone)
+        return verdicts
+
+    def _guarded(self, units: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         try:
-            guarded = guard_working_set(
+            return guard_working_set(
                 self._root,
-                {"units": [dict(unit) for unit in units]},
+                {"units": [dict(unit) for unit in units], "missing": []},
                 AnnotatedHits(hits=[]),
                 principal=self._principal,
                 purpose=self._purpose,
@@ -6269,10 +6287,11 @@ class ReaderView:
             )
         except Exception as error:  # noqa: BLE001 - the compiler abstains on it
             raise ReaderViewUnavailable("the release plane could not decide a unit") from error
-        if guarded is None:
-            return [False] * len(units)
-        kept = {(unit.get("ref"), unit.get("text")) for unit in guarded.get("units") or ()}
-        return [(unit.get("ref"), unit.get("text")) in kept for unit in units]
+
+
+def _marks_withheld_units(guarded: Mapping[str, Any]) -> bool:
+    """Did the guard report that the `units` section lost something?"""
+    return {"role": "units", "reason": "withheld"} in (guarded.get("missing") or ())
 
 
 def reader_view(
