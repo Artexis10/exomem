@@ -24,6 +24,9 @@ from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
 
+# The cell resources a chart that sets none gets; manifests.py owns the values.
+DEFAULT_RESOURCES = ResourceSettings()
+
 
 def _versioned_keys_env(name: str) -> dict[int, bytes]:
     """`name` holds JSON: {"1": "<base64>", "2": "<base64>", ...}."""
@@ -138,10 +141,10 @@ def build_cluster_config() -> ClusterConfig:
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
         resources=ResourceSettings(
-            cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", "250m"),
-            cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", "2"),
-            memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", "1Gi"),
-            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi"),
+            cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
+            cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
+            memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
+            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
         ),
         model_env=model_env,
         dedicated_cell_ids=tuple(dedicated_cell_ids),

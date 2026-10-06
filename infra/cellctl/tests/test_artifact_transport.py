@@ -9,7 +9,7 @@ import asyncpg
 import pytest
 
 from cellctl import main, reconcile
-from cellctl.manifests import render_network_policies, render_statefulset
+from cellctl.manifests import ResourceSettings, render_network_policies, render_statefulset
 from cellctl.state import CellRow
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
@@ -82,10 +82,12 @@ def test_selected_runtime_gets_only_the_broker_endpoint_and_network_edge() -> No
 def test_unselected_cells_keep_the_legacy_digest_when_transport_is_configured() -> None:
     row = CellRow(cell_id=CELL_ID, tenant_id=tenant_uuid("a"), storage_gib=10,
                   rollout_priority=1, desired_state="running", desired_image=None, generation=1)
-    baseline = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    # Production's live chart values still set the resources this digest was captured with.
+    captured = dataclasses.replace(_cluster_config(), resources=ResourceSettings(cpu_request="250m", memory_request="1Gi"))
+    baseline = reconcile._compute_render_digest(row, captured, _secrets_config())
     # This already-converged cell's digest predates optional transport inputs.
     assert baseline == "1987383291acb5cf023ae2f9e7f8af665ef2050121ec61a0cf4eac45f6ec8de8"
-    configured = dataclasses.replace(_cluster_config(), artifact_broker_url=BROKER_URL,
+    configured = dataclasses.replace(captured, artifact_broker_url=BROKER_URL,
                                     artifact_broker_cell_ids=("bbbbbbbbbbbbbbbb",))
     assert reconcile._compute_render_digest(row, configured, _secrets_config()) == baseline
     selected = dataclasses.replace(configured, artifact_broker_cell_ids=(CELL_ID,))

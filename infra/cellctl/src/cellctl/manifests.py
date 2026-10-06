@@ -93,9 +93,9 @@ def check_artifact_broker_url(endpoint: str) -> None:
 
 @dataclass(frozen=True)
 class ResourceSettings:
-    cpu_request: str = "250m"
+    cpu_request: str = "125m"
     cpu_limit: str = "2"
-    memory_request: str = "1Gi"
+    memory_request: str = "512Mi"
     memory_limit: str = "3Gi"
 
 
