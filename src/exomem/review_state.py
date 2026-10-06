@@ -1254,17 +1254,6 @@ def _cached_stamps(
     return cached
 
 
-def first_surfaced_map(payload: dict[str, Any] | None) -> dict[str, str]:
-    ledger = (payload or {}).get("surfaced") or {}
-    if not isinstance(ledger, dict):
-        return {}
-    return {
-        str(key): str(row["first_surfaced_at"])
-        for key, row in ledger.items()
-        if isinstance(row, dict) and row.get("first_surfaced_at")
-    }
-
-
 def surfaced_family(
     payload: dict[str, Any] | None, review_id: str, signal_fingerprint: str
 ) -> str | None:

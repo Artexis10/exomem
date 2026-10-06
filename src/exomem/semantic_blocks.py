@@ -202,12 +202,6 @@ class SemanticBlockDocument:
     def is_valid(self) -> bool:
         return not self.errors
 
-    def blocks_by_type(self, block_type: str) -> list[SemanticBlock]:
-        normalized = normalize_block_type(block_type)
-        if normalized is None:
-            return []
-        return [block for block in self.blocks if block.type == normalized]
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "blocks": [block.to_dict() for block in self.blocks],
@@ -218,6 +212,11 @@ class SemanticBlockDocument:
 
 def normalize_label(label: str) -> str:
     """Normalize user-visible heading/relation labels to schema keys."""
+    # The stored-key form: graph block anchors and semantic-unit metadata keys
+    # are built with it. Unifying it with semantic_language_registry's
+    # NFKC+casefold form re-keys labels such as "Straße" or full-width headings,
+    # so it needs epistemic_graph.SCHEMA_VERSION and semantic_index.PARSER_VERSION
+    # bumped on a release that already rebuilds.
     normalized = (label or "").strip().lower().rstrip(":").strip()
     normalized = _NORMALIZE_RE.sub("_", normalized)
     normalized = re.sub(r"_+", "_", normalized)

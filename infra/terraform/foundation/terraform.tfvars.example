@@ -5,5 +5,8 @@ cloudflare_zone_id    = "opaque-zone-id"
 control_hostname      = "control.example.com"
 transfer_hostname     = "transfer.example.com"
 database_hostname     = "db.example.com"
-admin_ssh_cidrs       = ["192.0.2.10/32"]
+# Administration runs over the company NetBird, so public SSH stays closed.
+# Break-glass only: set a CIDR for a temporary window, apply, then revert to []
+# and apply again. The Hetzner console and rescue system need neither.
+admin_ssh_cidrs       = []
 ssh_public_key        = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnlyReplaceMe operator"

@@ -1061,14 +1061,6 @@ def _released_paths(vault_root: Path, candidates: list[Path]) -> set[Path]:
     }
 
 
-def _find_by_key(
-    vault_root: Path, key: str, *, released_only: bool = True
-) -> tuple[WorkflowContract, Path, str] | None:
-    contracts, _findings, _limited = _scan(vault_root, released_only=released_only)
-    matches = [item for item in contracts if item[0].key == key]
-    return matches[0] if len(matches) == 1 else None
-
-
 def _frontmatter(source: str) -> dict[str, Any]:
     if not source.startswith("---\n"):
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "frontmatter missing")

@@ -243,6 +243,27 @@ def test_the_body_survives_a_correction_byte_identically(
     assert _body(vault, result.new_path) == before
 
 
+def test_a_crlf_source_is_corrected_and_keeps_its_line_endings(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    captured = _capture(vault, source_schema, title="Airfare notes", domain="travel")
+    page = vault / captured.path
+    page.write_bytes(page.read_bytes().replace(b"\n", b"\r\n"))
+
+    result = rc.reclassify(
+        vault, path=captured.path, source_kind="research-report",
+        reason="a written investigation", today=TODAY,
+    )
+
+    raw = (vault / result.new_path).read_bytes()
+    assert b"\n" not in raw.replace(b"\r\n", b"")
+    from exomem.vault import parse_frontmatter
+
+    front, _, _ = parse_frontmatter(raw.decode("utf-8"))
+    assert front["source_type"] == "research-report"
+    assert front["reclassified_reason"] == "a written investigation"
+
+
 def test_identity_and_provenance_survive_a_correction(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:

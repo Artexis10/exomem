@@ -571,20 +571,6 @@ def extension_key_for_label(label: str, namespace: str = "vault") -> str:
     return f"{namespace}.{_extension_label(normalize_relation(label))}"
 
 
-def available_extension_key(
-    registry: RelationRegistry, label: str, namespace: str = "vault"
-) -> str:
-    """Return the first deterministic namespaced key not occupied in this registry."""
-    base = extension_key_for_label(label, namespace)
-    occupied = registry.keys | frozenset(registry.aliases)
-    if base not in occupied:
-        return base
-    suffix = 2
-    while f"{base}_{suffix}" in occupied:
-        suffix += 1
-    return f"{base}_{suffix}"
-
-
 def _extension_label(label: str) -> str:
     return label.replace(".", "_")
 
