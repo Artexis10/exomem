@@ -140,10 +140,12 @@ print('offline load verified', MODEL_NAME, v.shape)"
 # with: bge-m3's pinned int8 artefact and its tokenizer, the model a personal
 # server runs. Fetched into the same model root through the same backend, then
 # loaded once more with the network closed, as `builder-hosted` does for the
-# English model. Only the cloud stage copies it.
+# English model. It fetches into a root of its own, so the cloud stage copies
+# bge-m3 alone: every cloud cell has cut over, and none loads the English model.
 ########################################################################
 FROM builder-hosted AS builder-cloud-model
-ENV EXOMEM_RECALL_MODEL=BAAI/bge-m3
+ENV HF_HOME=/opt/exomem-cloud-models \
+    EXOMEM_RECALL_MODEL=BAAI/bge-m3
 # The pinned multilingual export may need int8 quantization. ONNX's graph
 # builder stays in this build stage; the cloud runtime copies only its models.
 RUN uv pip install --python /app/.venv/bin/python "onnx>=1.17" \
@@ -241,8 +243,10 @@ ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
 
 ########################################################################
-# Final: hosted (target `hosted`). The platform mounts only the bound
-# vault/state/log roots plus native Secret/operator projections. Kubernetes
+# cell-runtime, and final: hosted (target `hosted`). `cell-runtime` is what
+# the hosted and cloud images share; each adds its own model. The platform
+# mounts only the bound vault/state/log roots plus native Secret/operator
+# projections. Kubernetes
 # supplies readOnlyRootFilesystem; this image supplies the matching fixed
 # runtime identity and avoids bytecode writes to the image layer.
 #
@@ -258,9 +262,8 @@ CMD ["--transport", "http", "--port", "8765"]
 # OS; the runtime also calls malloc_trim(0) after model reaps and derived
 # drain batches. The cloud stage inherits both.
 ########################################################################
-FROM python:3.12-slim AS hosted
+FROM python:3.12-slim AS cell-runtime
 COPY --from=builder-hosted /app/.venv /app/.venv
-COPY --from=builder-hosted /opt/exomem-models /opt/exomem-models
 COPY LICENSE /LICENSE
 
 ARG EXOMEM_RELEASE_BUILD_TIME
@@ -270,38 +273,43 @@ RUN test -n "$EXOMEM_RELEASE_BUILD_TIME" \
 
 ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_HOST=0.0.0.0 \
-    EXOMEM_CONTAINER_VARIANT=hosted \
     EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME} \
     HF_HOME=/opt/exomem-models \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     EXOMEM_DISABLE_RANKING=1 \
     EXOMEM_EMBED_BACKEND=onnx \
-    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5 \
     MALLOC_ARENA_MAX=2 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
-      org.opencontainers.image.description="exomem — isolated hosted cell runtime (fixed UID/GID, operator CLI, read-only-root compatible)"
 
 USER 10001:10001
 EXPOSE 8765
 ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
 
+# Each cell image adds only the model its cells encode with (see
+# `recall_space.configured_recall_model`): the English one here.
+FROM cell-runtime AS hosted
+COPY --from=builder-hosted /opt/exomem-models /opt/exomem-models
+ENV EXOMEM_CONTAINER_VARIANT=hosted \
+    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5
+
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.description="exomem — isolated hosted cell runtime (fixed UID/GID, operator CLI, read-only-root compatible)"
+
 ########################################################################
 # Final: cloud (target `cloud`). Exomem Cloud cell runtime (design D1/D2/D8).
 #
-# Derived from `hosted`: the same offline ONNX model environment,
-# `EXOMEM_DISABLE_RANKING`, pre-baked embedding weights and read-only-root
-# compatibility carry over unchanged. Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
+# Derived from `cell-runtime`, as `hosted` is: the same offline ONNX model
+# environment, `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with
+# bge-m3 as its only pre-baked model. Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
 # thin seam over the standalone runtime (D1), so this stage exists to add the
 # identity, backup tooling and command the cell pod needs — not a different
 # Python environment.
 #
-# UID/GID 10001 keeps `hosted`'s numeric identity but gets home `/data/host`
+# UID/GID 10001 keeps `cell-runtime`'s numeric identity but gets home `/data/host`
 # instead of `/nonexistent`: standalone custody resolves under
 # `<home>/.local/state/exomem/standalone-host-control-v1` with no code
 # override (`authorization_custody._standalone_host_control_root`, D2), so the
@@ -314,9 +322,9 @@ CMD ["--transport", "http", "--port", "8765"]
 # touches the volume — init, backup, restore — runs this one digest-pinned
 # image under the ValidatingAdmissionPolicy (D4, D8).
 ########################################################################
-FROM hosted AS cloud
+FROM cell-runtime AS cloud
 COPY --from=restic-fetch /usr/local/bin/restic /usr/local/bin/restic
-COPY --from=builder-cloud-model /opt/exomem-models /opt/exomem-models
+COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models
 
 USER root
 RUN usermod --home /data/host exomem
