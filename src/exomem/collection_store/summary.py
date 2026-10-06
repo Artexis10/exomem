@@ -61,10 +61,10 @@ def publication_outstanding(conn: sqlite3.Connection, collection_id: str) -> boo
                         "AND state<>'current' LIMIT 1", (collection_id,)).fetchone() is not None
 
 
-def mode_change_refused(current: str, requested: str) -> collections.CollectionError:
+def mode_change_refused(current: str, requested: str, *, reason: str | None = None) -> collections.CollectionError:
     return collections.CollectionError(
         MODE_CHANGE_UNSUPPORTED,
-        f"a populated {current} collection cannot change to {requested} in place",
+        reason or f"a populated {current} collection cannot change to {requested} in place",
         {
             "view_mode": current,
             "requested_view_mode": requested,

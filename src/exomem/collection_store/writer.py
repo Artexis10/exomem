@@ -341,8 +341,10 @@ class CollectionWriter:
                     continue
                 if marker is not None:
                     authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid))
-                catalog = self._operation.catalog(cid)
-                if self._operation.decision(catalog[0]).level < 6:
+                head = self._operation.summary_manifest(cid)
+                if head is None:
+                    head = (None, self._operation.decision(self._operation.catalog(cid)[0]))
+                if head[1].level < 6:
                     continue
                 if len(manifests) >= min(max_candidates, max_raw_candidates):
                     raise collections.CollectionError(
@@ -377,6 +379,10 @@ class CollectionWriter:
             except collections.CollectionError:
                 return False
             identity = f"exomem://{declared.item_type}/{manifest.collection_id}/{key}"
+            if manifest.view_mode == summary.SUMMARY:
+                found = governance.subjects(self.connection, manifest.collection_id,
+                                            self._operation.logical_vault_id, identity=identity)
+                return bool(found) and self._operation.decision(found[0]).level >= 6
             return any(subject.basis.identity == identity and self._operation.decision(subject).level >= 6
                        for subject in self._operation.catalog(manifest.collection_id)[1:])
 
@@ -425,14 +431,24 @@ class CollectionWriter:
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
         allowed = selection.released
         basis = selection.inspection_basis
+        release = self._operation.summary_release(manifest.collection_id)
         cached = None
-        if basis is not None:
+        if release is None and basis is not None:
             epoch, profile = basis
             cached = self.handle.release_cache.inspections.inspect(
                 manifest, epoch, profile, allowed,
                 lambda subject: self._inspection_record(manifest, subject),
             )
-        if cached is None:
+        if release is not None:
+            # Counts, guards and view states only: a summary inspection reads no row.
+            versions = (manifest.manifest_version,)
+            inspection = record_formats.CollectionInspection(
+                collection_id=manifest.collection_id, snapshot=release.snapshot, source_versions=versions,
+                source_hashes={version.path: version.hash for version in versions},
+                diagnostics=record_formats.inspection_diagnostics(manifest, release.snapshot),
+                record_count=release.released, presentation=(), observed_values=None,
+            )
+        elif cached is None:
             inspection = self._uncached_inspection(manifest)
         else:
             contributions, observed, presentation = cached
@@ -466,7 +482,11 @@ class CollectionWriter:
         )
         saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
         catalog = selection.catalog
-        complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
+        if release is not None:
+            complete, committed = release.complete, release.released
+        else:
+            complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
+            committed = len(allowed_rows)
         held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
         pending = sum(
             kind == "manifest" or row_id in allowed_rows or (kind in ("log", "summary") and complete)
@@ -501,7 +521,7 @@ class CollectionWriter:
             # Items mode stays wire-identical to file collections; summary names its own bounds.
             payload["contract"]["view_mode"] = manifest.view_mode
             payload["capacity"] = summary.capacity()
-        if manifest.item_presentation or manifest.record_presentation or manifest.item_filename:
+        if release is None and (manifest.item_presentation or manifest.record_presentation or manifest.item_filename):
             payload["presentation"] = record_governance._presentation_inspection(inspection.presentation, manifest)
         if declared.kind == "intended" and facade_profile != "records":
             payload["contract"].pop("plans")
@@ -513,9 +533,10 @@ class CollectionWriter:
         )
         payload.update({
             "legacy": None,
-            "observed_values": dict(inspection.observed_values or {}),
+            # Summary inspection reads no row, so it has no value vocabulary to report.
+            **({} if release is not None else {"observed_values": dict(inspection.observed_values or {})}),
             "coverage": {
-                "committed": len(allowed_rows), "held": len(held), "unreadable": 0,
+                "committed": committed, "held": len(held), "unreadable": 0,
                 "held_refs": [
                     {"held_id": candidate[0], "held_at": candidate[1],
                      "attempted_action": json.loads(candidate[2]).get("action", "update"),

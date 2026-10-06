@@ -19,9 +19,9 @@ from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 from test_records_bulk_upsert import EVIDENCE, _evidence
 
-from exomem import get_page, mutation_terminal, vault
+from exomem import get_page, mutation_terminal, record_formats, records, vault
 from exomem import structured_collections as collections
-from exomem.collection_store import governance, legacy_import
+from exomem.collection_store import governance, legacy_import, typed_storage
 from exomem.collection_store.reader import StoreAdapter
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.query_engine import legacy, runtime
@@ -323,6 +323,26 @@ def test_populated_file_collection_cannot_migrate_into_summary(tmp_path):
             for item in root.rglob("*") if item.is_file()} == original
 
 
+def test_file_collections_refuse_summary_on_create_and_revise(tmp_path):
+    """A file-authoritative collection accepting view_mode: summary and then still writing one file per row."""
+    root = tmp_path / "vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    (root / "Knowledge Base/log.md").write_text("# Log\n")
+    with pytest.raises(collections.CollectionError, match=MODE_CHANGE) as refused:
+        records.create_collection(root, manifest_path(), summary_text(), why="create", scaffold=True)
+    assert "new collection" in refused.value.details["migration"].lower()
+    assert not (root / manifest_path()).exists()
+    records.create_collection(root, manifest_path(), manifest_text(), why="create", scaffold=True)
+    records.append_record(root, manifest_path(), item={"title": "One"}, why="observe")
+    manifest = collections.load_manifest(root, root / manifest_path())
+    guard = records.lifecycle_guards(manifest, record_formats.load_adapter(root, manifest).read())
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(collections.CollectionError, match=MODE_CHANGE):
+        records.revise_collection(root, manifest.path, manifest_text=summary_text((root / manifest_path()).read_text()),
+                                  why="convert", **guard)
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
 @pytest.mark.parametrize("outstanding", ["none", "held", "offline-edit", "pending-publication"])
 def test_empty_collection_changes_mode_only_without_outstanding_state(store, outstanding):
     """An empty collection refused a guarded mode change, or allowed one over held, unclassified or unpublished state."""
@@ -395,13 +415,25 @@ def test_summary_rows_live_only_in_the_external_store_while_items_stays_default(
                                     (COPY_CID,)).fetchone() == ("items",)
 
 
-def test_summary_store_reads_are_owner_only_before_field_governance(store):
-    """A non-owner reading summary rows before field release exists, or the owner failing on path-less rows."""
+@pytest.mark.parametrize("rule", ["none", "broad-external"])
+def test_summary_store_reads_are_owner_only_before_field_governance(store, rule):
+    """A non-owner reading summary rows, pages, counts or existence before field release exists, even
+    where a configured rule releases the path to them, or the owner failing on path-less rows."""
+    if rule == "broad-external":
+        write_scope(store.root, paths="Records/**")
+        write_rule(store.root, ceiling=6)
     create(store)
     bulk(store, [{"title": "One", "count": 1}, {"title": "Two", "count": 2}])
+    store.reconcile_views()
     with request_scope(_external()):
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.inspect_collection(CID)
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            with store.read_collection(CID) as manifest:
+                StoreAdapter(store, manifest, None)._read(manifest)
+        assert store.discover_collections() == ((), ())
+        with store.read_snapshot():
+            assert not any(store._operation.allows_file(path) for path in (manifest_path(), *pages(store)))
         with runtime.read_session(store.root, store.handle.path) as session:
             with pytest.raises(runtime.QueryError) as refused:
                 session.admit(CID)
@@ -415,3 +447,31 @@ def test_summary_store_reads_are_owner_only_before_field_governance(store):
             plan = legacy.normalize(columns_available=admitted.fields, columns=["title"], sort_by="title")
             result = legacy_sql.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
         assert [row["title"] for row in result["rows"]] == ["One", "Two"]
+
+
+def test_summary_inspection_and_guards_read_no_rows(store, monkeypatch):
+    """A summary inspection or write guard that streams every row subject or decodes rows, so its
+    time and memory grow with the collection instead of staying bounded."""
+    write_scope(store.root, paths="Records/**")
+    write_rule(store.root, ceiling=0)
+    create(store)
+    first = bulk(store, [{"title": f"Row {n}", "count": n} for n in range(40)])
+    streams, decoded = [], []
+    stream, hydrate = governance.iter_subjects, typed_storage.hydrate
+
+    def counted(conn, cid, logical_vault_id, *, identity=None, view_path=None, **options):
+        if identity is None and view_path is None:
+            streams.append(cid)
+        return stream(conn, cid, logical_vault_id, identity=identity, view_path=view_path, **options)
+
+    monkeypatch.setattr(governance, "iter_subjects", counted)
+    monkeypatch.setattr(typed_storage, "hydrate", lambda conn, rows: decoded.extend(rows) or hydrate(conn, rows))
+    described = store.inspect_collection(CID)
+    assert described["coverage"]["committed"] == 40
+    assert described["lifecycle_guards"]["expected_container_hash"] == first["after_container_hash"]
+    assert streams == [] and decoded == []
+    key = store.connection.execute("SELECT item_key FROM items ORDER BY row_id LIMIT 1").fetchone()[0]
+    store.update_record(CID, item_key=key, changes={"count": 41}, why="correct",
+                        expected_container_hash=described["lifecycle_guards"]["expected_container_hash"],
+                        expected_item_version=_item_version(store, key))
+    assert streams == []

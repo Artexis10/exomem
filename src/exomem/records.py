@@ -2355,6 +2355,7 @@ def _validate_revision_manifest(
     if proposed.view_diagnostics:
         diagnostic = proposed.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+    _refuse_file_view_mode(proposed)
     if proposed.semantic_profile != semantic_profile or (
         proposed.collection_id != current.collection_id
         or proposed.semantic_profile != current.semantic_profile
@@ -2676,6 +2677,7 @@ def _preflight_collection_create(
     if manifest.view_diagnostics:
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+    _refuse_file_view_mode(manifest)
     record_formats.validate_storage_contract(manifest)
     source = root / manifest.storage.source
     _assert_portable_absent(root, source)
@@ -3877,6 +3879,18 @@ def _refuse_excluded_authored_names(names: object) -> None:
         return
     field, reason = excluded
     raise collections.CollectionError(vault.EXCLUDED_FIELD_CODE, reason, details={"field": field})
+
+
+def _refuse_file_view_mode(manifest: collections.CollectionManifest) -> None:
+    """A file collection is one view per row; summary rows live only in a NEW store collection."""
+    if manifest.view_mode == "items":
+        return
+    from .collection_store import summary
+
+    raise summary.mode_change_refused(
+        "items", manifest.view_mode,
+        reason=f"a file collection keeps one item view per row and cannot use view_mode: {manifest.view_mode}",
+    )
 
 
 def _refuse_excluded_manifest_fields(
