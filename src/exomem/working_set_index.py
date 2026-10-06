@@ -412,15 +412,17 @@ _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://" + _REFERENCE_CHAR + "*")
 #: name before a slash is a host only with one of these, a `www.` or a port:
 #: `Node.js/React` and `ASP.NET/Core` are prose.
 _HOST_TLDS = "com|org|net|io|dev|ai|app|co|uk|de|eu|info|me|sh|so|gg|xyz"
+#: A filesystem root: `/`, `\`, `~`, a drive letter or an environment variable.
+_PATH_ROOT = r"(?:~|[A-Za-z]:|\$\{\w+\}|\$\w+|%\w+%)?[\\/]"
 #: The start of a reference that names its own place: a URL without a scheme
 #: (`host.tld/...`), an scp-style remote (`user@host:...`), or a path from a
-#: root (`/`, `\`, `~`, a drive letter, or an environment variable).
+#: root (`_PATH_ROOT`).
 _ROOTED = (
     r"(?:www\.(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+(?::\d+)?"
     r"|(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:\d+"
     r"|(?:[A-Za-z0-9-]+\.)+(?:" + _HOST_TLDS + r"))/"
     r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)*:"
-    r"|(?:~|[A-Za-z]:|\$\{\w+\}|\$\w+|%\w+%)?[\\/]"
+    r"|" + _PATH_ROOT
 )
 #: A path relative to the current place, which keeps its final segment.
 _DOT_RELATIVE = r"\.\.?[\\/]"
@@ -432,24 +434,25 @@ _QUOTED = re.compile(
     r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019"
 )
 _SEPARATORS = re.compile(r"[\\/]")
+#: One path segment with no space, separator, quote, bracket or comma in it.
+_SEGMENT = r"""[^\s"'`<>()\[\]{},\\/\u2018\u2019\u201c\u201d]+"""
 #: A slash run with no root: segments up to a final one, which may be empty.
-_SLASH_RUN = re.compile(
-    _STARTS_A_REFERENCE + r"""(?:[^\s"'`<>()\[\]{},\\/\u2018\u2019\u201c\u201d]+[\\/])+"""
-    + _REFERENCE_CHAR
-    + "*"
-)
+_SLASH_RUN = re.compile(_STARTS_A_REFERENCE + r"(?:" + _SEGMENT + r"[\\/])+" + _REFERENCE_CHAR + "*")
+#: What may come before the indexed folder in a path into it: `./`, `../`, or a
+#: root and the folders after it, none with a space (`/srv/vault/`, `C:\vault\`).
+_VAULT_PATH_PREFIX = r"(?:" + _DOT_RELATIVE + r"|" + _PATH_ROOT + r"(?:" + _SEGMENT + r"[\\/])*)"
 _FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
 
 
 @functools.lru_cache(maxsize=4)
 def _vault_path(kb: str) -> re.Pattern[str]:
     """A path into the indexed folder (`kb_dirname`), up to a file name with
-    an extension, read as one reference even with spaces in its segments."""
+    an extension, read as one reference even with spaces in its segments. A
+    root before the folder (`/srv/vault/Knowledge Base/...`) is part of it."""
     return re.compile(
         _STARTS_A_REFERENCE
-        + "(?:"
-        + _DOT_RELATIVE
-        + ")?"
+        + _VAULT_PATH_PREFIX
+        + "?"
         + re.escape(kb)
         + r"""[\\/][^\n"'`<>()\[\]{}\u2018\u2019\u201c\u201d]*?[^.\s\\/]\.[A-Za-z0-9]{1,8}"""
         + r"(?=[" + re.escape(_CLOSERS) + r"]*(?:\s|$))"
@@ -483,8 +486,8 @@ def subject_text(turn: str) -> str:
     whose title is its file name; its directories are removed. A slash run is a
     relative path when it starts `./` or `../` or ends in a file name, so
     `dev/staging/prod` and `and/or` are prose, and `records/Node.js` loses
-    `records`. A path into the indexed folder (`Knowledge Base/...`) is one
-    reference up to its file name, spaces included. So is a quoted or
+    `records`. A path into the indexed folder (`Knowledge Base/...`), rooted or
+    not, is one reference up to its file name, spaces included. So is a quoted or
     backticked span. Any other path with spaces in it is cut at the first
     space: nothing marks where it ends.
 
