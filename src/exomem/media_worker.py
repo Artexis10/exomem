@@ -131,11 +131,22 @@ _SUPERVISE_POLL_SECONDS = 0.5
 #: Neither can starve a job; both are bounded by this interval rather than by
 #: the 0.5s pass.  It is a real net, not a formality: with the signature
 #: defeated, this is the only thing that starts a worker at all.
+#:
+#: This is the floor.  Each idle re-check doubles the next interval up to
+#: `_SUPERVISE_FORCED_RECHECK_MAX_SECONDS`, because the re-check opens the store
+#: through the full SQLite owner path, which a 0.108.0 cloud cell paid every
+#: 5 s for as long as it stayed idle.  Work, a store change or an in-process
+#: enqueue put it back here.
 _SUPERVISE_FORCED_RECHECK_SECONDS = 5.0
+#: The idle back-off's ceiling, and so the longest a write the signature misses
+#: can wait for a worker after a long quiet spell.
+_SUPERVISE_FORCED_RECHECK_MAX_SECONDS = 60.0
 #: SQLite writes land in the WAL and SHM long before the main file is
 #: checkpointed, so a freshness signature that reads only the database file
 #: would miss every enqueue it exists to catch.
 _JOB_STORE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+#: The supervisor's clock; a seam for tests.
+_clock = time.monotonic
 
 
 def _job_store_signature(store: MediaJobStore) -> tuple[object, ...] | None:
@@ -1096,6 +1107,7 @@ class MediaWorker:
         # when to stop trusting it.  `None` means "ask the store".
         idle_signature: tuple[object, ...] | None = None
         forced_recheck_at = 0.0
+        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
         try:
             while not self._stop_event.is_set():
                 child = self._child
@@ -1128,10 +1140,18 @@ class MediaWorker:
                         )
                     else:
                         delay = 0.5
-                    relaunch_after = time.monotonic() + delay
-                if self._child is None and time.monotonic() >= relaunch_after:
-                    now = time.monotonic()
+                    relaunch_after = _clock() + delay
+                    recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                if self._child is None and _clock() >= relaunch_after:
+                    now = _clock()
                     signature = _job_store_signature(self._store)
+                    if (
+                        idle_signature is not None
+                        and signature is not None
+                        and signature != idle_signature
+                    ):
+                        # Someone wrote the store since the last idle answer.
+                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                     settled = (
                         idle_signature is not None
                         and signature is not None
@@ -1140,12 +1160,14 @@ class MediaWorker:
                     )
                     parent_work = not settled and self._store.has_parent_work()
                     if parent_work:
+                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                         self._drain_parent_results()
                     elif not settled and self._store.needs_worker():
                         idle_signature = None
+                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                         refusal = _probe_writer_authority()
                         if refusal is not None:
-                            relaunch_after = time.monotonic() + _authority_recheck_seconds(
+                            relaunch_after = _clock() + _authority_recheck_seconds(
                                 refusal
                             )
                         else:
@@ -1153,7 +1175,7 @@ class MediaWorker:
                                 self._child = self._launch_child()
                             except OSError:
                                 log.exception("media worker: could not start child")
-                                relaunch_after = time.monotonic() + 5.0
+                                relaunch_after = _clock() + 5.0
                     elif not settled:
                         # Nothing to do.  Record the signature AFTER the check,
                         # not the one read before it: `needs_worker()` opens the
@@ -1161,14 +1183,21 @@ class MediaWorker:
                         # before-signature would never match again and the skip
                         # would never engage.
                         idle_signature = _job_store_signature(self._store)
-                        forced_recheck_at = (
-                            time.monotonic() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                        forced_recheck_at = _clock() + recheck_interval
+                        recheck_interval = min(
+                            recheck_interval * 2, _SUPERVISE_FORCED_RECHECK_MAX_SECONDS
                         )
-                self._wake.wait(_SUPERVISE_POLL_SECONDS)
-                # Clearing after the wait can swallow an enqueue that lands in
-                # the gap; the signature check is what makes that survivable,
-                # since the write it announced is still visible on the store.
-                self._wake.clear()
+                if self._wake.wait(_SUPERVISE_POLL_SECONDS):
+                    # Cleared only once it has fired, so a wake that lands
+                    # after a timed-out wait is still seen on the next one. A
+                    # second enqueue between the wait and the clear wrote the
+                    # store before it set the wake, so the next pass sees it.
+                    self._wake.clear()
+                    # An in-process enqueue: ask the store on the next pass
+                    # even if the signature missed its write, rather than
+                    # leave it to a backed-off re-check.
+                    idle_signature = None
+                    recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
         finally:
             child = self._child
             if child is not None and child.poll() is None:
