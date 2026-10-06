@@ -109,8 +109,16 @@ def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
         "cloudIngress": {"enabled": False},
         "cert-manager": {"enabled": False},
     }
-    show_only = ("templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml")
-    return [doc for _, doc in render_chart(stack, values, show_only=show_only)]
+    show_only = (
+        "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
+        "templates/namespaces.yaml",
+    )
+    # cellctl's alert-delivery Role lives in the release namespace; of the
+    # chart's namespaces only that one is needed here.
+    return [
+        doc for source, doc in render_chart(stack, values, show_only=show_only)
+        if source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE
+    ]
 
 
 def render_chart(
