@@ -11,7 +11,7 @@ import json
 import sqlite3
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -979,12 +979,15 @@ class OperationAuthorization:
                 TypeError, KeyError, sqlite3.Error):
             return Decision(0)
 
-    def allows_file(self, path: str, *, content_sha256: str | None = None) -> bool:
+    def allows_file(
+        self, path: str, *, content_sha256: str | Callable[[], str] | None = None
+    ) -> bool:
         """Gate ancillary reads without reopening policy or session authority.
 
         ``content_sha256`` is a caller-proved digest of the file's current bytes
         (a guarded import source); session grants then bind to it without
-        rereading a large file.
+        rereading a large file. A callable proves it only when an active session
+        grant names the path, so a file nothing else releases is refused unread.
         """
         projection = self.projection_decision(path)
         if projection is not None:
@@ -998,8 +1001,15 @@ class OperationAuthorization:
             return all(self.decision(subject).level >= 6 for subject in targets)
         return self._allows_path_metadata(path)
 
-    def _allows_path_metadata(self, path: str, content_sha256: str | None = None) -> bool:
-        key = path if content_sha256 is None else (path, content_sha256)
+    def _allows_path_metadata(
+        self, path: str, content_sha256: str | Callable[[], str] | None = None
+    ) -> bool:
+        # A digest proved on demand belongs to one call, so that decision is not cached.
+        key = (
+            path
+            if content_sha256 is None
+            else (path, content_sha256) if isinstance(content_sha256, str) else None
+        )
         if key in self.file_decisions:
             return self.file_decisions[key].level >= 6
         decision = Decision(0)
@@ -1020,22 +1030,34 @@ class OperationAuthorization:
                     if relative != path:
                         return False
                     fingerprint = hashlib.sha256(vault.read_bytes_without_pinning(page)).hexdigest()
-                current = authority.SessionMembership(path, fingerprint, tuple(sorted(scope_ids)))
-                matched = authority.active_session_grants_for_projection_catalog(
+                scopes = tuple(sorted(scope_ids))
+                current: list[authority.SessionMembership] = []
+
+                def resolve(identity: str) -> authority.SessionMembership | None:
+                    # Called only for paths an active grant names.
+                    if identity != path:
+                        return None
+                    if not current:
+                        digest = fingerprint() if callable(fingerprint) else fingerprint
+                        current.append(authority.SessionMembership(path, digest, scopes))
+                    return current[0]
+
+                matched = authority.active_session_grants_for_projection_resolver(
                     self.authority, context=self.context, audience=self.who.audience_id,
-                    purpose=self.purpose, catalog=(current,), policy_fingerprint=self.policy.fingerprint,
+                    purpose=self.purpose, resolve=resolve, policy_fingerprint=self.policy.fingerprint,
                     now=self.now,
                 )
                 grants.extend(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
                                                   grant.audience, grant.ceiling)
-                              for identity, grant in matched if identity == path and current in grant.membership)
+                              for identity, grant in matched if identity == path and current[0] in grant.membership)
             decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose,
                               policy=self.policy, active_grants=grants)
         except (membership.MembershipUnresolved, vault.VaultPathError, OSError, ValueError,
                 sqlite3.Error, authorization_session_lifecycle.AuthorizationSessionUnavailable):
             pass
         finally:
-            self.file_decisions[key] = decision
+            if key is not None:
+                self.file_decisions[key] = decision
         return decision.level >= 6
 
     @staticmethod

@@ -11542,6 +11542,8 @@ def op_record_memory(
 ) -> dict[str, Any]:
     """Store observed state; Planning uses plan_memory, originals use Sources/Evidence.
 
+    Describe/propose before create.
+
     Args:
         collection: Target collection; omit for describe, inventory, or new manifest validate/create.
         manifest_text: Full manifest for validate/create/revise.

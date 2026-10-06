@@ -275,11 +275,12 @@ def resolve_source(
     """The one gate from a source ref to readable bytes, with their SHA-256 and size.
 
     ``records.resolve_preserved_source`` decides which refs name a preserved
-    Sources/Evidence file; this streams the file's digest under a generation guard,
-    then asks ordinary authorization to release exactly those bytes, so a governed
-    session never makes the reader load a large file whole. Absent, unpreserved,
-    withheld and malformed refs refuse identically; there is no filesystem-path,
-    URL or executable form.
+    Sources/Evidence file; ordinary authorization then releases it. The digest is
+    streamed under a generation guard, so a governed session never makes the
+    reader load a large file whole, and only once a session grant names the file
+    or it is released: a withheld file is refused unread, in the time an absent
+    one takes. Absent, unpreserved, withheld and malformed refs refuse
+    identically; there is no filesystem-path, URL or executable form.
     """
     found: list[tuple[Source, str, int]] = []
 
@@ -291,9 +292,18 @@ def resolve_source(
             expected_generation=vault.stat_generation(os.lstat(path)),
         )
         source = Source(relative, path, guard)
-        sha256, size = _digest(root, source)
-        found.append((source, sha256, size))
-        return operation.allows_file(relative, content_sha256=sha256)
+        proved: list[tuple[str, int]] = []
+
+        def prove() -> str:
+            if not proved:
+                proved.append(_digest(root, source))
+            return proved[0][0]
+
+        if not operation.allows_file(relative, content_sha256=prove):
+            return False
+        prove()
+        found.append((source, *proved[0]))
+        return True
 
     if records.resolve_preserved_source(root, reference, released) is None:
         _source_not_found()
@@ -1471,10 +1481,15 @@ def _transaction(root: Path, writer, work) -> None:
     _mutate(root, import_job_settlement)
 
 
+def _forget(writer, job_id: str) -> None:
+    """Drop a job's host-local proof and store block once it stops running."""
+    _proofs(writer).pop(job_id, None)
+    writer.handle.import_blocked.pop(job_id, None)
+
+
 def _settle(root: Path, writer, job: _Job, state: str, reason: str, error=None) -> str:
     """Pause or fail a running job outside a batch; a failure records its typed error."""
-    if reason == "authority_lost":
-        _proofs(writer).pop(job.id, None)
+    _forget(writer, job.id)
 
     def write():
         progress = {**job.progress, "error": error} if error is not None else job.progress
@@ -1568,6 +1583,8 @@ def _step(root: Path, writer, job_id: str) -> str:
     settled = _load(writer.connection, job.id)
     if settled.state == "running" and settled.checkpoint["batch"] == sequence:
         raise RuntimeError("import batch replay did not settle its checkpoint")
+    if settled.state != "running":
+        _forget(writer, job.id)
     return outcome
 
 
@@ -1790,7 +1807,7 @@ def _cancel(writer, collection: str, request: _Request) -> dict[str, Any]:
                 (_stamp(), job.id),
             )
             job.state, job.reason = "partial", "cancelled"
-            writer.handle.import_blocked.pop(job.id, None)
+            _forget(writer, job.id)
         return _status(writer, job, "cancel")
 
 

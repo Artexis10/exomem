@@ -289,6 +289,20 @@ def test_a_governed_session_previews_and_starts_without_loading_the_source(store
     assert preview["source"]["bytes"] == size and job["state"] == "running"
 
 
+def test_a_withheld_source_is_refused_unread_like_an_absent_one(store, monkeypatch):
+    """Hashing before the release decision lets its timing tell a withheld file from an absent one."""
+    setup(store, b"")
+    _write_export(store.root / SOURCE, 500, "ndjson")
+    session(store, monkeypatch, paths="Evidence/**")
+    who = _session_at(store, NOW, 600)
+    hashed = []
+    monkeypatch.setattr(importer(), "_digest", lambda root, source: hashed.append(source.ref))
+    request = {"mode": "preview", "format": "ndjson", "mapping": MAPPING}
+    withheld = refused(call, store, who, source_ref=SOURCE, **request)
+    absent = refused(call, store, who, source_ref=SOURCE.replace("exercises", "missing"), **request)
+    assert (withheld.code, str(withheld), hashed) == ("IMPORT_SOURCE_NOT_FOUND", str(absent), [])
+
+
 def test_a_stray_csv_quote_rejects_only_its_own_record(store):
     """Framing that toggles on every quote lets one stray quote swallow the records after it."""
     data = (
@@ -1009,6 +1023,8 @@ def test_an_identical_start_replays_a_live_job_and_restarts_a_cancelled_one(stor
     assert fresh["continuation"] != job["continuation"] and "replayed" not in fresh
     run(store)
     assert status(store, fresh)["state"] == "complete"
+    # A long-lived writer would otherwise hold a proof for every job it ever ran.
+    assert store.handle.import_proofs == {}
 
 
 def test_cancel_stops_between_batches_and_cannot_be_resumed(store, monkeypatch):

@@ -468,20 +468,12 @@ def record_memory(
         ) from error
 
 
-# Routing guidance lives here, on demand, so the tool description stays a calling contract.
-_ROUTING = (
-    "resolve one compatible collection before append, bulk_upsert, update or import; if "
-    "none fits, describe and propose a manifest before validate and explicit create"
-)
-
-
 def parse_manifest_contract(*, store_mode: bool = False) -> dict[str, Any]:
     """Project the parser-owned collection contract without vault content."""
     from .structured_collections import manifest_authoring_contract
 
     return {
         **manifest_authoring_contract(),
-        "routing": _ROUTING,
         "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
     }
 
