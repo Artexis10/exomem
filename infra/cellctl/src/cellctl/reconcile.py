@@ -182,11 +182,14 @@ def _describe_error(error: BaseException) -> str:
     frames = traceback.extract_tb(error.__traceback__)
     if frames:
         described += f" at {Path(frames[-1].filename).name}:{frames[-1].lineno} in {frames[-1].name}"
-        # The innermost frame is usually inside the Kubernetes client; the
-        # innermost cellctl frame names the call that failed.
-        own = [frame for frame in frames if Path(frame.filename).parent == _PACKAGE_DIR]
+        # The innermost frame is usually inside the Kubernetes client, and the
+        # innermost cellctl one is its request wrapper; the cellctl frames
+        # around it name the call that failed.
+        own = [frame for frame in frames if Path(frame.filename).parent == _PACKAGE_DIR][-3:]
         if own and own[-1] is not frames[-1]:
-            described += f" via {Path(own[-1].filename).name}:{own[-1].lineno} in {own[-1].name}"
+            described += " via " + " < ".join(
+                f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}" for frame in reversed(own)
+            )
     return described
 
 
