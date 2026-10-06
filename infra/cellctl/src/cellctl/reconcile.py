@@ -1355,12 +1355,22 @@ async def _reconcile_row(
     # ready follows the pod on the update revision both ways, observed_state
     # stays served (so it is still backed up), and nothing is written but
     # ready, and observed_at with it, when it changes.
+    # A served cell is in place while its StatefulSet runs one replica over
+    # its claim. Out of place is more than readiness: the node-loss runbook
+    # stops a cell and retires its claim, and expects cellctl to start it
+    # again, or to report its recorded volume missing, so such a row always
+    # goes through decide().
+    out_of_place = already_served and not (
+        observation.statefulset_exists
+        and observation.statefulset_replicas == 1
+        and (observation.pvc_exists or observation.pvc_bound)
+    )
     readiness_only = (
         nothing_to_start
         and already_served
+        and not out_of_place
         and not refusal_parked
         and not dataclass_replace(row, ready=True).is_dirty()
-        and observation.statefulset_exists
         and observation.statefulset_image == row.observed_image
     )
     if readiness_only:
@@ -1368,7 +1378,8 @@ async def _reconcile_row(
         return await _write_observed(connection, row, changed, now)
     # A parked refused row is not dirty, but it still goes through decide(),
     # which applies nothing while it is parked and observes it this pass.
-    if not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start:
+    if (not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start
+            and not out_of_place):
         # D4 amendment: an observation that finds nothing changed writes only
         # a due observed_at refresh.
         return await _write_observed(connection, row, {}, now)
