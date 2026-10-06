@@ -291,3 +291,111 @@ def test_a_withheld_namesake_does_not_make_a_phrase_a_question(vault: Path) -> N
 
     assert restricted == absent
     assert [a["path"] for a in absent["anchors"]] == [plan]
+
+
+def test_a_withheld_units_category_chooses_no_lens(vault: Path) -> None:
+    """The removed unit is the note's only decision. The lenses that read
+    decisions must not be listed, as in a note without it."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    plain = "- [failure] The staging replica migration stalled twice last week. ^r-plain"
+    hidden = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^r-secret"
+    _write(vault, NOTE, _note("Replica migration stall", f"{plain}\n{hidden}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", plain))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [role["id"] for role in clean["roles"]] == ["material"]
+
+
+def test_a_carried_page_left_with_nothing_abstains_like_its_twin(vault: Path) -> None:
+    """The note's only unit links a withheld page. A note with nothing to serve
+    abstains `unresolved`; the restricted packet must say the same."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = (
+        "- [failure] The staging replica migration stalled near [[Secret cluster]] "
+        "last week. ^r-secret"
+    )
+    _write(vault, NOTE, _note("Replica migration stall", hidden))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", ""))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert clean["abstention"] == {"reason": "unresolved"}
+
+
+def test_a_withheld_unit_takes_no_role_slot(vault: Path) -> None:
+    """The removed unit is served first and fills one of a role's three slots.
+    The fourth decision must be served whole, not pointed at as `role_cap`."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^r-a"
+    kept = "\n".join(
+        f"- [decision] The replica migration retry {number} moved to the staging window. ^r-{ref}"
+        for number, ref in ((1, "b"), (2, "c"), (3, "d"))
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{hidden}\n{kept}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [unit["ref"][-4:] for unit in clean["units"]] == ["#r-b", "#r-c", "#r-d"]
+    assert clean["pointers"] == []
+
+
+def test_a_withheld_unit_takes_no_material_slot(vault: Path) -> None:
+    """The material lane serves three units and reads the first one off this
+    note. With it removed, the next unit takes its slot."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = (
+        "- [failure] The staging replica migration stalled near [[Secret cluster]] "
+        "last week. ^r-a"
+    )
+    kept = "\n".join(
+        f"- [failure] The staging replica migration stalled on attempt {number} last week. ^r-{ref}"
+        for number, ref in ((1, "b"), (2, "c"), (3, "d"), (4, "e"))
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{hidden}\n{kept}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [unit["ref"][-4:] for unit in clean["units"]] == ["#r-b", "#r-c", "#r-d"]
+
+
+def test_a_withheld_unit_past_the_cap_is_not_reported_as_cut(vault: Path) -> None:
+    """The removed unit is never served: it would be the material lane's fourth.
+    Reporting the lane as truncated would say that a fourth unit exists."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    kept = "\n".join(
+        f"- [failure] The staging replica migration stalled on attempt {number} last week. ^r-{ref}"
+        for number, ref in ((1, "a"), (2, "b"), (3, "c"))
+    )
+    hidden = (
+        "- [failure] The staging replica migration stalled near [[Secret cluster]] "
+        "last week. ^r-z"
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{kept}\n{hidden}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert clean["missing"] == []
