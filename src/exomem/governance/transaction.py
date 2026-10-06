@@ -6,12 +6,13 @@ import hashlib
 import json
 import os
 import stat
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .. import durable_write
 
 
 class GovernanceError(RuntimeError):
@@ -183,13 +184,8 @@ def fsync_directory(path: Path, *, expected: os.stat_result | None = None) -> No
 
 def durable_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    durable_write.replace_text(path, text, newline="\n")
     fsync_directory(path.parent)
 
 

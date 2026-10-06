@@ -85,6 +85,10 @@ k3s_vswitch_parent_interface: ""
 # Removal (remove-agent.yml). The headroom mirrors the platform chart's
 # capacity.headroom, so the preflight counts slots exactly as cellctl does.
 k3s_cell_namespace_prefix: exo-cell-
+# TopoLVM's own driver and topology key: a cell's local volume is pinned to
+# one node by its PV's node affinity on this key.
+k3s_local_storage_driver: topolvm.io
+k3s_local_storage_topology_key: topology.topolvm.io/node
 k3s_remove_headroom: 5
 k3s_remove_pod_procs_argv:
   - /usr/bin/find

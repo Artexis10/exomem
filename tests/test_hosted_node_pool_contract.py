@@ -1027,6 +1027,63 @@ def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Pa
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _local_volume(cell: str, node: str, phase: str) -> dict:
+    return {"metadata": {"name": f"pv-{cell}"},
+            "spec": {"csi": {"driver": "topolvm.io", "volumeHandle": f"lv-{cell}"},
+                     "claimRef": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                     "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [
+                         {"key": "topology.topolvm.io/node", "operator": "In", "values": [node]}]}]}}},
+            "status": {"phase": phase}}
+
+
+@pytest.mark.parametrize(("hold_on", "volume_phase", "refusal"), [
+    # An hourly backup on another node's cell no longer blocks the removal...
+    ("shared", "Bound", None),
+    # ...one on a cell whose volume is on the target still does.
+    ("target", "Released", "maintenance is in flight"),
+    # A cell still living on the target refuses it: deleting the Node would
+    # relocate that cell from its last backup.
+    (None, "Bound", "still holds"),
+    # A volume a relocation retained holds no live cell.
+    (None, "Released", None),
+], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "retained-volume-on-target"])
+def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
+    tmp_path: Path, hold_on: str | None, volume_phase: str, refusal: str | None
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+             for name in ("target", "shared")]
+    held = "aaaaaaaaaaaaaaaa"
+    volumes = [_local_volume(held, hold_on or "target", volume_phase)]
+    statefulsets = [] if hold_on is None else [{
+        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": "snapshot-backup"}},
+        "spec": {"replicas": 1, "template": {"spec": {}}},
+    }]
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        "k3s_local_storage_driver": "topolvm.io", "k3s_local_storage_topology_key": "topology.topolvm.io/node",
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
+            "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
+            for n in nodes]},
+        "k3s_remove_statefulsets_doc": {"items": statefulsets},
+        "k3s_remove_pvs_doc": {"items": volumes},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvcs")},
+    }
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])
 def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: Path, cell_id: str, profile: str) -> None:
     if ANSIBLE_PLAYBOOK is None:
