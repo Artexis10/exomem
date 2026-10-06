@@ -15,6 +15,7 @@ from typing import Any
 from . import (
     access,
     move_file,
+    provenance,
     record_formats,
     record_governance,
     reserved_paths,
@@ -177,9 +178,13 @@ def _rewrite_links(
     new_basename = new_no_ext.rsplit("/", 1)[-1]
     changed = 0
     ambiguous = False
+    # An origin carrier is recorded data: a link inside one keeps its bytes.
+    inside_carrier = provenance.in_carrier(text)
 
     def replace(match: re.Match[str]) -> str:
         nonlocal ambiguous, changed
+        if inside_carrier(match.start(), match.end()):
+            return match.group(0)
         raw = match.group(1).strip()
         alias = match.group(2) or ""
         target_path, marker, anchor = raw.partition("#")

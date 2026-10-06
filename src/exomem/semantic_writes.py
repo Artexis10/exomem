@@ -117,7 +117,10 @@ def _reject_generic_structured_item_write(path: str, source: str) -> None:
 
 
 def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:
-    """Pure canonical path-only rewrite shared by move staging and review carry."""
+    """Pure canonical path-only rewrite shared by move staging and review carry.
+
+    An origin carrier is recorded data, so a link inside one keeps its bytes.
+    """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
     prefix = kb_prefix()
@@ -128,9 +131,12 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     old_basename = old_no_ext.rsplit("/", 1)[-1]
     new_basename = new_no_ext.rsplit("/", 1)[-1]
     changed = 0
+    inside_carrier = provenance.in_carrier(text)
 
     def replace(match: re.Match[str]) -> str:
         nonlocal changed
+        if inside_carrier(match.start(), match.end()):
+            return match.group(0)
         target = match.group(1).strip()
         alias = match.group(2) or ""
         target_path, marker, anchor = target.partition("#")

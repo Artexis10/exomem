@@ -285,8 +285,10 @@ units (a unit overlapping a withheld span is dropped), category excerpts and
 activation's ranking text. The provenance report, the inbound-link index and
 the activation index's link edges drop each carrier's characters and keep its
 line breaks: a carrier is never a provenance tag or a link, so a carried page
-never lists a person only its carrier links. Semantic units keep the code
-exemption, so the write side keeps code examples literal. Reading over-hides
+never lists a person only its carrier links. A writer never rewrites a link
+inside a carrier, in link normalization or on a move, so a carrier keeps the
+bytes it recorded. Semantic units keep the code exemption, so the write side
+keeps code examples literal. Reading over-hides
 a literal that HTML would not treat as a comment, which costs nothing; writing
 accepts exactly one designated block and refuses anything else (malformed,
 unterminated or more than one) with a typed `ORIGIN_METADATA_INVALID`. Origin

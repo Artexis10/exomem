@@ -908,3 +908,59 @@ def test_retained_input_with_nonempty_policy_reads_a_unique_unicode_leaf(vault: 
     assert proof.retained.page.path == physical and proof.text == "Exact retained evidence.\n"
     for guard in proof.guards:
         guard.recheck(vault)
+
+
+def _carrier_with_reason(vault: Path, reason: str) -> str:
+    binding = _write(vault, "Original evidence.\n")
+    return provenance.encode_origin(
+        {
+            "inputs": {"original": binding},
+            "assessments": [
+                {"inputs": ["original"], "basis": "agent_assessment", "by": "agent", "reason": reason}
+            ],
+            "bindings": [],
+        }
+    )
+
+
+def test_link_normalization_leaves_a_carrier_reason_byte_identical(vault: Path) -> None:
+    """A carrier is recorded data: the writer normalizes the prose link, never the reason's."""
+    from exomem import note
+
+    reason = "Raised in the [[Linked page]] review."
+    block = _carrier_with_reason(vault, reason)
+    with request_scope(RequestPrincipal(audience_id="client-a")):
+        note.note(vault, content="Linked claim.\n", note_type="insight", title="Linked page", status="draft")
+        created = note.note(
+            vault,
+            content=block + "\n\nSee [[Linked page]].\n",
+            note_type="insight",
+            title="Parent page",
+            status="draft",
+        )
+
+    written = (vault / created.path).read_text(encoding="utf-8")
+    assert provenance.parse_origin(written, managed=True).payload["assessments"][0]["reason"] == reason
+    assert "See [[Knowledge Base/Notes/Insights/linked-page]]." in written
+
+
+def test_a_move_rewrites_the_prose_link_but_never_the_carrier(vault: Path) -> None:
+    """Moving a page updates links to it in prose; a carrier keeps the bytes it recorded."""
+    from exomem import move_file
+
+    target = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation"
+    block = _carrier_with_reason(vault, f"Raised in [[{target}]].")
+    referrer = vault / "Knowledge Base" / "Notes" / "Insights" / "carrier-referrer.md"
+    referrer.write_text(
+        "---\ntype: insight\nstatus: draft\ncreated: 2026-10-01\nupdated: 2026-10-01\n---\n\n"
+        f"{block}\n\nSee [[{target}]].\n",
+        encoding="utf-8",
+    )
+
+    move_file.move_file(
+        vault, old_path=target + ".md", new_path="Knowledge Base/Notes/Insights/renamed-disclosure.md"
+    )
+
+    text = referrer.read_text(encoding="utf-8")
+    assert block in text
+    assert "See [[Knowledge Base/Notes/Insights/renamed-disclosure]]." in text

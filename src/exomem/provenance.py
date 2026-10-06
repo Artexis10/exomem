@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -585,6 +585,16 @@ def without_carriers(content: str) -> str:
         pieces.append(re.sub(r"[^\r\n]", "", content[start:end]))
         cursor = end
     return "".join(pieces) + content[cursor:]
+
+
+def in_carrier(content: str) -> Callable[[int, int], bool]:
+    """Whether a `[start, end)` range of `content` touches a reserved origin span.
+
+    The span rule `without_carriers` uses. A writer that rewrites links asks it
+    before each rewrite, so a carrier keeps the bytes it recorded.
+    """
+    spans = reserved_spans(content)
+    return lambda start, end: any(low < end and start < high for low, high in spans)
 
 
 # A key:value token inside a comment. Value runs to the next whitespace.
