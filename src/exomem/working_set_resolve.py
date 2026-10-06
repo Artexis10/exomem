@@ -35,6 +35,7 @@ from .working_set_index import (
     fold_plural,
     fold_possessive,
     normalize,
+    subject_text,
     tokens_of,
 )
 
@@ -53,6 +54,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "continuity",
     "conversation",
     "agent_choice",
+    "carried_link",
 )
 
 #: `RARE_TERM_MAX_ANCHORS` lives in `working_set_index` (re-exported here):
@@ -530,9 +532,12 @@ class ResolvedAnchor:
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
+    #: The carried page this anchor is listed through (`carried_link`), or
+    #: `""`. Served, so the egress guard removes the anchor with that page.
+    via: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "ref": self.ref or self.path or self.anchor_id,
             "path": self.path,
             "title": self.title,
@@ -541,6 +546,9 @@ class ResolvedAnchor:
             "status": self.status,
             "evidence": list(self.evidence),
         }
+        if self.via:
+            out["via"] = self.via
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -1006,6 +1014,12 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     """
     if vocabulary is None:
         vocabulary = shipped_vocabulary()
+    # A quoted path or URL is a reference, not words (`subject_text`): every
+    # field that feeds subject evidence reads the turn without it. Whether
+    # the turn only points back, or is a follow-up, still reads the turn as
+    # written: a turn that quotes a path has said what it is about.
+    written = turn
+    turn = subject_text(turn)
     # Calls the shared `normalize()` rather than restating its formula: a
     # hand-rolled copy here once skipped `normalize()`'s typographic-
     # apostrophe fold, so a turn spelled with a curly quote matched none of
@@ -1033,13 +1047,14 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
                 if phrase not in seen:
                     seen.add(phrase)
                     ngrams.append(phrase)
-    token_text = f" {' '.join(_spell_out_cues(tokens, vocabulary))} "
+    written_tokens = tokens if written == turn else tokens_of(normalize(written))
+    token_text = f" {' '.join(_spell_out_cues(written_tokens, vocabulary))} "
     # A declared cue, and nothing else said (close-memory-loop D2, as
     # narrowed twice): the turn has to say it points back, and must not also
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
-    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(turn)
+    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(written)
     anaphora_text = f" {' '.join(_spell_out_cues(anaphora_tokens, vocabulary))} "
     anaphora_cue = any(f" {phrase} " in anaphora_text for phrase in vocabulary.phrases)
     pointing = working_set_anaphora.points_back(
@@ -1054,7 +1069,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         referential_cue=referential_cue,
         acronyms=_acronyms_of(turn, vocabulary.filler),
         follow_up=is_follow_up(
-            tokens, referential_cue=referential_cue, filler=vocabulary.filler
+            written_tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
         words=embedded_words(tokens, _word_edges(vocabulary)),
         capitalised=_capitalised_terms(turn),
@@ -1315,6 +1330,23 @@ def _lexical_overlap(
     two shared authored name terms. The one rule `candidates_for` and
     `entry_named_anchors` both read."""
     return len(shared_broad) >= min_terms and len(shared_name) >= 2
+
+
+def title_names(
+    analysis: TurnAnalysis, title: str, *, stopwords: frozenset[str] = _STOPWORDS
+) -> bool:
+    """Does the turn make name contact with a page by its own `title`?
+
+    The anchor rule (`_lexical_overlap`) applied to a page that is not an
+    anchor: its title is its only authored name and its only vocabulary.
+    """
+    terms = frozenset(
+        folded for term in tokens_of(title) if (folded := _fold_lexical_term(term)) is not None
+    )
+    turn_terms = _turn_terms_folded(analysis, stopwords)
+    return _lexical_overlap(
+        turn_terms & terms, turn_terms & terms, _min_lexical_terms(DEFAULT_RANKING)
+    )
 
 
 def candidates_for(

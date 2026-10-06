@@ -625,7 +625,9 @@ def test_a_newer_carried_page_does_not_take_the_resolved_anchors_slots(
         max_chars=8000,
     )
 
-    assert _resolved(packet) == [ENTITY]
+    # The page is named by its own title, so it resolves beside the entity
+    # (the 2026-10-05 ruling); it is still carried, after the entity.
+    assert _resolved(packet) == [ENTITY, NAMED_PAGE]
     assert packet["generation"].get("also_carried") == "retrieval"
     precedents = [u for u in packet["units"] if u["role"] == "precedents"]
     own = [u for u in precedents if u["provenance"]["path"] != NAMED_PAGE]

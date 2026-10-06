@@ -765,7 +765,8 @@ def test_a_turn_naming_two_separate_pages_carries_both(vault: Path) -> None:
         "Knowledge Base/Notes/Research/kelvane-throughput.md",
         "Knowledge Base/Notes/Research/murran-dispatch.md",
     }
-    assert _anchor_statuses(packet) == ["retrieval_carried", "retrieval_carried"]
+    # Each page is named by its own title: resolved (the 2026-10-05 ruling).
+    assert _anchor_statuses(packet) == ["resolved", "resolved"]
     assert packet["generation"]["carried_by"] == "retrieval"
 
 
@@ -923,9 +924,9 @@ def test_a_dominant_hit_carries_that_pages_units(carry_vault: Path, budget_free)
     assert packet["generation"]["carried_by"] == "retrieval"
     assert len(packet["anchors"]) == 1
     anchor = packet["anchors"][0]
-    assert anchor["status"] == "retrieval_carried"
+    assert anchor["status"] == "resolved"  # Named by its own title (the 2026-10-05 ruling).
+    assert anchor["evidence"] == ["lexical_overlap", "retrieval"]
     assert anchor["kind"] == "page"
-    assert anchor["evidence"] == ["retrieval"]
     assert anchor["path"] == CARRY_PAGE
     assert anchor["ref"] == CARRY_PAGE
     # The anchor says what the page says about itself, rather than asserting.
@@ -979,8 +980,10 @@ def test_a_resolved_anchor_wins_over_a_dominant_hit(carry_vault: Path, budget_fr
     assert "carried_by" not in packet["generation"]
     assert packet["generation"]["also_carried"] == "retrieval"
     assert "resolved" in _anchor_statuses(packet)
-    assert _anchor_statuses(packet).count("resolved") == 1
-    assert _anchor_statuses(packet).count("retrieval_carried") == 1
+    # The carried page is named by its own title too, so it also resolves
+    # (the 2026-10-05 ruling); the named anchor still leads.
+    assert _anchor_statuses(packet).count("resolved") == 2
+    assert packet["anchors"][0]["kind"] != "page"
     assert CARRY_PAGE in _unit_paths(packet)
 
 
@@ -1633,7 +1636,7 @@ def test_a_carried_and_a_named_packet_both_lead_with_recent_context(
 
     assert carried["abstained"] is False, carried.get("abstention")
     assert carried["generation"]["carried_by"] == "retrieval"
-    assert _anchor_statuses(carried) == ["retrieval_carried"]
+    assert _anchor_statuses(carried) == ["resolved"]  # Named by its own title (the 2026-10-05 ruling).
     assert list(carried)[0] == "recent_context", list(carried)
     assert carried["recent_context"], "a carried packet still says what was worked on"
     assert carried["units"], "and still serves the page it carried"
@@ -1650,7 +1653,7 @@ def test_a_carried_and_a_named_packet_both_lead_with_recent_context(
     )
 
     assert named["abstained"] is False, named.get("abstention")
-    assert _anchor_statuses(named) == ["retrieval_carried", "retrieval_carried"]
+    assert _anchor_statuses(named) == ["resolved", "resolved"]  # Named by its own title (the 2026-10-05 ruling).
     assert list(named)[0] == "recent_context", list(named)
     assert named["recent_context"], "a multi-page carry still says what was worked on"
     assert named["budget"]["used_chars"] <= 4000
@@ -2785,7 +2788,7 @@ def test_a_band_resolution_on_an_ordinary_word_yields_to_the_page_the_turn_names
     packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
 
     assert packet["generation"]["carried_by"] == "retrieval"
-    assert _statuses(packet) == {CARRY_PAGE: "retrieval_carried"}
+    assert _statuses(packet) == {CARRY_PAGE: "resolved"}  # Named by its own title (the 2026-10-05 ruling).
 
 
 def test_a_band_resolution_on_a_name_is_not_vetoed_by_a_phrase_hit(

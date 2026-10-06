@@ -973,6 +973,7 @@ def lexical_evidence(
     by_path = {row.path: row for row in rows if row.path}
     if not by_path:
         return [], "available"
+    turn = working_set_index.subject_text(turn)
     try:
         # A full-page match on the same single name word is not a second fact.
         # Require two distinct content units (words or unspaced runs); exact
@@ -1397,6 +1398,9 @@ def carry_named_groups(
     """
     from . import find, lexstore
 
+    # The resolver's own reading of the turn (`analyze_turn`): pair positions
+    # are kept in its token coordinates, so both must read the same text.
+    turn = working_set_index.subject_text(turn)
     try:
         stems = pairable_stems(turn)
         skipped = frozenset(pairable_stems(skip_terms)) if skip_terms else frozenset()
