@@ -2380,9 +2380,21 @@ def _require_supported_projected_find_request(
         )
 
 
-#: Hit signals ranked or counted over the whole corpus, before any page is
-#: decided: a caller other than the owner does not receive them (see `op_find`).
-_CORPUS_RANK_SIGNALS = ("bm25_rank", "vector_rank", "keyword_rank", "clip_rank", "graph_in_degree")
+#: Hit signals ranked, counted or cut at a candidate boundary over the whole
+#: corpus, before any page is decided: a caller anything could be withheld
+#: from does not receive them (see `op_find`). A lane's score is present only
+#: for a page inside that lane's top candidates, which a withheld page can
+#: occupy, so scores follow the same rule as ranks.
+_PRE_ADMISSION_SIGNALS = (
+    "bm25_rank",
+    "vector_rank",
+    "vector_score",
+    "keyword_rank",
+    "clip_rank",
+    "clip_score",
+    "rerank_score",
+    "graph_in_degree",
+)
 
 
 def op_find(
@@ -2658,27 +2670,21 @@ def op_find(
             explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
-    # A caller its audience restricts receives no retrieval diagnostics. Lane
-    # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
-    # graph in-degree and the keyword-fallback marker are computed over the
-    # whole corpus before any page is decided, so each moves with pages the
-    # caller may not see. The hits themselves are unchanged. An owner-audience
-    # caller without owner-local provenance keeps them: under RAW it may infer
-    # that a protected capture exists, never what it holds.
+    # Everything computed from pages before any is decided is content, not a
+    # diagnostic: lane statuses, fusion weights, raw scores, the emit count,
+    # per-lane ranks, graph in-degree, the keyword-fallback marker and the
+    # graph lane itself, whose hops are seeded before admission and follow
+    # link resolution over the whole vault (the shared recall cache is keyed
+    # by `graph`). Each moves with pages the caller may not see, down to
+    # whether a withheld page contains a word, so a caller anything could be
+    # withheld from, RAW included, receives none of them. The hits are
+    # unchanged.
     restricted = (
         projection_runtime is None
-        and egress_module.restricted_audience(vault_root, purpose=purpose)
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
     )
     if restricted:
         explain = False
-    if (
-        projection_runtime is None
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
-    ):
-        # The graph lane is retrieval, not a diagnostic: hops are seeded from
-        # pages before any is decided, follow link resolution over the whole
-        # vault, and the shared recall cache is keyed by `graph`. A caller
-        # anything could be withheld from, RAW included, recalls without it.
         graph = False
         graph_enrich = False
     compute_profile: dict[str, str | bool] = {}
@@ -2916,7 +2922,7 @@ def op_find(
                 signals = hit.get("signals")
                 if not isinstance(signals, dict):
                     continue
-                for name in _CORPUS_RANK_SIGNALS:
+                for name in _PRE_ADMISSION_SIGNALS:
                     signals.pop(name, None)
                 if not signals:
                     hit.pop("signals", None)
@@ -6434,7 +6440,7 @@ def op_activate_context(
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
     _carry_thread_through_abstention(packet, continuity)
-    _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    _withhold_vault_generation(vault_root, packet)
     # Every packet reports how its conversation was bounded; the compiler has
     # already said `absent` when it skipped the stage for the request's budget.
     if isinstance(packet.get("generation"), dict):
@@ -6486,12 +6492,12 @@ def _carry_thread_through_abstention(packet: Any, continuity: str | None) -> Non
 _VAULT_GENERATION_FIELDS = ("freshness_key", "index_generation")
 
 
-def _withhold_vault_generation(vault_root: Path, packet: Any, *, purpose: str | None) -> None:
+def _withhold_vault_generation(vault_root: Path, packet: Any) -> None:
     generation = packet.get("generation") if isinstance(packet, dict) else None
     if (
         isinstance(generation, dict)
         and any(name in generation for name in _VAULT_GENERATION_FIELDS)
-        and egress_module.restricted_audience(vault_root, purpose=purpose)
+        and egress_module.restricted_audience(vault_root)
     ):
         packet["generation"] = {
             key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
@@ -6572,7 +6578,7 @@ def _op_activate_context_body(
                 packet["request_budget"] = block
         if thread_carry is not None:
             identity_now, thread_now, started, state, salt_now = thread_carry
-            _withhold_vault_generation(vault_root, packet, purpose=purpose)
+            _withhold_vault_generation(vault_root, packet)
             token_now = (
                 working_set_runtime_module.mint_continuity(
                     packet,
@@ -6942,7 +6948,7 @@ def _op_activate_context_body(
         )
     packet = guarded
     # Before the token is minted: it carries the index generation too.
-    _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    _withhold_vault_generation(vault_root, packet)
     token = working_set_runtime_module.mint_continuity(
         packet, identity=identity, thread=thread, thread_ns=thread_ns, salt=salt
     )

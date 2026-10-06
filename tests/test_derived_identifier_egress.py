@@ -2338,18 +2338,22 @@ def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
     assert "graph_hop" in _text(owner), owner
 
 
-def test_a_marked_seed_reaches_no_caller_raw_withholds_it_from(tmp_path: Path) -> None:
-    """RAW: the graph lane is seeded before admission, so it runs only for a
-    caller RAW withholds nothing from. A remote owner and a guest on an
-    ungoverned vault keep explain (diagnostics follow the audience) and the
-    guest its packet's index generation, yet neither learns the marked page,
-    nor the unmarked page it alone links to, from a query only it matches."""
+def test_a_caller_raw_withholds_from_recalls_as_if_the_marked_page_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: everything computed from pages before admission is content. For a
+    query only a marked page matches, a remote owner and a guest on an
+    ungoverned vault get exactly what they would if the page were absent: no
+    graph hop it seeds, no explain lane status or score, no keyword-fallback
+    marker. The guest still keeps its packet's index generation."""
     import shutil
 
     marked = "__exomem_raw_v1__gamma-secret"
-    files = {
+    base = {
         **_filler(),
         f"{NOTES}/alpha.md": _page("Alpha", "Alpha plain body about orchards.", type="insight"),
+    }
+    original = {
         f"{NOTES}/{marked}.md": _page(
             "Zephyrquux Plan",
             "Zephyrquux acquisition target details. " + _LINKS_TO.format(t="Alpha"),
@@ -2357,24 +2361,89 @@ def test_a_marked_seed_reaches_no_caller_raw_withholds_it_from(tmp_path: Path) -
             title="Zephyrquux Plan",
         ),
     }
-    vault = _materialize(tmp_path / "vault", files, "external")
-    shutil.rmtree(vault / KB / "_Governance")
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
     calls = {
+        "plain": {"query": "Zephyrquux", "detail": "full"},
         "explain": {"query": "Zephyrquux", "explain": True, "detail": "full"},
         "enrich": {"query": "Zephyrquux", "deep": True, "graph_enrich": True},
     }
 
-    local = _call(vault, None, "ask_memory", **calls["explain"])
+    local = _call(vaults["present"], None, "ask_memory", **calls["explain"])
     assert marked in _text(local) and "alpha.md" in _text(local), local
     for principal in (owner_principal(surface="rest"), _principal("external")):
-        answers = {label: _call(vault, principal, "ask_memory", **kw) for label, kw in calls.items()}
-        for answer in answers.values():
-            assert "__error__" not in answer, answer
-            assert "__exomem_raw_v1__" not in _text(answer), answer
-            assert "alpha.md" not in _text(answer), answer
-        assert "retrieval_profile" in answers["explain"], answers["explain"]
-    packet = _call(vault, _principal("external"), "activate_context", turn="Tell me about Alpha.")
+        for kwargs in calls.values():
+            present = _call(vaults["present"], principal, "ask_memory", **kwargs)
+            assert "__error__" not in present, present
+            assert present == _call(vaults["absent"], principal, "ask_memory", **kwargs)
+    packet = _call(
+        vaults["present"], _principal("external"), "activate_context", turn="Tell me about Alpha."
+    )
     assert "index_generation" in packet["generation"], packet
+
+
+def test_a_review_item_reads_as_if_its_marked_neighbour_were_absent(tmp_path: Path) -> None:
+    """RAW: a review item's graph section is computed from pages before
+    admission, so for a remote owner and a guest on an ungoverned vault a
+    marked page linking to the item is absent, its node and edges and the
+    shown counts alike."""
+    import shutil
+
+    alpha = f"{NOTES}/alpha.md"
+    base = {
+        **_filler(),
+        alpha: _page("Alpha", "Alpha plain body. See [[filler-orchard]].", type="insight"),
+    }
+    original = {
+        f"{NOTES}/__exomem_raw_v1__gamma-secret.md": _page(
+            "Zephyrquux Plan", "Zephyrquux target. " + _LINKS_TO.format(t="Alpha"), type="insight"
+        ),
+    }
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+
+    def context(variant: str, principal: RequestPrincipal | None) -> Any:
+        review = _call(vaults[variant], None, "review_memory", mode="activation", limit=0)
+        ref = next(item["ref"] for item in review["items"] if item["path"] == alpha)
+        return _call(vaults[variant], principal, "review_item_context", ref=ref)
+
+    assert "__exomem_raw_v1__" in _text(context("present", None))
+    for principal in (owner_principal(surface="rest"), _principal("external")):
+        present = context("present", principal)
+        assert "__error__" not in present, present
+        assert present == context("absent", principal)
+
+
+def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAW: vector, image and rerank ranks and scores are cut at a candidate
+    boundary that marked pages occupy before admission, so a remote owner
+    receives none of them. Embeddings are off here, so `find` is stubbed with
+    a hit carrying every lane's signal."""
+    import shutil
+
+    from exomem.find_types import Hit
+
+    vault = _materialize(tmp_path / "vault", _filler(), "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    hit = Hit(
+        path=f"{NOTES}/filler-orchard.md", type="insight", scope=None,
+        title="Filler Orchard", updated="", excerpt="Orchard logistics.",
+        bm25_rank=1, vector_rank=1, vector_score=0.9, clip_rank=1, clip_score=0.8,
+        keyword_rank=1, rerank_score=0.7,
+    )
+    monkeypatch.setattr(find_module, "find", lambda *_args, **_kwargs: [hit])
+
+    local = _call(vault, None, "ask_memory", query="orchard", detail="full")
+    remote = _call(vault, owner_principal(surface="rest"), "ask_memory", query="orchard", detail="full")
+
+    assert {"vector_score", "clip_score", "rerank_score"} <= set(local[0]["signals"]), local
+    assert remote[0]["path"] == hit.path and "signals" not in remote[0], remote
 
 
 def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:

@@ -6075,23 +6075,21 @@ def restricted_audience(
     vault_root: Path,
     *,
     principal: RequestPrincipal | None = None,
-    purpose: str | None = None,
 ) -> bool:
     """True when the caller's audience, not RAW, restricts what it may see.
 
-    Retrieval diagnostics (explain's lane statuses, ranks and scores) and vault
-    generation counters follow this: an owner-audience caller without
+    Vault generation counters follow this: an owner-audience caller without
     owner-local provenance keeps them, and so does any caller on an ungoverned
-    vault with no tombstone. Every ref, path and content it receives still
-    passes `restricted_release_filter`, which applies RAW admission.
+    vault with no tombstone. Everything computed from pages before admission
+    follows `restricted_release_filter`, which applies RAW admission.
     """
-    branch, who = _release_caller(vault_root, principal)
+    branch, _who = _release_caller(vault_root, principal)
     if branch != "walk":
         return False
     policy = policy_module.load(Path(vault_root))
-    if _audience_withholds_nothing(vault_root, policy, lifecycle.tombstoned_paths(vault_root)):
-        return False
-    return release_walk_filter(vault_root, principal=who, purpose=purpose) is not None
+    return not _audience_withholds_nothing(
+        vault_root, policy, lifecycle.tombstoned_paths(vault_root)
+    )
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;
