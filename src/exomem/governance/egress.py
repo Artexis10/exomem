@@ -2845,6 +2845,7 @@ def guard_working_set(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    record: bool = True,
 ) -> dict[str, Any] | None:
     """Apply release decisions to a working-memory packet (design D7).
 
@@ -2864,6 +2865,10 @@ def guard_working_set(
     resolution state that exists so the compiler can bound its lanes and detect
     ambiguity; publishing it would hand an audience a page list it never asked
     for, and filtering it entry-by-entry would still disclose its SIZE.
+
+    `record=False` decides without writing receipts. `ReaderView.units` uses
+    it while the packet is compiled: nothing is disclosed then, and the packet
+    the compiler serves crosses this guard again with receipts.
     """
     if release.blocked:
         return None
@@ -2872,7 +2877,8 @@ def guard_working_set(
     policy, release_gate_active = gate_state(vault_root)
     who = principal if principal is not None else effective_principal()
     if policy.blocked or (not policy.empty and not who.resolved):
-        _record_blocked_outcome(who.audience_id)
+        if record:
+            _record_blocked_outcome(who.audience_id)
         return None
 
     named_paths, prose_names, interpretations, unresolvable = _working_set_paths(guarded)
@@ -2950,15 +2956,16 @@ def guard_working_set(
             # distinction, against `decisions`/`tombstoned`/the
             # filesystem.
             withheld.add(rel_path)
-        _outcome_for_decision(
-            vault_root,
-            rel_path,
-            decision=decision,
-            policy=policy,
-            audience=who.audience_id,
-            outcome="withheld" if rel_path in withheld else "released",
-            purpose=declared_purpose,
-        )
+        if record:
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld" if rel_path in withheld else "released",
+                purpose=declared_purpose,
+            )
 
     if policy_decides:
         for rel_path in sorted(path for path in named_paths if path):
@@ -6206,6 +6213,80 @@ def visible_page_filter(
         return keep(rel)
 
     return visible
+
+
+class ReaderViewUnavailable(RuntimeError):
+    """`ReaderView.units` could not decide a unit for this reader.
+
+    The compiler lets it through every lane's own soft failure: a release
+    plane that cannot decide abstains the whole packet `unavailable`, exactly
+    as `guard_working_set` failing does, rather than reporting a lane failed.
+    """
+
+
+class ReaderView:
+    """A restricted caller's view of the vault, for the working-set compiler.
+
+    Called with a path, it answers `visible_page_filter`. `units` answers, for
+    a batch of would-be packet units, which ones `guard_working_set` keeps for
+    this caller. The compiler asks both before it chooses lenses, slots,
+    pointers or abstention, so a unit the guard would remove is absent from the
+    compile, as in a vault without it. The served packet still crosses the
+    guard.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        pages: Callable[[str], bool],
+        *,
+        principal: RequestPrincipal | None,
+        purpose: str | None,
+    ) -> None:
+        self._root = Path(vault_root)
+        self._pages = pages
+        self._principal = principal
+        self._purpose = purpose
+
+    def __call__(self, rel_path: str) -> bool:
+        return self._pages(rel_path)
+
+    def units(self, units: Sequence[Mapping[str, Any]]) -> list[bool]:
+        """Whether the guard keeps each unit, by its `ref` and `text`.
+
+        Decided without receipts (`record=False`): nothing is disclosed here.
+        """
+        if not units:
+            return []
+        try:
+            guarded = guard_working_set(
+                self._root,
+                {"units": [dict(unit) for unit in units]},
+                AnnotatedHits(hits=[]),
+                principal=self._principal,
+                purpose=self._purpose,
+                record=False,
+            )
+        except Exception as error:  # noqa: BLE001 - the compiler abstains on it
+            raise ReaderViewUnavailable("the release plane could not decide a unit") from error
+        if guarded is None:
+            return [False] * len(units)
+        kept = {(unit.get("ref"), unit.get("text")) for unit in guarded.get("units") or ()}
+        return [(unit.get("ref"), unit.get("text")) in kept for unit in units]
+
+
+def reader_view(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> ReaderView | None:
+    """The caller's `ReaderView`, or `None` when nothing is withheld from it
+    (`visible_page_filter`: the owner, or no bound caller)."""
+    pages = visible_page_filter(vault_root, principal=principal, purpose=purpose)
+    if pages is None:
+        return None
+    return ReaderView(vault_root, pages, principal=principal, purpose=purpose)
 
 
 def release_allows_download(

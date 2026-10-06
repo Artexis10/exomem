@@ -634,14 +634,7 @@ def build_packet(
             if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
                 _defer(item, "unit_too_long")
                 continue
-            unit = {
-                "ref": item.ref,
-                "role": item.role,
-                "text": text,
-                "lifecycle": item.lifecycle,
-                "updated": item.updated,
-                "provenance": _provenance(item),
-            }
+            unit = _served_unit(item)
             cost = (
                 working_set_conversation.prose_chars(unit, role_ids=role_ids)
                 if conversation_inferred else served_chars("units", unit)
@@ -780,6 +773,36 @@ def _budgeted_recent(
     return entries, used
 
 
+def _served_unit(item: LaneItem) -> dict[str, Any]:
+    """The `units` entry `item` is served as. A restricted reader's guard
+    decides this same entry before any lane caps it (`_reader_admitted`)."""
+    return {
+        "ref": item.ref,
+        "role": item.role,
+        "text": bounded_text(item.text),
+        "lifecycle": item.lifecycle,
+        "updated": item.updated,
+        "provenance": _provenance(item),
+    }
+
+
+def _reader_admitted(
+    items: Sequence[LaneItem], visible: Callable[[str], bool] | None
+) -> tuple[LaneItem, ...]:
+    """The items whose served units a restricted reader's egress guard keeps.
+
+    A lane drops the rest before it ranks or caps anything. A unit the guard
+    would remove then takes no slot, pointer or truncation marker, and a lane
+    left with nothing reports `no_material`, as in a vault without that unit.
+    """
+    from .governance import egress
+
+    if not items or not isinstance(visible, egress.ReaderView):
+        return tuple(items)
+    kept = visible.units([_served_unit(item) for item in items])
+    return tuple(item for item, keep in zip(items, kept, strict=True) if keep)
+
+
 def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
     """A ref the budget could not afford, still saying what it would answer.
 
@@ -869,8 +892,9 @@ def run_lanes(
     Records lane and the packet's own `current_state[]` block are two views of
     the same reads and resolving them twice doubled the collection queries.
 
-    `visible` removes withheld pages before lane reads and caps; the release
-    guard remains the final check on the assembled packet.
+    `visible` removes withheld pages before lane reads and caps, and a
+    restricted reader's view also removes the units its egress guard would
+    (`_reader_admitted`). The guard remains the final check on the packet.
 
     `reached` records page ownership during these reads for promoted budgeting;
     it is request-local and never enters the packet.
@@ -881,6 +905,8 @@ def run_lanes(
     it has no indexed neighbourhood to expand, and expanding it would spend
     graph work to widen a claim that rests on one recall score.
     """
+    from .governance import egress
+
     root = Path(vault_root)
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
@@ -927,9 +953,12 @@ def run_lanes(
                     admit=admit,
                     material_scopes=material_scopes,
                     request_anchors=request_anchors,
+                    visible=visible,
                 )
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
+            except egress.ReaderViewUnavailable:
+                raise
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
                 failed = True
@@ -962,19 +991,23 @@ def _conclusion_pages(
     candidates: Iterable[str],
     *,
     categories: frozenset[str],
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """The candidates that hold at least one unit of a conclusion category,
     newest first, at most `ENTITY_CONCLUSION_PAGES`.
 
-    One indexed category read (`lexstore.unit_categories_of`) chooses the pages;
+    One indexed category read (`_unit_categories`) chooses the pages;
     every survivor's own date is then read (from the warm page cache; the
     candidates are bounded above) BEFORE the cut, so newest means newest.
     """
-    from . import find_corpus, lexstore
+    from . import find_corpus
+    from .governance import egress
 
     ordered = sorted(candidates)[: 4 * UNIT_LANE_LIMIT]
     try:
-        found = lexstore.get_store(Path(vault_root)).unit_categories_of(tuple(ordered))
+        found = _unit_categories(vault_root, tuple(ordered), visible)
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - a failed probe reaches no extra page
         log.debug("activation conclusion-page probe failed", exc_info=True)
         return ()
@@ -1049,6 +1082,7 @@ def reach_precedents(
                 root,
                 (path for path in row.linked_by - already if visible is None or visible(path)),
                 categories=frozenset(definition.categories),
+                visible=visible,
             )
             precedent.update(conclusions)
             if reached is not None:
@@ -1135,6 +1169,7 @@ def _lane(
     admit: Callable[[str, Any], bool] | None = None,
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1149,13 +1184,14 @@ def _lane(
     if role.lane == "units":
         return _units_lane(
             vault_root, role, neighbourhood=neighbourhood, freshness_snapshot=freshness_snapshot,
-            admit=admit,
+            admit=admit, visible=visible,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
             vault_root, role, anchors=anchors, neighbourhood=neighbourhood,
             registry=registry, analysis=analysis, freshness_snapshot=freshness_snapshot,
             admit=admit, material_scopes=material_scopes, request_anchors=request_anchors,
+            visible=visible,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1177,6 +1213,7 @@ def _units_lane(
     neighbourhood: frozenset[str],
     freshness_snapshot: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1218,7 +1255,7 @@ def _units_lane(
     hits = hits[:UNIT_LANE_LIMIT]
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    return LaneResult(_unit_items(role, hits), truncated)
+    return LaneResult(_reader_admitted(_unit_items(role, hits), visible), truncated)
 
 
 def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[LaneItem, ...]:
@@ -1268,6 +1305,7 @@ def _material_lane(
     admit: Callable[[str, Any], bool] | None = None,
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     from . import (
@@ -1347,7 +1385,7 @@ def _material_lane(
     ]
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    items = list(_unit_items(role, hits))
+    items = list(_reader_admitted(_unit_items(role, hits), visible))
     pages = store.search_bm25_result(
         [], MAX_ITEMS_PER_ROLE + 1, "kb", fresh, set(neighbourhood),
         query_units=query_units, term_budget=term_budget, recall_checkpoint=checkpoint,
@@ -2313,18 +2351,57 @@ def _carry_roles(
     )
 
 
+def _unit_categories(
+    vault_root: Path, paths: Sequence[str], visible: Callable[[str], bool] | None
+) -> dict[str, frozenset[str]] | None:
+    """The categories each page's semantic units are filed under, as the
+    reader sees them, or `None` when the catalogue cannot answer.
+
+    For a restricted reader (`egress.ReaderView`), a unit its egress guard
+    would remove does not count: a lens or a conclusion page is then chosen
+    as in a vault without that unit.
+    """
+    from . import lexstore
+    from .governance import egress
+
+    store = lexstore.get_store(Path(vault_root))
+    if not isinstance(visible, egress.ReaderView):
+        return store.unit_categories_of(paths)
+    rows = store.units_of(paths)
+    if rows is None:
+        return None
+    kept = visible.units([
+        _served_unit(LaneItem(
+            role="", level="unit", ref=ref, path=parent, title="", text=content,
+            lifecycle="active", updated="", anchor=parent,
+        ))
+        for parent, ref, _category, content in rows
+    ])
+    out: dict[str, set[str]] = {}
+    for (parent, _ref, category, _content), keep in zip(rows, kept, strict=True):
+        if keep and category:
+            out.setdefault(parent, set()).add(category)
+    return {path: frozenset(found) for path, found in out.items()}
+
+
 def _page_unit_categories(
-    vault_root: Path, path: str, *, freshness_snapshot: Any = None
+    vault_root: Path,
+    path: str,
+    *,
+    freshness_snapshot: Any = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str] | None:
     """The categories a page's own semantic units are filed under, or `None`
     when they cannot be read (the caller then keeps the unfiltered lenses).
 
     One indexed read of the maintained catalogue, never a unit query: the
     answer only chooses which lenses to read the page through."""
-    try:
-        from . import lexstore
+    from .governance import egress
 
-        found = lexstore.get_store(Path(vault_root)).unit_categories_of((path,))
+    try:
+        found = _unit_categories(vault_root, (path,), visible)
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - a probe that fails keeps the unfiltered lenses
         log.debug("activation carried page category probe failed for %s", path, exc_info=True)
         return None
@@ -2613,7 +2690,9 @@ def _carried_material(
             roles = _carry_roles(
                 registry,
                 analysis,
-                _page_unit_categories(vault_root, path, freshness_snapshot=freshness_snapshot),
+                _page_unit_categories(
+                    vault_root, path, freshness_snapshot=freshness_snapshot, visible=visible
+                ),
                 anchor_names=context_intents.anchor_terms((title,)),
                 limit=len(registry.roles),
             )
@@ -3000,10 +3079,11 @@ def _follow_up_packet(
 
 
 def _reader_view(root: Path, purpose: str | None):
-    """The caller's page view for anchor resolution, or `None` for the owner."""
+    """The caller's view of pages and units (`egress.ReaderView`), or `None`
+    for the owner."""
     from .governance import egress
 
-    return egress.visible_page_filter(root, purpose=purpose)
+    return egress.reader_view(root, purpose=purpose)
 
 
 def _conversation_affordable() -> bool:
