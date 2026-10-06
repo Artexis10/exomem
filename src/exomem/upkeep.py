@@ -42,11 +42,11 @@ _TRIAGE_ACTIONS = frozenset({"dismiss", "snooze", "reopen"})
 #: Delivery order among families: continuity first, then facts about entities,
 #: then connections, then naming, self-description and conventions.
 FAMILY_ORDER: tuple[str, ...] = (
-    "upkeep_fold",
+    dreamer_families.FOLD_FAMILY,
     dreamer_families.HYDRATION_FAMILY,
     dreamer_families.LINK_FAMILY,
     dreamer_families.ALIAS_FAMILY,
-    "upkeep_profile",
+    dreamer_families.PROFILE_FAMILY,
     dreamer_families.CONVENTION_FAMILY,
 )
 
@@ -57,6 +57,8 @@ LABELS: dict[str, str] = {
     dreamer_families.ALIAS_KIND: "Other notes name this page another way",
     dreamer_families.TAG_KIND: "A tag is spelled more than one way",
     dreamer_families.CATEGORY_KIND: "A unit label varies from the registered one",
+    dreamer_families.FOLD_KIND: "Conversation recaps name this page since it changed",
+    dreamer_families.PROFILE_KIND: "A linked page has no summary",
 }
 
 _LINK_WHY: dict[str, str] = {
@@ -127,6 +129,15 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
             f"{visible_origins} independent sources added facts that link here "
             "after it was last updated"
         )
+    if kind == dreamer_families.FOLD_KIND:
+        return (
+            f"{visible_origins} conversation recaps link this page after it was last updated, "
+            "and it cites none of them"
+        )
+    if kind == dreamer_families.PROFILE_KIND:
+        return (
+            f"pages from {visible_origins} independent sources link this page, which has no summary"
+        )
     measures = row.get("measures") or {}
     if kind == dreamer_families.ALIAS_KIND:
         count = int(measures.get("referrers") or 0)
@@ -157,8 +168,8 @@ def serve(
 
     The subject must be released. Withheld evidence is dropped, and the item
     is withheld whole when the family's evidence minimum no longer holds on
-    what remains: a link needs its other endpoint, hydration needs two
-    independent origins.
+    what remains: a link needs its other endpoint; hydration, fold and
+    profile need two independent origins.
     """
     subject = str(row.get("subject_path") or "")
     if not subject or not _visible(keep, subject):
@@ -176,6 +187,12 @@ def serve(
             return None
     elif kind == dreamer_families.HYDRATION_KIND:
         if len(origins) < dreamer_families.HYDRATION_MIN_ORIGINS:
+            return None
+    elif kind == dreamer_families.FOLD_KIND:
+        if len(origins) < dreamer_families.FOLD_MIN_ORIGINS:
+            return None
+    elif kind == dreamer_families.PROFILE_KIND:
+        if len(origins) < dreamer_families.PROFILE_MIN_ORIGINS:
             return None
     elif kind == dreamer_families.ALIAS_KIND:
         if not any(item.get("role") == "referrer" for item in others):

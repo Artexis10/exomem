@@ -94,9 +94,14 @@ def test_a_tick_over_relations_builds_no_resolver_and_walks_nothing(
     spy = _Builds(monkeypatch)
     _quiet(vault)
     assert spy.builds == 0 and spy.walks == 0, (spy.builds, spy.walks)
-    # The pass still proposes: the unauthored pair, and hydration.
+    # The pass still proposes: the unauthored pair, hydration, and the
+    # entity's missing summary.
     families = {row["family"] for row in _rows(vault)}
-    assert families == {dreamer_families.LINK_FAMILY, dreamer_families.HYDRATION_FAMILY}
+    assert families == {
+        dreamer_families.LINK_FAMILY,
+        dreamer_families.HYDRATION_FAMILY,
+        dreamer_families.PROFILE_FAMILY,
+    }
 
 
 def test_authored_relations_still_suppress_a_link(

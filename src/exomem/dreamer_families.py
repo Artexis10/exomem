@@ -20,6 +20,7 @@ the agent calls under that leaf's own authority.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1611,6 +1612,322 @@ CONVENTION = Family(
 )
 
 
+# ----------------------------------------------------------------------
+# episode-recap fold `upkeep_fold`, and profile `upkeep_profile`
+# ----------------------------------------------------------------------
+#
+# Both are per-subject counts over the published graph: the pages that link
+# one governed page P, grouped into independent origins. Neither keeps page
+# contributions of its own. Each is served per caller (`release`): every
+# served field, count and fingerprint is recomputed from the pages that caller
+# may see, so a withheld page equals an absent one. The stored row is the
+# owner's view, a superset that exists whenever some caller could be served.
+
+FOLD_FAMILY = "upkeep_fold"
+FOLD_KIND = "episode.fold"
+PROFILE_FAMILY = "upkeep_profile"
+PROFILE_KIND = "profile.summary"
+
+#: Independent origins either family needs: two episodes, or two Source origins.
+FOLD_MIN_ORIGINS = 2
+PROFILE_MIN_ORIGINS = 2
+
+#: Governed pages a changed page links that are examined again, per page.
+_LINKED_SUBJECTS_PER_PAGE = PER_PAGE_TERMS
+#: Linking pages read per subject; on the request path, released ones only.
+_LINKER_ROW_LIMIT = 64
+
+_LINKED_SUBJECTS_SQL = (
+    "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
+    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+    "WHERE e.source_path = ? AND d.path <> ? AND d.review_eligible = 1 "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "ORDER BY d.path LIMIT ?"
+)
+
+#: Live episode recaps that link the subject and that it neither links nor cites.
+_RECAPS_SQL = (
+    "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date "
+    "FROM graph_edges e JOIN graph_nodes f "
+    "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
+    "WHERE e.dst_key = ? AND substr(e.source_path, 1, ?) = ? "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    f"AND COALESCE(f.lifecycle_status, '') NOT IN ({','.join('?' for _ in _INACTIVE_STATUSES)}) "
+    "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
+    "AND b.dst_key = ('file:' || e.source_path)) "
+    "ORDER BY e.source_path"
+)
+
+#: Active governed pages that link the subject.
+_REFERRERS_SQL = (
+    "SELECT DISTINCT e.source_path FROM graph_edges e JOIN graph_nodes f "
+    "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
+    "WHERE e.dst_key = ? AND e.source_path <> ? AND f.review_eligible = 1 "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "ORDER BY e.source_path"
+)
+
+#: The `## Summary` section the entity page shape carries (`link.py`).
+_SUMMARY_SECTION = re.compile(r"^##[ \t]+summary[ \t]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _episodes_prefix() -> str:
+    from . import source_taxonomy
+    from .kbdir import kb_dirname
+
+    return f"{kb_dirname()}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}/"
+
+
+def _subject_node(ctx: Context, subject: str, keep) -> tuple[Any, ...] | None:
+    """The subject's graph row when it is an active governed page the caller may see."""
+    if not _visible(keep, subject):
+        return None
+    node = (
+        ctx.graph()
+        .execute(
+            "SELECT review_eligible, updated_date, origin_date, exomem_id, title "
+            "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+            (f"file:{subject}",),
+        )
+        .fetchone()
+    )
+    return node if node is not None and node[0] else None
+
+
+def _visible(keep, path: str) -> bool:
+    return keep is None or bool(keep(path))
+
+
+def _released_rows(cursor, keep) -> list[tuple[Any, ...]]:
+    """The first `_LINKER_ROW_LIMIT` rows whose page the caller may see, in path order."""
+    out: list[tuple[Any, ...]] = []
+    for row in cursor:
+        if _visible(keep, str(row[0])):
+            out.append(row)
+            if len(out) >= _LINKER_ROW_LIMIT:
+                break
+    return out
+
+
+def _linked_subjects(ctx: Context, rel_path: str) -> list[str]:
+    """The page itself and the governed pages it links (at most 16)."""
+    linked = [
+        str(row[0])
+        for row in ctx.graph().execute(
+            _LINKED_SUBJECTS_SQL, (rel_path, rel_path, _LINKED_SUBJECTS_PER_PAGE)
+        )
+    ]
+    return [rel_path, *linked]
+
+
+def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
+    """The fold proposal on one page, as a caller whose predicate is `keep` sees it.
+
+    Two or more episodes recorded recaps that link the page after it was last
+    updated, and the page neither links nor cites them: what was decided or
+    worked on in those conversations may not have reached its home. Revisions
+    of one episode are one origin; superseded revisions are not live.
+    """
+    node = _subject_node(ctx, subject, keep)
+    if node is None:
+        return None
+    since = _date(node[1], node[2])
+    prefix = _episodes_prefix()
+    rows = _released_rows(
+        ctx.graph().execute(
+            _RECAPS_SQL,
+            (
+                f"file:{subject}",
+                len(prefix),
+                prefix,
+                *sorted(_INACTIVE_STATUSES),
+                subject,
+            ),
+        ),
+        keep,
+    )
+    episodes: dict[str, tuple[str, str]] = {}
+    for path, updated, origin in rows:
+        recorded = _date(updated, origin)
+        if not recorded or recorded <= since:
+            continue
+        page = ctx.page(str(path))
+        frontmatter = page.frontmatter if page is not None else {}
+        key = frontmatter.get("episode") if isinstance(frontmatter, dict) else None
+        origin_key = review_state_digest(["episode", key if isinstance(key, str) else path])
+        # The newest revision speaks for its episode.
+        if origin_key not in episodes or (recorded, str(path)) > episodes[origin_key]:
+            episodes[origin_key] = (recorded, str(path))
+    if len(episodes) < FOLD_MIN_ORIGINS:
+        return None
+    chosen = sorted((path, origin) for origin, (_at, path) in episodes.items())
+    chosen = chosen[:_OTHER_MEMBERS]
+    subject_entry = _member_entry(ctx, subject, "subject")
+    return {
+        "family": FOLD_FAMILY,
+        "kind": FOLD_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": "",
+        "evidence": [
+            subject_entry,
+            *(_member_entry(ctx, path, "recap", origin=origin) for path, origin in chosen),
+        ],
+        "evidence_count": len(episodes) + 1,
+        "route": {
+            "tool": "maintain_memory",
+            "args": {
+                "mode": "curation",
+                "curation_action": "work-item",
+                "paths": [subject, *(path for path, _origin in chosen)],
+            },
+        },
+        "reason_code": "recaps_newer_than_page",
+        "signal_version": review_state_digest([subject, since, sorted(episodes)]),
+        "measures": {"episodes": len(episodes)},
+    }
+
+
+def _self_described(page: Any) -> bool:
+    """True when the page says what it is: a `summary` field or a `## Summary` section."""
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    value = frontmatter.get("summary")
+    if isinstance(value, str) and value.strip():
+        return True
+    return bool(_SUMMARY_SECTION.search(str(getattr(page, "body", "") or "")))
+
+
+def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
+    """The profile proposal on one page, as a caller whose predicate is `keep` sees it.
+
+    Pages of two or more independent origins link the page, and it carries no
+    summary of itself. Origins are the union-find over the referrers' declared
+    Sources the caller may see; referrers that declare none are one origin.
+    """
+    from . import provenance
+
+    if _subject_node(ctx, subject, keep) is None:
+        return None
+    page = ctx.page(subject)
+    if page is None or _self_described(page):
+        return None
+    graph = ctx.graph()
+    referrers = [
+        str(row[0])
+        for row in _released_rows(graph.execute(_REFERRERS_SQL, (f"file:{subject}", subject)), keep)
+    ]
+    if len(referrers) < PROFILE_MIN_ORIGINS:
+        return None
+    # A Source the caller may not see is no origin: the referrer reads as
+    # declaring only the Sources it may see, as on a vault without that Source.
+    sources: dict[str, set[str]] = {path: set() for path in referrers}
+    marks = ",".join("?" for _ in referrers)
+    for src_key, dst_key in graph.execute(
+        f"SELECT src_key, dst_key FROM graph_edges WHERE src_key IN ({marks}) "
+        "AND origin = 'frontmatter' AND source_anchor = 'sources' "
+        "AND relation_type = 'derived_from'",
+        [f"file:{path}" for path in referrers],
+    ):
+        if _visible(keep, str(dst_key).removeprefix("file:")):
+            sources[str(src_key).removeprefix("file:")].add(str(dst_key))
+    unsourced = {path: _UNSOURCED_ORIGIN for path, declared in sources.items() if not declared}
+    origins = provenance.origin_keys(sources, fallback=unsourced)
+    if len(set(origins.values())) < PROFILE_MIN_ORIGINS:
+        return None
+    firsts: dict[str, str] = {}
+    for path in sorted(referrers, key=lambda path: (origins[path], path)):
+        firsts.setdefault(origins[path], path)
+    chosen = sorted(firsts.values())[:_OTHER_MEMBERS]
+    subject_entry = _member_entry(ctx, subject, "subject")
+    return {
+        "family": PROFILE_FAMILY,
+        "kind": PROFILE_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": "",
+        "evidence": [
+            subject_entry,
+            *(_member_entry(ctx, path, "referrer", origin=origins[path]) for path in chosen),
+        ],
+        "evidence_count": len(referrers) + 1,
+        "route": {
+            "tool": "edit_memory",
+            "args": {
+                "path": subject,
+                "operation": {"kind": "patch_frontmatter", "field": "summary"},
+            },
+        },
+        "reason_code": "linked_without_summary",
+        "signal_version": review_state_digest([subject, sorted(set(origins.values()))]),
+        "measures": {"origins": len(set(origins.values())), "referrers": len(referrers)},
+    }
+
+
+def _subject_family(
+    name: str,
+    kind: str,
+    view: Callable[..., dict[str, Any] | None],
+    *,
+    linked_from: Callable[[str], bool],
+) -> Family:
+    """A family whose one proposal per subject page is `view` of that page.
+
+    A changed page recomputes its own proposal, and those of the governed
+    pages it links when `linked_from(path)` says it can count toward them.
+    """
+
+    def refresh(ctx: Context, subject: str) -> None:
+        kwargs = view(ctx, subject, keep=None) if _sig(ctx, subject) else None
+        if kwargs is None:
+            ctx.store.resolve(
+                ctx.conn,
+                dreamer_store.candidate_id(kind, subject, ""),
+                producer=PRODUCER,
+                now=ctx.now,
+            )
+            return
+        ctx.store.upsert_proposal(
+            ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, **kwargs
+        )
+
+    def on_page(ctx: Context, rel_path: str) -> None:
+        subjects = _linked_subjects(ctx, rel_path) if linked_from(rel_path) else [rel_path]
+        for subject in subjects:
+            refresh(ctx, subject)
+
+    def on_delete(ctx: Context, rel_path: str) -> None:
+        refresh(ctx, rel_path)
+
+    def revalidate(ctx: Context, row: dict[str, Any]) -> None:
+        refresh(ctx, str(row.get("subject_path") or ""))
+
+    def propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+        subject = str(row.get("subject_path") or "")
+        return view(ctx, subject, keep=None) if _sig(ctx, subject) else None
+
+    def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+        return _released(view(ctx, str(row.get("subject_path") or ""), keep=keep), row)
+
+    return Family(
+        name=name,
+        kinds=(kind,),
+        on_page=on_page,
+        on_delete=on_delete,
+        revalidate=revalidate,
+        propose=propose,
+        release=release,
+    )
+
+
+FOLD = _subject_family(
+    FOLD_FAMILY,
+    FOLD_KIND,
+    _fold_view,
+    linked_from=lambda path: path.startswith(_episodes_prefix()),
+)
+PROFILE = _subject_family(PROFILE_FAMILY, PROFILE_KIND, _profile_view, linked_from=lambda _p: True)
+
+
 def tick_start(ctx: Context) -> None:
     """Once per tick: resume after the size cap, and follow a registry change.
 
@@ -1663,7 +1980,7 @@ def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
 
 
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION]
+REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE]
 
 
 def family_names() -> tuple[str, ...]:
