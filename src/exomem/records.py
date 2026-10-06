@@ -395,7 +395,12 @@ def append_record(
         if existing:
             if len(existing) != 1 or existing[0].ambiguous:
                 raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
-            if _payload_hash(manifest, key, existing[0].values, existing[0].body) == payload_hash:
+            # File-mode Planning keeps its measured PLAN_ID_CONFLICT for an
+            # identical add; only the store replays it (Planning compatibility
+            # ruling, move-structured-collections-to-sqlite design).
+            if manifest.semantic_profile != "planning" and _payload_hash(
+                manifest, key, existing[0].values, existing[0].body
+            ) == payload_hash:
                 correlation = _replay_audit_correlation(
                     root, manifest, snapshot, existing[0], payload_hash
                 )

@@ -95,7 +95,8 @@ def test_semantic_chunk_inside_origin_carrier_uses_complete_parent(vault: Path) 
     assert "regulator" in find_module._stem_anchored_excerpt(page, "regulation")
 
 
-def test_origin_excerpt_keeps_raw_capture_and_literal_example(vault: Path) -> None:
+def test_origin_excerpt_keeps_raw_capture_and_withholds_a_literal_example(vault: Path) -> None:
+    """A raw capture keeps every byte; search fields withhold a reserved opener even in code."""
     carrier = "<!-- exomem-origin:v9 literal-attribution -->"
     captures = {
         "Knowledge Base/Sources/origin-raw.md": "# Raw capture\n\n" + carrier,
@@ -112,11 +113,12 @@ def test_origin_excerpt_keeps_raw_capture_and_literal_example(vault: Path) -> No
 
     hits = find_module.find(vault, query="literal-attribution", mode="keyword", graph=False)
 
-    assert {hit.path for hit in hits} == set(captures)
-    assert all(carrier in hit.excerpt for hit in hits)
-    titles = {hit.path: hit.title for hit in hits}
-    assert titles["Knowledge Base/Sources/origin-raw.md"] == "Public " + carrier + " title"
-    assert titles["Knowledge Base/Notes/origin-literal.md"] == "Public  title"
+    (raw,) = hits
+    assert raw.path == "Knowledge Base/Sources/origin-raw.md"
+    assert carrier in raw.excerpt and raw.title == "Public " + carrier + " title"
+    found = find_module.find(vault, query="Literal example", mode="keyword", graph=False)
+    literal = next(hit for hit in found if hit.path == "Knowledge Base/Notes/origin-literal.md")
+    assert literal.title == "Public  title" and "exomem-origin" not in literal.excerpt
 
 
 def test_no_matches_returns_empty(vault: Path) -> None:
