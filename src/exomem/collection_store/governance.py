@@ -979,12 +979,17 @@ class OperationAuthorization:
                 TypeError, KeyError, sqlite3.Error):
             return Decision(0)
 
-    def allows_file(self, path: str) -> bool:
-        """Gate ancillary reads without reopening policy or session authority."""
+    def allows_file(self, path: str, *, content_sha256: str | None = None) -> bool:
+        """Gate ancillary reads without reopening policy or session authority.
+
+        ``content_sha256`` is a caller-proved digest of the file's current bytes
+        (a guarded import source); session grants then bind to it without
+        rereading a large file.
+        """
         projection = self.projection_decision(path)
         if projection is not None:
             return projection.level >= 6
-        return self._allows_path_metadata(path)
+        return self._allows_path_metadata(path, content_sha256)
 
     def allows_history_path(self, path: str) -> bool:
         """Gate audit topology, not file bytes, including deleted legacy paths."""
@@ -993,9 +998,10 @@ class OperationAuthorization:
             return all(self.decision(subject).level >= 6 for subject in targets)
         return self._allows_path_metadata(path)
 
-    def _allows_path_metadata(self, path: str) -> bool:
-        if path in self.file_decisions:
-            return self.file_decisions[path].level >= 6
+    def _allows_path_metadata(self, path: str, content_sha256: str | None = None) -> bool:
+        key = path if content_sha256 is None else (path, content_sha256)
+        if key in self.file_decisions:
+            return self.file_decisions[key].level >= 6
         decision = Decision(0)
         try:
             if (self.failed or self.policy.blocked or self.access_blocked
@@ -1006,10 +1012,14 @@ class OperationAuthorization:
             scope_ids = membership.evaluate_path_only(self.root, path, self.policy).require_classified()
             grants = list(self.policy.grants)
             if self.authority is not None and not self.policy.empty:
-                page, relative = vault.resolve_under_vault(self.root, path, must_exist=True, must_be_file=True)
-                if relative != path:
-                    return False
-                fingerprint = hashlib.sha256(vault.read_bytes_without_pinning(page)).hexdigest()
+                fingerprint = content_sha256
+                if fingerprint is None:
+                    page, relative = vault.resolve_under_vault(
+                        self.root, path, must_exist=True, must_be_file=True
+                    )
+                    if relative != path:
+                        return False
+                    fingerprint = hashlib.sha256(vault.read_bytes_without_pinning(page)).hexdigest()
                 current = authority.SessionMembership(path, fingerprint, tuple(sorted(scope_ids)))
                 matched = authority.active_session_grants_for_projection_catalog(
                     self.authority, context=self.context, audience=self.who.audience_id,
@@ -1025,7 +1035,7 @@ class OperationAuthorization:
                 sqlite3.Error, authorization_session_lifecycle.AuthorizationSessionUnavailable):
             pass
         finally:
-            self.file_decisions[path] = decision
+            self.file_decisions[key] = decision
         return decision.level >= 6
 
     @staticmethod

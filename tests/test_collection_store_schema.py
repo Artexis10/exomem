@@ -47,6 +47,8 @@ EXPECTED_TABLES = {
     "query_cursor_state",
     "version_identity",
     "typed_encoding_mappings",
+    "import_jobs",
+    "import_rejections",
 }
 APPEND_ONLY = (
     "txns",
@@ -355,7 +357,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 5
+    assert schema.SCHEMA_VERSION == 6
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4

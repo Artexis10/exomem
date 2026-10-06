@@ -150,8 +150,13 @@ def dispatch(
             from ..record_memory import _bulk_upsert_contract
 
             writer._require_operation_context()
-            return True, {**collections.manifest_authoring_contract(),
-                          "bulk_upsert": _bulk_upsert_contract(store_mode=True)}
+            from .importer import contract
+
+            return True, {
+                **collections.manifest_authoring_contract(),
+                "bulk_upsert": _bulk_upsert_contract(store_mode=True),
+                "import": contract(),
+            }
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
@@ -178,6 +183,12 @@ def dispatch(
             )
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
+    if action == "import" and profile == "records":
+        from . import importer
+
+        return True, importer.dispatch(
+            vault_root, writer, args["collection"], args["import_request"]
+        )
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
         args["item_key"] = args.pop("plan_id")

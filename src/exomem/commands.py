@@ -11501,6 +11501,7 @@ def op_record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "import",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -11537,6 +11538,7 @@ def op_record_memory(
     rows: list[dict[str, Any]] | None = None,
     source: str | None = None,
     on_reject: Literal["abort", "skip"] | None = None,
+    import_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Store observed state; Planning uses plan_memory, originals use Sources/Evidence.
 
@@ -11600,6 +11602,7 @@ def op_record_memory(
         rows=rows,
         source=source,
         on_reject=on_reject,
+        import_request=import_request,
     )
 
 

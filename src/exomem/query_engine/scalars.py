@@ -44,6 +44,16 @@ def parse_instant(value: object) -> dt.datetime:
         raise ScalarValueError("scalar instant is invalid") from error
 
 
+def instant_offset_minutes(value: object) -> int:
+    """The UTC offset, in minutes, carried by a valid typed-v1 instant string."""
+    parse_instant(value)
+    offset = _INSTANT.fullmatch(value)["offset"]
+    if offset in {"Z", "z"}:
+        return 0
+    minutes = int(offset[1:3]) * 60 + int(offset[4:6])
+    return -minutes if offset[0] == "-" else minutes
+
+
 def _number_key(value: int | float) -> str:
     decimal = Decimal(value) if type(value) is int else Decimal.from_float(value)
     sign, digits, exponent = decimal.as_tuple()
