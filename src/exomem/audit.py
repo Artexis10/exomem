@@ -1413,7 +1413,8 @@ def semantic_recall_isolation_census(
     values, truncated, last, failure = _sidecar_rows(
         vault_root,
         graph_sidecar,
-        "SELECT edge_key, source_path, src_key, dst_key FROM graph_edges WHERE edge_key > ? ORDER BY edge_key",
+        "SELECT edge_key, source_path, src_key, dst_key, dst_page_key FROM graph_edges "
+        "WHERE edge_key > ? ORDER BY edge_key",
         after=stored.get("cursor", "") if stored.get("signature") == signature else "",
         limit=limit,
     )
@@ -1422,7 +1423,7 @@ def semantic_recall_isolation_census(
         incomplete["graph_edges"] = failure
     elif truncated and last is not None and signature is not None:
         continuation["graph_edges"] = {"cursor": last, "signature": signature}
-    for _edge_key, source_path, src_key, dst_key in values:
+    for _edge_key, source_path, src_key, dst_key, dst_page_key in values:
         for raw, identity, edge_column in (
             (source_path, source_path, "source_path"),
             (
@@ -1434,8 +1435,10 @@ def semantic_recall_isolation_census(
             ),
             (
                 dst_key,
-                dst_key.removeprefix("file:")
-                if isinstance(dst_key, str) and dst_key.startswith("file:")
+                # A unit destination belongs to a page; that page is the identity
+                # whose admission decides whether the edge may stay.
+                dst_page_key.removeprefix("file:")
+                if isinstance(dst_page_key, str) and dst_page_key.startswith("file:")
                 else None,
                 "dst_key",
             ),

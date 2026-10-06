@@ -105,6 +105,33 @@
     - k3s_remove_crypt.rc != 0
     - "'communicate with kernel device-mapper' not in k3s_remove_crypt.stderr"
 
+- name: Name the open dm-crypt mappings
+  ansible.builtin.set_fact:
+    k3s_remove_crypt_names: >-
+      {{ (k3s_remove_crypt.stdout_lines if k3s_remove_crypt.rc == 0 else []) | reject('match', '^No devices found')
+         | map('split') | map('first') | list }}
+
+# A dedicated agent keeps its cell storage in a volume group on a LUKS
+# mapping, and the active group holds the mapping open. Find each group that
+# sits on a mapping about to close. A mapping that is not a physical volume
+# finds none; a failed lookup leaves its mapping open, and the close stops.
+- name: Find the volume groups on the open dm-crypt mappings
+  ansible.builtin.command:
+    argv: [/usr/sbin/pvs, --noheadings, --options, vg_name, "/dev/mapper/{{ item }}"]
+  loop: "{{ k3s_remove_crypt_names }}"
+  register: k3s_remove_crypt_vgs
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname in (groups['dedicated_hosts'] | default([]))
+
+- name: Deactivate those volume groups so their mappings can close
+  ansible.builtin.command:
+    argv: [/usr/sbin/vgchange, --activate, n, "{{ item }}"]
+  loop: >-
+    {{ k3s_remove_crypt_vgs.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+       | map(attribute='stdout') | map('trim') | reject('equalto', '') | unique | list }}
+  changed_when: true
+
 # The encrypted storage class opens one mapping per volume; a mapping that
 # still backs a mount (such as an encrypted root) reports busy and stays.
 - name: Close the volumes' dm-crypt mappings
@@ -113,9 +140,7 @@
       - /usr/sbin/cryptsetup
       - close
       - "{{ item }}"
-  loop: >-
-    {{ (k3s_remove_crypt.stdout_lines if k3s_remove_crypt.rc == 0 else []) | reject('match', '^No devices found')
-       | map('split') | map('first') | list }}
+  loop: "{{ k3s_remove_crypt_names }}"
   register: k3s_remove_crypt_close
   changed_when: k3s_remove_crypt_close.rc == 0
   failed_when:

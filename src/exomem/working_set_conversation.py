@@ -420,12 +420,19 @@ def apply(
     # The qualifier needs only the anchors the turn or `focus` reached: an
     # entry's worded kinds on a row never depend on another row's words,
     # except through an embedded word (`candidates_for`'s consumption), where
-    # the whole catalogue is read.
+    # the whole catalogue is read. It asks only whether an entry names the
+    # anchor, so it never builds each reached row's full facts: a focus that
+    # reaches the whole candidate set would pay that per row per entry.
     embedded = any(set(analysis.words) - set(analysis.tokens) for analysis in analyses)
     reached = rows if embedded else [row for row in rows if row.anchor_id in merged]
-    drawn_reached = scan(reached)
-    for drawn in drawn_reached:
-        named.update(item.anchor_id for item in drawn if item.evidence & ENTRY_KINDS)
+    named.update(
+        resolve_module.entry_named_anchors(
+            analyses,
+            reached,
+            row_lexicons=lexicons,
+            **({"stopwords": stopwords} if stopwords is not None else {}),
+        )
+    )
     computed: list[tuple[tuple[Entry, Any, tuple[Any, ...]], ...]] = []
 
     def entry_candidates() -> tuple[tuple[Entry, Any, tuple[Any, ...]], ...]:
@@ -433,8 +440,7 @@ def apply(
         reach in the whole catalogue: the carry's input, scanned only when the
         carry runs."""
         if not computed:
-            drawn_all = drawn_reached if reached is rows else scan(rows)
-            computed.append(tuple(zip(segments.entries, drawn_all, strict=True)))
+            computed.append(tuple(zip(segments.entries, scan(rows), strict=True)))
             computed[0] = tuple((entry, analysis, drawn) for (entry, analysis), drawn in computed[0])
         return computed[0]
 

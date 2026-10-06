@@ -2098,11 +2098,6 @@ def _normalize_saved_view_aggregate(value: object, fields: set[str]) -> str:
     return f"{function}:{column}"
 
 
-def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
-    """Validate the optional manifest audit mapping and return its head."""
-    return _audit_head(frontmatter, "record_audit")
-
-
 def _require_records_reader_version(frontmatter: Mapping[str, Any], reader_version: int) -> None:
     if type(reader_version) is not int or reader_version < 1:
         raise CollectionError(
@@ -2160,11 +2155,6 @@ def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
     return head
 
 
-def _validate_record_audit_source(text: str) -> vault.yaml.nodes.MappingNode | None:
-    """Require an audit mapping's keys to be authored rather than YAML-merged."""
-    return _validate_audit_source(text, "record_audit")
-
-
 def _profile_owned_audit_name(text: str) -> str | None:
     """Find the declared profile without constructing YAML audit mappings."""
     text = text.removeprefix("\ufeff")
@@ -2219,12 +2209,6 @@ def _validate_audit_source(
         if node is not None:
             result = node
     return result
-
-
-def _validate_record_audit_document(
-    document: vault.yaml.nodes.MappingNode,
-) -> vault.yaml.nodes.MappingNode | None:
-    return _validate_audit_document(document, "record_audit")
 
 
 def _validate_audit_document(

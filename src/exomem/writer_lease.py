@@ -33,7 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from . import call_spans, mutation_lock, request_budget
+from . import call_spans, durable_write, mutation_lock, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -6322,7 +6322,16 @@ def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | s
             current = int(path.read_text(encoding="utf-8").strip() or "0")
         except Exception:  # noqa: BLE001 - a fresh/corrupt counter restarts
             current = 0
-        path.write_text(str(current + 1), encoding="utf-8")
+        # Replaced, never overwritten in place: a power cut must leave a whole
+        # counter, not an empty file that reads as a restart (design D9).
+        try:
+            durable_write.replace_text(path, str(current + 1))
+        except OSError:
+            # A reader that holds the file past the rename's retry window
+            # (Windows) must not stop the bump: a counter that stays put would
+            # admit a stale stamp. Write in place instead; a torn read of it
+            # differs from the stamp's generation, which disables reuse.
+            path.write_text(str(current + 1), encoding="utf-8")
     except Exception:  # noqa: BLE001 - the counter must never break a commit
         pass
 

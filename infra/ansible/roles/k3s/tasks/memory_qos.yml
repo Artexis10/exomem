@@ -16,7 +16,7 @@
   ansible.builtin.assert:
     that:
       - k3s_memory_qos_cgroup.stdout == 'cgroup2fs'
-      - ansible_kernel.split('-')[0] is version('5.9', '>=')
+      - ansible_facts['kernel'].split('-')[0] is version('5.9', '>=')
     fail_msg: MemoryQoS adoption requires cgroup v2 and the kernel 5.9 memory.high fix.
   when: k3s_memory_qos_enabled
 

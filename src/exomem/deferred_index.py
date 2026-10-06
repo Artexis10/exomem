@@ -2235,26 +2235,6 @@ def clear_semantic_receipts(vault_root: Path, rel_paths: list[str]) -> int:
     )
 
 
-def _list_paths(
-    vault_root: Path, *, table: str, limit: int | None = None
-) -> list[str]:
-    path = store_path(vault_root)
-    if not path.exists():
-        return []
-    conn = _connect(vault_root, create=False)
-    try:
-        if not any(conn.execute(f"PRAGMA table_info({table})")):
-            return []  # Predates this queue; see `_snapshot_plain`.
-        sql = f"SELECT rel_path FROM {table} ORDER BY rel_path"
-        params: tuple[Any, ...] = ()
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (max(0, limit),)
-        return [str(row[0]) for row in conn.execute(sql, params).fetchall()]
-    finally:
-        conn.close()
-
-
 def _purge_corrupt_paths(
     vault_root: Path,
     table: str,

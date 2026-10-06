@@ -18,8 +18,6 @@ compat with how this tool worked before the broadening.
 from __future__ import annotations
 
 import logging
-import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,53 +80,6 @@ class PreparedPageRead:
     resolved_relative: str
     raw: bytes
     mtime: float
-
-
-class _SnapshotChanged(OSError):
-    """The leaf named by a resolved target changed while it was being bound."""
-
-
-def _is_link_or_reparse(info: os.stat_result) -> bool:
-    attributes = getattr(info, "st_file_attributes", 0)
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse)
-
-
-def _snapshot_identity(info: os.stat_result) -> tuple[int, int]:
-    return info.st_dev, info.st_ino
-
-
-def _read_prepared_snapshot(target: Path) -> tuple[bytes, os.stat_result] | None:
-    """Bind bytes to the resolved leaf without following a later name swap."""
-    before = os.lstat(target)
-    if _is_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
-        return None
-
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(target, flags)
-    try:
-        bound = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(bound.st_mode)
-            or _snapshot_identity(before) != _snapshot_identity(bound)
-        ):
-            raise _SnapshotChanged("file changed while preparing read")
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        raw = b"".join(chunks)
-    finally:
-        os.close(descriptor)
-
-    try:
-        after = os.lstat(target)
-    except OSError as error:
-        raise _SnapshotChanged("file changed while preparing read") from error
-    if _is_link_or_reparse(after) or _snapshot_identity(after) != _snapshot_identity(bound):
-        raise _SnapshotChanged("file changed while preparing read")
-    return raw, bound
 
 
 #: The fixed reason for bytes that are not UTF-8. The codec's own message

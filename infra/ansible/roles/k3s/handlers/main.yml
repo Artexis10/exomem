@@ -11,3 +11,13 @@
   ansible.builtin.systemd_service:
     name: "{{ k3s_service_name }}"
     state: restarted
+
+- name: Restart WireGuard
+  ansible.builtin.systemd_service:
+    name: wg-quick@{{ k3s_wireguard_interface }}
+    state: restarted
+
+- name: Apply netplan
+  ansible.builtin.command:
+    argv: [/usr/sbin/netplan, apply]
+  changed_when: true
