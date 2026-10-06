@@ -14,7 +14,7 @@ from ..query_engine.indexes import (
     require_index_dependencies,
 )
 from ..query_engine.scalars import ScalarValueError
-from . import query_freshness, typed_storage
+from . import query_freshness, rollups, typed_storage
 from .query_indexes import ProjectionPlan, build_projection_plan
 
 _MAX_CELL_BYTES = 256 * 1024
@@ -106,6 +106,7 @@ def maintain_item(conn, collection_id, row_id, item_key, row_version, values: Ma
     """Maintain ready and building indexes in the canonical item transaction."""
     _transaction(conn)
     query_freshness.maintain(conn, collection_id, values, previous=previous)
+    rollups.maintain(conn, collection_id, row_id, item_key, values, previous=previous)
     mappings = conn.execute("SELECT generation,state,plan_json FROM query_projection_mappings "
                             "WHERE collection_id=? AND state IN ('ready','building')",
                             (collection_id,)).fetchall()
@@ -196,8 +197,9 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
 
 
 def prepare_manifest(conn, manifest, data, declared) -> None:
-    """Resolve logical index intent at governed create/revise, never at query."""
+    """Resolve logical index and rollup intent at governed create/revise, never at query."""
     _transaction(conn)
+    rollups.prepare(conn, manifest, data)
     fields = data["item_schema"]["fields"]
     inherited = {index.name: {"keys": [{"field": key.field, "direction": key.direction}
                  for key in index.keys]} for index in declared.indexes}

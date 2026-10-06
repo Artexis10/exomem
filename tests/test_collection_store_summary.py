@@ -14,14 +14,15 @@ from pathlib import Path
 
 import pytest
 from test_collection_store_legacy_import import CONTEXT, _capture, _connection, _items
-from test_collection_store_writer import CID, manifest_path, manifest_text
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, _gov_dir, write_rule, write_scope
 from test_records_bulk_upsert import EVIDENCE, _evidence
 
-from exomem import get_page, mutation_terminal, record_formats, records, vault
+from exomem import due_state, get_page, mutation_terminal, record_formats, records, vault
 from exomem import structured_collections as collections
 from exomem.collection_store import governance, legacy_import, typed_storage
+from exomem.collection_store.preview import preview_store
 from exomem.collection_store.reader import StoreAdapter
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.query_engine import legacy, runtime
@@ -525,3 +526,26 @@ def test_summary_collection_refuses_a_planning_join(store):
     with pytest.raises(collections.CollectionError, match="UNSUPPORTED_VIEW_MODE") as refused:
         store.create_collection(manifest_path(), joined, why="create", scaffold=False)
     assert refused.value.details["field"] == "links.plans[0].join"
+
+
+def test_stale_planning_binding_to_a_summary_collection_never_loads_its_rows(store, monkeypatch):
+    """A binding left in the projection index from before a revise to summary (which drops the join)
+    that makes every planning write load all summary rows to look for join partners."""
+    plan_path = manifest_path("planning")
+    store.create_collection(plan_path, manifest_text("planning").replace(CID, OTHER), why="create", scaffold=False)
+    create(store)
+    bulk(store, [{"title": "Batch", "count": 1}])
+    row = {"records": manifest_path(), "planning": plan_path, "join": {"title": "title"}}
+    due_state.save(store.root, {"version": due_state.SCHEMA_VERSION, "categories": {},
+                                "bindings": {plan_path: [row], manifest_path(): [row]}})
+    loaded = []
+    monkeypatch.setattr(due_state, "_unfiltered_snapshot", lambda root, manifest: loaded.append(manifest.path))
+    values = {"title": "Batch", "kind": "outcome", "status": "planned", "commitment": "committed",
+              "horizon": "quarter"}
+    added = store.append_record(OTHER, item=values, item_key=KEY, why="plan")
+    planning = collections.parse_manifest_bytes(store.root, plan_path, manifest_text("planning").replace(
+        CID, OTHER).encode())
+    with preview_store(store.root, store.handle):
+        due_state.apply_plan_write_delta(store.root, planning, path=added["affected_paths"][0], key=KEY,
+                                         values=values)
+    assert loaded == []

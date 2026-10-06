@@ -38,6 +38,7 @@ from . import (
     connection,
     governance,
     index_migrations,
+    rollups,
     summary,
     tokens,
     typed_storage,
@@ -1058,6 +1059,22 @@ class CollectionWriter:
         with self._mutation():
             _, manifest, _ = self._collection(collection)
             complete = index_migrations.backfill_batch(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                manifest.collection_id, limit=limit,
+            )
+            self._precommit(manifest)
+        return complete
+
+    def backfill_rollups(self, collection, *, limit=128) -> bool:
+        """Advance this collection's building rollups by one batch under the writer lease and current authority.
+
+        Internal maintenance like the query-index backfill, not a public route:
+        canonical items, generations and audit are unchanged. True once every
+        declared rollup is ready; until then the planner reads base rows.
+        """
+        with self._mutation():
+            _, manifest, _ = self._collection(collection)
+            complete = rollups.backfill_batch(
                 index_migrations.AccountedWriter(self.connection, self._execute),
                 manifest.collection_id, limit=limit,
             )

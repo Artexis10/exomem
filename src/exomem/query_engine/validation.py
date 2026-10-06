@@ -424,7 +424,7 @@ class _Binder:
         self.reduction_fields = {}
         for i, value in enumerate(_list(groups, "group_by", 4)):
             at = f"group_by[{i}]"
-            raw = _object(value, at, {"field", "bucket"}, {"field"})
+            raw = _object(value, at, {"field", "bucket", "from", "to"}, {"field"})
             field = self.field(raw["field"], f"{at}.field")
             if raw["field"] in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "unique group field path")
@@ -435,10 +435,27 @@ class _Binder:
                 bucket = _choice(raw["bucket"], f"{at}.bucket", {"day", "week", "month"})
                 if field.value_type not in {"date", "datetime"}:
                     _fail("QUERY_VALUE_INVALID", f"{at}.bucket", "declared date or datetime field")
+            window = []
+            for end in ("from", "to"):
+                if end not in raw:
+                    window.append(None)
+                    continue
+                if bucket is None:
+                    _fail("QUERY_KEY_UNKNOWN", f"{at}.{end}", "a local-day window only on a time bucket")
+                day = raw[end]
+                try:
+                    valid = type(day) is str and len(day) == 10 and dt.date.fromisoformat(day).isoformat() == day
+                except ValueError:
+                    valid = False
+                if not valid:
+                    _fail("QUERY_VALUE_INVALID", f"{at}.{end}", "ISO local date YYYY-MM-DD")
+                window.append(day)
+            if None not in window and window[0] > window[1]:
+                _fail("QUERY_VALUE_INVALID", f"{at}.to", "window end on or after its start")
             self.reduction_fields[raw["field"]] = (
                 replace(field, value_type="date") if bucket else field
             )
-            keys.append(GroupKey(field, bucket))
+            keys.append(GroupKey(field, bucket, *window))
         raw_values = _object(
             values, "aggregates", values.keys() if isinstance(values, dict) else ()
         )
@@ -454,11 +471,14 @@ class _Binder:
             op = _choice(
                 raw["op"],
                 f"{at}.op",
-                {"count", "sum", "avg", "min", "max", "percentile", "distinct_count"},
+                {"count", "sum", "avg", "min", "max", "latest", "percentile", "distinct_count"},
             )
             field = self.field(raw["field"], f"{at}.field") if "field" in raw else None
             if field is None and op != "count":
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "required declared field")
+            if op == "latest" and not any(key.bucket for key in keys):
+                # Recency is the bucket's source-local time basis; without one it is undefined.
+                _fail("QUERY_VALUE_INVALID", f"{at}.op", "latest needs a time bucket group key")
             if field is not None and (
                 field.value_type not in _SCALARS
                 and op != "count"
@@ -479,7 +499,7 @@ class _Binder:
                 "integer"
                 if op in {"count", "distinct_count"}
                 else field.value_type
-                if op in {"min", "max"}
+                if op in {"min", "max", "latest"}
                 else "number"
             )
             self.reduction_fields[name] = Field(self.source, name, output_type)
