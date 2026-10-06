@@ -122,8 +122,9 @@ def _filters(vault_root: Path) -> tuple[Any, bool]:
     withheld from it.
 
     Nothing can be on a vault with no file policy and no tombstones (no
-    predicate), or for the owner in file mode: `egress.restricted_release_filter`
-    gives such a caller no filter.
+    predicate). The owner in file mode is treated as withheld nothing, as
+    egress treats the owner for every derived structure:
+    `egress.restricted_release_filter` gives the owner no filter.
     """
     from .governance import egress
     from .governance.principal import effective_principal
