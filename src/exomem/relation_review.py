@@ -2052,27 +2052,6 @@ def cleanup_stale_lifecycle_prepared_batch(
     return LifecyclePreparedCleanupBatch(tuple(cleaned), tuple(blocked))
 
 
-def cleanup_stale_lifecycle_prepared(
-    vault_root: Path,
-    inspection: LifecyclePreparedInspection,
-) -> str:
-    """Compatibility wrapper routed through the guarded batch cleanup path."""
-    result = cleanup_stale_lifecycle_prepared_batch(vault_root, (inspection,))
-    if result.cleaned:
-        return result.cleaned[0]
-    issue = result.blocked[0]
-    raise RelationReviewError(
-        issue.code,
-        "prepared lifecycle cleanup was blocked by changed or unsafe state",
-    )
-
-
-def lifecycle_identity_reserved(vault_root: Path, page_identity: str) -> bool:
-    """Return whether any exact lifecycle identity directory reserves the UUID."""
-    _, _, census = _inspect_lifecycle_identity(vault_root, page_identity)
-    return census.directory_identity is not None
-
-
 def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
     inspected = _inspect_lifecycle_identity(root, page_identity)
     _, names, census = inspected

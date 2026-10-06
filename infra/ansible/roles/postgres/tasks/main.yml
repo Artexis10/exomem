@@ -73,7 +73,7 @@
   ansible.builtin.apt_repository:
     repo: >-
       deb [signed-by=/etc/apt/keyrings/postgresql.asc]
-      https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main
+      https://apt.postgresql.org/pub/repos/apt {{ ansible_facts['distribution_release'] }}-pgdg main
     filename: pgdg
     state: present
 

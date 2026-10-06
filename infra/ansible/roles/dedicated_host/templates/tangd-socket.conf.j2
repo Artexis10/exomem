@@ -1,0 +1,6 @@
+# Managed by the dedicated_host role: Tang answers only on the server's
+# private address, which the dedicated agents reach over their private link.
+[Socket]
+ListenStream=
+ListenStream={{ private_node_ip }}:{{ dedicated_host_tang_port }}
+FreeBind=yes

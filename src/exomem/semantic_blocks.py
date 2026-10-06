@@ -202,12 +202,6 @@ class SemanticBlockDocument:
     def is_valid(self) -> bool:
         return not self.errors
 
-    def blocks_by_type(self, block_type: str) -> list[SemanticBlock]:
-        normalized = normalize_block_type(block_type)
-        if normalized is None:
-            return []
-        return [block for block in self.blocks if block.type == normalized]
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "blocks": [block.to_dict() for block in self.blocks],
