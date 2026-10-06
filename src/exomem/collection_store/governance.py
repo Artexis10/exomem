@@ -225,7 +225,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         raise ValueError("canonical subject lookup must have one selector")
     row = conn.execute(
         "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,m.manifest_hash,m.governance_json,"
-        "c.type_name,c.type_version,t.declaration_hash,t.declaration_json,ct.builtin "
+        "c.type_name,c.type_version,t.declaration_hash,t.declaration_json,ct.builtin,c.view_mode "
         "FROM collections c JOIN collection_manifests m "
         "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version "
         "JOIN collection_type_versions t ON t.name=c.type_name AND t.version=c.type_version "
@@ -234,11 +234,16 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     store_identity = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
     if row is None or store_identity is None or not store_identity[0]:
         raise ValueError("canonical subject is unavailable")
-    path, source_path, layout, version, content_hash, metadata, name, type_version, declaration_hash, declaration, builtin = row
+    (path, source_path, layout, version, content_hash, metadata, name, type_version, declaration_hash,
+     declaration, builtin, view_mode) = row
     declared = types.parse_declaration(json.loads(declaration), builtin=bool(builtin))
     if (declared.name, declared.version) != (name, type_version):
         raise ValueError("canonical type identity differs")
     manifest_meta = _metadata(metadata)
+    # Summary rows have no view file: they take the manifest's subject, and stay
+    # owner-only until field release governs them (S1.5b).
+    summary = view_mode == "summary"
+    audience = "owner" if summary else declared.default_audience
 
     def make(ref, row_id, policy_path, item_type, raw_metadata, row_version, payload, domain):
         meta = _metadata(raw_metadata)
@@ -247,7 +252,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
             (item_type.lower(),), tuple(meta["classes"]),
         )
         basis = CanonicalGrantBasis(logical_vault_id, store_identity[0], ref, row_version, payload,
-                                    subject, declared.default_audience, version, content_hash,
+                                    subject, audience, version, content_hash,
                                     name, type_version, declaration_hash, domain)
         return CanonicalSubject(cid, row_id, basis)
 
@@ -276,7 +281,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                 meta = _metadata(raw_metadata)
                 if meta["projects"] != manifest_meta["projects"]:
                     raise ValueError("canonical row project differs from its manifest")
-                policy_path = source_path if layout == "markdown-log" else view_path
+                policy_path = path if summary else source_path if layout == "markdown-log" else view_path
                 yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
                            declared.item_type, raw_metadata, row_version, payload, "row")
     if not include_held:
@@ -298,12 +303,20 @@ def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject
     return replace(subject, basis=replace(subject.basis, logical_vault_id=logical_vault_id))
 
 
+#: Row subjects the writer's release cache keeps across collections before shedding them.
+_MAX_CACHED_SUBJECTS = 65536
+_MAX_CACHED_STATES = 8
+
+
 @dataclass(slots=True)
 class _CollectionState:
     epoch: tuple
     subjects: dict[str, CanonicalSubject]
     summaries: OrderedDict
     occupied_path_keys: Counter[str]
+    #: False once eviction shed the row subjects; the manifest subject, the
+    #: per-dependency release summaries and the item path keys stay current.
+    complete: bool = True
 
 
 class ReleaseCache:
@@ -370,9 +383,11 @@ class ReleaseCache:
     def prepare(self):
         self.check()
         if not self.unmanaged and self.conn.total_changes == self.accounted:
+            # Only a cached state takes committed deltas; an uncached collection needs none.
             self.prepared = {cid: {identity: next(iter(subjects(self.conn, cid, "unbound", identity=identity)), None)
                                   for identity in identities if identity is not None}
-                             for cid, identities in self.pending.items() if None not in identities}
+                             for cid, identities in self.pending.items()
+                             if None not in identities and (cid in self.replacements or cid in self.states)}
         self.prepared_stamp = self._stamp()
 
     def finish(self, committed):
@@ -389,23 +404,27 @@ class ReleaseCache:
                         self._remember_state(cid, state)
                 else:
                     for identity, current in self.prepared.get(cid, {}).items():
-                        previous = state.subjects.get(identity)
-                        if previous is not None and isinstance(previous.row_id, int):
-                            key = collections._portable_path_key(previous.basis.subject.path)
-                            state.occupied_path_keys[key] -= 1
-                            if not state.occupied_path_keys[key]:
-                                del state.occupied_path_keys[key]
-                        if current is not None:
-                            state.subjects[identity] = current
-                            if isinstance(current.row_id, int):
-                                state.occupied_path_keys[collections._portable_path_key(current.basis.subject.path)] += 1
-                        else:
-                            state.subjects.pop(identity, None)
+                        if state.complete:
+                            previous = state.subjects.get(identity)
+                            if previous is not None and isinstance(previous.row_id, int):
+                                key = collections._portable_path_key(previous.basis.subject.path)
+                                state.occupied_path_keys[key] -= 1
+                                if not state.occupied_path_keys[key]:
+                                    del state.occupied_path_keys[key]
+                            if current is not None:
+                                state.subjects[identity] = current
+                                if isinstance(current.row_id, int):
+                                    state.occupied_path_keys[collections._portable_path_key(current.basis.subject.path)] += 1
+                            else:
+                                state.subjects.pop(identity, None)
+                        elif current is not None and isinstance(current.row_id, int):
+                            # Items are never deleted and keep their view path, so a
+                            # shed state only needs each new row's path key.
+                            key = collections._portable_path_key(current.basis.subject.path)
+                            state.occupied_path_keys[key] = state.occupied_path_keys[key] or 1
                         for _denied, dirty in state.summaries.values():
-                            dirty.add(identity)
-            while self.states and sum(len(state.subjects) for state in self.states.values()) > 65536:
-                cid, _ = self.states.popitem(last=False)
-                self.inspections.discard(cid)
+                            dirty[identity] = current
+            self._evict()
         elif changed or self.unmanaged:
             self.inspections.clear()
             self.states.clear()
@@ -429,7 +448,26 @@ class ReleaseCache:
     def _remember_state(self, cid, state):
         self.states[cid] = state
         self.states.move_to_end(cid)
-        while self.states and (len(self.states) > 8 or sum(len(value.subjects) for value in self.states.values()) > 65536):
+        self._evict(keep=cid)
+
+    def _evict(self, keep=None):
+        """Shed least-recent row subjects before whole states, never a state's release summaries.
+
+        A write past the cap keeps the manifest subject and complete-release
+        summary it needs next, so it re-evaluates only its changed subjects.
+        The caller still holding ``keep`` sees it whole until the next boundary.
+        """
+        total = sum(len(state.subjects) for state in self.states.values())
+        for cid, state in self.states.items():
+            if total <= _MAX_CACHED_SUBJECTS:
+                break
+            if cid == keep or not state.complete:
+                continue
+            total -= len(state.subjects) - 1
+            state.subjects = {state.epoch[0]: state.subjects[state.epoch[0]]}
+            state.complete = False
+            self.inspections.discard(cid)
+        while len(self.states) > _MAX_CACHED_STATES:
             evicted, _ = self.states.popitem(last=False)
             self.inspections.discard(evicted)
 
@@ -446,10 +484,15 @@ class ReleaseCache:
             raise ValueError("canonical subject is unavailable")
         return row
 
-    def state(self, cid):
+    def state(self, cid, *, full=False):
+        """The collection's release state; ``full`` callers also need every row subject."""
         self.check()
         epoch = self.epoch(cid)
         current = self.replacements.get(cid) or self.states.get(cid)
+        if full and current is not None and not current.complete:
+            # Streaming recomputation of shed subjects replaces the shed state.
+            self.states.pop(cid, None)
+            current = None
         unexplained = self.pending is not None and self.unmanaged
         if current is None or current.epoch != epoch or unexplained:
             self.inspections.discard(cid)
@@ -554,7 +597,7 @@ class OperationAuthorization:
 
     def canonical_subjects(self, cid: str) -> tuple[CanonicalSubject, ...]:
         """Immutable unbound bases; only named grants need a session binding."""
-        state = self.cache.state(cid)
+        state = self.cache.state(cid, full=True)
         overlay = self.cache.overlay(cid)
         current = state.subjects
         if overlay:
@@ -649,22 +692,48 @@ class OperationAuthorization:
         return (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
                 self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation)
 
-    def _release_selection(self, cid: str):
-        """Reuse base policy work, then overlay this operation's fresh grants."""
-        state = self.cache.state(cid)
+    def uniform_release(self) -> bool:
+        """No row-varying policy, grant, exclusion, tombstone or session: one decision per path and audience."""
+        return (self.policy.empty and not self.policy.scopes and not self.policy.rules
+                and not self.policy.grants and not self.tombstones and not self.access["excluded"]
+                and not (self.mutation and self.access["readonly"])
+                and self.context is None and not self.failed)
+
+    def _uniform_summary_manifest(self, cid: str) -> CanonicalSubject | None:
+        """A summary collection's one release subject when release is uniform, else None.
+
+        Summary rows take the manifest's path and owner audience, so without a
+        row-varying rule each row decision equals the manifest's. Held
+        candidates keep their own path and take the exact per-subject route.
+        """
+        if not self.uniform_release():
+            return None
         self._load_grants()
+        row = self.conn.execute(
+            "SELECT manifest_path FROM collections WHERE collection_id=? AND view_mode='summary' "
+            "AND NOT EXISTS (SELECT 1 FROM held_candidates WHERE collection_id=?)", (cid, cid),
+        ).fetchone()
+        if row is None or self.grants:
+            return None
+        return next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=row[0])))
+
+    def _release_selection(self, cid: str, *, full=False):
+        """Reuse base policy work, then overlay this operation's fresh grants."""
+        state = self.cache.state(cid, full=full)
+        self._load_grants()
+        dependency = self._release_dependency()
+        if dependency not in state.summaries and not state.complete:
+            state = self.cache.state(cid, full=True)
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
         manifest_decision = self.decision(manifest)
         if manifest_decision.level < 6:
             self.refuse()
-        dependency = self._release_dependency()
         if dependency not in state.summaries:
             denied = {identity for identity, subject in state.subjects.items() if subject.row_id is not None
                       and self.decision(subject, session=False).level < 6}
-            self.cache._remember(state.summaries, dependency, (denied, set()), 16)
+            self.cache._remember(state.summaries, dependency, (denied, {}), 16)
         denied, dirty = state.summaries[dependency]
-        for identity in dirty:
-            subject = state.subjects.get(identity)
+        for identity, subject in dirty.items():
             if subject is not None and self.decision(subject, session=False).level < 6:
                 denied.add(identity)
             else:
@@ -672,9 +741,21 @@ class OperationAuthorization:
         dirty.clear()
         return state, denied, self.cache.overlay(cid), manifest, manifest_decision
 
+    def _subject(self, cid, state, overlay, identity):
+        """A grant-named subject of this collection, from the overlay, the state or the store."""
+        if identity in overlay or identity in state.subjects or state.complete:
+            return overlay.get(identity, state.subjects.get(identity))
+        subject = self.cache.point(identity)
+        return subject if subject is not None and subject.collection_id == cid else None
+
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
         if complete:
             try:
+                manifest = self._uniform_summary_manifest(cid)
+                if manifest is not None:
+                    if self.decision(manifest).level < 6:
+                        self.refuse()
+                    return ()
                 state, denied, overlay, _manifest, _decision = self._release_selection(cid)
                 count = len(denied)
                 for identity, subject in overlay.items():
@@ -683,7 +764,7 @@ class OperationAuthorization:
                         count += 1
                 # Session authority is fresh and can alter only its named subjects.
                 for identity in self.grants:
-                    subject = overlay.get(identity, state.subjects.get(identity))
+                    subject = self._subject(cid, state, overlay, identity)
                     if subject is None or subject.row_id is None:
                         continue
                     subject = _bound(subject, self.logical_vault_id)
@@ -704,7 +785,7 @@ class OperationAuthorization:
     def released_subjects(self, cid: str) -> tuple[CanonicalSubject, ...]:
         """Current released identities, without loading payloads or rebinding every row."""
         try:
-            state, denied, overlay, _manifest, _decision = self._release_selection(cid)
+            state, denied, overlay, _manifest, _decision = self._release_selection(cid, full=True)
             return self._released_subjects(state, denied, overlay)[1]
         except (ValueError, TypeError, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
@@ -750,7 +831,7 @@ class OperationAuthorization:
 
     def inspection_selection(self, cid: str, *, notices=False) -> _ReleaseSelection:
         try:
-            state, denied, overlay, manifest, manifest_decision = self._release_selection(cid)
+            state, denied, overlay, manifest, manifest_decision = self._release_selection(cid, full=True)
             grant_decisions = {}
             current, released = self._released_subjects(state, denied, overlay, grant_decisions)
             catalog = tuple(current.values())
@@ -826,7 +907,7 @@ class OperationAuthorization:
             self.refuse()
 
     def visible_snapshot(self, cid: str, allowed: tuple[CanonicalSubject, ...]) -> str:
-        state = self.cache.state(cid)
+        state = self.cache.state(cid, full=True)
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
         current_count = len(state.subjects) - 1
         for identity, subject in self.cache.overlay(cid).items():
@@ -1045,7 +1126,7 @@ class OperationAuthorization:
         from .typed_storage import hydrate
 
         hydrate(self.conn, rows)
-        rows.sort(key=lambda row: row["view_path"])
+        rows.sort(key=lambda row: (row["view_path"] or "", row["item_key"]))
         return rows, self.visible_snapshot(cid, allowed), {
             subject.row_id for subject in allowed if isinstance(subject.row_id, str)
         }

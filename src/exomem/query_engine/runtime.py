@@ -296,10 +296,7 @@ class ReadSession:
                     raise QueryError("COLLECTION_NOT_FOUND")
                 # An admitted manifest proves uniformity only without any
                 # row-varying policy, grant, exclusion or session context.
-                uniform = (operation.policy.empty and not operation.policy.scopes
-                           and not operation.policy.rules and not operation.policy.grants
-                           and not operation.tombstones and not operation.access["excluded"]
-                           and operation.context is None and not operation.failed)
+                uniform = operation.uniform_release()
                 yield manifest, subject.basis, subjects, uniform
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
