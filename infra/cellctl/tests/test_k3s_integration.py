@@ -359,6 +359,10 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
             kubeconfig_path = work / "kubeconfig.yaml"
             kubeconfig_path.write_text(raw_kubeconfig, encoding="utf-8")
             kubeconfig_path.chmod(0o600)
+            # Helm installs the platform into its release namespace, so it
+            # always exists in production; the chart puts namespaced objects
+            # there (cellctl's alert-delivery Role and RoleBinding).
+            _run(["docker", "exec", name, "kubectl", "create", "namespace", "exomem-platform"])
             yield K3sCluster(
                 name=name,
                 kubeconfig=kubeconfig_path,
