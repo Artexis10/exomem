@@ -29,7 +29,7 @@
 - name: Validate K3s and off-host snapshot inputs
   ansible.builtin.assert:
     that:
-      - ansible_architecture == "x86_64"
+      - ansible_facts['architecture'] == "x86_64"
       - k3s_server_hosts | length == 1
       - k3s_server_token | length >= 32
       - k3s_etcd_s3_endpoint | length > 0
@@ -49,7 +49,7 @@
 - name: Validate K3s agent join inputs
   ansible.builtin.assert:
     that:
-      - ansible_architecture == "x86_64"
+      - ansible_facts['architecture'] == "x86_64"
       - k3s_server_hosts | length == 1
       - inventory_hostname not in k3s_server_hosts
       - hostvars[k3s_server_hosts[0]]['private_node_ip'] | default('') | length > 0
