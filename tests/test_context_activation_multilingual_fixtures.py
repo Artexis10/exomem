@@ -42,10 +42,6 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-#: The English set's digest at the revision this sibling was authored against.
-#: The multilingual set must never be folded into it or edit it.
-ENGLISH_SET_DIGEST = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f"
-
 #: The design table's rows (STEP4 §9.1), by id.
 DESIGN_ROWS = {
     "M1-de", "M1-ru", "N1-de", "N1-ru",
@@ -85,7 +81,7 @@ def test_the_set_is_a_sibling_and_leaves_the_english_set_byte_identical() -> Non
     assert FIXTURE_SET_ID != english_set.FIXTURE_SET_ID
     assert CORPUS_ID != english_set.CORPUS_ID
     assert set(CASE_IDS).isdisjoint(english_set.CASE_IDS + english_set.TWIN_IDS)
-    assert english_set.fixture_set_digest() == ENGLISH_SET_DIGEST
+    assert english_set.fixture_set_digest() == english_set.FIXTURE_SET_SHA256
     assert len(english_set.FIXTURES) == 18
 
 

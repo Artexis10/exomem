@@ -2912,56 +2912,64 @@ def guard_working_set(
     }
 
     decisions: dict[str, Decision | None] = {}
-    if not _file_policy_empty(vault_root, policy):
+    policy_decides = not _file_policy_empty(vault_root, policy)
+    if policy_decides:
         grants_hash = _grants_hash(policy)
         declared_purpose = _declared_purpose(vault_root, who, purpose)
-        for rel_path in sorted(path for path in named_paths if path):
-            decision = _decide_path(
-                vault_root,
-                rel_path,
-                policy=policy,
-                audience=who.audience_id,
-                purpose=declared_purpose,
-                grants_hash=grants_hash,
-                authorization_session=who.authorization_session_id,
-                authorization_context=who.verified_authorization_session,
-            )
-            decisions[rel_path] = decision
-            if decision is not None:
-                if decision.level < RELEASE_FLOOR:
-                    withheld.add(rel_path)
-            elif rel_path in tombstoned or (vault_root / rel_path).exists():
-                # `_decide_path` returns `None` for BOTH a genuinely
-                # tombstoned/unreadable/unclassifiable EXISTING path and a
-                # path that simply does not exist. The latter is expected
-                # for a PHANTOM interpretation reading (R3): `named_paths`
-                # is the union of every candidate's readings
-                # (`_interpretations_for`), and an ambiguous candidate's
-                # non-real readings are validated as safe relative paths
-                # (`_is_safe_relative_path`) but never claimed to exist.
-                # Adding a phantom reading to `withheld` corrupts
-                # `frozen`'s canonical-key comparisons (`_names_withheld`)
-                # against every OTHER field in the packet -- and a phantom
-                # reading is frequently IDENTICAL to the candidate's own
-                # original text (`path.md#current`'s literal-reading IS
-                # `ref` itself), so it falsely matched its own item, as
-                # though a real withheld page shared that exact spelling --
-                # dropping a unit under a policy scoped to an entirely
-                # different folder. Only an existing-but-undecidable path is
-                # withheld here; the invalid_refs computation below makes
-                # the identical existence check for the phantom-vs-denied
-                # distinction, against `decisions`/`tombstoned`/the
-                # filesystem.
+
+    def decide(rel_path: str) -> None:
+        """Decide `rel_path` for this caller, record the outcome, and add it to
+        `withheld` when it may not be released. Only with a file policy."""
+        decision = _decide_path(
+            vault_root,
+            rel_path,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+            authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
+        )
+        decisions[rel_path] = decision
+        if decision is not None:
+            if decision.level < RELEASE_FLOOR:
                 withheld.add(rel_path)
-            _outcome_for_decision(
-                vault_root,
-                rel_path,
-                decision=decision,
-                policy=policy,
-                audience=who.audience_id,
-                outcome="withheld" if rel_path in withheld else "released",
-                purpose=declared_purpose,
-            )
+        elif rel_path in tombstoned or (vault_root / rel_path).exists():
+            # `_decide_path` returns `None` for BOTH a genuinely
+            # tombstoned/unreadable/unclassifiable EXISTING path and a
+            # path that simply does not exist. The latter is expected
+            # for a PHANTOM interpretation reading (R3): `named_paths`
+            # is the union of every candidate's readings
+            # (`_interpretations_for`), and an ambiguous candidate's
+            # non-real readings are validated as safe relative paths
+            # (`_is_safe_relative_path`) but never claimed to exist.
+            # Adding a phantom reading to `withheld` corrupts
+            # `frozen`'s canonical-key comparisons (`_names_withheld`)
+            # against every OTHER field in the packet -- and a phantom
+            # reading is frequently IDENTICAL to the candidate's own
+            # original text (`path.md#current`'s literal-reading IS
+            # `ref` itself), so it falsely matched its own item, as
+            # though a real withheld page shared that exact spelling --
+            # dropping a unit under a policy scoped to an entirely
+            # different folder. Only an existing-but-undecidable path is
+            # withheld here; the invalid_refs computation below makes
+            # the identical existence check for the phantom-vs-denied
+            # distinction, against `decisions`/`tombstoned`/the
+            # filesystem.
+            withheld.add(rel_path)
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=who.audience_id,
+            outcome="withheld" if rel_path in withheld else "released",
+            purpose=declared_purpose,
+        )
+
+    if policy_decides:
+        for rel_path in sorted(path for path in named_paths if path):
+            decide(rel_path)
 
     # A candidate the guard could not resolve to a single real page has
     # a SET of interpretations instead (R3): a plain string containing `#`
@@ -3063,14 +3071,55 @@ def guard_working_set(
     original_units = [
         item for item in guarded.get("units") or () if isinstance(item, Mapping)
     ]
-    guarded["units"] = [
-        unit
-        for unit in (
-            _guarded_unit(item, frozen, decisions, invalid_refs) for item in original_units
-        )
-        if unit is not None
-    ]
+    guarded["units"] = []
+    lost_unit_pages: set[str] = set()
+    for item in original_units:
+        unit = _guarded_unit(item, frozen, decisions, invalid_refs)
+        if unit is None:
+            lost_unit_pages.add(str((item.get("provenance") or {}).get("path") or ""))
+        else:
+            guarded["units"].append(unit)
     _note_removal("units", len(original_units), len(guarded["units"]))
+    _charge_back_removed(guarded, "units", original_units, guarded["units"])
+    # The anchors a carried page's units name (`carried_link`) were listed from
+    # the units the compiler served. When a unit goes here, the listing is
+    # rebuilt from the units that stay, by the compiler's own rule: dropping
+    # only the rows the removed unit named would leave its slots empty, and
+    # dropping every row of that page would hide a person a surviving unit
+    # names. Either tells the caller the page lost a unit; the rebuilt listing
+    # is the one a vault without the removed material produces.
+    if lost_unit_pages and any(
+        "carried_link" in (anchor.get("evidence") or ()) for anchor in guarded["anchors"]
+    ):
+        from .. import working_set
+
+        relisted = working_set.relist_carried_links(
+            vault_root, guarded["anchors"], guarded["units"], purpose=purpose
+        )
+        # A relisted row may be one this packet never named, so nothing above
+        # decided it. It is decided here for this caller, like every named path,
+        # rather than trusted to the compiler's own view of the reader.
+        for entry in relisted:
+            rel_path = str(entry.get("path") or "")
+            if not rel_path or rel_path in decisions or rel_path in withheld:
+                continue
+            if lifecycle.is_tombstoned(vault_root, rel_path):
+                withheld.add(rel_path)
+            elif policy_decides:
+                decide(rel_path)
+        guarded["anchors"] = [
+            anchor
+            for anchor in guarded["anchors"]
+            if "carried_link" not in (anchor.get("evidence") or ())
+        ] + [
+            anchor
+            for anchor in (
+                _guarded_anchor(entry, frozen, decisions, invalid_refs)
+                for entry in relisted
+                if str(entry.get("path") or "") not in withheld
+            )
+            if anchor is not None
+        ]
 
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)
@@ -3083,6 +3132,7 @@ def guard_working_set(
             ]
             if section in ("pointers", "current_state"):
                 _note_removal(section, len(values), len(kept))
+                _charge_back_removed(guarded, section, values, kept)
             guarded[section] = kept
 
     # Appended AFTER the `missing` filter runs, never before: `missing[]` entries
@@ -3154,7 +3204,7 @@ def guard_working_set(
 #: under every existing reading, and withholding its item if none exists.
 #: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
 #: and only on an item that ALSO carries one of these (T2).
-_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor")
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via")
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
@@ -3723,6 +3773,10 @@ def _guarded_anchor(
         # `guard_working_set` -- so it is checked by exact match here instead.
         or anchor.get("path") in invalid_refs
         or anchor.get("ref") in invalid_refs
+        # An anchor listed through a carried page (`via`) was reached only
+        # through that page: it goes wherever the page goes.
+        or _names_withheld(anchor.get("via"), withheld)
+        or anchor.get("via") in invalid_refs
     ):
         return None
     anchor_ref = str(anchor.get("ref") or "")
@@ -3788,6 +3842,33 @@ def _charge_back_removed_recent(
 ) -> None:
     """Subtract the removed recent entries' characters from `used_chars`."""
     removed = sum(map(_recent_entry_chars, before)) - sum(map(_recent_entry_chars, after))
+    if removed <= 0:
+        return
+    budget = guarded.get("budget")
+    if isinstance(budget, Mapping):
+        used = budget.get("used_chars")
+        if isinstance(used, int):
+            guarded["budget"] = {**dict(budget), "used_chars": max(0, used - removed)}
+
+
+def _charge_back_removed(
+    guarded: dict[str, Any],
+    section: str,
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+) -> None:
+    """Subtract what the removed `section` entries were charged from `used_chars`.
+
+    The compiler charged each served unit, pointer and state entry against the
+    budget (`working_set.served_chars`), so leaving the charge in place after
+    removing one would tell the caller how long the withheld entry was. A
+    conversation-inferred packet recounts its whole budget at the end instead.
+    """
+    from .. import working_set
+
+    removed = sum(working_set.served_chars(section, entry) for entry in before) - sum(
+        working_set.served_chars(section, entry) for entry in after
+    )
     if removed <= 0:
         return
     budget = guarded.get("budget")

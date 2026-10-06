@@ -56,7 +56,13 @@ def title_vault(vault: Path) -> Path:
 
 
 def _carried(packet: dict) -> set[str]:
-    return {a["path"] for a in packet["anchors"] if a["status"] == "retrieval_carried"}
+    # Every carried page is kind `page`; one the turn names by two title words
+    # is `resolved` (the 2026-10-05 ruling), any other `retrieval_carried`.
+    return {
+        a["path"]
+        for a in packet["anchors"]
+        if a["kind"] == "page" and a["status"] in {"retrieval_carried", "resolved"}
+    }
 
 
 def test_one_distinctive_word_beside_a_title_word_names_the_page(title_vault: Path) -> None:

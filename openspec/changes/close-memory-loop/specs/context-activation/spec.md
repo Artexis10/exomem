@@ -83,6 +83,20 @@ abstain with an empty packet. Lexical overlap SHALL ignore stopwords, and turn t
 SHALL keep their order and repetitions for n-gram construction so that two anchors
 sharing a word in their names can both receive `exact_alias` from one turn. `usage_prior` SHALL only break ties between
 otherwise equal candidates and SHALL never contribute to the two-kinds rule.
+A path or URL quoted in a turn SHALL be one reference, not words: a rooted path (`/`,
+`\\`, `~/`, a drive letter or an environment variable), a URL with a scheme, a URL
+without one whose host ends in a common lowercase top-level domain, starts `www.` or
+has a port, and an scp-style remote SHALL contribute no term to any subject evidence.
+A reference starts after whitespace, a bracket, a quote, a backtick, markdown emphasis,
+`=` or `,`. A relative path SHALL contribute only its final segment. A slash run is a
+relative path when it starts `./` or `../` or its final segment has a file extension,
+and a path into the indexed `Knowledge Base/` folder SHALL be one reference up to its
+file name, spaces included, so a vault page path names its page and none of its folder
+names. Any other slash run, such as `records/staging/prod`, is prose. A run whose final
+segment is a dotted name, such as `records/Node.js`, loses its other words: an
+accepted residual. A quoted or backticked span SHALL be read as one reference, spaces
+included. Whether a turn only points back or is a follow-up
+SHALL still read the turn as written.
 `claims_match` SHALL be computed with the existing collection-claims routing and
 `graph_corroboration` SHALL count a typed edge between two candidates even when both
 already appear in ordinary recall.
@@ -155,6 +169,16 @@ derived only from the caller's released view.
 #### Scenario: Usage never resolves
 - **WHEN** a candidate carries only `usage_prior` and `vector_band`
 - **THEN** it is at most `partial`
+
+#### Scenario: A quoted path names no project
+- **WHEN** a turn quotes `/home/<user>/handoffs/<file>.md`, a `~/` path, a Windows
+  drive path or a URL whose segments spell a project key such as `home` or `records`
+- **THEN** no project anchor is reached through those segments and none of its material
+  is served, while a turn naming the same project in prose still resolves it
+- **AND** slash-joined words without a root, a leading `./` or `../`, or a file name at
+  the end, such as `records/staging/prod` or `Node.js/records`, stay prose
+- **AND** an unquoted `Knowledge Base/.../<Name>.md` reaches that page and no other
+  anchor
 
 #### Scenario: Two same-kind domains named apart are both served
 - **WHEN** a turn spells the names of two same-kind anchors that share no anchor
@@ -492,7 +516,8 @@ whatever the turn resolved.
   a current ordinary page that is none of that anchor's neighbourhood
 - **THEN** the packet also carries that page as an anchor of kind `page` at status
   `retrieval_carried`, marked `generation.also_carried = "retrieval"`, with its units;
-  the resolved anchor is unchanged and the page is never reported `resolved`
+  the resolved anchor is unchanged and the page is reported `resolved` only when the
+  turn also names it by its own title (Hugo's ruling of 2026-10-05, below)
 - **AND** a turn that names nothing beyond what it resolved carries nothing extra
 
 #### Scenario: The named anchor keeps its own material ahead of a carried page's
@@ -696,6 +721,45 @@ pointer with reason `unit_too_long`, never as a half-claim.
 - **WHEN** a unit is longer than 900 characters
 - **THEN** it is not served as a unit and is reported as a pointer with reason
   `unit_too_long`
+
+### Requirement: A carried page reports the names the turn and its units give it
+A page the retrieval carry admits SHALL be reported `resolved`, with evidence
+`[lexical_overlap, retrieval]`, when the turn makes name contact with the page's own
+title under the anchor rule (two or more shared authored title terms); otherwise it
+stays `retrieval_carried` on `retrieval` alone. Admission SHALL NOT change: a phrase
+two pages answer to still asks, and only a current page is carried. No evidence kind
+or status clause is added for this. Recorded as Hugo's ruling of 2026-10-05.
+
+Where the carried pages are the packet's only anchors, each page SHALL also list, at
+most two per page and within the ordinary six-anchor allowance, the anchor rows
+wikilinked to or from it whose title or alias a unit the packet serves names, in the
+order the units first name them. A unit turned into a pointer is not served. Each SHALL
+be `partial` on `carried_link`, SHALL name the page in `via`, and SHALL never resolve,
+run a lane or be carried forward by a continuity token. A row the reader may not see,
+or one an earlier carried page already listed, SHALL NOT be listed or take a slot. When
+the egress guard removes the page named in its `via`, the row goes with it. When the
+guard removes a unit of a carried page, it SHALL list again by this rule from the units
+it lets through, so the restricted packet lists exactly what a vault without the
+removed material lists, and it SHALL decide each row it lists for the caller as it
+decides every path the packet names.
+
+#### Scenario: A page the turn names by its title is resolved
+- **WHEN** a turn names a current ordinary page by two words of its title, such as
+  "the kelvane intake checklist", and the carry admits that page alone
+- **THEN** the page is `resolved` with `[lexical_overlap, retrieval]` and its units
+- **AND** a page reached only through a body phrase, or through one title word, is
+  still `retrieval_carried`
+
+#### Scenario: A person the carried unit names is listed beside the page
+- **WHEN** a turn that never names a person carries a note whose served unit names that
+  person and links their page
+- **THEN** the person's anchor is listed `partial` on `carried_link`, never `resolved`
+- **AND** a person the note links but the unit does not name, or one withheld from the
+  reader, is not listed, and the restricted packet equals the packet of a vault
+  without that person
+- **AND** when the guard removes a unit of the note, the restricted packet equals the
+  packet of a vault whose note lacks that unit: a person another served unit names
+  stays listed, and a slot the removed unit filled goes to the next person named
 
 ### Requirement: A carried page is read through the lenses its own units answer
 The retrieval carry SHALL read each carried page through the `units` lenses that select

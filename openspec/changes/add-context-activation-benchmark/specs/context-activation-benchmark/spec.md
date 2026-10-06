@@ -91,7 +91,10 @@ unit's `updated` field, provenance, state entry and frozen source. Gold recall S
 gold identities once; precision SHALL count each eligible surfaced reference.
 Known poison projections SHALL remain poison, including when their packet metadata
 is malformed or attempts to claim supersession. Arbitrary unit fragments SHALL
-remain distinct. Identity-only oracle scoring SHALL remain supported. A run using
+remain distinct in the raw score. The v5 scorer, reported beside raw, SHALL count a
+`<page>#unit-` fragment whose parent is in the frozen canonical parent map as that
+page in recall, precision, poison and the twin rule, and SHALL keep fragments of
+unbound pages distinct. Identity-only oracle scoring SHALL remain supported. A run using
 bindings SHALL record and validate their digest. Only `oracle_packet` and legacy
 `unknown` mechanisms MAY omit bindings, and neither SHALL establish product-path
 acceptance. All other mechanisms SHALL require both the binding and its digest;
@@ -190,6 +193,18 @@ once `accelerate-governed-recall` lands.
 - **WHEN** at most one twin expected to be `unresolved` yields only `partial` anchors
   and no units, pointers, current state or ambiguity candidates
 - **THEN** the audit passes the twin and reports the count under its own metric
+
+#### Scenario: A twin that abstains with only partial anchors is the hedge
+- **WHEN** a twin expected to be `unresolved` abstains and lists only `partial`
+  anchors under the v5 scorer
+- **THEN** it counts as the run's hedge, its listed candidates are not poison, a
+  second such twin exceeds the ceiling, and any unit or pointer disqualifies it
+
+#### Scenario: A unit counts as its bound page under v5
+- **WHEN** a packet serves two units of one gold page, or a unit of a twin's own
+  narrow-gold page, or a unit of a poison page
+- **THEN** the v5 scorer credits the gold page once, does not flag the twin, and
+  reports the poison, while sixty junk fragments of unbound pages still fail precision
 
 #### Scenario: Confusable facts never match each other
 - **WHEN** the intersection is asked whether an assertion of one same-first-name
