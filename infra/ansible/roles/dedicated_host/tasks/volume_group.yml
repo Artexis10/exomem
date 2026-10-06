@@ -34,16 +34,50 @@
   changed_when: false
   failed_when: false
 
-# Design D1: the pool takes the whole group, with metadata and its spare at
-# LVM's defaults for the pool and chunk size. TopoLVM overprovisions it at
-# ratio 1.0, so no volume, snapshot or clone can outgrow it.
+- name: Read the volume group's free extents
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/vgs
+      - --noheadings
+      - --units=b
+      - --nosuffix
+      - --options=vg_free_count,vg_extent_size
+      - "{{ dedicated_host_volume_group }}"
+  register: dedicated_host_vg_free
+  changed_when: false
+  when: dedicated_host_pool.rc != 0
+
+# Design D1: the pool's chunk and metadata sizes are explicit, because LVM's
+# own policy grows the chunk with the pool, and a chunk size never changes
+# once the pool exists. The group keeps the metadata's spare plus
+# dedicated_host_vg_reserve_mib free, so the metadata can grow later.
+- name: Size the thin pool
+  ansible.builtin.set_fact:
+    dedicated_host_pool_extents: >-
+      {%- set free, extent = dedicated_host_vg_free.stdout.split() | map('int') | list -%}
+      {%- set kept = 2 * dedicated_host_thin_metadata_mib + dedicated_host_vg_reserve_mib -%}
+      {{ free - ((kept * 1048576 + extent - 1) // extent) }}
+  when: dedicated_host_pool.rc != 0
+
+- name: Require room for the pool beside its metadata and reserve
+  ansible.builtin.assert:
+    that: dedicated_host_pool_extents | int > 0
+    fail_msg: >-
+      {{ dedicated_host_volume_group }} cannot hold {{ dedicated_host_thin_metadata_mib }} MiB of
+      metadata, its spare and a {{ dedicated_host_vg_reserve_mib }} MiB reserve; nothing was changed.
+  when: dedicated_host_pool.rc != 0
+
+# --zero=y: a newly provisioned chunk never shows data a deleted volume left.
 - name: Create the thin pool
   ansible.builtin.command:
     argv:
       - /usr/sbin/lvcreate
       - --yes
       - --type=thin-pool
-      - --extents=100%FREE
+      - --extents={{ dedicated_host_pool_extents }}
+      - --chunksize={{ dedicated_host_thin_chunk_kib }}k
+      - --poolmetadatasize={{ dedicated_host_thin_metadata_mib }}m
+      - --zero=y
       - --name={{ dedicated_host_thin_pool }}
       - "{{ dedicated_host_volume_group }}"
   when: dedicated_host_pool.rc != 0

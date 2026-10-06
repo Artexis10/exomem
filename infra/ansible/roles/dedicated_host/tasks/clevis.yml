@@ -22,13 +22,15 @@
     dedicated_host_tang_working: >-
       {{ dedicated_host_clevis_pass.results | default([]) | selectattr('rc', 'equalto', 0) | list | length }}
 
+# -f only skips LUKSMeta initialisation questions. Never -y: it makes the
+# Tang pin trust any advertisement and skip the thp comparison.
 - name: Bind the array to Tang, pinned to the escrowed signing key
   ansible.builtin.command:
     argv:
       - /usr/bin/clevis
       - luks
       - bind
-      - -y
+      - -f
       - -d
       - "{{ dedicated_host_md_device }}"
       - -k

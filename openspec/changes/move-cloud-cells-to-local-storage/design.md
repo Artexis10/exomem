@@ -49,7 +49,7 @@ Each cell gets one logical volume with its own ext4 filesystem, provisioned by T
 - **Thin pool:** this gives CSI snapshots and clones, which D3 needs.
 - **No overcommit:** with ratio 1.0, the virtual size of every volume, snapshot and clone can never exceed the pool, so one tenant's backup can't take the whole pool down. A snapshot and its clone are each full-size thin volumes for this accounting.
 - **ext4, pinned:** a clone of a dirty filesystem must mount read-only on the same node. XFS needs `nouuid` for that and refuses some dirty logs read-only. ext4's default `auto_da_alloc` also makes write-to-temp-then-rename survive a power cut in practice (D9).
-- **Metadata:** the thin pool's metadata volume is sized for hourly snapshot churn (spike 1.1 measures it), with monitoring on its use.
+- **Metadata:** the dedicated-host role sets the pool's geometry explicitly, because a chunk size never changes once the pool exists. It uses 64 KiB chunks and 2 GiB of metadata, which is lvm2's 64 bytes per chunk for a 2 TiB pool. At that pool size, LVM's own policy would choose chunks of about 1 MiB. The volume group keeps 4 GiB free, so the metadata and its spare can double later. Monitoring watches metadata use. Revisit these values with spike 1.1's measurement before task 7.
 - **Capacity and resize:** TopoLVM publishes free capacity per node and supports online resize, so the import runbook's `storage_gib` increase still works.
 - **Operational weight:** one pinned subchart. Its webhook uses the cert-manager already installed.
 

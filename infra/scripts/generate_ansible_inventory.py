@@ -132,6 +132,42 @@ def _vswitch(document: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+# A data disk is named by its stable /dev/disk/by-id/ link; a partition adds
+# -part<N> to its disk's link.
+_DISK_ID = re.compile(r"^/dev/disk/by-id/(?P<disk>[^/]+?)(?:-part[0-9]+)?$")
+
+
+def _address(name: str, host: dict[str, Any], field: str, ipv4_only: bool = False) -> str:
+    value = host.get(field)
+    try:
+        address = ipaddress.ip_address(value) if isinstance(value, str) else None
+    except ValueError:
+        address = None
+    if address is None or (ipv4_only and address.version != 4):
+        kind = "an IPv4 address" if ipv4_only else "an IP address"
+        raise ValueError(f"{name}: {field} must be {kind}")
+    return str(address)
+
+
+def _data_disks(name: str, host: dict[str, Any]) -> tuple[list[str], list[str]]:
+    disks = host.get("data_disks")
+    if not isinstance(disks, list) or not all(isinstance(disk, str) for disk in disks):
+        raise ValueError(f"{name}: data_disks must be a list of /dev/disk/by-id/ paths")
+    matches = [_DISK_ID.match(disk) for disk in disks]
+    if not all(matches):
+        raise ValueError(f"{name}: data_disks must name /dev/disk/by-id/ paths, not kernel names")
+    # Two partitions of one disk mirror nothing; the role also compares the
+    # kernel's parent disks, which catches one disk under two by-id names.
+    if len(disks) != 2 or len({match["disk"] for match in matches if match}) != 2:
+        raise ValueError(f"{name}: data_disks must be two devices on two different disks")
+    wipe = host.get("wipe", [])
+    if not isinstance(wipe, list) or not all(isinstance(disk, str) for disk in wipe):
+        raise ValueError(f"{name}: wipe must be a list of its data_disks")
+    if not set(wipe) <= set(disks):
+        raise ValueError(f"{name}: wipe may only name its own data_disks")
+    return disks, wipe
+
+
 def _dedicated_hosts(
     path: Path, user: str, vswitch: dict[str, Any] | None
 ) -> dict[str, dict[str, Any]]:
@@ -147,42 +183,42 @@ def _dedicated_hosts(
     hosts: dict[str, dict[str, Any]] = {}
     for name, host in document.items():
         if not isinstance(name, str) or not _AGENT_NAME.match(name):
-            raise ValueError("each dedicated host must be named exomem-agent-<key>")
+            raise ValueError(f"{name}: a dedicated host must be named exomem-agent-<key>")
         if not isinstance(host, dict):
-            raise ValueError(f"{name} must be an object")
-        disks = host.get("data_disks")
-        if (
-            not isinstance(disks, list)
-            or len(disks) != 2
-            or len(set(disks)) != 2
-            or not all(isinstance(disk, str) and disk.startswith("/dev/") for disk in disks)
-        ):
-            raise ValueError(f"{name} needs exactly two distinct /dev/ data disks for RAID1")
-        wipe = host.get("wipe", [])
-        if not isinstance(wipe, list) or not set(wipe) <= set(disks):
-            raise ValueError(f"{name} may only wipe its own data disks")
-        private_ip = ipaddress.ip_address(str(host.get("private_ip")))
+            raise ValueError(f"{name}: must be an object")
+        disks, wipe = _data_disks(name, host)
+        private_ip = _address(name, host, "private_ip", ipv4_only=True)
         coordinates: dict[str, Any] = {
-            "ansible_host": str(ipaddress.ip_address(str(host.get("admin_address")))),
+            "ansible_host": _address(name, host, "admin_address"),
             "ansible_user": user,
-            "private_node_ip": str(private_ip),
-            "public_ipv4": str(ipaddress.IPv4Address(str(host.get("ipv4")))),
+            "private_node_ip": private_ip,
+            "public_ipv4": _address(name, host, "ipv4", ipv4_only=True),
             "dedicated_host_data_disks": disks,
         }
         if wipe:
             coordinates["dedicated_host_wipe_disks"] = wipe
         link = host.get("link")
         if link == "vswitch":
-            if vswitch is None or private_ip not in vswitch["subnet"]:
-                raise ValueError(f"{name} must sit in the foundation's vSwitch subnet")
+            if vswitch is None:
+                raise ValueError(f"{name}: link vswitch needs the foundation's vswitch output")
+            subnet = vswitch["subnet"]
+            if ipaddress.ip_address(private_ip) not in subnet or private_ip in (
+                vswitch["gateway"],
+                str(subnet.network_address),
+                str(subnet.broadcast_address),
+            ):
+                raise ValueError(
+                    f"{name}: private_ip must be a host address in the foundation's "
+                    "vSwitch subnet other than its gateway"
+                )
             coordinates["k3s_vswitch"] = {
                 "vlan_id": vswitch["vlan_id"],
-                "address": f"{private_ip}/{vswitch['subnet'].prefixlen}",
+                "address": f"{private_ip}/{subnet.prefixlen}",
                 "gateway": vswitch["gateway"],
                 "network": vswitch["network"],
             }
         elif link != "wireguard":
-            raise ValueError(f"{name} link must be wireguard or vswitch")
+            raise ValueError(f"{name}: link must be wireguard or vswitch")
         coordinates["k3s_private_link"] = link
         hosts[name] = coordinates
     return hosts
@@ -214,14 +250,16 @@ def main() -> int:
             if args.dedicated_hosts
             else {}
         )
-        if set(dedicated) & ({"exomem-alpha", "substrate-control-01"} | set(agents)):
-            raise ValueError("a dedicated host reuses another node's name")
+        reused = sorted(set(dedicated) & ({"exomem-alpha", "substrate-control-01"} | set(agents)))
+        if reused:
+            raise ValueError(f"{', '.join(reused)}: a dedicated host reuses another node's name")
         node_ips = [private_ip, control_private_ip] + [
             host["private_node_ip"] for host in (*agents.values(), *dedicated.values())
         ]
         taken = [address for address in node_ips if address is not None]
-        if len(taken) != len(set(taken)):
-            raise ValueError("every node needs its own private address")
+        shared = sorted({address for address in taken if taken.count(address) > 1})
+        if shared:
+            raise ValueError(f"{', '.join(shared)}: every node needs its own private address")
     except ValueError as error:
         raise SystemExit(str(error)) from error
 

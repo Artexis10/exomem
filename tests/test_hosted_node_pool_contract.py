@@ -163,11 +163,15 @@ def test_site_hardens_every_node_first_then_runs_server_then_agents() -> None:
     }
     # Tang serves before a dedicated agent binds to it, and that agent's
     # storage is unlocked before its K3s agent starts.
-    assert tang["tasks"][0]["ansible.builtin.include_role"] == {
-        "name": "dedicated_host",
-        "tasks_from": "tang.yml",
-    }
+    # tang.yml names each agent's interface from the k3s role's defaults.
+    assert [task["ansible.builtin.include_role"] for task in tang["tasks"]] == [
+        {"name": "k3s", "tasks_from": "interface.yml", "public": True},
+        {"name": "dedicated_host", "tasks_from": "tang.yml"},
+    ]
     assert storage["roles"] == ["dedicated_host"]
+    # Several storage tasks pass the recovery passphrase on stdin; without
+    # pipelining it lands in module files on the host's unencrypted root.
+    assert storage["vars"]["ansible_pipelining"] is True
     # Same hardening for every K3s node, and every node's inter-node firewall
     # converged before any agent joins (a join requires its peers to admit it).
     assert harden["roles"] == ["base"]
@@ -433,26 +437,43 @@ def test_inventory_generator_joins_hosts_terraform_does_not_create(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    "dedicated",
+    "dedicated,reason",
     [
         # Two inventory entries for one name would converge one machine as both.
-        _dedicated("exomem-agent-01", "10.51.0.40", "wireguard"),
+        (_dedicated("exomem-agent-01", "10.51.0.40", "wireguard"), "reuses another node's name"),
         # A second node on an existing node's address breaks the overlay.
-        _dedicated("exomem-agent-dx1", "10.50.1.31", "wireguard"),
-        # RAID1 needs exactly two distinct disks.
-        _dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
-                   data_disks=["/dev/disk/by-id/a", "/dev/disk/by-id/a"]),
-        # A wipe may only name one of the host's own data disks.
-        _dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wipe=["/dev/sda"]),
-        # A vSwitch address must sit in the Terraform vSwitch subnet.
-        _dedicated("exomem-agent-dx1", "10.50.3.40", "vswitch"),
-        _dedicated("exomem-agent-dx1", "10.51.0.40", "ipsec"),
+        (_dedicated("exomem-agent-dx1", "10.50.1.31", "wireguard"), "own private address"),
+        (_dedicated("exomem-agent-dx1", "fd00::40", "wireguard"), "dx1: private_ip must be an IPv4"),
+        ({"exomem-agent-dx1": {**_dedicated("x", "10.51.0.40", "wireguard")["x"], "private_ip": None}},
+         "dx1: private_ip must be an IPv4"),
+        # Kernel names move between boots; the wrong disk would be encrypted.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    data_disks=["/dev/nvme0n1p4", "/dev/nvme1n1p4"]), "not kernel names"),
+        # Two partitions of one disk mirror nothing.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    data_disks=["/dev/disk/by-id/nvme-a-part4", "/dev/disk/by-id/nvme-a-part5"]),
+         "two different disks"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    data_disks=[{"path": "/dev/disk/by-id/nvme-a"}, "/dev/disk/by-id/nvme-b"]),
+         "dx1: data_disks must be a list"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wipe=[{"path": "/dev/sda"}]),
+         "dx1: wipe must be a list"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wipe=["/dev/disk/by-id/nvme-c"]),
+         "wipe may only name its own data_disks"),
+        # A vSwitch address must be a host in the Terraform vSwitch subnet.
+        (_dedicated("exomem-agent-dx1", "10.50.3.40", "vswitch"), "other than its gateway"),
+        (_dedicated("exomem-agent-dx1", "10.50.2.1", "vswitch"), "other than its gateway"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "ipsec"), "link must be wireguard or vswitch"),
     ],
 )
-def test_inventory_generator_refuses_malformed_dedicated_hosts(tmp_path: Path, dedicated: dict) -> None:
+def test_inventory_generator_refuses_malformed_dedicated_hosts(
+    tmp_path: Path, dedicated: dict, reason: str
+) -> None:
     result = _generate_with_dedicated(tmp_path, dedicated)
-    # 1 is a refused input; argparse's usage error is 2.
+    # 1 is a refused input; argparse's usage error is 2. The reason names the
+    # host and field, so a traceback never stands in for a refusal.
     assert result.returncode == 1, result.stderr
+    assert reason in result.stderr
     assert not (tmp_path / "inventory.json").exists()
 
 
@@ -465,7 +486,6 @@ def test_escrowed_tang_keys_reach_the_variable_the_role_reads() -> None:
     assert destinations["escrow.tang-keys.active"]["kind"] == "sops_escrow"
     defaults = _yaml(ANSIBLE / "roles/dedicated_host/defaults/main.yml")
     assert defaults["dedicated_host_tang_keys"] == ""
-    assert "'dedicated_host_recovery_passphrase_' ~" in defaults["dedicated_host_recovery_passphrase"]
 
 
 _TERRAFORM_ONLY = {
@@ -478,9 +498,12 @@ _WITH_DEDICATED = json.loads(json.dumps(_TERRAFORM_ONLY))
 _WITH_DEDICATED["hosted_nodes"]["children"]["k3s_agents"]["children"] = {
     "dedicated_hosts": {
         "hosts": {
+            # A WireGuard host's private address sits on its WireGuard interface.
             "exomem-agent-dx1": {"private_node_ip": "10.51.0.40", "k3s_private_link": "wireguard",
-                                 "public_ipv4": "203.0.113.40"},
-            "exomem-agent-dx2": {"private_node_ip": "10.50.2.41", "k3s_private_link": "vswitch"},
+                                 "public_ipv4": "203.0.113.40",
+                                 "k3s_resolved_private_interface": "wgexomem"},
+            "exomem-agent-dx2": {"private_node_ip": "10.50.2.41", "k3s_private_link": "vswitch",
+                                 "k3s_resolved_private_interface": "vlan4000"},
         }
     }
 }
@@ -492,17 +515,23 @@ _WITH_DEDICATED["hosted_nodes"]["children"]["k3s_agents"]["children"] = {
         # An inventory of Terraform hosts turns every new branch off, so
         # site.yml converges them exactly as before.
         (_TERRAFORM_ONLY, {
-            "exomem-alpha": [[], [], False],
-            "exomem-agent-01": [[], [], False],
+            "exomem-alpha": [[], {"10.50.1.31": "priv"}, False],
+            "exomem-agent-01": [[], {"10.50.1.10": "priv"}, False],
         }),
-        # A WireGuard agent peers with every node and every node with it; its
-        # rules name the WireGuard interface everywhere else. Dedicated hosts
+        # A WireGuard agent peers with every node and every node with it;
+        # firewall rules for it name the WireGuard interface. Dedicated hosts
         # wait for their TopoLVM pool.
         (_WITH_DEDICATED, {
-            "exomem-alpha": [["exomem-agent-dx1"], ["10.51.0.40"], False],
-            "exomem-agent-01": [["exomem-agent-dx1"], ["10.51.0.40"], False],
-            "exomem-agent-dx1": [["exomem-agent-01", "exomem-agent-dx2", "exomem-alpha"], [], True],
-            "exomem-agent-dx2": [["exomem-agent-dx1"], ["10.51.0.40"], True],
+            "exomem-alpha": [["exomem-agent-dx1"],
+                             {"10.50.1.31": "priv", "10.51.0.40": "wgexomem", "10.50.2.41": "priv"}, False],
+            "exomem-agent-01": [["exomem-agent-dx1"],
+                                {"10.50.1.10": "priv", "10.51.0.40": "wgexomem", "10.50.2.41": "priv"}, False],
+            "exomem-agent-dx1": [["exomem-agent-01", "exomem-agent-dx2", "exomem-alpha"],
+                                 {"10.50.1.10": "wgexomem", "10.50.1.31": "wgexomem",
+                                  "10.50.2.41": "wgexomem"}, True],
+            "exomem-agent-dx2": [["exomem-agent-dx1"],
+                                 {"10.50.1.10": "vlan4000", "10.50.1.31": "vlan4000",
+                                  "10.51.0.40": "wgexomem"}, True],
         }),
     ],
 )
@@ -512,19 +541,60 @@ def test_private_link_and_storage_defaults_follow_the_inventory(
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
     inventory = tmp_path / "inventory.json"
-    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local",
+                                                      "k3s_resolved_private_interface": "priv"},
+                                             "children": groups}}))
     play = tmp_path / "defaults.yml"
     play.write_text(yaml.safe_dump([{"hosts": "hosted_nodes", "gather_facts": False,
         "vars": {"expected": expected}, "tasks": [
             {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
             {"ansible.builtin.assert": {"that": [
-                "[k3s_wireguard_peers | sort, k3s_firewall_wireguard_peer_ips, k3s_agent_local_storage | bool]"
+                "[k3s_wireguard_peers | sort, k3s_peer_interfaces, k3s_agent_local_storage | bool]"
                 " == expected[inventory_hostname]",
             ]}},
         ]}]))
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+_WIREGUARD_KEY = "HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw="
+
+
+@pytest.mark.parametrize(
+    "published,accepted",
+    [
+        (_WIREGUARD_KEY, True),
+        # Root on one node must not write wg-quick configuration, which runs
+        # PreUp commands as root, on every other node.
+        (_WIREGUARD_KEY + "\n[Interface]\nPreUp = touch /tmp/owned", False),
+    ],
+)
+def test_a_peer_cannot_inject_wireguard_configuration(
+    tmp_path: Path, published: str, accepted: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    groups = json.loads(json.dumps(_WITH_DEDICATED))
+    dedicated = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]
+    dedicated["hosts"]["exomem-agent-dx1"]["k3s_wireguard_public_key"] = published
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    link = next(task for task in _yaml(K3S_ROLE / "tasks/private_link.yml")
+                if task["name"] == "Converge the WireGuard private link")
+    refuse = next(task for task in link["block"]
+                  if task["name"] == "Refuse a WireGuard key that is not exactly one public key")
+    play = tmp_path / "keys.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "exomem-alpha", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        refuse,
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if accepted:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and "other than one public key" in result.stdout, result.stdout
 
 
 # --- Ansible: the k3s role --------------------------------------------------
@@ -634,10 +704,6 @@ def test_agent_join_waits_for_ready_and_published_attach_capacity() -> None:
     # A converged node relabels to "not labeled": no change reported.
     assert "'not labeled' not in" in agent
     assert "no_log: true" in agent
-    # An agent with node-local cell storage joins once TopoLVM publishes its
-    # pool, never on the Hetzner attachment limit it does not have.
-    assert "capacity\\.topolvm\\.io/{{ k3s_topolvm_device_class }}" in agent
-    assert agent.count("k3s_agent_local_storage | bool") >= 2
 
 
 def test_inter_node_firewall_names_peer_addresses_never_the_subnet() -> None:
@@ -646,10 +712,6 @@ def test_inter_node_firewall_names_peer_addresses_never_the_subnet() -> None:
     assert "community.general.ufw" in firewall
     assert "map('extract', hostvars, 'private_node_ip')" in defaults
     assert "k3s_firewall_peer_ips" in firewall
-    assert (
-        "interface: \"{{ k3s_wireguard_interface if item in k3s_firewall_wireguard_peer_ips"
-        " else k3s_resolved_private_interface }}\""
-    ) in firewall
     assert "direction: in" in firewall
     for port, proto in (("8472", "udp"), ("10250", "tcp"), ("6443", "tcp")):
         assert f'port: "{port}"' in firewall

@@ -19,7 +19,6 @@
     fail_msg: >-
       Pass this host's dedicated_host_recovery_passphrase_<host> (at least 32
       characters) and dedicated_host_tang_keys from their SOPS files.
-  no_log: true
 
 - name: Pin the Tang server's escrowed signing key
   ansible.builtin.set_fact:
@@ -56,13 +55,22 @@
       - dedicated_host_md_detail.stdout is search('(?m)^MD_NAME=([^:]+:)?' ~ dedicated_host_md_name ~ '$')
     fail_msg: "{{ dedicated_host_md_device }} is not this role's RAID1 array; nothing was changed."
 
-# A failed disk is an alert and a runbook step, not a convergence failure.
+# Exit status 1 is a degraded array, 2 one that cannot run.
+- name: Check the array's health
+  ansible.builtin.command:
+    argv: [/usr/sbin/mdadm, --detail, --test, "{{ dedicated_host_md_device }}"]
+  register: dedicated_host_md_health
+  changed_when: false
+  failed_when: dedicated_host_md_health.rc not in [0, 1]
+
+# A failed disk does not stop convergence: the run reports it and the runbook
+# replaces the disk. Nothing alerts on it yet (OpenSpec task 5.5).
 - name: Report a degraded array
   ansible.builtin.debug:
     msg: >-
       {{ dedicated_host_md_device }} is degraded; replace the failed disk as
       docs/runbooks/hosted/dedicated-host.md describes.
-  when: dedicated_host_md_detail.stdout is search('(?m)^MD_DEGRADED=[1-9]')
+  when: dedicated_host_md_health.rc == 1
 
 - name: Record the array's UUID
   ansible.builtin.set_fact:

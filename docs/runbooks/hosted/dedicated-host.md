@@ -101,6 +101,12 @@ it cannot administer over NetBird.
 
 ## Choose the private link
 
+Precondition for either link: OpenSpec task 6.5 has set the cluster's flannel
+MTU. Cloud nodes run flannel at 1400 over the 1450-byte Cloud network, so their
+VXLAN packets are 1450 bytes. A vSwitch carries at most 1400, and a default
+WireGuard interface 1420. Until 6.5 is done, pod traffic to a dedicated agent
+is unproven.
+
 - **Hetzner dedicated: vSwitch.** Create the vSwitch in Robot, attach the
   server, and set the foundation variable. Plan and apply as usual. This adds
   one subnet and changes nothing else:
@@ -157,6 +163,11 @@ infra/scripts/ansible_with_sops.sh \
   --vars infra/secrets/ansible/recovery-passphrase-exomem-agent-dx1.v1.sops.json
 ```
 
+The first run fixes the thin pool's geometry: 64 KiB chunks and 2 GiB of
+metadata, sized for a pool of up to 2 TiB. For a larger pool, set
+`dedicated_host_thin_metadata_mib` in `group_vars/hosted_nodes.yml` to 64
+bytes per chunk before that run. A 4 TiB pool needs 4096.
+
 Every later `site.yml` run needs the Tang keys and every dedicated host's
 passphrase. Each run proves that the escrowed passphrase still opens the array
 and that Tang still unlocks it.
@@ -193,46 +204,111 @@ same unlock.
 
 ## Tang lost or replaced
 
-If the server is rebuilt, `site.yml` reinstalls the escrowed Tang keys, so
-every existing binding keeps working and nothing is rebound. If the keys
-themselves are lost, escrow a new key set as a new version, update
-`--vars` to it, and run `site.yml`. Each agent's role finds that its binding no
-longer unlocks and binds again with its passphrase. Then remove the stale
-binding:
+If the server is rebuilt, `site.yml` reinstalls the escrowed Tang keys. Every
+existing binding keeps working, and nothing is rebound.
 
-```bash
-ssh exomem-admin@100.64.0.40 'sudo clevis luks list -d /dev/md/exomem-cells'
-ssh exomem-admin@100.64.0.40 'sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f'
-```
+If the Tang keys themselves are lost:
+
+1. Escrow a new key set as the next version, as in Preconditions, with `--version v2`.
+2. Run `site.yml` with `--vars infra/secrets/ansible/tang-keys.v2.sops.json`.
+3. On each dedicated host, list the bindings: `sudo clevis luks list -d /dev/md/exomem-cells`.
+4. Remove the binding the role replaced: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
+
+Expected result: each host lists one `tang` binding, and `site.yml` reports no
+change. In step 2, each host's role finds that its binding no longer unlocks,
+and binds again with its passphrase.
+
+## Rotate the Tang keys
+
+Tang keeps a key it no longer advertises as a hidden `.jwk` file, and still
+answers recovery requests with it. Old bindings therefore keep unlocking until
+you delete those files.
+
+1. Escrow a new key set as the next version, as in Preconditions, with `--version v2`.
+2. Run `site.yml` with `--vars infra/secrets/ansible/tang-keys.v2.sops.json`.
+3. Compute the new signing key's thumbprint on your machine. Only the thumbprint is printed:
+
+   ```bash
+   thp=$(sops decrypt --extract '["jwks"]' infra/secrets/escrow/tang-keys.v2.sops.json \
+     | jq -c '.keys[] | select(.alg == "ES512")' | jose jwk thp -i- -a S256)
+   ```
+
+4. On each dedicated host, note the current Tang slot: `sudo clevis luks list -d /dev/md/exomem-cells`.
+5. Bind a new slot pinned to the new key. The passphrase travels from SOPS over SSH:
+
+   ```bash
+   sops decrypt --extract '["passphrase"]' \
+     infra/secrets/escrow/recovery-passphrase-exomem-agent-dx1.v1.sops.json \
+     | ssh exomem-admin@100.64.0.40 \
+       "sudo clevis luks bind -f -d /dev/md/exomem-cells -k - tang '{\"url\":\"http://10.50.1.10:7500\",\"thp\":\"$thp\"}'"
+   ```
+
+6. Remove the slot you noted in step 4: `sudo clevis luks unbind -d /dev/md/exomem-cells -s <old slot> -f`.
+7. When every host is rebound, delete the hidden keys on the server: `sudo find /var/lib/tang -name '.*.jwk' -delete`.
+8. Run `site.yml` again.
+
+Expected result: step 8 reports no change on any dedicated host. A host you
+missed fails its Tang test in step 8, and binds again from its passphrase.
+Until then, it needs a manual unlock after a reboot. If the key directory is
+not `/var/lib/tang`, `systemctl cat tangd@.service` shows it.
 
 ## Replace a failed disk
 
-`site.yml` reports a degraded array but does not repair it. After the provider
-swaps the disk, recreate its partition as above and add it:
+`site.yml` reports a degraded array but does not repair it. Nothing alerts on
+it yet (OpenSpec task 5.5). After the provider swaps the disk, run these steps
+on the host. `<new>` and `<surviving>` are whole disks, for example
+`/dev/nvme1n1` and `/dev/nvme0n1`.
 
-```bash
-ssh exomem-admin@100.64.0.40 'sudo mdadm --manage /dev/md/exomem-cells --add /dev/disk/by-id/<new disk>-part4'
-```
+1. Identify the new disk and the surviving disk: `ls -l /dev/disk/by-id/` and `cat /proc/mdstat`.
+2. Copy the surviving disk's partition table onto the new disk. The `--replicate` value is the target:
+   `sudo sgdisk --replicate=/dev/<new> /dev/<surviving>`.
+3. Give the copy its own GUIDs: `sudo sgdisk --randomize-guids /dev/<new>`.
+4. For each OS array in `/proc/mdstat` that lost a member, add the new disk's matching partition:
+   `sudo mdadm --manage /dev/<md array> --add /dev/<new partition>`.
+5. Add the new data partition to the cell array:
+   `sudo mdadm --manage /dev/md/exomem-cells --add /dev/disk/by-id/<new disk>-part4`.
+6. If `/proc/mdstat` shows no array for the EFI system partition, copy that partition. The `of=` value is the new one:
+   `sudo dd if=/dev/<surviving ESP> of=/dev/<new ESP> bs=4M`.
+7. Install the boot loader on the new disk. On UEFI, run `sudo dpkg-reconfigure grub-efi-amd64` and select both ESPs.
+   On BIOS boot, run `sudo grub-install /dev/<new>`.
+8. Replace the old disk's ID in `data_disks` in the host list, and regenerate the inventory.
+9. If the host joins over WireGuard, delete its key with `sudo rm /etc/wireguard/wgexomem.key`. Then run `site.yml` without `--limit`.
 
-Update `data_disks` in the host list with the new disk's ID.
+Expected result: `cat /proc/mdstat` shows every array rebuilding, then `[UU]`.
+After step 9, every peer holds the host's new public key and the tunnel is up.
+The removed disk held the old WireGuard key and the agent token
+(`/etc/rancher/k3s/config.yaml`) unencrypted. If the provider cannot confirm
+that it destroyed the disk, rotate the agent token as in `secrets.md`.
 
 ## Remove the host
 
 Removing an agent that still holds cells needs relocation (task 6.4), which
 `remove-agent.yml` does not do yet. Until it does, remove only an agent with no
-cells. Run the removal playbook first, as in [node-pool.md](node-pool.md#remove-a-node):
+cells.
 
-```bash
-cd infra/ansible
-ansible-playbook --inventory inventory.yml remove-agent.yml -e k3s_remove_node=exomem-agent-dx1
-```
+1. Run the removal playbook, as in [node-pool.md](node-pool.md#remove-a-node):
 
-Then drop the host from the host list, regenerate the inventory and run
-`site.yml`. That revokes its WireGuard peer, its inter-node rules and its Tang
-access. Keep its escrowed passphrase until the disks are erased. Before you
-hand the server back, destroy the LUKS header on the host. This is
-irreversible, so pass the exact array name yourself:
+   ```bash
+   cd infra/ansible
+   ansible-playbook --inventory inventory.yml remove-agent.yml -e k3s_remove_node=exomem-agent-dx1
+   ```
 
-```bash
-ssh exomem-admin@100.64.0.40 'sudo cryptsetup close exomem_cells; sudo cryptsetup erase /dev/md/exomem-cells'
-```
+2. Close the cell storage and destroy its LUKS header. This is irreversible, so type the confirmation yourself:
+
+   ```bash
+   ssh -t exomem-admin@100.64.0.40 'sudo vgchange --activate n cells && sudo cryptsetup close exomem_cells && sudo cryptsetup erase /dev/md/exomem-cells'
+   ```
+
+3. Remove the host from the host list, regenerate the inventory, and run `site.yml` without `--limit`.
+4. Boot the server into the provider's rescue system.
+5. If the disks are NVMe, wipe each whole disk: `nvme format --ses=1 /dev/nvme0n1`, then `/dev/nvme1n1`.
+6. If they are not NVMe, wipe each whole disk with `blkdiscard -f /dev/<disk>`.
+7. Remove the host's peer from NetBird.
+8. Remove the host's passphrase entry from the secret matrix, and delete its SOPS files.
+
+Expected result: after step 3, every node has dropped the host's WireGuard
+peer, inter-node rules and Tang rule. If it was the last WireGuard host, every
+node has also stopped `wg-quick@wgexomem` and removed its configuration and
+key. After step 6, `blkid --probe` finds nothing on either disk. Nothing then
+needs rotating: the WireGuard key and the agent token were only on those
+disks. If you cannot wipe them, rotate the agent token as in `secrets.md`.

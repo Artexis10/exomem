@@ -84,10 +84,15 @@ esac
 
 secret_dir="$(mktemp -d "${tmpfs_root%/}/exomem-ansible-secrets.XXXXXX")"
 cleanup() {
-  find "${secret_dir}" -xdev -type f -delete 2>/dev/null || true
+  find "${secret_dir}" -xdev -mindepth 1 -delete 2>/dev/null || true
   rmdir -- "${secret_dir}" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
+
+# Ansible writes controller-side temp files (copy content, module payloads
+# with their arguments) that carry these secrets; keep them on the same tmpfs.
+mkdir -m 0700 -- "${secret_dir}/ansible-local"
+export ANSIBLE_LOCAL_TEMP="${secret_dir}/ansible-local"
 
 extra_vars=()
 index=0

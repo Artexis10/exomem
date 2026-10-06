@@ -21,10 +21,24 @@
 
 - name: List what holds or mounts each named data disk
   ansible.builtin.command:
-    argv: [/usr/bin/lsblk, --json, --paths, --output, "NAME,TYPE,MOUNTPOINTS", "{{ item }}"]
+    argv: [/usr/bin/lsblk, --json, --paths, --output, "NAME,PKNAME,TYPE,MOUNTPOINTS", "{{ item }}"]
   loop: "{{ dedicated_host_data_disks }}"
   register: dedicated_host_disk_lsblk
   changed_when: false
+
+# Two partitions of one disk, or one disk under two names, mirror nothing.
+- name: Require the two data devices to sit on different physical disks
+  ansible.builtin.assert:
+    that: dedicated_host_physical_disks | unique | length == 2
+    fail_msg: "{{ dedicated_host_data_disks | join(' and ') }} are on the same physical disk; nothing was changed."
+  vars:
+    dedicated_host_physical_disks: >-
+      {%- set found = [] -%}
+      {%- for result in dedicated_host_disk_lsblk.results -%}
+        {%- set node = (result.stdout | from_json).blockdevices[0] -%}
+        {%- set _ = found.append(node.pkname or node.name) -%}
+      {%- endfor -%}
+      {{ found }}
 
 - name: Decide which named data disks the array may use
   ansible.builtin.set_fact:

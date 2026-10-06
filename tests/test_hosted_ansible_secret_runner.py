@@ -150,8 +150,16 @@ for path in paths:
     assert path.is_file()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert os.statvfs(path).f_fsid == os.statvfs(os.environ['TEST_TMPFS_ROOT']).f_fsid
+# Ansible's controller-side temp files (copy content, module payloads with
+# their arguments) carry the same secrets, so they must stay on tmpfs too.
+local = pathlib.Path(os.environ['ANSIBLE_LOCAL_TEMP'])
+assert stat.S_IMODE(local.stat().st_mode) == 0o700
+assert os.statvfs(local).f_fsid == os.statvfs(os.environ['TEST_TMPFS_ROOT']).f_fsid
+(local / 'ansible-local-1').mkdir()
+(local / 'ansible-local-1' / 'content').write_text(os.environ['TEST_SENTINEL'])
 pathlib.Path(os.environ['TEST_MARKER']).write_text(
-    json.dumps({'args': sys.argv[1:], 'values': [json.loads(path.read_text()) for path in paths]})
+    json.dumps({'args': sys.argv[1:], 'values': [json.loads(path.read_text()) for path in paths],
+                'local_temp': str(local)})
 )
 """,
     )
@@ -190,4 +198,5 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     assert "--check" in invocation["args"]
     for path in decrypted_paths.read_text(encoding="utf-8").splitlines():
         assert not Path(path).exists()
+    assert not Path(invocation["local_temp"]).exists()
     assert stat.S_IMODE(RUNNER.stat().st_mode) & stat.S_IXUSR

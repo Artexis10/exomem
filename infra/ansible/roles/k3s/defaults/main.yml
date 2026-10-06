@@ -49,9 +49,9 @@ k3s_firewall_peer_ips: >-
 k3s_firewall_comment: Exomem K3s inter-node
 
 # A node outside the Hetzner network joins over WireGuard (D8): it peers with
-# every other node, every other node peers with it, and the inter-node rules
-# for it name this interface. No dash: Ansible's per-interface facts rewrite
-# dashes, which the private-interface lookup would then miss.
+# every other node, and every other node peers with it. No dash: Ansible's
+# per-interface facts rewrite dashes, which the private-interface lookup
+# would then miss.
 k3s_wireguard_interface: wgexomem
 k3s_wireguard_port: 51820
 k3s_wireguard_hosts: >-
@@ -61,8 +61,17 @@ k3s_wireguard_hosts: >-
 k3s_wireguard_peers: >-
   {{ ((groups['hosted_nodes'] | default([])) if inventory_hostname in k3s_wireguard_hosts
       else k3s_wireguard_hosts) | difference([inventory_hostname]) }}
-k3s_firewall_wireguard_peer_ips: >-
-  {{ k3s_wireguard_hosts | difference([inventory_hostname]) | map('extract', hostvars, 'private_node_ip') | list }}
+# The interface each peer's private address arrives on: WireGuard for a peer
+# that joined over it, this node's private interface otherwise (on a WireGuard
+# node that is the WireGuard interface too). Firewall rules name it.
+k3s_peer_interfaces: >-
+  {%- set mapping = {} -%}
+  {%- for peer in k3s_cluster_hosts | difference([inventory_hostname])
+      if hostvars[peer].private_node_ip is defined -%}
+    {%- set _ = mapping.update({hostvars[peer].private_node_ip:
+          k3s_wireguard_interface if peer in k3s_wireguard_hosts else k3s_resolved_private_interface}) -%}
+  {%- endfor -%}
+  {{ mapping }}
 # A dedicated Hetzner server's vSwitch VLAN hangs off its default-route NIC
 # unless this names another.
 k3s_vswitch_parent_interface: ""

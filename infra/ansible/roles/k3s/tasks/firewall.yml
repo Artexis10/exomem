@@ -6,8 +6,8 @@
 # filter on it. Every rule carries k3s_firewall_comment, and every run prunes
 # commented rules whose source is no longer a peer, so the set converges to
 # k3s_firewall_peer_ips (the inventory, or the inventory minus a removed node).
-# A peer joined over WireGuard (k3s_firewall_wireguard_peer_ips) arrives on the
-# WireGuard interface instead, so its rules name that interface.
+# Each rule names the interface its peer arrives on (k3s_peer_interfaces): the
+# private interface, or WireGuard for a peer outside the Hetzner network.
 - name: Read the inter-node rules this role added earlier
   ansible.builtin.command:
     argv:
@@ -27,8 +27,7 @@
               'allow in on ([^ ]+) from ([^ ]+) to any port ([0-9]+) proto (tcp|udp)') -%}
         {%- set parsed = found[0] if found else none -%}
         {%- if parsed and (parsed[1] not in k3s_firewall_peer_ips
-              or parsed[0] != (k3s_wireguard_interface if parsed[1] in k3s_firewall_wireguard_peer_ips
-                               else k3s_resolved_private_interface)
+              or parsed[0] != k3s_peer_interfaces.get(parsed[1])
               or (parsed[2] == '6443' and k3s_node_role != 'server')) -%}
           {%- set _ = stale.append({'interface': parsed[0], 'src': parsed[1],
                                     'port': parsed[2], 'proto': parsed[3]}) -%}
@@ -53,7 +52,7 @@
   community.general.ufw:
     rule: allow
     direction: in
-    interface: "{{ k3s_wireguard_interface if item in k3s_firewall_wireguard_peer_ips else k3s_resolved_private_interface }}"
+    interface: "{{ k3s_peer_interfaces[item] }}"
     src: "{{ item }}"
     port: "8472"
     proto: udp
@@ -64,7 +63,7 @@
   community.general.ufw:
     rule: allow
     direction: in
-    interface: "{{ k3s_wireguard_interface if item in k3s_firewall_wireguard_peer_ips else k3s_resolved_private_interface }}"
+    interface: "{{ k3s_peer_interfaces[item] }}"
     src: "{{ item }}"
     port: "10250"
     proto: tcp
@@ -75,7 +74,7 @@
   community.general.ufw:
     rule: allow
     direction: in
-    interface: "{{ k3s_wireguard_interface if item in k3s_firewall_wireguard_peer_ips else k3s_resolved_private_interface }}"
+    interface: "{{ k3s_peer_interfaces[item] }}"
     src: "{{ item }}"
     port: "6443"
     proto: tcp

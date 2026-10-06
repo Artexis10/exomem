@@ -7,10 +7,17 @@
 - name: Run the Tang key server for dedicated agents
   hosts: hosted_nodes:!k3s_agents
   become: true
-  gather_facts: false
+  # site.yml's earlier plays gather these facts; this playbook has none.
+  gather_facts: true
   any_errors_fatal: true
 
   tasks:
+    - name: Resolve the K3s private network interface
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: interface.yml
+        public: true
+
     - name: Run Tang with its escrowed keys
       ansible.builtin.include_role:
         name: dedicated_host
@@ -21,6 +28,8 @@
   become: true
   gather_facts: false
   any_errors_fatal: true
+  vars:
+    ansible_pipelining: true
 
   roles:
     - dedicated_host

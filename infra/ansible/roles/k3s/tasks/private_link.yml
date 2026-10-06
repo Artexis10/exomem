@@ -49,12 +49,14 @@
         group: root
         mode: "0755"
 
-    # The private key is created on the node and never leaves it.
+    # The private key is created on the node and never leaves it. Deleting
+    # the key file and running site.yml rotates it on every peer.
     - name: Create this node's WireGuard key and read its public key
       ansible.builtin.command:
         argv: [/usr/local/sbin/exomem-wireguard-key, "{{ k3s_wireguard_interface }}"]
       register: k3s_wireguard_pubkey
       changed_when: "'created' in k3s_wireguard_pubkey.stderr"
+      notify: Restart WireGuard
 
     - name: Publish this node's WireGuard public key to its peers
       ansible.builtin.set_fact:
@@ -70,6 +72,18 @@
         fail_msg: >-
           WireGuard peers are missing from this run; run site.yml without --limit
           so every node learns every peer's key.
+
+    # A key is whatever a peer's helper printed. Prevents: root on one node
+    # writing configuration (a PreUp command) into every other node's
+    # wg-quick file. Fires wrongly: never for a key wg pubkey printed.
+    - name: Refuse a WireGuard key that is not exactly one public key
+      ansible.builtin.assert:
+        that:
+          - k3s_wireguard_peer_keys | reject('match', '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$') | list | length == 0
+          - k3s_wireguard_peer_keys | map('length') | reject('equalto', 44) | list | length == 0
+        fail_msg: A WireGuard peer published something other than one public key; nothing was configured.
+      vars:
+        k3s_wireguard_peer_keys: "{{ k3s_wireguard_peers | map('extract', hostvars, 'k3s_wireguard_public_key') | list }}"
 
     - name: Configure the WireGuard interface and its peers
       ansible.builtin.template:
@@ -96,6 +110,31 @@
         name: wg-quick@{{ k3s_wireguard_interface }}
         enabled: true
         state: started
+
+# Removing the last WireGuard host leaves no peer, so every other node takes
+# its interface down rather than keep a tunnel to a server that is gone.
+- name: Retire the WireGuard private link
+  when: k3s_wireguard_hosts | length == 0
+  block:
+    - name: Look for a WireGuard configuration left by a removed host
+      ansible.builtin.stat:
+        path: /etc/wireguard/{{ k3s_wireguard_interface }}.conf
+        get_checksum: false
+      register: k3s_wireguard_leftover
+
+    - name: Stop the WireGuard interface
+      ansible.builtin.systemd_service:
+        name: wg-quick@{{ k3s_wireguard_interface }}
+        enabled: false
+        state: stopped
+      when: k3s_wireguard_leftover.stat.exists
+
+    - name: Remove the WireGuard configuration and key
+      ansible.builtin.file:
+        path: /etc/wireguard/{{ k3s_wireguard_interface }}.{{ item }}
+        state: absent
+      loop: [conf, key]
+      when: k3s_wireguard_leftover.stat.exists
 
 - name: Apply the private link before any node resolves its private interface
   ansible.builtin.meta: flush_handlers

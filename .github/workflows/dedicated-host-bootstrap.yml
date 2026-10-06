@@ -3,8 +3,9 @@ name: Dedicated host bootstrap
 # Proves the dedicated_host role (openspec move-cloud-cells-to-local-storage
 # 5.1-5.3) on a disposable runner: RAID1 over two loop devices, LUKS2, Clevis
 # bound to a local Tang, the cells volume group and thin pool, a second run
-# that changes nothing, and unattended unlock. A runner cannot reboot, so the
-# boot path is proven by starting the crypttab unit with the mapping closed.
+# that changes nothing, unattended unlock, and that a degraded, stopped or
+# partial array is never rebuilt. A runner cannot reboot, so the boot path is
+# proven by starting the crypttab unit with the mapping closed.
 on:
   pull_request:
     paths:
@@ -75,10 +76,18 @@ jobs:
               children: {hosted_nodes: {
                 hosts: {"exomem-alpha": {private_node_ip: "127.0.0.1"}},
                 children: {k3s_agents: {children: {dedicated_hosts: {hosts: {"exomem-agent-ci": {
-                  private_node_ip: "127.0.0.1", dedicated_host_data_disks: [$d0, $d1]}}}}}}}}}}'
+                  private_node_ip: "127.0.0.1", dedicated_host_data_disks: [$d0, $d1],
+                  dedicated_host_thin_metadata_mib: 64, dedicated_host_vg_reserve_mib: 128}}}}}}}}}}'
           }
           inventory "$DECOY" "$DATA0" > "$RUNNER_TEMP/decoy-inventory.json"
           inventory "$DATA0" "$DATA1" > "$RUNNER_TEMP/inventory.json"
+          # The identities a rebuild would change: array, encryption, group, pool.
+          printf '%s\n' '#!/bin/bash' 'set -euo pipefail' \
+            'sudo mdadm --detail --export /dev/md/exomem-cells | grep "^MD_UUID="' \
+            'sudo cryptsetup luksUUID /dev/md/exomem-cells' \
+            'sudo vgs --noheadings -o vg_uuid cells' \
+            'sudo lvs --noheadings -o lv_uuid cells/pool0' > "$RUNNER_TEMP/identities.sh"
+          chmod +x "$RUNNER_TEMP/identities.sh"
       - name: Refuse a named disk that holds a filesystem
         timeout-minutes: 15
         working-directory: infra/ansible
@@ -106,6 +115,10 @@ jobs:
           sudo vgs cells
           sudo lvs -o lv_name,lv_attr,lv_size,data_percent,metadata_percent,chunk_size cells
           sudo lvs --noheadings -o lv_attr cells/pool0 | grep -E '^ *t'
+          # The explicit geometry, and the reserve left free for metadata growth.
+          test "$(sudo lvs --noheadings --units k --nosuffix -o chunk_size cells/pool0 | tr -d ' ')" = 64.00
+          test "$(sudo lvs --noheadings --units m --nosuffix -o lv_metadata_size cells/pool0 | tr -d ' ')" = 64.00
+          test "$(sudo vgs --noheadings --units m --nosuffix -o vg_free cells | tr -d ' ' | cut -d. -f1)" -ge 128
           lsblk -o NAME,TYPE,SIZE,FSTYPE "$DATA0" "$DATA1"
       - name: Second run changes nothing
         working-directory: infra/ansible
@@ -114,6 +127,17 @@ jobs:
             ci-dedicated-host.yml | tee "$RUNNER_TEMP/second.log"
           grep -E '^(exomem-alpha|exomem-agent-ci) +: ok=' "$RUNNER_TEMP/second.log"
           if grep -E ' changed=[1-9]' "$RUNNER_TEMP/second.log"; then echo "the second run changed something"; exit 1; fi
+      # The role binds with -f, never -y, so the Tang pin compares thp.
+      - name: Clevis refuses a Tang whose signing key is not the pinned one
+        run: |
+          slots() { sudo cryptsetup luksDump /dev/md/exomem-cells | grep -cE '^  [0-9]+: luks2$'; }
+          before=$(slots)
+          wrong='{"url":"http://127.0.0.1:7500","thp":"Ec7Ji7XkHtq3X1a8eXnzvYlOMkxaxdZuG6Na9u_9u0E"}'
+          if jq -j '.dedicated_host_recovery_passphrase_exomem_agent_ci' "$RUNNER_TEMP/escrow.json" \
+               | sudo clevis luks bind -f -d /dev/md/exomem-cells -k - tang "$wrong"; then
+            echo "clevis bound to a Tang it could not verify"; exit 1
+          fi
+          test "$(slots)" = "$before"
       - name: Clevis unlocks the closed array from Tang alone
         run: |
           sudo vgchange --activate n cells
@@ -145,17 +169,80 @@ jobs:
           systemctl is-active exomem-cells-ready.service k3s-agent.service
           test -b /dev/mapper/exomem_cells
           sudo lvs --noheadings -o lv_attr cells/pool0 | grep -E '^ *t.{3}a'
+      - name: A degraded array is reported, never rebuilt
+        timeout-minutes: 15
+        working-directory: infra/ansible
+        run: |
+          "$RUNNER_TEMP/identities.sh" > "$RUNNER_TEMP/identities.before"
+          sudo mdadm --manage /dev/md/exomem-cells --fail "$DATA1"
+          sudo mdadm --manage /dev/md/exomem-cells --remove "$DATA1"
+          ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+            ci-dedicated-host.yml | tee "$RUNNER_TEMP/degraded.log"
+          grep -F '/dev/md/exomem-cells is degraded' "$RUNNER_TEMP/degraded.log"
+          if grep -E ' changed=[1-9]' "$RUNNER_TEMP/degraded.log"; then echo "the degraded run changed something"; exit 1; fi
+          "$RUNNER_TEMP/identities.sh" | diff "$RUNNER_TEMP/identities.before" -
+          sudo mdadm --manage /dev/md/exomem-cells --add "$DATA1"
+      - name: A stopped array is assembled, never rebuilt
+        timeout-minutes: 15
+        working-directory: infra/ansible
+        run: |
+          sudo systemctl stop exomem-cells-ready.service
+          sudo vgchange --activate n cells
+          sudo cryptsetup close exomem_cells
+          sudo mdadm --stop /dev/md/exomem-cells
+          sudo udevadm settle
+          if test -e /dev/md/exomem-cells; then echo "udev reassembled the array before the role ran"; exit 1; fi
+          ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+            ci-dedicated-host.yml | tee "$RUNNER_TEMP/stopped.log"
+          grep -A2 -F 'TASK [dedicated_host : Assemble the existing array]' "$RUNNER_TEMP/stopped.log" \
+            | grep -F 'changed: [exomem-agent-ci]'
+          "$RUNNER_TEMP/identities.sh" | diff "$RUNNER_TEMP/identities.before" -
+      # remove-agent.yml's stop tasks, run on the agent as the playbook runs
+      # them. While the volume group is active its mapping is in use, so the
+      # stop must deactivate the group before it can close the mapping.
+      - name: Removal closes the agent's cell storage
+        timeout-minutes: 10
+        working-directory: infra/ansible
+        env:
+          ANSIBLE_ROLES_PATH: ${{ github.workspace }}/infra/ansible/roles
+        run: |
+          if sudo cryptsetup close exomem_cells; then echo "the mapping closed under an active group"; exit 1; fi
+          sudo install -d -m 0750 /etc/rancher/k3s
+          printf '%s\n' '- hosts: dedicated_hosts' '  become: true' '  gather_facts: false' '  tasks:' \
+            '    - ansible.builtin.include_role: {name: k3s, tasks_from: remove_stop.yml}' \
+            '    - ansible.builtin.assert: {that: k3s_remove_stop_confirmed | bool}' > "$RUNNER_TEMP/remove-stop.yml"
+          ansible-playbook -i "$RUNNER_TEMP/inventory.json" "$RUNNER_TEMP/remove-stop.yml"
+          test ! -e /dev/mapper/exomem_cells
+      - name: A partial array is refused, and neither disk is written
+        timeout-minutes: 15
+        working-directory: infra/ansible
+        run: |
+          # The removal step left the storage closed.
+          test ! -e /dev/mapper/exomem_cells
+          sudo systemctl stop exomem-cells-ready.service
+          sudo mdadm --stop /dev/md/exomem-cells
+          sudo udevadm settle
+          sudo mdadm --zero-superblock "$DATA1"
+          if ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+               ci-dedicated-host.yml > "$RUNNER_TEMP/partial.log" 2>&1; then
+            cat "$RUNNER_TEMP/partial.log"; echo "the role rebuilt a partial array"; exit 1
+          fi
+          grep -F 'Only one named data disk belongs to exomem-cells' "$RUNNER_TEMP/partial.log"
+          sudo mdadm --examine "$DATA0" | grep -F 'exomem-cells'
+          if sudo blkid --probe "$DATA1"; then echo "the role wrote to the blank disk"; exit 1; fi
       - name: Summarize
-        if: always()
+        if: success()
         run: |
           {
             echo "### Dedicated host bootstrap on loop devices"
             echo
             echo "Proven on a disposable runner: the disk guard, RAID1, LUKS2, a Clevis Tang"
-            echo "binding pinned to the escrowed signing key, the cells volume group and thin"
-            echo "pool, an idempotent second run, and unattended unlock (clevis luks unlock, and"
-            echo "the crypttab unit with K3s waiting on it). Not proven: a reboot, which a runner"
-            echo "cannot do; that stays task 5.3's hardware evidence."
+            echo "binding pinned to the escrowed signing key (a wrong pin is refused), the cells"
+            echo "volume group and thin pool at the explicit geometry, an idempotent second run,"
+            echo "unattended unlock (clevis luks unlock, and the crypttab unit with K3s waiting"
+            echo "on it), no rebuild of a degraded, stopped or partial array, and removal's stop"
+            echo "tasks closing the storage. Not proven: a reboot, which a runner cannot do; that"
+            echo "stays task 5.3's hardware evidence."
             echo
             echo '```'
             lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS "$DATA0" "$DATA1" 2>/dev/null || true
