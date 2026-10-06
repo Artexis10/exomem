@@ -1,4 +1,4 @@
-"""Private isolated create/restart producer; production admission remains closed.
+"""Private create/restart/takeover producer; public routes and launch support remain closed.
 
 One intent references the immutable create receipt. It survives cutover in shared
 snapshots without requiring a new business transaction or replica publication.
@@ -19,31 +19,55 @@ from pathlib import Path
 from .. import held_fs, state_migration, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
-from . import authority, chain, connection, replica, schema
+from . import authority, chain, connection, custody, replica, schema, takeover
 from .connection import CollectionStoreError
 
 
 @contextmanager
 def _isolated_session(parent):
-    """Allocate custody; only this live owner (or its forked child) can resume it."""
-    with ExitStack() as stack:
-        session = _IsolatedSession(parent, stack)
-        try:
-            state_migration.require_vault_state_ready(session.root)
-            session.state_fs = stack.enter_context(held_fs.acquire(session.path.parent.parent).require())
-            session.state_directory = stack.enter_context(session.state_fs.parent(session.path.parent.name).require())
-            yield session
-        finally:
-            session.alive[0] = 0
+    """Allocate disposable custody; only this live owner (or its forked child) can resume it."""
+    parent = Path(parent).resolve()
+    if not state_paths.state_store_root().resolve().is_relative_to(parent):
+        raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state must be inside the isolated parent")
+    root = Path(tempfile.mkdtemp(prefix="collection-create-", dir=parent))
+    (root / vault.kb_dirname()).mkdir()
+    with _ProducerSession.open(root, production=False) as session:
+        yield session
 
 
-class _IsolatedSession:
-    def __init__(self, parent, stack):
-        parent = Path(parent).resolve()
-        if not state_paths.state_store_root().resolve().is_relative_to(parent):
-            raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state must be inside the isolated parent")
-        self.root = Path(tempfile.mkdtemp(prefix="collection-create-", dir=parent))
-        (self.root / vault.kb_dirname()).mkdir()
+@contextmanager
+def production_session(vault_root):
+    """Bind a real vault whose supported single-host custody verifies on its actual paths.
+
+    Unknown custody refuses only this store producer; file collections and
+    knowledge never consult it. No caller flag or attestation can mint a session.
+    """
+    root = Path(vault_root).resolve()
+    verified = custody.verify(root)
+    if not verified.verified:
+        raise CollectionStoreError("COLLECTION_STORE_CUSTODY_UNVERIFIED", verified.reason)
+    with _ProducerSession.open(root, production=True) as session:
+        yield session
+
+
+def _require_state(root):
+    """Store-bearing state is validated later by token-bound recovery; a fresh copy bootstraps here."""
+    recorded = state_migration.recorded_descriptor_ids(root)
+    _, optional = state_migration.partition_state_descriptor_ids(recorded or ())
+    marker = authority.read_marker(root)
+    if marker is None and not optional:
+        state_migration.require_vault_state_ready(root)
+    elif recorded is None and not state_migration.bootstrap_fresh_state(root):
+        raise state_migration.StateMigrationOfflineRequired("copied store vault state is not fresh")
+
+
+class _ProducerSession:
+    """The one private producer custody: a disposable root or a custody-verified real vault."""
+
+    def __init__(self, root, stack, *, production):
+        self.root = Path(root).resolve()
+        self.production = production
+        parent = self.root.parent
         self.fs = stack.enter_context(held_fs.acquire(parent).require())
         self.directory = stack.enter_context(self.fs.parent(self.root.name).require())
         self.kb_directory = stack.enter_context(self.fs.parent(
@@ -57,6 +81,24 @@ class _IsolatedSession:
         self.owner = os.getpid()
         self.path = connection.store_path(self.root).resolve()
         self.manager = None
+        self.fence_client = None
+        # Minted only after custody verified (or on an isolated root). Re-derived at takeover,
+        # create/resume, cutover and every replica publication; operations use this verdict.
+        self.custody, self.custody_reason = True, "verified when the session was minted"
+
+    @classmethod
+    @contextmanager
+    def open(cls, root, *, production):
+        with ExitStack() as stack:
+            session = cls(root, stack, production=production)
+            try:
+                _require_state(session.root)
+                session.state_fs = stack.enter_context(held_fs.acquire(session.path.parent.parent).require())
+                session.state_directory = stack.enter_context(
+                    session.state_fs.parent(session.path.parent.name).require())
+                yield session
+            finally:
+                session.alive[0] = 0
 
     def check(self):
         try:
@@ -67,20 +109,26 @@ class _IsolatedSession:
             self.fs.validate_directory(self.kb_directory).require()
             self.fs.validate_directory(self.namespace).require()
             self.state_fs.validate_directory(self.state_directory).require()
-            return True
+            return self.custody
         except (OSError, ValueError, held_fs.HeldFsError):
             return False
 
+    def verify_custody(self):
+        verdict = custody.verify(self.root) if self.production else custody.Custody(True, "isolated root")
+        self.custody, self.custody_reason = verdict.verified, verdict.reason
+        return self.custody
+
     def bind(self, manager):
-        if type(self) is not _IsolatedSession:
-            raise state_migration.StateMigrationOfflineRequired("isolated collection-store custody is absent")
+        if type(self) is not _ProducerSession:
+            raise state_migration.StateMigrationOfflineRequired("collection-store producer custody is absent")
         if not self.check() or not manager.config.enabled:
-            raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "isolated writer custody is absent")
+            raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "producer writer custody is absent")
         if self.manager is not None and self.manager is not manager:
             raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "session already has a writer")
         self.manager = manager
 
-    def runtime(self):
+    def runtime(self, *, retire=True):
+        """This session's runtime; ``retire`` closes its idle writer so a direct writer can open."""
         from .runtime import CollectionStoreRuntime
 
         runtime = self.manager._collection_store
@@ -89,19 +137,16 @@ class _IsolatedSession:
                                              _bootstrap=True)
         if runtime.root != self.root or not runtime._bootstrap:
             raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "foreign runtime binding")
-        with self.manager._report_lock:
-            with self.manager._lock:
-                if self.manager._store_borrowers or self.manager._store_handoff:
-                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "runtime is still borrowed")
-                if runtime._handle is not None:
-                    runtime._handle.close()
-                    runtime._handle = None
-                    runtime._writer_token = None
+        if self.fence_client is not None and runtime._resolver is None:
+            runtime._resolver = lambda: _resolve(self)
+        runtime._publication_custody = lambda token: _publication_custody(self, token)
+        if retire and not runtime.retire_idle_handle():
+            raise CollectionStoreError("COLLECTION_STORE_BUSY", "runtime is still borrowed")
         return runtime
 
     def require(self, token):
         if not self.check():
-            raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "isolated directory custody was lost")
+            raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "producer directory custody was lost")
         self.manager.validate_fencing_token(token)
         return self.manager._mutation_coordinator_for(self.root).current_thread_holds_boundary()
 
@@ -122,7 +167,9 @@ class _IsolatedSession:
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
                fence_client, scaffold=True):
-    _IsolatedSession.bind(session, manager)
+    session.verify_custody()
+    _ProducerSession.bind(session, manager)
+    _bind_fence_client(session, fence_client)
     with manager.consistency_guard(session.root, operation="collection_store_create"):
         if session.path.exists():
             session.runtime()
@@ -205,16 +252,194 @@ def _replay_create(writer, request_id, receipt):
 
 
 def resume_local(session, manager, *, fence_client):
-    _IsolatedSession.bind(session, manager)
+    session.verify_custody()
+    _ProducerSession.bind(session, manager)
+    _bind_fence_client(session, fence_client)
     with manager.consistency_guard(session.root, operation="collection_store_resume"):
         return _resume_locked(session, fence_client)
 
 
-def _resume_locked(session, fence_client, *, preparation_token=None):
+def _bind_fence_client(session, fence_client):
     manager = session.manager
     if (fence_client.config.url != manager.config.url
             or fence_client.config.vault_id != manager.config.vault_id):
         raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "coordinator binding differs")
+    session.fence_client = fence_client
+
+
+def open_store(session, manager, *, fence_client):
+    """Startup, lease takeover and copied-vault adoption for a store-routed vault.
+
+    Returns ``admitted``, or an unresolved ``sync_pending``/``diverged``/``flush_pending``
+    (or transient ``busy``) state under which reads of a local copy continue and
+    collection writes refuse; ``LeaseManager.status()`` reports it with its attention
+    flag. Ordinary checkout re-runs this resolution every 10 s and on replica change.
+    """
+    _ProducerSession.bind(session, manager)
+    _bind_fence_client(session, fence_client)
+    return _resolve(session, force=True)
+
+
+def _resolve(session, *, force=False):
+    """Admit this token's store, adopt the vault replica, or record why neither is safe yet.
+
+    Reads of the local copy never wait on it: an unresolved verdict that is not yet due
+    returns before any boundary, and the replica is copied and validated outside the
+    mutation boundary. Only settling (installation, divergence and epoch publication)
+    holds it, after a cheap recheck of the marker, heads and replica digest it decided on.
+    """
+    manager = session.manager
+    runtime = session.runtime(retire=False)
+    previous = runtime._takeover
+    token = manager._fencing_token
+    if token is not None and runtime.reporting_ready(token):
+        return {"status": "admitted"}
+    if not force and previous is not None and previous.token == token and not previous.due(session.root):
+        return previous.status()
+    if not session.verify_custody():
+        return _custody_lost(session, token).status()
+    raw, marker, fence = _routed_store(session)
+    with manager.writer_authority_guard(vault_root=session.root):
+        token = manager._fencing_token
+        if runtime.reporting_ready(token):
+            return {"status": "admitted"}
+        facts, diverged, signature = _takeover_facts(session, runtime, token, raw, marker, fence)
+        action, reason = ((takeover.DIVERGED, "this store records unresolved divergence") if diverged
+                          else takeover.decide(staged=None, **facts))
+        recorded, local = facts["recorded"], facts["local"]
+
+        def check():
+            manager._renew_collection_store(token, due_only=True)
+            session.require(token)
+
+        with ExitStack() as stack:
+            staged = None
+            if action == "stage":
+                heads = [None if recorded is None else (recorded.commit_seq, recorded.head_hash),
+                         None if local is None else (local.commit_seq, local.head_hash)]
+                staged = stack.enter_context(takeover.staged_replica(session, check, heads))
+                action, reason = ((takeover.SYNC_PENDING, "the vault replica has not arrived")
+                                  if staged is None else takeover.decide(staged=staged, **facts))
+            if action in {"admit", "adopt", "continue"} or (
+                    action == takeover.DIVERGED and local is not None and not diverged):
+                with manager.consistency_guard(session.root, operation="collection_store_takeover"):
+                    action, reason = _settle(session, runtime, token, facts, staged, action, reason, check)
+        if action == "admitted":
+            return {"status": "admitted"}
+        state = takeover.Pending(token, action, reason, None if recorded is None else recorded.commit_seq,
+                                 None if local is None else local.commit_seq, signature)
+        if previous is not None and (previous.code, previous.recorded) == (state.code, state.recorded):
+            state.since = previous.since
+        with manager._report_lock:
+            # A racing resolve may have admitted this token meanwhile; never shadow it.
+            if runtime._admitted_token == token:
+                return {"status": "admitted"}
+            runtime._takeover = state
+        return state.status()
+
+
+def _custody_lost(session, token):
+    """Unverified custody leaves C pending with attention: reads continue, writes and publication wait."""
+    runtime = session.manager._collection_store
+    previous = runtime._takeover
+    state = takeover.Pending(token, takeover.CUSTODY_LOST, session.custody_reason, None,
+                             runtime.sample_head().commit_seq if session.path.exists() else None,
+                             takeover.replica_signature(session.root))
+    if previous is not None and previous.code == state.code:
+        state.since = previous.since
+    runtime._takeover = state
+    return state
+
+
+def _publication_custody(session, token):
+    """Re-derive custody once per replica publication, before it writes into the vault."""
+    if session.verify_custody():
+        return True
+    _custody_lost(session, token)
+    return False
+
+
+def _routed_store(session):
+    """The marker this takeover serves, with the coordinator's store fence bound to it.
+
+    A copied vault meeting a fresh coordinator cuts the fence over from its marker,
+    which revokes any earlier token, so this precedes the lease acquisition.
+    """
+    if session.path.exists():
+        with closing(connection.open_reader(session.path)) as reader:
+            if authority.pending_create(reader) is not None:
+                raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
+                                           "create recovery owns this store; resume that create")
+    raw = authority.read_marker(session.root)
+    if raw is None:
+        raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no collection here routes to a store")
+    marker = authority.parse_marker(session.root, raw)
+    fence = _store_fence(session.fence_client, session.fence_client.collection_store_fence(), marker,
+                         initial=marker["collection_store_fence"]["generation"] == 1)
+    return raw, marker, fence
+
+
+def _takeover_facts(session, runtime, token, raw, marker, fence):
+    """What the takeover decision reads; none of it needs the mutation boundary."""
+    recorded = _acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head
+    signature = takeover.replica_signature(session.root)
+    local, relation, diverged = None, None, False
+    if session.path.exists():
+        local = runtime.sample_head()
+        with closing(connection.open_reader(session.path)) as reader:
+            diverged = reader.execute("SELECT 1 FROM store_meta WHERE key=?",
+                                      (schema.META_REPLICA_DIVERGENCE,)).fetchone() is not None
+            if recorded is not None:
+                relation = chain.head_relation(reader, recorded.commit_seq, recorded.head_hash)
+    facts = dict(marker=marker, raw_marker=raw, recorded=recorded, local=local,
+                 local_relation=relation, token=token)
+    return facts, diverged, signature
+
+
+def _settle(session, runtime, token, facts, staged, action, reason, check):
+    """Under the boundary: revalidate cheaply what the decision read, then apply it."""
+    manager = session.manager
+    state_migration._require_collection_store_recovery(session, token)
+    if action == takeover.DIVERGED:
+        # Durable once the handle is idle; until then the in-memory verdict refuses writes.
+        if runtime.retire_idle_handle():
+            with session.writer(token) as writer, writer.handle.transaction() as conn:
+                conn.execute("INSERT INTO store_meta(key,value) VALUES (?,?)", (
+                    schema.META_REPLICA_DIVERGENCE, json.dumps({"reason": reason}, sort_keys=True)))
+        return action, reason
+    if (authority.read_marker(session.root) != facts["raw_marker"]
+            or (runtime.sample_head() if session.path.exists() else None) != facts["local"]
+            or (staged is not None and (staged.signature is None
+                                        or takeover.replica_signature(session.root) != staged.signature))):
+        return takeover.BUSY, "the store or vault replica changed during takeover"
+    if not runtime.retire_idle_handle():
+        return takeover.BUSY, "the live store is still borrowed"
+    try:
+        if action == "adopt":
+            runtime._identity = takeover.install(session, staged, token, check)
+        elif action == "continue":
+            with session.writer(token) as writer:
+                runtime._identity = takeover.continue_in_place(writer, staged, token)
+    except CollectionStoreError as error:
+        if error.code != takeover.BUSY:
+            raise
+        return takeover.BUSY, str(error)
+    # Every admission enrolls compatibility, so a crash after installation recovers here.
+    state_migration.record_collection_store_compatibility(
+        session.root, authority_check=lambda: session.require(token))
+    with session.writer(token) as writer:
+        published = _publish_current_epoch(session, writer, token)
+    if published.status == "published":
+        # Record this instance's head now, so the next holder adopts this replica.
+        manager._renew_collection_store(token)
+        return "admitted", None
+    code = {"diverged": takeover.DIVERGED, "custody_unverified": takeover.CUSTODY_LOST}.get(
+        published.status, "COLLECTION_STORE_FLUSH_PENDING")
+    return code, f"replica publication: {published.reason or published.status}"
+
+
+def _resume_locked(session, fence_client, *, preparation_token=None):
+    manager = session.manager
     runtime = session.runtime()
     with closing(connection.open_reader(session.path)) as reader:
         chain.verify_store_chain(reader)
@@ -228,9 +453,7 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
         runtime._admitted_token = None
     fence = fence_client.collection_store_fence()
     initial_cut = not fence.enrolled
-    if not fence.enrolled:
-        if intent["expected_marker"] is not None or fence.generation != 0:
-            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "initial fence basis differs")
+    if initial_cut:
         if preparation_token is None:
             preparation_token = manager.ensure_writer().fencing_token
             with session.writer(preparation_token) as writer:
@@ -238,10 +461,7 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
                 if recovered["status"] == "conflict":
                     return recovered
         session.require(preparation_token)
-        fence = fence_client.transition_collection_store_fence(expected_generation=0, store_id=target["store_id"])
-    if (fence.store_id != target["store_id"]
-            or fence.generation != target["collection_store_fence"]["generation"]):
-        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "store fence differs")
+    fence = _store_fence(fence_client, fence, target, initial=intent["expected_marker"] is None)
     lease = manager.ensure_writer()
     token = lease.fencing_token
     if preparation_token is not None and not initial_cut and preparation_token != token:
@@ -286,6 +506,8 @@ def _publish_current_epoch(session, writer, token):
         manager._renew_collection_store(token, due_only=True)
         return session.require(token)
 
+    if not _publication_custody(session, token):
+        return replica.PublicationResult("custody_unverified", reason=session.custody_reason)
     pending = replica.recover_replica(session.root, writer.handle, authority_check=check, deadline=deadline)
     if pending.status != "published" and (pending.reason is not None or writer.connection.execute(
         "SELECT 1 FROM store_meta WHERE key=?", (schema.META_PENDING_REPLICA_PUBLICATION,),
@@ -300,19 +522,42 @@ def _publish_current_epoch(session, writer, token):
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "publication did not reach current head")
         with manager._report_lock:
             session.require(token)
-            manager._collection_store._admitted_token = token
+            manager._collection_store.record_admission(token)
     return published
 
 
-def _verify_acquisition(writer, runtime, fence, target):
+def _require_fence(fence, target, code="COLLECTION_STORE_MARKER_CONFLICT"):
+    if fence.store_id != target["store_id"] or fence.generation != target["collection_store_fence"]["generation"]:
+        raise CollectionStoreError(code, "store fence differs from the marker")
+    return fence
+
+
+def _store_fence(fence_client, fence, target, *, initial):
+    """Cut an unenrolled coordinator over to ``target``'s store once, then bind its fence.
+
+    ``initial`` says the caller's marker basis may make that first cut: a create that
+    replaces no marker, or a copied vault whose marker carries the first generation.
+    """
+    if not fence.enrolled:
+        if not initial or fence.generation != 0:
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "initial fence basis differs")
+        fence = fence_client.transition_collection_store_fence(expected_generation=0, store_id=target["store_id"])
+    return _require_fence(fence, target)
+
+
+def _acquired(runtime, fence, code):
+    """The current token's acquisition, bound to the coordinator's store fence."""
     acquired = runtime._acquisition
     if (acquired is None or acquired.fencing_token != runtime.manager._fencing_token
-            or fence.store_id != target["store_id"]
-            or fence.generation != target["collection_store_fence"]["generation"]
             or acquired.collection_store_fence_generation != fence.generation
             or acquired.required_collection_store_capability != fence.capability):
-        raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "acquisition fence differs")
-    recorded = acquired.collection_store_head
+        raise CollectionStoreError(code, "acquisition fence differs")
+    return acquired
+
+
+def _verify_acquisition(writer, runtime, fence, target):
+    _require_fence(fence, target, "COLLECTION_STORE_CREATE_CONFLICT")
+    recorded = _acquired(runtime, fence, "COLLECTION_STORE_CREATE_CONFLICT").collection_store_head
     if recorded is not None:
         found = writer.connection.execute(
             "SELECT store_head_hash FROM txns WHERE commit_seq=?", (recorded.commit_seq,),
@@ -323,6 +568,7 @@ def _verify_acquisition(writer, runtime, fence, target):
 
 
 def _install_marker(session, token, fence_client, target, intent, current, writer):
+    session.verify_custody()
     session.require(token)
     fence = fence_client.collection_store_fence()
     if (fence.store_id != target["store_id"]
