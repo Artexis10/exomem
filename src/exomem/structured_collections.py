@@ -813,6 +813,8 @@ class FieldSpec:
     items: FieldSpec | None = None
     units: tuple[str, ...] = ()
     link_kind: str | None = None
+    #: A datetime field's per-record UTC offset field: the source-local day basis (§3).
+    offset: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2379,6 +2381,9 @@ def _parse_schema(version: int, value: object) -> ItemSchema:
                 "INVALID_ITEM_SCHEMA", "item schema contains an invalid field name"
             )
         fields[name] = _parse_field_spec(raw_spec)
+    for spec in fields.values():
+        if spec.offset is not None and getattr(fields.get(spec.offset), "type", None) != "string":
+            raise CollectionError("INVALID_ITEM_SCHEMA", "a datetime offset must name a declared string field")
     natural_raw = schema.get("natural_key", ())
     if not isinstance(natural_raw, list) or not natural_raw:
         raise CollectionError("INVALID_NATURAL_KEY", "item schema requires a natural_key list")
@@ -2725,7 +2730,10 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     link_kind = raw.get("link_kind")
     if link_kind is not None and type(link_kind) is not str:
         raise CollectionError("INVALID_ITEM_SCHEMA", "link_kind must be a string")
-    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind)
+    offset = raw.get("offset")
+    if offset is not None and (kind != "datetime" or depth or type(offset) is not str):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "offset names a top-level datetime field's offset field")
+    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset)
 
 
 def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:

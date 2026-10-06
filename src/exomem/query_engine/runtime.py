@@ -33,19 +33,44 @@ class QueryError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+_MIB = 1024 * 1024
+#: Each execution profile's bounds, which are also the widest a caller may set (design §12).
+#: Analytics is explicit and synchronous: a whole-call deadline, no partial
+#: aggregate and no continuation.
+PROFILES = {
+    "interactive": {"timeout_ms": 200, "max_row_visits": 100_000, "max_temp_bytes": 64 * _MIB,
+                    "max_groups": 1000, "max_state_bytes": 8 * _MIB},
+    "analytics": {"timeout_ms": 2000, "max_row_visits": 10_000_000, "max_temp_bytes": 256 * _MIB,
+                  "max_groups": 1000, "max_state_bytes": 8 * _MIB},
+}
+
+
 @dataclass(frozen=True, slots=True)
 class QueryLimits:
-    timeout_ms: int = 200
-    max_row_visits: int = 100_000
-    max_temp_bytes: int = 64 * 1024 * 1024
+    """One session's bounds: its profile's, or tighter ones a caller sets; never wider."""
+
+    timeout_ms: int | None = None
+    max_row_visits: int | None = None
+    max_temp_bytes: int | None = None
     fetch_size: int = 128
+    profile: str = "interactive"
+    max_groups: int | None = None
+    max_state_bytes: int | None = None
 
     def __post_init__(self):
-        for name, maximum in (("timeout_ms", 200), ("max_row_visits", 100_000),
-                              ("max_temp_bytes", 64 * 1024 * 1024), ("fetch_size", 128)):
+        maxima = PROFILES.get(self.profile) if type(self.profile) is str else None
+        if maxima is None:
+            raise ValueError(f"profile must be one of {sorted(PROFILES)}")
+        for name, maximum in (*maxima.items(), ("fetch_size", 128)):
             value = getattr(self, name)
-            if type(value) is not int or not 0 < value <= maximum:
+            if value is None:
+                object.__setattr__(self, name, maximum)
+            elif type(value) is not int or not 0 < value <= maximum:
                 raise ValueError(f"{name} must be a positive integer at most {maximum}")
+
+    def bounds(self) -> dict[str, int]:
+        """The bounds this session enforces, as reported with a reduction."""
+        return {name: getattr(self, name) for name in PROFILES[self.profile]}
 
 
 class _UncachedRelease(governance.ReleaseCache):
@@ -306,6 +331,12 @@ class ReadSession:
         from .typed_rows import admit_query
 
         return admit_query(self, query, as_of=as_of)
+
+    def reduce(self, query, *, as_of: str) -> dict:
+        """Run one grouped reduction to completion under this session's profile, or refuse."""
+        from .reductions import reduce
+
+        return reduce(self, query, as_of=as_of)
 
 
 def _summary_released(operation, collection_id: str) -> bool:

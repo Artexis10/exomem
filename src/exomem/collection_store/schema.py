@@ -38,7 +38,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -72,6 +72,9 @@ TABLES = (
     "query_cursor_state",
     "version_identity",
     "typed_encoding_mappings",
+    "rollup_definitions",
+    "rollup_buckets",
+    "rollup_members",
 )
 _V1_APPEND_ONLY_TABLES = (
     "txns",
@@ -611,10 +614,43 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE projection_state_v6 RENAME TO projection_state")
 
 
+def _migrate_to_7(conn: sqlite3.Connection) -> None:
+    """Admit declared exact rollups: versioned definitions, buckets and extreme members.
+
+    A definition is building until bounded writer-owned backfill covers every
+    row, then ready. Buckets hold exact per-bucket reduction state; members
+    index a bucket's rows only for rollups that reduce min/max/latest.
+    """
+    conn.execute("""CREATE TABLE rollup_definitions(
+      rollup_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('building','ready')),
+      definition_json TEXT NOT NULL CHECK(json_valid(definition_json)),
+      last_row_id INTEGER NOT NULL DEFAULT 0,
+      flagged INTEGER NOT NULL DEFAULT 0 CHECK(flagged >= 0),
+      UNIQUE(collection_id,name)
+    ) STRICT""")
+    conn.execute("""CREATE TABLE rollup_buckets(
+      rollup_id INTEGER NOT NULL REFERENCES rollup_definitions(rollup_id),
+      bucket TEXT NOT NULL,
+      groups TEXT NOT NULL CHECK(json_valid(groups)),
+      state_json TEXT NOT NULL CHECK(json_valid(state_json)),
+      PRIMARY KEY(rollup_id,bucket,groups)
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("""CREATE TABLE rollup_members(
+      rollup_id INTEGER NOT NULL REFERENCES rollup_definitions(rollup_id),
+      bucket TEXT NOT NULL,
+      groups TEXT NOT NULL,
+      row_id INTEGER NOT NULL REFERENCES items(row_id),
+      PRIMARY KEY(rollup_id,bucket,groups,row_id)
+    ) STRICT, WITHOUT ROWID""")
+
+
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5,
-    6: _migrate_to_6,
+    6: _migrate_to_6, 7: _migrate_to_7,
 }
 
 

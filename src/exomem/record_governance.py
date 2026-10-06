@@ -1715,6 +1715,7 @@ def _inventory_coverage(
     same keys, so the hole is named rather than filled.
     """
     from . import due_state
+    from .collection_store.governance import RELEASE_LIMIT
 
     writer = selected_writer(root, manifest)
     if writer is not None:
@@ -1722,7 +1723,7 @@ def _inventory_coverage(
         try:
             release = writer._operation.summary_release(manifest.collection_id)
         except collections.CollectionError as error:
-            if error.code != "COLLECTION_RELEASE_LIMIT":
+            if error.code != RELEASE_LIMIT:
                 raise
             release, limited = None, True
         if limited:

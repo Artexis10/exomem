@@ -2713,6 +2713,7 @@ def _normalized_manifest_contract(
                 **({"enum": list(spec.enum)} if spec.enum else {}),
                 **({"units": list(spec.units)} if spec.units else {}),
                 **({"link_kind": spec.link_kind} if spec.link_kind is not None else {}),
+                **({"offset": spec.offset} if spec.offset is not None else {}),
             }
             for name, spec in manifest.schema.fields.items()
         },

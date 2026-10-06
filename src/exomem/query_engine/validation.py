@@ -454,11 +454,14 @@ class _Binder:
             op = _choice(
                 raw["op"],
                 f"{at}.op",
-                {"count", "sum", "avg", "min", "max", "percentile", "distinct_count"},
+                {"count", "sum", "avg", "min", "max", "latest", "percentile", "distinct_count"},
             )
             field = self.field(raw["field"], f"{at}.field") if "field" in raw else None
             if field is None and op != "count":
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "required declared field")
+            if op == "latest" and not any(key.bucket for key in keys):
+                # Recency is the bucket's source-local time basis; without one it is undefined.
+                _fail("QUERY_VALUE_INVALID", f"{at}.op", "latest needs a time bucket group key")
             if field is not None and (
                 field.value_type not in _SCALARS
                 and op != "count"
@@ -479,7 +482,7 @@ class _Binder:
                 "integer"
                 if op in {"count", "distinct_count"}
                 else field.value_type
-                if op in {"min", "max"}
+                if op in {"min", "max", "latest"}
                 else "number"
             )
             self.reduction_fields[name] = Field(self.source, name, output_type)
