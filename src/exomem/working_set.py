@@ -1005,7 +1005,7 @@ def _conclusion_pages(
 
     ordered = sorted(candidates)[: 4 * UNIT_LANE_LIMIT]
     try:
-        found = _unit_categories(vault_root, tuple(ordered), visible)
+        found = _unit_categories(vault_root, tuple(ordered), visible, wanted=categories)
     except egress.ReaderViewUnavailable:
         raise
     except Exception:  # noqa: BLE001 - a failed probe reaches no extra page
@@ -2352,14 +2352,19 @@ def _carry_roles(
 
 
 def _unit_categories(
-    vault_root: Path, paths: Sequence[str], visible: Callable[[str], bool] | None
+    vault_root: Path,
+    paths: Sequence[str],
+    visible: Callable[[str], bool] | None,
+    *,
+    wanted: frozenset[str] | None = None,
 ) -> dict[str, frozenset[str]] | None:
     """The categories each page's semantic units are filed under, as the
     reader sees them, or `None` when the catalogue cannot answer.
 
     For a restricted reader (`egress.ReaderView`), a unit its egress guard
     would remove does not count: a lens or a conclusion page is then chosen
-    as in a vault without that unit.
+    as in a vault without that unit. `wanted` limits that decision to the
+    units of the categories the caller asks about.
     """
     from . import lexstore
     from .governance import egress
@@ -2370,6 +2375,8 @@ def _unit_categories(
     rows = store.units_of(paths)
     if rows is None:
         return None
+    if wanted is not None:
+        rows = [row for row in rows if row[2] in wanted]
     kept = visible.units([
         _served_unit(LaneItem(
             role="", level="unit", ref=ref, path=parent, title="", text=content,
