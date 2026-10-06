@@ -13,18 +13,23 @@ import json
 import os
 import subprocess
 import sys
+import tracemalloc
 from pathlib import Path
 
 import pytest
 from s1_export_fixture import daily_csv, daily_summaries, iter_exercises, local_day
 from test_authorization_session_authority import NOW
 from test_collection_store_governance import session
+from test_collection_store_s1_gate import ab as ab
+from test_collection_store_s1_gate import abc as abc
+from test_collection_store_s1_gate import requires_fork, run_host
+from test_collection_store_writer import CID as GATE_CID
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import commands
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection, typed_storage
+from exomem.collection_store import connection, schema, typed_storage
 from exomem.collection_store.preview import preview_store
 from exomem.governance import authorization_custody, authorization_session_lifecycle
 from exomem.governance import store as authority_store
@@ -193,9 +198,18 @@ print(json.dumps({"rows": rows, "delta_kib": after - before}))
 
 
 def _write_export(path, count, fmt):
+    """The fixture export with GPS-sized rows: each route carries 200 points."""
     with open(path, "wb") as handle:
         handle.write(b"[" if fmt == "json-array" else b"")
         for index, record in enumerate(iter_exercises(count)):
+            record["route"] = [
+                {
+                    "lat": round(59.4 + step / 1e5, 6),
+                    "lon": round(24.7 + step / 1e5, 6),
+                    "t": step * 60,
+                }
+                for step in range(200)
+            ]
             if fmt == "json-array" and index:
                 handle.write(b",")
             handle.write(
@@ -206,11 +220,11 @@ def _write_export(path, count, fmt):
 
 @pytest.mark.parametrize("fmt", ["ndjson", "json-array"])
 def test_streaming_peak_memory_is_independent_of_total_rows(tmp_path, fmt):
-    """A reader that loads the export or keeps its rows grows with a 200k-row source."""
+    """A reader that loads the export, or a batch that keeps each row's decoded object, grows."""
     (tmp_path / "Knowledge Base").mkdir()
     small_path, large_path = tmp_path / "small", tmp_path / "large"
-    _write_export(small_path, 2_000, fmt)
-    _write_export(large_path, 200_000, fmt)
+    _write_export(small_path, 20, fmt)
+    _write_export(large_path, 10_000, fmt)
     assert large_path.stat().st_size > 64 << 20
     completed = subprocess.run(
         [
@@ -231,7 +245,7 @@ def test_streaming_peak_memory_is_independent_of_total_rows(tmp_path, fmt):
         check=True,
     )
     measured = json.loads(completed.stdout.strip().splitlines()[-1])
-    assert measured["rows"] == len(valid(iter_exercises(200_000)))
+    assert measured["rows"] == len(valid(iter_exercises(10_000)))
     assert measured["delta_kib"] < 16 * 1024, measured
 
 
@@ -253,6 +267,58 @@ def test_a_row_over_one_mebibyte_refuses_at_its_position(store, fmt):
     assert (result["state"], result["reason"]) == ("failed", "invalid_row")
     assert result["error"]["code"] == "IMPORT_ROW_TOO_LARGE" and result["error"]["row"] == 1
     assert result["rows"]["imported"] == 0 and count(store.connection) == 0
+
+
+def test_a_governed_session_previews_and_starts_without_loading_the_source(store, monkeypatch):
+    """A release check that fingerprints the source by reading it loads a large export whole."""
+    setup(store, b"")
+    _write_export(store.root / SOURCE, 3_000, "ndjson")
+    size = (store.root / SOURCE).stat().st_size
+    session(store, monkeypatch, paths="Unrelated/**")
+    who = _session_at(store, NOW, 600)
+    tracemalloc.start()
+    try:
+        preview = call(
+            store, who, mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING
+        )
+        job = start(store, who)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert size > 24 << 20 and peak < 8 << 20, peak
+    assert preview["source"]["bytes"] == size and job["state"] == "running"
+
+
+def test_a_stray_csv_quote_rejects_only_its_own_record(store):
+    """Framing that toggles on every quote lets one stray quote swallow the records after it."""
+    data = (
+        b'date,steps,resting_hr\n2026-03-01,100,50\n2026-03-02,1"00,50\n'
+        b"2026-03-03,300,52\n2026-03-04,400,53\n"
+    )
+    setup(store, data, cid=DAILY, title="Daily", fields=DAILY_FIELDS)
+    job = call(
+        store,
+        cid=DAILY,
+        mode="start",
+        source_ref=SOURCE,
+        format="csv",
+        mapping={**DAILY_MAPPING, "on_invalid": "skip"},
+    )
+    run(store)
+    result = call(store, cid=DAILY, mode="status", continuation=job["continuation"])
+    assert (result["state"], result["rows"]["imported"], result["rows"]["rejected"]) == (
+        "complete",
+        3,
+        1,
+    )
+    assert result["rejections"] == [
+        {"row": 1, "byte": data.index(b"2026-03-02"), "code": "IMPORT_ROW_MALFORMED", "at": ""}
+    ]
+    stored = {
+        values["date"]: values["steps"]
+        for _, values in typed_storage.collection_values(store.connection, DAILY)
+    }
+    assert stored == {"2026-03-01": 100, "2026-03-03": 300, "2026-03-04": 400}
 
 
 @pytest.mark.parametrize("fmt", ["ndjson", "json-array"])
@@ -519,6 +585,83 @@ def test_host_takeover_reproves_the_bound_source_hash(store, monkeypatch, change
             assert count(handle.connection) == len(valid(iter_exercises()))
 
 
+@requires_fork
+def test_a_job_continues_on_the_host_that_takes_over_its_store(abc, tmp_path, monkeypatch):
+    """A job bound to the store's exact lineage stalls once a takeover appends a tenure."""
+    source = "Knowledge Base/Evidence/gate/export/rows.ndjson"
+    write_source(
+        abc.root, ndjson({"title": f"Imported {i}", "count": i} for i in range(30)), source
+    )
+    small(monkeypatch, rows=10)
+
+    def on(found, work):
+        with (
+            request_scope(_external()),
+            preview_store(found.root, found.manager._collection_store),
+            found.manager.mutation_guard(found.root),
+        ):
+            return work()
+
+    def request(found, **body):
+        return on(
+            found,
+            lambda: record_memory(
+                found.root, action="import", collection=GATE_CID, import_request=body
+            ),
+        )
+
+    job = request(
+        abc,
+        mode="start",
+        source_ref=source,
+        format="ndjson",
+        mapping={"fields": {"title": "title", "count": "count"}},
+    )
+    on(abc, lambda: importer().run_jobs(abc.root, max_batches=1))
+    abc.release()
+
+    def host_b(found):
+        admitted = found.open()
+        on(found, lambda: importer().run_jobs(found.root))
+        result = request(found, mode="status", continuation=job["continuation"])
+        tenures = len(json.loads(found.meta()[schema.META_LINEAGE]))
+        return admitted, tenures, result["state"], result["rows"]["imported"]
+
+    assert run_host(tmp_path, tmp_path / "state-b", "host-b", host_b) == (
+        {"status": "admitted"},
+        2,
+        "complete",
+        30,
+    )
+
+
+@pytest.mark.parametrize("change", ["store_id", "lineage"])
+def test_a_job_pauses_when_its_store_is_replaced_or_forked(store, monkeypatch, change):
+    """A job that accepts another store, or a forked lineage, writes where it never bound."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+    lineage = json.loads(
+        count(store.connection, "SELECT value FROM store_meta WHERE key=?", (schema.META_LINEAGE,))
+    )
+    forked = [{**lineage[0], "instance_id": "00000000-0000-4000-8000-0000000000ee"}, *lineage[1:]]
+    key, value = {
+        "store_id": (schema.META_STORE_ID, "00000000-0000-4000-8000-0000000000ff"),
+        "lineage": (schema.META_LINEAGE, json.dumps(forked, separators=(",", ":"))),
+    }[change]
+    with store.handle.transaction() as conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", (value, key))
+    run(store)
+    result = status(store, job)
+    assert (result["state"], result["reason"], result["rows"]["imported"]) == (
+        "partial",
+        "authority_lost",
+        committed,
+    )
+
+
 # Preview and mapping
 
 
@@ -545,6 +688,21 @@ def test_preview_reports_real_time_fields_and_never_guesses_a_day(store):
     assert conflicts["mapping.fields.calories"]["allowed"] == ["string"]
     assert result["identity"] == {"natural_key": ["exercise_id"], "mapped": True}
     assert result["source"]["bytes"] == len(ndjson(records))
+
+
+def test_preview_bounds_every_shape_section_and_says_so(store):
+    """An unbounded preview echoes a wide row back many times over."""
+    row = {
+        "id": "x",
+        **{f"day{i}": "2026-03-01" for i in range(4000)},
+        "samples": {f"s{i}": {} for i in range(4000)},
+        "k" * 300: 1,
+    }
+    setup(store, ndjson([row]))
+    result = call(store, mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+    assert len(json.dumps(result).encode()) < 64 << 10
+    assert result["truncated"] == {"fields": True, "nested": True, "time_fields": True}
+    assert len(result["fields"]) == len(result["nested"]) == len(result["time"]["fields"]) == 64
 
 
 @pytest.mark.parametrize(
@@ -734,6 +892,10 @@ def test_uncertain_commit_is_settled_once_without_duplicate_effects(store, monke
     assert import_txns(store.connection) == result["batches"] == 3
 
 
+class _Crash(BaseException):
+    """Process death mid-batch: no handler in the process sees it."""
+
+
 def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypatch):
     """A checkpoint advanced outside the batch transaction skips or repeats rows after a crash."""
     from exomem.collection_store.writer import CollectionWriter
@@ -749,17 +911,104 @@ def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypat
     def crash(self, *args, **kwargs):
         writes.append(1)
         if len(writes) == 5:
-            raise RuntimeError("simulated crash mid-batch")
+            raise _Crash
         return write_item(self, *args, **kwargs)
 
     monkeypatch.setattr(CollectionWriter, "_write_item", crash)
-    assert run(store, max_batches=1)["errors"] == 1
+    with pytest.raises(_Crash):
+        run(store, max_batches=1)
     monkeypatch.setattr(CollectionWriter, "_write_item", write_item)
     assert (count(store.connection), import_txns(store.connection)) == (committed, txns)
     assert status(store, job)["next_position"]["row"] == 40
     run(store)
     result = status(store, job)
     assert result["state"] == "complete" and count(store.connection) == len(valid(iter_exercises()))
+
+
+def test_an_unexpected_batch_error_fails_the_job_with_a_typed_code(store, monkeypatch):
+    """A runner that swallows a batch error retries it every tick while reporting running."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("defect inside the writer")
+
+    monkeypatch.setattr(CollectionWriter, "_write_item", broken)
+    assert run(store)["errors"] == 1
+    result = status(store, job)
+    assert (result["state"], result["reason"], result["error"]["code"]) == (
+        "failed",
+        "batch_error",
+        "IMPORT_BATCH_FAILED",
+    )
+    assert count(store.connection) == result["rows"]["imported"] == committed
+    assert run(store)["errors"] == 0
+
+
+def test_a_store_refusal_pauses_the_job_until_the_store_accepts_writes(store, monkeypatch):
+    """A runner that swallows a store refusal shows a stuck job as running with no reason."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+    store.connection.execute("INSERT INTO store_meta(key,value) VALUES ('diverged','1')")
+    assert run(store)["errors"] == 1
+    paused = status(store, job)
+    assert (paused["state"], paused["reason"], paused["error"]["code"]) == (
+        "partial",
+        "store_unavailable",
+        "COLLECTION_STORE_DIVERGED",
+    )
+    assert count(store.connection) == paused["rows"]["imported"] == committed
+    store.connection.execute("DELETE FROM store_meta WHERE key='diverged'")
+    run(store)
+    result = status(store, job)
+    assert (result["state"], result["error"]) == ("complete", None)
+    assert result["rows"]["imported"] == count(store.connection) == len(valid(iter_exercises()))
+
+
+def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(store, monkeypatch):
+    """Batch boundaries decide which duplicate wins, and whether a stop-policy job fails."""
+    rows = [{"id": f"r{i}", "kind": "first"} for i in range(12)]
+    rows.insert(3, {"id": "r1", "kind": "second"})
+    mapping = {"fields": {"exercise_id": "id", "kind": "kind"}, "on_invalid": "stop"}
+    outcomes = []
+    for cid, title, size in ((CID, "Workouts", 40), (DAILY, "Workouts B", 2)):
+        setup(store, ndjson(rows), cid=cid, title=title)
+        small(monkeypatch, rows=size)
+        job = start(store, cid=cid, mapping=mapping)
+        run(store)
+        result = status(store, job, cid=cid)
+        stored = {
+            values["exercise_id"]: values["kind"]
+            for _, values in typed_storage.collection_values(store.connection, cid)
+        }
+        outcomes.append((result["state"], result["rows"], stored))
+    assert outcomes[0] == outcomes[1]
+    state, counts, stored = outcomes[0]
+    assert state == "complete" and stored["r1"] == "second" and len(stored) == 12
+    assert (counts["imported"], counts["duplicates"], counts["rejected"]) == (12, 1, 0)
+
+
+def test_an_identical_start_replays_a_live_job_and_restarts_a_cancelled_one(store, monkeypatch):
+    """A retried start that binds a second job duplicates work; replaying a cancelled one dead-ends."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    again = start(store)
+    assert (again["continuation"], again["replayed"]) == (job["continuation"], True)
+    call(store, mode="cancel", continuation=job["continuation"])
+    fresh = start(store)
+    assert fresh["continuation"] != job["continuation"] and "replayed" not in fresh
+    run(store)
+    assert status(store, fresh)["state"] == "complete"
 
 
 def test_cancel_stops_between_batches_and_cannot_be_resumed(store, monkeypatch):

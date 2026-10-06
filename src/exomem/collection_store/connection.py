@@ -22,6 +22,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from . import schema
 
@@ -142,6 +143,11 @@ class WriterConnection:
         self._closed = False
         self._release_cache = None
         self._inspection_identity = object()
+        # Host-local import job facts (``importer``), keyed by job id: this handle's
+        # proofs of bound source bytes, and the store refusal blocking a running job.
+        # A new handle, as after a takeover, starts with neither.
+        self.import_proofs: dict[str, Any] = {}
+        self.import_blocked: dict[str, str] = {}
 
     @property
     def release_cache(self):

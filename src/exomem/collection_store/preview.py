@@ -147,16 +147,12 @@ def dispatch(
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
     if action == "describe":
         if profile == "records":
-            from ..record_memory import _bulk_upsert_contract
+            from ..record_memory import parse_manifest_contract
 
             writer._require_operation_context()
             from .importer import contract
 
-            return True, {
-                **collections.manifest_authoring_contract(),
-                "bulk_upsert": _bulk_upsert_contract(store_mode=True),
-                "import": contract(),
-            }
+            return True, {**parse_manifest_contract(store_mode=True), "import": contract()}
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile

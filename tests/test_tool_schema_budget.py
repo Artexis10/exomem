@@ -34,7 +34,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "manage_memory_file": 4325,
     "connect_memory": 4300,
     "episode_memory": 4300,
-    "record_memory": 4319,
+    "record_memory": 4275,
     "ask_memory": 4125,
     "schema_memory": 4000,
     "observe_memory": 3850,

@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -39,7 +40,7 @@ from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
 from ..query_engine import scalars
-from . import connection, governance, schema, tokens
+from . import connection, governance, schema, takeover, tokens
 
 log = logging.getLogger(__name__)
 
@@ -56,12 +57,16 @@ CSV_TYPES = ("string", "integer", "number", "boolean")
 _CHUNK = 1 << 16
 _LISTED = 20
 _PREVIEW_PATHS = 64
+_PATH_BYTES = 256
 _JOB_PREFIX = "import-job:"
 _JOB_TOKEN = re.compile(r"import-job:([0-9a-f]{32})")
 _BOM = b"\xef\xbb\xbf"
 _START = {"row": 0, "byte": 0, "state": {}}
-_REASONS = ("authority_lost", "time_cap", "invalid_row", "cancelled")
 _RESUMABLE = ("authority_lost", "time_cap")
+# Store refusals a later tick outlives; any other batch error fails the job.
+_STORE_STATE = frozenset(
+    {takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST}
+)
 
 
 def contract() -> dict[str, Any]:
@@ -90,17 +95,25 @@ def contract() -> dict[str, Any]:
             },
             "continuation": (
                 "the job token start returns; status, cancel, or start again to resume a job "
-                "paused by authority_lost or time_cap"
+                "paused by authority_lost or time_cap. An identical start returns the same job "
+                "unless it failed or was cancelled"
             ),
         },
+        "identity": (
+            "rows sharing a natural key: the last valid occurrence wins whatever the batching; "
+            "status counts the superseded ones as duplicates"
+        ),
         "preview": (
             f"reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
             "fields, flagged rows, mapping findings and row identity"
         ),
         "states": {
             "running": "batches continue in the store writer",
-            "partial": "paused: authority_lost, time_cap or cancelled",
-            "failed": "invalid_row under on_invalid stop; earlier batches stay committed",
+            "partial": (
+                "paused: authority_lost or time_cap until continued, cancelled for good, or "
+                "store_unavailable until the store accepts writes again"
+            ),
+            "failed": "invalid_row under on_invalid stop, or batch_error; earlier batches stay",
             "complete": "the whole source was consumed",
         },
         "limits": {
@@ -257,49 +270,34 @@ class Source:
 
 
 def resolve_source(
-    root: Path,
-    operation: governance.OperationAuthorization,
-    reference: Any,
-    *,
-    sha256: str | None = None,
-) -> Source:
-    """The one gate from a source ref to readable bytes.
+    root: Path, operation: governance.OperationAuthorization, reference: Any
+) -> tuple[Source, str, int]:
+    """The one gate from a source ref to readable bytes, with their SHA-256 and size.
 
-    Only a canonical vault path to an existing preserved Sources/Evidence file
-    that ordinary authorization releases to this operation's principal resolves.
-    Absent, unpreserved, withheld and malformed refs refuse identically; there is
-    no filesystem-path, URL or executable form. A later raw-release fence plugs
-    in here.
+    ``records.resolve_preserved_source`` decides which refs name a preserved
+    Sources/Evidence file; this streams the file's digest under a generation guard,
+    then asks ordinary authorization to release exactly those bytes, so a governed
+    session never makes the reader load a large file whole. Absent, unpreserved,
+    withheld and malformed refs refuse identically; there is no filesystem-path,
+    URL or executable form.
     """
-    if (
-        type(reference) is not str
-        or not reference
-        or len(reference.encode()) > 1024
-        or "://" in reference
-        or "\\" in reference
-        or "\0" in reference
-        or reference.startswith("/")
-    ):
-        _source_not_found()
-    try:
-        path, relative = vault.resolve_under_vault(
-            root, reference, must_exist=True, must_be_file=True
-        )
-        lanes = tuple(f"{vault.kb_prefix()}{lane}/" for lane in records._BULK_SOURCE_LANES)
-        if relative != reference or not relative.startswith(lanes):
-            _source_not_found()
+    found: list[tuple[Source, str, int]] = []
+
+    def released(relative: str, path: Path) -> bool:
         guard = vault.PathGuard.capture(
             root,
             relative,
             leaf_policy="generation",
             expected_generation=vault.stat_generation(os.lstat(path)),
         )
-        allowed = operation.allows_file(relative, content_sha256=sha256)
-    except (vault.VaultPathError, vault.PathGuardError, OSError, ValueError):
+        source = Source(relative, path, guard)
+        sha256, size = _digest(root, source)
+        found.append((source, sha256, size))
+        return operation.allows_file(relative, content_sha256=sha256)
+
+    if records.resolve_preserved_source(root, reference, released) is None:
         _source_not_found()
-    if not allowed:
-        _source_not_found()
-    return Source(relative, path, guard)
+    return found[0]
 
 
 def _open_source(source: Source):
@@ -328,7 +326,7 @@ def _digest(root: Path, source: Source) -> tuple[str, int]:
 
 _OUTSIDE = re.compile(rb'["\[\]{},]')
 _IN_STRING = re.compile(rb'["\\]')
-_CSV_TOKEN = re.compile(rb'["\n]')
+_CSV_TOKEN = re.compile(rb'[",\n]')
 _WHITESPACE = b" \t\r\n"
 
 
@@ -430,6 +428,74 @@ def _decode_object(data: bytes) -> tuple[Any, tuple[str, str] | None]:
     return value, None
 
 
+class _LineFrame:
+    """An NDJSON record ends at its newline."""
+
+    __slots__ = ("position",)
+
+    def __init__(self) -> None:
+        self.position = 0
+
+    def find(self, buffer: bytearray) -> int | None:
+        index = buffer.find(b"\n", self.position)
+        if index == -1:
+            self.position = len(buffer)
+            return None
+        return index + 1
+
+    def shift(self, count: int) -> None:
+        self.position -= count
+
+
+class _CsvFrame:
+    """A pinned-dialect CSV record ends at a newline outside a quoted field.
+
+    A double quote opens a quoted field only at the field's start; anywhere else
+    it is a literal that leaves just that record malformed, so one stray quote
+    cannot swallow the records after it.
+    """
+
+    __slots__ = ("field", "position", "quoted")
+
+    def __init__(self) -> None:
+        self.position = self.field = 0
+        self.quoted = False
+
+    def find(self, buffer: bytearray) -> int | None:
+        size = len(buffer)
+        while self.position < size:
+            if self.quoted:
+                index = buffer.find(b'"', self.position)
+                if index == -1:
+                    self.position = size
+                    return None
+                if index + 1 == size:
+                    self.position = index  # a doubled quote may follow in the next chunk
+                    return None
+                if buffer[index + 1] == 0x22:
+                    self.position = index + 2
+                else:
+                    self.quoted, self.position = False, index + 1
+                continue
+            match = _CSV_TOKEN.search(buffer, self.position)
+            if match is None:
+                self.position = size
+                return None
+            index = match.start()
+            self.position = index + 1
+            if buffer[index] == 0x0A:
+                return index + 1
+            if buffer[index] == 0x2C:
+                self.field = index + 1
+            elif index == self.field:
+                self.quoted = True
+        return None
+
+    def shift(self, count: int) -> None:
+        self.position -= count
+        self.field -= count
+
+
 class _Reader:
     """Bounded incremental reader resuming at an exact byte offset and parser state."""
 
@@ -498,38 +564,25 @@ class _Reader:
         self.ordinal += 1
         return row
 
-    def _delimited(self, token: re.Pattern[bytes] | None) -> tuple[bytes | None, bool]:
-        """Take one newline-terminated record; CSV quotes may contain newlines.
+    def _frame(self, frame: _LineFrame | _CsvFrame) -> tuple[bytes | None, bool]:
+        """Take one record ``frame`` delimits; one over the cap is skipped, never buffered.
 
-        Returns ``(record, too_large)``; a record over the cap is skipped without
-        being buffered. ``(None, False)`` is the end of the source.
+        Returns ``(record, too_large)``; ``(None, False)`` is the end of the source.
         """
-        position, quoted, skipping = 0, False, False
+        skipping = False
         while True:
-            while True:
-                match = (
-                    token.search(self.buffer, position)
-                    if token is not None
-                    else self.buffer.find(b"\n", position)
-                )
-                if match is None or match == -1:
-                    break
-                end = match.end() if token is not None else match + 1
-                position = end
-                if token is not None and self.buffer[match.start()] == 0x22:
-                    quoted = not quoted
-                    continue
-                if not quoted:
-                    skipping = skipping or end - 1 > MAX_ROW_BYTES
-                    record = b"" if skipping else bytes(self.buffer[:end])
-                    self._consume(end)
-                    return record, skipping
-            position = len(self.buffer)
-            if position > MAX_ROW_BYTES:
+            end = frame.find(self.buffer)
+            if end is not None:
+                skipping = skipping or end - 1 > MAX_ROW_BYTES
+                record = b"" if skipping else bytes(self.buffer[:end])
+                self._consume(end)
+                return record, skipping
+            if len(self.buffer) > MAX_ROW_BYTES:
                 skipping = True
             if skipping:
-                self._consume(position)
-                position = 0
+                scanned = frame.position
+                self._consume(scanned)
+                frame.shift(scanned)
             chunk = self._read()
             if not chunk:
                 if not self.buffer and not skipping:
@@ -543,7 +596,7 @@ class _Reader:
     def _ndjson(self) -> Row | None:
         while True:
             start = self.base
-            line, too_large = self._delimited(None)
+            line, too_large = self._frame(_LineFrame())
             if line is None:
                 return None
             if too_large:
@@ -611,7 +664,7 @@ class _Reader:
     def _csv(self) -> Row | None:
         while True:
             start = self.base
-            record, too_large = self._delimited(_CSV_TOKEN)
+            record, too_large = self._frame(_CsvFrame())
             if record is None:
                 return None
             if too_large:
@@ -652,7 +705,6 @@ _ABSENT = object()
 _INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)")
 _NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_OFFSET = re.compile(r"(?:Z|([+-])([01][0-9]|2[0-3]):([0-5][0-9]))")
 
 
 @dataclass(frozen=True, slots=True)
@@ -783,17 +835,14 @@ def _unzoned(raw: Any) -> bool:
 
 
 def _offset_minutes(raw: Any) -> int | None:
-    matched = _OFFSET.fullmatch(raw) if type(raw) is str else None
-    if matched is None:
+    try:
+        return scalars.offset_minutes(raw)
+    except scalars.ScalarValueError:
         return None
-    if raw == "Z":
-        return 0
-    minutes = int(matched[2]) * 60 + int(matched[3])
-    return -minutes if matched[1] == "-" else minutes
 
 
 def _path(raw: Any, at: str, fmt: str) -> tuple[str, ...]:
-    if type(raw) is not str or not raw or len(raw.encode()) > 256:
+    if type(raw) is not str or not raw or len(raw.encode()) > _PATH_BYTES:
         _mapping_invalid(at, "a source path is a non-empty string", expected="string")
     parts = (raw,) if fmt == "csv" else tuple(raw.split("."))
     if not all(parts):
@@ -975,6 +1024,7 @@ def _next_batch(reader: _Reader, plan: Plan, pending: list[Row]) -> Batch:
         values = None
         if error is None:
             values, error = plan.apply(row.value)
+            row.value = None
         if error is not None and (row.fatal or plan.on_invalid == "stop"):
             return Batch(rows, rejections, (row, *error), checkpoint or reader.position(), 0, False)
         if error is not None:
@@ -1088,15 +1138,44 @@ def _lineage(conn, cid: str) -> dict[str, Any]:
             (schema.META_STORE_ID, schema.META_LINEAGE),
         )
     )
+    lineage = meta.get(schema.META_LINEAGE)
     return {
         "collection_id": cid,
         "store_id": meta.get(schema.META_STORE_ID),
-        "lineage": meta.get(schema.META_LINEAGE),
+        "lineage": json.loads(lineage) if lineage else [],
         "manifest_version": row[0],
         "manifest_hash": row[1],
         "type": [row[2], row[3]],
         "encoding": row[4],
     }
+
+
+def _holds(bound: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """Whether the bound target still holds: the same store and declaration.
+
+    A takeover appends its tenure to the store's lineage, so the bound lineage
+    need only be a prefix of the current one. Another store, or a lineage that
+    forks from the bound one, does not hold.
+    """
+    lineage = bound["lineage"]
+    return current["lineage"][: len(lineage)] == lineage and all(
+        current[key] == value for key, value in bound.items() if key != "lineage"
+    )
+
+
+def _identity(binding: Mapping[str, Any]) -> str:
+    """What an identical start binds: principal, exact source, target, mapping."""
+    principal = binding["principal"]
+    return hashlib.sha256(
+        _json(
+            {
+                "principal": [principal["audience_id"], principal["issuer_family"]],
+                "source": binding["source"],
+                "target": {k: v for k, v in binding["target"].items() if k != "lineage"},
+                "mapping": binding["mapping"]["sha256"],
+            }
+        ).encode()
+    ).hexdigest()
 
 
 def _now() -> int:
@@ -1107,28 +1186,39 @@ def _iso(timestamp: int) -> str:
     return dt.datetime.fromtimestamp(timestamp, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _status(conn, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
+def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     progress, checkpoint = job.progress, job.checkpoint
     rejections = [
         {"row": ordinal, "byte": offset, "code": code, "at": at}
-        for ordinal, offset, code, at in conn.execute(
+        for ordinal, offset, code, at in writer.connection.execute(
             "SELECT ordinal,byte_offset,code,at FROM import_rejections WHERE job_id=? ORDER BY ordinal LIMIT ?",
             (job.id, _LISTED),
         )
     ]
-    complete = job.state == "complete"
+    state, reason, error = job.state, job.reason, progress["error"]
+    blocked = writer.handle.import_blocked.get(job.id) if state == "running" else None
+    if blocked is not None:
+        # The store refuses writes, so this pause is host-local; a later tick resumes.
+        state, reason = "partial", "store_unavailable"
+        error = {
+            "code": blocked,
+            "at": "store",
+            "row": checkpoint["row"],
+            "byte": checkpoint["byte"],
+        }
     return {
         "mode": mode,
         **extra,
         "continuation": _JOB_PREFIX + job.id,
-        "state": job.state,
-        "reason": job.reason,
+        "state": state,
+        "reason": reason,
         "collection_id": job.collection_id,
         "source_ref": job.binding["source"]["ref"],
         "rows": {
             "imported": progress["imported"],
             "rejected": progress["rejected"],
-            "remaining": 0 if complete else None,
+            "duplicates": progress["duplicates"],
+            "remaining": 0 if state == "complete" else None,
             "inserted": progress["inserted"],
             "updated": progress["updated"],
             "unchanged": progress["unchanged"],
@@ -1139,7 +1229,7 @@ def _status(conn, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "next_position": {"row": checkpoint["row"], "byte": checkpoint["byte"]},
         "last_receipt": progress["last_receipt"],
         "rejections": rejections,
-        "error": progress["error"],
+        "error": error,
     }
 
 
@@ -1158,8 +1248,9 @@ def _authorize(writer, job: _Job, *, prove: bool) -> Source:
     """Re-resolve the bound principal's authority now; raise _Lost when any part fails.
 
     The checks are the collection's complete-state mutation rule, a live (never
-    extended) session, unchanged target lineage and release of the exact bound
-    source bytes. A host without its own proof of those bytes re-hashes them.
+    extended) session, the bound store and declaration (``_holds``) and release of
+    the exact bound source bytes. A host without its own proof of those bytes
+    re-hashes them.
     """
     bound = job.binding
     session = bound["principal"]["session"]
@@ -1173,7 +1264,9 @@ def _authorize(writer, job: _Job, *, prove: bool) -> Source:
             operation.require_collection(job.collection_id, complete=True)
         except collections.CollectionError as error:
             raise _Lost from error
-        if operation.failed or _lineage(writer.connection, job.collection_id) != bound["target"]:
+        if operation.failed or not _holds(
+            bound["target"], _lineage(writer.connection, job.collection_id)
+        ):
             raise _Lost
         proof = _proofs(writer).get(job.id)
         if proof is None:
@@ -1191,25 +1284,20 @@ def _authorize(writer, job: _Job, *, prove: bool) -> Source:
 
 
 def _proofs(writer) -> dict[str, Source]:
-    """Per-writer-handle proofs of bound source bytes; a new host starts with none."""
-    proofs = getattr(writer.handle, "_import_proofs", None)
-    if proofs is None:
-        proofs = {}
-        writer.handle._import_proofs = proofs
-    return proofs
+    """This writer handle's proofs of bound source bytes; a new host starts with none."""
+    return writer.handle.import_proofs
 
 
 def _prove(writer, job: _Job, operation) -> Source:
-    source = job.binding["source"]
+    bound = job.binding["source"]
     try:
-        resolved = resolve_source(writer.root, operation, source["ref"], sha256=source["sha256"])
-        proved = _digest(writer.root, resolved) == (source["sha256"], source["bytes"])
-    except (collections.CollectionError, OSError) as error:
+        source, sha256, size = resolve_source(writer.root, operation, bound["ref"])
+    except collections.CollectionError as error:
         raise _Lost from error
-    if not proved:
+    if (sha256, size) != (bound["sha256"], bound["bytes"]):
         raise _Lost
-    _proofs(writer)[job.id] = resolved
-    return resolved
+    _proofs(writer)[job.id] = source
+    return source
 
 
 def _json(value: Any) -> str:
@@ -1220,15 +1308,67 @@ def _stamp() -> str:
     return dt.datetime.now(dt.UTC).isoformat()
 
 
+def _collapse(
+    rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str
+) -> tuple[list[tuple[Row, dict[str, Any]]], int]:
+    """Keep each natural key's last occurrence in a batch, by the writer's own identity rule.
+
+    A row the writer would refuse has no identity here, so it neither supersedes
+    nor is superseded: the last valid occurrence wins.
+    """
+    if not manifest.schema.natural_key:
+        return rows, 0
+    keys = []
+    for _, values in rows:
+        try:
+            keys.append(
+                collections.derived_item_key(
+                    manifest, records._bulk_row_values(manifest, values, source_ref)
+                )
+            )
+        except collections.CollectionError:
+            keys.append(None)
+    last = {key: index for index, key in enumerate(keys) if key is not None}
+    kept = [
+        row
+        for index, (row, key) in enumerate(zip(rows, keys, strict=True))
+        if key is None or last[key] == index
+    ]
+    return kept, len(rows) - len(kept)
+
+
+def _rewrote(writer, job: _Job, outcome: Mapping[str, Any]) -> bool:
+    """Whether a row re-states an identity this job wrote in an earlier batch."""
+    if (
+        outcome["outcome"] not in {"updated", "unchanged"}
+        or outcome.get("identity") != "natural-key"
+    ):
+        return False
+    found = writer.connection.execute(
+        "SELECT t.request_id FROM items i JOIN version_identity v ON v.row_id=i.row_id "
+        "AND v.row_version=i.row_version-? JOIN txns t ON t.txn_id=v.txn_id "
+        "WHERE i.collection_id=? AND i.item_key=?",
+        (1 if outcome["outcome"] == "updated" else 0, job.collection_id, outcome["item_key"]),
+    ).fetchone()
+    return found is not None and (found[0] or "").startswith(f"import:{job.id}:")
+
+
 def _record(
     writer,
     job: _Job,
     batch: Batch,
     *,
+    kept: list[tuple[Row, dict[str, Any]]] = (),
+    superseded: int = 0,
     result: Mapping[str, Any] | None = None,
     fail: tuple[Row, str, str] | None = None,
 ) -> None:
-    """Advance the checkpoint, counters and rejections inside the batch transaction."""
+    """Advance the checkpoint, counters and rejections inside the batch transaction.
+
+    A row superseded in this batch, or re-stating what this job wrote in an
+    earlier one, counts once as a duplicate, so the counts do not depend on where
+    batches end. ``batches`` counts settlements that committed rows.
+    """
     progress = dict(job.progress)
     sequence = job.checkpoint["batch"]
     checkpoint = job.checkpoint
@@ -1239,15 +1379,14 @@ def _record(
     else:
         rejections = list(batch.rejections)
         counts = {"inserted": 0, "updated": 0, "unchanged": 0}
+        duplicates = superseded
         for outcome in (result or {}).get("rows", ()):
             if outcome["outcome"] == "rejected":
                 rejections.append(
-                    (
-                        batch.rows[outcome["index"]][0],
-                        outcome.get("code", "IMPORT_ROW_REJECTED"),
-                        "item",
-                    )
+                    (kept[outcome["index"]][0], outcome.get("code", "IMPORT_ROW_REJECTED"), "item")
                 )
+            elif _rewrote(writer, job, outcome):
+                duplicates += 1
             else:
                 counts[outcome["outcome"]] += 1
         if result is not None and result.get("committed"):
@@ -1256,11 +1395,12 @@ def _record(
                 "batch_id": result["batch_id"],
                 "transition_id": result["first_transition"],
             }
+            progress["batches"] += 1
         for name, value in counts.items():
             progress[name] += value
         progress["imported"] += sum(counts.values())
         progress["rejected"] += len(rejections)
-        progress["batches"] += 1
+        progress["duplicates"] += duplicates
         writer._execute(
             "INSERT INTO import_rejections(job_id,ordinal,byte_offset,code,at) VALUES (?,?,?,?,?)",
             [(job.id, row.ordinal, row.start, code, at) for row, code, at in rejections],
@@ -1280,8 +1420,22 @@ def _record(
 class _Settlement:
     """Commit-time authority recheck plus progress, inside the writer's transaction."""
 
-    def __init__(self, job: _Job, batch: Batch, plan: Plan, proof: Source) -> None:
-        self.job, self.batch, self.plan = job, batch, plan
+    def __init__(
+        self,
+        job: _Job,
+        batch: Batch,
+        kept: list[tuple[Row, dict[str, Any]]],
+        superseded: int,
+        plan: Plan,
+        proof: Source,
+    ) -> None:
+        self.job, self.batch, self.kept, self.superseded, self.plan = (
+            job,
+            batch,
+            kept,
+            superseded,
+            plan,
+        )
         self.source = (proof.ref, proof.guard)
 
     def __call__(self, writer, result: Mapping[str, Any]) -> None:
@@ -1289,18 +1443,22 @@ class _Settlement:
         rejected = [outcome for outcome in result["rows"] if outcome["outcome"] == "rejected"]
         if rejected and not result.get("committed") and self.plan.on_invalid == "stop":
             first = rejected[0]
+            row = self.kept[first["index"]][0]
             _record(
                 writer,
                 self.job,
                 self.batch,
-                fail=(
-                    self.batch.rows[first["index"]][0],
-                    first.get("code", "IMPORT_ROW_REJECTED"),
-                    "item",
-                ),
+                fail=(row, first.get("code", "IMPORT_ROW_REJECTED"), "item"),
             )
         else:
-            _record(writer, self.job, self.batch, result=result)
+            _record(
+                writer,
+                self.job,
+                self.batch,
+                kept=self.kept,
+                superseded=self.superseded,
+                result=result,
+            )
 
 
 def _transaction(root: Path, writer, work) -> None:
@@ -1313,18 +1471,25 @@ def _transaction(root: Path, writer, work) -> None:
     _mutate(root, import_job_settlement)
 
 
-def _pause(root: Path, writer, job: _Job, reason: str) -> str:
+def _settle(root: Path, writer, job: _Job, state: str, reason: str, error=None) -> str:
+    """Pause or fail a running job outside a batch; a failure records its typed error."""
     if reason == "authority_lost":
         _proofs(writer).pop(job.id, None)
-    _transaction(
-        root,
-        writer,
-        lambda: writer._execute(
-            "UPDATE import_jobs SET state='partial',reason=?,updated_at=? WHERE job_id=? AND state='running'",
-            (reason, _stamp(), job.id),
-        ),
-    )
+
+    def write():
+        progress = {**job.progress, "error": error} if error is not None else job.progress
+        writer._execute(
+            "UPDATE import_jobs SET state=?,reason=?,progress_json=?,updated_at=? "
+            "WHERE job_id=? AND state='running'",
+            (state, reason, _json(progress), _stamp(), job.id),
+        )
+
+    _transaction(root, writer, write)
     return "paused"
+
+
+def _pause(root: Path, writer, job: _Job, reason: str) -> str:
+    return _settle(root, writer, job, "partial", reason)
 
 
 def _authorized_now(writer, job: _Job) -> bool:
@@ -1364,40 +1529,76 @@ def _step(root: Path, writer, job_id: str) -> str:
         except (_Lost, OSError, vault.PathGuardError):
             return _pause(root, writer, job, "authority_lost")
         sequence = job.checkpoint["batch"]
+        kept, superseded = _collapse(batch.rows, manifest, proof.ref)
         try:
-            if batch.stop is not None or not batch.rows:
+            if batch.stop is not None or not kept:
 
                 def settle_alone():
                     _authorize(writer, job, prove=False)
                     if batch.stop is not None:
                         _record(writer, job, batch, fail=batch.stop)
                     else:
-                        _record(writer, job, batch)
+                        _record(writer, job, batch, superseded=superseded)
 
                 _transaction(root, writer, settle_alone)
-                return "paused" if batch.stop is not None else "batch"
-            _mutate(
-                root,
-                writer.bulk_upsert_records,
-                job.collection_id,
-                rows=[{"item": values} for _, values in batch.rows],
-                why=f"import {job.id[:12]} batch {sequence}",
-                expected_container_hash=tokens.container_hash(job.collection_id, generation, head),
-                source=proof.ref,
-                on_reject="skip" if plan.on_invalid == "skip" else "abort",
-                request_id=f"import:{job.id}:{sequence}",
-                _import=_Settlement(job, batch, plan, proof),
-            )
+                outcome = "paused" if batch.stop is not None else "batch"
+            else:
+                _mutate(
+                    root,
+                    writer.bulk_upsert_records,
+                    job.collection_id,
+                    rows=[{"item": values} for _, values in kept],
+                    why=f"import {job.id[:12]} batch {sequence}",
+                    expected_container_hash=tokens.container_hash(
+                        job.collection_id, generation, head
+                    ),
+                    source=proof.ref,
+                    on_reject="skip" if plan.on_invalid == "skip" else "abort",
+                    request_id=f"import:{job.id}:{sequence}",
+                    _import=_Settlement(job, batch, kept, superseded, plan, proof),
+                )
+                outcome = "batch"
         except _Lost:
             return _pause(root, writer, job, "authority_lost")
         except (collections.CollectionError, vault.PathGuardError):
             if not _authorized_now(writer, job):
                 return _pause(root, writer, job, "authority_lost")
             raise
+    writer.handle.import_blocked.pop(job.id, None)
     settled = _load(writer.connection, job.id)
     if settled.state == "running" and settled.checkpoint["batch"] == sequence:
         raise RuntimeError("import batch replay did not settle its checkpoint")
-    return "batch"
+    return outcome
+
+
+def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exception) -> None:
+    """Classify a batch error once its transaction is gone.
+
+    If the checkpoint moved, the batch committed and only its acknowledgement
+    failed. A store refusal (busy, sync pending, diverged, custody) blocks the
+    job on this host until a later tick finds the store writable. Anything
+    else fails the job with a typed code.
+    """
+    job = _load(writer.connection, job_id)
+    if job is None or job.state != "running" or job.checkpoint["batch"] != sequence:
+        return
+    code = getattr(error, "code", None)
+    if code in _STORE_STATE:
+        writer.handle.import_blocked[job_id] = code
+        return
+    if not isinstance(code, str) or not isinstance(
+        error, (collections.CollectionError, connection.CollectionStoreError)
+    ):
+        code = "IMPORT_BATCH_FAILED"
+    checkpoint = job.checkpoint
+    _settle(
+        root,
+        writer,
+        job,
+        "failed",
+        "batch_error",
+        {"code": code, "at": "batch", "row": checkpoint["row"], "byte": checkpoint["byte"]},
+    )
 
 
 def run_jobs(
@@ -1406,8 +1607,8 @@ def run_jobs(
     """Advance running import jobs on the single store writer's own thread.
 
     The single-writer service calls this between requests with a batch or
-    monotonic-deadline budget. Each batch is an ordinary writer-lease transaction;
-    a failure leaves the job running at its last committed checkpoint.
+    monotonic-deadline budget. Each batch is an ordinary writer-lease
+    transaction; ``_after_error`` settles a batch that raised.
     """
     from .preview import bound_writer
 
@@ -1430,14 +1631,17 @@ def run_jobs(
         while (max_batches is None or summary["batches"] < max_batches) and (
             deadline is None or time.monotonic() < deadline
         ):
+            job = _load(writer.connection, job_id)
+            sequence = job.checkpoint["batch"] if job is not None else None
             try:
                 outcome = _step(root, writer, job_id)
-            except Exception:  # noqa: BLE001 - the job resumes from its committed checkpoint
-                log.warning(
-                    "import batch did not settle; the job resumes from its checkpoint",
-                    exc_info=True,
-                )
+            except Exception as error:  # noqa: BLE001 - settled by _after_error
+                log.warning("import batch raised; settling the job", exc_info=True)
                 summary["errors"] += 1
+                try:
+                    _after_error(root, writer, job_id, sequence, error)
+                except Exception:  # noqa: BLE001 - the store refused even the settlement
+                    log.warning("import job settlement deferred to a later tick", exc_info=True)
                 break
             if outcome != "batch":
                 summary["paused"] += outcome == "paused"
@@ -1451,6 +1655,7 @@ def run_jobs(
 _PROGRESS = {
     "imported": 0,
     "rejected": 0,
+    "duplicates": 0,
     "inserted": 0,
     "updated": 0,
     "unchanged": 0,
@@ -1470,9 +1675,7 @@ def dispatch(vault_root: Path, writer, collection: str, raw: Any) -> dict[str, A
         return _preview(root, writer, collection, request)
     if request.mode == "status":
         with writer.read_snapshot():
-            return _status(
-                writer.connection, _visible(writer, collection, request.job_id), "status"
-            )
+            return _status(writer, _visible(writer, collection, request.job_id), "status")
     if request.mode == "cancel":
         return _mutate(root, _cancel, writer, collection, request)
     if request.job_id is not None:
@@ -1497,6 +1700,7 @@ def _visible(writer, collection: str, job_id: str) -> _Job:
 
 
 def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
+    """Bind a new job, or return the live one an identical start already bound."""
     who = principal_module.effective_principal()
     if not who.resolved:
         _refuse(
@@ -1513,13 +1717,9 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
         operation = writer._fresh_authorization()
         try:
             operation.require_collection(cid, complete=True)
-            source = resolve_source(root, operation, request.source_ref)
+            source, sha256, size = resolve_source(root, operation, request.source_ref)
         finally:
             operation.close()
-    try:
-        sha256, size = _digest(root, source)
-    except (OSError, vault.PathGuardError):
-        _source_not_found()
     binding = {
         "version": 1,
         "principal": _bound_principal(who),
@@ -1531,17 +1731,14 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             "sha256": hashlib.sha256(_json(plan.canonical).encode()).hexdigest(),
         },
     }
-    identity = {
-        "principal": [who.audience_id, who.issuer_family],
-        "source": binding["source"],
-        "target": binding["target"],
-        "mapping": binding["mapping"]["sha256"],
-    }
-    job_id = hashlib.sha256(b"exomem-import-job:v1\0" + _json(identity).encode()).hexdigest()[:32]
-    replayed = False
+    identity = _identity(binding)
     with writer.handle.transaction():
-        existing = _load(writer.connection, job_id)
-        if existing is None:
+        latest = writer.connection.execute(
+            "SELECT job_id FROM import_jobs WHERE identity=? AND state<>'failed' "
+            "AND reason IS NOT 'cancelled' ORDER BY created_at DESC, job_id DESC LIMIT 1",
+            (identity,),
+        ).fetchone()
+        if latest is None:
             operation = writer._fresh_authorization()
             try:
                 operation.require_collection(cid, complete=True)
@@ -1552,7 +1749,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
                 _source_not_found()
             finally:
                 operation.close()
-            if _lineage(writer.connection, cid) != binding["target"]:
+            if not _holds(binding["target"], _lineage(writer.connection, cid)):
                 _refuse(
                     "IMPORT_LINEAGE_CHANGED",
                     "the collection changed while the import was being bound",
@@ -1560,13 +1757,14 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
                     repair="retry the start",
                     retryable=True,
                 )
-            now = _now()
+            job_id, now = secrets.token_hex(16), _now()
             writer._execute(
-                "INSERT INTO import_jobs(job_id,collection_id,binding_json,state,reason,checkpoint_json,"
-                "progress_json,window_started,window_expires,created_at,updated_at) "
-                "VALUES (?,?,?,'running',NULL,?,?,?,?,?,?)",
+                "INSERT INTO import_jobs(job_id,identity,collection_id,binding_json,state,reason,"
+                "checkpoint_json,progress_json,window_started,window_expires,created_at,updated_at) "
+                "VALUES (?,?,?,?,'running',NULL,?,?,?,?,?,?)",
                 (
                     job_id,
+                    identity,
                     cid,
                     _json(binding),
                     _json({**_START, "batch": 0}),
@@ -1577,12 +1775,10 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
                     _stamp(),
                 ),
             )
-        else:
-            replayed = True
-    if not replayed:
+    if latest is None:
         _proofs(writer)[job_id] = source
-    job = _load(writer.connection, job_id)
-    return _status(writer.connection, job, "start", **({"replayed": True} if replayed else {}))
+        return _status(writer, _load(writer.connection, job_id), "start")
+    return _status(writer, _load(writer.connection, latest[0]), "start", replayed=True)
 
 
 def _cancel(writer, collection: str, request: _Request) -> dict[str, Any]:
@@ -1594,7 +1790,8 @@ def _cancel(writer, collection: str, request: _Request) -> dict[str, Any]:
                 (_stamp(), job.id),
             )
             job.state, job.reason = "partial", "cancelled"
-        return _status(writer.connection, job, "cancel")
+            writer.handle.import_blocked.pop(job.id, None)
+        return _status(writer, job, "cancel")
 
 
 def _continue(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
@@ -1602,7 +1799,7 @@ def _continue(root: Path, writer, collection: str, request: _Request) -> dict[st
     with writer.read_snapshot():
         job = _visible(writer, collection, request.job_id)
     if job.state == "running":
-        return _status(writer.connection, job, "start")
+        return _status(writer, job, "start")
     if not (job.state == "partial" and job.reason in _RESUMABLE):
         _refuse(
             "IMPORT_JOB_NOT_RESUMABLE",
@@ -1634,7 +1831,7 @@ def _continue(root: Path, writer, collection: str, request: _Request) -> dict[st
             "updated_at=? WHERE job_id=? AND state='partial'",
             (_json(job.binding), now, now + JOB_WINDOW_SECONDS, _stamp(), job.id),
         )
-    return _status(writer.connection, _load(writer.connection, job.id), "start")
+    return _status(writer, _load(writer.connection, job.id), "start")
 
 
 # Preview
@@ -1655,7 +1852,7 @@ def _json_type(value: Any) -> str:
 
 
 def _time_kind(text: str) -> str | None:
-    if _OFFSET.fullmatch(text):
+    if _offset_minutes(text) is not None:
         return "offset"
     if _DATE.fullmatch(text):
         return "date"
@@ -1680,21 +1877,36 @@ class _Sample:
         self.errors: list[dict[str, Any]] = []
         self.conflicts: dict[str, set[str]] = {}
         self.present: set[str] = set()
+        self.truncated = {"fields": False, "nested": False, "time_fields": False}
+
+    def _note(self, section: str, found: dict, path: str, value: Any, *, add: bool = False) -> None:
+        """Record one path under the same bound for every shape section."""
+        if path in found or len(found) < _PREVIEW_PATHS:
+            if add:
+                found.setdefault(path, set()).add(value)
+            else:
+                found[path] = value
+        else:
+            self.truncated[section] = True
 
     def observe(self, value: Mapping[str, Any], prefix: str = "", depth: int = 0) -> None:
         for key, item in value.items():
             path, kind = f"{prefix}{key}", _json_type(item)
-            if path in self.paths or len(self.paths) < _PREVIEW_PATHS:
-                self.paths.setdefault(path, set()).add(kind)
+            if len(path.encode()) > _PATH_BYTES:
+                self.truncated["fields"] = True  # longer than any mapping path can name
+                continue
+            self._note("fields", self.paths, path, kind, add=True)
             if kind == "object":
-                self.nested[path] = "object"
+                self._note("nested", self.nested, path, "object")
                 if depth < 3:
                     self.observe(item, f"{path}.", depth + 1)
             elif kind == "array":
                 inner = sorted({_json_type(element) for element in item[:8]})
-                self.nested[path] = f"array<{'|'.join(inner)}>" if inner else "array"
+                self._note(
+                    "nested", self.nested, path, f"array<{'|'.join(inner)}>" if inner else "array"
+                )
             elif kind == "string" and (time_kind := _time_kind(item)) is not None:
-                self.time_fields.setdefault(path, set()).add(time_kind)
+                self._note("time_fields", self.time_fields, path, time_kind, add=True)
 
     def add(self, row: Row) -> None:
         self.rows += 1
@@ -1764,7 +1976,7 @@ class _Sample:
 def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
-        source = resolve_source(root, writer._operation, request.source_ref)
+        source, _, size = resolve_source(root, writer._operation, request.source_ref)
         plan, findings = None, []
         if request.mapping is not None:
             try:
@@ -1781,7 +1993,6 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
                         fatal = True
                         break
                 complete = not fatal and reader.at_end()
-                size = os.fstat(handle.fileno()).st_size
         except (OSError, vault.PathGuardError):
             _source_not_found()
         encoding = writer.connection.execute(
@@ -1812,6 +2023,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         },
         "fields": {path: sorted(kinds) for path, kinds in sample.paths.items()},
         "nested": sample.nested,
+        "truncated": sample.truncated,
         "time": {
             "fields": {path: sorted(kinds) for path, kinds in sample.time_fields.items()},
             "bases": sample.bases if plan is not None and plan.bases else None,

@@ -1534,15 +1534,7 @@ class CollectionWriter:
                                         "source is not a preserved Sources or Evidence page", source=reference))
                         continue
                     source_rel, guard = resolved
-                    values = dict(raw["item"])
-                    if has_sources:
-                        link = records._bulk_source_link(source_rel)
-                        listed = values.get("sources")
-                        if listed is None:
-                            values["sources"] = [link]
-                        elif isinstance(listed, list) and link not in listed:
-                            values["sources"] = [*listed, link]
-                    values = records._validate_values(manifest, values)
+                    values = records._bulk_row_values(manifest, raw["item"], source_rel)
                 except collections.CollectionError as error:
                     outcomes.append(records._bulk_error_row(index, error))
                     continue

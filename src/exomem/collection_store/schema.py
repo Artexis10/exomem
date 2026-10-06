@@ -586,14 +586,17 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
 
     A job's checkpoint, counters and rejections change only inside the batch
     transaction that commits its rows (``importer``); the binding JSON holds
-    identifiers and hashes, never credential material.
+    identifiers and hashes, never credential material. ``identity`` is the
+    digest of what an identical start binds, so a retry finds its job.
     """
     conn.execute("""CREATE TABLE import_jobs(
       job_id TEXT PRIMARY KEY,
+      identity TEXT NOT NULL,
       collection_id TEXT NOT NULL REFERENCES collections(collection_id),
       binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
       state TEXT NOT NULL CHECK (state IN ('running', 'partial', 'failed', 'complete')),
-      reason TEXT CHECK (reason IN ('authority_lost', 'time_cap', 'invalid_row', 'cancelled')),
+      reason TEXT CHECK (reason IN ('authority_lost', 'time_cap', 'cancelled', 'invalid_row',
+                                    'batch_error')),
       checkpoint_json TEXT NOT NULL CHECK (json_valid(checkpoint_json)),
       progress_json TEXT NOT NULL CHECK (json_valid(progress_json)),
       window_started INTEGER NOT NULL,
@@ -602,6 +605,7 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
       updated_at TEXT NOT NULL
     ) STRICT, WITHOUT ROWID""")
     conn.execute("CREATE INDEX import_jobs_by_state ON import_jobs(state, created_at)")
+    conn.execute("CREATE INDEX import_jobs_by_identity ON import_jobs(identity, created_at)")
     conn.execute("""CREATE TABLE import_rejections(
       job_id TEXT NOT NULL REFERENCES import_jobs(job_id),
       ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
