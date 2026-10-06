@@ -129,6 +129,11 @@ form, so `semantic_authoring`'s contract version and digest move, and with them
 the scaffold skill headers and the pinned tool schemas. This is the change that
 the archived design meant by "owns the schema bump" and it is not separable: an
 authoring form nobody is told about is not an authoring form.
+Released Hosted profiles (`hosted-alpha-agent-v1`..`-v4`) keep teaching the v4
+contract: `src/exomem/hosted_legacy_authoring_contract.json` is a frozen snapshot
+of what each released profile published, never regenerated, and the bootstrap
+serves it to those profiles so their bootstrap and pinned tool descriptions name
+the same contract. A new released profile freezes its own entry.
 
 ## Risks / Trade-offs
 
