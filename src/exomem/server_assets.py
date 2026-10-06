@@ -95,10 +95,15 @@ def server_icons() -> list[mcp.types.Icon]:
 
 
 # How long a liveness snapshot is served before a worker thread re-reads it.
-HEALTH_SNAPSHOT_TTL_SECONDS = 5.0
+# Only state placement is re-read; install provenance is read once.
+HEALTH_SNAPSHOT_TTL_SECONDS = 60.0
 # A refresh in flight longer than this means a read is wedged (a hung
 # filesystem): /health then answers 503 instead of serving a stale 200.
 HEALTH_REFRESH_WEDGED_SECONDS = 120.0
+# How long a ready proof answers `/health/ready` before a probe proves again.
+# A not-ready proof is never reused. The kubelet probes every 5 s, and each
+# proof costs a coordination thread, a catalogue open and a log-directory write.
+READINESS_SUCCESS_TTL_SECONDS = 30.0
 
 # Readiness measurements get their own workers. anyio's default limiter is
 # shared with every synchronous tool call, so slow calls would queue readiness
@@ -106,15 +111,19 @@ HEALTH_REFRESH_WEDGED_SECONDS = 120.0
 _READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="exomem-readiness")
 
 
-def _read_liveness_facts() -> dict[str, object]:
-    """Blocking reads behind `/health`: install provenance and state placement."""
-    facts: dict[str, object] = {}
+def _read_install_provenance() -> dict[str, object] | None:
+    """Where the running code was installed from, or `None` if that read failed."""
     try:
         from . import deploy_provenance
 
-        facts.update(deploy_provenance.provenance(include_local=False))
+        return dict(deploy_provenance.provenance(include_local=False))
     except Exception:  # noqa: BLE001 — provenance must never fail the probe
-        facts["version"] = "unknown"
+        return None
+
+
+def _read_state_placement() -> dict[str, object]:
+    """Blocking read behind `/health`: content-free machine-local state placement."""
+    facts: dict[str, object] = {}
     # Content-free machine-local state placement.  This route is public:
     # absolute roots belong only in the local doctor surface.
     try:
@@ -140,10 +149,15 @@ class _LivenessSnapshot:
     Read once at construction (route registration, before any load), then at
     most once per `HEALTH_SNAPSHOT_TTL_SECONDS` on an executor thread. A refresh
     that blocks leaves the previous snapshot in service instead of the probe.
+
+    Install provenance is kept for the life of the process once it has been
+    read: it describes the code that is running, and an in-place upgrade that
+    rewrites the package metadata does not change that code.
     """
 
     def __init__(self) -> None:
-        self._facts = _read_liveness_facts()
+        self._provenance = _read_install_provenance()
+        self._facts = self._compose()
         self._read_at = time.monotonic()
         self._lock = threading.Lock()
         self._refreshing = False
@@ -163,9 +177,20 @@ class _LivenessSnapshot:
             )
             return dict(self._facts), start, wedged
 
+    def _compose(self) -> dict[str, object]:
+        facts: dict[str, object] = (
+            dict(self._provenance) if self._provenance is not None else {"version": "unknown"}
+        )
+        facts.update(_read_state_placement())
+        return facts
+
     def refresh(self) -> None:
         try:
-            facts = _read_liveness_facts()
+            # Only a failed first read is retried, so a transient metadata
+            # error cannot pin `version: unknown` for the life of the process.
+            if self._provenance is None:
+                self._provenance = _read_install_provenance()
+            facts = self._compose()
         except BaseException:
             with self._lock:
                 self._refreshing = False
@@ -194,13 +219,52 @@ def register_health_routes(
     # The proof in flight, by tool-surface digest. A probe that arrives while
     # one runs answers from it: waiters queued without bound behind the
     # readiness workers, and a client that gave up still left its proof queued, so a 30 s
-    # stall replayed 30 proofs back to back. A finished proof is never reused.
-    readiness_flights: dict[object, asyncio.Future] = {}
+    # stall replayed 30 proofs back to back. Each flight carries the cache token
+    # taken before its proof started.
+    readiness_flights: dict[object, tuple[asyncio.Future, tuple[int, int]]] = {}
+    # The last ready proof, by digest: the token it was proved under, when it
+    # was kept, and the payload. Only a ready proof is kept, and only while no
+    # transition this process made could have outdated it.
+    ready_proofs: dict[object, tuple[tuple[int, int], float, dict]] = {}
 
-    def _readiness_flight(digest: object, traffic: dict) -> asyncio.Future:
-        flight = readiness_flights.get(digest)
-        if flight is not None and not flight.done():
-            return flight
+    def _reusable(snapshot: object) -> bool:
+        if not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
+            return False
+        # A standby is polled every 0.1 s for its `cutover` block, which moves
+        # while its serving status stays ready.
+        cutover = snapshot.get("cutover")
+        return not (isinstance(cutover, dict) and cutover.get("standby") is True)
+
+    def _cached_ready(digest: object) -> tuple[dict, float] | None:
+        entry = ready_proofs.get(digest)
+        if entry is None:
+            return None
+        token, proved_at, snapshot = entry
+        age = time.monotonic() - proved_at
+        if (
+            age >= READINESS_SUCCESS_TTL_SECONDS
+            or token != runtime_readiness_module.cached_readiness_token()
+        ):
+            ready_proofs.pop(digest, None)
+            return None
+        return snapshot, age
+
+    def _keep_if_reusable(digest: object, token: tuple[int, int], snapshot: object) -> None:
+        if not _reusable(snapshot):
+            return
+        if token != runtime_readiness_module.cached_readiness_token():
+            return
+        kept = ready_proofs.get(digest)
+        if kept is None or kept[2] is not snapshot:
+            ready_proofs[digest] = (token, time.monotonic(), snapshot)
+
+    def _readiness_flight(digest: object, traffic: dict) -> tuple[asyncio.Future, tuple[int, int]]:
+        current = readiness_flights.get(digest)
+        if current is not None and not current[0].done():
+            return current
+        # Taken before the proof starts: a transition that lands while it runs
+        # leaves its answer unservable to the next probe.
+        token = runtime_readiness_module.cached_readiness_token()
         # The proof runs on the readiness workers, apart from anyio's default
         # limiter that every synchronous tool call shares.
         flight = asyncio.get_running_loop().run_in_executor(
@@ -211,14 +275,15 @@ def register_health_routes(
                 traffic=traffic,
             ),
         )
-        readiness_flights[digest] = flight
+        readiness_flights[digest] = (flight, token)
 
         def _forget(done: asyncio.Future) -> None:
-            if readiness_flights.get(digest) is done:
+            current = readiness_flights.get(digest)
+            if current is not None and current[0] is done:
                 del readiness_flights[digest]
 
         flight.add_done_callback(_forget)
-        return flight
+        return flight, token
 
     def _record_health_probe() -> dict:
         try:
@@ -266,7 +331,11 @@ def register_health_routes(
 
     @mcp_app.custom_route("/health/ready", methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001
-        """Content-free admission probe; liveness remains the separate /health route."""
+        """Content-free admission probe; liveness remains the separate /health route.
+
+        A ready proof answers later probes for up to
+        `READINESS_SUCCESS_TTL_SECONDS`, and `proof_age_seconds` says how old the
+        answer is. A not-ready proof is never reused."""
         traffic = _record_health_probe()
         digest = getattr(mcp_app, "_exomem_tool_surface_sha256", None)
         if digest is None:
@@ -276,15 +345,30 @@ def register_health_routes(
                 mcp_app._exomem_tool_surface_sha256 = digest
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
-        # Off the event loop, on the readiness workers: the retrieval proof and
-        # coordination status take reserved-state locks, and one probe held the
-        # loop 5.8 s on one at the 0.96.0 promotion, timing out the liveness
-        # polls queued behind it. Shielded: one caller going away must not
-        # cancel the proof the others are waiting on.
-        snapshot = await asyncio.shield(_readiness_flight(digest, traffic))
-        status_code = 200 if snapshot["status"] == "ready" else 503
+        cached = _cached_ready(digest)
+        if cached is not None:
+            snapshot, age = cached
+        else:
+            # Off the event loop, on the readiness workers: the retrieval proof
+            # and coordination status take reserved-state locks, and one probe
+            # held the loop 5.8 s on one at the 0.96.0 promotion, timing out the
+            # liveness polls queued behind it. Shielded: one caller going away
+            # must not cancel the proof the others are waiting on.
+            flight, token = _readiness_flight(digest, traffic)
+            snapshot = await asyncio.shield(flight)
+            age = 0.0
+            # Kept here rather than in a done callback: an executor future can
+            # be done when it is created, and then its callbacks run only after
+            # this handler has already answered.
+            _keep_if_reusable(digest, token, snapshot)
+        payload = dict(snapshot)
+        # This probe's own counters, whichever proof answers it.
+        if "traffic" in payload:
+            payload["traffic"] = dict(traffic)
+        payload["proof_age_seconds"] = round(age, 3)
+        status_code = 200 if payload["status"] == "ready" else 503
         return JSONResponse(
-            snapshot,
+            payload,
             status_code=status_code,
             headers={"Cache-Control": "no-store"},
         )

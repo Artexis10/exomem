@@ -187,8 +187,9 @@ def test_health_fails_once_a_refresh_has_been_wedged_past_the_bound(
     app = _app()
     monkeypatch.setattr(server_assets, "HEALTH_SNAPSHOT_TTL_SECONDS", 0.0)
     monkeypatch.setattr(server_assets, "HEALTH_REFRESH_WEDGED_SECONDS", 0.3, raising=False)
-    hold = _Hold()
-    monkeypatch.setattr(deploy_provenance, "provenance", hold)
+    # Provenance is read once, at registration; the state read is what refreshes.
+    hold = _Hold("complete")
+    monkeypatch.setattr(state_migration, "migration_status", hold)
 
     async def scenario() -> tuple[int, int, int]:
         first = await _get(app, "/health")  # starts the refresh, which blocks
@@ -210,12 +211,12 @@ def test_health_fails_once_a_refresh_has_been_wedged_past_the_bound(
 def test_snapshot_refreshes_after_the_ttl_with_one_refresh_in_flight(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app_versions = iter(range(1, 1000))
+    reads = iter(range(1, 1000))
     in_flight = 0
     max_in_flight = 0
     lock = threading.Lock()
 
-    def provenance(**_kwargs):
+    def migration_status(_root):
         nonlocal in_flight, max_in_flight
         with lock:
             in_flight += 1
@@ -223,16 +224,16 @@ def test_snapshot_refreshes_after_the_ttl_with_one_refresh_in_flight(
         time.sleep(0.05)
         with lock:
             in_flight -= 1
-        return {"version": f"v{next(app_versions)}"}
+        return f"v{next(reads)}"
 
-    monkeypatch.setattr(deploy_provenance, "provenance", provenance)
+    monkeypatch.setattr(state_migration, "migration_status", migration_status)
     app = _app()  # registration reads v1
     monkeypatch.setattr(server_assets, "HEALTH_SNAPSHOT_TTL_SECONDS", 0.1)
 
     async def scenario() -> list[str]:
         seen = []
         for _ in range(40):
-            seen.append((await _get(app, "/health")).json()["version"])
+            seen.append((await _get(app, "/health")).json()["state"]["migration"])
             await asyncio.sleep(0.02)
         return seen
 

@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,37 @@ COORDINATION_STATUS_TIMEOUT_SECONDS = 0.75
 
 _COORDINATION_PROBES_LOCK = threading.Lock()
 _COORDINATION_PROBES: dict[str, tuple[threading.Event, dict[str, object]]] = {}
+
+# Bumped at every transition after which a cached ready answer must not be
+# served again; see `invalidate_cached_readiness`.
+_CACHED_READY_LOCK = threading.Lock()
+_cached_ready_epoch = 0
+
+
+def invalidate_cached_readiness() -> None:
+    """Retire every ready answer proved before this call.
+
+    For a state change whose consumer reads `/health/ready` as soon as it has
+    caused it. Standby promotion is the one: the supervisor promotes, then waits
+    for the promoted worker to report ready.
+    """
+    global _cached_ready_epoch
+    with _CACHED_READY_LOCK:
+        _cached_ready_epoch += 1
+
+
+def cached_readiness_token() -> tuple[int, int]:
+    """What a cached ready answer must still match to be served again.
+
+    The invalidation epoch, and the retrieval-admission generation. That
+    generation moves on every admission change this process makes: a warm,
+    a revocation by a request or the lexical store, a re-admission.
+    """
+    from . import readiness
+
+    with _CACHED_READY_LOCK:
+        epoch = _cached_ready_epoch
+    return epoch, readiness.retrieval_proof_generation()
 
 
 class SilentTrafficMonitor:
@@ -285,14 +316,23 @@ def _public_graph_sync(value: object) -> dict[str, Any] | None:
     return {"state": state, "generation": generation}
 
 
+_package_release: str | None = None
+
+
 def package_release() -> str:
-    """Return the installed distribution release without making readiness fragile."""
-    try:
-        return version("exomem")
-    except PackageNotFoundError:
-        return "0+unknown"
-    except Exception:  # noqa: BLE001 - metadata failure must become diagnostic state
-        return "0+unknown"
+    """Return the installed distribution release without making readiness fragile.
+
+    Read once per process: the release of the running code cannot change, and
+    an in-place upgrade that rewrites the metadata does not change what runs.
+    A failed read is not kept, so the next probe reads again.
+    """
+    global _package_release
+    if _package_release is None:
+        try:
+            _package_release = version("exomem")
+        except Exception:  # noqa: BLE001 - metadata failure must become diagnostic state
+            return "0+unknown"
+    return _package_release
 
 
 _DEFAULT_OBSERVABILITY: dict[str, Any] = {
