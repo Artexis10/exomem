@@ -51,7 +51,7 @@
 - [x] 6.2 Proposers:
   - structural (a graph edge either way);
   - temporal same-subject (at least two shared authored link targets, and different knowledge dates);
-  - cosine (stored vectors of the ranked encoder whose source hash matches, θ = 0.72 keyed by the exact encoder fingerprint, the matrix bounded at 16,384 units per tick).
+  - cosine (stored vectors of the ranked encoder whose source hash matches, θ = 0.72 keyed by the exact encoder fingerprint, 16,384 vectors held in memory; 8.3 replaced the per-tick matrix bound with one shared pass per tick).
 
   Pairs are cross-page only, with no identical texts, and capped in a fixed order. Test per-pair monotonicity: a third page never adds or removes a pair. Task 8.3 replaced the cap of 128 per page, which marked a binding page capped, with 128 per page pair, and replaced the cosine matrix bound with a memory bound that never changes what is proposed.
 - [x] 6.3 Projection per pair: consumed readings become edges (state, verdict, direction, `p`, instrument, reading id, fingerprint over the inputs and verdict); `instruments_disagree` across active instruments; stale and migrating pairs are queued. Readings the worker appended between ticks are ingested at tick start.
@@ -79,6 +79,7 @@
 - [ ] 8.4 Slice 3: close-memory-loop `design.md:212` condition (a). Build a fixture on the sensed family's real pairs showing the label improves disposition at a false-positive rate no worse than the family's structural evidence.
 - [x] 8.5 Close-memory-loop `design.md:212` condition (b): no read regression in the write-burst probes. `tests/test_sensed_write_burst_probe.py` measures `read_memory` and `activate_context` on a synthetic vault under a write burst, with sensing off and on, interleaved. The numbers are recorded under "Measured" in `design.md`.
 - [ ] 8.6 Before sensing is on by default, or slice 3 surfaces status widely: bound a hub's served-status cost ("Open items" in `design.md`). Filter neutral verdicts in the query and keep each partner's dropped count. Make any truncation count released edges only and report `evidence_complete: false`.
+- [ ] 8.7 Before sensing is enabled on any install, and before slice 5's ledger restore: close the three rebuild windows under "Open items" in `design.md`. Hold the sensed tick and its view while the dreamer reseeds. Write the `seeding` flag atomically with the schema row. Gate the view during a genesis-triggered reprojection.
 
 ## 9. Later slices (specified here, built later)
 
@@ -98,6 +99,7 @@
 
 - [x] 10.1 Scoped suites green: dreamer, upkeep, claims, audit, egress twins and the new sensing tests.
 - [x] 10.2 `uvx ruff check --select F src tests`, `validate-public-artifacts --repository` and `openspec validate --all --strict` pass.
-- [ ] 10.3 An independent review of the slice-1 diff. The first round's findings (H1, M2, M3, L4–L9) are corrected on this branch, and its informational items are recorded under "Open items" in `design.md`. A re-review closes this task.
+- [x] 10.3 An independent review of the slice-1 diff. The first round's findings (H1, M2, M3, L4–L9) are corrected on this branch, and its informational items are recorded under "Open items" in `design.md`. A re-review closes this task.
+  - Closed by the independent re-review of task 8.3 (two rounds, final verdict APPROVE). Round 1 verified each first-round finding in code and by test. The recheck verified the 8.3 corrections and recorded three latent rebuild windows as Open items (task 8.7).
 - [x] 10.4 Record known misses in `design.md` from the real-pin fixture run.
 - [x] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.
