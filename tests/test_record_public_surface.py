@@ -30,6 +30,7 @@ RECORD_ACTIONS = (
     "revise",
     "rebaseline",
     "discard",
+    "import",
 )
 
 #: What `hosted-alpha-agent-v2` published, frozen. A historical Hosted candidate
@@ -37,7 +38,7 @@ RECORD_ACTIONS = (
 #: registry (see `hosted_legacy_schemas`), so a new action lands on the current
 #: profile and leaves this list where its promotion record found it.
 HOSTED_V2_RECORD_ACTIONS = tuple(
-    action for action in RECORD_ACTIONS if action not in {"discard", "bulk_upsert"}
+    action for action in RECORD_ACTIONS if action not in {"discard", "bulk_upsert", "import"}
 )
 
 

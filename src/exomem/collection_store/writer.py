@@ -1559,9 +1559,21 @@ class CollectionWriter:
         )
         self._pending(manifest.storage.source, manifest.collection_id, "log", txn["generation_after"], text)
 
+    def _fresh_authorization(self):
+        """A new mutation-authority snapshot, independent of any open operation."""
+        return governance.OperationAuthorization(
+            self.root, self.connection, mutation=True, cache=self.handle.release_cache
+        )
+
     def bulk_upsert_records(self, collection, *, rows, why, expected_container_hash,
-                            source=None, on_reject="abort", request_id=None):
-        """Plan Records rows under one guard; commit one transition with N effects."""
+                            source=None, on_reject="abort", request_id=None, _import=None):
+        """Plan Records rows under one guard; commit one transition with N effects.
+
+        ``_import`` is an import job's batch settlement (``importer``): its
+        ``source`` is the job's proved source and it is called with the result
+        inside this transaction, so the job's checkpoint commits or rolls back
+        with the rows.
+        """
         records._validate_why(why)
         if on_reject not in {"abort", "skip"} or not isinstance(rows, list | tuple):
             raise collections.CollectionError("INVALID_BULK_ROWS", "rows must be a list and on_reject abort or skip")
@@ -1615,22 +1627,19 @@ class CollectionWriter:
                         outcomes.append(records._bulk_reject(index, "SOURCE_REQUIRED",
                                                             "a row needs a preserved source reference"))
                         continue
-                    resolved = records._resolve_bulk_source(self.root, reference,
-                                                           self._operation.allows_file, cache)
+                    resolved = (
+                        _import.source
+                        if _import is not None
+                        else records._resolve_bulk_source(
+                            self.root, reference, self._operation.allows_file, cache
+                        )
+                    )
                     if resolved is None:
                         outcomes.append(records._bulk_reject(index, "SOURCE_NOT_FOUND",
                                         "source is not a preserved Sources or Evidence page", source=reference))
                         continue
                     source_rel, guard = resolved
-                    values = dict(raw["item"])
-                    if has_sources:
-                        link = records._bulk_source_link(source_rel)
-                        listed = values.get("sources")
-                        if listed is None:
-                            values["sources"] = [link]
-                        elif isinstance(listed, list) and link not in listed:
-                            values["sources"] = [*listed, link]
-                    values = records._validate_values(manifest, values)
+                    values = records._bulk_row_values(manifest, raw["item"], source_rel)
                 except collections.CollectionError as error:
                     outcomes.append(records._bulk_error_row(index, error))
                     continue
@@ -1682,6 +1691,8 @@ class CollectionWriter:
                           batch_id=batch_id, committed=False, on_reject=on_reject, rows=outcomes,
                           counts=counts, before_container_hash=current_hash, after_container_hash=current_hash)
             if not plans or (counts["rejected"] and on_reject == "abort"):
+                if _import is not None:
+                    _import(self, result)
                 return result
             if _renders_rows(manifest):
                 self._preflight_views(path for _, _, _, path, _, _ in plans)
@@ -1704,6 +1715,8 @@ class CollectionWriter:
             for guard in source_guards.values():
                 self._recheck_guard(guard, publication=True)
             self._insert_txn(txn, result)
+            if _import is not None:
+                _import(self, result)
         writer_lease.mark_active_mutation_committed()
         advisory = None
         for key, values, _, path, before, _ in plans:
