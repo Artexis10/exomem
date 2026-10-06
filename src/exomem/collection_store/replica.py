@@ -223,41 +223,39 @@ class _Publisher:
 
     def diverge(self, reason, *, foreign=None, leaf=None, parent=None):
         marker = {"reason": reason}
-        digest = None
         if foreign is not None:
-            digest = self.digest(foreign)
-            marker.update(
-                {
-                    "source_leaf": self.leaf_relative(leaf, parent).as_posix(),
-                    "foreign_leaf": f".foreign-{self.identity['instance_id']}-{secrets.token_hex(16)}",
-                    "sha256": digest,
-                }
-            )
+            marker.update(self.aside(foreign, leaf, parent))
         self.bookkeeping({schema.META_REPLICA_DIVERGENCE: _json(marker)})
         if foreign is not None:
             # Durable divergence fences business writes before preservation.
-            # This trusted seam retains every other intrinsic authority check.
-            self.check(allow_diverged=True)
-            self.filesystem.rename(
-                foreign, self.parent, marker["foreign_leaf"], replace=False
-            ).require()
-            self.check(allow_diverged=True)
-            with self.file(marker["foreign_leaf"], required=True) as preserved:
-                if (
-                    not held_fs._same_file_identity(foreign.identity, preserved.identity)
-                    or snapshot._file_sha256(
-                        preserved.descriptor, lambda: self.check(allow_diverged=True)
-                    )
-                    != digest
-                ):
-                    raise _Diverged("foreign preservation identity changed; all bytes retained")
-                self.record(marker["foreign_leaf"], preserved.identity)
-            self.record(leaf, None, parent=parent)
-            for directory in (self.parent, self.workspace):
-                if directory is not None:
-                    self.check(allow_diverged=True)
-                    self.filesystem.flush_directory(directory).require()
+            self.preserve(foreign, leaf, parent, marker)
         raise _Diverged(reason)
+
+    def aside(self, foreign, leaf, parent):
+        return {
+            "source_leaf": self.leaf_relative(leaf, parent).as_posix(),
+            "foreign_leaf": f".foreign-{self.identity['instance_id']}-{secrets.token_hex(16)}",
+            "sha256": self.digest(foreign),
+        }
+
+    def preserve(self, foreign, leaf, parent, marker):
+        """Keep foreign bytes aside, no-clobber; this seam retains every other authority check."""
+        self.check(allow_diverged=True)
+        self.filesystem.rename(foreign, self.parent, marker["foreign_leaf"], replace=False).require()
+        self.check(allow_diverged=True)
+        with self.file(marker["foreign_leaf"], required=True) as preserved:
+            if (
+                not held_fs._same_file_identity(foreign.identity, preserved.identity)
+                or snapshot._file_sha256(preserved.descriptor, lambda: self.check(allow_diverged=True))
+                != marker["sha256"]
+            ):
+                raise _Diverged("foreign preservation identity changed; all bytes retained")
+            self.record(marker["foreign_leaf"], preserved.identity)
+        self.record(leaf, None, parent=parent)
+        for directory in (self.parent, self.workspace):
+            if directory is not None:
+                self.check(allow_diverged=True)
+                self.filesystem.flush_directory(directory).require()
 
     def file(self, leaf, *, required=False, parent=None, access="mutate"):
         result = self.filesystem.file(parent or self.parent, leaf, access=access)
@@ -517,7 +515,15 @@ class _Publisher:
                     current = self.file(connection.STORE_FILENAME)
                     if current is not None:
                         with current:
-                            if self.digest(current) != digest:
+                            found = self.digest(current)
+                            adopted = self.metadata.get(schema.META_ADOPTED_FOREIGN_REPLICA)
+                            if found != digest and found == adopted:
+                                # Owner adopt-local previewed exactly these bytes: keep them as
+                                # evidence and publish over the freed name.
+                                self.preserve(current, connection.STORE_FILENAME, None,
+                                              self.aside(current, connection.STORE_FILENAME, None))
+                                self.bookkeeping({schema.META_ADOPTED_FOREIGN_REPLICA: None})
+                            elif found != digest:
                                 self.diverge(
                                     "unexpected replica target",
                                     foreign=current,

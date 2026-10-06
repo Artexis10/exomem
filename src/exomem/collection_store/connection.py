@@ -164,7 +164,7 @@ class WriterConnection:
         The publisher may preserve a detected foreign file after recording
         divergence. That trusted filesystem-only caller can opt out of the
         divergence fence, never the opening-thread, open-handle or lease checks.
-        Transactions always retain the fence.
+        Transactions retain the fence, except owner adopt-local's, which clears it.
         """
         self.require_owner_thread()
         if self._closed:
@@ -180,9 +180,9 @@ class WriterConnection:
             )
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, resolve_divergence: bool = False) -> Iterator[sqlite3.Connection]:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
-        self.require_write_authority()
+        self.require_write_authority(allow_diverged=resolve_divergence)
         cache = self.release_cache
         cache.check()
         self.connection.execute("BEGIN IMMEDIATE")

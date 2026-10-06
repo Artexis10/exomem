@@ -120,6 +120,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "lease",
         "governance-schema",
         "relations",
+        "collections",
     }
 )
 
@@ -293,6 +294,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _governance_schema_main(raw[1:])
     if raw and raw[0] == "relations":
         return _relations_main(raw[1:])
+    if raw and raw[0] == "collections":
+        return _collections_main(raw[1:])
     if raw and raw[0] == "cell-init":
         return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context
@@ -2017,6 +2020,94 @@ def _lease_schema_admission_main(
             file=sys.stderr,
         )
     return 0 if admission.admitted else 1
+
+
+def _collections_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem collections",
+        description=(
+            "Owner operations on this vault's collection store. Not an MCP or REST command; "
+            "file collections are never read or changed."
+        ),
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    backup = subcommands.add_parser(
+        "backup", help="write an integrity-checked single-file snapshot; the live store is never copied"
+    )
+    target = backup.add_mutually_exclusive_group(required=True)
+    target.add_argument("--to", type=Path, help="snapshot file, outside the vault and synced roots")
+    target.add_argument("--stdout", action="store_true", help="stream the snapshot to standard output")
+    adopt = subcommands.add_parser(
+        "adopt-local",
+        help="continue from this host's store past a foreign head or replica; preview first",
+    )
+    adopt.add_argument("--why", required=True, help="reason recorded with the fork point")
+    mode = adopt.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="preview the fork point; writes nothing")
+    mode.add_argument("--preview-id", help="apply exactly the preview with this identity")
+    for command in (backup, adopt):
+        command.add_argument(
+            "--vault",
+            default=os.environ.get("EXOMEM_VAULT_PATH"),
+            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        )
+    args = parser.parse_args(argv)
+    if not args.vault:
+        print("collections: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
+        return 2
+
+    from .cli_ops import OpError
+    from .collection_store import owner
+    from .collection_store.connection import CollectionStoreError
+
+    try:
+        if args.command == "backup":
+            result = owner.backup(
+                Path(args.vault), destination=args.to, stream=sys.stdout.buffer if args.stdout else None
+            )
+            print(json.dumps(result, sort_keys=True), file=sys.stderr if args.stdout else sys.stdout)
+        elif args.dry_run:
+            print(json.dumps(owner.adopt_local_preview(Path(args.vault), recorded=_coordinator_head()),
+                             sort_keys=True))
+        else:
+            print(json.dumps(_adopt_local_apply(Path(args.vault), args.why, args.preview_id), sort_keys=True))
+    except (CollectionStoreError, OpError, OSError) as error:
+        code = getattr(error, "code", type(error).__name__)
+        print(f"{code}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _coordinator_head():
+    """The coordinator's recorded store head, or ``unknown`` without a configured coordinator."""
+    from . import writer_lease
+    from .collection_store import owner
+
+    config = writer_lease.LeaseConfig.from_env()
+    if not config.enabled:
+        return owner.UNKNOWN
+    return writer_lease.LeaseCoordinatorClient(config).status().collection_store_head
+
+
+def _adopt_local_apply(vault: Path, why: str, preview_id: str) -> dict:
+    """Run the producer here under the configured writer lease, then hand the lease back."""
+    from . import writer_lease
+    from .collection_store import admission
+    from .collection_store.connection import CollectionStoreError
+
+    fence_client = writer_lease.configured_schema_fence_operator_client()
+    if fence_client is None:
+        raise CollectionStoreError(
+            "COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease"
+        )
+    with admission.production_session(vault) as session:
+        manager = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+        try:
+            return admission.adopt_local(
+                session, manager, why=why, preview_id=preview_id, fence_client=fence_client
+            )
+        finally:
+            manager.close()
 
 
 def _lease_main(argv: list[str]) -> int:

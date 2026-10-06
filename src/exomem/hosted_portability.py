@@ -888,6 +888,22 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _flush_collection_replica(vault_root: Path) -> None:
+    """Export carries the collection store's replica at its committed head (design §11, A9).
+
+    Refusing beats an archive whose replica lacks acknowledged rows, which a restore
+    would silently drop; the operator retries the export. A vault whose store this
+    process does not serve has nothing newer than its replica.
+    """
+    from .cli_ops import OpError
+    from .collection_store import connection, runtime
+
+    try:
+        runtime.flush_for_export(vault_root)
+    except (connection.CollectionStoreError, OpError) as error:
+        _fail("COLLECTION_STORE_FLUSH_PENDING", f"collection store replica is not flushed: {error}")
+
+
 def export_quiesced_vault(
     vault_root: Path | str,
     artifact_root: Path | str,
@@ -916,6 +932,7 @@ def export_quiesced_vault(
         if stat.S_ISLNK(output_stat.st_mode) or not stat.S_ISDIR(output_stat.st_mode):
             _fail("UNSAFE_ARTIFACT_ROOT", "artifact root must be a regular directory")
 
+    _flush_collection_replica(source_root)
     guard = mutation_guard if mutation_guard is not None else nullcontext()
     with guard:
         snapshots = _enumerate_source(source_root, effective_limits)

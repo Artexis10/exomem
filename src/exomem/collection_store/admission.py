@@ -19,7 +19,7 @@ from pathlib import Path
 from .. import held_fs, state_migration, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
-from . import authority, chain, connection, custody, replica, schema, takeover
+from . import authority, chain, connection, custody, owner, replica, schema, takeover
 from .connection import CollectionStoreError
 
 
@@ -336,6 +336,83 @@ def _resolve(session, *, force=False):
                 return {"status": "admitted"}
             runtime._takeover = state
         return state.status()
+
+
+def _owner_operation(session, manager, fence_client, why):
+    if not isinstance(why, str) or not why.strip():
+        raise ValueError("an owner store operation needs a reason")
+    session.verify_custody()
+    _ProducerSession.bind(session, manager)
+    _bind_fence_client(session, fence_client)
+    runtime = session.runtime(retire=False)
+    return runtime, _routed_store(session)[2]
+
+
+def _stale_preview():
+    return CollectionStoreError("COLLECTION_STORE_ADOPT_PREVIEW_STALE",
+                                "the store, replica or recorded head changed since the preview; preview again")
+
+
+def adopt_local(session, manager, *, why, fence_client, preview_id=None):
+    """Owner adopt-local (A3), preview-first: continue from this host's store past a foreign head.
+
+    Without ``preview_id`` it only previews. Applying records the fork point and a new
+    lineage tenure, clears the divergence it previewed, keeps the previewed foreign
+    bytes as ``.foreign-*`` evidence and republishes; a changed store, replica or
+    recorded head refuses as stale. Reconcile later holds the other side's changes.
+    """
+    runtime, fence = _owner_operation(session, manager, fence_client, why)
+    with manager.writer_authority_guard(vault_root=session.root):
+        token = manager._fencing_token
+        recorded = _acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head
+        with manager.consistency_guard(session.root, operation="collection_store_adopt_local"):
+            sealed = owner.adopt_local_preview(session.root, recorded=recorded)
+            if preview_id is None:
+                return sealed
+            if sealed["preview_id"] != preview_id:
+                raise _stale_preview()
+            if sealed["preview"]["state"] == "in_sync":
+                return {"status": "in_sync", **sealed}
+            if not runtime.retire_idle_handle():
+                raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+            with session.writer(token) as writer:
+                with writer.handle.transaction(resolve_divergence=True) as conn:
+                    runtime._identity = owner.record_fork(conn, sealed["preview"], why=why, token=token)
+                published = _publish_current_epoch(session, writer, token)
+        if published.status != "published":
+            return {"status": "pending", "reason": published.reason or published.status, **sealed}
+        manager._renew_collection_store(token)
+        return {"status": "adopted", "instance_id": runtime._identity[1], **sealed}
+
+
+def reconcile_store(session, manager, *, why, fence_client, preview_id=None):
+    """Owner reconcile (§15 item 5), preview-first: foreign evidence becomes held corrections.
+
+    Every item a preserved foreign store changed after its common ancestor with this
+    one is held with its values and diagnostics; no canonical row changes. A diverged
+    store refuses: adopt-local decides which side continues first.
+    """
+    runtime, _fence = _owner_operation(session, manager, fence_client, why)
+    with manager.writer_authority_guard(vault_root=session.root):
+        token = manager._fencing_token
+        if not runtime.reporting_ready(token):
+            raise runtime._refusal()
+        with manager.consistency_guard(session.root, operation="collection_store_reconcile"):
+            with closing(connection.open_reader(session.path)) as local:
+                if local.execute("SELECT 1 FROM store_meta WHERE key=?",
+                                 (schema.META_REPLICA_DIVERGENCE,)).fetchone() is not None:
+                    raise CollectionStoreError(takeover.DIVERGED, "run adopt-local before reconciling")
+                sealed, items = owner.reconcile_plan(session.root, local)
+            if preview_id is None:
+                return sealed
+            if sealed["preview_id"] != preview_id:
+                raise _stale_preview()
+            if not runtime.retire_idle_handle():
+                raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+            with session.writer(token) as writer:
+                result = writer.hold_store_delta(
+                    items, reconciled=[source["sha256"] for source in sealed["preview"]["sources"]], why=why)
+    return {"status": "held", **result, **sealed}
 
 
 def _custody_lost(session, token):

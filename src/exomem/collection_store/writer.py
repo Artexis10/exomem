@@ -33,7 +33,17 @@ from .. import (
 from .. import structured_collections as collections
 from ..governance.principal import effective_principal
 from ..query_engine.indexes import IndexDeclarationError
-from . import chain, connection, governance, index_migrations, tokens, typed_storage, types, views
+from . import (
+    chain,
+    connection,
+    governance,
+    index_migrations,
+    schema,
+    tokens,
+    typed_storage,
+    types,
+    views,
+)
 
 BULK_UPSERT_MAX_ROWS = 500
 
@@ -984,6 +994,58 @@ class CollectionWriter:
                 except (held_fs.HeldFsError, OSError, connection.CollectionStoreError):
                     batch.pending = True
                 self._precommit(manifest)
+        return result
+
+    def hold_store_delta(self, items, *, reconciled, why):
+        """Divergence reconciliation (design §15 item 5): each foreign change becomes a held correction.
+
+        No canonical row changes. Each item the other store changed after the common
+        ancestor is held as a view correction carrying that store's values and
+        diagnostics for an owner decision; the evidence digests are marked reconciled.
+        """
+        result = {"held_ids": [], "why": why}
+        with self._mutation(reconcile=True):
+            self._publication.bind(result)
+            for item in items:
+                cid, key = item["collection_id"], item["item_key"]
+                _, manifest, _ = self._collection(cid)
+                reference = hashlib.sha256(
+                    f"store-delta\0{item['evidence_sha256']}\0{cid}\0{key}".encode()).hexdigest()[:24]
+                path = f"{records._held_directory(manifest)}/{reference}.md"
+                self._preflight_views([path])
+                raw = _json({"item_key": key, "values": item["values"], "body": item["body"]}).encode()
+                metadata = self.connection.execute(
+                    "SELECT m.governance_json FROM collection_manifests m JOIN collections c ON "
+                    "c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+                    (cid,),
+                ).fetchone()[0]
+                try:
+                    held_metadata = governance.row_metadata(manifest.schema, item["values"], metadata)
+                except (ValueError, collections.CollectionError):
+                    held_metadata = _json({**governance._metadata(metadata), "tags": [], "classes": []})
+                diagnostics = _json([{"code": "COLLECTION_STORE_DIVERGED", **{
+                    name: value for name, value in item.items() if name not in {"values", "body"}}}])
+                now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                self._execute(
+                    "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
+                    "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash) "
+                    "VALUES (?,?,'view-correction','COLLECTION_STORE_DIVERGED',?,?,?,?,?,?,?,?)",
+                    (reference, cid, _json({"action": "store-delta", "item_key": key}), raw, diagnostics, path,
+                     item["local_row_version"], now, held_metadata, hashlib.sha256(raw).hexdigest()),
+                )
+                text = views.held_view({
+                    "collection_id": cid, "held_id": reference, "updated_at": now, "kind": "view-correction",
+                    "held_bytes": raw, "diagnostics_json": diagnostics, "governance_json": held_metadata,
+                }, self._publication.identity)
+                self._pending(path, cid, "held", 1, text, manifest=manifest)
+                self.handle.release_cache.touch(cid, f"exomem://collection-held/{cid}/{reference}")
+                self._precommit(manifest)
+                result["held_ids"].append(reference)
+            found = self.connection.execute(
+                "SELECT value FROM store_meta WHERE key=?", (schema.META_RECONCILED_FOREIGN,)).fetchone()
+            done = json.loads(found[0]) if found else []
+            self._execute("INSERT INTO store_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET "
+                          "value=excluded.value", (schema.META_RECONCILED_FOREIGN, _json(sorted({*done, *reconciled}))))
         return result
 
     def backfill_query_indexes(self, collection, *, limit=128) -> bool:

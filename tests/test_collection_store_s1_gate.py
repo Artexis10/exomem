@@ -7,6 +7,7 @@ actual older interpreter. Cases owned by a later slice are strict xfails naming
 it. No case may let C fall back to files, migrate A/B or expose a half-created C.
 """
 
+import hashlib
 import json
 import multiprocessing
 import os
@@ -633,27 +634,74 @@ def test_unverified_replica_is_never_adopted(abc, tmp_path, tamper, copied, expe
     assert status["status"] == expected and not live and file_write == "committed"
 
 
-# --- later slices: strict xfails naming the slice that turns them green -----------------
+# --- slices 3-6: coalesced publication, export flush, backup, divergence and reconcile ------
 
 
-@pytest.mark.xfail(strict=True, reason="s1-A2: coalesced off-ack replica publisher")
-def test_steady_writes_reach_the_replica_off_ack_at_most_once_per_window(abc, monkeypatch):
-    """Defect: acknowledged C rows never reach the replica until release, or every write republishes."""
+def _replica_meta(root):
+    with closing(connection.open_reader(replica.replica_path(root))) as reader:
+        return dict(reader.execute("SELECT key,value FROM store_meta"))
+
+
+def _until(predicate, seconds=10):
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached"
+        time.sleep(0.05)
+
+
+def _published(found):
+    """Wait until the coalesced publisher has carried the live head into the vault replica and finished."""
+    def done():
+        meta = found.meta()
+        head = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
+        return (schema.META_PENDING_REPLICA_PUBLICATION not in meta and head is not None
+                and str(head["commit_seq"]) == meta[schema.META_COMMIT_SEQ])
+    _until(done)
+
+
+def _counted_publications(monkeypatch):
     calls = []
     publish = replica.publish_replica
     monkeypatch.setattr(replica, "publish_replica", lambda *a, **k: calls.append(1) or publish(*a, **k))
+    return calls
+
+
+def test_steady_writes_reach_the_replica_off_ack_at_most_once_per_window(abc, monkeypatch):
+    """Defect: acknowledged C rows never reach the replica until release, or every write republishes."""
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 2.0)  # a loaded host's slow write stays in the burst
+    calls = _counted_publications(monkeypatch)
     for index in range(5):
         abc.write_c(str(uuid.uuid4()), f"steady {index}")
-    live = abc.meta()
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        with closing(connection.open_reader(replica.replica_path(abc.root))) as reader:
-            published = dict(reader.execute("SELECT key,value FROM store_meta"))
-        if published[schema.META_COMMIT_SEQ] == live[schema.META_COMMIT_SEQ]:
-            break
-        time.sleep(0.1)
-    assert published[schema.META_COMMIT_SEQ] == live[schema.META_COMMIT_SEQ]
-    assert len(calls) <= 1
+    assert not calls  # publication stays off the acknowledgement path
+    _published(abc)
+    assert len(calls) == 1
+
+
+def test_a_second_write_waits_out_the_window_until_the_export_flush(abc, tmp_path, monkeypatch):
+    """Defect: a write inside the window republishes, or export ships a replica behind acknowledged rows."""
+    from exomem import hosted_portability as portability
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 0.1)
+    (abc.root / ".exomem/schema").mkdir(parents=True)
+    (abc.root / ".exomem/schema/SKILL.md").write_text("# schema\n")
+    _published(abc)
+    calls = _counted_publications(monkeypatch)
+    abc.write_c(LATER, "Inside the window")
+    time.sleep(1)  # ten settle periods, all inside the 60 s window
+    assert not calls and _replica_meta(abc.root)[schema.META_COMMIT_SEQ] != abc.meta()[schema.META_COMMIT_SEQ]
+    context = dict(cell_id="cell-gate", vault_id="vault-gate", created_at="2026-10-06T00:00:00+00:00",
+                   operator_authorized=True, routing_stopped=True, active_mutations=0,
+                   background_writers_stopped=True, reads_allowed=True)
+    exported = portability.export_quiesced_vault(abc.root, tmp_path / "exports", context=portability.PortabilityContext(
+        operation_id="export-gate", lifecycle_state="quiesced", **context))
+    assert len(calls) == 1
+    staged = portability.prepare_restore(exported.archive_path, tmp_path / "staged", context=portability.PortabilityContext(
+        operation_id="restore-gate", lifecycle_state="restore-staging", **context)).staging_root
+    assert _replica_meta(staged)[schema.META_COMMIT_SEQ] == abc.meta()[schema.META_COMMIT_SEQ]
+    assert not [path for path in staged.rglob("*") if path.name.endswith(("-wal", "-shm"))]
 
 
 def _cli(root, *arguments):
@@ -661,7 +709,6 @@ def _cli(root, *arguments):
                           env={**os.environ, "EXOMEM_VAULT_PATH": str(root)}, timeout=120)
 
 
-@pytest.mark.xfail(strict=True, reason="s1-A2: exomem collections backup")
 def test_backup_is_an_integrity_checked_snapshot_without_the_live_store(abc, tmp_path):
     """Defect: backup copies the live WAL store as a file or omits C's rows."""
     abc.release()
@@ -673,13 +720,127 @@ def test_backup_is_an_integrity_checked_snapshot_without_the_live_store(abc, tmp
     assert not (tmp_path / "backup.sqlite-wal").exists()
 
 
-@pytest.mark.xfail(strict=True, reason="s1-A2: owner preview-first adopt-local and held reconciliation")
+@pytest.mark.parametrize("where", ["vault", "synced", "live"])
+def test_backup_refuses_the_vault_a_synced_root_or_the_live_store(abc, tmp_path, where):
+    """Defect: backup lands a store copy where sync carries it, or replaces the live store itself."""
+    abc.release()
+    synced = tmp_path / "synced"
+    (synced / ".stfolder").mkdir(parents=True)
+    target = {"vault": abc.root / "Knowledge Base/backup.sqlite", "synced": synced / "backup.sqlite",
+              "live": abc.session.path}[where]
+    before = target.read_bytes() if target.exists() else None
+    result = _cli(abc.root, "collections", "backup", "--to", str(target))
+    assert result.returncode == 1 and "COLLECTION_BACKUP_DESTINATION_UNSAFE" in result.stderr
+    assert (target.read_bytes() if target.exists() else None) == before
+
+
 def test_adopt_local_previews_the_fork_point_before_continuing(abc):
     """Defect: adopt-local continues without recording the fork point, or without an owner preview."""
     abc.release()
     result = _cli(abc.root, "collections", "adopt-local", "--why", "sync is off", "--dry-run")
     assert result.returncode == 0, result.stderr
     assert "fork_point" in json.loads(result.stdout)["preview"]
+
+
+def _adopt(found, why):
+    preview = admission.adopt_local(found.session, found.manager, why=why, fence_client=found.operator)
+    refused(lambda: admission.adopt_local(found.session, found.manager, why=why, preview_id="0" * 64,
+                                          fence_client=found.operator), "COLLECTION_STORE_ADOPT_PREVIEW_STALE")
+    adopted = admission.adopt_local(found.session, found.manager, why=why, preview_id=preview["preview_id"],
+                                    fence_client=found.operator)
+    return preview["preview"], adopted
+
+
+def test_watch_diverges_on_a_same_signature_rewrite_and_adopt_local_keeps_the_foreign_bytes(abc, monkeypatch):
+    """Defect: a foreign rewrite keeping inode, size and mtime goes unseen, or adopt-local drops its bytes."""
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "WATCH_SECONDS", 0.05)
+    monkeypatch.setattr(runtime, "WATCH_DIGEST_SECONDS", 0.2)
+    _published(abc)
+    path = replica.replica_path(abc.root)
+    signature, stamp = takeover.replica_signature(abc.root), path.stat()
+    rewritten = bytearray(path.read_bytes())
+    rewritten[-1] ^= 0xFF
+    with open(path, "r+b") as file:
+        file.write(rewritten)
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert takeover.replica_signature(abc.root) == signature
+    _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
+    refused(lambda: abc.write_c(LATER, "Refused"), "COLLECTION_STORE_DIVERGED")
+    assert abc.read_c() == ["Canonical"] and abc.write_a("A beside divergence") == "committed"
+    instance = abc.meta()[schema.META_INSTANCE_ID]
+    preview, adopted = _adopt(abc, "the rewrite was a stray editor")
+    evidence = [entry for entry in preview["fork_point"]["foreign"] if entry["source"] == "evidence"]
+    assert [entry["sha256"] for entry in evidence] == [hashlib.sha256(rewritten).hexdigest()]
+    assert adopted["status"] == "adopted", adopted.get("reason")
+    assert abc.write_c(LATER, "After adopt")["outcome"] == "committed"
+    assert (path.parent / evidence[0]["leaf"]).read_bytes() == rewritten
+    meta = abc.meta()
+    assert [fork["local"]["commit_seq"] for fork in json.loads(meta[schema.META_FORKS])] == [2]
+    assert json.loads(meta[schema.META_LINEAGE])[-1]["adopted_from"] == instance
+    assert _replica_meta(abc.root)[schema.META_INSTANCE_ID] == meta[schema.META_INSTANCE_ID]
+
+
+def test_adopt_local_abandons_the_publication_a_divergence_interrupted(abc, monkeypatch):
+    """Defect: a foreign write landing mid-publication leaves an intent that re-diverges every adopt-local."""
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)  # the next write publishes promptly
+    _published(abc)
+    install = replica._Publisher.flush_installed
+
+    def foreign_write_lands(publisher, expected):
+        monkeypatch.setattr(replica._Publisher, "flush_installed", install)
+        path = replica.replica_path(abc.root)
+        path.write_bytes(path.read_bytes() + b"\0")
+        return install(publisher, expected)
+
+    monkeypatch.setattr(replica._Publisher, "flush_installed", foreign_write_lands)
+    assert abc.write_c(LATER, "Mid publication")["outcome"] == "committed"
+    _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
+    assert schema.META_PENDING_REPLICA_PUBLICATION in abc.meta()
+    preview, adopted = _adopt(abc, "the write mid-publication was a stray editor")
+    assert adopted["status"] == "adopted", adopted.get("reason")
+    assert preview["abandoned_publication"] is not None
+    assert abc.write_c(str(uuid.uuid4()), "After adopt")["outcome"] == "committed"
+
+
+@requires_fork
+def test_reconcile_holds_every_foreign_item_change_after_the_fork_point(abc, tmp_path):
+    """Defect: a diverged store loses the other side's later writes, or reconcile edits rows silently."""
+    abc.release()  # the other host starts from A's flushed replica
+    copy = tmp_path / "copy"
+    shutil.copytree(abc.root, copy)
+
+    def other_host(found):
+        assert found.open() == {"status": "admitted"}
+        found.write_c(LATER, "From the other host")
+        found.release()
+
+    run_host(tmp_path, tmp_path / "state-b", "host-b", other_host, root=copy,
+             database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
+    assert abc.write_c(str(uuid.uuid4()), "Kept on A")["outcome"] == "committed"
+    _published(abc)
+    shutil.copyfile(replica.replica_path(copy), abc.root / "delivery.tmp")
+    os.replace(abc.root / "delivery.tmp", replica.replica_path(abc.root))  # sync delivers it
+    _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
+    _adopt(abc, "keep this host, hold the other")
+    plan = admission.reconcile_store(abc.session, abc.manager, why="hold the other host's writes",
+                                     fence_client=abc.operator)
+    assert [(item["collection_id"], item["item_key"]) for item in plan["preview"]["items"]] == [(CID, LATER)]
+    result = admission.reconcile_store(abc.session, abc.manager, why="hold the other host's writes",
+                                       preview_id=plan["preview_id"], fence_client=abc.operator)
+    assert result["status"] == "held" and abc.read_c() == ["Canonical", "Kept on A"]
+    with closing(connection.open_reader(abc.session.path)) as reader:
+        held = reader.execute("SELECT kind,code,held_bytes,diagnostics_json FROM held_candidates").fetchall()
+    assert [(kind, code) for kind, code, _, _ in held] == [("view-correction", "COLLECTION_STORE_DIVERGED")]
+    assert b"From the other host" in held[0][2] and json.loads(held[0][3])[0]["common_ancestor_commit_seq"] == 2
+    again = admission.reconcile_store(abc.session, abc.manager, why="again", fence_client=abc.operator)
+    assert again["preview"]["items"] == []
+
+
+# --- later slices: strict xfails naming the slice that turns them green -----------------
 
 
 @pytest.mark.xfail(strict=True, reason="s1-A3: compatibility flip for supported launchers on fresh roots")

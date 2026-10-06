@@ -147,3 +147,27 @@ def verify(vault_root) -> Custody:
     except (OSError, ValueError) as error:
         return Custody(False, f"custody cannot be verified: {error}")
     return Custody(True, "single-host deployment without sync")
+
+
+def verify_backup_destination(vault_root, destination) -> Custody:
+    """A backup lands outside the vault, the live store's directory and every detected synced root.
+
+    Inside the vault a store copy is synced and backed up as vault content beside the
+    one replica the vault may carry; in the live store's directory it could replace the
+    live store or its WAL; in a synced root a sync client carries the scratch family.
+    """
+    try:
+        target = _resolved(destination)
+        store_directory = _resolved(state_paths.vault_state_dir(Path(vault_root)))
+        for root, what in ((_resolved(vault_root), "the vault"), (store_directory, "the live store's directory")):
+            if target.is_relative_to(root):
+                return Custody(False, f"the destination is inside {what}")
+        for root in _configured_roots():
+            if target.is_relative_to(root):
+                return Custody(False, f"the destination is inside configured sync root {root}")
+        evidence = _client_evidence(target.parent) or _windows_sync_folder(target, _windows_mounts())
+        if evidence is not None:
+            return Custody(False, evidence)
+    except (OSError, ValueError) as error:
+        return Custody(False, f"the destination cannot be verified: {error}")
+    return Custody(True, "outside the vault, the live store and every detected synced root")
