@@ -73,6 +73,7 @@ from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
     CANARY_PARKED,
     MANIFEST_IMMUTABLE,
+    RELOCATION_REFUSED,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
     TARGET_REJECTED,
@@ -238,6 +239,48 @@ class LoopMemory:
     backup_alert_delivered: bool | None = None
     stale_backups: list[str] = field(default_factory=list)
     backup_alert_retry_at: datetime | None = None
+    # D4: when this process first saw each node absent from the API, until it
+    # is seen present again. A restart restarts every clock.
+    node_absent_since: dict[str, datetime] = field(default_factory=dict)
+
+
+# D4: a Node gone from the API counts as lost only once this process has seen
+# it absent this long. `kubectl delete node` on a healthy agent re-registers
+# it within seconds, and that must neither relocate its cells nor complete a
+# deletion proof. Five minutes is several fast passes, and small against the
+# 4 h fleet RTO.
+NODE_ABSENCE_GRACE = timedelta(minutes=5)
+
+
+def _note_node_presence(memory: LoopMemory, now: datetime, *, absent: set[str], present: set[str]) -> None:
+    for node in present:
+        memory.node_absent_since.pop(node, None)
+    for node in absent:
+        memory.node_absent_since.setdefault(node, now)
+
+
+def _node_gone(memory: LoopMemory, node: str, now: datetime) -> bool:
+    since = memory.node_absent_since.get(node)
+    return since is not None and now - since >= NODE_ABSENCE_GRACE
+
+
+def _with_lost_nodes(
+    observations: dict[str, ClusterObservation], memory: LoopMemory, now: datetime
+) -> dict[str, ClusterObservation]:
+    """D4: a cell's node is lost once the operator confirmed its stop, or
+    once it has been absent from the API for NODE_ABSENCE_GRACE."""
+
+    _note_node_presence(
+        memory, now,
+        absent={o.pv_node for o in observations.values() if o.pv_node is not None and o.pv_node_absent},
+        present={o.pv_node for o in observations.values() if o.pv_node is not None and not o.pv_node_absent},
+    )
+    return {
+        cell_id: dataclass_replace(observation, pv_node_lost=observation.pv_node is not None and (
+            observation.pv_node_stop_confirmed
+            or (observation.pv_node_absent and _node_gone(memory, observation.pv_node, now))))
+        for cell_id, observation in observations.items()
+    }
 
 
 def _record_refusal(
@@ -436,6 +479,18 @@ def _hetzner_volume_absent(volume_id: str, volume_provider, now: datetime, memor
     return False
 
 
+def _with_recent_absences(state: LocalVolumeState, now: datetime, memory: LoopMemory) -> LocalVolumeState:
+    """D4: a node absent from the API for less than NODE_ABSENCE_GRACE still
+    counts as present, so its volumes still block a deletion proof."""
+
+    named = {node for _, node, _ in state.claimed_pvs} | {node for _, node in state.snapshot_contents}
+    named |= {volume.node for volume in state.volumes}
+    named -= {None, ""}
+    _note_node_presence(memory, now, absent=named - state.present_nodes, present=set(state.present_nodes))
+    recent = {node for node in named - state.present_nodes if not _node_gone(memory, node, now)}
+    return dataclass_replace(state, present_nodes=state.present_nodes | recent)
+
+
 def _augment_deletion_observation(
     observation: ClusterObservation,
     row: CellRow,
@@ -466,7 +521,9 @@ def _augment_deletion_observation(
         # snapshots and their clones must all be gone, unless they sit on a
         # node confirmed destroyed. The Hetzner check below still applies.
         no_pv_claims_namespace = namespace_absent_confirmed and cell_data_absent(
-            cluster.local_volume_state(storage.local), namespace=namespace, volume_id=row.volume_id
+            _with_recent_absences(cluster.local_volume_state(storage.local), now or datetime.now(UTC),
+                                  memory or LoopMemory()),
+            namespace=namespace, volume_id=row.volume_id,
         )
     else:
         no_pv_claims_namespace = namespace_absent_confirmed and cluster.pv_absent_for_namespace(namespace)
@@ -847,7 +904,7 @@ def _select_relocation_candidates(
         return (
             _active_hold(row, observation) == "restore"
             and observation.statefulset_relocation_volume is not None
-            and row.last_error_code != RESTORE_FAILED
+            and row.last_error_code not in (RESTORE_FAILED, RELOCATION_REFUSED)
         )
 
     due = sorted(
@@ -1000,6 +1057,7 @@ async def reconcile_once(
     # upgrade or digest re-apply. Backups go on: its row's own backup hold
     # still counts as an occupied slot.
     unobserved_rows = [row for row in rows if row.cell_id not in observations and row.desired_state != "deleted"]
+    observations = _with_lost_nodes(observations, memory, now)
     await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
@@ -1038,7 +1096,12 @@ async def reconcile_once(
     statefulset_blocked = frozenset(cell_id for cell_id in parked if refusal_records[cell_id].statefulset_blocked)
 
     upgrade_candidate: str | None = None
-    relocation_candidates = _select_relocation_candidates(non_deleted_rows, observations, cluster_config.storage, config)
+    # Like an upgrade, no relocation starts while a row is unobserved: it may
+    # be the owner's, which must relocate first. Started ones continue.
+    relocation_candidates = (
+        set() if fleet_unobserved
+        else _select_relocation_candidates(non_deleted_rows, observations, cluster_config.storage, config)
+    )
     backup_candidates: set[str] = set()
     render_digest_candidate: str | None = None
     backup_candidates = _select_backup_candidates(
@@ -1047,7 +1110,8 @@ async def reconcile_once(
     )
     if fleet_unobserved:
         logger.error(
-            "cellctl: %d cell(s) could not be observed; no upgrade or re-render starts this pass", len(unobserved_rows)
+            "cellctl: %d cell(s) could not be observed; no upgrade, re-render or relocation starts this pass",
+            len(unobserved_rows),
         )
     else:
         upgrade_candidate = select_upgrade_candidate(
@@ -1355,10 +1419,23 @@ async def _reconcile_row(
     # D4 relocation: the old PV is set to Retain one pass, and its claim is
     # deleted only on a later pass that observes Retain (admission checks it
     # again). Neither depends on the StatefulSet's apply.
-    if decision.retain_volume:
-        cluster.retain_volume(decision.retain_volume)
-    if decision.delete_claim:
-        cluster.delete_claim(namespace_name(row.cell_id))
+    if decision.retain_volume or decision.delete_claim:
+        try:
+            if decision.retain_volume:
+                cluster.retain_volume(decision.retain_volume)
+            if decision.delete_claim:
+                cluster.delete_claim(namespace_name(row.cell_id))
+        except ApiException as error:
+            if not _is_refusal(error):
+                raise
+            logger.error("cellctl: relocation step refused for cell %s: status=%s reason=%s",
+                         row.cell_id, error.status, error.reason)
+            # The claim is still there, so the row keeps its volume identity.
+            kept = {key: value for key, value in decision.row_updates.items() if key not in ("volume_id", "node")}
+            decision.row_updates = {**kept, "last_error_code": RELOCATION_REFUSED, "ready": False}
+        else:
+            if row.last_error_code == RELOCATION_REFUSED:
+                decision.row_updates = {**decision.row_updates, "last_error_code": None}
 
     refused: list[tuple[str, str]] = []
     applied_cleanly = False

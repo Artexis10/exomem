@@ -283,7 +283,7 @@ class ClusterClient:
         # only a local volume is relocated: those the operator confirmed
         # stopped, and any a local volume names that the API no longer has.
         nodes = self._core.list_node().items if self._storage_config.local is not None else None
-        lost_node = _lost_node_check(nodes)
+        node_presence = _node_presence(nodes)
 
         observations: dict[str, ClusterObservation | Exception] = {}
         for cell_id, namespace in cells.items():
@@ -301,14 +301,14 @@ class ClusterClient:
                     pvs.get(pv_name) if pv_name else None,
                     statefulsets.get(namespace),
                     pods.get(namespace, []),
-                    lost_node,
+                    node_presence,
                 )
             except Exception as error:  # noqa: BLE001 - H4: one cell's failure is that cell's alone
                 observations[cell_id] = error
         return observations
 
     def _observation(
-        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, lost_node=lambda node: False
+        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None
     ) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
         namespace_volume_lost = (getattr(namespace_obj.metadata, "annotations", None) or {}).get(VOLUME_LOST_ANNOTATION)
@@ -430,7 +430,8 @@ class ClusterClient:
             pv_name=pv_name,
             pv_reclaim_policy=pv_reclaim_policy,
             pv_node=pv_node,
-            pv_node_lost=pv_node is not None and lost_node(pv_node),
+            pv_node_stop_confirmed=pv_node is not None and node_presence is not None and pv_node in node_presence[1],
+            pv_node_absent=pv_node is not None and node_presence is not None and pv_node not in node_presence[0],
             namespace_volume_lost=namespace_volume_lost,
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
@@ -734,16 +735,14 @@ OUT_OF_SERVICE_TAINT = "node.kubernetes.io/out-of-service"
 VOLUME_LOST_ANNOTATION = "exomem.io/volume-lost"
 
 
-def _lost_node_check(nodes):
-    """D4: a node is lost once the operator confirmed it stopped (out of
-    service and not Ready), or once it is gone from the API. With no node
-    list read, no node is lost."""
+def _node_presence(nodes) -> tuple[frozenset[str], frozenset[str]] | None:
+    """D4: (the nodes in the API, those the operator confirmed stopped). None
+    with no node list read: then no node is stopped or absent."""
 
     if nodes is None:
-        return lambda node: False
-    present = {node.metadata.name for node in nodes}
-    stopped = {node.metadata.name for node in nodes if _stop_confirmed(node)}
-    return lambda node: node in stopped or node not in present
+        return None
+    return (frozenset(node.metadata.name for node in nodes),
+            frozenset(node.metadata.name for node in nodes if _stop_confirmed(node)))
 
 
 def _stop_confirmed(node) -> bool:

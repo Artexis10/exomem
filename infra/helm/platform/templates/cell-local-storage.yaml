@@ -141,6 +141,11 @@ spec:
         app.kubernetes.io/name: snapshot-controller
     spec:
       serviceAccountName: snapshot-controller
+      # On the server only, for the reason values.yaml gives for the TopoLVM
+      # controller: its token writes every VolumeSnapshot and VolumeSnapshotContent,
+      # and updates every claim, cluster-wide.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

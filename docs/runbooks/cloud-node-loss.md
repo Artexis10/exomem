@@ -20,13 +20,14 @@ Relocation restores each cell on the lost agent from its last hourly backup onto
    kubectl taint node "$NODE" node.kubernetes.io/out-of-service=nodeshutdown:NoExecute --overwrite
    ```
 
-   The taint also makes Kubernetes delete the node's pods. A Node already deleted from the cluster is the other trigger: only `remove-agent.yml` deletes one, after the same confirmation.
+   The taint also makes Kubernetes delete the node's pods. A Node deleted from the cluster is the other trigger, five minutes after it disappears: only `remove-agent.yml` deletes one, after the same confirmation. A Node deleted by mistake re-registers within seconds and relocates nothing.
 4. cellctl then relocates each cell whose volume is on that node. The owner's cell goes alone first. Once its restore has ended, the rest follow by rollout priority, at most four at a time. For each cell, cellctl sets the old volume's reclaim policy to Retain, deletes the claim, restores the last backup into a new claim on another node, and starts the cell only after the restore succeeds. The row shows hold `restore` until the cell is back. Accept each cell with recall, governance status and a governed write.
 5. A cell whose row shows `RELOCATION_NO_BACKUP` has no backup to restore from. It stays as it is; decide with its owner.
 6. A cell whose row shows `RESTORE_FAILED` stays stopped. Its failed restore Job expires five minutes after it fails and the next pass runs the restore again, so a restore that keeps failing needs its cause fixed (`kubectl -n exo-cell-<cell id> logs job/<job>` while it exists). The other cells do not wait for it.
-7. Once every cell is accepted, remove the agent with `remove-agent.yml` ([node pool](hosted/node-pool.md#remove-a-node)). Its retained volumes do not block the removal. A deleted cell's volume on that node counts as gone only once the Node is gone from the cluster, so the removal also completes those deletions.
-8. Never let the agent rejoin with its `cells` volume group. If the server comes back, keep it out of the cluster and erase its cells device (below) before it is reused. A rejoined node would bring back volumes whose cells now run elsewhere, and volumes of deleted cells.
-9. Delete the lost node's retained PersistentVolume objects once the Node is gone from the cluster.
+7. A cell whose row shows `RELOCATION_REFUSED` stays stopped: admission refused its Retain patch or its claim delete. Find the refusal in cellctl's log, fix its cause, and cellctl retries the step on the next pass. The other cells do not wait for it.
+8. Once every cell is accepted, remove the agent with `remove-agent.yml` ([node pool](hosted/node-pool.md#remove-a-node)). Its retained volumes do not block the removal. A deleted cell's volume on that node counts as gone only five minutes after the Node is gone from the cluster, so the removal also completes those deletions.
+9. Never let the agent rejoin with its `cells` volume group. If the server comes back, keep it out of the cluster and erase its cells device (below) before it is reused. A rejoined node would bring back volumes whose cells now run elsewhere, and volumes of deleted cells.
+10. Delete the lost node's retained PersistentVolume objects once the Node is gone from the cluster.
 
 ## Erase a removed agent's cells device
 
@@ -160,9 +161,19 @@ etcd snapshots are taken every 30 minutes. A restore loses the cluster objects o
 
 `VOLUME_MISSING`: the row records a volume, but the cell's claim is gone. cellctl never gives such a cell a fresh, empty claim, so it stays stopped.
 
-1. Find out where the volume went. Check `kubectl get persistentvolumes` for a PV with that `volumeHandle`, and list the volume's node as in "After restoring etcd" step 2.
-2. If the volume is on its node, re-adopt it as in step 4 of that section.
-3. If it is lost, mark it lost as in step 5, and cellctl relocates the cell from its backup.
+1. Find out where the volume went. Check `kubectl get persistentvolumes` for a PV with that `volumeHandle`. A local volume's ID is a UUID; a Hetzner Cloud Volume's is a number.
+2. For a local volume, list its node as in "After restoring etcd" step 2. If the volume is on its node, re-adopt it as in step 4 of that section. If it is lost, mark it lost as in step 5, and cellctl relocates the cell from its backup.
+3. For a Hetzner volume, re-adopt it with the steps below.
+
+The usual cause on Hetzner is an etcd restore that drops a cell created after the snapshot: its namespace, claim and PV are gone, but its volume still exists at Hetzner.
+
+1. Pause cellctl as in "Restore etcd" step 6.
+2. Check the volume exists: `hcloud volume describe "$VOLUME_ID"`. Expect its size and location.
+3. If it shows a server, check on that host that nothing mounts it (`findmnt | grep "$VOLUME_ID"` prints nothing). Then detach it: `hcloud volume detach "$VOLUME_ID"`.
+4. Create its PersistentVolume, copying the spec of a surviving Hetzner cell's PV: driver `csi.hetzner.cloud`, `volumeHandle: $VOLUME_ID`, the volume's size as `capacity`, and the same class, reclaim policy and node affinity. Set `claimRef` to namespace `exo-cell-<cell id>`, name `cell-data`.
+5. Release the row's identity by compare-and-set, as in "After restoring etcd" step 4.4. It must report `UPDATE 1`.
+6. Resume cellctl. It recreates the namespace if it is gone, and creates the claim, which binds to the PV that names it.
+7. Check that `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data` shows `Bound` to that PV, and that the row records `$VOLUME_ID` again. Accept the cell with recall, governance status and a governed write.
 
 `CELL_INIT_EMPTY_VOLUME_REFUSED`: the cell has a recorded backup, and it started on an empty volume. It refused to create an empty vault, and stays not ready.
 

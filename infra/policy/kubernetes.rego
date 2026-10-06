@@ -55,8 +55,8 @@ deny contains message if {
 # workload, another container of these DaemonSets, or another path is still denied.
 approved_topolvm_chart := "topolvm-17.2.0"
 
-# The one image either privileged container may run: the reference the
-# platform chart pins in values.yaml (`topolvm.image.reference`).
+# The one image every container of those DaemonSets may run: the reference
+# the platform chart pins in values.yaml (`topolvm.image.reference`).
 approved_topolvm_image := "ghcr.io/topolvm/topolvm-with-sidecar:0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc"
 
 approved_topolvm_daemonsets := {
@@ -88,6 +88,15 @@ approved_topolvm_privileged(container) if {
   approved_topolvm_node
   container.name == approved_topolvm_daemonsets[input.metadata.name].container
   container.image == approved_topolvm_image
+}
+
+# Every container of the two exempted DaemonSets, its sidecars and init
+# containers included, runs the pinned image: they share the host's devices.
+deny contains message if {
+  approved_topolvm_node
+  some container in array.concat(object.get(pod_spec, "initContainers", []), pod_spec.containers)
+  container.image != approved_topolvm_image
+  message := sprintf("%s/%s runs a container on an image other than the pinned TopoLVM image", [input.kind, input.metadata.name])
 }
 
 deny contains message if {

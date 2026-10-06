@@ -390,8 +390,9 @@ cellStorage:
 # class at overprovision ratio 1.0 on the `cells` volume group, as the storage
 # spike rehearsed it (task 1.1). This is the only TopoLVM configuration: a drill
 # installs TopoLVM from these values. Its image is pinned here,
-# not left to the chart's default, and infra/policy/kubernetes.rego admits the
-# privileged node plugin and lvmd only with this exact reference. Its node
+# not left to the chart's default, and infra/policy/kubernetes.rego admits every
+# container of the privileged node plugin and lvmd only with this exact
+# reference. Its node
 # plugin and lvmd run only on agents labelled
 # node-restriction.kubernetes.io/exomem-local-storage=true, the ones with that
 # volume group. The server applies that label at join; a kubelet cannot set a
@@ -403,7 +404,7 @@ cellStorage:
 # volume first (D4). The platform renders the classes itself. The fixed full
 # name keeps the node agent's service account, which
 # templates/cell-local-storage.yaml confines to its own node, the same under
-# any release name.
+# any release name; the values schema requires it.
 topolvm:
   fullnameOverride: exomem-platform-topolvm
   image:
@@ -430,6 +431,19 @@ topolvm:
   controller:
     nodeFinalize:
       skipped: true
+    # The controller's token can create PVs, patch every Node and write every
+    # LogicalVolume, and no admission policy confines it. It runs on the server
+    # only, which a kubelet cannot claim: the label below is one only K3s sets.
+    # Prevents: a compromised agent reading that token from a controller pod
+    # scheduled beside its cells. Costs when it fires wrongly: no volume is
+    # provisioned, resized or snapshotted while the server is down, when the
+    # API is down anyway. Who pays: tenants whose cell is created, relocated or
+    # backed up during a server outage, already waiting on the API. One
+    # replica: two would need two servers to satisfy the chart's anti-affinity.
+    replicaCount: 1
+    affinity: ""
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
   storageClasses: []
 
 cloudIngress:

@@ -99,15 +99,16 @@ async def test_after_the_cutover_only_a_new_claim_takes_the_local_class(
     assert claim["spec"]["storageClassName"] == rendered_class
 
 
-@pytest.mark.parametrize(("listed", "lost"), [
-    ("ready", False),
+@pytest.mark.parametrize(("listed", "stop_confirmed", "absent"), [
+    ("ready", False, False),
     # Only partitioned: never relocated.
-    ("not-ready", False),
-    ("out-of-service", True),
-    # Gone from the API: removed after a confirmed stop, or destroyed.
-    ("absent", True),
+    ("not-ready", False, False),
+    ("out-of-service", True, False),
+    # Gone from the API: reconcile.py decides how long that must last.
+    ("absent", False, True),
 ])
-def test_a_local_volume_is_matched_to_the_node_its_pv_is_pinned_to(listed: str, lost: bool) -> None:
+def test_a_local_volume_is_matched_to_the_node_its_pv_is_pinned_to(listed: str, stop_confirmed: bool,
+                                                                    absent: bool) -> None:
     from types import SimpleNamespace as NS
 
     from cellctl.k8s_client import ClusterClient
@@ -131,7 +132,8 @@ def test_a_local_volume_is_matched_to_the_node_its_pv_is_pinned_to(listed: str, 
 
     observed = client.observe_cells({"aaaaaaaaaaaaaaaa": NAMESPACE})["aaaaaaaaaaaaaaaa"]
 
-    assert (observed.pv_node, observed.pv_node_lost) == ("agent-2", lost)
+    assert (observed.pv_node, observed.pv_node_stop_confirmed, observed.pv_node_absent) == (
+        "agent-2", stop_confirmed, absent)
 
 
 def test_with_no_local_class_an_existing_cells_render_digest_does_not_move() -> None:
@@ -690,7 +692,7 @@ def test_with_local_storage_configured_a_deleting_cell_waits_for_its_logical_vol
 # --- 2.4: operator-triggered relocation -------------------------------------------------
 
 LAST_BACKUP = "d" * 64
-LOST = dict(pv_name="pv-old", pvc_volume_id="vol-old", pvc_exists=True, pv_node_lost=True,
+LOST = dict(pv_name="pv-old", pvc_volume_id="vol-old", pvc_exists=True, pv_node_stop_confirmed=True, pv_node_lost=True,
             pod_exists=False, pod_ready=False)
 
 
@@ -775,6 +777,125 @@ def test_the_owner_relocates_alone_then_the_rest_a_bounded_number_at_a_time() ->
     assert _select_relocation_candidates(rows, owner_done, MIGRATING, config) == set(tenants[:2])
     one_running = {**owner_done, tenants[0]: _relocating()}
     assert _select_relocation_candidates(rows, one_running, MIGRATING, config) == {tenants[1]}
+
+
+def test_a_node_briefly_gone_from_the_api_is_not_lost() -> None:
+    # `kubectl delete node` on a healthy agent: its kubelet registers the node
+    # again within seconds, and its cells must stay where they are. Each
+    # return restarts the clock.
+    memory = reconcile.LoopMemory()
+    gone = {"aaaaaaaaaaaaaaaa": _local(pv_node_absent=True)}
+    back = {"aaaaaaaaaaaaaaaa": _local()}
+
+    for minute, observations in ((0, gone), (4, gone), (5, back), (6, gone), (10, gone)):
+        decided = reconcile._with_lost_nodes(observations, memory, NOW + timedelta(minutes=minute))
+        assert decided["aaaaaaaaaaaaaaaa"].pv_node_lost is False, minute
+
+
+def test_a_node_gone_from_the_api_for_five_minutes_is_lost() -> None:
+    memory = reconcile.LoopMemory()
+    gone = {"aaaaaaaaaaaaaaaa": _local(pv_node_absent=True)}
+
+    reconcile._with_lost_nodes(gone, memory, NOW)
+    decided = reconcile._with_lost_nodes(gone, memory, NOW + reconcile.NODE_ABSENCE_GRACE)
+
+    assert decided["aaaaaaaaaaaaaaaa"].pv_node_lost is True
+
+
+def test_a_deleted_cells_volume_on_a_node_briefly_gone_still_blocks_the_deletion_proof() -> None:
+    # The same re-registration must not let a deleted cell report deleted
+    # while its volume is still on that agent's disk.
+    from cellctl.storage.topolvm import cell_data_absent
+
+    namespace = "exo-cell-aaaaaaaaaaaaaaaa"
+    state = _remaining(claimed_pvs=((namespace, "agent-1", "vol-old"),), present_nodes=frozenset({"agent-2"}))
+    memory = reconcile.LoopMemory()
+
+    just_gone = reconcile._with_recent_absences(state, NOW, memory)
+    assert cell_data_absent(just_gone, namespace=namespace, volume_id="vol-1") is False
+    long_gone = reconcile._with_recent_absences(state, NOW + reconcile.NODE_ABSENCE_GRACE, memory)
+    assert cell_data_absent(long_gone, namespace=namespace, volume_id="vol-1") is True
+
+
+async def test_no_relocation_starts_while_a_cell_is_unobserved(cell_db: CellDatabase) -> None:
+    # The unobserved cell may be the owner's, which must relocate first.
+    from cellctl import db
+    from cellctl.manifests import RELOCATION_ANNOTATION
+
+    owner, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+
+    class Gateway(FakeClusterGateway):
+        def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
+            if cell_id == owner:
+                raise RuntimeError("observe failed")
+            return super().observe(cell_id, namespace)
+
+    await _seed_cell(cell_db, owner, "tenant-a")
+    await _seed_cell(cell_db, tenant, "tenant-b")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    await db.write_observed(connection, tenant, {
+        "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A, "volume_id": "vol-old",
+        "node": "agent-1", "last_backup_at": STARTED, "last_backup_snapshot": LAST_BACKUP})
+    cluster = Gateway()
+    cluster.observations[tenant] = _bound(LOCAL.class_name, statefulset_row_generation=1, **LOST, pv_node="agent-1",
+                                          pv_reclaim_policy="Delete", namespace_cell_label=tenant)
+    try:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       ClusterConfig(object_storage_bucket="b", storage=MIGRATING), now=NOW)
+    finally:
+        await connection.close()
+
+    # The tenant still converges where it is; it only does not start relocating.
+    statefulset = cluster.applied[(namespace_name(tenant), "StatefulSet", "cell")]
+    assert RELOCATION_ANNOTATION not in statefulset["metadata"].get("annotations", {})
+
+
+async def test_a_refused_relocation_step_ends_that_relocation_and_frees_the_fleet(cell_db: CellDatabase) -> None:
+    # A refused Retain patch never succeeds on its own; an owner stuck in it
+    # would hold back every other cell's relocation forever.
+    from kubernetes.client.rest import ApiException
+
+    from cellctl import db
+    from cellctl.decide import DEFAULT_RECONCILE_CONFIG
+    from cellctl.reconcile import _select_relocation_candidates
+    from cellctl.state import RELOCATION_REFUSED
+
+    from .test_reconcile import _observed_from_applied
+
+    class Gateway(FakeClusterGateway):
+        def retain_volume(self, name: str) -> None:
+            raise ApiException(status=422, reason="Invalid")
+
+    owner, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    await _seed_cell(cell_db, owner, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    await db.write_observed(connection, owner, {
+        "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A, "volume_id": "vol-old",
+        "node": "agent-1", "last_backup_at": STARTED, "last_backup_snapshot": LAST_BACKUP})
+    cluster = Gateway()
+    lost = dict(pv_storage_class=LOCAL.class_name, pvc_storage_class=LOCAL.class_name, pv_node="agent-1", **LOST)
+    cluster.observations[owner] = _bound(LOCAL.class_name, statefulset_row_generation=1, **lost,
+                                         pv_reclaim_policy="Delete")
+
+    async def run(minute: int) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       ClusterConfig(object_storage_bucket="b", storage=MIGRATING),
+                                       now=NOW + timedelta(minutes=minute))
+
+    try:
+        await run(0)
+        cluster.observations[owner] = _observed_from_applied(
+            cluster, owner, **lost, statefulset_relocation_volume="vol-old", pv_reclaim_policy="Delete",
+            pod_uses_volume=False)
+        await run(1)
+        (row,) = await db.select_all_rows(connection)
+    finally:
+        await connection.close()
+
+    assert (row.last_error_code, row.volume_id) == (RELOCATION_REFUSED, "vol-old")
+    rows = [row, _row(cell_id=tenant, rollout_priority=row.rollout_priority + 1, last_backup_snapshot=LAST_BACKUP)]
+    observations = {owner: cluster.observations[owner], tenant: _local(**LOST)}
+    assert _select_relocation_candidates(rows, observations, MIGRATING, DEFAULT_RECONCILE_CONFIG) == {tenant}
 
 
 def test_relocation_retains_the_old_volume_before_it_deletes_the_claim() -> None:

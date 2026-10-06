@@ -6324,7 +6324,14 @@ def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | s
             current = 0
         # Replaced, never overwritten in place: a power cut must leave a whole
         # counter, not an empty file that reads as a restart (design D9).
-        durable_write.replace_text(path, str(current + 1))
+        try:
+            durable_write.replace_text(path, str(current + 1))
+        except OSError:
+            # A reader that holds the file past the rename's retry window
+            # (Windows) must not stop the bump: a counter that stays put would
+            # admit a stale stamp. Write in place instead; a torn read of it
+            # differs from the stamp's generation, which disables reuse.
+            path.write_text(str(current + 1), encoding="utf-8")
     except Exception:  # noqa: BLE001 - the counter must never break a commit
         pass
 

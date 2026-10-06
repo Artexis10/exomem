@@ -179,7 +179,7 @@ A restore into a new namespace SHALL produce a cell that answers recall, reports
 
 When a row's `desired_state` becomes `deleted`, cellctl SHALL remove the cell's namespace and volume and every object version under its backup prefix. It SHALL delete its object-storage key and destroy its wrapped backup key.
 
-It SHALL report `deleted` only after it has observed that the namespace, persistent volume, the storage backend's volume for that cell, any snapshot or clone of it, and every backup object version are all absent. A failed observation MUST NOT count as absence. A volume on a node that is gone from the cluster SHALL count as absent. A volume on a stopped node still in the cluster SHALL NOT, because that node could rejoin with it.
+It SHALL report `deleted` only after it has observed that the namespace, persistent volume, the storage backend's volume for that cell, any snapshot or clone of it, and every backup object version are all absent. A failed observation MUST NOT count as absence. A volume on a node that has been gone from the cluster for at least five minutes SHALL count as absent. A volume on a stopped node still in the cluster SHALL NOT, because that node could rejoin with it.
 
 Encrypted cluster-state snapshots MAY retain the cell's Secret until their retention expires. That bound SHALL be documented in the operator runbook.
 
@@ -217,7 +217,7 @@ For each node in the configured cell storage domain, cellctl SHALL publish `cell
 
 ### Requirement: A lost cell node is recovered from off-site backups
 
-The operator SHALL be able to relocate a cell whose node is lost onto other capacity, through cellctl, by recreating its volume and restoring the cell's latest backup before the cell starts. Relocation SHALL be operator-triggered, never automatic, and SHALL begin only once the old node's stop is confirmed by the same rule as node removal, or once the node is gone from the cluster. It SHALL then force the cell's pod off the old node, set the old volume's reclaim policy to Retain before deleting the claim, restore into a new claim, record the new volume identity, and start the cell only after the restore succeeds.
+The operator SHALL be able to relocate a cell whose node is lost onto other capacity, through cellctl, by recreating its volume and restoring the cell's latest backup before the cell starts. Relocation SHALL be operator-triggered, never automatic, and SHALL begin only once the old node's stop is confirmed by the same rule as node removal, or once the node has been gone from the cluster for at least five minutes. It SHALL then force the cell's pod off the old node, set the old volume's reclaim policy to Retain before deleting the claim, restore into a new claim, record the new volume identity, and start the cell only after the restore succeeds.
 
 After a node loss, recovery SHALL proceed in order:
 1. etcd, from its off-site snapshots, when the server node was lost, followed by reconciling volumes: a logical volume that matches a cell row's recorded volume identity SHALL be re-adopted by an operator step that binds that existing volume, with its data, to a recreated storage-driver volume object and persistent volume, and that releases the row's recorded identity only by compare-and-set on the matched identity, so that cellctl records the new one under its class and claim checks; a logical volume that matches no row SHALL be released only by an operator step on its host; a row whose volume cannot be re-adopted SHALL be relocated from its backup, and the identity check SHALL NOT be skipped;

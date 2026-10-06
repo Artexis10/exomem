@@ -476,7 +476,9 @@
     },
     "topolvm": {
       "type": "object",
+      "required": ["fullnameOverride"],
       "properties": {
+        "fullnameOverride": {"type": "string", "minLength": 1},
         "lvmd": {
           "type": "object",
           "properties": {

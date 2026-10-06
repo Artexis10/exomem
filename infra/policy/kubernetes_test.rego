@@ -61,3 +61,9 @@ test_a_second_privileged_container_in_the_named_daemonset_is_denied if {
   ]}}}})
   "DaemonSet/exomem-platform-topolvm-node uses a privileged container" in deny with input as two
 }
+
+test_an_unprivileged_container_on_another_image_in_the_named_daemonset_is_denied if {
+  sidecar := {"name": "sidecar", "image": "example.invalid/x@sha256:00"}
+  two := topolvm_node({"spec": {"template": {"spec": {"initContainers": [sidecar]}}}})
+  "DaemonSet/exomem-platform-topolvm-node runs a container on an image other than the pinned TopoLVM image" in deny with input as two
+}

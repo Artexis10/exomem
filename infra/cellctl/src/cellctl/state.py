@@ -43,6 +43,10 @@ RELOCATION_NO_BACKUP = "RELOCATION_NO_BACKUP"
 # initialise a blank vault over the tenant's. The operator re-adopts the volume
 # or marks it lost (docs/runbooks/cloud-node-loss.md).
 VOLUME_MISSING = "VOLUME_MISSING"
+# D4: a relocation step before the restore (the Retain patch or the claim
+# delete) was refused. A refusal does not resolve itself, so the relocation
+# ends for the operator, like RESTORE_FAILED, and no longer holds back others.
+RELOCATION_REFUSED = "RELOCATION_REFUSED"
 # move-cloud-cells-to-local-storage D5: cell-init's own value-free refusal,
 # read from its termination message. Only these codes ever reach the row.
 EMPTY_VOLUME_REFUSED = "CELL_INIT_EMPTY_VOLUME_REFUSED"
@@ -133,8 +137,13 @@ class ClusterObservation:
     # A local volume's node, from its PV's node affinity on the configured
     # topology key. None for a volume that is not node-local.
     pv_node: str | None = None
-    # D4: that node is lost: the operator tainted it out of service by the
-    # node-removal rule and it is not Ready, or it is gone from the API.
+    # D4, observed this pass: the operator tainted that node out of service
+    # by the node-removal rule and it is not Ready.
+    pv_node_stop_confirmed: bool = False
+    # D4, observed this pass: that node is not in the API.
+    pv_node_absent: bool = False
+    # D4, set by reconcile.py from the two above: the node is lost, so its
+    # cells relocate. Stop-confirmed, or absent for NODE_ABSENCE_GRACE.
     pv_node_lost: bool = False
 
     statefulset_exists: bool = False

@@ -77,3 +77,22 @@ def test_every_json_state_writer_goes_through_the_durable_path(
     write()
 
     assert len(written) == 1
+
+
+def test_the_commit_generation_still_advances_when_the_rename_keeps_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Windows reader that outlasts the rename's retry window must not leave
+    # the counter where it was: an unchanged counter admits a stale stamp.
+    path = writer_lease._commit_generation_path(tmp_path, "/vault")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("7", encoding="utf-8")
+
+    def refused(path: Path, text: str, **kwargs: object) -> None:
+        raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+
+    monkeypatch.setattr(durable_write, "replace_text", refused)
+
+    writer_lease._bump_commit_generation(tmp_path, "/vault")
+
+    assert path.read_text(encoding="utf-8") == "8"

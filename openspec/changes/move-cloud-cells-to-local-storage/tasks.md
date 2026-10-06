@@ -113,6 +113,7 @@
   - check large-vault restart latency against the existing gates.
 - [ ] 7.4 Migrate the remaining cells one at a time with the same acceptance.
 - [ ] 7.5 Update `docs/runbooks/cloud-operator-import.md`, which still cites the nightly 02:00–05:00 UTC backup window.
+- [ ] 7.6 Before the cutover (7.2), pin the Hetzner CSI controller to the server node, as the TopoLVM and snapshot controllers are: its token can attach any volume to any node. This moves a live production pod, so it ships on its own. Evidence: the controller pod's node, and a volume attach after the move.
 
 ## 8. Retire Hetzner volumes
 
