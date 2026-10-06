@@ -18,14 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_governance_egress import (
-    OPEN_PATH,
-    RESTRICTED_PATH,
-    _external,
-    _reset_caches,
-    write_rule,
-    write_scope,
-)
+from test_governance_egress import OPEN_PATH, RESTRICTED_PATH, _external, write_rule, write_scope
 from test_working_set_carry import seed_ordinary_notes
 
 from exomem import commands, lexstore, memory_refs, working_set_index, working_set_runtime
@@ -35,6 +28,8 @@ from exomem.governance.principal import request_scope
 TALIA_ID = "5b1d7c2e-8f4a-4c61-9e3b-7a2d6f0c9e14"
 TALIA = "Knowledge Base/Entities/People/Talia Verenko.md"
 OREN = "Knowledge Base/Entities/People/Oren Haldane.md"
+PELL = "Knowledge Base/Entities/People/Pell Mordaunt.md"
+QUILL = "Knowledge Base/Entities/People/Quill Aster.md"
 NOTE = "Knowledge Base/Notes/Failures/replica-migration-stall.md"
 TURN = "My teammate who had the replica migration stall last week pinged again."
 
@@ -68,10 +63,14 @@ def linked_vault(vault: Path) -> Path:
         "- [failure] Talia Verenko's migration stalled on the staging replica last week. ^r-stall\n\n"
         "## Context\n\nAffected teammate: [[Talia Verenko]]. Reviewer: [[Oren Haldane]].\n",
     )
+    _reindex(vault)
+    return vault
+
+
+def _reindex(vault: Path) -> None:
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
-    return vault
 
 
 def _anchors(packet: dict) -> dict[str, tuple[str, list[str]]]:
@@ -89,18 +88,53 @@ def test_a_person_the_carried_unit_names_is_listed_partial(linked_vault: Path) -
     assert not any("Oren" in str(a) for a in packet["anchors"]), anchors
 
 
-def test_a_person_the_reader_may_not_see_is_not_listed(linked_vault: Path) -> None:
-    write_scope(linked_vault, paths=TALIA, name="Withheld")
-    write_rule(linked_vault, ceiling=0)
-    _reset_caches()
-    working_set_runtime.reset_caches_for_tests()
+def test_the_people_a_unit_names_first_are_the_ones_listed(vault: Path) -> None:
+    """Two slots go to the unit's own subject first, not to catalogue order."""
+    seed_ordinary_notes(vault)
+    for rel, name in (
+        (TALIA, "Talia Verenko"),
+        (OREN, "Oren Haldane"),
+        (PELL, "Pell Mordaunt"),
+        (QUILL, "Quill Aster"),
+    ):
+        _write(vault, rel, _person(name, "Works on storage."))
+    _write(
+        vault,
+        NOTE,
+        "---\ntype: note\nstatus: active\nupdated: 2026-09-28\n---\n\n"
+        "# Replica migration stall\n\n## Summary\n\n"
+        "- [failure] Talia Verenko's migration stalled on the staging replica last week; "
+        "Oren Haldane, Pell Mordaunt and Quill Aster were on call. ^r-stall\n\n"
+        "## Context\n\n[[Oren Haldane]] [[Pell Mordaunt]] [[Quill Aster]] [[Talia Verenko]]\n",
+    )
+    _reindex(vault)
 
-    with request_scope(_external()):
-        packet = commands.op_activate_context(linked_vault, turn=TURN)
+    packet = commands.op_activate_context(vault, turn=TURN)
 
-    anchors = _anchors(packet)
-    assert NOTE in anchors, anchors
-    assert memory_refs.memory_ref(TALIA_ID) not in anchors and TALIA not in str(anchors)
+    listed = [a["path"] for a in packet["anchors"] if "carried_link" in a["evidence"]]
+    assert listed == [TALIA, OREN], packet["anchors"]
+
+
+def test_a_unit_too_long_to_serve_names_no_one(vault: Path) -> None:
+    """A unit the packet turns into a pointer was never served, so it lists no one."""
+    seed_ordinary_notes(vault)
+    _write(vault, TALIA, _person("Talia Verenko", "Works on storage."))
+    filler = " ".join(["the staging replica lag grew steadily"] * 30)
+    _write(
+        vault,
+        NOTE,
+        "---\ntype: note\nstatus: active\nupdated: 2026-09-28\n---\n\n"
+        "# Replica migration stall\n\n## Summary\n\n"
+        "- [decision] The migration moved to the staging replica last week. ^r-plain\n"
+        f"- [decision] Talia Verenko's migration moved to the staging replica; {filler}. ^r-long\n\n"
+        "## Context\n\nAffected teammate: [[Talia Verenko]].\n",
+    )
+    _reindex(vault)
+
+    packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert any(p.get("reason") == "unit_too_long" for p in packet["pointers"]), packet["pointers"]
+    assert not [a for a in packet["anchors"] if "carried_link" in a["evidence"]], packet["anchors"]
 
 
 def test_the_guard_removes_a_linked_anchor_with_the_page_it_came_through(vault: Path) -> None:
