@@ -368,7 +368,10 @@ def _routine_converge(
     changes_live: bool,
     refusal_parked: bool,
 ) -> Decision:
-    if observation.statefulset_exists:
+    # A cell that has served restarts on the image it ran, even when its
+    # StatefulSet is gone: the rollout target would be an upgrade with no
+    # pre-upgrade backup. Only a cell that never served starts on the target.
+    if observation.statefulset_exists or row.observed_image is not None:
         image = current_image(row, observation)
     else:
         image, error = _initial_image(row, rollout, cell_image)
