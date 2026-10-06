@@ -591,7 +591,7 @@ _HYDRATION_TYPES = (
 
 _ENTITY_TARGETS_SQL = (
     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
-    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+    "ON d.node_key = e.dst_page_key "
     "WHERE e.source_path = ? AND d.page_type = 'entity' AND d.path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     "ORDER BY d.path LIMIT ?"
@@ -609,14 +609,14 @@ _CONTRIBUTORS_SQL = (
     "f.title "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_key = ? AND e.source_path <> ? "
+    "WHERE e.dst_page_key = ? AND e.source_path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     f"AND {_NEWER_THAN} "
     f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
     f"AND COALESCE(f.lifecycle_status, '') NOT IN "
     f"({','.join('?' for _ in _INACTIVE_STATUSES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
-    "AND b.dst_key = ('file:' || e.source_path)) "
+    "AND b.dst_page_key = ('file:' || e.source_path)) "
     "ORDER BY e.source_path, e.src_key LIMIT ?"
 )
 

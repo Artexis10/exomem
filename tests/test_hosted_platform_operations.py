@@ -2554,6 +2554,7 @@ def test_runbook_index_is_complete_and_executable_by_default() -> None:
         "deletion",
         "node-replacement",
         "node-pool",
+        "dedicated-host",
         "break-glass",
     }
     assert set(contract["runbooks"]) == required

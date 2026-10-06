@@ -1,0 +1,162 @@
+---
+# The private link each node joins the cluster over (move-cloud-cells-to-local-storage
+# D8). Hetzner Cloud nodes keep the Cloud network. A dedicated Hetzner server
+# couples to it through a vSwitch VLAN. A server at another provider joins over
+# WireGuard, and then every K3s node peers with it. With neither in the
+# inventory this changes nothing.
+- name: Couple a dedicated Hetzner server to the Cloud network
+  when: k3s_vswitch is defined
+  block:
+    - name: Read the network facts
+      ansible.builtin.setup:
+        gather_subset: ["!all", "!min", network]
+
+    - name: Install the vSwitch VLAN
+      ansible.builtin.template:
+        src: vswitch-netplan.yaml.j2
+        dest: /etc/netplan/60-exomem-vswitch.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Apply netplan
+
+# Every node's key must exist before any node lists its peers, so the play
+# that includes this file runs without serial: each task reaches every host
+# before the next one starts.
+- name: Converge the WireGuard private link
+  when: k3s_wireguard_hosts | length > 0
+  block:
+    - name: Install WireGuard
+      ansible.builtin.apt:
+        name: wireguard-tools
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create the WireGuard configuration directory
+      ansible.builtin.file:
+        path: /etc/wireguard
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install the WireGuard key helper
+      ansible.builtin.copy:
+        src: exomem-wireguard-key.sh
+        dest: /usr/local/sbin/exomem-wireguard-key
+        owner: root
+        group: root
+        mode: "0755"
+
+    # The private key is created on the node and never leaves it. Deleting
+    # the key file and running site.yml rotates it on every peer.
+    - name: Create this node's WireGuard key and read its public key
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/exomem-wireguard-key, "{{ k3s_wireguard_interface }}"]
+      register: k3s_wireguard_pubkey
+      changed_when: "'created' in k3s_wireguard_pubkey.stderr"
+      notify: Restart WireGuard
+
+    - name: Publish this node's WireGuard public key to its peers
+      ansible.builtin.set_fact:
+        k3s_wireguard_public_key: "{{ k3s_wireguard_pubkey.stdout }}"
+
+    - name: Require every WireGuard peer in this run
+      ansible.builtin.assert:
+        that:
+          - k3s_wireguard_peers | map('extract', hostvars) | selectattr('k3s_wireguard_public_key', 'defined')
+            | list | length == k3s_wireguard_peers | length
+          - k3s_wireguard_hosts | map('extract', hostvars) | selectattr('public_ipv4', 'defined')
+            | list | length == k3s_wireguard_hosts | length
+        fail_msg: >-
+          WireGuard peers are missing from this run; run site.yml without --limit
+          so every node learns every peer's key.
+
+    # A key is whatever a peer's helper printed. Prevents: root on one node
+    # writing configuration (a PreUp command) into every other node's
+    # wg-quick file. Fires wrongly: never for a key wg pubkey printed.
+    - name: Refuse a WireGuard key that is not exactly one public key
+      ansible.builtin.assert:
+        that:
+          - k3s_wireguard_peer_keys | reject('match', '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$') | list | length == 0
+          - k3s_wireguard_peer_keys | map('length') | reject('equalto', 44) | list | length == 0
+        fail_msg: A WireGuard peer published something other than one public key; nothing was configured.
+      vars:
+        k3s_wireguard_peer_keys: "{{ k3s_wireguard_peers | map('extract', hostvars, 'k3s_wireguard_public_key') | list }}"
+
+    # Addresses are rendered into PostUp, AllowedIPs and Endpoint lines that
+    # wg-quick evaluates as root. Defence in depth behind inject_facts_as_vars:
+    # each must be exactly one dotted-quad IPv4 address, and no two nodes share
+    # a private one.
+    - name: Refuse a peer address that is not exactly one IPv4 address
+      ansible.builtin.assert:
+        that:
+          - k3s_wireguard_addresses | reject('string') | list | length == 0
+          - k3s_wireguard_addresses | map('trim') | list == k3s_wireguard_addresses
+          - >-
+            k3s_wireguard_addresses | reject('match',
+            '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$')
+            | list | length == 0
+          - k3s_wireguard_private_ips | unique | length == k3s_wireguard_private_ips | length
+        fail_msg: A WireGuard peer's address is not exactly one IPv4 address, or two nodes share one; nothing was configured.
+      vars:
+        k3s_wireguard_private_ips: >-
+          {{ ([inventory_hostname] + k3s_wireguard_peers) | map('extract', hostvars, 'private_node_ip') | list }}
+        k3s_wireguard_addresses: >-
+          {{ k3s_wireguard_private_ips
+             + (k3s_wireguard_hosts | map('extract', hostvars, 'public_ipv4') | list) }}
+
+    - name: Configure the WireGuard interface and its peers
+      ansible.builtin.template:
+        src: wireguard.conf.j2
+        dest: /etc/wireguard/{{ k3s_wireguard_interface }}.conf
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Restart WireGuard
+
+    # WireGuard answers nothing that is not signed by a configured peer, so
+    # the port is open to any source; the other nodes reach it from their
+    # public addresses.
+    - name: Admit WireGuard on a node outside the Hetzner network
+      community.general.ufw:
+        rule: allow
+        port: "{{ k3s_wireguard_port | string }}"
+        proto: udp
+        comment: Exomem WireGuard private link
+      when: inventory_hostname in k3s_wireguard_hosts
+
+    - name: Enable the WireGuard interface
+      ansible.builtin.systemd_service:
+        name: wg-quick@{{ k3s_wireguard_interface }}
+        enabled: true
+        state: started
+
+# Removing the last WireGuard host leaves no peer, so every other node takes
+# its interface down rather than keep a tunnel to a server that is gone.
+- name: Retire the WireGuard private link
+  when: k3s_wireguard_hosts | length == 0
+  block:
+    - name: Look for a WireGuard configuration left by a removed host
+      ansible.builtin.stat:
+        path: /etc/wireguard/{{ k3s_wireguard_interface }}.conf
+        get_checksum: false
+      register: k3s_wireguard_leftover
+
+    - name: Stop the WireGuard interface
+      ansible.builtin.systemd_service:
+        name: wg-quick@{{ k3s_wireguard_interface }}
+        enabled: false
+        state: stopped
+      when: k3s_wireguard_leftover.stat.exists
+
+    - name: Remove the WireGuard configuration and key
+      ansible.builtin.file:
+        path: /etc/wireguard/{{ k3s_wireguard_interface }}.{{ item }}
+        state: absent
+      loop: [conf, key]
+      when: k3s_wireguard_leftover.stat.exists
+
+- name: Apply the private link before any node resolves its private interface
+  ansible.builtin.meta: flush_handlers

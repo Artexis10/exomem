@@ -11,6 +11,7 @@
     "deletion": {"path": "docs/runbooks/hosted/deletion.md", "destructive": true, "approval_flag": "--allow-destructive"},
     "node-replacement": {"path": "docs/runbooks/hosted/node-replacement.md", "destructive": true, "approval_flag": "--allow-destructive"},
     "node-pool": {"path": "docs/runbooks/hosted/node-pool.md", "destructive": true, "approval_flag": "--allow-destructive"},
+    "dedicated-host": {"path": "docs/runbooks/hosted/dedicated-host.md", "destructive": true, "approval_flag": "wipe"},
     "break-glass": {"path": "docs/runbooks/hosted/break-glass.md", "destructive": false, "approval_flag": ""}
   }
 }
