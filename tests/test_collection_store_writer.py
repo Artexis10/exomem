@@ -457,3 +457,26 @@ def test_provenance_is_rechecked_at_precommit(store, monkeypatch):
         store.append_record(CID, item={"title": "One"}, why="capture", sources=(source,))
     assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
     assert chain.verify_store_chain(store.connection)[0] == 1
+
+
+def test_control_transition_chains_without_changing_the_collection_and_splits_large_id_lists(store, monkeypatch):
+    # The importer's job states and reconcile record through this API: each part must
+    # advance the store chain, keep the collection unchanged and pass its own receipt check.
+    create(store)
+    before = store.connection.execute(
+        "SELECT generation, manifest_version, audit_head FROM collections").fetchone()
+    monkeypatch.setattr(mutation_terminal, "CONTROL_RECEIPT_MAX_IDS", 2)
+
+    receipts = store.record_control_transition(
+        "store_reconcile",
+        {CID: {"counts": {"held": 3}, "ids": {"held_ids": ["a1", "a2", "a3"]}}},
+        why="reconcile",
+    )
+
+    assert [receipt["ids"]["held_ids"] for receipt in receipts] == [["a1", "a2"], ["a3"]]
+    assert [receipt["counts"] for receipt in receipts] == [
+        {"held": 3, "part": 1, "parts": 2}, {"held": 3, "part": 2, "parts": 2}]
+    assert all(mutation_terminal.valid_control_receipt(receipt) for receipt in receipts)
+    assert chain.verify_store_chain(store.connection)[0] == receipts[-1]["commit_seq"] == 3
+    assert store.connection.execute(
+        "SELECT generation, manifest_version, audit_head FROM collections").fetchone() == before

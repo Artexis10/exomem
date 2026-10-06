@@ -27,22 +27,24 @@ logger = logging.getLogger(__name__)
 PUBLISH_INTERVAL_SECONDS = 60.0
 #: A burst of commits shares one publication once writes pause this long.
 PUBLISH_SETTLE_SECONDS = 1.0
-#: The `_Collections/` watch (A4): stat the replica every tick, hash it at least this often.
+#: The `_Collections/` watch (A4): stat the replica every tick; hash it only when that changes.
 WATCH_SECONDS = 1.0
-WATCH_DIGEST_SECONDS = 10.0
 _BUSY_RETRY_SECONDS = 0.05
-# Admitted runtimes by vault, for the synchronous portability-export flush.
+# Producer-bound runtimes by vault: the export flush and the in-service owner route find them.
 _SERVING = weakref.WeakValueDictionary()
 
 
 class _Publisher:
     """Coalesced off-ack replica publication and the `_Collections/` watch for one admitted store.
 
-    Publication goes through the lease manager's idle-instant quiescence, so it never
-    delays an acknowledgement; a busy store defers it. The watch hashes the replica
-    against the digest this instance last published, so a foreign rewrite is found
-    even when it keeps inode, size and mtime. The publisher's own check-then-swap then
-    records the divergence and preserves the foreign bytes; the watch decides nothing.
+    Publication starts only at an idle instant, so it never delays an acknowledgement
+    already in progress. It then holds the vault-wide mutation boundary for its whole
+    duration: a write that arrives meanwhile, a file-collection write included, waits
+    for it and refuses MUTATION_BUSY when it outlasts the mutation timeout. The watch
+    hashes the replica against the digest this instance last published when its stat
+    signature changes. A foreign rewrite that keeps inode, size and mtime is found by
+    the next publication's check-then-swap, which records the divergence and preserves
+    the foreign bytes; the watch decides nothing.
     """
 
     def __init__(self, runtime):
@@ -52,7 +54,7 @@ class _Publisher:
         self.published = None  # last coalesced publication, monotonic
         self.foreign = False
         self.retry = None
-        self.signature = self.hashed = None
+        self.signature = None
         threading.Thread(target=self.run, name="exomem-collection-replica", daemon=True).start()
 
     def note_commit(self):
@@ -95,10 +97,9 @@ class _Publisher:
     def tick(self):
         runtime, manager = self.runtime, self.runtime.manager
         token = manager._fencing_token
-        # Release already flushed, an unadmitted takeover rechecks the replica itself and a
-        # diverged store waits for the owner: none of them has anything to publish.
-        if (token is None or not runtime.reporting_ready(token)
-                or runtime._meta(schema.META_REPLICA_DIVERGENCE) != [None]):
+        # Release already flushed and an unadmitted takeover rechecks the replica itself:
+        # neither has anything to publish.
+        if token is None or not runtime.reporting_ready(token):
             with self.condition:
                 self.dirty, self.foreign = None, False
             return
@@ -109,6 +110,11 @@ class _Publisher:
             if due is None or due > now:
                 return
             dirty, foreign = self.dirty, self.foreign
+        # A diverged store waits for the owner; the store is read only when something is due.
+        if runtime._meta(schema.META_REPLICA_DIVERGENCE) != [None]:
+            with self.condition:
+                self.dirty, self.foreign = None, False
+            return
         if not foreign and runtime.replica_current():
             with self.condition:
                 if self.dirty == dirty:
@@ -125,11 +131,10 @@ class _Publisher:
     def watch(self):
         from .takeover import replica_signature
 
-        signature, now = replica_signature(self.runtime.root), time.monotonic()
-        if (signature == self.signature and self.hashed is not None
-                and now - self.hashed < WATCH_DIGEST_SECONDS):
+        signature = replica_signature(self.runtime.root)
+        if signature == self.signature:
             return
-        self.signature, self.hashed = signature, now
+        self.signature = signature
         if not self.runtime.replica_matches():
             with self.condition:
                 self.foreign = True
@@ -138,21 +143,42 @@ class _Publisher:
 def flush_for_export(vault_root, *, timeout=30.0):
     """Synchronously publish the replica of an admitted store this process serves.
 
-    A vault with no admitted store here has nothing newer than its replica: release
-    and shutdown already flushed it. Returns the flushed head or None.
+    Returns the flushed head, or None when no flush runs here and the replica already
+    carries the live head. When this process cannot flush (no admitted store, a lost
+    lease or lost custody) and the live store is ahead of the head it last published,
+    it refuses FLUSH_PENDING rather than let an export drop acknowledged rows.
     """
-    runtime = _SERVING.get(Path(vault_root).resolve())
-    if runtime is None:
-        return None
-    token = runtime.manager._fencing_token
-    if token is None or not runtime.reporting_ready(token):
-        return None
-    head = runtime.manager._release_collection_store(
-        token, deadline=time.monotonic() + timeout, release=False)
-    if not head:
+    root = Path(vault_root).resolve()
+    runtime = _SERVING.get(root)
+    token = None if runtime is None else runtime.manager._fencing_token
+    if token is not None and runtime.reporting_ready(token):
+        head = runtime.manager._release_collection_store(
+            token, deadline=time.monotonic() + timeout, release=False)
+        if not head:
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_FLUSH_PENDING", "the replica could not be flushed before export")
+        return head
+    path = connection.store_path(root)
+    if path.exists() and not _replica_carries_live_head(path):
         raise connection.CollectionStoreError(
-            "COLLECTION_STORE_FLUSH_PENDING", "the replica could not be flushed before export")
-    return head
+            "COLLECTION_STORE_FLUSH_PENDING",
+            "the live store is ahead of its published replica and this process cannot flush it")
+    return None
+
+
+def _replica_carries_live_head(path):
+    """Whether the replica this store last published carries its committed head."""
+    with closing(connection.open_reader(path)) as reader:
+        reader.execute("BEGIN")
+        meta = dict(reader.execute("SELECT key,value FROM store_meta"))
+    sequence, head = int(meta[schema.META_COMMIT_SEQ]), meta.get(schema.META_STORE_HEAD_HASH)
+    published = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
+    if published is not None:
+        return (published["commit_seq"], published["head_hash"]) == (sequence, head)
+    # A tenure adopted at this head has published nothing new since the replica it adopted.
+    entry = json.loads(meta[schema.META_LINEAGE])[-1]
+    return sequence == 0 or (meta.get(schema.META_LAST_PUBLISHED_REPLICA_SHA256) is not None
+                             and entry["adopted_from"] is not None and entry["adopted_at_commit_seq"] == sequence)
 
 
 class _Scope:
@@ -274,6 +300,8 @@ class CollectionStoreRuntime:
         self._takeover = None
         # A producer re-derives custody for each publication, which writes into the vault.
         self._publication_custody = None
+        # The producer session that bound this runtime, if any (the in-service owner route).
+        self._session = None
         # The last admitted token published its head when it released the lease.
         self._handed_off = False
         self._publisher = None
@@ -297,7 +325,6 @@ class CollectionStoreRuntime:
         self._handed_off = False
         if self._publisher is None:
             self._publisher = _Publisher(self)
-            _SERVING[self.root] = self
 
     def _meta(self, *keys):
         with closing(connection.open_reader(self.path)) as reader:
@@ -349,10 +376,11 @@ class CollectionStoreRuntime:
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
         token = self.manager._fencing_token
         if token is not None and self.reporting_ready(token):
-            (divergence,) = self._meta(schema.META_REPLICA_DIVERGENCE)
-            if divergence is not None:
+            divergence, view = self._meta(schema.META_REPLICA_DIVERGENCE, schema.META_VIEW_DIVERGED)
+            if divergence is not None or view is not None:
                 return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True,
-                        "reason": json.loads(divergence)["reason"]}
+                        "reason": json.loads(divergence)["reason"] if divergence is not None
+                        else "a view carries another store instance's stamp"}
             return {"status": "admitted"}
         return self._takeover.status() if self._takeover is not None else {"status": "unadmitted"}
 

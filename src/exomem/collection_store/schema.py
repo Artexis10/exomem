@@ -51,6 +51,8 @@ META_LAST_PUBLISHED_REPLICA_SHA256 = "last_published_replica_sha256"
 META_PENDING_REPLICA_PUBLICATION = "pending_replica_publication"
 META_PUBLISHED_REPLICA_HEAD = "published_replica_head"
 META_REPLICA_DIVERGENCE = "replica_divergence"
+# "1" while a view carries another store instance's stamp; business writes refuse until adopt-local or reconcile.
+META_VIEW_DIVERGED = "diverged"
 # Owner adopt-local: the previewed foreign replica digest the next publication keeps as evidence.
 META_ADOPTED_FOREIGN_REPLICA = "adopted_foreign_replica"
 # Digests of foreign evidence already reconciled into held corrections.

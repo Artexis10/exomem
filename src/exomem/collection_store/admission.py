@@ -128,8 +128,12 @@ class _ProducerSession:
         self.manager = manager
 
     def runtime(self, *, retire=True):
-        """This session's runtime; ``retire`` closes its idle writer so a direct writer can open."""
-        from .runtime import CollectionStoreRuntime
+        """This session's runtime; ``retire`` closes its idle writer so a direct writer can open.
+
+        The first live session in this process that binds a vault serves it: the export
+        flush and the in-service owner route find its runtime through ``_SERVING``.
+        """
+        from .runtime import _SERVING, CollectionStoreRuntime
 
         runtime = self.manager._collection_store
         if runtime is None:
@@ -137,6 +141,10 @@ class _ProducerSession:
                                              _bootstrap=True)
         if runtime.root != self.root or not runtime._bootstrap:
             raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "foreign runtime binding")
+        runtime._session = self
+        serving = _SERVING.get(self.root)
+        if serving is None or serving._session is None or not serving._session.check():
+            _SERVING[self.root] = runtime
         if self.fence_client is not None and runtime._resolver is None:
             runtime._resolver = lambda: _resolve(self)
         runtime._publication_custody = lambda token: _publication_custody(self, token)
@@ -358,13 +366,18 @@ def adopt_local(session, manager, *, why, fence_client, preview_id=None):
 
     Without ``preview_id`` it only previews. Applying records the fork point and a new
     lineage tenure, clears the divergence it previewed, keeps the previewed foreign
-    bytes as ``.foreign-*`` evidence and republishes; a changed store, replica or
-    recorded head refuses as stale. Reconcile later holds the other side's changes.
+    bytes as ``.foreign-*`` evidence, removes the abandoned publication's workspace and
+    republishes; a changed store, replica or recorded head refuses as stale. The
+    recorded head is the coordinator's fresh status, as the lease-free preview reads it.
+    The runtime takes the new identity at once and re-resolves at its next use, so a
+    service applying this keeps its lease and its writes. Reconcile later holds the
+    other side's changes.
     """
     runtime, fence = _owner_operation(session, manager, fence_client, why)
     with manager.writer_authority_guard(vault_root=session.root):
         token = manager._fencing_token
-        recorded = _acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head
+        _acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED")
+        recorded = manager.client.status().collection_store_head
         with manager.consistency_guard(session.root, operation="collection_store_adopt_local"):
             sealed = owner.adopt_local_preview(session.root, recorded=recorded)
             if preview_id is None:
@@ -375,14 +388,25 @@ def adopt_local(session, manager, *, why, fence_client, preview_id=None):
                 return {"status": "in_sync", **sealed}
             if not runtime.retire_idle_handle():
                 raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+            abandoned = sealed["preview"]["abandoned_publication"]
             with session.writer(token) as writer:
                 with writer.handle.transaction(resolve_divergence=True) as conn:
-                    runtime._identity = owner.record_fork(conn, sealed["preview"], why=why, token=token)
+                    (predecessor,) = conn.execute("SELECT value FROM store_meta WHERE key=?", (
+                        schema.META_LAST_PUBLISHED_REPLICA_SHA256,)).fetchone() or (None,)
+                    identity = owner.record_fork(conn, sealed["preview"], why=why, token=token)
+                with manager._report_lock:
+                    runtime._identity = identity
+                    # A pending takeover verdict described the old tenure.
+                    runtime._takeover = None
+                kept = None if abandoned is None else replica.discard_abandoned_publication(
+                    session.root, writer.handle, abandoned, predecessor=predecessor,
+                    authority_check=_publication_authority(session, token), deadline=time.monotonic() + 30)
                 published = _publish_current_epoch(session, writer, token)
+        workspace = {} if abandoned is None else {"abandoned_workspace": kept or "removed"}
         if published.status != "published":
-            return {"status": "pending", "reason": published.reason or published.status, **sealed}
+            return {"status": "pending", "reason": published.reason or published.status, **workspace, **sealed}
         manager._renew_collection_store(token)
-        return {"status": "adopted", "instance_id": runtime._identity[1], **sealed}
+        return {"status": "adopted", "instance_id": identity[1], **workspace, **sealed}
 
 
 def reconcile_store(session, manager, *, why, fence_client, preview_id=None):
@@ -410,8 +434,7 @@ def reconcile_store(session, manager, *, why, fence_client, preview_id=None):
             if not runtime.retire_idle_handle():
                 raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
             with session.writer(token) as writer:
-                result = writer.hold_store_delta(
-                    items, reconciled=[source["sha256"] for source in sealed["preview"]["sources"]], why=why)
+                result = writer.hold_store_delta(items, reconciled=sealed["preview"]["reconciled"], why=why)
     return {"status": "held", **result, **sealed}
 
 
@@ -434,14 +457,50 @@ def _route_step(root):
     return "adopt-local", adopt
 
 
+def _serving_session(root):
+    """This process's producer session serving ``root`` under a held lease, or None."""
+    from .runtime import _SERVING
+
+    runtime = _SERVING.get(root)
+    session = None if runtime is None else runtime._session
+    if (session is None or session.manager is not runtime.manager
+            or runtime.manager._fencing_token is None or not session.check()):
+        return None
+    return session
+
+
+def _require_no_service(config):
+    """Refuse an out-of-service apply while any holder's lease is live (A11, as `collections migrate`).
+
+    Taking the lease beside a running service would hand its token back under it and
+    change the store identity it serves.
+    """
+    record = writer_lease.LeaseCoordinatorClient(config).status()
+    if record.holder is not None and record.expires_at is not None and record.expires_at > time.time():
+        raise CollectionStoreError(
+            "COLLECTION_STORE_SERVICE_ACTIVE",
+            f"a service ({record.holder}) holds this vault's writer lease; apply through its "
+            "maintain_memory(mode=\"collections-store-adopt-local\") or stop it first")
+
+
+def _apply_step(session, manager, fence_client, step, *, why, preview_id):
+    if step == "adopt-local":
+        return adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
+    open_store(session, manager, fence_client=fence_client)
+    return reconcile_store(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
+
+
 def adopt_local_route(vault_root, *, why=None, preview_id=None):
     """The one owner route behind `exomem collections adopt-local` and its maintain_memory mode (A3).
 
     Preview-first: the preview reads without the writer lease and names its step,
     adopt-local or, once this store continues, reconciling preserved foreign evidence
     into held corrections. Applying runs that step's `adopt_local` or `reconcile_store`
-    with ``preview_id`` in this process's own producer session, under the configured
-    lease, and hands the lease back with the flushed head.
+    with ``preview_id``. In a process that serves the vault (the service answering
+    maintain_memory) it runs on that service's own session and lease, which it keeps.
+    Elsewhere (the CLI) it refuses while any service holds the lease; otherwise it runs
+    in its own producer session under the configured lease and hands the lease back
+    with the flushed head.
     """
     from ..governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -451,19 +510,27 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None):
     root = Path(vault_root).resolve()
     step, sealed = _route_step(root)
     if preview_id is None:
+        if sealed["preview"].get("recorded_head") == owner.UNKNOWN:
+            return {"step": step, **sealed, "warnings": [
+                "no writer lease is configured here, so the coordinator's head was not read; "
+                "an apply needs a preview taken with the configured writer lease"]}
         return {"step": step, **sealed}
+    serving = _serving_session(root)
+    if serving is not None:
+        fence_client = serving.fence_client or writer_lease.configured_schema_fence_operator_client()
+        if fence_client is None:
+            raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
+        return {"step": step, **_apply_step(serving, serving.manager, fence_client, step, why=why,
+                                            preview_id=preview_id)}
     fence_client = writer_lease.configured_schema_fence_operator_client()
     if fence_client is None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
+    config = writer_lease.LeaseConfig.from_env()
+    _require_no_service(config)
     with production_session(root) as session:
-        manager = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+        manager = writer_lease.LeaseManager(config)
         try:
-            if step == "adopt-local":
-                result = adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
-            else:
-                open_store(session, manager, fence_client=fence_client)
-                result = reconcile_store(session, manager, why=why, fence_client=fence_client,
-                                         preview_id=preview_id)
+            result = _apply_step(session, manager, fence_client, step, why=why, preview_id=preview_id)
         except BaseException:
             # The refusal is the answer; an unadmitted token keeps its lease until it expires.
             with suppress(Exception):
@@ -633,14 +700,18 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
             raise
 
 
+def _publication_authority(session, token):
+    def check():
+        session.manager._renew_collection_store(token, due_only=True)
+        return session.require(token)
+
+    return check
+
+
 def _publish_current_epoch(session, writer, token):
     manager = session.manager
     deadline = time.monotonic() + 30
-
-    def check():
-        manager._renew_collection_store(token, due_only=True)
-        return session.require(token)
-
+    check = _publication_authority(session, token)
     if not _publication_custody(session, token):
         return replica.PublicationResult("custody_unverified", reason=session.custody_reason)
     pending = replica.recover_replica(session.root, writer.handle, authority_check=check, deadline=deadline)

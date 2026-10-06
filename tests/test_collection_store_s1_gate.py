@@ -2,11 +2,12 @@
 
 Every case drives the real writer lease against a real coordinator database and
 the production producer session on a real vault path. Restarts and other hosts
-are separate processes with their own state roots; older-reader cases run the
+are spawned interpreters with their own state roots; older-reader cases run the
 actual older interpreter. Cases owned by a later slice are strict xfails naming
 it. No case may let C fall back to files, migrate A/B or expose a half-created C.
 """
 
+import functools
 import hashlib
 import json
 import multiprocessing
@@ -46,11 +47,8 @@ A_PATH = manifest_path("records").replace("Work", "Legacy")
 B_PATH = manifest_path("planning").replace("Work", "Legacy")
 ROW = "33333333-3333-4333-8333-333333333333"
 LATER = "44444444-4444-4444-8444-444444444444"
+ONLY_ON_COPY = "55555555-5555-4555-8555-555555555555"
 OLDER = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
-# Other hosts are forked processes; the context is created only inside run_host, so the
-# module still imports (and its fork-free cases still run) where fork does not exist.
-requires_fork = pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(),
-                                   reason="requires fork")
 
 
 @contextmanager
@@ -121,26 +119,30 @@ def host(root, base, name, *, vault_id="gate"):
                 runtime._handle.close()
 
 
+def _host_main(sender, state, base, name, action, root, database, vault_id):
+    """One other host: a fresh interpreter with its own state root, lease state and session."""
+    os.environ["EXOMEM_STATE_ROOT"] = str(state)
+    # The parent's `ab` fixture patches these; a spawned interpreter applies them again.
+    records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
+    try:
+        with coordinator(database), host(root, base, name, vault_id=vault_id) as found:
+            sender.send(("ok", action(found)))
+    except BaseException as error:  # noqa: BLE001 - reported to the parent assertion
+        sender.send(("error", f"{type(error).__name__}: {error}"))
+        os._exit(1)
+    os._exit(0)
+
+
 def run_host(base, state, name, action, *, root=None, database=None, vault_id="gate", exit_code=0):
-    """Run one host in a fresh process: its own state root, lease state and session."""
-    fork = multiprocessing.get_context("fork")
-    receiver, sender = fork.Pipe(duplex=False)
-
-    def main():
-        os.environ["EXOMEM_STATE_ROOT"] = str(state)
-        try:
-            with coordinator(database or base / "coordinator.sqlite"), \
-                    host(root or base / "vault", base, name, vault_id=vault_id) as found:
-                sender.send(("ok", action(found)))
-        except BaseException as error:  # noqa: BLE001 - reported to the parent assertion
-            sender.send(("error", f"{type(error).__name__}: {error}"))
-            os._exit(1)
-        os._exit(0)
-
-    child = fork.Process(target=main)
+    """Run one host in a spawned interpreter; ``action`` is a module-level function or a partial of one."""
+    spawn = multiprocessing.get_context("spawn")
+    receiver, sender = spawn.Pipe(duplex=False)
+    child = spawn.Process(target=_host_main, args=(
+        sender, state, base, name, action, root or base / "vault", database or base / "coordinator.sqlite",
+        vault_id))
     child.start()
     sender.close()
-    child.join(90)
+    child.join(120)
     try:
         assert not child.is_alive(), "host process did not finish"
         try:
@@ -207,21 +209,6 @@ def abc(ab):
 # --- slice 1: production session, custody and create ---------------------------------
 
 
-def test_gate_imports_where_fork_does_not_exist(monkeypatch):
-    """Defect: importing the gate creates a fork context, so a fork-less platform cannot collect it."""
-    import importlib.util
-
-    def no_fork(method=None):
-        raise ValueError(f"cannot find context for {method!r}")
-
-    monkeypatch.setattr(multiprocessing, "get_context", no_fork)
-    monkeypatch.setattr(multiprocessing, "get_all_start_methods", lambda: ["spawn"])
-    spec = importlib.util.spec_from_file_location("gate_without_fork", __file__)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.requires_fork.args == (True,)
-
-
 def test_abc_reads_guarded_writes_and_audit_follow_each_authority(abc):
     """Defect: a production-created C writes into files, or A/B rows are diverted into the store."""
     root = abc.root
@@ -264,26 +251,29 @@ def test_precommit_failure_leaves_no_c_scaffold_marker_or_fence(ab, monkeypatch)
     assert not ab.operator.collection_store_fence().enrolled
 
 
-@requires_fork
+def _crash_around_cutover(cut, found):
+    rename = found.session.fs.rename
+
+    def cut_marker(source, parent, leaf, **kwargs):
+        if leaf != "mode.json":
+            return rename(source, parent, leaf, **kwargs)
+        if cut == "after":
+            rename(source, parent, leaf, **kwargs)
+        os._exit(73)
+
+    found.session.fs.rename = cut_marker
+    create_c(found)
+
+
+def _resume_create(found):
+    return admission.resume_local(found.session, found.manager, fence_client=found.operator)
+
+
 @pytest.mark.parametrize("cut", ["before", "after"])
 def test_crash_around_marker_cutover_recovers_the_same_create_once(ab, cut, tmp_path):
     """Defect: a restarted process re-executes C's create, loses its receipt or leaves C half-routed."""
     before = ab_bytes(ab.root)
-
-    def crash(found):
-        rename = found.session.fs.rename
-
-        def cut_marker(source, parent, leaf, **kwargs):
-            if leaf != "mode.json":
-                return rename(source, parent, leaf, **kwargs)
-            if cut == "after":
-                rename(source, parent, leaf, **kwargs)
-            os._exit(73)
-
-        found.session.fs.rename = cut_marker
-        create_c(found)
-
-    run_host(tmp_path, tmp_path / "state", "host-a", crash, exit_code=73)
+    run_host(tmp_path, tmp_path / "state", "host-a", functools.partial(_crash_around_cutover, cut), exit_code=73)
     with closing(connection.open_reader(ab.session.path)) as reader:
         intent = authority.pending_create(reader)
         assert reader.execute("SELECT count(*) FROM txns").fetchone() == (1,)
@@ -292,9 +282,7 @@ def test_crash_around_marker_cutover_recovers_the_same_create_once(ab, cut, tmp_
     assert marker == (None if cut == "before" else intent["target_marker"].encode())
     assert not (ab.root / manifest_path()).exists()
 
-    result = run_host(tmp_path, tmp_path / "state", "host-a",
-                      lambda found: admission.resume_local(found.session, found.manager,
-                                                           fence_client=found.operator))
+    result = run_host(tmp_path, tmp_path / "state", "host-a", _resume_create)
     assert result["status"] == "marker_admitted"
     assert result["txn_id"] == intent["txn_id"]
     with closing(connection.open_reader(ab.session.path)) as reader:
@@ -401,36 +389,34 @@ def test_older_interpreter_refuses_the_newer_store_schema(abc):
 # --- slice 2: restart, takeover, lag, divergence and copied-vault adoption ---------------
 
 
-@requires_fork
+def _restart(found):
+    return found.open(), found.write_c(LATER, "After restart")["outcome"], found.meta()
+
+
 def test_restart_reacquires_its_own_head_without_waiting(abc, tmp_path):
     """Defect: a restarted host waits on, re-adopts or refuses its own recorded head."""
     instance = abc.meta()[schema.META_INSTANCE_ID]
     abc.release()
-
-    def restart(found):
-        return found.open(), found.write_c(LATER, "After restart")["outcome"], found.meta()
-
-    status, outcome, meta = run_host(tmp_path, tmp_path / "state", "host-a", restart)
+    status, outcome, meta = run_host(tmp_path, tmp_path / "state", "host-a", _restart)
     assert status == {"status": "admitted"} and outcome == "committed"
     assert meta[schema.META_INSTANCE_ID] == instance
 
 
-@requires_fork
+def _handoff_on_b(found):
+    status = found.open()
+    rows = found.read_c()
+    found.write_c(LATER, "From B")
+    meta = found.meta()
+    found.release()
+    return status, rows, meta
+
+
 def test_lease_handoff_adopts_the_newer_replica_in_both_directions(abc, tmp_path):
     """Defect: a new holder writes on its stale local store instead of adopting the recorded head."""
     first = abc.meta()[schema.META_INSTANCE_ID]
     before = ab_bytes(abc.root)
     abc.release()
-
-    def host_b(found):
-        status = found.open()
-        rows = found.read_c()
-        found.write_c(LATER, "From B")
-        meta = found.meta()
-        found.release()
-        return status, rows, meta
-
-    status, rows, meta = run_host(tmp_path, tmp_path / "state-b", "host-b", host_b)
+    status, rows, meta = run_host(tmp_path, tmp_path / "state-b", "host-b", _handoff_on_b)
     assert status == {"status": "admitted"} and rows == ["Canonical"]
     lineage = json.loads(meta[schema.META_LINEAGE])
     assert first in {entry["instance_id"] for entry in lineage}
@@ -469,16 +455,36 @@ def _held_read(found):
         thread.join(30)
 
 
-@requires_fork
+def _adopt_and_release(found):
+    assert found.open() == {"status": "admitted"}
+    found.release()
+
+
+def _behind(found):
+    pending = found.open()
+    takeover.RECHECK_SECONDS = 0  # every checkout re-resolves while another thread borrows
+    rows = _held_read(found)
+    refusal = refused(lambda: found.write_c(LATER, "Lost write"), "COLLECTION_STORE_SYNC_PENDING")
+    with preview_store(found.root, found.manager._collection_store):
+        file_write = found.write_a("A while C waits")
+    found.release()
+    found.write_a("A on a later token")
+    found.release()  # a later token than the resolving one still hands the lease back
+    return pending, rows, refusal, file_write
+
+
+def _delivery(delivered, found):
+    takeover.ATTENTION_SECONDS = 0
+    found.open()
+    attention = found.manager.status()["collection_store"]["attention"]
+    replica.replica_path(found.root).write_bytes(delivered)
+    return attention, found.write_c(LATER, "After delivery")["outcome"], found.read_c()
+
+
 def test_lagging_replica_is_sync_pending_with_reads_until_delivery(abc, tmp_path):
     """Defect: a holder behind the recorded head writes over it, blocks reads, A/B or the lease, or never rechecks."""
     abc.release()
-
-    def adopt_and_release(found):
-        assert found.open() == {"status": "admitted"}
-        found.release()
-
-    run_host(tmp_path, tmp_path / "state-b", "host-b", adopt_and_release)
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _adopt_and_release)
     lagging = replica.replica_path(abc.root).read_bytes()
     assert abc.write_c(KEY, "Newer on A")["outcome"] == "committed"
     # B handed back the head A already had: A records its tenure in place, no re-adoption.
@@ -486,65 +492,44 @@ def test_lagging_replica_is_sync_pending_with_reads_until_delivery(abc, tmp_path
     abc.release()
     delivered = replica.replica_path(abc.root).read_bytes()
     replica.replica_path(abc.root).write_bytes(lagging)
-
-    def behind(found):
-        pending = found.open()
-        takeover.RECHECK_SECONDS = 0  # every checkout re-resolves while another thread borrows
-        rows = _held_read(found)
-        refusal = refused(lambda: found.write_c(LATER, "Lost write"), "COLLECTION_STORE_SYNC_PENDING")
-        with preview_store(found.root, found.manager._collection_store):
-            file_write = found.write_a("A while C waits")
-        found.release()
-        found.write_a("A on a later token")
-        found.release()  # a later token than the resolving one still hands the lease back
-        return pending, rows, refusal, file_write
-
-    pending, rows, refusal, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b", behind)
+    pending, rows, refusal, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b", _behind)
     assert pending["status"] == "sync_pending"
     assert (pending["recorded_commit_seq"], pending["local_commit_seq"]) == (3, 2)
     assert rows == ["Canonical"]
     assert "adopt-local" in refusal and file_write == "committed"
     assert abc.write_a("A while B waits") == "committed"
     abc.release()
-
-    def delivery(found):
-        takeover.ATTENTION_SECONDS = 0
-        found.open()
-        attention = found.manager.status()["collection_store"]["attention"]
-        replica.replica_path(found.root).write_bytes(delivered)
-        return attention, found.write_c(LATER, "After delivery")["outcome"], found.read_c()
-
-    attention, outcome, final = run_host(tmp_path, tmp_path / "state-b", "host-b", delivery)
+    attention, outcome, final = run_host(tmp_path, tmp_path / "state-b", "host-b",
+                                         functools.partial(_delivery, delivered))
     assert attention is True
     assert outcome == "committed" and final == ["After delivery", "Canonical", "Newer on A"]
 
 
-@requires_fork
+def _write_and_crash(found):
+    assert found.open() == {"status": "admitted"}
+    found.write_c(LATER, "Unpublished on B")
+    os._exit(73)
+
+
+def _restart_diverged(found):
+    status = found.open()
+    rows = found.read_c()
+    refused(lambda: found.write_c(OTHER, "Refused"), "COLLECTION_STORE_DIVERGED")
+    with preview_store(found.root, found.manager._collection_store):
+        file_write = found.write_a("A beside divergence")
+    found.manager.close()
+    return status, rows, file_write, found.meta()
+
+
 def test_fork_is_durably_diverged_with_reads_and_a_b_writes_continuing(abc, tmp_path):
     """Defect: a host whose unpublished commits fork from the replica adopts over them or keeps writing."""
     abc.release()
-
-    def write_and_crash(found):
-        assert found.open() == {"status": "admitted"}
-        found.write_c(LATER, "Unpublished on B")
-        os._exit(73)
-
-    run_host(tmp_path, tmp_path / "state-b", "host-b", write_and_crash, exit_code=73)
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _write_and_crash, exit_code=73)
     stranded = abc.manager.client.status()
     abc.manager.client.release_holder("host-b", stranded.fencing_token)
     assert abc.write_c(KEY, "A after fork")["outcome"] == "committed"
     abc.release()
-
-    def restart_b(found):
-        status = found.open()
-        rows = found.read_c()
-        refused(lambda: found.write_c(OTHER, "Refused"), "COLLECTION_STORE_DIVERGED")
-        with preview_store(found.root, found.manager._collection_store):
-            file_write = found.write_a("A beside divergence")
-        found.manager.close()
-        return status, rows, file_write, found.meta()
-
-    status, rows, file_write, meta = run_host(tmp_path, tmp_path / "state-b", "host-b", restart_b)
+    status, rows, file_write, meta = run_host(tmp_path, tmp_path / "state-b", "host-b", _restart_diverged)
     assert status["status"] == "diverged" and rows == ["Canonical", "Unpublished on B"]
     assert file_write == "committed" and schema.META_REPLICA_DIVERGENCE in meta
     # The diverged host hands the lease back without replacing the recorded head.
@@ -553,7 +538,12 @@ def test_fork_is_durably_diverged_with_reads_and_a_b_writes_continuing(abc, tmp_
     assert abc.read_c() == ["A after fork", "Canonical"]
 
 
-@requires_fork
+def _adopt_late_delivery(delivered, found):
+    pending = found.open()
+    replica.replica_path(found.root).write_bytes(delivered)
+    return pending, found.open(), found.read_c(), found.write_c(LATER, "On the copy")["outcome"]
+
+
 def test_copied_vault_on_fresh_state_and_coordinator_adopts_the_replica(abc, tmp_path):
     """Defect: a copied vault falls back C to files, imports A/B, cannot write C, or strands a late replica."""
     abc.release()
@@ -562,14 +552,8 @@ def test_copied_vault_on_fresh_state_and_coordinator_adopts_the_replica(abc, tmp
     original, copied_ab = file_bytes(abc.root), ab_bytes(copy)
     delivered = replica.replica_path(copy).read_bytes()
     _truncated(copy)
-
-    def adopt(found):
-        pending = found.open()
-        replica.replica_path(found.root).write_bytes(delivered)
-        return pending, found.open(), found.read_c(), found.write_c(LATER, "On the copy")["outcome"]
-
     pending, status, rows, outcome = run_host(
-        tmp_path, tmp_path / "state-copy", "copy-host", adopt, root=copy,
+        tmp_path, tmp_path / "state-copy", "copy-host", functools.partial(_adopt_late_delivery, delivered), root=copy,
         database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
     assert pending["status"] == "sync_pending"
     assert status == {"status": "admitted"} and rows == ["Canonical"] and outcome == "committed"
@@ -610,7 +594,12 @@ def _granted_epoch(vault):
         conn.commit()
 
 
-@requires_fork
+def _refused_replica(found):
+    status = found.open()
+    refused(lambda: record_memory(found.root, "query", collection=CID), "")
+    return status, found.session.path.exists(), found.write_a("A beside the refused replica")
+
+
 @pytest.mark.parametrize(("tamper", "copied", "expected"), [
     (_foreign_store, True, "diverged"), (_missing_marker_collection, True, "sync_pending"),
     (_foreign_lineage, False, "diverged"), (_granted_epoch, False, "diverged"),
@@ -624,13 +613,7 @@ def test_unverified_replica_is_never_adopted(abc, tmp_path, tamper, copied, expe
         shutil.copytree(abc.root, root)
         where = dict(root=root, database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
     tamper(root)
-
-    def adopt(found):
-        status = found.open()
-        refused(lambda: record_memory(found.root, "query", collection=CID), "")
-        return status, found.session.path.exists(), found.write_a("A beside the refused replica")
-
-    status, live, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b", adopt, **where)
+    status, live, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b", _refused_replica, **where)
     assert status["status"] == expected and not live and file_write == "committed"
 
 
@@ -704,6 +687,25 @@ def test_a_second_write_waits_out_the_window_until_the_export_flush(abc, tmp_pat
     assert not [path for path in staged.rglob("*") if path.name.endswith(("-wal", "-shm"))]
 
 
+def test_export_refuses_a_lagging_replica_once_this_host_lost_the_lease(abc, tmp_path):
+    """Defect: a host that can no longer flush exports a replica behind an acknowledged row."""
+    from exomem import hosted_portability as portability
+
+    (abc.root / ".exomem/schema").mkdir(parents=True)
+    (abc.root / ".exomem/schema/SKILL.md").write_text("# schema\n")
+    _published(abc)
+    assert abc.write_c(LATER, "Acknowledged inside the window")["outcome"] == "committed"
+    token = abc.manager._fencing_token
+    abc.manager.client.release_holder("host-a", token)  # the coordinator hands the lease away
+    refused(lambda: abc.manager._renew_collection_store(token), "WRITER_FENCED")
+    context = dict(cell_id="cell-gate", vault_id="vault-gate", created_at="2026-10-06T00:00:00+00:00",
+                   operator_authorized=True, routing_stopped=True, active_mutations=0,
+                   background_writers_stopped=True, reads_allowed=True)
+    with pytest.raises(portability.PortabilityError, match="COLLECTION_STORE_FLUSH_PENDING"):
+        portability.export_quiesced_vault(abc.root, tmp_path / "exports", context=portability.PortabilityContext(
+            operation_id="export-gate", lifecycle_state="quiesced", **context))
+
+
 def _cli(root, *arguments):
     return subprocess.run([sys.executable, "-m", "exomem", *arguments], capture_output=True, text=True,
                           env={**os.environ, "EXOMEM_VAULT_PATH": str(root)}, timeout=120)
@@ -720,18 +722,39 @@ def test_backup_is_an_integrity_checked_snapshot_without_the_live_store(abc, tmp
     assert not (tmp_path / "backup.sqlite-wal").exists()
 
 
-@pytest.mark.parametrize("where", ["vault", "synced", "live"])
-def test_backup_refuses_the_vault_a_synced_root_or_the_live_store(abc, tmp_path, where):
-    """Defect: backup lands a store copy where sync carries it, or replaces the live store itself."""
+@pytest.mark.parametrize("where", ["vault", "live"])
+def test_backup_refuses_the_vault_or_the_live_store(abc, tmp_path, where):
+    """Defect: backup lands a store copy where vault sync carries it, or replaces the live store itself."""
     abc.release()
-    synced = tmp_path / "synced"
-    (synced / ".stfolder").mkdir(parents=True)
-    target = {"vault": abc.root / "Knowledge Base/backup.sqlite", "synced": synced / "backup.sqlite",
-              "live": abc.session.path}[where]
+    target = {"vault": abc.root / "Knowledge Base/backup.sqlite", "live": abc.session.path}[where]
     before = target.read_bytes() if target.exists() else None
     result = _cli(abc.root, "collections", "backup", "--to", str(target))
     assert result.returncode == 1 and "COLLECTION_BACKUP_DESTINATION_UNSAFE" in result.stderr
     assert (target.read_bytes() if target.exists() else None) == before
+
+
+def test_backup_through_a_vault_symlink_writes_only_at_its_real_target(abc, tmp_path):
+    """Defect: a symlink in the vault passes the check, then the backup replaces it as a vault file."""
+    abc.release()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = abc.root / "Knowledge Base/backup.sqlite"
+    link.symlink_to(outside / "backup.sqlite")
+    result = _cli(abc.root, "collections", "backup", "--to", str(link))
+    assert result.returncode == 0, result.stderr
+    assert link.is_symlink() and (outside / "backup.sqlite").is_file()
+    assert not list(abc.root.rglob(".exomem-collection-backup-*"))
+
+
+def test_backup_into_a_synced_root_succeeds_with_a_warning(abc, tmp_path):
+    """Defect: an owner who backs up into a synced folder is refused instead of warned."""
+    abc.release()
+    synced = tmp_path / "synced"
+    (synced / ".stfolder").mkdir(parents=True)
+    result = _cli(abc.root, "collections", "backup", "--to", str(synced / "backup.sqlite"))
+    assert result.returncode == 0, result.stderr
+    assert "sync" in " ".join(json.loads(result.stdout)["warnings"])
+    assert (synced / "backup.sqlite").exists()
 
 
 def test_adopt_local_previews_the_fork_point_before_continuing(abc):
@@ -742,6 +765,15 @@ def test_adopt_local_previews_the_fork_point_before_continuing(abc):
     assert "fork_point" in json.loads(result.stdout)["preview"]
 
 
+def _lease_environment(found, monkeypatch):
+    """The configured lease the owner route reads, naming the gate coordinator and this host."""
+    lease = {"URL": "http://localhost", "VAULT_ID": "gate", "REPLICA_ID": "host-a", "TOKEN": "lease",
+             "STATE_DIR": str(found.manager.config.state_dir)}
+    for name, value in lease.items():
+        monkeypatch.setenv(f"EXOMEM_WRITER_LEASE_{name}", value)
+    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "operator")
+
+
 def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_the_coordinator(
         abc, monkeypatch, capsys):
     """Defect: the owner's real route cannot apply adopt-local with the configured lease and coordinator."""
@@ -750,11 +782,7 @@ def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_
     from exomem.governance.principal import library_scope
 
     abc.release()
-    lease = {"URL": "http://localhost", "VAULT_ID": "gate", "REPLICA_ID": "host-a", "TOKEN": "lease",
-             "STATE_DIR": str(abc.manager.config.state_dir)}
-    for name, value in lease.items():
-        monkeypatch.setenv(f"EXOMEM_WRITER_LEASE_{name}", value)
-    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "operator")
+    _lease_environment(abc, monkeypatch)
     path = replica.replica_path(abc.root)
     foreign = path.read_bytes() + b"\0"
     path.write_bytes(foreign)  # another copy published over this host's replica
@@ -768,6 +796,29 @@ def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_
     assert len(json.loads(abc.meta()[schema.META_FORKS])) == 1
 
 
+def test_owner_route_applies_inside_the_running_service_which_keeps_its_lease_and_writes(abc, monkeypatch):
+    """Defect: adopt-local applied while the service runs hands its lease back or strands its old identity."""
+    from exomem import commands
+    from exomem.collection_store import runtime
+    from exomem.governance.principal import library_scope
+
+    monkeypatch.setattr(runtime, "WATCH_SECONDS", 0.05)
+    _lease_environment(abc, monkeypatch)
+    _published(abc)
+    path = replica.replica_path(abc.root)
+    path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
+    _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
+    token = abc.manager._fencing_token
+    with library_scope():
+        preview = commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local")
+        applied = commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local", apply=True,
+                                              plan_id=preview["plan_id"], why="the other copy is stale")
+    assert (preview["step"], applied["status"]) == ("adopt-local", "adopted"), applied.get("reason")
+    assert abc.manager._fencing_token == token
+    assert abc.write_c(LATER, "Service write after adopt-local")["outcome"] == "committed"
+    assert abc.manager.status()["collection_store"] == {"status": "admitted"}
+
+
 def _adopt(found, why):
     preview = admission.adopt_local(found.session, found.manager, why=why, fence_client=found.operator)
     refused(lambda: admission.adopt_local(found.session, found.manager, why=why, preview_id="0" * 64,
@@ -777,12 +828,12 @@ def _adopt(found, why):
     return preview["preview"], adopted
 
 
-def test_watch_diverges_on_a_same_signature_rewrite_and_adopt_local_keeps_the_foreign_bytes(abc, monkeypatch):
-    """Defect: a foreign rewrite keeping inode, size and mtime goes unseen, or adopt-local drops its bytes."""
+def test_publication_diverges_on_a_same_signature_rewrite_and_adopt_local_keeps_the_foreign_bytes(
+        abc, monkeypatch):
+    """Defect: a foreign rewrite keeping inode, size and mtime is published over, or adopt-local drops its bytes."""
     from exomem.collection_store import runtime
 
-    monkeypatch.setattr(runtime, "WATCH_SECONDS", 0.05)
-    monkeypatch.setattr(runtime, "WATCH_DIGEST_SECONDS", 0.2)
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)  # the next write publishes promptly
     _published(abc)
     path = replica.replica_path(abc.root)
     signature, stamp = takeover.replica_signature(abc.root), path.stat()
@@ -792,9 +843,11 @@ def test_watch_diverges_on_a_same_signature_rewrite_and_adopt_local_keeps_the_fo
         file.write(rewritten)
     os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     assert takeover.replica_signature(abc.root) == signature
+    assert abc.write_c(KEY, "Before the next publication")["outcome"] == "committed"
     _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
     refused(lambda: abc.write_c(LATER, "Refused"), "COLLECTION_STORE_DIVERGED")
-    assert abc.read_c() == ["Canonical"] and abc.write_a("A beside divergence") == "committed"
+    assert abc.read_c() == ["Before the next publication", "Canonical"]
+    assert abc.write_a("A beside divergence") == "committed"
     instance = abc.meta()[schema.META_INSTANCE_ID]
     preview, adopted = _adopt(abc, "the rewrite was a stray editor")
     evidence = [entry for entry in preview["fork_point"]["foreign"] if entry["source"] == "evidence"]
@@ -803,49 +856,95 @@ def test_watch_diverges_on_a_same_signature_rewrite_and_adopt_local_keeps_the_fo
     assert abc.write_c(LATER, "After adopt")["outcome"] == "committed"
     assert (path.parent / evidence[0]["leaf"]).read_bytes() == rewritten
     meta = abc.meta()
-    assert [fork["local"]["commit_seq"] for fork in json.loads(meta[schema.META_FORKS])] == [2]
+    forks = json.loads(meta[schema.META_FORKS])
+    assert [fork["local"]["commit_seq"] for fork in forks] == [3]
+    assert forks[0]["divergence"]["source_leaf"] == "Knowledge Base/_Collections/collections.sqlite"
     assert json.loads(meta[schema.META_LINEAGE])[-1]["adopted_from"] == instance
+    _published(abc)
     assert _replica_meta(abc.root)[schema.META_INSTANCE_ID] == meta[schema.META_INSTANCE_ID]
 
 
 def test_adopt_local_abandons_the_publication_a_divergence_interrupted(abc, monkeypatch):
-    """Defect: a foreign write landing mid-publication leaves an intent that re-diverges every adopt-local."""
+    """Defect: an interrupted publication's intent re-diverges every adopt-local, or its workspace stays forever."""
     from exomem.collection_store import runtime
 
     monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)  # the next write publishes promptly
     _published(abc)
-    install = replica._Publisher.flush_installed
+    path = replica.replica_path(abc.root)
+    resolve = replica._Publisher.resolve
 
-    def foreign_write_lands(publisher, expected):
-        monkeypatch.setattr(replica._Publisher, "flush_installed", install)
-        path = replica.replica_path(abc.root)
-        path.write_bytes(path.read_bytes() + b"\0")
-        return install(publisher, expected)
+    def foreign_write_lands(publisher, pending):
+        if pending["phase"] == "ready":
+            monkeypatch.setattr(replica._Publisher, "resolve", resolve)
+            path.write_bytes(path.read_bytes() + b"\0")
+        return resolve(publisher, pending)
 
-    monkeypatch.setattr(replica._Publisher, "flush_installed", foreign_write_lands)
+    monkeypatch.setattr(replica._Publisher, "resolve", foreign_write_lands)
     assert abc.write_c(LATER, "Mid publication")["outcome"] == "committed"
     _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
     assert schema.META_PENDING_REPLICA_PUBLICATION in abc.meta()
+    assert list(path.parent.glob(".exomem-collection-replica-work-*"))
     preview, adopted = _adopt(abc, "the write mid-publication was a stray editor")
     assert adopted["status"] == "adopted", adopted.get("reason")
-    assert preview["abandoned_publication"] is not None
+    assert preview["abandoned_publication"] is not None and adopted["abandoned_workspace"] == "removed"
+    assert not list(path.parent.glob(".exomem-collection-replica-work-*"))
     assert abc.write_c(str(uuid.uuid4()), "After adopt")["outcome"] == "committed"
 
 
-@requires_fork
+def test_a_view_stamp_divergence_reports_diverged_until_adopt_local_clears_it(abc):
+    """Defect: a view stamped by another store fences writes with no owner exit while status says admitted."""
+    with closing(sqlite3.connect(abc.session.path)) as conn:  # what edit-back records for a foreign view stamp
+        conn.execute("INSERT INTO store_meta(key,value) VALUES (?,'1')", (schema.META_VIEW_DIVERGED,))
+        conn.commit()
+    assert abc.manager.status()["collection_store"]["status"] == "diverged"
+    refused(lambda: abc.write_c(LATER, "Refused"), "COLLECTION_STORE_DIVERGED")
+    preview, adopted = _adopt(abc, "the foreign view was a stale copy")
+    assert (preview["state"], preview["view_diverged"], adopted["status"]) == ("diverged", True, "adopted")
+    assert abc.write_c(LATER, "After adopt")["outcome"] == "committed"
+    assert abc.manager.status()["collection_store"] == {"status": "admitted"}
+
+
+def _adopt_local_from_sync_pending(found):
+    pending = found.open()
+    preview = admission.adopt_local(found.session, found.manager, why="sync is off", fence_client=found.operator)
+    applied = admission.adopt_local(found.session, found.manager, why="sync is off",
+                                    preview_id=preview["preview_id"], fence_client=found.operator)
+    outcome = found.write_c(LATER, "After adopt-local on B")["outcome"]
+    found.release()
+    return (pending["status"], preview["preview"]["replica"]["published_by_this_store"], applied["status"],
+            applied.get("reason"), outcome, found.meta()[schema.META_INSTANCE_ID])
+
+
+def test_adopt_local_from_sync_pending_continues_past_this_hosts_own_replica(abc, tmp_path):
+    """Defect: adopt-local, the remedy SYNC_PENDING names, leaves the host pending and its store diverged."""
+    abc.release()
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _adopt_and_release)
+    own = replica.replica_path(abc.root).read_bytes()  # B's last publication
+    assert abc.write_c(KEY, "Newer on A")["outcome"] == "committed"
+    abc.release()
+    replica.replica_path(abc.root).write_bytes(own)  # A's newer replica has not reached B
+    pending, ours, status, reason, outcome, instance = run_host(
+        tmp_path, tmp_path / "state-b", "host-b", _adopt_local_from_sync_pending)
+    assert (pending, ours, status, outcome) == ("sync_pending", True, "adopted", "committed"), reason
+    assert abc.manager.client.status().collection_store_head.instance_id == instance
+    assert _replica_meta(abc.root)[schema.META_INSTANCE_ID] == instance
+
+
+def _write_on_the_copy(found):
+    assert found.open() == {"status": "admitted"}
+    found.write_c(LATER, "From the other host")
+    found.write_c(KEY, "Written on both hosts")
+    found.release()
+
+
 def test_reconcile_holds_every_foreign_item_change_after_the_fork_point(abc, tmp_path):
-    """Defect: a diverged store loses the other side's later writes, or reconcile edits rows silently."""
+    """Defect: reconcile loses the other side's writes, edits rows silently, or its holds miss the replica."""
     abc.release()  # the other host starts from A's flushed replica
     copy = tmp_path / "copy"
     shutil.copytree(abc.root, copy)
-
-    def other_host(found):
-        assert found.open() == {"status": "admitted"}
-        found.write_c(LATER, "From the other host")
-        found.release()
-
-    run_host(tmp_path, tmp_path / "state-b", "host-b", other_host, root=copy,
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _write_on_the_copy, root=copy,
              database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
+    assert abc.write_c(KEY, "Written on both hosts")["outcome"] == "committed"  # the same row as the copy's
     assert abc.write_c(str(uuid.uuid4()), "Kept on A")["outcome"] == "committed"
     _published(abc)
     shutil.copyfile(replica.replica_path(copy), abc.root / "delivery.tmp")
@@ -855,15 +954,82 @@ def test_reconcile_holds_every_foreign_item_change_after_the_fork_point(abc, tmp
     plan = admission.reconcile_store(abc.session, abc.manager, why="hold the other host's writes",
                                      fence_client=abc.operator)
     assert [(item["collection_id"], item["item_key"]) for item in plan["preview"]["items"]] == [(CID, LATER)]
+    assert plan["preview"]["unchanged"] == 1
     result = admission.reconcile_store(abc.session, abc.manager, why="hold the other host's writes",
                                        preview_id=plan["preview_id"], fence_client=abc.operator)
-    assert result["status"] == "held" and abc.read_c() == ["Canonical", "Kept on A"]
+    assert result["status"] == "held"
+    assert abc.read_c() == ["Canonical", "Kept on A", "Written on both hosts"]
     with closing(connection.open_reader(abc.session.path)) as reader:
         held = reader.execute("SELECT kind,code,held_bytes,diagnostics_json FROM held_candidates").fetchall()
     assert [(kind, code) for kind, code, _, _ in held] == [("view-correction", "COLLECTION_STORE_DIVERGED")]
     assert b"From the other host" in held[0][2] and json.loads(held[0][3])[0]["common_ancestor_commit_seq"] == 2
     again = admission.reconcile_store(abc.session, abc.manager, why="again", fence_client=abc.operator)
     assert again["preview"]["items"] == []
+    abc.release()  # an orderly release carries the reconciliation into the vault replica
+    with closing(connection.open_reader(replica.replica_path(abc.root))) as reader:
+        assert reader.execute("SELECT code FROM held_candidates").fetchall() == [("COLLECTION_STORE_DIVERGED",)]
+        marker = reader.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_RECONCILED_FOREIGN,)).fetchone()
+    assert json.loads(marker[0]) == [source["sha256"] for source in plan["preview"]["sources"]]
+
+
+def _write_and_create_on_the_copy(found):
+    assert found.open() == {"status": "admitted"}
+    found.write_c(LATER, "From the other host")
+    created = admission.create_new(found.session, found.manager, manifest_path().replace("Work", "Copy"),
+                                   manifest_text().replace(CID, ONLY_ON_COPY), why="a collection only the copy has",
+                                   request_id="create-d", fence_client=found.operator)
+    assert created["status"] == "marker_admitted", created
+    with preview_store(found.root, found.manager._collection_store) as writer:
+        with found.manager.mutation_guard(found.root):
+            writer.append_record(ONLY_ON_COPY, item={"title": "Only on the copy"}, item_key=ROW, why="gate write")
+    found.release()
+
+
+def _write_again_on_the_copy(found):
+    assert found.open() == {"status": "admitted"}
+    found.write_c(str(uuid.uuid4()), "Second from the other host")
+    found.release()
+
+
+def _deliver_and_adopt(found, copy, why):
+    """A writes, the copy's replica arrives over A's, and the owner keeps A."""
+    assert found.write_c(str(uuid.uuid4()), f"On A before: {why}")["outcome"] == "committed"
+    _published(found)
+    shutil.copyfile(replica.replica_path(copy), found.root / "delivery.tmp")
+    os.replace(found.root / "delivery.tmp", replica.replica_path(found.root))
+    _until(lambda: found.manager.status()["collection_store"]["status"] == "diverged")
+    assert _adopt(found, why)[1]["status"] == "adopted"
+
+
+def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(abc, tmp_path, monkeypatch):
+    """Defect: reconcile marks evidence done while dropping part of its delta, or holds one item twice."""
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)  # each round's write publishes promptly
+    abc.release()
+    copy = tmp_path / "copy"
+    shutil.copytree(abc.root, copy)
+    elsewhere = dict(root=copy, database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _write_and_create_on_the_copy, **elsewhere)
+    _deliver_and_adopt(abc, copy, "keep A over the first delivery")
+    plan = admission.reconcile_store(abc.session, abc.manager, why="hold", fence_client=abc.operator)
+    assert [(item["collection_id"], item["item_key"]) for item in plan["preview"]["items"]] == [(CID, LATER)]
+    assert [(entry["collection_id"], entry["reason"]) for entry in plan["preview"]["skipped"]] == [
+        (ONLY_ON_COPY, "collection absent from this store")]
+    assert plan["preview"]["reconciled"] == []
+    first = admission.reconcile_store(abc.session, abc.manager, why="hold", preview_id=plan["preview_id"],
+                                      fence_client=abc.operator)
+    run_host(tmp_path, tmp_path / "state-b", "host-b", _write_again_on_the_copy, **elsewhere)
+    _deliver_and_adopt(abc, copy, "keep A over the second delivery")
+    plan = admission.reconcile_store(abc.session, abc.manager, why="hold again", fence_client=abc.operator)
+    assert len(plan["preview"]["sources"]) == 2 and plan["preview"]["reconciled"] == []
+    second = admission.reconcile_store(abc.session, abc.manager, why="hold again", preview_id=plan["preview_id"],
+                                       fence_client=abc.operator)
+    assert first["held_ids"][0] in second["held_ids"] and second["superseded"] == 1
+    with closing(connection.open_reader(abc.session.path)) as reader:
+        held = [json.loads(candidate)["item_key"]
+                for (candidate,) in reader.execute("SELECT candidate_json FROM held_candidates")]
+    assert len(held) == 2 and held.count(LATER) == 1
 
 
 # --- later slices: strict xfails naming the slice that turns them green -----------------

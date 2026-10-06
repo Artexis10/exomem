@@ -48,20 +48,23 @@ def backup(vault_root, *, destination=None, stream=None, timeout=300.0) -> dict:
     """`exomem collections backup`: a validated single-file snapshot, never a copy of the live files.
 
     The snapshot passes integrity, foreign-key, schema, identity and lineage checks
-    before it replaces ``destination`` atomically or streams to ``stream``.
+    before it replaces ``destination`` atomically or streams to ``stream``. The
+    destination is checked, written and staged at its real path, so a symlink cannot
+    land it inside the vault. A synced destination is the owner's choice and only warns.
     """
     root = Path(vault_root).resolve()
     _live(root)
     if (destination is None) == (stream is None):
         raise ValueError("backup needs exactly one of a destination or a stream")
-    target = None
+    target, warnings = None, []
     scratch = connection.store_path(root).parent
     if destination is not None:
-        target = Path(destination).absolute()
+        target = Path(destination).expanduser().resolve()
         verdict = custody.verify_backup_destination(root, target)
         if not verdict.verified or target.is_dir():
             raise CollectionStoreError("COLLECTION_BACKUP_DESTINATION_UNSAFE",
                                        verdict.reason if not verdict.verified else "the destination is a directory")
+        warnings = [found] if (found := custody.backup_sync_warning(target)) else []
         scratch = target.parent
     with tempfile.TemporaryDirectory(prefix=".exomem-collection-backup-", dir=scratch) as private, \
             snapshot.staged_snapshot(root, directory=Path(private), deadline=time.monotonic() + timeout) as artifact:
@@ -79,7 +82,8 @@ def backup(vault_root, *, destination=None, stream=None, timeout=300.0) -> dict:
                     os.close(directory)
         return {"path": None if target is None else str(target), "sha256": artifact.file_sha256,
                 "size_bytes": artifact.size_bytes, "store_id": artifact.store_id,
-                "commit_seq": artifact.commit_seq, "head_hash": artifact.head_hash, "integrity_check": "ok"}
+                "commit_seq": artifact.commit_seq, "head_hash": artifact.head_hash, "integrity_check": "ok",
+                "warnings": warnings}
 
 
 def _head(meta) -> dict:
@@ -143,6 +147,8 @@ def adopt_local_preview(vault_root, *, recorded=UNKNOWN) -> dict:
         lineage = {entry["instance_id"] for entry in json.loads(meta[schema.META_LINEAGE])}
         raw = meta.get(schema.META_REPLICA_DIVERGENCE)
         divergence = None if raw is None else json.loads(raw)
+        # A view stamped by another store instance fences business writes the same way.
+        view_diverged = meta.get(schema.META_VIEW_DIVERGED) == "1"
         foreign, recorded_view = [], recorded
         if recorded not in (UNKNOWN, None):
             relation = chain.head_relation(local, recorded.commit_seq, recorded.head_hash)
@@ -161,20 +167,23 @@ def adopt_local_preview(vault_root, *, recorded=UNKNOWN) -> dict:
             if not replica_view["published_by_this_store"]:
                 foreign.append(_foreign_file(local, replica.replica_path(root), "replica", path.parent))
         # A publication the divergence interrupted belongs to the old tenure; adopting abandons
-        # it, and its workspace bytes stay where they are.
+        # it and removes its workspace.
         abandoned = meta.get(schema.META_PENDING_REPLICA_PUBLICATION)
-    state = "diverged" if divergence is not None else "foreign" if foreign else "in_sync"
-    return _sealed({"state": state, "divergence": divergence, "recorded_head": recorded_view,
-                    "replica": replica_view, "abandoned_publication": abandoned,
-                    "fork_point": {"local": head, "foreign": foreign}})
+    state = "diverged" if divergence is not None or view_diverged else "foreign" if foreign else "in_sync"
+    return _sealed({"state": state, "divergence": divergence, "view_diverged": view_diverged,
+                    "recorded_head": recorded_view, "replica": replica_view,
+                    "abandoned_publication": abandoned, "fork_point": {"local": head, "foreign": foreign}})
 
 
 def record_fork(conn, preview: dict, *, why: str, token: int):
     """Continue this store as a new lineage tenure past the previewed fork; returns its identity.
 
-    A foreign replica still at the shared name is named for the next publication to
-    keep as evidence; the owner's own published replica stays the swap predecessor.
-    The old tenure's interrupted publication intent is dropped; its workspace stays.
+    The fork record keeps the previewed divergence marker, including the source leaf the
+    foreign bytes came from. A foreign replica still at the shared name is named for the
+    next publication to keep as evidence; the owner's own published replica stays the swap
+    predecessor by digest, while its published head (the old tenure's) is cleared so the
+    new tenure republishes. The old tenure's interrupted publication intent is dropped;
+    adopt-local removes its workspace.
     """
     meta = dict(conn.execute("SELECT key,value FROM store_meta"))
     local = preview["fork_point"]["local"]
@@ -185,15 +194,17 @@ def record_fork(conn, preview: dict, *, why: str, token: int):
     forks = [*json.loads(meta.get(schema.META_FORKS) or "[]"), {
         "recorded_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "why": why,
         "lease_epoch": token, "local": local, "foreign": preview["fork_point"]["foreign"],
+        "divergence": preview["divergence"], "view_diverged": preview["view_diverged"],
         "abandoned_publication": preview["abandoned_publication"]}]
     shared = preview["replica"]
     ours = shared is not None and shared["published_by_this_store"]
     values = {schema.META_INSTANCE_ID: instance, schema.META_LINEAGE: _json(lineage),
               schema.META_FORKS: _json(forks), schema.META_REPLICA_DIVERGENCE: None,
-              schema.META_PENDING_REPLICA_PUBLICATION: None,
+              schema.META_VIEW_DIVERGED: None, schema.META_PENDING_REPLICA_PUBLICATION: None,
+              schema.META_PUBLISHED_REPLICA_HEAD: None,
               schema.META_ADOPTED_FOREIGN_REPLICA: None if shared is None or ours else shared["sha256"]}
     if not ours:
-        values.update({schema.META_PUBLISHED_REPLICA_HEAD: None, schema.META_LAST_PUBLISHED_REPLICA_SHA256: None})
+        values[schema.META_LAST_PUBLISHED_REPLICA_SHA256] = None
     for key, value in values.items():
         if value is None:
             conn.execute("DELETE FROM store_meta WHERE key=?", (key,))
@@ -206,8 +217,12 @@ def record_fork(conn, preview: dict, *, why: str, token: int):
 def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
     """Every item that unreconciled foreign evidence changed after its common ancestor (§15 item 5).
 
-    Returns the sealed preview and the full items, with the foreign values to hold.
-    Items equal to this store's row carry nothing to decide and are only counted.
+    Returns the sealed preview and the full items, with the foreign values to hold. Every
+    effect kind counts as a change, a foreign hold included. Items equal to this store's
+    row carry nothing to decide and are only counted. ``reconciled`` names the evidence
+    that applying marks done: only files whose every changed item becomes a hold. A
+    change that cannot be held here is listed in ``skipped`` with the reason, and its
+    file stays unreconciled.
     """
     root = Path(vault_root).resolve()
     meta = dict(local.execute("SELECT key,value FROM store_meta"))
@@ -225,19 +240,20 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
             ancestor = _common_ancestor(local, conn)
             sources.append({"leaf": path.name, "sha256": digest, **_head(foreign),
                             "common_ancestor_commit_seq": ancestor})
-            for cid, key in conn.execute(
-                "SELECT DISTINCT t.collection_id,e.item_key FROM audit_effects e JOIN txns t ON t.txn_id=e.txn_id "
-                "WHERE t.commit_seq>? AND e.item_key IS NOT NULL AND e.effect IN ('insert','update','resume') "
-                "ORDER BY 1,2",
+            for cid, key, effects in conn.execute(
+                "SELECT t.collection_id,e.item_key,group_concat(DISTINCT e.effect) FROM audit_effects e "
+                "JOIN txns t ON t.txn_id=e.txn_id WHERE t.commit_seq>? AND e.item_key IS NOT NULL "
+                "GROUP BY 1,2 ORDER BY 1,2",
                 (ancestor,),
             ).fetchall():
+                where = {"leaf": path.name, "sha256": digest, "collection_id": cid, "item_key": key}
+                if local.execute("SELECT 1 FROM collections WHERE collection_id=?", (cid,)).fetchone() is None:
+                    skipped.append({**where, "reason": "collection absent from this store"})
+                    continue
                 row = conn.execute("SELECT row_id,row_version,body,payload_hash FROM items "
                                    "WHERE collection_id=? AND item_key=?", (cid, key)).fetchone()
                 if row is None:
-                    continue
-                if local.execute("SELECT 1 FROM collections WHERE collection_id=?", (cid,)).fetchone() is None:
-                    skipped.append({"leaf": path.name, "sha256": digest, "collection_id": cid, "item_key": key,
-                                    "reason": "collection absent from this store"})
+                    skipped.append({**where, "reason": "the foreign change has no committed row to hold"})
                     continue
                 mine = local.execute("SELECT row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?",
                                      (cid, key)).fetchone()
@@ -247,8 +263,12 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
                 items.append({"collection_id": cid, "item_key": key, "evidence_leaf": path.name,
                               "evidence_sha256": digest, "foreign_instance_id": foreign[schema.META_INSTANCE_ID],
                               "foreign_commit_seq": int(foreign[schema.META_COMMIT_SEQ]),
-                              "common_ancestor_commit_seq": ancestor, "foreign_row_version": row[1],
-                              "foreign_payload_hash": row[3], "local_row_version": None if mine is None else mine[0],
+                              "common_ancestor_commit_seq": ancestor, "foreign_effects": sorted(effects.split(",")),
+                              "foreign_row_version": row[1], "foreign_payload_hash": row[3],
+                              "local_row_version": None if mine is None else mine[0],
                               "values": typed_storage.item_values(conn, row[0]), "body": row[2]})
+    unresolved = {entry["sha256"] for entry in skipped}
+    reconciled = [source["sha256"] for source in sources if source["sha256"] not in unresolved]
     shown = [{name: value for name, value in item.items() if name not in {"values", "body"}} for item in items]
-    return _sealed({"sources": sources, "skipped": skipped, "items": shown, "unchanged": unchanged}), items
+    return _sealed({"sources": sources, "skipped": skipped, "items": shown, "unchanged": unchanged,
+                    "reconciled": reconciled}), items

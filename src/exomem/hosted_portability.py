@@ -892,8 +892,8 @@ def _flush_collection_replica(vault_root: Path) -> None:
     """Export carries the collection store's replica at its committed head (design §11, A9).
 
     Refusing beats an archive whose replica lacks acknowledged rows, which a restore
-    would silently drop; the operator retries the export. A vault whose store this
-    process does not serve has nothing newer than its replica.
+    would silently drop; the operator retries the export. A process that cannot flush
+    refuses whenever the live store is ahead of the replica it last published.
     """
     from .cli_ops import OpError
     from .collection_store import connection, runtime

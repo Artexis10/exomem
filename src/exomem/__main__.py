@@ -2035,7 +2035,7 @@ def _collections_main(argv: list[str]) -> int:
         "backup", help="write an integrity-checked single-file snapshot; the live store is never copied"
     )
     target = backup.add_mutually_exclusive_group(required=True)
-    target.add_argument("--to", type=Path, help="snapshot file, outside the vault and synced roots")
+    target.add_argument("--to", type=Path, help="snapshot file outside the vault; a synced folder only warns")
     target.add_argument("--stdout", action="store_true", help="stream the snapshot to standard output")
     adopt = subcommands.add_parser(
         "adopt-local",
@@ -2073,8 +2073,8 @@ def _collections_main(argv: list[str]) -> int:
                 result = admission.adopt_local_route(Path(args.vault), why=args.why, preview_id=args.preview_id)
             print(json.dumps(result, sort_keys=True))
     except (CollectionStoreError, OpError, OSError) as error:
-        code = getattr(error, "code", type(error).__name__)
-        print(f"{code}: {error}", file=sys.stderr)
+        code, message = getattr(error, "code", type(error).__name__), str(error)
+        print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
         return 1
     return 0
 
