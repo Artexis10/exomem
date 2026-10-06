@@ -265,7 +265,10 @@ def test_concurrent_readiness_probes_share_the_in_flight_proof(
     """Review L2: the limiter bounded running proofs at two, but waiters queued
     without bound, and a client that gave up still left its proof queued: after
     a 30 s stall, 30 polls replayed their proofs back to back. A probe that
-    arrives while a proof runs now answers from that proof."""
+    arrives while a proof runs now answers from that proof.
+
+    The proof here is not ready, because a ready one is kept for later probes
+    (`tests/test_health_probe_cost.py`); a finished not-ready proof is not."""
     httpx = pytest.importorskip("httpx")
     from fastmcp import FastMCP
 
@@ -276,7 +279,7 @@ def test_concurrent_readiness_probes_share_the_in_flight_proof(
     def slow_readiness(**_kwargs):
         calls.append("proof")
         time.sleep(0.5)
-        return {"status": "ready"}
+        return {"status": "not_ready"}
 
     monkeypatch.setattr(runtime_readiness, "runtime_readiness", slow_readiness)
     app = FastMCP("readiness-coalesce-probe")
@@ -294,5 +297,5 @@ def test_concurrent_readiness_probes_share_the_in_flight_proof(
             responses.append(await client.get("/health/ready"))
             return [response.status_code for response in responses]
 
-    assert asyncio.run(scenario()) == [200] * 11
+    assert asyncio.run(scenario()) == [503] * 11
     assert calls == ["proof", "proof"]
