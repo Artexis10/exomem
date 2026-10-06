@@ -10,7 +10,7 @@ PR1513 changed the intended host label to `substrate-control-01`; its live renam
 
 **Goals:** Establish `substrate-systems/substrate-infra` and fixed shared foundation/durability workspaces; transfer existing management; preserve operating dependencies and recovery; make Exomem a consumer.
 
-**Non-Goals:** Hetzner project transfer, server replacement or reboot, changing database endpoints or credentials, moving product migrations, applying the pending rename, Kimai migration, tenant-fleet changes or Cloud releases. Provider transfer requires an independently designed maintenance/connectivity plan: Hetzner requires detaching assigned Primary IPs before moving a server between projects.
+**Non-Goals of the ownership handover (tasks 1-4):** Hetzner project transfer, server replacement or reboot, changing database endpoints or credentials, moving product migrations, applying the pending rename, Kimai migration, tenant-fleet changes or Cloud releases. The project relocation is a separate later phase (decision 10, section 5), with its own maintenance/connectivity plan: Hetzner requires detaching assigned Primary IPs before moving a server between projects.
 
 ## Decisions
 
@@ -39,6 +39,17 @@ The existing Bitwarden peer topology carries the selected workstation endpoints,
 
 Native mobile clients receive primary DNS through a separate opt-in owner DNS group managed by the shared Terraform source. This enables NetBird's private peer-name resolver; ordinary public queries use the selected upstream resolvers. DNS membership grants no network access. Concurrent WSL clients retain DNS disabled, preserving client-owned resolution. Verify named SSH from the actual phone and retain its old Tailscale entry until that connection passes.
 
+10. **Relocate the control host to its own Hetzner project after the handover (owner decision, 2026-10-06).** The shared database must not live in the Exomem Cloud project, where Exomem's Terraform and its in-cluster Hetzner tokens can reach it; the CSI token is project-scoped and read-write. Move the control host to a dedicated Substrate project once tasks 3.4, 4.1 and 4.2 have made `substrate-infra` its only owner. The durability workspace holds only B2 resources, so nothing of it moves.
+    - **Transport.** Hetzner private networks cannot span projects, so cellctl and the gateway stop using the private address (10.50.1.20). This reverses the cloud-cell requirement that their roles are reachable only over the private network. The replacement property:
+      - PostgreSQL 5432 listens on every address (`*`), as PgBouncer already does, so an address change cannot silently unbind it; the three layers below do the admission. cellctl's `LISTEN` needs a direct session, which PgBouncer's transaction pool cannot carry.
+      - Only the K3s server node's public /32 reaches 5432, at all three layers: the Hetzner firewall, UFW, and pg_hba (`hostssl`, `scram-sha-256`, the two Exomem roles only). Every other source stays refused.
+      - cellctl and the gateway are pinned to the server node, so their egress always leaves from that /32. The server node already carries ingress and the control plane, so the pin adds no new single point of failure.
+      - Clients keep `sslmode=verify-full` against the existing certificate hostname. Exomem empties the `cloudDatabase` host alias, so that hostname resolves to the public address.
+      - The /32 is a consumer input of the dependency contract (decision 4): Exomem publishes it and `substrate-infra` consumes it, versioned and refused when missing or incompatible, like the contract's other direction. Replacing the server node is a contract version change.
+    - **Address change.** Primary IPs belong to one project, so the transfer may change the database's public address. NetworkPolicy `ipBlock` entries are literals, not DNS. Before the window, stage both the current and the target /32 in the egress rules. Change DNS through its owning Terraform, then drop the old /32.
+    - **Window.** Detaching the Primary IP makes the move a short announced outage. Rehearse it on disposable resources first, including the rollback: transfer back and reattach the original Primary IP.
+    - **Cost.** Nothing recurring once the old Primary IP is released; the same account pays for both projects. The project the host leaves is renamed Exomem Cloud.
+
 ## Migration Plan
 
 1. Complete control SSH acceptance; retain identity/firewall evidence and reconcile the administrator allowlist input. Inventory exact source addresses, consumers, workspace contracts and backup ownership without exposing secrets.
@@ -50,7 +61,7 @@ Native mobile clients receive primary DNS through a separate opt-in owner DNS gr
 6. Deliver Exomem dependency integration and retire the transferred management code and old control-node targeting while the writer freeze remains active. Keep declarative removal evidence and one canonical recovery/source owner. Verify the actual merged delivery revisions cannot recreate or configure the transferred host.
 7. Verify target states own every selected ID once and source states own none. Verify ordinary plans from the actual delivery revisions have no unapproved changes, DNS/IP/network identity, key-only managed tailnet SSH, TLS database health/role boundaries, backup/WAL continuity and representative Substrate/Exomem consumers. Lift the freeze only after source retirement, dependency publication and these receipts. Move completed shared contracts into the target's OpenSpec during coordinated specification closure.
 
-**Rollback:** Freeze both writers. If target owns an adopted resource, forget it there with `destroy=false` before restoring its original source management by reviewed import; never restore an old source state while target still owns the same ID. Revalidate resource manifests, ordinary no-change plans and consumers before releasing the freeze. No rollback deletes a provider resource or restores database content.
+**Rollback:** Freeze both writers. If target owns an adopted resource, forget it there with `destroy=false` before restoring its original source management by reviewed import; never restore an old source state while target still owns the same ID. Revalidate resource manifests, ordinary no-change plans and consumers before releasing the freeze. No rollback deletes a provider resource or restores database content. A failed relocation (section 5) transfers the host back and reattaches its original Primary IP; consumers keep both /32s until section 5 closes.
 
 ## Risks / Trade-offs
 
@@ -61,4 +72,7 @@ Native mobile clients receive primary DNS through a separate opt-in owner DNS gr
 - Backup extraction weakens recovery → preserve separate durability state, retention, cipher and off-host lineage; isolated restoration is a pre-handover gate.
 - A broad or wrong mesh enrollment widens access → explicit account identity, server peer groups, permission tests and no subnet advertisement; preserve BWS SSH authentication as a second boundary.
 - Concurrent VPN clients can conflict in address selection, routes or DNS → retain Tailscale during staged migration, verify desktop coexistence and mobile tunnel switching, then retire dependencies only after replacement workflows pass.
+- The relocation exposes the Exomem roles beyond the private network → one allowlisted /32 at three layers, `verify-full` and SCRAM; every other source stays refused.
+- The allowlisted /32 drifts when the server node changes → the /32 is a dependency-contract input, and the pin keeps cellctl and gateway egress on it.
+- A failed transfer → a rehearsed rollback, with both database addresses staged in Exomem's egress rules.
 - A VPN outage locks out operators → verify boot recovery and provider-console access, stage ingress restrictions after a second successful managed connection.
