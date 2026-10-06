@@ -301,7 +301,8 @@ def test_l6_projection_omits_managed_origin_without_changing_canonical_identity(
     variant = projections.build_projection_variant(**arguments, full_search_fields=fields)
     marker_free = projections.build_projection_variant(
         **arguments,
-        full_search_fields={"body": "\n\nPublic prose.", "title": "Public title", "status": "active "},
+        # The carrier's own line goes with it; the blank line after it stays.
+        full_search_fields={"body": "\nPublic prose.", "title": "Public title", "status": "active "},
     )
 
     assert variant is not None
@@ -316,10 +317,6 @@ def test_l6_projection_omits_managed_origin_without_changing_canonical_identity(
         (
             "Knowledge Base/Sources/original.md",
             "<!-- exomem-origin:v2 captured attribution -->\nOriginal prose.",
-        ),
-        (
-            "Knowledge Base/Notes/example.md",
-            "Literal `<!-- exomem-origin:v2 example -->` remains prose.",
         ),
         ("Knowledge Base/Notes/spacing.md", " \n"),
     ),
@@ -337,6 +334,21 @@ def test_l6_projection_preserves_unmanaged_prose(
 
     assert variant is not None
     assert variant.search_fields == {"body": body}
+
+
+def test_l6_projection_withholds_a_carrier_that_an_unclosed_fence_made_code() -> None:
+    """Projected fields serve other audiences, so code context never releases a carrier."""
+    body = "```\n<!-- exomem-origin:v1 private-attribution -->\nPublic prose."
+    variant = projections.build_projection_variant(
+        item_identity="Knowledge Base/Notes/fenced.md",
+        content_hash=hashlib.sha256(body.encode()).hexdigest(),
+        decision=Decision(level=6),
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
+        full_search_fields={"body": body},
+    )
+
+    assert variant is not None
+    assert variant.search_fields == {"body": "```\nPublic prose."}
 
 
 def test_origin_prose_projector_version_invalidates_derived_identities() -> None:

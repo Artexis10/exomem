@@ -32,8 +32,8 @@ Corrections made before this module existed have neither; `read` reports
 them as `unavailable_legacy` by matching the row's verified audit transitions
 against the kept names, never as an empty history presented as complete.
 
-A kept body is released through the same origin projection as the live row,
-under the reader's own principal, and who made a correction is shown only to
+A kept body is released through the same origin projection and gate as the
+live row, under the reader's own principal, and who made a correction is shown only to
 the owner or to the audience that made it.
 """
 
@@ -248,11 +248,13 @@ def read(
         older = [version for version in versions if after is None or version < after]
         page = older[:page_size]
         reader = effective_principal().audience_id
+        # The live row's gate: with no configured audience nothing is projected.
+        project = not egress._file_policy_empty(root, policy)  # noqa: SLF001
         revisions = []
         for version in page:
             revision = _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)
             prior = revision.get("prior")
-            if isinstance(prior, dict) and isinstance(prior.get("body"), str):
+            if project and isinstance(prior, dict) and isinstance(prior.get("body"), str):
                 # The reader's own principal decides what of a kept origin it sees.
                 prior["body"] = origin_bindings.project_origin_text(root, prior["body"])
             actor = revision.get("actor")

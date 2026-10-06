@@ -405,7 +405,13 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 - **WHEN** a reserved origin opener appears anywhere outside Markdown code and is not backslash-escaped, including inside HTML attributes, raw text, a link title or an earlier unterminated comment
 - **THEN** reading treats it as a removable carrier running to its first terminator or the end of the text, so it is withheld rather than disclosed as prose
 - **AND** writing accepts only exactly one valid designated block and refuses every other reserved carrier with a typed `ORIGIN_METADATA_INVALID`
-- **AND** fenced, indented and inline code examples remain literal at their original offsets
+- **AND** fenced, indented and inline code examples remain literal at their original offsets for writers and for readers to whom the page's valid carrier is released
+
+#### Scenario: A carrier pushed into code is still withheld
+
+- **WHEN** an unclosed fence or an indent above a carrier makes it code, and its bound input is not released to the reader
+- **THEN** reading withholds every reserved opener on the page, in code and escapes included, to its first terminator or the end of the text
+- **AND** classification and writing still treat only openers outside code as carriers
 
 #### Scenario: Normalized Records provenance survives interrupted commitment
 

@@ -953,7 +953,7 @@ def resolve_approved_abstraction(
     from .. import provenance
 
     projected = strip_provenance(
-        {"body": provenance.origin_prose(parsed.body, owner_path=grant.path)},
+        {"body": provenance.withheld_prose(parsed.body, owner_path=grant.path)},
         admission.strip_identities,
         direct_page=True,
     )

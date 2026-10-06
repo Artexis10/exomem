@@ -7104,9 +7104,9 @@ def op_read_memory(
         if released is not None and released.get("body") != page.body:
             # A full release whose only change is a removed origin carrier
             # still serves every unit outside it.
-            carriers = provenance_module.parse_owned_origin(page.body, owner_path=page.path)
-            if released.get("body") == carriers.without_metadata(page.body):
-                withheld_spans = carriers.spans
+            carriers = provenance_module.withheld_spans(page.body, owner_path=page.path)
+            if released.get("body") == provenance_module.remove_carriers(page.body, carriers):
+                withheld_spans = carriers
         if (
             released is None
             or (released.get("body") != page.body and not withheld_spans)

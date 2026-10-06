@@ -142,11 +142,14 @@ def project_origin_text(vault_root: Path, text: str) -> str:
 
     Disclosure depends only on whether every bound input is still released and
     available to the caller. A stale binding (its input changed since the
-    assessment) is accounting state: the carrier stays visible.
+    assessment) is accounting state: the carrier stays visible. Unless the
+    page's one valid carrier is released, every reserved opener is withheld,
+    in code and escapes too (`provenance.reserved_spans`).
     """
-    metadata = provenance.parse_origin(text, managed=True)
-    if metadata.status == "absent":
+    withheld = provenance.reserved_spans(text)
+    if not withheld:
         return text
+    metadata = provenance.parse_origin(text, managed=True)
     if metadata.status == "valid":
         assert metadata.payload is not None
         try:
@@ -172,9 +175,9 @@ def project_origin_text(vault_root: Path, text: str) -> str:
             pass
         else:
             return text
-    # Malformed, duplicate and unavailable carriers are never partially
-    # disclosed. Keep unrelated prose and examples in their original positions.
-    return metadata.without_metadata(text)
+    # Malformed, duplicate, unavailable and code-hidden carriers are never
+    # partially disclosed. Keep unrelated prose in its original positions.
+    return provenance.remove_carriers(text, withheld)
 
 
 def _authored_origin(source: str, before_source: str | None) -> provenance.OriginDocument | None:

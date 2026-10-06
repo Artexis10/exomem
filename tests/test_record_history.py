@@ -196,37 +196,45 @@ def test_history_is_withheld_exactly_when_its_row_is(vault: Path) -> None:
             ) == _refusal(lambda command=command: writer_lease.invoke_command(command, vault, path=absent))
 
 
-def test_history_hides_an_origin_whose_input_the_reader_can_no_longer_see(vault: Path) -> None:
+@pytest.mark.parametrize(
+    "configured", [True, False], ids=["withheld-from-the-reader", "unconfigured-owner"]
+)
+def test_a_kept_origin_follows_the_live_row_disclosure(vault: Path, configured: bool) -> None:
+    """A restricted reader loses a carrier whose input it cannot see; an unconfigured owner never does."""
     from test_episode_records_leaf import _origin_reading_body
     from test_episode_recovery import _write_source_rule
+    from test_origin_bindings import _PATH
 
     from exomem import records
 
     _collection(vault)
     body = _origin_reading_body(vault)
-    _write_source_rule(vault, ceiling=6)
-    reader = RequestPrincipal(audience_id="client-a", surface="mcp")
+    if configured:
+        _write_source_rule(vault, ceiling=6)
+    reader = (
+        RequestPrincipal(audience_id="client-a", surface="mcp")
+        if configured
+        else owner_principal(surface="mcp")
+    )
     with request_scope(reader):
         key = _append(vault)
-        records.update_record(
-            vault, COLLECTION, item_key=key, changes={}, body=body,
-            expected_container_hash=_container(vault),
-            expected_item_version=hashlib.sha256(_entry(vault, key).read_bytes()).hexdigest(),
-            why="Attach the reading's origin.",
-        )
-        records.update_record(
-            vault, COLLECTION, item_key=key, changes={}, body="- [finding] Corrected. ^reading\n",
-            expected_container_hash=_container(vault),
-            expected_item_version=hashlib.sha256(_entry(vault, key).read_bytes()).hexdigest(),
-            why="Drop the origin.",
-        )
+        for revised, why in ((body, "Attach the reading's origin."), ("- [finding] Corrected. ^reading\n", "Drop it.")):
+            records.update_record(
+                vault, COLLECTION, item_key=key, changes={}, body=revised,
+                expected_container_hash=_container(vault),
+                expected_item_version=hashlib.sha256(_entry(vault, key).read_bytes()).hexdigest(),
+                why=why,
+            )
         assert "exomem-origin" in _history(vault, key)["revisions"][0]["prior"]["body"]
-    _write_source_rule(vault, ceiling=0)
+    if configured:
+        _write_source_rule(vault, ceiling=0)
+    else:
+        (vault / _PATH).unlink()
 
     with request_scope(reader):
         history = _history(vault, key)
     (newest, _oldest) = history["revisions"]
-    assert "exomem-origin" not in newest["prior"]["body"]
+    assert ("exomem-origin" in newest["prior"]["body"]) is not configured
     assert "The vat reading was retained." in newest["prior"]["body"]
     assert history["status"] == "complete"
 

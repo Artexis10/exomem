@@ -75,6 +75,8 @@ _ORIGIN_COMMENT_RE = re.compile(r"<!--(?P<body>.*?)(?P<end>-->|\Z)", re.DOTALL)
 # A reserved opener is found directly, never through another comment's span:
 # a stray `<!--` earlier on the page must not swallow the carrier after it.
 _ORIGIN_OPENER_RE = re.compile(r"<!--(?=\s*exomem-origin(?:[:\s]|-->|\Z))", re.IGNORECASE)
+# Withholding fails closed: any reserved opener, in code or escaped or not.
+_WITHHELD_OPENER_RE = re.compile(r"<!--(?=\s*exomem-origin)", re.IGNORECASE)
 _ORIGIN_PAYLOAD_RE = re.compile(r"^\s*exomem-origin:v1\s+(.+?)\s*$", re.DOTALL)
 
 
@@ -532,9 +534,42 @@ def parse_owned_origin(content: str, *, owner_path: str) -> OriginDocument:
     return parse_origin(content, managed=not source_closure._eligible_path(owner_path))  # noqa: SLF001
 
 
+def reserved_spans(content: str) -> tuple[tuple[int, int], ...]:
+    """Every reserved opener wherever it sits, each to its first `-->` or the end.
+
+    Classification and writing exempt code and escapes, so one carrier outside
+    code stays the rule and a fenced example stays literal for writers. What a
+    reader is shown fails closed instead: an unclosed fence or an indent above
+    a carrier must not turn its payload into displayed code. Over-hiding a
+    fenced example of a carrier is the accepted cost.
+    """
+    if "<!--" not in content or "exomem-origin" not in content.lower():
+        return ()
+    return _merged(
+        _ORIGIN_COMMENT_RE.match(content, opener.start()).span()
+        for opener in _WITHHELD_OPENER_RE.finditer(content)
+    )
+
+
+def withheld_spans(content: str, *, owner_path: str) -> tuple[tuple[int, int], ...]:
+    """The spans a restricted reader never sees; raw captures keep every byte."""
+    if "<!--" not in content or "exomem-origin" not in content.lower():
+        return ()
+    from . import source_closure
+
+    if source_closure._eligible_path(owner_path):  # noqa: SLF001
+        return ()
+    return reserved_spans(content)
+
+
 def origin_prose(content: str, *, owner_path: str) -> str:
     """Keep structured managed attribution out of prose, preserving raw captures."""
     return parse_owned_origin(content, owner_path=owner_path).without_metadata(content)
+
+
+def withheld_prose(content: str, *, owner_path: str) -> str:
+    """Prose served to another audience: every reserved opener withheld, code included."""
+    return remove_carriers(content, withheld_spans(content, owner_path=owner_path))
 
 
 # A key:value token inside a comment. Value runs to the next whitespace.

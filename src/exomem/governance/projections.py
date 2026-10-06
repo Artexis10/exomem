@@ -516,7 +516,8 @@ def build_projection_variant(
     fields = _canonical_full_fields(full_search_fields)
     cleaned_fields: dict[str, str] = {}
     for name, original in fields.items():
-        prose = provenance.origin_prose(original, owner_path=identity)
+        # Projected fields serve other audiences: withhold code-hidden carriers too.
+        prose = provenance.withheld_prose(original, owner_path=identity)
         if prose.strip() or prose == original:
             cleaned_fields[name] = prose
     fields = cleaned_fields

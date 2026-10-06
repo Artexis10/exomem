@@ -628,27 +628,37 @@ def _parent_with_origin(vault: Path, *, configured: bool) -> tuple[object, str]:
     return created, rationale
 
 
-@pytest.mark.parametrize("input_change", ["withheld", "deleted", "stray-opener"])
-def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
-    vault: Path, input_change: str
-) -> None:
-    """An unreleased or unavailable input hides its whole carrier, never the released claim.
+def _hand_edit_above_carrier(parent: Path, prefix: str) -> None:
+    text = parent.read_text(encoding="utf-8")
+    at = text.index("<!-- exomem-origin")
+    parent.write_text(text[:at] + prefix + text[at:], encoding="utf-8")
 
-    A hand edit that leaves a literal `<!--` above the carrier must not hide
-    the reserved opener inside an ordinary comment span.
-    """
+
+@pytest.mark.parametrize(
+    "input_change, prefix",
+    [
+        ("withheld", ""),
+        ("deleted", ""),
+        # A literal `<!--` cannot fold the reserved opener into an ordinary comment.
+        ("withheld", "HTML comments open with <!-- in markup.\n"),
+        # Nor can indentation turn the carrier into code that is shown as written.
+        ("withheld", "Para.\n\n    "),
+    ],
+    ids=["withheld", "deleted", "stray-opener", "indented-into-code"],
+)
+def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
+    vault: Path, input_change: str, prefix: str
+) -> None:
+    """An unreleased or unavailable input hides its whole carrier, never the released claim."""
     from test_episode_recovery import _write_source_rule
 
     from exomem import commands
 
     created, rationale = _parent_with_origin(vault, configured=True)
     parent = vault / created.path
-    if input_change == "stray-opener":
-        text = parent.read_text(encoding="utf-8")
-        end = text.index("\n---\n", 4) + 5
-        parent.write_text(text[:end] + "HTML comments open with <!-- in markup.\n" + text[end:])
+    _hand_edit_above_carrier(parent, prefix)
     canonical = parent.read_bytes()
-    if input_change in {"withheld", "stray-opener"}:
+    if input_change == "withheld":
         _write_source_rule(vault, ceiling=0)
     else:
         (vault / _PATH).unlink()
@@ -667,6 +677,22 @@ def test_public_parent_read_removes_the_whole_unreleased_origin_payload(
     unit_wire = json.dumps(unit, default=str)
     assert "Public claim" in unit_wire and rationale not in unit_wire
     assert parent.read_bytes() == canonical
+
+
+def test_an_unclosed_fence_above_an_unreleased_carrier_never_discloses_it(vault: Path) -> None:
+    """Code context decides what a writer may author, never what a restricted reader sees."""
+    from test_episode_recovery import _write_source_rule
+
+    from exomem import commands
+
+    created, rationale = _parent_with_origin(vault, configured=True)
+    _hand_edit_above_carrier(vault / created.path, "```\n")
+    _write_source_rule(vault, ceiling=0)
+    with request_scope(RequestPrincipal(audience_id="client-a")):
+        projected = commands.op_get(vault, path=created.path)
+    wire = json.dumps(projected, default=str)
+    assert rationale not in wire and "exomem-origin" not in wire
+    assert "Public claim" in projected["body"]
 
 
 @pytest.mark.parametrize("input_change", ["stale", "unconfigured"])
@@ -732,8 +758,7 @@ def test_unassessed_parent_payload_is_hidden_but_raw_capture_is_uninterpreted(va
 
     _write_source_rule(vault, ceiling=6)
     carrier = "<!-- exomem-origin:v2 unavailable attribution details -->"
-    example = "Sample `<!-- exomem-origin:v2 example -->`."
-    body = f"{carrier}\n\nPublic prose. <!-- ordinary comment --> {example}\n"
+    body = f"{carrier}\n\nPublic prose. <!-- ordinary comment --> Sample `<!-- exomem-origin:v2 example -->`.\n"
     parent = vault / "Knowledge Base/Notes/Insights/legacy.md"
     parent.parent.mkdir(parents=True, exist_ok=True)
     parent.write_text(f"---\ntype: insight\n---\n\n{body}", encoding="utf-8")
@@ -744,7 +769,8 @@ def test_unassessed_parent_payload_is_hidden_but_raw_capture_is_uninterpreted(va
         raw_capture = commands.op_get(vault, path=_PATH, include_raw=True)
     assert "unavailable attribution details" not in json.dumps(projected, default=str)
     assert "content" not in projected
-    assert example in projected["body"] and "<!-- ordinary comment -->" in projected["body"]
+    # An unreleased page withholds every reserved opener, an inline-code example too.
+    assert "Sample ``." in projected["body"] and "<!-- ordinary comment -->" in projected["body"]
     assert carrier in raw_capture["body"] and carrier in raw_capture["content"]
     assert parent.read_bytes() == canonical
 

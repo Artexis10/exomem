@@ -4307,8 +4307,9 @@ def annotate_page(
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
         from .. import provenance
 
-        # An excerpt is prose: no origin carrier, released or not, starts it.
-        body = provenance.origin_prose(body, owner_path=rel_path)
+        # An excerpt is prose: no origin carrier, released or not, starts it,
+        # and none pushed into code reaches this restricted reader either.
+        body = provenance.withheld_prose(body, owner_path=rel_path)
         body = redact_withheld_references(
             vault_root,
             body,
