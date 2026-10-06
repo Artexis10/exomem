@@ -300,18 +300,6 @@ def _vault_relative(root: Path, path: Path | str) -> str | None:
     return "/".join(parts)
 
 
-def _is_records_descendant(parts: list[str]) -> bool:
-    return len(parts) >= 3 and parts[0] == vault.kb_dirname() and parts[1] == "Records"
-
-
-def _is_records_alias(parts: list[str]) -> bool:
-    return (
-        len(parts) >= 3
-        and parts[0].casefold() == vault.kb_dirname().casefold()
-        and parts[1].casefold() == "records"
-    )
-
-
 def _is_structured_descendant(parts: list[str]) -> bool:
     return len(parts) >= 3 and parts[0] == vault.kb_dirname() and parts[1] in {"Records", "Planning"}
 

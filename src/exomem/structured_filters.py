@@ -370,15 +370,6 @@ class IndexCandidateAlgebra:
     def state(self) -> str:
         return self.status
 
-    @property
-    def seed_groups(self) -> tuple[tuple[str, frozenset[str]], ...]:
-        groups: list[tuple[str, frozenset[str]]] = []
-        if self.category_seeds is not None:
-            groups.append(("unit.category", self.category_seeds))
-        if self.kind_seeds is not None:
-            groups.append(("unit.kind", self.kind_seeds))
-        return tuple(groups)
-
 
 @dataclass(frozen=True, slots=True)
 class _Seed:

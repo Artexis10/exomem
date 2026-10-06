@@ -79,6 +79,10 @@ _DETAILS = frozenset({"counts", "keys"})
 #: false precision.
 VERDICTS = ("precise", "too_specific", "wrong_direction", "wrong_predicate", "should_be_generic")
 DEFAULT_SAMPLE_SIZE = 40
+#: Entries `detail="keys"` lists for edges whose `#fragment` did not land on a unit.
+FRAGMENT_LIST_LIMIT = 50
+#: The ways a fragment target can keep its page edge, as the graph records them.
+_FRAGMENT_OUTCOMES = ("missing", "ambiguous", "not_unit")
 _WILSON_Z = 1.959964
 
 Keep = Callable[[str], bool] | None
@@ -336,6 +340,8 @@ class _Row(NamedTuple):
     dst_page: str | None
     dst_kind: str | None  # "file" or the unit kind
     dst_anchor: str | None
+    fragment: str | None  # how a `#fragment` target resolved; None for no fragment
+    target_fragment: str | None  # the fragment as authored
 
     @property
     def touches_other(self) -> bool:
@@ -346,7 +352,9 @@ _ROWS_SQL = (
     "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, registry_status, "
     "origin, source_path, source_anchor, resolver_source_kind, resolver_target_kind, "
     "CASE WHEN registry_status = 'unregistered' "
-    "THEN json_extract(metadata, '$.line') END "
+    "THEN json_extract(metadata, '$.line') END, "
+    "json_extract(metadata, '$.fragment_resolution'), "
+    "json_extract(metadata, '$.target_fragment') "
     "FROM graph_edges WHERE origin NOT IN (?, ?)"
 )
 
@@ -443,6 +451,8 @@ class _Reader:
             source_kind,
             target_kind,
             line,
+            fragment,
+            target_fragment,
         ) in self.connection.execute(_ROWS_SQL, _STRUCTURAL_ORIGINS):
             if not self.author_ok(source_path):
                 continue
@@ -467,6 +477,8 @@ class _Reader:
                 dst_path,
                 dst_kind,
                 dst_anchor,
+                fragment,
+                target_fragment,
             )
 
     def pair_checks(
@@ -608,6 +620,8 @@ def _census_payload(
     by_status = dict.fromkeys(_STATUS_KEYS, 0)
     authored_edges = 0
     unresolved_target_edges = 0
+    fragment_edges = dict.fromkeys(_FRAGMENT_OUTCOMES, 0)
+    fragment_listing: list[tuple[str, str, str, str, str]] = []
     predicate_edges: Counter[str] = Counter()
     aliases_in_use: set[str] = set()
     unregistered_pages: dict[str, set[str]] = {}
@@ -672,6 +686,19 @@ def _census_payload(
             )
         if row.origin in _AUTHORED_ORIGINS:
             authored_edges += 1
+            if row.fragment in fragment_edges:
+                fragment_edges[row.fragment] += 1
+                fragment_listing.append(
+                    (
+                        source,
+                        str(row.source_anchor or ""),
+                        row.dst_page or "",
+                        row.target_fragment or "",
+                        row.fragment,
+                    )
+                )
+                if len(fragment_listing) > 2 * FRAGMENT_LIST_LIMIT:
+                    fragment_listing = sorted(fragment_listing)[:FRAGMENT_LIST_LIMIT]
             bucket = _bucket(row)
             by_status[bucket] += 1
             if bucket == "unregistered":
@@ -704,6 +731,13 @@ def _census_payload(
     metrics: dict[str, Any] = {
         "authored_edges": authored_edges,
         "unresolved_target_edges": unresolved_target_edges,
+        # A `[[Page#unit]]` target that did not land on a unit keeps its page
+        # edge. `unresolved_fragment_edges` counts a unit address that names
+        # nothing (a typo, a case mismatch, a removed unit); `not_unit` counts a
+        # heading reference, which this graph does not resolve.
+        "unresolved_fragment_edges": fragment_edges["missing"],
+        "ambiguous_fragment_edges": fragment_edges["ambiguous"],
+        "not_unit_fragment_edges": fragment_edges["not_unit"],
         "by_status": by_status,
         "generic_share": _ratio(by_status["core_generic"], registered_edges),
         "typed_coverage": {
@@ -798,6 +832,25 @@ def _census_payload(
         payload["keys"] = {
             "predicates": {key: predicate_edges[key] for key in sorted(predicate_edges)},
             "extensions_unused": sorted(set(registry.extensions) - set(extension_used)),
+            # Which edges the fragment counts above are counting, so an author
+            # can find them. Admission-filtered like every other row, capped,
+            # and honest about what the cap left out.
+            "fragment_edges": {
+                "total": sum(fragment_edges.values()),
+                "truncated": sum(fragment_edges.values()) > FRAGMENT_LIST_LIMIT,
+                "items": [
+                    {
+                        "source": source,
+                        "anchor": anchor or None,
+                        "target": target,
+                        "fragment": fragment,
+                        "resolution": outcome,
+                    }
+                    for source, anchor, target, fragment, outcome in sorted(fragment_listing)[
+                        :FRAGMENT_LIST_LIMIT
+                    ]
+                ],
+            },
         }
     return payload
 

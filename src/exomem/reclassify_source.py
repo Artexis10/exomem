@@ -33,6 +33,7 @@ from . import move_file as move_file_module
 from . import source_taxonomy, vocabulary_resolution
 from .kbdir import kb_dirname
 from .vault import (
+    _FM_PATTERN,
     VaultPathError,
     find_inbound_wikilinks,
     parse_frontmatter,
@@ -48,6 +49,7 @@ CLASSIFICATION_FIELDS = ("source_type", "domain")
 RECORD_FIELDS = ("reclassified", "reclassified_from", "reclassified_reason")
 
 _MAX_REASON_CHARS = 400
+_FENCE_LINE = re.compile(r"---\r?\n")
 
 
 @dataclass
@@ -200,17 +202,21 @@ def _rewrite_classification(
     today: dt.date,
 ) -> str:
     """Return `text` with only the classification and record fields changed."""
-    if not text.startswith("---\n"):
+    match = _FM_PATTERN.match(text)
+    if match is None:
+        if _FENCE_LINE.match(text):
+            raise ReclassifyError(
+                "NO_FRONTMATTER", "the source's frontmatter block is unterminated."
+            )
         raise ReclassifyError(
             "NO_FRONTMATTER", "the source has no frontmatter block to correct."
         )
-    end = text.find("\n---", 4)
-    if end == -1:
-        raise ReclassifyError(
-            "NO_FRONTMATTER", "the source's frontmatter block is unterminated."
-        )
-    front_text = text[4:end]
-    rest = text[end:]
+    opening = text[: match.start(1)]
+    # Edit a CRLF page's fields as LF lines and restore its line endings after,
+    # so inserted fields match the page rather than mixing endings.
+    crlf = opening.endswith("\r\n")
+    front_text = match.group(1).replace("\r\n", "\n") if crlf else match.group(1)
+    rest = text[match.end(1) :]
 
     front_text = _set_scalar(front_text, "source_type", kind, after="title")
     if domain is None:
@@ -230,7 +236,9 @@ def _rewrite_classification(
         _quote(reason),
         after="reclassified_from" if previous_path is not None else "reclassified",
     )
-    return "---\n" + front_text + rest
+    if crlf:
+        front_text = front_text.replace("\n", "\r\n")
+    return opening + front_text + rest
 
 
 def _quote(value: str) -> str:

@@ -2012,21 +2012,6 @@ def _restore_epoch_artifacts(
                 )
 
 
-def publish_deletion_checkpoint(
-    vault_root: Path, removed_rel_paths: Iterable[str]
-) -> GraphSyncCheckpoint | None:
-    """Durably record graph-relevant removals before derived fan-out runs."""
-    epoch = prepare_deletion_epoch(vault_root, removed_rel_paths)
-    if epoch is None:
-        return None
-    try:
-        commit_deletion_epoch(epoch)
-    except Exception:
-        restore_deletion_epoch(epoch)
-        raise
-    return epoch.checkpoint
-
-
 @dataclass(frozen=True)
 class GraphBuildOutcome:
     generation: int
@@ -2210,20 +2195,6 @@ def _parse_reset_manifest(directory: Any, raw: bytes) -> tuple[GraphReset, dict[
     if raw != _reset_manifest_raw(reset, parsed):
         raise GraphResetFailed()
     return reset, parsed
-
-
-def _read_reset_manifest(directory: Any) -> tuple[GraphReset, dict[str, tuple[int, ...]]]:
-    """Parse only the closed, content-free reset manifest shape."""
-    from .mutation_lock import retain_secure_directory, retained_read_file
-
-    retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
-    try:
-        return _parse_reset_manifest(retained, retained_read_file(retained, _RESET_MANIFEST, limit=8_192))
-    except OSError as error:
-        raise GraphResetFailed() from error
-    finally:
-        if retained is not directory:
-            retained.close()
 
 
 def _reset_manifest_placement(parent: Any, directory: Any, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> str:
@@ -2508,34 +2479,6 @@ def _cleanup_graph_lineage_reset_retained(parent: Any, directory: Any, reset: Gr
             pass
         remove_retained_child_directory(parent, directory, directory.path.name)
         return True
-    except OSError:
-        return False
-
-
-def cleanup_graph_lineage_reset(vault_root: Path, operation_id: str) -> bool:
-    """Best-effort, non-recursive cleanup of one manifest-recorded quarantine."""
-    from .mutation_lock import retain_child_directory, retain_secure_directory
-
-    kb = _reset_directory(Path(vault_root), operation_id).parent
-    name = f"{_RESET_PREFIX}{operation_id}"
-    try:
-        parent = retain_secure_directory(kb)
-        try:
-            directory: _SecureDirectory | None = retain_child_directory(
-                parent, name, delete_access=True
-            )
-            try:
-                reset, _identities = _resolve_reset_manifest_residue(parent, directory)
-                if reset.phase != "prepared":
-                    return False
-                cleaned = _cleanup_graph_lineage_reset_retained(parent, directory, reset)
-                directory = None
-                return cleaned
-            finally:
-                if directory is not None:
-                    directory.close()
-        finally:
-            parent.close()
     except OSError:
         return False
 
@@ -3701,11 +3644,6 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_rebuild_locks_in_forked_child)
 
 atexit.register(_close_rebuild_locks_at_exit)
-
-
-def live_owned_temporary(vault_root: Path) -> Path | None:
-    # Kernel lock ownership is deliberately not represented by PID metadata.
-    return None
 
 
 def wait_for_current(
