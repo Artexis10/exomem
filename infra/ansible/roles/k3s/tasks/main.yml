@@ -11,6 +11,24 @@
 - name: Validate the K3s inputs for this node role
   ansible.builtin.import_tasks: validate.yml
 
+# 0700, as K3s creates its own agent directories.
+- name: Create the kubelet drop-in directory
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install the kubelet image age limit
+  ansible.builtin.copy:
+    src: 10-exomem-image-gc.conf
+    dest: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/10-exomem-image-gc.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart K3s
+
 - name: Configure the independently adopted node memory policy
   ansible.builtin.import_tasks: memory_qos.yml
 
