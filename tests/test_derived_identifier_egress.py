@@ -2452,6 +2452,92 @@ def test_a_review_item_reads_as_if_its_marked_neighbour_were_absent(tmp_path: Pa
     assert present == context("absent", _principal("external"))
 
 
+def test_a_guest_activates_as_if_the_marked_page_were_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAW: activation's lexical pass is cut at a candidate limit a protected
+    page occupies before admission, so on an ungoverned vault a guest's packet
+    anchors exactly the pages it would were that page absent, not one short."""
+    import shutil
+
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    def insight(title: str, body: str) -> str:
+        return (
+            "---\ntype: insight\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+            f"# {title}\n\n## Summary\n\n{body}\n"
+        )
+
+    marked = f"{NOTES}/Insights/__exomem_raw_v1__quince-secret.md"
+    base = {
+        **_filler(),
+        **{
+            f"{NOTES}/Insights/quince-{n:02d}.md": insight(
+                f"Quince harvest {n}",
+                f"Quince orchard harvest planning note {n}. "
+                + " ".join(f"filler{n}w{word}" for word in range(150)),
+            )
+            for n in range(12)
+        },
+    }
+    original = {marked: insight("Quince harvest secret", "Quince orchard harvest plan " * 2)}
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vault = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vault / KB / "_Governance")
+        lexstore.ensure_fresh(vault)
+        working_set_runtime.reset_caches_for_tests()
+        working_set_index.WorkingSetIndex(vault).rebuild()
+        vaults[variant] = vault
+
+    def activate(variant: str, principal: RequestPrincipal | None) -> Any:
+        monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vaults[variant]))
+        packet = _call(
+            vaults[variant],
+            principal,
+            "activate_context",
+            turn="What is the quince orchard harvest plan?",
+        )
+        return {key: packet.get(key) for key in ("abstention", "ambiguity", "anchors", "units")}
+
+    assert marked in _text(activate("present", None))
+    assert activate("present", _principal("external")) == activate("absent", _principal("external"))
+
+
+def test_a_guests_referents_count_as_if_the_marked_entity_were_absent(tmp_path: Path) -> None:
+    """RAW: a referent's reasons are counted over the whole entity registry
+    before admission, so on an ungoverned vault a guest asking which person a
+    name is gets the counts it would were a protected organization absent."""
+    import shutil
+
+    def entity(entity_type: str, title: str) -> str:
+        return (
+            f"---\ntype: entity\nentity_type: {entity_type}\ntitle: {title}\nstatus: active\n"
+            f"---\n# {title}\n\n{title} entity page.\n"
+        )
+
+    base = {
+        **_filler(),
+        f"{KB}/Entities/People/jane-zephyr.md": entity("person", "Jane Zephyr"),
+        f"{KB}/Entities/Organizations/acme.md": entity("organization", "Acme Corp"),
+    }
+    original = {
+        f"{KB}/Entities/Organizations/__exomem_raw_v1__secretco.md": entity(
+            "organization", "Secretco Holdings"
+        ),
+    }
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+    query = {"query": "which person is Jane Zephyr", "detail": "full"}
+
+    local = _call(vaults["present"], None, "ask_memory", **query)
+    assert local["referents"]["reasons"]["type_mismatch"] == 2, local
+    guest = [_call(vaults[variant], _principal("external"), "ask_memory", **query) for variant in vaults]
+    assert guest[0]["referents"] == guest[1]["referents"]
+
+
 def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

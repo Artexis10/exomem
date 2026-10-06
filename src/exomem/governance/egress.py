@@ -2641,7 +2641,8 @@ def guard_referents(
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
         return None
-    if release_gate_active:
+    # Both are counted over the whole entity registry before admission.
+    if release_gate_active or caller_restricted(vault_root, principal=principal, purpose=purpose):
         guarded.pop("reasons", None)
         guarded.pop("omitted_candidate_count", None)
 
@@ -2916,6 +2917,9 @@ def guard_working_set(
         )
     }
     withheld = set(release.withheld_paths) | tombstoned
+    # Policy state is the right question here: the packet was compiled over this
+    # caller's own view, and `withheld` already holds every named path RAW
+    # withholds from it, so with no policy there is no other decision to take.
     if not release_gate_active and policy.empty and not withheld:
         # Nothing to decide, so nothing to resolve. A vault that has opted into no
         # governance must not depend on a DERIVED index for its reads: resolving
@@ -6046,6 +6050,21 @@ def restricted_release_filter(
     if who.resolved and who.audience_id == OWNER_AUDIENCE:
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+def caller_restricted(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """Could anything, RAW included, be withheld from this caller?
+
+    The question every count, cut or diagnostic computed before admission
+    asks. Policy state (`gate_state`) is a different question: RAW withholds
+    a protected page from a guest on an ungoverned vault too.
+    """
+    return restricted_release_filter(vault_root, principal=principal, purpose=purpose) is not None
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;

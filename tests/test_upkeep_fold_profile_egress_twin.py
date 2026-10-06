@@ -255,37 +255,23 @@ def test_an_owner_session_start_recomputes_no_fold_or_profile_row(
     assert owner_items == caller_items == [dreamer_families.FOLD_KIND]
 
 
-def test_a_remote_owner_session_start_recomputes_no_fold_or_profile_row(
+def test_a_remote_owner_session_start_is_served_as_the_local_owners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Owner ruling: the owner is the owner on any surface, so the owner's OAuth
-    connector is served the stored fold and profile rows at session start, as
-    the local owner is, and recomputes neither. A guest, the positive control,
-    still has both recomputed."""
-    vault = _build(tmp_path, {})
-    recomputed: list[str] = []
-
-    def counting(family: dreamer_families.Family) -> dreamer_families.Family:
-        def release(ctx, row, keep):
-            recomputed.append(row["kind"])
-            return family.release(ctx, row, keep)
-
-        return dataclasses.replace(family, release=release)
-
-    monkeypatch.setattr(
-        dreamer_families,
-        "REGISTRY",
-        [
-            counting(family)
-            if family in (dreamer_families.FOLD, dreamer_families.PROFILE)
-            else family
-            for family in dreamer_families.REGISTRY
-        ],
+    """Owner ruling: the owner is the owner on any surface. The owner's OAuth
+    connector is served the stored fold that counts a raw-protected third recap,
+    as the local owner is; a guest is served a fold recomputed without it."""
+    raw_recap = fx.recap(
+        "Private session",
+        episode="ep-" + "d4" * 16,
+        captured="2026-05-04",
+        decided="Retire the [[Orbit Pump]] next year",
     )
+    vault = _build(tmp_path, {f"{fx.EPISODES}/__exomem_raw_v1__private-session.md": raw_recap})
     monkeypatch.setattr(dreamer, "delivering", lambda: True)
     monkeypatch.setattr(upkeep, "_wall", lambda: LATER + 7200)
 
-    def session_start(principal, session: str) -> list[str]:
+    def session_start(principal, session: str) -> list[tuple[str, str]]:
         packet = {
             "recent_context": [{"path": fx.ENTITY, "title": "Orbit Pump", "why": "edited"}],
             "anchors": [],
@@ -294,19 +280,22 @@ def test_a_remote_owner_session_start_recomputes_no_fold_or_profile_row(
         }
         with request_scope(principal):
             upkeep.for_packet(vault, packet, session=session)
-        return [item["kind"] for item in (packet.get("upkeep") or {}).get("items") or ()]
+        items = (packet.get("upkeep") or {}).get("items") or ()
+        return [(item["kind"], item["why"]) for item in items]
 
     connector = RequestPrincipal(
-        audience_id="owner", surface="mcp", resolved=True,
-        issuer_family="mcp-oauth:" + "c" * 64, remote_owner=True,
+        audience_id="owner",
+        surface="mcp",
+        resolved=True,
+        issuer_family="mcp-oauth:" + "c" * 64,
+        remote_owner=True,
     )
     owner_items = session_start(owner_principal(), "owner")
     _reset_caches()
     connector_items = session_start(connector, "connector")
-    connector_recomputed = list(recomputed)
     _reset_caches()
-    session_start(_external(), "external")
+    guest_items = session_start(_external(), "external")
 
-    assert connector_recomputed == []
-    assert connector_items == owner_items == [dreamer_families.FOLD_KIND]
-    assert sorted(recomputed) == sorted([dreamer_families.FOLD_KIND, dreamer_families.PROFILE_KIND])
+    assert owner_items, owner_items
+    assert connector_items == owner_items
+    assert guest_items != owner_items, guest_items

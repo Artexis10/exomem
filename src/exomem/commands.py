@@ -2679,9 +2679,8 @@ def op_find(
     # whether a withheld page contains a word, so a caller anything could be
     # withheld from, RAW included, receives none of them. The hits are
     # unchanged.
-    restricted = (
-        projection_runtime is None
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    restricted = projection_runtime is None and egress_module.caller_restricted(
+        vault_root, purpose=purpose
     )
     if restricted:
         explain = False
@@ -2794,7 +2793,8 @@ def op_find(
         # an ungoverned vault, so the owner's empty-policy fast path keeps `limit`
         # exactly as asked and the latency profile is unchanged. A restricted
         # caller over-fetches there too: RAW can still withhold a hit, and an
-        # unfilled slot would say so.
+        # unfilled slot would say so. Policy state still counts on its own: a
+        # tombstone withholds from the owner as well.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
         retrieval_limit = (
             egress_module.pool_limit(limit) if _release_active or restricted else limit
@@ -5998,6 +5998,9 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
         return True
     from .governance import egress as egress_module
 
+    # Policy state is the right question here: with no policy RAW is the only
+    # floor, and a protected target lists the same links its absent twin does,
+    # since an inbound link resolves by name whether or not its target exists.
     policy, _ = egress_module.gate_state(Path(vault_root))
     if policy.empty:
         return True
@@ -6509,7 +6512,7 @@ def _withhold_vault_generation(vault_root: Path, packet: Any) -> None:
     if (
         isinstance(generation, dict)
         and any(name in generation for name in _VAULT_GENERATION_FIELDS)
-        and egress_module.restricted_release_filter(vault_root) is not None
+        and egress_module.caller_restricted(vault_root)
     ):
         packet["generation"] = {
             key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
@@ -6797,6 +6800,7 @@ def _op_activate_context_body(
                     limit=(
                         egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
                         if release_active
+                        or egress_module.caller_restricted(vault_root, purpose=purpose)
                         else ACTIVATE_RETRIEVAL_LIMIT
                     ),
                     freshness=lexical_freshness,
