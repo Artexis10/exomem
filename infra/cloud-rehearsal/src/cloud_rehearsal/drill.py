@@ -61,7 +61,7 @@ from cellctl.manifests import (
     hold_job_name,
     namespace_name,
 )
-from cellctl.state import EMPTY_VOLUME_REFUSED, RESTORE_FAILED, SNAPSHOT_BACKUP
+from cellctl.state import BACKUP_FAILED, EMPTY_VOLUME_REFUSED, RESTORE_FAILED, SNAPSHOT_BACKUP
 from cellctl.storage_config import LocalStorage
 
 from . import build, drill_cluster, images, infra, platform, substrate
@@ -498,6 +498,9 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
         started = seen["hold_started_at"]
         if started:
             snapshot = drill.maybe_json("get", "volumesnapshot", hold_job_name(SNAPSHOT_NAME, started), "--namespace", cell.namespace)
+            error = ((snapshot or {}).get("status") or {}).get("error")
+            if error:
+                seen["snapshot_error"] = str(error.get("message"))[:600]
             if snapshot and (snapshot.get("status") or {}).get("readyToUse"):
                 seen["snapshot"] = {"name": snapshot["metadata"]["name"],
                                     "created_at": snapshot["status"].get("creationTime"),
@@ -523,11 +526,15 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
         seen["polls_not_ready"] += 0 if pod_ready(drill.cell_pod(cell)) else 1
 
     row = await drill.wait_row(
-        cell, lambda r: r.get("last_backup_snapshot") not in (None, previous_snapshot) and r.get("hold_kind") is None,
-        timeout=900, interval=1, during=look, description=f"an hourly backup of cell {cell.label} to finish",
+        cell,
+        lambda r: r.get("last_error_code") == BACKUP_FAILED
+        or (r.get("last_backup_snapshot") not in (None, previous_snapshot) and r.get("hold_kind") is None),
+        timeout=1200, interval=1, during=look, description=f"an hourly backup of cell {cell.label} to finish",
     )
     look()
     seen["row"] = row_summary(row)
+    if row.get("last_error_code") == BACKUP_FAILED:
+        raise StepFailure(f"cellctl recorded BACKUP_FAILED for cell {cell.label}: {seen}")
     return seen
 
 
@@ -1018,6 +1025,8 @@ ADAPTATIONS = (
     "migrations; cells are seeded as rows, as cellctl's live suite does",
     "the etcd snapshot is taken on the server's disk with `k3s etcd-snapshot save`, so the runbook's B2 "
     "listing and its --etcd-s3 restore transport are not exercised",
+    "the drill loads dm_thin_pool and dm_snapshot on the runner: the agents' LVM cannot load kernel modules "
+    "from inside their containers, as a real agent's LVM does on demand",
     "TopoLVM and the snapshot controller are pulled by the nodes from ghcr.io and registry.k8s.io by digest; "
     "agent B pulls TopoLVM's image before the loss",
 )
@@ -1046,7 +1055,10 @@ async def run_drill(args: argparse.Namespace) -> int:
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode="dockerfile")
             agent_image = drill_cluster.build_agent_image(run_id, workdir)
         with stage(report, "infrastructure"):
-            run(["sudo", "modprobe", "dm_thin_pool"])
+            # The agents' LVM cannot load modules from their containers; a real
+            # agent would load these on demand. LVM asks for the snapshot
+            # target even for a thin snapshot.
+            run(["sudo", "modprobe", "--all", "dm_thin_pool", "dm_snapshot"])
             network = drill_cluster.create_network(run_id)
             stack = infra.Stack(run_id=run_id, workdir=workdir, network=network, subnet=drill_cluster.SUBNET,
                                 k3s=None, postgres=None, object_store=None)  # type: ignore[arg-type]

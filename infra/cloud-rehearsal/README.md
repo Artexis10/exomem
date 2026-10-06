@@ -113,3 +113,42 @@ K3s-in-Docker adaptations are detected, applied only where needed, and each one 
 - system images imported instead of pulled.
 
 `--gateway-build host` is for machines whose `docker build` cannot reach the npm registry with a trusted CA. It assembles the gateway image's final stage from a host build, and the report records that it did.
+
+## Local-storage node-loss drill
+
+`move-cloud-cells-to-local-storage` task 4, with the rehearsal evidence for
+tasks 2.3, 2.4 and 2.9. It needs privileged Docker, loop devices and `sudo`
+for `losetup` and `modprobe`, so it runs on a GitHub runner: dispatch the
+`Cloud rehearsal` workflow with `mode` set to `local-storage-drill`.
+
+```
+cd infra/cloud-rehearsal
+uv run --frozen exomem-cloud-rehearsal local-storage-drill --report local-storage-drill-report.json
+```
+
+It runs a K3s server with embedded etcd and two agents, each with its own
+loop-device `cells` volume group. TopoLVM, the snapshot controller, the cell
+classes and cellctl come from one render of the platform chart with
+`cellStorage.local.enabled`. The control database holds cellctl's fixture
+schema, and cells are seeded as rows.
+
+The checks run in order, each on the state the one before leaves:
+
+1. **2.3:** three hourly snapshot backups of a serving cell on agent A.
+2. **4.1 and 2.4:** one more write, then agent A and its disk are destroyed.
+   The cell is relocated onto agent B from its last backup and accepted.
+3. **4.2:** the backed-up cell started on an empty claim refuses to start.
+4. **4.3:** a relocation's restore is interrupted. The cell stays down, the
+   retained volumes do not change, and the retried restore serves.
+5. **2.9:** the server is restored from an etcd snapshot older than a second
+   cell, which is re-adopted by the runbook's steps.
+
+The report (`exomem-local-storage-drill-report-v1`) records each check's
+evidence, the measured recovery point and recovery time, and the backup upload
+times, each with its source. Exit 0 means every check passed, 1 a check
+failed, and 2 the drill itself failed.
+
+The agents share the runner's kernel, where device-mapper names are global,
+so two `cells/pool0` pools cannot be active at once. Agent B therefore gets
+its volume group only after agent A's disk is destroyed, as replacement
+capacity. The report lists this and every other adaptation.
