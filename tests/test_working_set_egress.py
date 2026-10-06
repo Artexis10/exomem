@@ -3656,6 +3656,27 @@ def test_used_chars_is_untouched_when_the_guard_removes_nothing(vault: Path) -> 
     assert guarded["budget"]["used_chars"] == 1234
 
 
+def test_used_chars_drops_by_exactly_the_removed_unit(vault: Path) -> None:
+    """A governed packet whose guard removes one unit: the charge falls by that
+    unit's characters and nothing else. The starting 1234 is deliberately not
+    a recount of the packet, so a guard that recounted would be caught."""
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    packet = _packet()
+    packet["pointers"] = [p for p in packet["pointers"] if p["ref"] == OPEN_PATH]
+    packet["current_state"] = [s for s in packet["current_state"] if s["anchor"] == OPEN_PATH]
+    packet["budget"] = {"limit_chars": 4000, "used_chars": 1234}
+    (hidden,) = [u for u in packet["units"] if u["ref"] == UNIT_REF_HIDDEN]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert UNIT_REF_HIDDEN not in [unit["ref"] for unit in guarded["units"]]
+    assert len(guarded["units"]) == len(packet["units"]) - 1
+    assert guarded["budget"]["used_chars"] == 1234 - len(hidden["text"])
+
+
 # --------------------------------------------------------------------------- #
 # Retrieval-carried packets (design D3) cross the same guard
 # --------------------------------------------------------------------------- #

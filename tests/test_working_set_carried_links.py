@@ -19,7 +19,14 @@ from pathlib import Path
 
 import pytest
 from test_governance_egress import OPEN_PATH, RESTRICTED_PATH, _external, write_rule, write_scope
-from test_working_set_carry import seed_ordinary_notes
+from test_working_set_carry import (
+    CARRY_PAGE,
+    GENUINE_PAGE,
+    _seed_carry_pages,
+    _seed_prose_corpus,
+    seed_ordinary_notes,
+)
+from test_working_set_named_domains import BOTH_TURN
 
 from exomem import commands, lexstore, memory_refs, working_set_index, working_set_runtime
 from exomem.governance import egress
@@ -135,6 +142,47 @@ def test_a_unit_too_long_to_serve_names_no_one(vault: Path) -> None:
 
     assert any(p.get("reason") == "unit_too_long" for p in packet["pointers"]), packet["pointers"]
     assert not [a for a in packet["anchors"] if "carried_link" in a["evidence"]], packet["anchors"]
+
+
+def test_a_person_listed_through_one_carried_page_takes_no_slot_of_the_next(vault: Path) -> None:
+    """Two carried pages both name Talia first. The second page's two slots go
+    to the next people it names, not to Talia a second time."""
+    _seed_prose_corpus(vault)
+    _seed_carry_pages(vault)
+    for rel, name in (
+        (TALIA, "Talia Verenko"),
+        (OREN, "Oren Haldane"),
+        (PELL, "Pell Mordaunt"),
+        (QUILL, "Quill Aster"),
+    ):
+        _write(vault, rel, _person(name, "Works on storage."))
+    _write(
+        vault,
+        CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
+        "# Quillon vantry window\n\n## Summary\n\n"
+        "- [decision] The quillon vantry window was widened to nine minutes; "
+        "Talia Verenko and Pell Mordaunt reran the queue. ^q-decision\n\n"
+        "## Context\n\n[[Talia Verenko]] [[Pell Mordaunt]]\n",
+    )
+    _write(
+        vault,
+        GENUINE_PAGE,
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
+        "# Kelvane throughput review\n\n## Summary\n\n"
+        "- [decision] The kelvane throughput ceiling was raised to eleven units; "
+        "Talia Verenko, Oren Haldane and Quill Aster ran the review. ^k-decision\n\n"
+        "## Context\n\n[[Talia Verenko]] [[Oren Haldane]] [[Quill Aster]]\n",
+    )
+    _reindex(vault)
+
+    packet = commands.op_activate_context(vault, turn=BOTH_TURN)
+
+    listed: dict[str, list[str]] = {}
+    for anchor in packet["anchors"]:
+        if "carried_link" in anchor["evidence"]:
+            listed.setdefault(anchor["via"], []).append(anchor["path"])
+    assert listed == {CARRY_PAGE: [TALIA, PELL], GENUINE_PAGE: [OREN, QUILL]}, packet["anchors"]
 
 
 def test_the_guard_removes_a_linked_anchor_with_the_page_it_came_through(vault: Path) -> None:

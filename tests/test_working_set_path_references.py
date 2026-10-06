@@ -3,9 +3,11 @@
 A turn that quoted `/home/<user>/handoffs/<file>.md` was read as the words
 `home`, `handoffs`, ..., and `home` named the vault's `home` project by
 exact alias: an unrelated project's preferences were carried into the
-packet. A rooted path (POSIX, `~`, a Windows drive) or a URL now contributes
-no word to subject evidence, and a relative path contributes only its final
-segment, so a quoted vault page path still names the page it always named.
+packet. A rooted path (POSIX, `~`, a Windows drive, an environment
+variable), a URL with or without a scheme and an scp-style remote now
+contribute no word to subject evidence. A `./` or `../` path contributes only
+its final segment. Any other slash run is prose, and a vault page path still
+names the page it always named.
 
 Invented names throughout.
 """
@@ -69,24 +71,38 @@ def _reached(packet: dict) -> set[str]:
         "Read ~/records/home-todo.md and pick it up.",
         r"Read C:\Users\example\Records\Home\plan.txt and pick it up.",
         "Read https://example.com/home/records/index.html and pick it up.",
-        "Read Knowledge Base/Records/Home/sync-notes.md and pick it up.",
+        "Read ./records/home/sync-notes.md and pick it up.",
         "Read ${HOME}/records/home-todo.md and pick it up.",
         "Pull git@example.com:acme/home.git and pick it up.",
+        "Pull deploy@prod:/srv/home/records and pick it up.",
         "See example.com/acme/records and pick it up.",
         'Read "/srv/notes/My Home Records/plan.md" and pick it up.',
         "Read `/srv/notes/My Home Records/plan.md` and pick it up.",
+        "Read **/srv/home/handoff.md** and pick it up.",
+        'Read "/srv/home/handoffs and pick it up.',
+        "Read `/srv/home/handoffs and pick it up.",
+        "Read {/srv/home/handoff.md} and pick it up.",
+        "Read notes,/srv/home/handoffs and pick it up.",
+        "Read \u2018/srv/home/handoff.md\u2019 and pick it up.",
     ],
     ids=[
         "posix",
         "tilde",
         "windows",
         "url",
-        "relative-directories",
+        "dot-relative-directories",
         "environment-variable",
         "scp-style-remote",
+        "scp-style-remote-dotless-host",
         "schemeless-host",
         "quoted-with-spaces",
         "backticked-with-spaces",
+        "bold",
+        "unclosed-quote",
+        "unclosed-backtick",
+        "braces",
+        "after-a-comma",
+        "curly-single-quotes",
     ],
 )
 def test_a_quoted_path_names_no_project(project_vault: Path, turn: str) -> None:
@@ -103,11 +119,19 @@ def test_the_same_project_named_in_prose_still_resolves(project_vault: Path) -> 
     assert PROJECT_PAGES["records"] in _reached(packet)
 
 
-def test_slash_joined_words_are_prose_not_a_path(project_vault: Path) -> None:
-    """Only a run ending in a file name, or starting `./` or `../`, is a path."""
-    packet = commands.op_activate_context(
-        project_vault, turn="Compare the records/staging/prod setups."
-    )
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Compare the records/staging/prod setups.",
+        "Compare the records/Node.js setups.",
+        "Compare the Node.js/records setups.",
+    ],
+    ids=["three-words", "ends-in-a-dotted-name", "dotted-name-then-word"],
+)
+def test_slash_joined_words_are_prose_not_a_path(project_vault: Path, turn: str) -> None:
+    """Without a root or a leading `./` or `../`, a slash run is prose, and a
+    dotted name such as `Node.js` before a slash is not a host."""
+    packet = commands.op_activate_context(project_vault, turn=turn)
 
     assert "project:records" in _reached(packet)
 

@@ -96,6 +96,58 @@ def test_a_unit_the_guard_removes_lists_no_one(vault: Path) -> None:
     assert restricted == clean
 
 
+def test_a_person_a_surviving_unit_names_stays_listed(vault: Path) -> None:
+    """The guard drops a unit that links a withheld page, but another unit of
+    the same note names Talia. She stays listed, as in a note without the
+    dropped unit: losing her would show that the note lost a unit."""
+    seed_ordinary_notes(vault)
+    _write(vault, TALIA, _person("Talia Verenko"))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    survivor = (
+        "- [failure] The staging replica migration stalled twice last week; "
+        "Talia Verenko reran it. ^r-talia"
+    )
+    hidden = (
+        "- [failure] The migration stalled on the staging replica last week "
+        "near [[Secret cluster]]. ^r-secret"
+    )
+    context = "Affected teammate: [[Talia Verenko]]."
+    _write(vault, NOTE, _note("Replica migration stall", f"{survivor}\n{hidden}", context))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", survivor, context))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [a["path"] for a in clean["anchors"] if "carried_link" in a["evidence"]] == [TALIA]
+
+
+def test_a_slot_the_removed_unit_held_goes_to_the_next_person_named(vault: Path) -> None:
+    """The removed unit is served first and names Oren and Pell, filling both
+    slots. Without it, a slot goes to Talia, whom the surviving unit names, as
+    in a note without the removed unit."""
+    seed_ordinary_notes(vault)
+    for rel, name in ((TALIA, "Talia Verenko"), (OREN, "Oren Haldane"), (PELL, "Pell Mordaunt")):
+        _write(vault, rel, _person(name))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = (
+        "- [decision] Oren Haldane and Pell Mordaunt moved the replica migration "
+        "off [[Secret cluster]]. ^r-secret"
+    )
+    survivor = "- [decision] Talia Verenko reran the staging migration the next week. ^r-talia"
+    context = "[[Oren Haldane]] [[Pell Mordaunt]] [[Talia Verenko]]"
+    _write(vault, NOTE, _note("Replica migration stall", f"{hidden}\n{survivor}", context))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", survivor, context))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [a["path"] for a in clean["anchors"] if "carried_link" in a["evidence"]] == [TALIA]
+
+
 def test_a_withheld_person_is_listed_exactly_as_an_absent_one(vault: Path) -> None:
     """At a notice level the guard would mark a removed anchor, so a withheld
     row that reached the packet shows. It must never be listed at all."""
