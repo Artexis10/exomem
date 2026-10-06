@@ -2463,12 +2463,13 @@ def _carried_packet(
         # headers), so rebuild and keep only those the units served after that
         # still name, until nothing more drops.
         room = max(0, working_set_resolve.MAX_ANCHORS - len(carried_anchors))
-        listed = _carried_links(index, carried_anchors, packet["units"], visible=visible)[:room]
+        pages = [anchor.path for anchor in carried_anchors]
+        listed = _carried_links(index, pages, packet["units"], visible=visible)[:room]
         while listed:
             rebuilt = build(listed)
             named = {
                 anchor.anchor_id
-                for anchor in _carried_links(index, carried_anchors, rebuilt["units"], visible=visible)
+                for anchor in _carried_links(index, pages, rebuilt["units"], visible=visible)
             }
             still = tuple(anchor for anchor in listed if anchor.anchor_id in named)
             if len(still) == len(listed):
@@ -2715,7 +2716,7 @@ CARRIED_LINK_MAX_PER_PAGE = 2
 
 def _carried_links(
     index: working_set_index.WorkingSetIndex,
-    carried: Sequence[working_set_resolve.ResolvedAnchor],
+    carried: Sequence[str],
     units: Sequence[Mapping[str, Any]],
     *,
     visible: Callable[[str], bool] | None,
@@ -2725,38 +2726,48 @@ def _carried_links(
     A carried note about a person often names that person in its unit and
     links their page, while the turn that carried it never said the name.
     Such a row is listed `partial` on `carried_link` and never resolves: no
-    lane reads it, and the token never carries it forward. `units` are the
-    units the packet serves; a unit turned into a pointer was never served
-    and names no one. A row the page links without naming it in a served unit
-    stays out, and so does a row the reader may not see, before any slot is
-    counted. Each page lists at most `CARRIED_LINK_MAX_PER_PAGE`, in the order
-    its units first name them. `via` names the page, so the egress guard
-    removes the row whenever it removes the page or a unit of it.
+    lane reads it, and the token never carries it forward. `carried` are the
+    carried pages' paths, in order; `units` are the units the packet serves,
+    and a unit turned into a pointer was never served and names no one. A row
+    the page links without naming it in a served unit stays out, and so do a
+    row the reader may not see and a row an earlier carried page already
+    listed, before any slot is counted. Each page lists at most
+    `CARRIED_LINK_MAX_PER_PAGE`, in the order its units first name them.
+    `via` names the page. The egress guard relists from the units it lets
+    through (`relist_carried_links`), so a restricted packet lists exactly
+    what a packet without the removed material would.
     """
     rows = index.anchors()
+    carried_paths = frozenset(carried)
     out: list[working_set_resolve.ResolvedAnchor] = []
+    listed: set[str] = set()
     for page in carried:
         texts = [
             working_set_index.tokens_of(working_set_index.normalize(str(unit.get("text") or "")))
             for unit in units
-            if (unit.get("provenance") or {}).get("path") == page.path
+            if (unit.get("provenance") or {}).get("path") == page
         ]
         if not texts:
             continue
         named: list[tuple[tuple[int, int], Any]] = []
         for row in rows:
-            if not row.path or row.path == page.path or row.path in {a.path for a in carried}:
+            if not row.path or row.path in carried_paths or row.path in listed:
                 continue
-            if page.path not in row.neighbourhood and page.path not in row.linked_by:
+            if page not in row.neighbourhood and page not in row.linked_by:
                 continue
             if visible is not None and not working_set_resolve.anchor_visible(row, visible):
                 continue
             first = _first_mention(texts, (row.title, *row.aliases))
             if first is not None:
                 named.append((first, row))
-        for _first, row in sorted(named, key=lambda pair: pair[0])[:CARRIED_LINK_MAX_PER_PAGE]:
-            if row.path in {anchor.path for anchor in out}:
+        taken = 0
+        for _first, row in sorted(named, key=lambda pair: pair[0]):
+            if taken == CARRIED_LINK_MAX_PER_PAGE:
+                break
+            if row.path in listed:
                 continue
+            listed.add(row.path)
+            taken += 1
             out.append(
                 working_set_resolve.ResolvedAnchor(
                     anchor_id=row.anchor_id,
@@ -2768,11 +2779,61 @@ def _carried_links(
                     status="partial",
                     evidence=("carried_link",),
                     categories=(),
-                    neighbourhood=frozenset({page.path}),
-                    via=page.path,
+                    neighbourhood=frozenset({page}),
+                    via=page,
                 )
             )
     return tuple(out)
+
+
+def relist_carried_links(
+    vault_root: Path,
+    anchors: Sequence[Mapping[str, Any]],
+    units: Sequence[Mapping[str, Any]],
+    *,
+    purpose: str | None,
+) -> list[dict[str, Any]]:
+    """The `carried_link` anchors a carried packet lists when it serves `units`.
+
+    The egress guard calls this after removing units, with the units it lets
+    through. It is the compiler's own listing (`_carried_links`) over the
+    surviving carried pages, so a slot a removed unit filled goes to the next
+    person a surviving unit names, exactly as in a packet built without that
+    unit. Each entry takes the `origin` of the page it was listed through.
+    """
+    carried = [
+        str(anchor.get("path") or "")
+        for anchor in anchors
+        if "carried_link" not in (anchor.get("evidence") or ()) and anchor.get("path")
+    ]
+    if not carried:
+        return []
+    room = max(0, working_set_resolve.MAX_ANCHORS - len(carried))
+    listed = _carried_links(
+        working_set_index.WorkingSetIndex(vault_root),
+        carried,
+        units,
+        visible=_reader_view(vault_root, purpose),
+    )[:room]
+    entries = [anchor.as_dict() for anchor in listed]
+    _stamp_via_origins([*anchors, *entries], entries)
+    return entries
+
+
+def _stamp_via_origins(
+    anchors: Sequence[Mapping[str, Any]], entries: Sequence[dict[str, Any]]
+) -> None:
+    """Give each of `entries` listed through a page (`via`) that page's
+    `origin` among `anchors`: whose words reached the page reached the row."""
+    origins = {
+        str(anchor.get("path") or ""): anchor["origin"]
+        for anchor in anchors
+        if not anchor.get("via") and "origin" in anchor
+    }
+    for entry in entries:
+        origin = origins.get(str(entry.get("via") or ""))
+        if origin is not None and "origin" not in entry:
+            entry["origin"] = origin
 
 
 def _first_mention(
@@ -3012,17 +3073,24 @@ def _label_origins(packet: dict[str, Any], origins: Mapping[str, str]) -> None:
 
     An entry keeps the origin an earlier stage gave it (a carried anchor), then
     takes the one the conversation stage recorded for its ref or path, and is
-    otherwise `turn`. Never adds an entry, never touches any other field.
+    otherwise `turn`. A row listed through a carried page (`via`) takes that
+    page's origin. Never adds an entry, never touches any other field.
     """
     for block in ("anchors", "ambiguity"):
         for entry in packet.get(block) or ():
-            if not isinstance(entry, dict) or "origin" in entry:
+            if not isinstance(entry, dict) or "origin" in entry or entry.get("via"):
                 continue
             entry["origin"] = (
                 origins.get(str(entry.get("ref") or ""))
                 or origins.get(str(entry.get("path") or ""))
                 or _DEFAULT_ORIGIN
             )
+    # A row listed through a carried page (`via`) was reached by whatever
+    # reached that page; the egress guard stamps a row it relists the same way.
+    anchors = [entry for entry in packet.get("anchors") or () if isinstance(entry, dict)]
+    _stamp_via_origins(anchors, [entry for entry in anchors if entry.get("via")])
+    for entry in anchors:
+        entry.setdefault("origin", _DEFAULT_ORIGIN)
 
 
 def _compile_packet(

@@ -3066,21 +3066,32 @@ def guard_working_set(
             guarded["units"].append(unit)
     _note_removal("units", len(original_units), len(guarded["units"]))
     _charge_back_removed(guarded, "units", original_units, guarded["units"])
-    # An anchor listed because a carried page's unit named it (`carried_link`)
-    # goes whenever that page loses any unit here: the removed unit may be the
-    # one that named it, and the caller must not learn that it existed.
-    if lost_unit_pages:
-        listed = len(guarded["anchors"])
+    # The anchors a carried page's units name (`carried_link`) were listed from
+    # the units the compiler served. When a unit goes here, the listing is
+    # rebuilt from the units that stay, by the compiler's own rule: dropping
+    # only the rows the removed unit named would leave its slots empty, and
+    # dropping every row of that page would hide a person a surviving unit
+    # names. Either tells the caller the page lost a unit; the rebuilt listing
+    # is the one a vault without the removed material produces.
+    if lost_unit_pages and any(
+        "carried_link" in (anchor.get("evidence") or ()) for anchor in guarded["anchors"]
+    ):
+        from .. import working_set
+
+        relisted = working_set.relist_carried_links(
+            vault_root, guarded["anchors"], guarded["units"], purpose=purpose
+        )
         guarded["anchors"] = [
             anchor
             for anchor in guarded["anchors"]
-            if not (
-                "carried_link" in (anchor.get("evidence") or ())
-                and str(anchor.get("via") or "") in lost_unit_pages
+            if "carried_link" not in (anchor.get("evidence") or ())
+        ] + [
+            anchor
+            for anchor in (
+                _guarded_anchor(entry, frozen, decisions, invalid_refs) for entry in relisted
             )
+            if anchor is not None
         ]
-        if len(guarded["anchors"]) < listed:
-            removed["anchors"] = removed.get("anchors", 0) + listed - len(guarded["anchors"])
 
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)
