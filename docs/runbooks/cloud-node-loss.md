@@ -2,7 +2,7 @@
 
 # Cloud node loss: relocate cells, reconcile volumes
 
-**Status:** written with `move-cloud-cells-to-local-storage` phase 2. Not yet rehearsed: the node-loss drill (task 4.1) runs the relocation, and its etcd restore from an older snapshot runs the restore and the reconciliation. Until then, treat every step as unproven.
+**Status:** written with `move-cloud-cells-to-local-storage` phase 2. The node-loss drill rehearsed it on disposable K3s, in the cloud rehearsal's `local-storage-drill` mode ([run 37428273291](https://github.com/Artexis10/exomem/actions/runs/37428273291), 2026-10-06). It ran "Relocate the cells of a lost agent" steps 1-4 and 6, "Restore etcd from an older snapshot" steps 3-6 from a snapshot on the server's disk, "After restoring etcd" steps 1-4 and 6, and the `CELL_INIT_EMPTY_VOLUME_REFUSED` steps 1-3 for a row that records its volume, through step 5's mark. It did not rehearse the escrowed-key S3 listing and `--etcd-s3` restore, a real B2 upload time (its object store is a local S3 double), the Hetzner `VOLUME_MISSING` steps, or the erase of a removed agent's cells device.
 
 This applies to cells on local storage (the `exomem-cloud-local` class, TopoLVM). A cell on a Hetzner Cloud Volume never needs it: its volume survives its node.
 
@@ -176,14 +176,19 @@ The usual cause on Hetzner is an etcd restore that drops a cell created after th
 6. Resume cellctl. It recreates the namespace if it is gone, and creates the claim, which binds to the PV that names it.
 7. Check that `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data` shows `Bound` to that PV, and that the row records `$VOLUME_ID` again. Accept the cell with recall, governance status and a governed write.
 
-`CELL_INIT_EMPTY_VOLUME_REFUSED`: the cell has a recorded backup, and it started on an empty volume. It refused to create an empty vault, and stays not ready.
+`CELL_INIT_EMPTY_VOLUME_REFUSED`: the cell has a recorded backup, and it started on a volume that holds no vault. It refused to create an empty vault, and stays not ready.
 
-1. Find the claim's volume: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data`.
-2. Check whether the row's `volume_id` matches it. If not, the cell's real volume may still exist: look for it as for `VOLUME_MISSING`, and re-adopt it.
-3. If the row records the claim's volume and the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the empty claim as in step 4.3, mark the row's `volume_id` lost as in step 5, then resume cellctl. Expect cellctl to relocate the cell from its backup.
+1. Find the claim's volume ID, the value a row's `volume_id` holds:
+
+   ```bash
+   CLAIM_VOLUME=$(kubectl get pv "$(kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data -o jsonpath='{.spec.volumeName}')" -o jsonpath='{.spec.csi.volumeHandle}')
+   ```
+
+2. Check whether the row's `volume_id` matches `$CLAIM_VOLUME`. If not, the cell's real volume may still exist: look for it as for `VOLUME_MISSING`, and re-adopt it.
+3. If the row records `$CLAIM_VOLUME` and the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the claim as in step 4.3, mark the row's `volume_id` lost as in step 5, then resume cellctl. Expect cellctl to relocate the cell from its backup.
 
    If the row records no volume, cellctl cannot relocate the cell: it relocates only a recorded volume. Re-adopt the real volume as in step 2.
-4. If the row records no volume and the real volume is gone, record the claim's volume on the row. The refusal proves that volume empty, so recording it loses nothing. As the control database owner, run `UPDATE exomem_cloud_cells SET volume_id = '<claim volume>' WHERE cell_id = '<cell id>' AND volume_id IS NULL;`. Expect `UPDATE 1`.
+4. If the row records no volume and the real volume is gone, record `$CLAIM_VOLUME` on the row. That volume holds no vault, and the relocation retains it, so nothing is deleted. As the control database owner, run `UPDATE exomem_cloud_cells SET volume_id = '<CLAIM_VOLUME>' WHERE cell_id = '<cell id>' AND volume_id IS NULL;`. Expect `UPDATE 1`.
 5. Follow step 3 for that volume. Expect cellctl to relocate the cell from its backup.
 
 Never clear the backup record to get past this refusal: the cell would then serve an empty vault as if it were the tenant's.
