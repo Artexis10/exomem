@@ -117,7 +117,7 @@ Activation priors SHALL be bounded derived ranking signals with provenance, vers
 
 ### Requirement: Dreamer proposes bounded consolidation off the interactive path
 
-The dreamer SHALL provide deterministic, delta-driven or idle-scheduled consolidation proposals using bounded indexed evidence. Candidate families SHALL include supported alias/anchor, category/convention, link, hydration and profile improvements. The active agent SHALL remain the semantic decider and canonical writers SHALL enforce current authority. Background execution SHALL be default-off and provide pause/quiet controls, explicit work/time/memory bounds, checkpointed continuation, evidence-version invalidation and deduplication. It SHALL NOT perform autonomous canonical writes or be required for online capture/recall.
+The dreamer SHALL provide deterministic, delta-driven or idle-scheduled consolidation proposals using bounded indexed evidence. Candidate families SHALL include supported alias/anchor, category/convention, link, hydration, profile and episode-recap fold improvements. For the profile and episode-recap fold families, a withheld recap, referrer or Source SHALL change nothing a restricted caller observes, delivery timing included. The active agent SHALL remain the semantic decider and canonical writers SHALL enforce current authority. Background execution SHALL be default-off and provide pause/quiet controls, explicit work/time/memory bounds, checkpointed continuation, evidence-version invalidation and deduplication. It SHALL NOT perform autonomous canonical writes or be required for online capture/recall.
 
 Eligible proposals SHALL enter the existing bounded review/activation carrier at an ordinary supported lifecycle boundary without requiring an explicit review request. Delivery SHALL respect current quiet/defer settings and existing budgets. Tool-only clients SHALL expose the same proposals with best-effort initiation. Acceptance SHALL establish next-session delivery and authorized agent disposition, not only queue creation.
 
@@ -183,6 +183,17 @@ The background worker SHALL write only its own disposable sidecar. It SHALL NOT 
 
 - **WHEN** a family meets an identity ambiguity
 - **THEN** it proposes nothing for it and reports the ambiguity under the existing audit category that owns the defect
+
+#### Scenario: Conversation recaps name a page that has not caught up
+
+- **WHEN** live recaps of two or more episodes link an active governed page after its last update, and the page neither links nor cites them
+- **THEN** one curation work item over the page and those recaps is proposed
+- **AND** revisions of one episode count once, and the item resolves when the page is updated or links them
+
+#### Scenario: A linked page carries no summary
+
+- **WHEN** pages of two or more independent origins link an active governed page that has no `summary` field or `## Summary` section
+- **THEN** `edit_memory` setting its `summary` is proposed
 
 ### Requirement: Alias and convention upkeep are corpus-derived and audience-exact
 
