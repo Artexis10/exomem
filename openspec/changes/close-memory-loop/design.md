@@ -413,6 +413,7 @@ Accepted residuals:
 - Unlike alias and convention, both keep the per-family cap of 64 open rows and the total row cap. Without a cap, profile would hold a row for nearly every linked page. At saturation the weakest rows are evicted by the owner's evidence count, so whether a page's row survives can depend on withheld referrers. That reveals only that the page's owner count ranks in the top 64, only at saturation, and never content.
 - A withheld Source that merges two referrers' origins lowers the owner's count, so it can suppress the stored row for every caller. That is a missed item, never a disclosure.
 - Any governed write to the page moves its `updated` date and resets the fold clock, so applying a profile `summary` patch also resolves a pending fold item. The follow-up is a clock taken from the page's body content in place of `updated`.
+- An owner's dismissal binds to the owner's fingerprint, so it does not hide the item from a restricted caller whose served view differs. Alias and convention items have the same property under rule 3.
 - Fold sees only recaps whose items carry `[[links]]`: a recap's `about` refs stay in the recorder's per-audience ledger, and the background worker never reads them.
 
 ### 9. Three iteration loops

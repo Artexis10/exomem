@@ -29,7 +29,7 @@ from test_upkeep_vocabulary_egress_twin import (
 )
 
 from exomem import dreamer, dreamer_families, dreamer_store, freshness, upkeep
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.writer_lease import invoke_command
 
 REFS = {
@@ -146,3 +146,46 @@ def test_a_withheld_recap_or_referrer_equals_an_absent_one(
         item["kind"] for block in right["carrier"] if block for item in block.get("items") or ()
     }
     assert set(REFS) <= offered, offered
+
+
+def test_a_withheld_source_that_merges_two_origins_reads_as_absent(tmp_path: Path) -> None:
+    """Referrers declare {S1, SX}, {S2, SX} and {S3}. SX merges the first two,
+    so the owner counts two origins; a caller who may not see SX counts three."""
+    shared = f"{fx.KB}/Sources/A-Restricted/shared-batch.md"
+    vault = fx.build(tmp_path, with_graph=False)
+    fx.write(vault, shared, fx.source("Shared batch"))
+    for rel, title, sources in (
+        (fx.CAVITATION, "Pump cavitation", ["field-report-one", "A-Restricted/shared-batch"]),
+        (fx.SEAL_WEAR, "Pump seal wear", ["field-report-two", "A-Restricted/shared-batch"]),
+        (f"{fx.KB}/Notes/Insights/pump-noise.md", "Pump noise", ["field-report-three"]),
+    ):
+        fx.write(
+            vault,
+            rel,
+            fx.insight(
+                title,
+                sources=sources,
+                updated="2026-05-02",
+                links="Seen on the [[Notes/Entities/orbit-pump]].",
+            ),
+        )
+    _govern(vault, ["Sources/A-Restricted/**"])
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    for now in (None, LATER):
+        results = fx.run_to_quiet(vault, now=now)
+        assert all(result.stop_reason != "error" for result in results), results
+    _reset_caches()
+
+    def profile_why() -> str:
+        items = upkeep.review(vault, limit=50)["items"]
+        return next(item["why"] for item in items if item["kind"] == dreamer_families.PROFILE_KIND)
+
+    with request_scope(owner_principal()):
+        owner = profile_why()
+    _reset_caches()
+    with request_scope(_external()):
+        caller = profile_why()
+    assert owner.startswith("pages from 2 independent sources"), owner
+    assert caller.startswith("pages from 3 independent sources"), caller

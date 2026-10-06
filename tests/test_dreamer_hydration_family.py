@@ -90,6 +90,36 @@ def test_an_entity_linked_by_many_older_pages_still_hydrates(tmp_path: Path) -> 
     assert _candidate(vault)["measures"]["origins"] == 2
 
 
+def test_a_relation_to_one_of_the_entitys_units_contributes(tmp_path: Path) -> None:
+    """A relation target `[[entity#unit]]` lands on the unit; it still links the entity."""
+    vault = fx.build(tmp_path, with_graph=False)
+    fx.write(
+        vault,
+        fx.ENTITY,
+        fx.entity(
+            extra="\n## Observations\n\n- [finding] Runs at 40 litres a minute. ^pump-flow\n"
+        ),
+    )
+    fx.write(
+        vault,
+        fx.SEAL_WEAR,
+        fx.insight(
+            "Pump seal wear",
+            sources=["field-report-two"],
+            updated="2026-05-02",
+            observation="Seal wear doubles after a dry start.",
+            extra="\n## Relations\n\n- supports [[Notes/Entities/orbit-pump#pump-flow]]\n",
+        ),
+    )
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    _quiet(vault)
+    row = _candidate(vault)
+    assert row is not None and row["measures"]["origins"] == 2
+    contributors = {item["path"] for item in row["evidence"] if item["role"] == "contributor"}
+    assert contributors == {fx.CAVITATION, fx.SEAL_WEAR}
+
+
 def test_one_source_fanned_out_counts_once(tmp_path: Path) -> None:
     vault = fx.build(tmp_path)
     fx.edit(

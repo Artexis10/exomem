@@ -11,10 +11,10 @@ ref names the same candidate for context.
 Nothing here scans the vault. An item is revalidated from its own subject and
 evidence pages only, never through the attention union or an audit, and every
 count is taken after egress and triage filtering: a withheld page never
-appears, not even as a number. Alias and convention items go further: each is
-recomputed per request from the members its caller may see
-(`dreamer_families.release`), so a withheld page equals an absent one in the
-served fingerprint too.
+appears, not even as a number. Alias, convention, fold and profile items go
+further: each is recomputed per request from the pages and Sources its caller
+may see (`dreamer_families.release`), so a withheld page equals an absent one
+in the served fingerprint too.
 """
 
 from __future__ import annotations

@@ -2029,10 +2029,10 @@ def tick_start(ctx: Context) -> None:
 def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
     """One stored row as a caller whose release predicate is `keep` may see it.
 
-    A family without per-item egress is served from its stored row. A global
-    family recomputes the row from the members that caller may see, so a
-    withheld page equals an absent one in every served field, count and
-    fingerprint. None when the family's minimum does not hold on them, or the
+    A family without per-item egress is served from its stored row. A family
+    with a `release` hook (alias, convention, fold and profile) recomputes the
+    row from the pages and Sources that caller may see, so a withheld page
+    equals an absent one in every served field, count and fingerprint. None when the family's minimum does not hold on them, or the
     sidecar cannot be read without waiting.
     """
     family = family_for(str(row.get("family") or ""))

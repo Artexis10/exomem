@@ -117,7 +117,7 @@ Activation priors SHALL be bounded derived ranking signals with provenance, vers
 
 ### Requirement: Dreamer proposes bounded consolidation off the interactive path
 
-The dreamer SHALL provide deterministic, delta-driven or idle-scheduled consolidation proposals using bounded indexed evidence. Candidate families SHALL include supported alias/anchor, category/convention, link, hydration, profile and episode-recap fold improvements. For the profile and episode-recap fold families, a withheld recap, referrer or Source SHALL change nothing a restricted caller observes, delivery timing included. The active agent SHALL remain the semantic decider and canonical writers SHALL enforce current authority. Background execution SHALL be default-off and provide pause/quiet controls, explicit work/time/memory bounds, checkpointed continuation, evidence-version invalidation and deduplication. It SHALL NOT perform autonomous canonical writes or be required for online capture/recall.
+The dreamer SHALL provide deterministic, delta-driven or idle-scheduled consolidation proposals using bounded indexed evidence. Candidate families SHALL include supported alias/anchor, category/convention, link, hydration, profile and episode-recap fold improvements. For the profile and episode-recap fold families, a withheld recap, referrer or Source SHALL change nothing a restricted caller observes, delivery timing included, except the residuals design §8 accepts: which rows survive the row caps at saturation, and a withheld Source that merges origins. The active agent SHALL remain the semantic decider and canonical writers SHALL enforce current authority. Background execution SHALL be default-off and provide pause/quiet controls, explicit work/time/memory bounds, checkpointed continuation, evidence-version invalidation and deduplication. It SHALL NOT perform autonomous canonical writes or be required for online capture/recall.
 
 Eligible proposals SHALL enter the existing bounded review/activation carrier at an ordinary supported lifecycle boundary without requiring an explicit review request. Delivery SHALL respect current quiet/defer settings and existing budgets. Tool-only clients SHALL expose the same proposals with best-effort initiation. Acceptance SHALL establish next-session delivery and authorized agent disposition, not only queue creation.
 
@@ -192,7 +192,7 @@ The background worker SHALL write only its own disposable sidecar. It SHALL NOT 
 
 #### Scenario: A linked page carries no summary
 
-- **WHEN** pages of two or more independent origins link an active governed page that has no `summary` field or `## Summary` section
+- **WHEN** pages of two or more independent origins link an active governed page that has no `summary` field and no non-empty `## Summary` section outside code
 - **THEN** `edit_memory` setting its `summary` is proposed
 
 ### Requirement: Alias and convention upkeep are corpus-derived and audience-exact
