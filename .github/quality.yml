@@ -13,19 +13,56 @@ classes:
     - "infra/*/tests/fixtures/*"
     - "fixture-vault/*"
     - "plugins/hosted/*fixture*.json"
+  # Proof outside tests/ and benchmarks/ is named by file, so a new script defaults to product.
   tests:
     - "tests/*"
     - "infra/*/tests/*"
     - ".test_durations.json"
+    - "scripts/e2e_http_server.py"
+    - "scripts/e2e_product_loop.py"
+    - "scripts/smoke-media-pipeline.py"
+    - "scripts/smoke-upload.py"
+    - "scripts/time-to-value.py"
+    - "scripts/verify_studio_install.py"
+    - "scripts/verify-hosted-image.py"
+    - "scripts/live_write_acceptance.py"
+    - "scripts/records_live_acceptance.py"
+    - "scripts/activation_real_turns.py"
+    - "infra/scripts/accept_hosted_service.py"
+    - "infra/scripts/external_blackbox.py"
+    - "infra/scripts/network_policy_probes.py"
+    - "infra/scripts/smoke_hosted_cell.py"
   eval:
     - "benchmarks/*"
     - "plugins/cloud/evals/*"
+    - "scripts/activation_lexical_latency.py"
+    - "scripts/analyze_tool_surface.py"
+    - "scripts/bootstrap-byte-breakdown.py"
+    - "scripts/category_recall_latency.py"
+    - "scripts/cell_memory_profile.py"
+    - "scripts/context-footprint.py"
+    - "scripts/durable_closure_*.py"
+    - "scripts/graph_concurrent_convergence.py"
+    - "scripts/graph_value_benchmark.py"
+    - "scripts/latency_curve.py"
+    - "scripts/managed_recall.py"
+    - "scripts/measure*.py"
+    - "scripts/product_flow_benchmark.py"
+    - "scripts/recall_latency_gate.py"
+    - "scripts/recall_mask_latency.py"
+    - "scripts/referent_resolution_benchmark.py"
+    - "scripts/relation_review_scale.py"
+    - "scripts/repro_graph_rebuild_hold.py"
+    - "scripts/semantic_write_latency.py"
+    - "scripts/shared_weights_probe.py"
+    - "scripts/startup_benchmark.py"
+    - "scripts/synth_vault.py"
   # Regenerated plugin output: neither product nor proof.
   generated:
     - "plugins/*/generated/*"
   # Product is whatever ships, is installed or run by users, or runs in a build, deploy or
-  # image: before scripts, so the install and service scripts count here; infra/scripts
-  # (operator tooling) stays in scripts.
+  # image. The install and service scripts are listed; the other build, release, deploy and
+  # user-run scripts (infra/scripts apply, handoff and upgrade among them) default to product.
   product:
     - "src/*"
     - "plugins/*"
@@ -58,13 +95,28 @@ classes:
     - "scripts/set-rest-key.py"
     - "scripts/set-upload-token.py"
     - "pyproject.toml"
-    - "uv.lock"
     - "Dockerfile"
     - "compose*.yaml"
     - "server.json"
+  # Dev, CI and read-only verification scripts. infra/scripts is not globbed: its OWNERSHIP.md
+  # also covers saved-plan apply and secret handoff, which are deploy.
   scripts:
-    - "scripts/*"
-    - "infra/scripts/*"
+    - "scripts/ci-apt-install.sh"
+    - "scripts/check_openspec_archive_discipline.py"
+    - "scripts/check_pr_title.py"
+    - "scripts/codex_task.sh"
+    - "scripts/generate-capabilities.py"
+    - "scripts/generate-public-privacy-fixtures.py"
+    - "scripts/generate_harness_modules.py"
+    - "scripts/refresh_test_durations.py"
+    - "scripts/tui_frames.py"
+    - "scripts/validate-public-artifacts.py"
+    - "infra/scripts/audit_hosted_database_budget.py"
+    - "infra/scripts/validate.sh"
+    - "infra/scripts/validate_sops_ciphertext.py"
+    - "infra/scripts/verify_hcp_backend.py"
+    - "infra/scripts/verify_hosted_release.py"
+  tooling:
     - ".github/*"
   specs:
     - "openspec/*"
