@@ -162,19 +162,17 @@ def test_ir_must_rebind_to_current_declared_fields_and_type(store):
             session.admit_query(replace(logical, page=ir.Page(after="raw")), as_of=AS_OF)
 
 
-def test_byte_cap_stops_after_last_emitted_row_and_single_row_fails(store, monkeypatch):
+def test_byte_cap_stops_after_last_emitted_row_and_single_row_fails(store):
     """Byte truncation must offer progress; an oversized first row must fail."""
-    from exomem import query_data
+    from exomem.query_engine.typed_rows import execute_rows
     setup_rows(store, [(KEY, {"title": "First"}), (OTHER, {"title": "Second"})])
-    monkeypatch.setattr(query_data, "MAX_RESPONSE_BYTES", 8192 + 25)
     with runtime.read_session(store.root, store.handle.path) as session:
-        result = page(session, query(select=["title"]))
+        result = execute_rows(session.admit_query(query(select=["title"]), as_of=AS_OF), max_response_bytes=25)
         assert result.rows == [{"title": "First"}] and result.has_more
         assert result.last_order_key == (KEY,)
-    monkeypatch.setattr(query_data, "MAX_RESPONSE_BYTES", 8192 + 10)
     with runtime.read_session(store.root, store.handle.path) as session:
         with pytest.raises(runtime.QueryError, match="QUERY_RESULT_TOO_LARGE"):
-            page(session, query(select=["title"]))
+            execute_rows(session.admit_query(query(select=["title"]), as_of=AS_OF), max_response_bytes=10)
 
 
 def test_normalized_membership_and_four_sort_keys_rebind_without_changing_meaning(store):
@@ -211,7 +209,7 @@ def test_large_unselected_fields_do_not_consume_selected_value_budget(store, unu
         from exomem.query_engine.typed_rows import execute_rows
 
         result = execute_rows(session.admit_query(query(fields=fields, select=["title"]), as_of=AS_OF),
-                              max_response_bytes=len(b'[{"title":"Tiny"}]'))
+                              max_response_bytes=len(b'[{"title": "Tiny"}]'))
         assert result.rows == [{"title": "Tiny"}] and not result.has_more
 
 

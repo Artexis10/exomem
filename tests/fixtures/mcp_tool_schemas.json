@@ -2713,7 +2713,7 @@
     }
   },
   "record_memory": {
-    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nResolve one compatible collection; otherwise describe/propose before create.",
+    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDescribe/propose before create.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2729,13 +2729,14 @@
             "update",
             "revise",
             "rebaseline",
-            "discard"
+            "discard",
+            "import"
           ],
           "type": "string"
         },
         "collection": {
           "type": "string",
-          "description": "Target collection; omit for describe, inventory, or new manifest validate/create."
+          "description": "Target; omit for describe, inventory or new-manifest validate/create."
         },
         "manifest_path": {
           "type": "string"
@@ -2817,7 +2818,7 @@
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "Current snapshot for append/bulk_upsert/update/revise/rebaseline."
+          "description": "Current container hash for guarded writes."
         },
         "expected_manifest_hash": {
           "type": "string",
@@ -2914,7 +2915,7 @@
         },
         "held": {
           "type": "string",
-          "description": "Resume append/update with item/changes overrides; null removes a field. Discard removes the held candidate."
+          "description": "Resume append/update (item/changes override; null removes a field); discard deletes it."
         },
         "hold": {
           "type": "boolean",
@@ -2937,7 +2938,14 @@
             "skip"
           ],
           "type": "string",
-          "description": "bulk_upsert: abort writes nothing on rejection; skip commits the rest."
+          "description": "bulk_upsert: abort writes nothing; skip commits the rest."
+        },
+        "import_request": {
+          "type": "object"
+        },
+        "query": {
+          "type": "object",
+          "description": "v1 query object; grammar via describe."
         },
         "response_detail": {
           "default": "compact",

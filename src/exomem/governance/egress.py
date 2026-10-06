@@ -4955,6 +4955,9 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+        # One selector for every import mode: start and cancel write, so the
+        # read-only preview and status take the same conservative writer path.
+        "import": "mutation",
     },
     ("episode_memory", "action"): {
         "record": "mutation",

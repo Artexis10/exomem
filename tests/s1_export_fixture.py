@@ -19,10 +19,10 @@ from __future__ import annotations
 import csv
 import io
 import json
-import math
 import random
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
+from fractions import Fraction
 
 KINDS = ("running", "walking", "cycling")
 PLACES = ("Riverside Park", "Harbour Loop", "Old Town Square", "Hill Trail")
@@ -132,9 +132,11 @@ def local_day(record: dict) -> date | None:
     return parsed.date()
 
 
-def _total(values: list) -> int | float:
-    """Exact integer sums; one correctly rounded sum (``math.fsum``) once a float is present."""
-    return sum(values) if all(type(value) is int for value in values) else math.fsum(values)
+def _sum_and_mean(values: list) -> tuple[int | float, float]:
+    """The exact sum and mean, each rounded once: an integer sum stays exact at any size."""
+    exact = sum(map(Fraction, values), Fraction(0))
+    total = int(exact) if all(type(value) is int for value in values) else float(exact)
+    return total, float(exact / len(values))
 
 
 def expected_daily(records: list[dict], metric: str) -> tuple[dict[str, dict], list[str]]:
@@ -157,8 +159,8 @@ def expected_daily(records: list[dict], metric: str) -> tuple[dict[str, dict], l
         if value is None:
             continue
         buckets.setdefault(day.isoformat(), []).append(value)
-    result = {
-        key: {"count": len(values), "sum": _total(values), "avg": _total(values) / len(values)}
-        for key, values in sorted(buckets.items())
-    }
+    result = {}
+    for key, values in sorted(buckets.items()):
+        total, mean = _sum_and_mean(values)
+        result[key] = {"count": len(values), "sum": total, "avg": mean}
     return result, flagged

@@ -12,12 +12,11 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from ..collection_store import query_freshness
 from . import ir, typed_sql
-from .runtime import _MAX_DECODE_BYTES, QueryError
+from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
 from .typed_rows import AdmittedQuery, execute_rows
 
 _MAX_TOKEN_BYTES = 4096
-_MAX_RESULT_BYTES = 64 * 1024
 _TOKEN_KEYS = frozenset({"v", "query", "principal", "schema", "authorization", "visible", "lineage", "as_of", "boundary"})
 
 
@@ -162,7 +161,7 @@ def _resume(admitted, payload):
 
 
 def execute_page(session, query, *, as_of=None):
-    """A dark leaf; no tool route, field-classified release or migration enabled."""
+    """One typed row page, measured whole against the result cap as the caller receives it."""
     session.check()
     if not isinstance(query, ir.Query):
         raise QueryError("QUERY_UNSUPPORTED")
@@ -186,9 +185,10 @@ def execute_page(session, query, *, as_of=None):
               "schema_version": admitted.schema_version,
               "schema_fingerprint": binding["schema"],
               "truncated": page.has_more,
-              "truncation_reason": ("bytes" if len(page.rows) < query.page.limit else "limit") if page.has_more else None}
+              "truncation_reason": ("bytes" if len(page.rows) < query.page.limit else "limit") if page.has_more else None,
+              "mode": query.mode, "execution_profile": session.limits.profile}
     session.check()
-    if len(_json(result).encode()) > _MAX_RESULT_BYTES:
+    if wire_bytes(result) > MAX_RESULT_BYTES:
         raise QueryError("QUERY_RESULT_TOO_LARGE")
     session.check()
     return result

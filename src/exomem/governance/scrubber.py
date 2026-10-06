@@ -186,6 +186,8 @@ _STRUCTURAL_FIELDS = frozenset(
         # `activate_context`'s token: base64 the caller echoes on its next
         # turn, so replacing it cuts every surface's conversation in two.
         "continuity",
+        # A typed query page's encrypted continuation, echoed as `page.after`.
+        "next_cursor",
     }
 )
 

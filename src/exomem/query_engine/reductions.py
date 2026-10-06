@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass
 from ..collection_store import query_freshness, rollups, typed_storage
 from . import cursors, ir
 from .buckets import EXTREMES, Accumulator, Basis, bucket_key, declared_kind, group_key
-from .runtime import QueryError
+from .runtime import MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
 
 _UNSUPPORTED = frozenset({"percentile", "distinct_count"})
@@ -308,31 +308,29 @@ def _binding(session, query, collection_id: str, manifest, shape: _Shape, unifor
     if shape.basis is not None:
         read |= {name for name in (shape.basis.field, shape.basis.offset) if name is not None}
     basis = query_freshness.uniform_basis(session.connection, collection_id, read) if uniform else None
-    if basis is None:
+    if not uniform:
         # S1.5b (write-time released-field bases) replaces this refusal with a bound continuation.
         raise QueryError("QUERY_UNSUPPORTED", "continuation under mixed release is not supported: narrow the "
-                         "local-day window to one page" if not uniform else
-                         "continuation needs the collection's freshness basis: narrow the window to one page")
+                         "local-day window to one page")
+    if basis is None:
+        # The row path's refusal for the same missing coverage (cursors._visible).
+        raise QueryError("QUERY_UNAVAILABLE", "continuation needs the collection's freshness basis")
     return {**cursors.caller_binding(session, query), "schema": cursors._hash([collection_id,
             manifest.manifest_version.hash]), "visible": cursors._hash(["exomem.group-pages.v1", asdict(basis)])}
 
 
-def _size(value) -> int:
-    return len(cursors._json(value).encode())
-
-
 def _assemble(session, query, shape: _Shape, ordered, envelope: dict, mint) -> dict:
     """Whole groups up to the page limit and the result byte cap; a stop with groups left mints a cursor."""
-    empty = {**envelope, "groups": [], "returned": 0, "truncated": False, "truncation_reason": "limit",
-             "next_cursor": ""}
-    rows, used, last, reason = [], _size(empty) + _PAGE_RESERVE, None, None
+    empty = {**envelope, "groups": [], "returned": 0, "has_more": False, "truncated": False,
+             "truncation_reason": "limit", "next_cursor": ""}
+    rows, used, last, reason = [], wire_bytes(empty) + _PAGE_RESERVE, None, None
     for bucket, identity, tagged, count, accumulators in ordered:
         if len(rows) == query.page.limit:
             reason = "limit"
             break
         row = _row(shape, bucket, tagged, count, accumulators)
-        size = _size(row) + 1
-        if used + size > cursors._MAX_RESULT_BYTES:
+        size = wire_bytes(row) + 2
+        if used + size > MAX_RESULT_BYTES:
             if not rows:
                 raise QueryError("QUERY_RESULT_TOO_LARGE", "one group exceeds the result size cap")
             reason = "bytes"
@@ -341,10 +339,10 @@ def _assemble(session, query, shape: _Shape, ordered, envelope: dict, mint) -> d
         used += size
         last = (bucket, identity)
     token = None if reason is None else mint(_boundary(*last))
-    result = {**envelope, "groups": rows, "returned": len(rows), "truncated": reason is not None,
-              "truncation_reason": reason, "next_cursor": token}
+    result = {**envelope, "groups": rows, "returned": len(rows), "has_more": reason is not None,
+              "truncated": reason is not None, "truncation_reason": reason, "next_cursor": token}
     session.check()
-    if _size(result) > cursors._MAX_RESULT_BYTES:
+    if wire_bytes(result) > MAX_RESULT_BYTES:
         raise QueryError("QUERY_RESULT_TOO_LARGE")
     return result
 
@@ -373,8 +371,9 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
     with session._manifest(collection_id) as (manifest, _, _, uniform):
         shape = _shape(query, manifest)
     plan = _plan(session, collection_id, shape, uniform)
-    result = {"collection": collection_id, "as_of": frozen, "execution_profile": limits.profile,
-              "bounds": limits.bounds(), "plan": plan.describe(shape)}
+    result = {"source": asdict(query.source), "query_version": query.version,
+              "schema_version": manifest.schema.version, "mode": query.mode, "as_of": frozen,
+              "execution_profile": limits.profile, "bounds": limits.bounds(), "plan": plan.describe(shape)}
     binding = after = None
     if payload is not None:
         binding = _binding(session, query, collection_id, manifest, shape, uniform)

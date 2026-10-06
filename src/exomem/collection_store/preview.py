@@ -150,9 +150,10 @@ def dispatch(
             from ..record_memory import parse_manifest_contract
 
             writer._require_operation_context()
+            from ..query_engine import route
             from .importer import contract
 
-            return True, {**parse_manifest_contract(store_mode=True), "import": contract()}
+            return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
@@ -162,6 +163,10 @@ def dispatch(
         return True, writer.inspect_collection(args["collection"], facade_profile=profile)
     if action == "inspect":
         return True, writer.inspect_collection(args["collection"])
+    if action == "query" and "query" in args:
+        from ..query_engine import route
+
+        return True, route.run(writer, args["collection"], args["query"], facade_profile=profile)
     if action == "query":
         from .. import planning, record_governance
 

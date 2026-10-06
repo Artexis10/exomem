@@ -6,11 +6,10 @@ import json
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
-from .. import query_data
 from ..collection_store import index_migrations
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
-from .runtime import _MAX_DECODE_BYTES, QueryError, ReadSession
+from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, ReadSession, wire_bytes
 
 _SEAL = object()
 _RESPONSE_RESERVE_BYTES = 8 * 1024
@@ -184,7 +183,7 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
     if not isinstance(admitted, AdmittedQuery):
         raise QueryError("QUERY_UNSUPPORTED")
     admitted.check()
-    budget = query_data.MAX_RESPONSE_BYTES - _RESPONSE_RESERVE_BYTES
+    budget = MAX_RESULT_BYTES - _RESPONSE_RESERVE_BYTES
     if max_response_bytes is not None:
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
             raise QueryError("QUERY_VALUE_INVALID")
@@ -240,13 +239,14 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
                     if error.code == "QUERY_RESULT_TOO_LARGE" and rows:
                         return RowPage(rows, True, last)
                     raise
-                row_size = len(raw.encode())
-                if size + row_size + bool(rows) > budget:
+                row = json.loads(raw)
+                row_size = wire_bytes(row) + 2 * bool(rows)
+                if size + row_size > budget:
                     if not rows:
                         raise QueryError("QUERY_RESULT_TOO_LARGE")
                     return RowPage(rows, True, last)
-                size += row_size + bool(rows)
-                rows.append(json.loads(raw))
+                size += row_size
+                rows.append(row)
                 last = tuple(order)
     admitted.check()
     return RowPage(rows, False, last)

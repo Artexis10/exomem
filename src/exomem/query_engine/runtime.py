@@ -20,9 +20,26 @@ from ..governance.principal import effective_principal
 
 _READERS_GUARD = threading.Lock()
 _READERS: dict[Path, int] = {}
+#: Analytics sessions per store. Each holds one of the store's two readers for up to two
+#: seconds, so at most one runs at a time and an interactive reader always remains.
+_ANALYTICS: dict[Path, int] = {}
+MAX_ANALYTICS_SESSIONS = 1
 _ADMISSION_SEAL = object()
 _CURRENT_SESSION: ContextVar[ReadSession | None] = ContextVar("collection_query_session", default=None)
 _MAX_DECODE_BYTES = 256 * 1024
+#: The whole serialized v1 result, rows or groups (design §8).
+MAX_RESULT_BYTES = 64 * 1024
+
+
+def wire_bytes(value) -> int:
+    """Bytes of ``value`` as the widest shipped transport serializes a result.
+
+    MCP sends compact UTF-8 JSON (FastMCP's pydantic serializer); REST and the CLI
+    use ``json.dumps(..., ensure_ascii=False)`` with spaced separators, which is never
+    smaller. No transport escapes non-ASCII text, so a result measured here fits
+    every surface.
+    """
+    return len(json.dumps(value, ensure_ascii=False).encode())
 
 
 class QueryError(RuntimeError):
@@ -30,6 +47,7 @@ class QueryError(RuntimeError):
 
     def __init__(self, code: str, message: str = "collection query could not complete") -> None:
         self.code = code
+        self.message = message
         super().__init__(f"{code}: {message}")
 
 
@@ -361,10 +379,13 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
     limits = limits or QueryLimits()
     deadline = time.monotonic() + limits.timeout_ms / 1000
     target = Path(store_path).resolve()
+    analytics = limits.profile == "analytics"
     with _READERS_GUARD:
-        if _READERS.get(target, 0) >= 2:
-            raise QueryError("QUERY_BUSY")
+        if _READERS.get(target, 0) >= 2 or analytics and _ANALYTICS.get(target, 0) >= MAX_ANALYTICS_SESSIONS:
+            raise QueryError("QUERY_BUSY", "the store's query readers are in use; retry shortly")
         _READERS[target] = _READERS.get(target, 0) + 1
+        if analytics:
+            _ANALYTICS[target] = _ANALYTICS.get(target, 0) + 1
     conn = session = token = None
     try:
         conn = connection.open_query_reader(target, busy_timeout_ms=limits.timeout_ms)
@@ -419,3 +440,7 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
                 _READERS[target] -= 1
                 if not _READERS[target]:
                     del _READERS[target]
+                if analytics:
+                    _ANALYTICS[target] -= 1
+                    if not _ANALYTICS[target]:
+                        del _ANALYTICS[target]
