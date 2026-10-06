@@ -27,14 +27,19 @@ def _parser() -> argparse.ArgumentParser:
             "name keep their public IPv4."
         ),
     )
+    # Required: site.yml converges the private link, the inter-node firewall
+    # and Tang to the inventory, so an inventory that silently omits dedicated
+    # hosts would tear them out of the cluster. Pass a file holding {} when
+    # there are none.
     parser.add_argument(
         "--dedicated-hosts",
         type=Path,
+        required=True,
         help=(
             "Private JSON object of K3s agents Terraform does not create (dedicated or "
             "auction servers, other providers), keyed by inventory name: ipv4, "
             "admin_address, private_ip, link (wireguard or vswitch), data_disks and "
-            "optional wipe."
+            "optional wipe. A file holding {} when there are none."
         ),
     )
     return parser
@@ -245,11 +250,7 @@ def main() -> int:
         admin_addresses = (
             _admin_addresses(args.admin_addresses) if args.admin_addresses else {}
         )
-        dedicated = (
-            _dedicated_hosts(args.dedicated_hosts, args.user, _vswitch(document))
-            if args.dedicated_hosts
-            else {}
-        )
+        dedicated = _dedicated_hosts(args.dedicated_hosts, args.user, _vswitch(document))
         reused = sorted(set(dedicated) & ({"exomem-alpha", "substrate-control-01"} | set(agents)))
         if reused:
             raise ValueError(f"{', '.join(reused)}: a dedicated host reuses another node's name")

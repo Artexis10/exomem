@@ -89,6 +89,11 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# The repository's Ansible configuration applies wherever the operator runs
+# this from; among other things it keeps module-returned facts from shadowing
+# inventory variables.
+export ANSIBLE_CONFIG="${repo_root}/infra/ansible/ansible.cfg"
+
 # Ansible writes controller-side temp files (copy content, module payloads
 # with their arguments) that carry these secrets; keep them on the same tmpfs.
 mkdir -m 0700 -- "${secret_dir}/ansible-local"

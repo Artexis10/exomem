@@ -83,6 +83,8 @@
 - [ ] 5.3 Make the k3s agent unit wait for the unlock. Evidence: `lsblk` and `cryptsetup status` output, plus a reboot that unlocks unattended and starts K3s afterwards.
 - [ ] 5.4 Add the manual unlock and the Tang rebind to the operator runbook, and exercise the manual unlock once.
 - [ ] 5.5 Alert when a dedicated host's cell array is degraded, through the existing alert receiver. Today `site.yml` only reports it, and the host has no mail transport for `mdmonitor`. Evidence: an alert from a failed member on a disposable host.
+- [ ] 5.6 Alert when a thin pool's data or metadata use passes 80%, from TopoLVM's thin-pool metrics, through the existing alert receiver. Evidence: an alert-rule test.
+- [ ] 5.7 Write and rehearse a rotation of the K3s agent token (`k3s_agent_token`) for the pinned K3s version. A dedicated host's disk that leaves the provider's custody unwiped exposes the token. Evidence: every agent rejoins with the new token, and the old token is refused.
 
 ## 6. Private-link join (needs the purchased server)
 

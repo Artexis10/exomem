@@ -86,6 +86,21 @@
   register: k3s_agent_label
   changed_when: "'not labeled' not in k3s_agent_label.stdout"
 
+- name: Admit TopoLVM's node plugin to an agent with local cell storage
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - label
+      - node
+      - "{{ inventory_hostname }}"
+      - "{{ k3s_topolvm_node_label }}"
+      - --overwrite
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_topolvm_label
+  changed_when: "'not labeled' not in k3s_agent_topolvm_label.stdout"
+  when: k3s_agent_local_storage | bool
+
 # Registration flags do not update existing Nodes. Own only this reservation
 # key; resourceVersion keeps a concurrent taint update from being overwritten.
 - name: Read the agent reservation

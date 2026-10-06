@@ -28,6 +28,13 @@ def _k3s_tasks() -> str:
     )
 
 
+def _no_dedicated_hosts(tmp_path: Path) -> str:
+    """The explicit empty host list the generator requires when there are none."""
+    path = tmp_path / "no-dedicated-hosts.json"
+    path.write_text("{}", encoding="utf-8")
+    return str(path)
+
+
 def test_node_memory_qos_is_opt_in_and_renders_the_measured_kubelet_configuration() -> None:
     # Catch accidental shared-node activation and a misrendered runtime bundle;
     # the live isolated gate separately proves effective kernel controls.
@@ -173,6 +180,8 @@ def test_inventory_generator_emits_only_non_sensitive_host_coordinates(tmp_path:
             str(generator),
             str(terraform_output),
             str(inventory),
+            "--dedicated-hosts",
+            _no_dedicated_hosts(tmp_path),
             "--user",
             "alpha-admin",
         ],
@@ -671,6 +680,8 @@ def test_inventory_generator_optionally_emits_the_control_database_host(
             str(generator),
             str(terraform_output),
             str(inventory),
+            "--dedicated-hosts",
+            _no_dedicated_hosts(tmp_path),
             "--user",
             "alpha-admin",
         ],
@@ -719,6 +730,8 @@ def test_inventory_generator_addresses_hosts_by_their_administration_address(
             str(generator),
             str(terraform_output),
             str(tmp_path / "inventory.json"),
+            "--dedicated-hosts",
+            _no_dedicated_hosts(tmp_path),
             "--admin-addresses",
             str(addresses),
         ],
@@ -737,6 +750,42 @@ def test_inventory_generator_addresses_hosts_by_their_administration_address(
         children["control_nodes"]["hosts"]["substrate-control-01"]["ansible_host"]
         == "192.0.2.20"
     )
+
+
+def test_a_module_result_cannot_shadow_an_inventory_variable(tmp_path: Path) -> None:
+    # Root on any host can make a module return arbitrary ansible_facts. Peers
+    # render inventory variables such as private_node_ip into wg-quick files
+    # they execute as root, so a returned fact must never replace one.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN to run pinned Ansible")
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "hostile_facts.py").write_text(
+        "#!/usr/bin/python3\nimport json\n"
+        "print(json.dumps({'changed': False, 'ansible_facts': "
+        "{'private_node_ip': '10.0.0.9/32 dev wgexomem; touch /tmp/owned; true'}}))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "inventory.ini").write_text(
+        "node ansible_connection=local private_node_ip=10.0.0.1\n", encoding="utf-8"
+    )
+    (tmp_path / "play.yml").write_text(
+        "- hosts: node\n  gather_facts: false\n  become: false\n  tasks:\n"
+        "    - hostile_facts: {}\n"
+        "    - ansible.builtin.assert: {that: \"private_node_ip == '10.0.0.1'\"}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "-i", "inventory.ini", "play.yml"],
+        cwd=tmp_path,
+        env={**os.environ, "ANSIBLE_CONFIG": str(ANSIBLE / "ansible.cfg"),
+             "ANSIBLE_LIBRARY": str(library)},
+        check=False,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_ansible_syntax_with_pinned_binary() -> None:

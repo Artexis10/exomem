@@ -47,24 +47,36 @@
   changed_when: false
   when: dedicated_host_pool.rc != 0
 
-# Design D1: the pool's chunk and metadata sizes are explicit, because LVM's
-# own policy grows the chunk with the pool, and a chunk size never changes
-# once the pool exists. The group keeps the metadata's spare plus
-# dedicated_host_vg_reserve_mib free, so the metadata can grow later.
-- name: Size the thin pool
+# Design D1: 64 bytes of metadata per chunk of the largest pool the group can
+# hold, at least LVM's 2 MiB and at most its 15.81 GiB, unless overridden. The
+# group keeps the metadata's spare and a reserve of twice the metadata free.
+- name: Size the thin pool and its metadata
   ansible.builtin.set_fact:
-    dedicated_host_pool_extents: >-
+    dedicated_host_pool_geometry: >-
       {%- set free, extent = dedicated_host_vg_free.stdout.split() | map('int') | list -%}
-      {%- set kept = 2 * dedicated_host_thin_metadata_mib + dedicated_host_vg_reserve_mib -%}
-      {{ free - ((kept * 1048576 + extent - 1) // extent) }}
+      {%- set mib = 1048576 -%}
+      {%- set chunk = dedicated_host_thin_chunk_kib | int * 1024 -%}
+      {%- if dedicated_host_thin_metadata_mib | string | length > 0 -%}
+        {%- set metadata = (dedicated_host_thin_metadata_mib | int * mib + extent - 1) // extent -%}
+      {%- else -%}
+        {%- set metadata = [[(64 * free + chunk - 1) // chunk, (2 * mib + extent - 1) // extent] | max,
+                            (16192 * mib) // extent] | min -%}
+      {%- endif -%}
+      {%- if dedicated_host_vg_reserve_mib | string | length > 0 -%}
+        {%- set reserve = (dedicated_host_vg_reserve_mib | int * mib + extent - 1) // extent -%}
+      {%- else -%}
+        {%- set reserve = 2 * metadata -%}
+      {%- endif -%}
+      {{ {'pool_extents': free - 2 * metadata - reserve, 'metadata_kib': metadata * extent // 1024,
+          'reserve_kib': reserve * extent // 1024} }}
   when: dedicated_host_pool.rc != 0
 
 - name: Require room for the pool beside its metadata and reserve
   ansible.builtin.assert:
-    that: dedicated_host_pool_extents | int > 0
+    that: dedicated_host_pool_geometry.pool_extents | int > 0
     fail_msg: >-
-      {{ dedicated_host_volume_group }} cannot hold {{ dedicated_host_thin_metadata_mib }} MiB of
-      metadata, its spare and a {{ dedicated_host_vg_reserve_mib }} MiB reserve; nothing was changed.
+      {{ dedicated_host_volume_group }} cannot hold {{ dedicated_host_pool_geometry.metadata_kib }} KiB of
+      metadata, its spare and a {{ dedicated_host_pool_geometry.reserve_kib }} KiB reserve; nothing was changed.
   when: dedicated_host_pool.rc != 0
 
 # --zero=y: a newly provisioned chunk never shows data a deleted volume left.
@@ -74,9 +86,9 @@
       - /usr/sbin/lvcreate
       - --yes
       - --type=thin-pool
-      - --extents={{ dedicated_host_pool_extents }}
+      - --extents={{ dedicated_host_pool_geometry.pool_extents }}
       - --chunksize={{ dedicated_host_thin_chunk_kib }}k
-      - --poolmetadatasize={{ dedicated_host_thin_metadata_mib }}m
+      - --poolmetadatasize={{ dedicated_host_pool_geometry.metadata_kib }}k
       - --zero=y
       - --name={{ dedicated_host_thin_pool }}
       - "{{ dedicated_host_volume_group }}"

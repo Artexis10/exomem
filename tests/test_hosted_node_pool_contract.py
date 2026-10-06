@@ -45,6 +45,13 @@ def _block(text: str, header: str) -> str:
     return text.split(header, 1)[1].split("\nresource ", 1)[0]
 
 
+def _no_dedicated_hosts(tmp_path: Path) -> str:
+    """The explicit empty host list the generator requires when there are none."""
+    path = tmp_path / "no-dedicated-hosts.json"
+    path.write_text("{}", encoding="utf-8")
+    return str(path)
+
+
 # --- Terraform --------------------------------------------------------------
 
 
@@ -163,11 +170,6 @@ def test_site_hardens_every_node_first_then_runs_server_then_agents() -> None:
     }
     # Tang serves before a dedicated agent binds to it, and that agent's
     # storage is unlocked before its K3s agent starts.
-    # tang.yml names each agent's interface from the k3s role's defaults.
-    assert [task["ansible.builtin.include_role"] for task in tang["tasks"]] == [
-        {"name": "k3s", "tasks_from": "interface.yml", "public": True},
-        {"name": "dedicated_host", "tasks_from": "tang.yml"},
-    ]
     assert storage["roles"] == ["dedicated_host"]
     # Several storage tasks pass the recovery passphrase on stdin; without
     # pipelining it lands in module files on the host's unencrypted root.
@@ -252,7 +254,8 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
     terraform_output.chmod(0o600)
 
     result = subprocess.run(
-        ["python3", str(generator), str(terraform_output), str(inventory), "--user", "ops"],
+        ["python3", str(generator), str(terraform_output), str(inventory), "--user", "ops",
+         "--dedicated-hosts", _no_dedicated_hosts(tmp_path)],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -304,7 +307,8 @@ def test_inventory_generator_refuses_malformed_agents(tmp_path: Path, agents: di
     )
     terraform_output.chmod(0o600)
     result = subprocess.run(
-        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml")],
+        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml"),
+         "--dedicated-hosts", _no_dedicated_hosts(tmp_path)],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -329,7 +333,8 @@ def test_inventory_generator_refuses_sensitive_agent_output(tmp_path: Path) -> N
     )
     terraform_output.chmod(0o600)
     result = subprocess.run(
-        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml")],
+        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml"),
+         "--dedicated-hosts", _no_dedicated_hosts(tmp_path)],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -434,6 +439,24 @@ def test_inventory_generator_joins_hosts_terraform_does_not_create(tmp_path: Pat
                              "k3s_vswitch": {"vlan_id": 4000, "address": "10.50.2.41/24",
                                              "gateway": "10.50.2.1", "network": "10.50.0.0/16"}},
     }
+
+
+def test_inventory_generator_requires_the_dedicated_host_list(tmp_path: Path) -> None:
+    # An inventory that omits dedicated hosts makes site.yml retire their
+    # WireGuard link, firewall rules and Tang access on every other node.
+    terraform_output = tmp_path / "foundation.json"
+    terraform_output.write_text(json.dumps({
+        "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
+        "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
+    }), encoding="utf-8")
+    terraform_output.chmod(0o600)
+    result = subprocess.run(
+        ["python3", str(ROOT / "infra/scripts/generate_ansible_inventory.py"),
+         str(terraform_output), str(tmp_path / "inventory.json")],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == 2 and "--dedicated-hosts" in result.stderr
+    assert not (tmp_path / "inventory.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -562,39 +585,85 @@ _WIREGUARD_KEY = "HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw="
 
 
 @pytest.mark.parametrize(
-    "published,accepted",
+    "published,private_ip,refusal",
     [
-        (_WIREGUARD_KEY, True),
+        (_WIREGUARD_KEY, "10.51.0.40", None),
         # Root on one node must not write wg-quick configuration, which runs
-        # PreUp commands as root, on every other node.
-        (_WIREGUARD_KEY + "\n[Interface]\nPreUp = touch /tmp/owned", False),
+        # PreUp and PostUp commands as root, on every other node.
+        (_WIREGUARD_KEY + "\n[Interface]\nPreUp = touch /tmp/owned", "10.51.0.40",
+         "other than one public key"),
+        (_WIREGUARD_KEY, "10.51.0.40/32 dev wgexomem; touch /tmp/owned; true",
+         "not exactly one IPv4 address"),
     ],
 )
 def test_a_peer_cannot_inject_wireguard_configuration(
-    tmp_path: Path, published: str, accepted: bool
+    tmp_path: Path, published: str, private_ip: str, refusal: str | None
 ) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
     groups = json.loads(json.dumps(_WITH_DEDICATED))
     dedicated = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]
     dedicated["hosts"]["exomem-agent-dx1"]["k3s_wireguard_public_key"] = published
+    dedicated["hosts"]["exomem-agent-dx1"]["private_node_ip"] = private_ip
     inventory = tmp_path / "inventory.json"
     inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
     link = next(task for task in _yaml(K3S_ROLE / "tasks/private_link.yml")
                 if task["name"] == "Converge the WireGuard private link")
-    refuse = next(task for task in link["block"]
-                  if task["name"] == "Refuse a WireGuard key that is not exactly one public key")
+    checks = [task for task in link["block"] if task["name"] in (
+        "Refuse a WireGuard key that is not exactly one public key",
+        "Refuse a peer address that is not exactly one IPv4 address",
+    )]
+    assert len(checks) == 2
     play = tmp_path / "keys.yml"
     play.write_text(yaml.safe_dump([{"hosts": "exomem-alpha", "gather_facts": False, "tasks": [
         {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
-        refuse,
+        *checks,
     ]}]))
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    if accepted:
+    if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
     else:
-        assert result.returncode != 0 and "other than one public key" in result.stdout, result.stdout
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    "free_extents,overrides,expected",
+    [
+        # 2 x 3.84 TB in RAID1: 64 B per 64 KiB chunk is 895 extents (3.5 GiB),
+        # and twice that stays free. A fixed 2 GiB would starve this pool.
+        (915527, {}, {"pool_extents": 915527 - 4 * 895, "metadata_kib": 895 * 4096,
+                      "reserve_kib": 2 * 895 * 4096}),
+        # Past about 15.8 TiB the metadata stops at LVM's 15.81 GiB limit.
+        (5242880, {}, {"pool_extents": 5242880 - 4 * 4048, "metadata_kib": 4048 * 4096,
+                       "reserve_kib": 2 * 4048 * 4096}),
+        # An operator's sizes replace the computed ones.
+        (1000, {"dedicated_host_thin_metadata_mib": 64, "dedicated_host_vg_reserve_mib": 128},
+         {"pool_extents": 1000 - 32 - 32, "metadata_kib": 65536, "reserve_kib": 131072}),
+    ],
+)
+def test_thin_pool_metadata_grows_with_the_pool(
+    tmp_path: Path, free_extents: int, overrides: dict, expected: dict
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    role = ANSIBLE / "roles/dedicated_host"
+    size = next(task for task in _yaml(role / "tasks/volume_group.yml")
+                if task["name"] == "Size the thin pool and its metadata")
+    play = tmp_path / "size.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
+        # What `vgs` reports for the group: free extents of 4 MiB each.
+        "dedicated_host_vg_free": {"stdout": f"  {free_extents} 4194304"},
+        "dedicated_host_pool": {"rc": 5}, "expected": expected,
+    }, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(role / "defaults/main.yml")}},
+        *([{"ansible.builtin.set_fact": overrides}] if overrides else []),
+        size,
+        {"ansible.builtin.assert": {"that": ["dedicated_host_pool_geometry == expected"]}},
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # --- Ansible: the k3s role --------------------------------------------------

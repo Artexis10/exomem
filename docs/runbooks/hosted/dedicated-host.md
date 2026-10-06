@@ -163,10 +163,10 @@ infra/scripts/ansible_with_sops.sh \
   --vars infra/secrets/ansible/recovery-passphrase-exomem-agent-dx1.v1.sops.json
 ```
 
-The first run fixes the thin pool's geometry: 64 KiB chunks and 2 GiB of
-metadata, sized for a pool of up to 2 TiB. For a larger pool, set
-`dedicated_host_thin_metadata_mib` in `group_vars/hosted_nodes.yml` to 64
-bytes per chunk before that run. A 4 TiB pool needs 4096.
+The first run fixes the thin pool's geometry: 64 KiB chunks, and 64 bytes of
+metadata per chunk computed from the pool's size. Above about 15.8 TiB of pool,
+the metadata stops at LVM's 15.81 GiB limit; set a larger
+`dedicated_host_thin_chunk_kib` in `group_vars/hosted_nodes.yml` before that run.
 
 Every later `site.yml` run needs the Tang keys and every dedicated host's
 passphrase. Each run proves that the escrowed passphrase still opens the array
@@ -277,8 +277,9 @@ on the host. `<new>` and `<surviving>` are whole disks, for example
 Expected result: `cat /proc/mdstat` shows every array rebuilding, then `[UU]`.
 After step 9, every peer holds the host's new public key and the tunnel is up.
 The removed disk held the old WireGuard key and the agent token
-(`/etc/rancher/k3s/config.yaml`) unencrypted. If the provider cannot confirm
-that it destroyed the disk, rotate the agent token as in `secrets.md`.
+(`/etc/rancher/k3s/config.yaml`) unencrypted. Unless the provider confirms
+that it destroyed the disk, the agent token must be rotated. That procedure is
+pending (OpenSpec task 5.7); until it exists, record the exposure.
 
 ## Remove the host
 
@@ -293,10 +294,10 @@ cells.
    ansible-playbook --inventory inventory.yml remove-agent.yml -e k3s_remove_node=exomem-agent-dx1
    ```
 
-2. Close the cell storage and destroy its LUKS header. This is irreversible, so type the confirmation yourself:
+2. Destroy the cell array's LUKS header. Step 1 already closed the storage. This is irreversible, so type the confirmation yourself:
 
    ```bash
-   ssh -t exomem-admin@100.64.0.40 'sudo vgchange --activate n cells && sudo cryptsetup close exomem_cells && sudo cryptsetup erase /dev/md/exomem-cells'
+   ssh -t exomem-admin@100.64.0.40 'sudo cryptsetup erase /dev/md/exomem-cells'
    ```
 
 3. Remove the host from the host list, regenerate the inventory, and run `site.yml` without `--limit`.
@@ -309,6 +310,8 @@ cells.
 Expected result: after step 3, every node has dropped the host's WireGuard
 peer, inter-node rules and Tang rule. If it was the last WireGuard host, every
 node has also stopped `wg-quick@wgexomem` and removed its configuration and
-key. After step 6, `blkid --probe` finds nothing on either disk. Nothing then
-needs rotating: the WireGuard key and the agent token were only on those
-disks. If you cannot wipe them, rotate the agent token as in `secrets.md`.
+key. After step 5, `nvme format` has completed on both disks. The WireGuard
+key and the agent token were only on those disks. Rotate the agent token
+unless the wipe is confirmed: `blkdiscard` and an empty `blkid --probe` do not
+prove erasure. That rotation is pending (OpenSpec task 5.7); until it exists,
+record the exposure.

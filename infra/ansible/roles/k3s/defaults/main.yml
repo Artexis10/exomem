@@ -39,6 +39,12 @@ k3s_join_delay: 5
 k3s_agent_local_storage: "{{ inventory_hostname in (groups['dedicated_hosts'] | default([])) }}"
 k3s_topolvm_driver: topolvm.io
 k3s_topolvm_device_class: thin
+# TopoLVM's privileged node plugin runs only on nodes with this label. The
+# server applies it: NodeRestriction stops a kubelet from setting labels under
+# node-restriction.kubernetes.io/ on its own Node, so a compromised agent cannot
+# draw the plugin and its service-account token onto itself. Never put it in
+# node-label, where the kubelet's registration would be refused.
+k3s_topolvm_node_label: node-restriction.kubernetes.io/exomem-local-storage=true
 
 # Every K3s node in the inventory; the host firewall admits inter-node
 # traffic only from their declared private addresses.

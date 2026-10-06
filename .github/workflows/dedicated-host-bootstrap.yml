@@ -76,8 +76,7 @@ jobs:
               children: {hosted_nodes: {
                 hosts: {"exomem-alpha": {private_node_ip: "127.0.0.1"}},
                 children: {k3s_agents: {children: {dedicated_hosts: {hosts: {"exomem-agent-ci": {
-                  private_node_ip: "127.0.0.1", dedicated_host_data_disks: [$d0, $d1],
-                  dedicated_host_thin_metadata_mib: 64, dedicated_host_vg_reserve_mib: 128}}}}}}}}}}'
+                  private_node_ip: "127.0.0.1", dedicated_host_data_disks: [$d0, $d1]}}}}}}}}}}'
           }
           inventory "$DECOY" "$DATA0" > "$RUNNER_TEMP/decoy-inventory.json"
           inventory "$DATA0" "$DATA1" > "$RUNNER_TEMP/inventory.json"
@@ -115,10 +114,14 @@ jobs:
           sudo vgs cells
           sudo lvs -o lv_name,lv_attr,lv_size,data_percent,metadata_percent,chunk_size cells
           sudo lvs --noheadings -o lv_attr cells/pool0 | grep -E '^ *t'
-          # The explicit geometry, and the reserve left free for metadata growth.
-          test "$(sudo lvs --noheadings --units k --nosuffix -o chunk_size cells/pool0 | tr -d ' ')" = 64.00
-          test "$(sudo lvs --noheadings --units m --nosuffix -o lv_metadata_size cells/pool0 | tr -d ' ')" = 64.00
-          test "$(sudo vgs --noheadings --units m --nosuffix -o vg_free cells | tr -d ' ' | cut -d. -f1)" -ge 128
+          # The computed geometry: 64 KiB chunks, at least 64 bytes of metadata
+          # per chunk, and twice the metadata left free for it to grow.
+          read -r pool meta chunk < <(sudo lvs --noheadings --units b --nosuffix \
+            -o lv_size,lv_metadata_size,chunk_size cells/pool0)
+          free=$(sudo vgs --noheadings --units b --nosuffix -o vg_free cells | tr -d ' ')
+          test "$chunk" -eq 65536
+          test "$meta" -ge $(( 64 * pool / chunk ))
+          test "$free" -ge $(( 2 * meta ))
           lsblk -o NAME,TYPE,SIZE,FSTYPE "$DATA0" "$DATA1"
       - name: Second run changes nothing
         working-directory: infra/ansible
@@ -128,15 +131,46 @@ jobs:
           grep -E '^(exomem-alpha|exomem-agent-ci) +: ok=' "$RUNNER_TEMP/second.log"
           if grep -E ' changed=[1-9]' "$RUNNER_TEMP/second.log"; then echo "the second run changed something"; exit 1; fi
       # The role binds with -f, never -y, so the Tang pin compares thp.
-      - name: Clevis refuses a Tang whose signing key is not the pinned one
+      # A Tang that answers every advertisement request with its own, separately
+      # generated keys. The role, pointed at it, must refuse to bind: its pin is
+      # the escrowed signing key. With -y in clevis.yml the bind would succeed
+      # and add a keyslot.
+      - name: The role refuses a Tang that cannot show the pinned signing key
+        timeout-minutes: 10
+        working-directory: infra/ansible
         run: |
+          fake="$(mktemp -d)"
+          jose jwk gen -i '{"alg":"ES512"}' -o "$fake/sig.jwk"
+          jose jwk gen -i '{"alg":"ECMR"}' -o "$fake/exc.jwk"
+          jose jwk pub -s -i "$fake/sig.jwk" -i "$fake/exc.jwk" -o "$fake/pub.jwks"
+          jose jws sig -I "$fake/pub.jwks" -k "$fake/sig.jwk" -s '{"protected":{"cty":"jwk-set+json"}}' \
+            -o "$fake/adv.jws"
+          python3 - "$fake/adv.jws" <<'PY' &
+          import http.server, sys
+          body = open(sys.argv[1], "rb").read()
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  ok = self.path.startswith("/adv")
+                  self.send_response(200 if ok else 404)
+                  self.send_header("Content-Type", "application/jose+json")
+                  self.end_headers()
+                  if ok:
+                      self.wfile.write(body)
+              def log_message(self, *args):
+                  pass
+          http.server.HTTPServer(("127.0.0.1", 7600), Handler).serve_forever()
+          PY
+          server=$!
+          trap 'kill "$server"' EXIT
+          for _ in $(seq 20); do curl -sf http://127.0.0.1:7600/adv/probe > /dev/null && break; sleep 0.5; done
           slots() { sudo cryptsetup luksDump /dev/md/exomem-cells | grep -cE '^  [0-9]+: luks2$'; }
           before=$(slots)
-          wrong='{"url":"http://127.0.0.1:7500","thp":"Ec7Ji7XkHtq3X1a8eXnzvYlOMkxaxdZuG6Na9u_9u0E"}'
-          if jq -j '.dedicated_host_recovery_passphrase_exomem_agent_ci' "$RUNNER_TEMP/escrow.json" \
-               | sudo clevis luks bind -f -d /dev/md/exomem-cells -k - tang "$wrong"; then
-            echo "clevis bound to a Tang it could not verify"; exit 1
+          if ansible-playbook -i "$RUNNER_TEMP/inventory.json" -e "@$RUNNER_TEMP/escrow.json" \
+               -e dedicated_host_tang_url=http://127.0.0.1:7600 ci-dedicated-host.yml > "$RUNNER_TEMP/fake-tang.log" 2>&1; then
+            cat "$RUNNER_TEMP/fake-tang.log"; echo "the role bound to a Tang it could not verify"; exit 1
           fi
+          grep -A3 -F 'TASK [dedicated_host : Bind the array to Tang, pinned to the escrowed signing key]' \
+            "$RUNNER_TEMP/fake-tang.log" | grep -F 'fatal: [exomem-agent-ci]'
           test "$(slots)" = "$before"
       - name: Clevis unlocks the closed array from Tang alone
         run: |
@@ -237,8 +271,8 @@ jobs:
             echo "### Dedicated host bootstrap on loop devices"
             echo
             echo "Proven on a disposable runner: the disk guard, RAID1, LUKS2, a Clevis Tang"
-            echo "binding pinned to the escrowed signing key (a wrong pin is refused), the cells"
-            echo "volume group and thin pool at the explicit geometry, an idempotent second run,"
+            echo "binding pinned to the escrowed signing key (a Tang with other keys is refused),"
+            echo "the cells volume group and thin pool at the computed geometry, an idempotent second run,"
             echo "unattended unlock (clevis luks unlock, and the crypttab unit with K3s waiting"
             echo "on it), no rebuild of a degraded, stopped or partial array, and removal's stop"
             echo "tasks closing the storage. Not proven: a reboot, which a runner cannot do; that"

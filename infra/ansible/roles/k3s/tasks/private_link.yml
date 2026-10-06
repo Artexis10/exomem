@@ -85,6 +85,28 @@
       vars:
         k3s_wireguard_peer_keys: "{{ k3s_wireguard_peers | map('extract', hostvars, 'k3s_wireguard_public_key') | list }}"
 
+    # Addresses are rendered into PostUp, AllowedIPs and Endpoint lines that
+    # wg-quick evaluates as root. Defence in depth behind inject_facts_as_vars:
+    # each must be exactly one dotted-quad IPv4 address, and no two nodes share
+    # a private one.
+    - name: Refuse a peer address that is not exactly one IPv4 address
+      ansible.builtin.assert:
+        that:
+          - k3s_wireguard_addresses | reject('string') | list | length == 0
+          - k3s_wireguard_addresses | map('trim') | list == k3s_wireguard_addresses
+          - >-
+            k3s_wireguard_addresses | reject('match',
+            '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$')
+            | list | length == 0
+          - k3s_wireguard_private_ips | unique | length == k3s_wireguard_private_ips | length
+        fail_msg: A WireGuard peer's address is not exactly one IPv4 address, or two nodes share one; nothing was configured.
+      vars:
+        k3s_wireguard_private_ips: >-
+          {{ ([inventory_hostname] + k3s_wireguard_peers) | map('extract', hostvars, 'private_node_ip') | list }}
+        k3s_wireguard_addresses: >-
+          {{ k3s_wireguard_private_ips
+             + (k3s_wireguard_hosts | map('extract', hostvars, 'public_ipv4') | list) }}
+
     - name: Configure the WireGuard interface and its peers
       ansible.builtin.template:
         src: wireguard.conf.j2

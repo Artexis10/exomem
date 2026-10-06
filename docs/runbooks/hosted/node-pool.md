@@ -59,7 +59,8 @@ terraform -chdir=infra/terraform/foundation output -json > /run/user/$UID/founda
 chmod 0600 /run/user/$UID/foundation.json
 infra/scripts/generate_ansible_inventory.py /run/user/$UID/foundation.json \
   infra/ansible/inventory.yml --user exomem-admin \
-  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}"
+  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
+  --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
 infra/scripts/ansible_with_sops.sh \
   --inventory infra/ansible/inventory.yml \
   --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
@@ -67,6 +68,13 @@ infra/scripts/ansible_with_sops.sh \
   --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
   --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
 ```
+
+The inventory always carries every node. `EXOMEM_DEDICATED_HOSTS` is the
+private host list from [dedicated-host.md](dedicated-host.md), or a file
+holding `{}` when there are none. An inventory without a dedicated host makes
+`site.yml` remove that host's WireGuard link, firewall rules and Tang access
+on every other node. While dedicated hosts exist, also pass the Tang keys and
+each host's passphrase, as dedicated-host.md shows.
 
 ## Reserve an agent for one selected cell
 

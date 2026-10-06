@@ -159,7 +159,7 @@ assert os.statvfs(local).f_fsid == os.statvfs(os.environ['TEST_TMPFS_ROOT']).f_f
 (local / 'ansible-local-1' / 'content').write_text(os.environ['TEST_SENTINEL'])
 pathlib.Path(os.environ['TEST_MARKER']).write_text(
     json.dumps({'args': sys.argv[1:], 'values': [json.loads(path.read_text()) for path in paths],
-                'local_temp': str(local)})
+                'local_temp': str(local), 'config': os.environ.get('ANSIBLE_CONFIG')})
 )
 """,
     )
@@ -199,4 +199,7 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     for path in decrypted_paths.read_text(encoding="utf-8").splitlines():
         assert not Path(path).exists()
     assert not Path(invocation["local_temp"]).exists()
+    # Run from any directory, the repository's configuration still applies; it
+    # keeps module-returned facts from shadowing inventory variables.
+    assert invocation["config"] == str(ROOT / "infra" / "ansible" / "ansible.cfg")
     assert stat.S_IMODE(RUNNER.stat().st_mode) & stat.S_IXUSR

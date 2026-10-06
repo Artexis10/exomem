@@ -210,7 +210,12 @@ infra/scripts/validate.sh
 openspec validate add-hosted-private-alpha-infrastructure --strict
 ```
 
-Generate non-sensitive inventory and run the governed two-pass convergence gate:
+Generate non-sensitive inventory and run the governed two-pass convergence gate.
+The gate converges the whole K3s fleet: the server, every Terraform agent and
+every dedicated host. `site.yml` converges the inter-node firewall, the private
+link and Tang to the inventory, so a run over part of the fleet would remove
+the missing nodes' rules on every node it reaches. The control database keeps
+its own play and is left out here.
 
 ```bash
 set -euo pipefail
@@ -219,14 +224,26 @@ command -v jq >/dev/null
 deploy_work_dir="$(mktemp -d)"
 trap 'rm -rf -- "${deploy_work_dir}"' EXIT
 terraform -chdir=infra/terraform/foundation output -json \
-  | jq '{server_ipv4, private_node_ip}' > "${deploy_work_dir}/foundation-output.json"
+  | jq '{server_ipv4, private_node_ip, k3s_agent_nodes, vswitch} | with_entries(select(.value != null))' \
+  > "${deploy_work_dir}/foundation-output.json"
 infra/scripts/generate_ansible_inventory.py \
   "${deploy_work_dir}/foundation-output.json" "${deploy_work_dir}/inventory.json" \
-  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}"
-infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inventory.json" \
-  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
-  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
+  --admin-addresses "${EXOMEM_ADMIN_ADDRESSES:?private NetBird address map required}" \
+  --dedicated-hosts "${EXOMEM_DEDICATED_HOSTS:?private dedicated host list required}"
+# Without the agent token the server configuration loses it; without the Tang
+# keys or a passphrase a dedicated host's play refuses. Pass each that exists.
+convergence_vars=(
+  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json
+  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json
   --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+)
+for secret in infra/secrets/ansible/k3s-agent-token.v1.sops.json \
+  infra/secrets/ansible/tang-keys.v1.sops.json \
+  infra/secrets/ansible/recovery-passphrase-*.v1.sops.json; do
+  if [[ -f "$secret" ]]; then convergence_vars+=(--vars "$secret"); fi
+done
+infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inventory.json" \
+  "${convergence_vars[@]}"
 ```
 
 Prepare one private Helm-values file from exactly one canonical pair member.

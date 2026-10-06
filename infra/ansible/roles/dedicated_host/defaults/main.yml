@@ -16,16 +16,17 @@ dedicated_host_luks_name: exomem_cells
 # TopoLVM's thin device class names this volume group and pool.
 dedicated_host_volume_group: cells
 dedicated_host_thin_pool: pool0
-# Thin-pool geometry (design D1), fixed when the pool is created. 64 KiB
-# chunks are what spike 1.1 measured hourly snapshots with; LVM's own policy
-# would pick about 1 MiB for a 2 TiB pool, so every first write after an
-# hourly snapshot would copy 1 MiB. 2 GiB of metadata is lvm2's 64 bytes per
-# chunk for a 2 TiB pool (the kernel's guidance is 48), enough for every chunk
-# mapped, which overprovision ratio 1.0 bounds. Size it at 64 bytes per chunk
-# for a larger pool. The reserve lets the metadata and its spare double.
+# Thin-pool geometry (design D1), fixed when the pool is created: a chunk size
+# never changes afterwards. 64 KiB chunks keep the copy after each hourly
+# snapshot small; LVM's own policy would choose larger chunks for a large pool.
+# Empty metadata and reserve sizes are computed from the volume group: 64 bytes
+# of metadata per chunk (LVM's own default for a chunk size), capped at LVM's
+# 15.81 GiB limit, and twice that left free so the metadata and its spare can
+# grow. Beyond about 15.8 TiB of pool at 64 KiB, raise the chunk size instead.
+# Set either size in MiB only to override the computed value.
 dedicated_host_thin_chunk_kib: 64
-dedicated_host_thin_metadata_mib: 2048
-dedicated_host_vg_reserve_mib: 4096
+dedicated_host_thin_metadata_mib: ""
+dedicated_host_vg_reserve_mib: ""
 dedicated_host_ready_unit: exomem-cells-ready.service
 dedicated_host_packages:
   - clevis
