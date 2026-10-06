@@ -407,14 +407,13 @@ def test_delivered_twice_then_held_until_the_fingerprint_changes(
 ) -> None:
     vault = _ready(tmp_path)
     # Only the link family is delivered here.
-    commands.op_triage_memory(
-        vault,
-        ref=upkeep.upkeep_ref(
-            dreamer_store.candidate_id(dreamer_families.HYDRATION_KIND, fx.ENTITY, "")
-        ),
-        action="dismiss",
-        why="handled: covered elsewhere",
-    )
+    for kind in (dreamer_families.HYDRATION_KIND, dreamer_families.PROFILE_KIND):
+        commands.op_triage_memory(
+            vault,
+            ref=upkeep.upkeep_ref(dreamer_store.candidate_id(kind, fx.ENTITY, "")),
+            action="dismiss",
+            why="handled: covered elsewhere",
+        )
     first = _items(_carry(vault, session="one"))
     assert first and first[0]["family"] == dreamer_families.LINK_FAMILY
     assert first[0]["disposition"]["delivered_before"] == 0

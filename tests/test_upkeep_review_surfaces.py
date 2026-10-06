@@ -78,7 +78,11 @@ def test_review_mode_upkeep_is_bounded_and_counts_after_egress(tmp_path: Path) -
     listed = commands.op_review_memory(vault, mode="upkeep")
     assert listed["status"] == "available"
     kinds = {item["kind"] for item in listed["items"]}
-    assert kinds == {dreamer_families.LINK_KIND, dreamer_families.HYDRATION_KIND}
+    assert kinds == {
+        dreamer_families.LINK_KIND,
+        dreamer_families.HYDRATION_KIND,
+        dreamer_families.PROFILE_KIND,
+    }
     assert listed["families"]["upkeep_hydration"] == 1
     assert listed["families"]["upkeep_link"] >= 1
     # Hydration ranks before link.

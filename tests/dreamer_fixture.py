@@ -446,3 +446,36 @@ def build_vocabulary(root: Path, *, with_graph: bool = True) -> Path:
     if with_graph:
         publish_graph(vault)
     return vault
+
+
+EPISODES = f"{KB}/Sources/Episodes"
+
+
+def recap(subject: str, *, episode: str, captured: str, decided: str, status: str = "") -> str:
+    """An episode recap page in the shape `episode_memory` records it."""
+    return (
+        "---\n"
+        f"title: {subject}\n"
+        "type: source\n"
+        "source_type: episode\n"
+        f"captured: {captured}\n"
+        f"summary: {subject}\n"
+        f"episode: {episode}\n" + (f"status: {status}\n" if status else "") + "ingested_into: []\n"
+        "---\n\n"
+        f"# {subject}\n\n"
+        "### Decided\n\n"
+        f"- {decided}\n"
+    )
+
+
+def entity_recap(episode: str, day: str) -> tuple[str, str]:
+    """`(path, text)` of a recap recorded on 2026-05-<day> whose decision links the entity."""
+    return (
+        f"{EPISODES}/pump-session-{day}.md",
+        recap(
+            f"Pump session {day}",
+            episode=episode,
+            captured=f"2026-05-{day}",
+            decided="Service the [[Orbit Pump]] monthly",
+        ),
+    )
