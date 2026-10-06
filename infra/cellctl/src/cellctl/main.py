@@ -24,7 +24,8 @@ from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
 
-# The cell resources a chart that sets none gets; manifests.py owns the values.
+# cellctl's own cell resources when CELLCTL_CELL_* is unset (the chart always
+# sets them); manifests.py owns the values.
 DEFAULT_RESOURCES = ResourceSettings()
 
 

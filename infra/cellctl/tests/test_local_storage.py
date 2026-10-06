@@ -457,7 +457,7 @@ def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serv
 
     hard = render_resource_quota(spec)["spec"]["hard"]
 
-    # Serving 250m/1Gi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
+    # Serving 125m/512Mi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
     assert {key: hard[key] for key in ("persistentvolumeclaims", "requests.storage", "requests.cpu",
                                        "requests.memory", "limits.cpu")} == {
         "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "225m",
