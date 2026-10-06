@@ -17,15 +17,15 @@ from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
 
 
-def test_raw_source_is_absent_from_remote_owner_audit_summary(vault: Path) -> None:
+def test_raw_source_is_absent_from_guest_audit_summary(vault: Path) -> None:
     """Dropping a hidden finding after counting must not leak the audit total."""
     from exomem import commands
     from exomem.governance import egress, principal
 
-    remote = principal.RequestPrincipal(
-        "owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic",
+    guest = principal.RequestPrincipal(
+        "principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic",
     )
-    with principal.request_scope(remote):
+    with principal.request_scope(guest):
         before = commands.op_audit(vault, categories=["unprocessed_source"])
         hidden = vault / "Knowledge Base/Sources/__exomem_raw_v1__private.md"
         hidden.write_text("---\ntype: source\ncreated: 2020-01-01\ningested_into: []\n---\nPrivate source\n", encoding="utf-8")

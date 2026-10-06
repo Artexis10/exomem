@@ -193,18 +193,16 @@ def test_owner_mint_still_downloads(vault: Path) -> None:
     assert resolved.audience_id == principal_module.OWNER_AUDIENCE
 
 
-def test_marked_raw_orphan_is_not_downloadable_by_remote_owner_without_policy(vault: Path) -> None:
-    """A copied raw artifact must not become public when its companion is lost."""
+def test_marked_raw_orphan_is_downloadable_only_by_the_owner_without_policy(vault: Path) -> None:
+    """A copied raw artifact must not become public when its companion is lost.
+    The owner's transfer bearer and owner-audience capabilities still serve it;
+    a guest's capability, or one forged with the public bearer, reads as absent."""
     path = "Knowledge Base/Evidence/Test/export/__exomem_raw_v1__sample.csv"
     artifact = vault / path
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(b"timestamp,latitude\n2026-10-01,12.345\n")
-    who = principal_module.RequestPrincipal(
-        audience_id="owner", surface="mcp", remote_owner=True,
-        issuer_family="mcp-oauth:synthetic",
-    )
     client = _client()
-    token = _mint_as(vault, who)
+    token = _mint_as(vault, _oauth_principal())
     response = _download(client, path, token)
     shared_key = _download(client, path, SECRET)
     legacy_owner = _download(client, path, upload_tokens.mint_bound(SECRET, audience="owner"))
@@ -218,8 +216,8 @@ def test_marked_raw_orphan_is_not_downloadable_by_remote_owner_without_policy(va
 
     assert response.status_code == absent.status_code == 404
     assert response.content == absent.content
-    assert shared_key.status_code == legacy_owner.status_code == 404
-    assert shared_key.content == legacy_owner.content == absent.content
+    assert shared_key.status_code == legacy_owner.status_code == 200
+    assert shared_key.content == legacy_owner.content == b"timestamp,latitude\n2026-10-01,12.345\n"
     assert forged_local.status_code == forged_absent.status_code
     assert forged_local.content == forged_absent.content
 
@@ -285,8 +283,9 @@ def test_raw_preservation_release_revocation_and_held_download(vault: Path, monk
 
 
 @pytest.mark.parametrize("signing_root", [None, SECRET], ids=["missing-private-root", "root-is-public-bearer"])
-def test_non_private_signer_keeps_legacy_transfer_but_reports_raw_unavailable(vault, monkeypatch, signing_root):
-    """Static-bearer deployments must neither forge locality nor claim RAW transfer support."""
+def test_non_private_signer_keeps_legacy_transfer_for_the_owner(vault, monkeypatch, signing_root):
+    """Static-bearer deployments serve the owner's protected original through the
+    owner-audience capability, and cannot forge a full principal."""
     if signing_root is None:
         monkeypatch.delenv("EXOMEM_JWT_SIGNING_KEY")
     else:
@@ -301,11 +300,11 @@ def test_non_private_signer_keeps_legacy_transfer_but_reports_raw_unavailable(va
         page = commands.op_read_memory(vault, path=saved["path"], include_raw=True)
     assert page["content"] == "exact local original\n"
     assert handoff["preserves_ingress_principal"] is False
-    assert handoff["raw_transfer_unavailable_reason"]
+    assert "raw_transfer_unavailable_reason" not in handoff
     assert upload_tokens.bound_audience(handoff["token"], SECRET) == "owner"
     client = _client()
     assert _download(client, RELEASED, handoff["token"]).content == (vault / RELEASED).read_bytes()
-    assert _download(client, saved["path"], handoff["token"]).status_code == 404
+    assert _download(client, saved["path"], handoff["token"]).content == b"exact local original\n"
     forged = upload_tokens.mint_principal(SECRET, local)
     assert _download(client, saved["path"], forged).status_code == 401
 

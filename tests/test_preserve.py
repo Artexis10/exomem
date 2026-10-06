@@ -101,8 +101,8 @@ def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: 
     before = raw_protection.binding(vault, protected["path"])[0]
     preserve_module.update_sidecar_extraction(vault, sidecar, text="sensitive extraction", engine="upload")
     assert raw_protection.binding(vault, protected["path"])[0] == before
-    remote = RequestPrincipal("owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic")
-    with request_scope(remote):
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
         with pytest.raises(ValueError, match="NOT_FOUND"):
             commands.op_read_memory(vault, path=protected["sidecar_path"])
         receipt = egress.postfilter("preserve_evidence", protected, vault)
@@ -111,7 +111,7 @@ def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: 
         assert protected["ref"] not in str(receipt)
         assert egress.release_allows_download(vault, legacy["path"])
     sidecar.write_text("---\ntype: source\n---\nstripped companion\n", encoding="utf-8")
-    assert not egress.release_allows_download(vault, protected["path"], principal=remote)
+    assert not egress.release_allows_download(vault, protected["path"], principal=guest)
 
 
 def test_protected_dedup_requires_a_real_pair_and_matching_original_bytes(vault: Path) -> None:
@@ -173,7 +173,8 @@ def test_raw_rollback_survivor_keeps_its_intrinsic_floor(vault: Path, monkeypatc
     assert original.read_bytes() == b"exact surviving bytes"
     assert not companion.exists()
     rel = original.relative_to(vault).as_posix()
-    assert not egress.release_allows_download(vault, rel, principal=RequestPrincipal("owner", remote_owner=True))
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    assert not egress.release_allows_download(vault, rel, principal=guest)
     assert egress.release_allows_download(vault, rel, principal=owner_principal(surface="library"))
     with pytest.raises(preserve_module.PreserveError) as retry:
         preserve_module.preserve(

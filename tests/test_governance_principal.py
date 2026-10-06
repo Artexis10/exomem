@@ -199,6 +199,16 @@ def test_hosted_missing_principal_fails_closed() -> None:
     assert resolved.audience_id == MOST_RESTRICTIVE_AUDIENCE
 
 
+def test_no_hosted_gateway_scope_resolves_to_the_owner() -> None:
+    """RAW admits the owner audience on any surface, so a hosted gateway scope
+    must never fold into it, however it is spelled: a cell caller is always a
+    principal, which needs a whole-artifact release."""
+    from exomem.governance import raw_protection
+
+    for scope in ("owner", f" {OWNER_AUDIENCE} ", "principal:owner", "cf-access:owner"):
+        assert not raw_protection.is_owner(resolve_hosted_principal(scope)), scope
+
+
 def test_hosted_principal_is_stable_for_same_scope() -> None:
     a = resolve_hosted_principal("principal-scope-abc")
     b = resolve_hosted_principal("principal-scope-abc")

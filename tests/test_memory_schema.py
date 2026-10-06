@@ -58,16 +58,16 @@ def test_inference_is_conservative_below_five_pages(tmp_path: Path) -> None:
     assert not any(rule["required"] for rule in result["proposal"]["blocks"].values())
 
 
-def test_raw_page_does_not_change_remote_owner_schema_frequencies(tmp_path: Path) -> None:
+def test_raw_page_does_not_change_guest_schema_frequencies(tmp_path: Path) -> None:
     """A hidden source must not disclose its fields through corpus inference."""
     from exomem.governance import egress, principal
 
     root = tmp_path / "vault"
     _seed_pages(root)
-    remote = principal.RequestPrincipal(
-        "owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic",
+    guest = principal.RequestPrincipal(
+        "principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic",
     )
-    with principal.request_scope(remote):
+    with principal.request_scope(guest):
         before = commands.op_schema_memory(
             root, operation="infer", name="atlas-insights", project="atlas",
         )

@@ -152,12 +152,12 @@ def census_vault(tmp_path: Path) -> Path:
 
 def test_raw_write_does_not_change_external_census_freshness(census_vault: Path) -> None:
     """A content-scoped census must not expose hidden whole-vault write increments."""
-    remote = RequestPrincipal("owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic")
-    with request_scope(remote):
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
         before = relation_census.census(census_vault)
     _write(census_vault, f"{NOTES}/__exomem_raw_v1__private.md", _page("insight", "Private", "Private original"))
     _built(census_vault)
-    with request_scope(remote):
+    with request_scope(guest):
         after = relation_census.census(census_vault)
     assert after["metrics"] == before["metrics"]
     assert after["cohort"] == before["cohort"]

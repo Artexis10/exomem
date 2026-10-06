@@ -66,7 +66,7 @@ def test_withheld_preserved_source_refuses_before_storing_provenance(store):
     assert tuple(store.connection.iterdump()) == before
 
 
-def test_raw_source_cannot_enter_remote_owner_provenance_without_policy(request):
+def test_raw_source_cannot_enter_guest_provenance_without_policy(request):
     """Canonical collection admission must not inherit the file-mode owner shortcut."""
     writer = request.getfixturevalue("store")
     create(writer)
@@ -75,8 +75,8 @@ def test_raw_source_cannot_enter_remote_owner_provenance_without_policy(request)
     page.parent.mkdir(parents=True)
     page.write_text("---\ntype: source\n---\nPrivate original\n")
     before = tuple(writer.connection.iterdump())
-    remote = RequestPrincipal("owner", surface="mcp", remote_owner=True, issuer_family="mcp-oauth:synthetic")
-    with request_scope(remote):
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
         with pytest.raises(collections.CollectionError, match="INVALID_RECORD_SOURCE"):
             writer.append_record(CID, item={"title": "One"}, item_key=KEY,
                                  sources=(source,), why="capture")

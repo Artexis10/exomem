@@ -2722,7 +2722,12 @@ def op_find(
     collect_timings = include_timings or call_spans_module.MCP_CALL_TOKEN.get() is not None
     timings = find_module.FindTimings() if collect_timings and projection_runtime is None else None
     timings_suppressed = (
-        {"status": "governed_projection"} if projection_runtime is not None else None
+        {"status": "governed_projection"} if projection_runtime is not None
+        # Which stages ran, their counts and the rerank decision all move with
+        # pages the caller may not see, so a restricted caller asking for
+        # timings gets the status instead, never a subset of the table.
+        else {"status": "release_restricted"} if restricted and include_timings
+        else None
     )
     # Deliberately not declared in retrieval_models.FindEnvelope: its schema
     # permits additive properties, while declaring this optional marker would
@@ -2786,10 +2791,14 @@ def op_find(
     else:
         # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
         # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
-        # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
-        # as the caller asked and the latency profile is unchanged.
+        # an ungoverned vault, so the owner's empty-policy fast path keeps `limit`
+        # exactly as asked and the latency profile is unchanged. A restricted
+        # caller over-fetches there too: RAW can still withhold a hit, and an
+        # unfilled slot would say so.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
-        retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
+        retrieval_limit = (
+            egress_module.pool_limit(limit) if _release_active or restricted else limit
+        )
         catalog_proof: dict[str, Any] = {}
         hits = find_module.find(
             vault_root,
@@ -2946,7 +2955,9 @@ def op_find(
         # Notices occupy only the slots the over-fetch pool could not backfill.
         hit_dicts.extend(release.notices)
     timings_dict = (
-        timings.as_dict() if timings is not None and include_timings else None
+        timings.as_dict()
+        if timings is not None and include_timings and timings_suppressed is None
+        else None
     )
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
@@ -6488,7 +6499,8 @@ def _carry_thread_through_abstention(packet: Any, continuity: str | None) -> Non
 
 #: Packet generation fields that move with every file in the vault: the
 #: freshness key counts and digests them, and the index generation advances on
-#: every write. A reader other than the owner does not receive them.
+#: every write, a protected capture's included. A reader other than the owner
+#: does not receive them, on an ungoverned vault too.
 _VAULT_GENERATION_FIELDS = ("freshness_key", "index_generation")
 
 
@@ -6497,7 +6509,7 @@ def _withhold_vault_generation(vault_root: Path, packet: Any) -> None:
     if (
         isinstance(generation, dict)
         and any(name in generation for name in _VAULT_GENERATION_FIELDS)
-        and egress_module.restricted_audience(vault_root)
+        and egress_module.restricted_release_filter(vault_root) is not None
     ):
         packet["generation"] = {
             key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
@@ -7677,7 +7689,7 @@ def op_capture_source(
         files: Client file handles, captured instead of `content`.
         adoption: Selects exactly one supplied handle. Establishes eligibility,
             not write consent; agent-initiated use obeys proactive_capture.
-        raw_protection: Keep the original owner-local until a whole-artifact release.
+        raw_protection: Keep the original owner-only until a whole-artifact release.
     """
     if files or adoption is not None:
         from . import client_artifacts
@@ -8004,7 +8016,7 @@ def op_preserve_evidence(
         filename: Filename with extension.
         content: Exact UTF-8 text.
         description: Sidecar description.
-        raw_protection: Keep the original owner-local until a whole-artifact release.
+        raw_protection: Keep the original owner-only until a whole-artifact release.
     """
     return op_preserve(
         vault_root,
@@ -8038,7 +8050,7 @@ def op_preserve_artifacts(
         scope: Case/project key; one path segment.
         category: One path segment.
         adoption: Selected handle: eligibility, not write consent; proactive_capture applies.
-        raw_protection: Keep originals owner-local until whole-artifact release.
+        raw_protection: Keep originals owner-only until whole-artifact release.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -8085,8 +8097,8 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
-    # Full ingress provenance requires private signing authority. The legacy
-    # bearer can bind an audience, but cannot prove that audience arrived locally.
+    # Carrying the full principal (its session and purpose) requires private
+    # signing authority. The legacy bearer can bind an audience, nothing more.
     who = principal_module.effective_principal()
     audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(

@@ -20,7 +20,7 @@ from . import (
     authorization_session_lifecycle,
     store,
 )
-from .principal import LOCAL_INGRESS_ISSUER_FAMILY, OWNER_AUDIENCE, RequestPrincipal
+from .principal import OWNER_AUDIENCE, RequestPrincipal
 
 PREFIX = "__exomem_raw_v1__"
 COMPATIBILITY_ID = "raw-protection-v1"
@@ -54,17 +54,10 @@ def required_compatibility(root: Path) -> frozenset[str]:
     return frozenset()
 
 
-def owner_local(who: RequestPrincipal) -> bool:
-    if not who.resolved or who.audience_id != OWNER_AUDIENCE or who.remote_owner:
-        return False
-    return (
-        who.local_owner and who.issuer_family == LOCAL_INGRESS_ISSUER_FAMILY
-        or (who.surface, who.issuer_family) in {
-            ("cli", "cli-local-owner"),
-            ("library", "library-local-owner"),
-            ("mcp", "mcp-local-stdio"),
-        }
-    )
+def is_owner(who: RequestPrincipal) -> bool:
+    """The owner on any surface: local, a remote connector, the REST key or the
+    transfer bearer. Every other audience needs a whole-artifact release."""
+    return who.resolved and who.audience_id == OWNER_AUDIENCE
 
 
 def protect(page: str, *, artifact_path: str, digest: str) -> str:
@@ -149,7 +142,7 @@ def permits(
         finally:
             if connection is not None:
                 connection.close()
-    if owner_local(who):
+    if is_owner(who):
         return True
     # An original's release never approves newly extracted pixels or aliases.
     if derived:

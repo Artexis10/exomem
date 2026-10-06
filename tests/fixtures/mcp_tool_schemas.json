@@ -654,7 +654,7 @@
         },
         "raw_protection": {
           "default": false,
-          "description": "Keep the original owner-local until a whole-artifact release.",
+          "description": "Keep the original owner-only until a whole-artifact release.",
           "type": "boolean"
         },
         "response_detail": {
@@ -2458,7 +2458,7 @@
         },
         "raw_protection": {
           "default": false,
-          "description": "Keep originals owner-local until whole-artifact release.",
+          "description": "Keep originals owner-only until whole-artifact release.",
           "type": "boolean"
         },
         "response_detail": {
@@ -2511,7 +2511,7 @@
         },
         "raw_protection": {
           "default": false,
-          "description": "Keep the original owner-local until a whole-artifact release.",
+          "description": "Keep the original owner-only until a whole-artifact release.",
           "type": "boolean"
         },
         "response_detail": {

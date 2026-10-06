@@ -272,8 +272,12 @@ def mint_for_endpoint(
     if scope == "upload":
         out["lane"] = lane or "evidence"
     if scope == "download":
+        from .governance.raw_protection import is_owner
+
         out["preserves_ingress_principal"] = principal is not None and signing_root is not None
-        if not out["preserves_ingress_principal"]:
+        # The owner needs no more than the bound owner audience to receive a
+        # protected original; a grant recipient needs its session and purpose.
+        if not out["preserves_ingress_principal"] and not (principal is not None and is_owner(principal)):
             out["raw_transfer_unavailable_reason"] = "Private signing authority or verified ingress principal is unavailable."
     if large_base_url:
         out["large_upload_url"] = f"{large_base_url}/upload"

@@ -2338,25 +2338,59 @@ def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
     assert "graph_hop" in _text(owner), owner
 
 
-def test_a_caller_raw_withholds_from_recalls_as_if_the_marked_page_were_absent(
+def test_the_owners_remote_connector_recalls_and_reads_as_the_local_owner_does(
     tmp_path: Path,
 ) -> None:
+    """Owner ruling: the owner is the owner on any surface. An OAuth connector
+    bound as the owner recalls exactly as the local owner does, the graph hop
+    a protected original seeds and explain included, and reads that original."""
+    import shutil
+
+    marked = f"{NOTES}/__exomem_raw_v1__gamma-secret.md"
+    files = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha plain body about orchards.", type="insight"),
+        marked: _page(
+            "Zephyrquux Plan",
+            "Zephyrquux acquisition target details. " + _LINKS_TO.format(t="Alpha"),
+            type="insight",
+            title="Zephyrquux Plan",
+        ),
+    }
+    vault = _materialize(tmp_path / "vault", files, "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    connector = RequestPrincipal(
+        audience_id="owner", surface="mcp", resolved=True,
+        issuer_family="mcp-oauth:" + "c" * 64, remote_owner=True,
+    )
+    recall = {"query": "Zephyrquux", "explain": True, "detail": "full"}
+
+    local = _call(vault, None, "ask_memory", **recall)
+    assert "graph_hop" in _text(local) and marked in _text(local), local
+    assert _call(vault, connector, "ask_memory", **recall) == local
+    assert "Zephyrquux acquisition" in _text(_call(vault, connector, "read_memory", path=marked))
+
+
+def test_a_guest_recalls_as_if_the_marked_page_were_absent(tmp_path: Path) -> None:
     """RAW: everything computed from pages before admission is content. For a
-    query only a marked page matches, a remote owner and a guest on an
-    ungoverned vault get exactly what they would if the page were absent: no
-    graph hop it seeds, no explain lane status or score, no keyword-fallback
-    marker. The guest still keeps its packet's index generation."""
+    query only a marked page matches, or one it outranks the rest on, a guest
+    on an ungoverned vault gets exactly what it would if the page were absent:
+    no graph hop it seeds, no explain lane status or score, no keyword-fallback
+    marker, no timings, and still `limit` hits. Nor does it receive the vault
+    generation counters, which move with every protected capture."""
     import shutil
 
     marked = "__exomem_raw_v1__gamma-secret"
     base = {
         **_filler(),
-        f"{NOTES}/alpha.md": _page("Alpha", "Alpha plain body about orchards.", type="insight"),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", "Alpha plain body about orchards and quinces.", type="insight"
+        ),
     }
     original = {
         f"{NOTES}/{marked}.md": _page(
             "Zephyrquux Plan",
-            "Zephyrquux acquisition target details. " + _LINKS_TO.format(t="Alpha"),
+            "Zephyrquux quinces quinces quinces. " + _LINKS_TO.format(t="Alpha"),
             type="insight",
             title="Zephyrquux Plan",
         ),
@@ -2369,26 +2403,27 @@ def test_a_caller_raw_withholds_from_recalls_as_if_the_marked_page_were_absent(
         "plain": {"query": "Zephyrquux", "detail": "full"},
         "explain": {"query": "Zephyrquux", "explain": True, "detail": "full"},
         "enrich": {"query": "Zephyrquux", "deep": True, "graph_enrich": True},
+        "timings": {"query": "Zephyrquux", "include_timings": True},
+        "limit": {"query": "quinces", "limit": 1},
     }
+    guest = _principal("external")
 
-    local = _call(vaults["present"], None, "ask_memory", **calls["explain"])
-    assert marked in _text(local) and "alpha.md" in _text(local), local
-    for principal in (owner_principal(surface="rest"), _principal("external")):
-        for kwargs in calls.values():
-            present = _call(vaults["present"], principal, "ask_memory", **kwargs)
-            assert "__error__" not in present, present
-            assert present == _call(vaults["absent"], principal, "ask_memory", **kwargs)
-    packet = _call(
-        vaults["present"], _principal("external"), "activate_context", turn="Tell me about Alpha."
-    )
-    assert "index_generation" in packet["generation"], packet
+    local = _call(vaults["present"], None, "ask_memory", **calls["limit"])
+    assert marked in _text(local) and "alpha.md" not in _text(local), local
+    answers = {
+        label: [_call(vaults[variant], guest, "ask_memory", **kwargs) for variant in vaults]
+        for label, kwargs in calls.items()
+    }
+    assert "__error__" not in _text(answers), answers
+    assert [label for label, (present, absent) in answers.items() if present != absent] == []
+    packet = _call(vaults["present"], guest, "activate_context", turn="Tell me about Alpha.")
+    assert "index_generation" not in packet["generation"], packet
 
 
 def test_a_review_item_reads_as_if_its_marked_neighbour_were_absent(tmp_path: Path) -> None:
     """RAW: a review item's graph section is computed from pages before
-    admission, so for a remote owner and a guest on an ungoverned vault a
-    marked page linking to the item is absent, its node and edges and the
-    shown counts alike."""
+    admission, so for a guest on an ungoverned vault a marked page linking to
+    the item is absent, its node and edges and the shown counts alike."""
     import shutil
 
     alpha = f"{NOTES}/alpha.md"
@@ -2412,18 +2447,17 @@ def test_a_review_item_reads_as_if_its_marked_neighbour_were_absent(tmp_path: Pa
         return _call(vaults[variant], principal, "review_item_context", ref=ref)
 
     assert "__exomem_raw_v1__" in _text(context("present", None))
-    for principal in (owner_principal(surface="rest"), _principal("external")):
-        present = context("present", principal)
-        assert "__error__" not in present, present
-        assert present == context("absent", principal)
+    present = context("present", _principal("external"))
+    assert "__error__" not in present, present
+    assert present == context("absent", _principal("external"))
 
 
 def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """RAW: vector, image and rerank ranks and scores are cut at a candidate
-    boundary that marked pages occupy before admission, so a remote owner
-    receives none of them. Embeddings are off here, so `find` is stubbed with
+    boundary that marked pages occupy before admission, so a guest receives
+    none of them. Embeddings are off here, so `find` is stubbed with
     a hit carrying every lane's signal."""
     import shutil
 
@@ -2440,10 +2474,10 @@ def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
     monkeypatch.setattr(find_module, "find", lambda *_args, **_kwargs: [hit])
 
     local = _call(vault, None, "ask_memory", query="orchard", detail="full")
-    remote = _call(vault, owner_principal(surface="rest"), "ask_memory", query="orchard", detail="full")
+    guest = _call(vault, _principal("external"), "ask_memory", query="orchard", detail="full")
 
     assert {"vector_score", "clip_score", "rerank_score"} <= set(local[0]["signals"]), local
-    assert remote[0]["path"] == hit.path and "signals" not in remote[0], remote
+    assert guest[0]["path"] == hit.path and "signals" not in guest[0], guest
 
 
 def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:

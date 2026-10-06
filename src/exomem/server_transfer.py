@@ -152,9 +152,9 @@ def download_principal(
 ) -> principal_module.RequestPrincipal:
     """Canonical audience for a `/download` caller (design D5).
 
-    The public bearer and legacy v2 tokens carry an audience, never proof of
-    locality. V3 preserves the minting principal using the server-private
-    signing root. Cloudflare Access identities use the same normalized audience
+    The public bearer and legacy v2 tokens carry an audience, nothing more. V3
+    preserves the minting principal, its session and purpose included, using
+    the server-private signing root. Cloudflare Access identities use the same normalized audience
     as REST. Every form still meets the live release decision for the bytes sent.
 
     Module-level (not a closure over the route) so the resolution contract is

@@ -191,9 +191,6 @@ def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.Mo
     expected = [h.as_dict() for h in find_module.find(vault, query="metabolism", mode="keyword")]
     assert payload["data"] == expected
 
-    # A REST key is not owner-local provenance, and explain is computed from
-    # pages before raw-protection admission, so the route serves the hits
-    # without it: no `retrieval_profile` envelope, no per-hit explanation.
     explained = client.post(
         "/api/ask_memory",
         json={
@@ -204,8 +201,8 @@ def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.Mo
         },
         headers=_auth(),
     ).json()["data"]
-    assert isinstance(explained, list), explained
-    assert explained and all("ranking_explanation" not in hit for hit in explained)
+    assert explained["retrieval_profile"]["effective_mode"] == "keyword"
+    assert explained["hits"][0]["ranking_explanation"]["final_rank"] == 1
 
 
 def test_replace_memory_route_exists(vault, monkeypatch: pytest.MonkeyPatch) -> None:
