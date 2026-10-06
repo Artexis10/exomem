@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 
 from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
@@ -655,7 +655,3 @@ def _job_observation(job, *, prefix: str, snapshot_id: str | None = None) -> dic
         result["backup_job_snapshot_id"] = snapshot_id if succeeded else None
         result["backup_job_started_at"] = job.status.start_time
     return result
-
-
-def now_utc() -> datetime:
-    return datetime.now(UTC)

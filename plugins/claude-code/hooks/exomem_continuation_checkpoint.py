@@ -1896,11 +1896,6 @@ def _unlink_at(directory: _SecureDirectory, name: str) -> None:
         os.unlink(name, dir_fd=directory.fd)
 
 
-def _safe_unlink(path: Path) -> None:
-    with _open_secure_directory(path.parent, create=True) as directory:
-        _unlink_at(directory, path.name)
-
-
 class _AdvisoryLock:
     def __init__(
         self,
