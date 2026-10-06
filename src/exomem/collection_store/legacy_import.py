@@ -15,7 +15,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import held_fs, planning, record_formats, records, vault
+from .. import held_fs, mutation_terminal, planning, record_formats, records, vault
 from .. import structured_collections as collections
 from . import chain, governance, tokens, types
 from .connection import CollectionStoreError
@@ -661,6 +661,9 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
             digest,
             legacy_json,
         ) = row
+        if operation in mutation_terminal.CONTROL_OPERATIONS:
+            # Reconcile and job-state records carry no content and change no row.
+            continue
         expected = _envelope(captured, context, transition, count, previous, original=legacy_json)
         if checkpoint_seen:
             _refuse("d", "history follows import checkpoint")

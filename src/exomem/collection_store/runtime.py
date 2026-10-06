@@ -23,7 +23,7 @@ from . import connection, replica, schema
 
 logger = logging.getLogger(__name__)
 
-#: A9/N4: steady writes publish the replica at most once per interval, off the acknowledgement.
+#: A9/N4: steady writes publish the replica at most once per interval, outside the write path.
 PUBLISH_INTERVAL_SECONDS = 60.0
 #: A burst of commits shares one publication once writes pause this long.
 PUBLISH_SETTLE_SECONDS = 1.0
@@ -35,12 +35,12 @@ _SERVING = weakref.WeakValueDictionary()
 
 
 class _Publisher:
-    """Coalesced off-ack replica publication and the `_Collections/` watch for one admitted store.
+    """Coalesced replica publication and the `_Collections/` watch for one admitted store.
 
-    Publication starts only at an idle instant, so it never delays an acknowledgement
-    already in progress. It then holds the vault-wide mutation boundary for its whole
-    duration: a write that arrives meanwhile, a file-collection write included, waits
-    for it and refuses MUTATION_BUSY when it outlasts the mutation timeout. The watch
+    Publication copies a pinned snapshot outside the vault-wide mutation boundary, so
+    writes, file-collection writes included, proceed during the copy. Only its two
+    brief steps hold the boundary, each taken at an idle instant: recording the intent,
+    and verifying and swapping the copy; a write arriving during one waits for it. The watch
     hashes the replica against the digest this instance last published when its stat
     signature changes. A foreign rewrite that keeps inode, size and mtime is found by
     the next publication's check-then-swap, which records the divergence and preserves
@@ -438,11 +438,37 @@ class CollectionStoreRuntime:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_HEAD_INVALID", "committed metadata and tail disagree"
                 )
-            if self._identity is not None and self._identity != (head.store_id, head.instance_id):
-                raise connection.CollectionStoreError(
-                    "COLLECTION_STORE_IDENTITY_CHANGED", "the enrolled store identity changed"
-                )
-            return head
+        if self._identity is not None and self._identity != (head.store_id, head.instance_id):
+            self._accept_descendant(head, json.loads(metadata[schema.META_LINEAGE]))
+        return head
+
+    def _accept_descendant(self, head, lineage):
+        """Take the identity an owner adopt-local continued this store under, applied elsewhere.
+
+        The CLI, or the route while this service's lease was idle-released, may continue
+        the store as a new instance. It is accepted only with the same store id, a lineage
+        that descends from the cached instance and the coordinator recording the new
+        instance; custody is then re-verified. Anything else refuses IDENTITY_CHANGED.
+        """
+        refused = connection.CollectionStoreError(
+            "COLLECTION_STORE_IDENTITY_CHANGED", "the enrolled store identity changed"
+        )
+        store_id, ancestor = self._identity
+        parents = {entry["instance_id"]: entry["adopted_from"] for entry in lineage}
+        found, seen = head.instance_id, set()
+        while found is not None and found != ancestor and found not in seen:
+            seen.add(found)
+            found = parents.get(found)
+        if head.store_id != store_id or found != ancestor or not self.manager.config.enabled:
+            raise refused
+        recorded = self.manager.client.status().collection_store_head
+        if recorded is None or (recorded.store_id, recorded.instance_id) != (head.store_id, head.instance_id):
+            raise refused
+        if self._session is not None and not self._session.verify_custody():
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_CUSTODY_UNVERIFIED", "single-host custody no longer verifies"
+            )
+        self._identity = (head.store_id, head.instance_id)
 
     def _admit(self, token, *, reads=False):
         if self.manager.config.enabled:
@@ -504,8 +530,8 @@ class CollectionStoreRuntime:
                 if changed and self._publisher is not None:
                     self._publisher.note_commit()
 
-    def flush(self, token, *, deadline, cancelled=None):
-        """Called only after admission stops, drainage and boundary acquisition."""
+    def _publication_writer(self, token):
+        """This store's writer for a publication step; the caller holds the boundary."""
         if not self._authority(token, progress=True):
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_LEASE_REQUIRED", "publication authority is unavailable"
@@ -518,9 +544,53 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
             )
-        with connection.open_writer(
-            self.path, lease_check=lambda: self._authority(token, progress=True)
-        ) as writer:
+        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True))
+
+    def publish(self, token, *, deadline):
+        """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
+
+        Each boundary step is brief and taken at an idle instant. The swap step first
+        renews the lease with the coordinator, so a host that lost it while copying
+        abandons the swap. Returns the published head (possibly older than the live
+        one), or None when the store was busy before anything was recorded.
+        """
+        from ..cli_ops import OpError
+        from ..writer_lease import CollectionStoreHead
+
+        manager = self.manager
+
+        @contextmanager
+        def step(patience, cancelled):
+            if patience:
+                try:
+                    manager._renew_collection_store(token)
+                except OpError as error:
+                    raise connection.CollectionStoreError(
+                        "COLLECTION_STORE_LEASE_REQUIRED", "the writer lease was lost during the copy"
+                    ) from error
+            with manager._store_publication_window(token, patience=patience, cancelled=cancelled):
+                with self._publication_writer(token) as writer:
+                    yield writer, lambda: self._authority(token, progress=True)
+
+        try:
+            result = replica.publish_replica_concurrently(
+                self.root, step=step, deadline=deadline, patience=manager._mutation_timeout_seconds,
+                cancelled=lambda: manager._fencing_token != token or manager._store_closed,
+            )
+        except connection.CollectionStoreError as error:
+            if error.code == "COLLECTION_STORE_BUSY":
+                return None
+            raise
+        if result.status != "published":
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_FLUSH_PENDING", result.reason or result.status
+            )
+        head = self.sample_head()
+        return CollectionStoreHead(head.store_id, head.instance_id, result.commit_seq, result.head_hash)
+
+    def flush(self, token, *, deadline, cancelled=None):
+        """Called only after admission stops, drainage and boundary acquisition."""
+        with self._publication_writer(token) as writer:
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,

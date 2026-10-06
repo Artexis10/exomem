@@ -1050,17 +1050,24 @@ class CollectionWriter:
             self._precommit(manifest)
         return receipts
 
-    def hold_store_delta(self, items, *, reconciled, why):
+    def hold_store_delta(self, items, *, reconciled, why, acknowledged=()):
         """Divergence reconciliation (design §15 item 5): each foreign change becomes a held correction.
 
         No canonical row changes. Each item another store instance changed after the
         common ancestor is held as a view correction carrying that store's latest values
-        and diagnostics for an owner decision; a later reconcile of the same instance's
-        change to the same item supersedes that hold. The ``reconciled`` evidence digests
-        are marked, a view-stamp divergence is cleared, and the reconciliation is recorded
-        as one content-free control transition per affected collection.
+        and diagnostics for an owner decision under the plan's ``held_id``; a later change
+        by the same instance to the same item supersedes that hold. The plan leaves out a
+        change already held, so a repeat with nothing new records nothing.
+        The ``reconciled`` evidence digests are marked, a view-stamp divergence is cleared,
+        and the reconciliation is recorded as one content-free control transition per
+        affected collection. ``acknowledged`` are the preview's skipped changes the owner
+        accepted; their ids are recorded by skip code.
         """
         result = {"held_ids": [], "superseded": 0, "why": why}
+        skipped = {}
+        for entry in acknowledged:
+            ref = entry["sha256"] if "item_key" not in entry else f"{entry['collection_id']}:{entry['item_key']}"
+            skipped.setdefault(f"skipped_{entry['code']}", []).append(ref)
         latest = {}
         for item in items:
             identity = (item["foreign_instance_id"], item["collection_id"], item["item_key"])
@@ -1069,9 +1076,9 @@ class CollectionWriter:
         with self._mutation(reconcile=True):
             self._publication.bind(result)
             touched = {}
-            for (instance, cid, key), item in sorted(latest.items()):
+            for (_instance, cid, key), item in sorted(latest.items()):
                 _, manifest, _ = self._collection(cid)
-                reference = hashlib.sha256(f"store-delta\0{instance}\0{cid}\0{key}".encode()).hexdigest()[:24]
+                reference = item["held_id"]
                 path = f"{records._held_directory(manifest)}/{reference}.md"
                 self._preflight_views([path])
                 raw = _json({"item_key": key, "values": item["values"], "body": item["body"]}).encode()
@@ -1130,8 +1137,9 @@ class CollectionWriter:
                     "SELECT collection_id FROM collections ORDER BY collection_id").fetchall()}
                 result["transitions"] = self.record_control_transition("store_reconcile", {
                     cid: {"counts": {"held": len(facts["held"]), "superseded": facts["superseded"],
-                                     "evidence_reconciled": len(marked), "view_divergence_cleared": int(cleared)},
-                          "ids": {"held_ids": facts["held"], "evidence_sha256": marked}}
+                                     "evidence_reconciled": len(marked), "view_divergence_cleared": int(cleared),
+                                     "skipped_acknowledged": len(acknowledged)},
+                          "ids": {"held_ids": facts["held"], "evidence_sha256": marked, **skipped}}
                     for cid, facts in affected.items()}, why=why)
         return result
 

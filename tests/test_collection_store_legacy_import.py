@@ -112,6 +112,18 @@ def test_baseline_checkpoint_preserves_current_rows_and_exact_projections(tmp_pa
         assert chain.verify_store_chain(conn)[0] == 1
 
 
+def test_a_control_transition_after_the_checkpoint_keeps_the_import_proved(tmp_path, store):
+    # Reconcile and the importer's job states record content-free txns after the checkpoint.
+    root, path = _items(tmp_path, values={"title": "One", "count": 3})
+    with _capture(tmp_path, root, path) as (audit, captured):
+        store.connection.execute("BEGIN")
+        result = legacy_import.import_legacy_collection(store.connection, captured, audit=audit, context=CONTEXT)
+        store.connection.execute("COMMIT")
+        store.record_control_transition("store_reconcile", {CID: {"counts": {"held": 0}, "ids": {}}}, why="reconcile")
+        legacy_import._prove(store.connection, captured, CONTEXT, result.checkpoint_txn_id,
+                             result.checkpoint_transition_id, result.checkpoint_event_hash)
+
+
 def test_complete_held_capture_and_codec_are_not_limited_to_500(tmp_path):
     # The old inspector silently omits the 501st held candidate.
     root, path = _items(tmp_path)

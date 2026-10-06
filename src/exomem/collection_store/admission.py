@@ -409,12 +409,15 @@ def adopt_local(session, manager, *, why, fence_client, preview_id=None):
         return {"status": "adopted", "instance_id": identity[1], **workspace, **sealed}
 
 
-def reconcile_store(session, manager, *, why, fence_client, preview_id=None):
+def reconcile_store(session, manager, *, why, fence_client, preview_id=None, acknowledge_skipped=False):
     """Owner reconcile (§15 item 5), preview-first: foreign evidence becomes held corrections.
 
     Every item a preserved foreign store changed after its common ancestor with this
     one is held with its values and diagnostics; no canonical row changes. A diverged
-    store refuses: adopt-local decides which side continues first.
+    store refuses: adopt-local decides which side continues first. Evidence with a
+    change that cannot be held stays unreconciled unless the owner applies with
+    ``acknowledge_skipped``, which marks every previewed file reconciled and records
+    the skipped changes by id and skip code.
     """
     runtime, _fence = _owner_operation(session, manager, fence_client, why)
     with manager.writer_authority_guard(vault_root=session.root):
@@ -433,8 +436,12 @@ def reconcile_store(session, manager, *, why, fence_client, preview_id=None):
                 raise _stale_preview()
             if not runtime.retire_idle_handle():
                 raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+            preview = sealed["preview"]
+            acknowledged = preview["skipped"] if acknowledge_skipped else []
+            reconciled = (sorted({entry["sha256"] for entry in (*preview["sources"], *acknowledged)})
+                          if acknowledge_skipped else preview["reconciled"])
             with session.writer(token) as writer:
-                result = writer.hold_store_delta(items, reconciled=sealed["preview"]["reconciled"], why=why)
+                result = writer.hold_store_delta(items, reconciled=reconciled, acknowledged=acknowledged, why=why)
     return {"status": "held", **result, **sealed}
 
 
@@ -483,14 +490,15 @@ def _require_no_service(config):
             "maintain_memory(mode=\"collections-store-adopt-local\") or stop it first")
 
 
-def _apply_step(session, manager, fence_client, step, *, why, preview_id):
+def _apply_step(session, manager, fence_client, step, *, why, preview_id, acknowledge_skipped=False):
     if step == "adopt-local":
         return adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
     open_store(session, manager, fence_client=fence_client)
-    return reconcile_store(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
+    return reconcile_store(session, manager, why=why, fence_client=fence_client, preview_id=preview_id,
+                           acknowledge_skipped=acknowledge_skipped)
 
 
-def adopt_local_route(vault_root, *, why=None, preview_id=None):
+def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skipped=False):
     """The one owner route behind `exomem collections adopt-local` and its maintain_memory mode (A3).
 
     Preview-first: the preview reads without the writer lease and names its step,
@@ -500,7 +508,8 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None):
     maintain_memory) it runs on that service's own session and lease, which it keeps.
     Elsewhere (the CLI) it refuses while any service holds the lease; otherwise it runs
     in its own producer session under the configured lease and hands the lease back
-    with the flushed head.
+    with the flushed head. ``acknowledge_skipped`` (the CLI only) applies the reconcile
+    step's owner acknowledgement of changes it cannot hold.
     """
     from ..governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -509,6 +518,9 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", "adopt-local is owner-only")
     root = Path(vault_root).resolve()
     step, sealed = _route_step(root)
+    if acknowledge_skipped and step != "reconcile":
+        raise CollectionStoreError("COLLECTION_STORE_ACKNOWLEDGE_UNAVAILABLE",
+                                   f"--acknowledge-skipped applies to the reconcile step; the next step is {step}")
     if preview_id is None:
         if sealed["preview"].get("recorded_head") == owner.UNKNOWN:
             return {"step": step, **sealed, "warnings": [
@@ -521,7 +533,7 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None):
         if fence_client is None:
             raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
         return {"step": step, **_apply_step(serving, serving.manager, fence_client, step, why=why,
-                                            preview_id=preview_id)}
+                                            preview_id=preview_id, acknowledge_skipped=acknowledge_skipped)}
     fence_client = writer_lease.configured_schema_fence_operator_client()
     if fence_client is None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
@@ -530,7 +542,8 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None):
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
         try:
-            result = _apply_step(session, manager, fence_client, step, why=why, preview_id=preview_id)
+            result = _apply_step(session, manager, fence_client, step, why=why, preview_id=preview_id,
+                                 acknowledge_skipped=acknowledge_skipped)
         except BaseException:
             # The refusal is the answer; an unadmitted token keeps its lease until it expires.
             with suppress(Exception):

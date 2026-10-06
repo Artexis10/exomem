@@ -6097,40 +6097,74 @@ class LeaseManager:
                 self._store_condition.notify_all()
 
     def _publish_collection_store(self, token, *, deadline):
-        """A9 coalesced replica publication off the acknowledgement path, keeping the lease.
+        """A9 coalesced replica publication outside the write path, keeping the lease.
 
-        It starts only at an idle instant and takes only a free boundary, so it never
-        waits on a writer; arrivals wait for it (bounded), and a thread already holding
-        a boundary passes it. Returns the published head, or None when the store was
-        busy and the publication should be retried.
+        The snapshot copy runs outside the vault-wide boundary while writers proceed;
+        only its two brief steps (record the intent, then verify and swap) hold it,
+        each taken at an idle instant. A write that arrives during a step waits for
+        it. Returns the published head, or None when the store was busy and the
+        publication should be retried.
         """
-        runtime = self._collection_store
         with self._lock:
             if (self._fencing_token != token or self._store_handoff or self._store_closed
                     or self._store_borrowers or self._active_mutations):
                 return None
-            self._store_handoff = self._store_publishing = True
-        try:
-            with ExitStack() as boundary:
-                try:
-                    boundary.enter_context(self._mutation_coordinator_for(runtime.root).hold(
-                        timeout_seconds=0.01, operation="collection_store_publish"))
-                except OpError as error:
-                    if error.code != "MUTATION_BUSY":
-                        raise
-                    return None
+        return self._collection_store.publish(token, deadline=deadline)
+
+    @contextmanager
+    def _store_publication_window(self, token, *, patience, cancelled=None):
+        """One brief publication step under the vault-wide boundary, taken at an idle instant.
+
+        It waits up to ``patience`` seconds for an instant with no store borrower or
+        mutation in flight and a free boundary, never waiting on a writer. Arrivals then
+        wait for the step (bounded) and a thread already holding a boundary passes it.
+        Raises COLLECTION_STORE_BUSY when no idle instant came or ``cancelled`` fired,
+        and COLLECTION_STORE_LEASE_REQUIRED once ``token`` no longer holds the lease.
+        """
+        from .collection_store.connection import CollectionStoreError
+
+        mutation = self._mutation_coordinator_for(self._collection_store.root)
+        until = time.monotonic() + patience
+        with ExitStack() as held:
+            while True:
                 with self._store_condition:
-                    # A boundary holder that checked out before this publication is unwinding.
-                    unwound = min(deadline, time.monotonic() + 1.0)
-                    while self._store_borrowers:
-                        if (remaining := unwound - time.monotonic()) <= 0:
-                            return None
+                    if self._fencing_token != token or self._store_closed:
+                        raise CollectionStoreError(
+                            "COLLECTION_STORE_LEASE_REQUIRED", "publication authority was lost")
+                    idle = not (self._store_handoff or self._store_borrowers or self._active_mutations)
+                    if idle:
+                        self._store_handoff = self._store_publishing = True
+                    elif (remaining := until - time.monotonic()) > 0 and not (cancelled and cancelled()):
                         self._store_condition.wait(min(0.05, remaining))
-                return runtime.flush(token, deadline=deadline)
-        finally:
+                        continue
+                    else:
+                        raise CollectionStoreError("COLLECTION_STORE_BUSY", "no idle instant for publication")
+                # Unwinding releases the boundary first, then lets arrivals through.
+                held.callback(self._end_store_publication)
+                try:
+                    held.enter_context(mutation.hold(timeout_seconds=0.01, operation="collection_store_publish"))
+                    break
+                except BaseException as error:
+                    held.pop_all().close()
+                    if not isinstance(error, OpError) or error.code != "MUTATION_BUSY":
+                        raise
+                    if time.monotonic() >= until or (cancelled and cancelled()):
+                        raise CollectionStoreError(
+                            "COLLECTION_STORE_BUSY", "no idle instant for publication") from None
+                    time.sleep(0.01)
             with self._store_condition:
-                self._store_handoff = self._store_publishing = False
-                self._store_condition.notify_all()
+                # A boundary holder that checked out before this step is unwinding.
+                unwound = time.monotonic() + 1.0
+                while self._store_borrowers:
+                    if (remaining := unwound - time.monotonic()) <= 0:
+                        raise CollectionStoreError("COLLECTION_STORE_BUSY", "a store borrower is unwinding")
+                    self._store_condition.wait(min(0.05, remaining))
+            yield
+
+    def _end_store_publication(self):
+        with self._store_condition:
+            self._store_handoff = self._store_publishing = False
+            self._store_condition.notify_all()
 
     def _attempt_preferred_reclaim(self) -> None:
         """Retry writer acquisition while this preferred replica is a follower.

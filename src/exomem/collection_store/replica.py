@@ -6,7 +6,9 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
+import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -271,8 +273,16 @@ class _Publisher:
         return file
 
     def digest(self, file):
+        """Hash one held file. Authority is checked before it, as before every effect;
+        between chunks only the deadline and cancellation are (a hash changes nothing)."""
         self.check()
-        return snapshot._file_sha256(file.descriptor, self.check)
+        return snapshot._file_sha256(file.descriptor, self._progress)
+
+    def _progress(self):
+        if self.cancelled is not None and self.cancelled():
+            raise _Retry("publication was cancelled")
+        if time.monotonic() >= self.deadline:
+            raise _Retry("publication deadline elapsed")
 
     def leaf_relative(self, leaf, parent=None):
         return (
@@ -554,91 +564,134 @@ class _Publisher:
         return None
 
     def run(self, stage_new):
+        """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary."""
         self.check()
         requested = _head(_metadata(self.writer))
         with self.bound():
-            pending = self.pending()
-            if pending is not None:
-                self.resolve(pending)
-            digest, head = self.published()
-            current = self.file(connection.STORE_FILENAME)
-            if current is not None:
-                with current:
-                    found = self.digest(current)
-                    adopted = self.metadata.get(schema.META_ADOPTED_FOREIGN_REPLICA)
-                    if found != digest and found == adopted:
-                        # Owner adopt-local previewed exactly these bytes: keep them as
-                        # evidence and publish over the freed name.
-                        self.preserve(current, connection.STORE_FILENAME, None,
-                                      self.aside(current, connection.STORE_FILENAME, None))
-                        self.bookkeeping({schema.META_ADOPTED_FOREIGN_REPLICA: None})
-                    elif found != digest:
-                        self.diverge(
-                            "unexpected replica target",
-                            foreign=current,
-                            leaf=connection.STORE_FILENAME,
-                        )
-            elif digest is not None:
-                self.diverge("published replica disappeared")
+            digest, head = self.settle()
             if head == requested or not stage_new:
-                if head is not None:
-                    self.flush_installed(digest)
-                return PublicationResult(
-                    "published" if head is not None else "retry_pending",
-                    head["commit_seq"] if head else None,
-                    head["head_hash"] if head else None,
-                )
+                return self.current(digest, head)
             while head is None or head["commit_seq"] < requested["commit_seq"]:
-                self.check()
-                token = secrets.token_hex(16)
-                pending = {
-                    "version": 2,
-                    "phase": "staging",
-                    "token": token,
-                    "workspace_leaf": f".exomem-collection-replica-work-{token}",
-                    "workspace_identity": None,
-                    "stage_leaf": f"{snapshot._PREFIX}{token}.sqlite",
-                    "store_id": self.identity["store_id"],
-                    "instance_id": self.identity["instance_id"],
-                    "lease_epoch": self.epoch,
-                }
-                self.bookkeeping({_PENDING: _json(pending)})
-                self.open_workspace(pending, create=True)
+                pending = self.begin()
                 with snapshot.staged_snapshot(
                     self.root,
                     directory=self.root / self.workspace_relative,
                     deadline=self.deadline,
                     cancelled=self._staging_cancelled,
-                    scratch_token=token,
+                    scratch_token=pending["token"],
                 ) as artifact:
-                    self.check()
-                    self.validate_head(
-                        {key: getattr(artifact, key) for key in self.identity}
-                    )
-                    if artifact.lease_epoch != self.epoch:
-                        raise _Retry("snapshot lease epoch changed")
-                    with self.file(
-                        artifact.path.name, required=True, parent=self.workspace
-                    ) as staged:
-                        if self.digest(staged) != artifact.file_sha256:
-                            self.diverge(
-                                "verified snapshot changed",
-                                foreign=staged,
-                                leaf=artifact.path.name,
-                                parent=self.workspace,
-                            )
-                        self.record(
-                            artifact.path.name, staged.identity, parent=self.workspace
-                        )
-                    self.flush()
-                    pending.update(
-                        phase="ready",
-                        sha256=artifact.file_sha256,
-                        **{key: getattr(artifact, key) for key in self.identity},
-                    )
-                    self.bookkeeping({_PENDING: _json(pending)})
-                    head = self.resolve(pending)
+                    head = self.install(pending, artifact)
             return PublicationResult("published", head["commit_seq"], head["head_hash"])
+
+    def prepare(self):
+        """Concurrent publication, first boundary step: settle and record the staging intent.
+
+        Returns the recorded intent, or the outcome when nothing needs copying.
+        """
+        self.check()
+        requested = _head(_metadata(self.writer))
+        with self.bound():
+            digest, head = self.settle()
+            if head == requested:
+                return self.current(digest, head)
+            return self.begin()
+
+    def swap(self, pending, artifact):
+        """Concurrent publication, second boundary step: verify the copy and swap it in.
+
+        The intent must be the one ``prepare`` recorded and its workspace unchanged; the
+        copied head must still be in this store's chain, and the installed replica must
+        still be the one this store last published (check-then-swap, A4).
+        """
+        self.check()
+        if self.pending_raw is None or json.loads(self.pending_raw) != pending:
+            raise _Retry("publication intent changed")
+        with self.bound():
+            self.open_workspace(pending)
+            if self.workspace is None:
+                raise _Retry("publication workspace disappeared")
+            head = self.install(pending, artifact)
+            if head is None:
+                return PublicationResult("retry_pending", reason="publication stage disappeared")
+            return PublicationResult("published", head["commit_seq"], head["head_hash"])
+
+    def settle(self):
+        """Resolve leftover intent and check the installed replica; returns the published digest and head."""
+        pending = self.pending()
+        if pending is not None:
+            self.resolve(pending)
+        digest, head = self.published()
+        current = self.file(connection.STORE_FILENAME)
+        if current is not None:
+            with current:
+                found = self.digest(current)
+                adopted = self.metadata.get(schema.META_ADOPTED_FOREIGN_REPLICA)
+                if found != digest and found == adopted:
+                    # Owner adopt-local previewed exactly these bytes: keep them as
+                    # evidence and publish over the freed name.
+                    self.preserve(current, connection.STORE_FILENAME, None,
+                                  self.aside(current, connection.STORE_FILENAME, None))
+                    self.bookkeeping({schema.META_ADOPTED_FOREIGN_REPLICA: None})
+                elif found != digest:
+                    self.diverge(
+                        "unexpected replica target",
+                        foreign=current,
+                        leaf=connection.STORE_FILENAME,
+                    )
+        elif digest is not None:
+            self.diverge("published replica disappeared")
+        return digest, head
+
+    def current(self, digest, head):
+        if head is not None:
+            self.flush_installed(digest)
+        return PublicationResult(
+            "published" if head is not None else "retry_pending",
+            head["commit_seq"] if head else None,
+            head["head_hash"] if head else None,
+        )
+
+    def begin(self):
+        """Record a staging intent and create its empty private workspace."""
+        self.check()
+        token = secrets.token_hex(16)
+        pending = {
+            "version": 2,
+            "phase": "staging",
+            "token": token,
+            "workspace_leaf": f".exomem-collection-replica-work-{token}",
+            "workspace_identity": None,
+            "stage_leaf": f"{snapshot._PREFIX}{token}.sqlite",
+            "store_id": self.identity["store_id"],
+            "instance_id": self.identity["instance_id"],
+            "lease_epoch": self.epoch,
+        }
+        self.bookkeeping({_PENDING: _json(pending)})
+        self.open_workspace(pending, create=True)
+        return pending
+
+    def install(self, pending, artifact):
+        """Verify a staged copy against this store and the intent, mark it ready and swap it in."""
+        self.check()
+        copied = {key: getattr(artifact, key) for key in self.identity}
+        if any(copied[key] != self.identity[key] for key in ("store_id", "instance_id")):
+            raise _Retry("store identity changed")
+        self.validate_head(copied)
+        if artifact.lease_epoch != self.epoch:
+            raise _Retry("snapshot lease epoch changed")
+        with self.file(artifact.path.name, required=True, parent=self.workspace) as staged:
+            if self.digest(staged) != artifact.file_sha256:
+                self.diverge(
+                    "verified snapshot changed",
+                    foreign=staged,
+                    leaf=artifact.path.name,
+                    parent=self.workspace,
+                )
+            self.record(artifact.path.name, staged.identity, parent=self.workspace)
+        self.flush()
+        pending.update(phase="ready", sha256=artifact.file_sha256, **copied)
+        self.bookkeeping({_PENDING: _json(pending)})
+        return self.resolve(pending)
 
     def _staging_cancelled(self):
         self.check()
@@ -696,7 +749,7 @@ def discard_abandoned_publication(
     """
     publisher = _publisher(vault_root, writer, authority_check, deadline, None)
     try:
-        with publisher.bound():
+        with _alone(publisher.root, deadline), publisher.bound():
             return publisher.abandon(json.loads(intent), predecessor)
     except (_Diverged, _Retry, TimeoutError, held_fs.HeldFsError, OSError, ValueError, TypeError,
             AttributeError) as error:
@@ -716,10 +769,111 @@ def _publisher(root, writer, authority_check, deadline, cancelled):
     return _Publisher(root, writer, authority_check, deadline, cancelled)
 
 
+def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, patience=5.0) -> PublicationResult:
+    """Coalesced publication (A9): the copy runs outside the vault-wide boundary.
+
+    ``step(patience, cancelled)`` is the caller's context manager for one brief
+    boundary step: at an idle instant it holds the boundary, rechecks lease and
+    custody, and yields this vault's writer with its authority check. It is entered
+    twice. The first step settles leftover intent, checks the installed replica and
+    records a staging intent; a busy store raises from it and the caller retries.
+    Then the snapshot copy, integrity checks and hashes run on a pinned WAL read
+    while writers proceed. The second step, waiting up to ``patience`` for an idle
+    instant, verifies that the intent and workspace are unchanged and the copied head
+    is still in this store's chain, then swaps check-then-swap (A4). Anything else
+    abandons the copy; its workspace waits for bounded recovery as before.
+
+    The result can carry a head older than the live one: the next window or orderly
+    boundary publishes the newer head. Orderly publication in this process stops the
+    copy and runs alone.
+    """
+    root = Path(vault_root).resolve()
+    serial = _serial(root)
+    if not serial.lock.acquire(blocking=False):
+        return PublicationResult("retry_pending", reason="another replica publication is running")
+    try:
+        def stop():
+            return serial.waiters > 0 or (cancelled is not None and cancelled())
+
+        with step(0.0, None) as (writer, authority_check):
+            publisher = _publisher(root, writer, authority_check, deadline, None)
+            pending = _outcome(writer, publisher.prepare)
+        if isinstance(pending, PublicationResult):
+            return pending
+        try:
+            with snapshot.staged_snapshot(
+                root,
+                directory=replica_path(root).parent / pending["workspace_leaf"],
+                deadline=deadline,
+                cancelled=stop,
+                scratch_token=pending["token"],
+            ) as artifact, step(patience, stop) as (writer, authority_check):
+                publisher = _publisher(root, writer, authority_check, deadline, None)
+                return _outcome(writer, lambda: publisher.swap(pending, artifact))
+        except connection.CollectionStoreError as error:
+            if error.code not in {"COLLECTION_STORE_BUSY", "COLLECTION_STORE_LEASE_REQUIRED",
+                                  "COLLECTION_STORE_CUSTODY_UNVERIFIED", "COLLECTION_SNAPSHOT_CANCELLED"}:
+                raise
+            return PublicationResult("retry_pending", reason=error.code)
+        except (TimeoutError, held_fs.HeldFsError, OSError, sqlite3.OperationalError) as error:
+            return PublicationResult("retry_pending", reason=str(error))
+    finally:
+        serial.lock.release()
+
+
+class _Serial:
+    """One vault's replica work in this process: a concurrent copy yields to orderly publication."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.waiters = 0
+
+
+_SERIAL_GUARD = threading.Lock()
+_SERIALS = weakref.WeakValueDictionary()
+
+
+def _serial(root):
+    with _SERIAL_GUARD:
+        serial = _SERIALS.get(root)
+        if serial is None:
+            serial = _SERIALS[root] = _Serial()
+        return serial
+
+
+@contextmanager
+def _alone(root, deadline):
+    """Run orderly replica work alone: this process's concurrent copy stops first."""
+    serial = _serial(Path(root).resolve())
+    with _SERIAL_GUARD:
+        serial.waiters += 1
+    try:
+        acquired = serial.lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+    finally:
+        with _SERIAL_GUARD:
+            serial.waiters -= 1
+    if not acquired:
+        raise _Retry("a concurrent replica copy did not stop")
+    try:
+        yield
+    finally:
+        serial.lock.release()
+
+
 def _run(root, writer, authority_check, deadline, cancelled, *, stage_new):
     publisher = _publisher(root, writer, authority_check, deadline, cancelled)
+
+    def attempt():
+        with _alone(publisher.root, deadline):
+            return publisher.run(stage_new)
+
+    return _outcome(writer, attempt)
+
+
+def _outcome(writer, attempt):
+    """Run one publication attempt and map its failure to an honest outcome."""
     try:
-        return publisher.run(stage_new)
+        return attempt()
     except _Diverged as error:
         return PublicationResult("diverged", reason=str(error))
     except connection.CollectionStoreError as error:

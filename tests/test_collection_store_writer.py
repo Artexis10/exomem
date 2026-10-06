@@ -466,17 +466,21 @@ def test_control_transition_chains_without_changing_the_collection_and_splits_la
     before = store.connection.execute(
         "SELECT generation, manifest_version, audit_head FROM collections").fetchone()
     monkeypatch.setattr(mutation_terminal, "CONTROL_RECEIPT_MAX_IDS", 2)
+    held = ["a" * 24, "b" * 24, "c" * 24]
 
     receipts = store.record_control_transition(
         "store_reconcile",
-        {CID: {"counts": {"held": 3}, "ids": {"held_ids": ["a1", "a2", "a3"]}}},
+        {CID: {"counts": {"held": 3}, "ids": {"held_ids": held}}},
         why="reconcile",
     )
 
-    assert [receipt["ids"]["held_ids"] for receipt in receipts] == [["a1", "a2"], ["a3"]]
+    assert [receipt["ids"]["held_ids"] for receipt in receipts] == [held[:2], held[2:]]
     assert [receipt["counts"] for receipt in receipts] == [
         {"held": 3, "part": 1, "parts": 2}, {"held": 3, "part": 2, "parts": 2}]
     assert all(mutation_terminal.valid_control_receipt(receipt) for receipt in receipts)
+    # Ids are registered names of exact shapes: no free text, no unknown name.
+    assert not mutation_terminal.valid_control_receipt({**receipts[0], "ids": {"held_ids": ["sk-live-0123456789"]}})
+    assert not mutation_terminal.valid_control_receipt({**receipts[0], "ids": {"notes": [held[0]]}})
     assert chain.verify_store_chain(store.connection)[0] == receipts[-1]["commit_seq"] == 3
     assert store.connection.execute(
         "SELECT generation, manifest_version, audit_head FROM collections").fetchone() == before

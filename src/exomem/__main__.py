@@ -2046,6 +2046,11 @@ def _collections_main(argv: list[str]) -> int:
     mode = adopt.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="preview the next step; writes nothing")
     mode.add_argument("--preview-id", help="apply exactly the preview with this identity")
+    adopt.add_argument(
+        "--acknowledge-skipped", action="store_true",
+        help="reconcile step only: mark evidence whose changes cannot be held as reconciled, "
+        "recording the skipped changes by id and reason",
+    )
     for command in (backup, adopt):
         command.add_argument(
             "--vault",
@@ -2070,7 +2075,8 @@ def _collections_main(argv: list[str]) -> int:
             print(json.dumps(result, sort_keys=True), file=sys.stderr if args.stdout else sys.stdout)
         else:
             with library_scope():
-                result = admission.adopt_local_route(Path(args.vault), why=args.why, preview_id=args.preview_id)
+                result = admission.adopt_local_route(Path(args.vault), why=args.why, preview_id=args.preview_id,
+                                                     acknowledge_skipped=args.acknowledge_skipped)
             print(json.dumps(result, sort_keys=True))
     except (CollectionStoreError, OpError, OSError) as error:
         code, message = getattr(error, "code", type(error).__name__), str(error)

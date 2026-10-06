@@ -214,20 +214,30 @@ def record_fork(conn, preview: dict, *, why: str, token: int):
     return meta[schema.META_STORE_ID], instance
 
 
+#: Why reconcile cannot hold a change; the code names its ids in an acknowledgement receipt.
+_SKIPPED = {code: {"code": code, "reason": reason} for code, reason in (
+    ("unreadable", "unreadable"),
+    ("another_store", "another store"),
+    ("collection_absent", "collection absent from this store"),
+    ("no_committed_row", "the foreign change has no committed row to hold"),
+)}
+
+
 def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
     """Every item that unreconciled foreign evidence changed after its common ancestor (§15 item 5).
 
     Returns the sealed preview and the full items, with the foreign values to hold. Every
     effect kind counts as a change, a foreign hold included. Items equal to this store's
-    row carry nothing to decide and are only counted. ``reconciled`` names the evidence
+    row carry nothing to decide and are only counted, as are changes already held
+    (``already_held``), so a repeat with nothing new applies nothing. ``reconciled`` names the evidence
     that applying marks done: only files whose every changed item becomes a hold. A
-    change that cannot be held here is listed in ``skipped`` with the reason, and its
-    file stays unreconciled.
+    change that cannot be held here is listed in ``skipped`` with its code and reason, and
+    its file stays unreconciled until the owner acknowledges the skipped changes.
     """
     root = Path(vault_root).resolve()
     meta = dict(local.execute("SELECT key,value FROM store_meta"))
     done = set(json.loads(meta.get(schema.META_RECONCILED_FOREIGN) or "[]"))
-    sources, skipped, items, unchanged = [], [], [], 0
+    sources, skipped, items, unchanged, already_held = [], [], [], 0, 0
     scratch = connection.store_path(root).parent
     for path in sorted(replica.replica_path(root).parent.glob(_FOREIGN_PREFIX + "*")):
         with _evidence(path, scratch) as (digest, conn, foreign):
@@ -235,7 +245,7 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
                 continue
             if foreign is None or foreign[schema.META_STORE_ID] != meta[schema.META_STORE_ID]:
                 skipped.append({"leaf": path.name, "sha256": digest,
-                                "reason": "unreadable" if foreign is None else "another store"})
+                                **(_SKIPPED["unreadable"] if foreign is None else _SKIPPED["another_store"])})
                 continue
             ancestor = _common_ancestor(local, conn)
             sources.append({"leaf": path.name, "sha256": digest, **_head(foreign),
@@ -248,19 +258,26 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
             ).fetchall():
                 where = {"leaf": path.name, "sha256": digest, "collection_id": cid, "item_key": key}
                 if local.execute("SELECT 1 FROM collections WHERE collection_id=?", (cid,)).fetchone() is None:
-                    skipped.append({**where, "reason": "collection absent from this store"})
+                    skipped.append({**where, **_SKIPPED["collection_absent"]})
                     continue
                 row = conn.execute("SELECT row_id,row_version,body,payload_hash FROM items "
                                    "WHERE collection_id=? AND item_key=?", (cid, key)).fetchone()
                 if row is None:
-                    skipped.append({**where, "reason": "the foreign change has no committed row to hold"})
+                    skipped.append({**where, **_SKIPPED["no_committed_row"]})
                     continue
                 mine = local.execute("SELECT row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?",
                                      (cid, key)).fetchone()
                 if mine is not None and mine[1] == row[3]:
                     unchanged += 1
                     continue
-                items.append({"collection_id": cid, "item_key": key, "evidence_leaf": path.name,
+                held_id = hashlib.sha256(
+                    f"store-delta\0{foreign[schema.META_INSTANCE_ID]}\0{cid}\0{key}".encode()).hexdigest()[:24]
+                held = local.execute("SELECT diagnostics_json FROM held_candidates WHERE held_id=?",
+                                     (held_id,)).fetchone()
+                if held is not None and _held_change(held[0]) == (row[1], row[3], None if mine is None else mine[0]):
+                    already_held += 1
+                    continue
+                items.append({"collection_id": cid, "item_key": key, "held_id": held_id, "evidence_leaf": path.name,
                               "evidence_sha256": digest, "foreign_instance_id": foreign[schema.META_INSTANCE_ID],
                               "foreign_commit_seq": int(foreign[schema.META_COMMIT_SEQ]),
                               "common_ancestor_commit_seq": ancestor, "foreign_effects": sorted(effects.split(",")),
@@ -271,4 +288,10 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
     reconciled = [source["sha256"] for source in sources if source["sha256"] not in unresolved]
     shown = [{name: value for name, value in item.items() if name not in {"values", "body"}} for item in items]
     return _sealed({"sources": sources, "skipped": skipped, "items": shown, "unchanged": unchanged,
-                    "reconciled": reconciled}), items
+                    "already_held": already_held, "reconciled": reconciled}), items
+
+
+def _held_change(diagnostics):
+    """The foreign row version and payload, and this store's base, a store-delta hold was made for."""
+    found = json.loads(diagnostics)[0]
+    return found.get("foreign_row_version"), found.get("foreign_payload_hash"), found.get("local_row_version")

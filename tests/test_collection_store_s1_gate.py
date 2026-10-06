@@ -36,6 +36,7 @@ from exomem.collection_store import (
     custody,
     replica,
     schema,
+    snapshot,
     takeover,
 )
 from exomem.collection_store.connection import CollectionStoreError
@@ -643,10 +644,34 @@ def _published(found):
 
 
 def _counted_publications(monkeypatch):
+    """Count publications that installed a replica, orderly or coalesced."""
     calls = []
-    publish = replica.publish_replica
-    monkeypatch.setattr(replica, "publish_replica", lambda *a, **k: calls.append(1) or publish(*a, **k))
+
+    def counted(publish, *args, **kwargs):
+        result = publish(*args, **kwargs)
+        if result.status == "published":
+            calls.append(result)
+        return result
+
+    for name in ("publish_replica", "publish_replica_concurrently"):
+        monkeypatch.setattr(replica, name, functools.partial(counted, getattr(replica, name)))
     return calls
+
+
+def _stalled_copy(monkeypatch):
+    """Stall every replica copy once staged, as a large store's copy and checks would, until released."""
+    staged, release = threading.Event(), threading.Event()
+    stage = snapshot.staged_snapshot
+
+    @contextmanager
+    def stalled(*args, **kwargs):
+        with stage(*args, **kwargs) as artifact:
+            staged.set()
+            release.wait(60)
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", stalled)
+    return staged, release
 
 
 def test_steady_writes_reach_the_replica_off_ack_at_most_once_per_window(abc, monkeypatch):
@@ -685,6 +710,50 @@ def test_a_second_write_waits_out_the_window_until_the_export_flush(abc, tmp_pat
         operation_id="restore-gate", lifecycle_state="restore-staging", **context)).staging_root
     assert _replica_meta(staged)[schema.META_COMMIT_SEQ] == abc.meta()[schema.META_COMMIT_SEQ]
     assert not [path for path in staged.rglob("*") if path.name.endswith(("-wal", "-shm"))]
+
+
+def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc, monkeypatch):
+    """Defect: publication holds the vault-wide boundary while it copies, so writes refuse MUTATION_BUSY."""
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 0.1)
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
+    _published(abc)
+    staged, release = _stalled_copy(monkeypatch)
+    abc.write_c(LATER, "Starts a publication")
+    assert staged.wait(10)
+    try:
+        started = time.monotonic()
+        assert abc.write_a("A file write during the copy") == "committed"
+        assert abc.write_c(str(uuid.uuid4()), "A store write during the copy")["outcome"] == "committed"
+        took = time.monotonic() - started
+    finally:
+        release.set()
+    assert took < 2.5  # the mutation timeout is 5 s; a held boundary refuses MUTATION_BUSY there
+    _published(abc)  # the next window carries the writes made during the copy
+
+
+def test_a_lease_lost_during_the_copy_abandons_the_swap_and_keeps_the_previous_replica(abc, monkeypatch):
+    """Defect: a host that lost the lease while copying still swaps its copy into the vault."""
+    from exomem.collection_store import runtime
+
+    monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 0.1)
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
+    _published(abc)
+    previous, published = replica.replica_path(abc.root).read_bytes(), abc.meta()[schema.META_PUBLISHED_REPLICA_HEAD]
+    outcomes = []
+    publish = replica.publish_replica_concurrently
+    monkeypatch.setattr(replica, "publish_replica_concurrently",
+                        lambda *a, **k: outcomes.append(publish(*a, **k)) or outcomes[-1])
+    staged, release = _stalled_copy(monkeypatch)
+    assert abc.write_c(LATER, "Acknowledged before the lease moved")["outcome"] == "committed"
+    assert staged.wait(10)
+    abc.manager.client.release_holder("host-a", abc.manager._fencing_token)  # the coordinator hands it away
+    release.set()
+    _until(lambda: outcomes)
+    assert (outcomes[0].status, outcomes[0].reason) == ("retry_pending", "COLLECTION_STORE_LEASE_REQUIRED")
+    assert replica.replica_path(abc.root).read_bytes() == previous
+    assert abc.meta()[schema.META_PUBLISHED_REPLICA_HEAD] == published
 
 
 def test_export_refuses_a_lagging_replica_once_this_host_lost_the_lease(abc, tmp_path):
@@ -794,6 +863,8 @@ def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_
     assert json.loads(capsys.readouterr().out)["status"] == "adopted"
     assert [evidence.read_bytes() for evidence in path.parent.glob(".foreign-*")] == [foreign]
     assert len(json.loads(abc.meta()[schema.META_FORKS])) == 1
+    # The idle service continues under the adopted identity without a restart.
+    assert abc.write_c(str(uuid.uuid4()), "Written after the owner adopted")["outcome"] == "committed"
 
 
 def test_owner_route_applies_inside_the_running_service_which_keeps_its_lease_and_writes(abc, monkeypatch):
@@ -1001,8 +1072,10 @@ def _deliver_and_adopt(found, copy, why):
     assert _adopt(found, why)[1]["status"] == "adopted"
 
 
-def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(abc, tmp_path, monkeypatch):
-    """Defect: reconcile marks evidence done while dropping part of its delta, or holds one item twice."""
+def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(abc, tmp_path, monkeypatch, capsys):
+    """Defect: reconcile marks evidence done while dropping part of its delta, holds one item twice,
+    re-records a repeat, or leaves the owner no exit from evidence it cannot hold."""
+    from exomem import __main__ as cli
     from exomem.collection_store import runtime
 
     monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)  # each round's write publishes promptly
@@ -1023,13 +1096,29 @@ def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(
     _deliver_and_adopt(abc, copy, "keep A over the second delivery")
     plan = admission.reconcile_store(abc.session, abc.manager, why="hold again", fence_client=abc.operator)
     assert len(plan["preview"]["sources"]) == 2 and plan["preview"]["reconciled"] == []
+    assert plan["preview"]["already_held"] == 2  # LATER, unchanged, in both files
     second = admission.reconcile_store(abc.session, abc.manager, why="hold again", preview_id=plan["preview_id"],
                                        fence_client=abc.operator)
-    assert first["held_ids"][0] in second["held_ids"] and second["superseded"] == 1
+    assert len(second["held_ids"]) == 1 and first["held_ids"][0] not in second["held_ids"]
     with closing(connection.open_reader(abc.session.path)) as reader:
         held = [json.loads(candidate)["item_key"]
                 for (candidate,) in reader.execute("SELECT candidate_json FROM held_candidates")]
     assert len(held) == 2 and held.count(LATER) == 1
+    plan = admission.reconcile_store(abc.session, abc.manager, why="nothing new", fence_client=abc.operator)
+    sequence = abc.meta()[schema.META_COMMIT_SEQ]
+    repeat = admission.reconcile_store(abc.session, abc.manager, why="nothing new", preview_id=plan["preview_id"],
+                                       fence_client=abc.operator)
+    assert (plan["preview"]["items"], repeat["held_ids"], repeat["transitions"]) == ([], [], [])
+    assert abc.meta()[schema.META_COMMIT_SEQ] == sequence
+    _lease_environment(abc, monkeypatch)
+    assert cli._collections_main(["adopt-local", "--vault", str(abc.root), "--why", "the copy-only collection is gone",
+                                  "--preview-id", plan["preview_id"], "--acknowledge-skipped"]) == 0
+    acknowledged = json.loads(capsys.readouterr().out)
+    assert {tuple(receipt["ids"]["skipped_collection_absent"]) for receipt in acknowledged["transitions"]} == {
+        tuple(f"{entry['collection_id']}:{entry['item_key']}" for entry in plan["preview"]["skipped"])}
+    assert sorted(acknowledged["reconciled"]) == sorted(source["sha256"] for source in plan["preview"]["sources"])
+    assert admission.reconcile_store(abc.session, abc.manager, why="done", fence_client=abc.operator)[
+        "preview"]["sources"] == []
 
 
 # --- later slices: strict xfails naming the slice that turns them green -----------------

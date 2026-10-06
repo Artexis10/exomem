@@ -2395,13 +2395,27 @@ CONTROL_RECEIPT_MARKER = "exomem.collection-control"
 CONTROL_RECEIPT_MAX_IDS = 4096
 _CONTROL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _CONTROL_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:-]{0,127}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_ITEM_REF = re.compile(f"{_UUID}:{_UUID}")  # collection id, then item key
+#: The id names a control receipt may carry, each with the only shape its ids may take.
+#: A caller reusing the API registers its own names here.
+CONTROL_ID_PATTERNS = {
+    "held_ids": re.compile(r"[0-9a-f]{24}"),
+    "evidence_sha256": _HEX64,
+    "skipped_unreadable": _HEX64,
+    "skipped_another_store": _HEX64,
+    "skipped_collection_absent": _ITEM_REF,
+    "skipped_no_committed_row": _ITEM_REF,
+}
 
 
 def valid_control_receipt(value: Any) -> bool:
     """Whether *value* is one closed, content-free control-transition receipt.
 
-    ``counts`` maps names to non-negative integers and ``ids`` maps names to lists of
-    identifiers (held ids, digests, job ids); neither can carry an item value or free text.
+    ``counts`` maps names to non-negative integers. ``ids`` maps registered names
+    (``CONTROL_ID_PATTERNS``) to lists of identifiers of that name's exact shape, so
+    neither can carry an item value, free text or a secret-shaped string.
     """
     if not isinstance(value, Mapping) or set(value) != {
         "_control_receipt", "receipt_version", "operation", "collection_id", "transition_id",
@@ -2430,8 +2444,8 @@ def valid_control_receipt(value: Any) -> bool:
         and len(ids) <= 16
         and sum(len(found) for found in ids.values() if isinstance(found, list)) <= CONTROL_RECEIPT_MAX_IDS
         and all(
-            isinstance(name, str) and _CONTROL_NAME.fullmatch(name) and isinstance(found, list)
-            and all(isinstance(item, str) and _CONTROL_ID.fullmatch(item) for item in found)
+            name in CONTROL_ID_PATTERNS and isinstance(found, list)
+            and all(isinstance(item, str) and CONTROL_ID_PATTERNS[name].fullmatch(item) for item in found)
             for name, found in ids.items()
         )
     )
