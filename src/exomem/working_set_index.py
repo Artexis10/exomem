@@ -439,7 +439,7 @@ _SEGMENT = r"""[^\s"'`<>()\[\]{},\\/\u2018\u2019\u201c\u201d]+"""
 #: A slash run with no root: segments up to a final one, which may be empty.
 _SLASH_RUN = re.compile(_STARTS_A_REFERENCE + r"(?:" + _SEGMENT + r"[\\/])+" + _REFERENCE_CHAR + "*")
 #: What may come before the indexed folder in a path into it: `./`, `../`, or a
-#: root and the folders after it, none with a space (`/srv/vault/`, `C:\vault\`).
+#: root and the folders after it, none with a space (`/srv/vault/`, `C:\example\`).
 _VAULT_PATH_PREFIX = r"(?:" + _DOT_RELATIVE + r"|" + _PATH_ROOT + r"(?:" + _SEGMENT + r"[\\/])*)"
 _FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
 

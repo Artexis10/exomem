@@ -151,7 +151,7 @@ def test_slash_joined_words_are_prose_not_a_path(project_vault: Path, turn: str)
         f"Look at {MARIT} please.",
         f"Look at ./{MARIT} please.",
         f"Look at /vault/{MARIT} please.",
-        "Look at C:\\vault\\" + MARIT.replace("/", "\\") + " please.",
+        "Look at C:\\example\\" + MARIT.replace("/", "\\") + " please.",
         "Look at Marit Solheim.md please.",
     ],
     ids=["quoted", "relative", "dot-relative", "rooted", "rooted-windows", "bare-file-name"],
