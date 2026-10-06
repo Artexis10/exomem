@@ -885,6 +885,48 @@ def test_relation_review_batch_matches_all_graph_native_legacy_candidates(
     assert actual == expected
 
 
+def test_relation_review_batch_reads_a_unit_destination_as_its_page_like_the_legacy_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both generators lift a unit destination to its page and label it by page, not unit key."""
+    root = tmp_path / "vault"
+    _write(
+        root,
+        f"{KB}/target.md",
+        "---\ntype: insight\nstatus: active\n"
+        "exomem_id: 44444444-4444-4444-8444-444444444444\n---\n# Target\n\n"
+        "## Open Question\n- id: t-unit\n\nWhat decides?\n",
+    )
+    for name in ("source", "rival"):
+        _write(
+            root,
+            f"{KB}/{name}.md",
+            f"---\ntype: insight\nstatus: active\n---\n# {name}\n\n"
+            f"## Claim\n- id: c-{name}\n- relations: answers: [[{KB}/target#t-unit]]\n\nA claim.\n",
+        )
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
+
+    legacy = _legacy_relation_queue(root, limit_pages=50, limit_per_page=50)
+    _warm_identity_authority(root, monkeypatch)
+    native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
+        limit_pages=50, limit_per_page=50
+    )
+
+    def proposals(result: dict) -> list[tuple[str, str, str]]:
+        items = next(g for g in result["groups"] if g["path"] == f"{KB}/source.md")["items"]
+        return sorted(
+            (item["method"], item["to"], str(item.get("evidence", {}).get("matches", "")))
+            for item in items
+            if item["method"] in {"unit_relation_lift", "shared_resolution_target"}
+        )
+
+    target = f"{KB}/target.md"
+    assert proposals(native) == proposals(legacy)
+    assert ("unit_relation_lift", target) in [p[:2] for p in proposals(native)]
+    assert target in str(proposals(native))
+
+
 def test_relation_review_batch_has_honest_caps_and_no_inverse_candidate(
     tmp_path: Path,
 ) -> None:

@@ -34,9 +34,9 @@ _COMPACT_RE = re.compile(
 )
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _CATEGORY_SEPARATORS_RE = re.compile(r"[\s_-]+")
-_ANCHOR_RE = re.compile(
-    r"(?:^|[ \t])\^(?P<anchor>[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)$"
-)
+_ANCHOR_ID = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?"
+_ANCHOR_RE = re.compile(rf"(?:^|[ \t])\^(?P<anchor>{_ANCHOR_ID})$")
+_UNIT_IDENTITY_RE = re.compile(r"unit-[0-9a-f]{64}")
 _TRAILING_TAG_RE = re.compile(r"(?:^|[ \t])#(?P<tag>[^\s#]+)$")
 _RICH_METADATA_RE = re.compile(
     r"^\s*[-*+]\s+(?P<key>[A-Za-z0-9 _-]+)\s*:", re.IGNORECASE
@@ -304,6 +304,18 @@ class SemanticUnitDocument:
     @property
     def canonical_note_relations(self) -> tuple[markdown_relations.MarkdownRelation, ...]:
         return tuple(relation for relation in self.note_relations if relation.canonical)
+
+    def resolve_fragment(self, fragment: str) -> SemanticUnitResolution:
+        """Resolve a `[[Page#fragment]]` fragment to one unit of this page.
+
+        The fragment is an authored anchor (`#id` or the block-reference form
+        `#^id`) or a `unit-<fingerprint>` identity, so it takes exactly the path
+        an exact `unit_ref` takes. A page with no parent reference addresses
+        nothing.
+        """
+        if not self.parent_ref:
+            return SemanticUnitResolution(status="missing", unit_ref="")
+        return self.resolve_unit(_anchored_unit_ref(self.parent_ref, fragment.removeprefix("^")))
 
     def resolve_unit(
         self,
@@ -870,6 +882,21 @@ def _stable_json(value: Any) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def is_unit_anchor_shaped(fragment: str) -> bool:
+    """Whether `fragment` is written the way a unit is addressed, found or not.
+
+    That is the block-reference form `^id`, a bare authored anchor, or a
+    `unit-<fingerprint>` identity. Anything else (heading text, a phrase) does
+    not claim to name a unit.
+    """
+    bare = fragment.removeprefix("^")
+    return (
+        fragment.startswith("^")
+        or re.fullmatch(_ANCHOR_ID, bare) is not None
+        or _UNIT_IDENTITY_RE.fullmatch(bare) is not None
     )
 
 

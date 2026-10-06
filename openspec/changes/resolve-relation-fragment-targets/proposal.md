@@ -60,8 +60,11 @@ propose an edge between the two pages.
 
 - `src/exomem/epistemic_graph.py` — fragment-preserving target resolution and a
   unit-destination edge; `_shared_open_question_candidates`.
-- `src/exomem/markdown_relations.py` — the fragment is already accepted by the
-  target pattern; the diagnostic for an unresolvable one is new.
+- `src/exomem/semantic_units.py` — `SemanticUnitDocument.resolve_fragment`, the
+  exact resolver the edge builder calls.
+- `src/exomem/relation_census.py` — the unresolvable and ambiguous fragment
+  counts. `markdown_relations.py` is unchanged: its target pattern already
+  accepts the fragment.
 - The semantic-authoring contract version, because the relation grammar gains a
   documented target form. That moves the contract digest embedded in the
   scaffold skills and in `tests/fixtures/mcp_tool_schemas.json`, and therefore

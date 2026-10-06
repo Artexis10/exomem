@@ -26,7 +26,10 @@ from importlib.resources import files
 from types import MappingProxyType
 from typing import Any
 
+from . import semantic_authoring
+
 _RESOURCE = "hosted_legacy_profile_schemas.json"
+_AUTHORING_RESOURCE = "hosted_legacy_authoring_contract.json"
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,39 @@ LEGACY_PROFILE_PARAMS: Mapping[str, Mapping[str, tuple[str, ...]]]
 LEGACY_PROFILE_CONTRACTS: Mapping[str, Mapping[str, LegacyCommandContract]]
 
 SOURCE_REVISION, LEGACY_PROFILE_PARAMS, LEGACY_PROFILE_CONTRACTS = _load()
+
+
+def _load_authoring_contracts() -> Mapping[str, semantic_authoring.SemanticAuthoringContract]:
+    """Load the semantic authoring contract each historical profile published.
+
+    `hosted_legacy_authoring_contract.json` is a frozen snapshot, never
+    regenerated: the live contract moves with the product, and a released
+    profile's bootstrap must keep teaching the contract its pinned tool
+    descriptions name. A newly released profile freezes its own entry. Each
+    entry is rebuilt through the live content-addressing and must reproduce the
+    digest it was recorded under.
+    """
+    payload = json.loads(
+        files("exomem").joinpath(_AUTHORING_RESOURCE).read_text(encoding="utf-8")
+    )
+    if payload.get("schema_version") != 1:
+        raise RuntimeError("pinned Hosted authoring contracts have an unsupported version")
+    contracts: dict[str, semantic_authoring.SemanticAuthoringContract] = {}
+    for digest, recorded in payload["contracts"].items():
+        contract = semantic_authoring.contract_from_normative(
+            {key: value for key, value in recorded.items() if key != "content_digest"}
+        )
+        if not digest == recorded["content_digest"] == contract.content_digest:
+            raise RuntimeError(f"pinned Hosted authoring contract {digest} does not reproduce")
+        contracts[digest] = contract
+    profiles = payload["profiles"]
+    if set(profiles) != set(LEGACY_PROFILE_CONTRACTS):
+        raise RuntimeError("every historical Hosted profile needs a pinned authoring contract")
+    return MappingProxyType({profile: contracts[digest] for profile, digest in profiles.items()})
+
+
+#: profile -> the semantic authoring contract its bootstrap published.
+LEGACY_AUTHORING_CONTRACTS = _load_authoring_contracts()
 
 
 def legacy_ask_memory_output_schema() -> dict[str, Any]:
