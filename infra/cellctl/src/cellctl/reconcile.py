@@ -182,7 +182,15 @@ def _describe_error(error: BaseException) -> str:
     frames = traceback.extract_tb(error.__traceback__)
     if frames:
         described += f" at {Path(frames[-1].filename).name}:{frames[-1].lineno} in {frames[-1].name}"
+        # The innermost frame is usually inside the Kubernetes client; the
+        # innermost cellctl frame names the call that failed.
+        own = [frame for frame in frames if Path(frame.filename).parent == _PACKAGE_DIR]
+        if own and own[-1] is not frames[-1]:
+            described += f" via {Path(own[-1].filename).name}:{own[-1].lineno} in {own[-1].name}"
     return described
+
+
+_PACKAGE_DIR = Path(__file__).parent
 
 
 # A lost or half-open database session. It fails every row alike, so it
