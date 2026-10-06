@@ -654,6 +654,30 @@ def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
     return [*entities, *(path for path in linked if path not in entities)]
 
 
+def _declared_sources(
+    graph: sqlite3.Connection,
+    paths: list[str],
+    visible: Callable[[str], bool] | None = None,
+) -> dict[str, set[str]]:
+    """The Sources each page in ``paths`` declares in frontmatter, by page path.
+
+    ``visible`` drops a Source the caller may not see, so it reads as absent.
+    """
+    sources: dict[str, set[str]] = {path: set() for path in paths}
+    if not paths:
+        return sources
+    marks = ",".join("?" for _ in paths)
+    for src_key, source_key in graph.execute(
+        f"SELECT src_key, dst_page_key FROM graph_edges WHERE src_key IN ({marks}) "
+        "AND origin = 'frontmatter' AND source_anchor = 'sources' "
+        "AND relation_type = 'derived_from'",
+        [f"file:{path}" for path in paths],
+    ):
+        if visible is None or visible(str(source_key).removeprefix("file:")):
+            sources[str(src_key).removeprefix("file:")].add(str(source_key))
+    return sources
+
+
 def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     """The hydration proposal for one entity, from the graph snapshot alone.
 
@@ -702,7 +726,6 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             ).fetchone()
             if unit is not None:
                 entry["units"].add(str(unit[0]))
-    sources: dict[str, set[str]] = {}
     for path, entry in list(contributors.items()):
         if entry["page_level"]:
             entry["units"].update(
@@ -715,18 +738,9 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             )
         if not entry["units"]:
             contributors.pop(path)
-            continue
-        sources[path] = {
-            str(row[0])
-            for row in graph.execute(
-                "SELECT dst_key FROM graph_edges WHERE src_key = ? "
-                "AND origin = 'frontmatter' AND source_anchor = 'sources' "
-                "AND relation_type = 'derived_from'",
-                (f"file:{path}",),
-            )
-        }
     if not contributors:
         return None
+    sources = _declared_sources(graph, list(contributors))
     # Pages that declare no Source count as ONE origin between them. The graph
     # carries no session key to tell their conversations apart, so the
     # conservative reading is a single conversation-only fan-out.
@@ -1877,16 +1891,7 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
         return None
     # A Source the caller may not see is no origin: the referrer reads as
     # declaring only the Sources it may see, as on a vault without that Source.
-    sources: dict[str, set[str]] = {path: set() for path in referrers}
-    marks = ",".join("?" for _ in referrers)
-    for src_key, source_key in graph.execute(
-        f"SELECT src_key, dst_page_key FROM graph_edges WHERE src_key IN ({marks}) "
-        "AND origin = 'frontmatter' AND source_anchor = 'sources' "
-        "AND relation_type = 'derived_from'",
-        [f"file:{path}" for path in referrers],
-    ):
-        if _visible(keep, str(source_key).removeprefix("file:")):
-            sources[str(src_key).removeprefix("file:")].add(str(source_key))
+    sources = _declared_sources(graph, referrers, lambda path: _visible(keep, path))
     unsourced = {path: _UNSOURCED_ORIGIN for path, declared in sources.items() if not declared}
     origins = provenance.origin_keys(sources, fallback=unsourced)
     if len(set(origins.values())) < PROFILE_MIN_ORIGINS:
