@@ -1056,15 +1056,23 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
     growth["filesystem_after"] = drill.filesystem(x)
     growth["quota_storage"] = wait_for(quota_storage, timeout=300, interval=5, description="cell X's quota to cover the grown claim")
     growth["quota_seconds_after_hold"] = round(time.monotonic() - hold_ended, 1)
-    # D6: a grown cell takes its extra slots, and the reserve follows the
-    # largest cell, now this one.
-    expected_drop = (-(-grown // LOCAL.default_cell_gib) - 1) + (
-        2 * (grown - size) * LOCAL.backup_concurrency_per_node // LOCAL.default_cell_gib)
+    # D6 on agent B's pool: (pool - reserve) // default size, less a grown
+    # cell's extra slots. The reserve is twice the largest cell per
+    # concurrent backup, and the grown cell is now the largest. The reading
+    # before can lag: 2.9 renamed volumes outside TopoLVM's lvmd, which
+    # publishes free bytes from its last own read of the pool.
+    def d6_slots(largest: int) -> int:
+        reserve = 2 * largest * LOCAL.backup_concurrency_per_node
+        extra = -(-largest // LOCAL.default_cell_gib) - 1
+        return (drill_cluster.POOL_GIB - reserve) // LOCAL.default_cell_gib - extra
+
     deadline = time.monotonic() + 180
-    while (slots_after := await drill.slots(agent_b)) != slots_before - expected_drop and time.monotonic() < deadline:
+    while (slots_after := await drill.slots(agent_b)) != d6_slots(grown) and time.monotonic() < deadline:
         await asyncio.sleep(5)
-    growth["slots"] = {"before": slots_before, "after": slots_after, "expected_drop": expected_drop,
-                       "source": "exomem_cloud_capacity.cell_slots for agent B, as cellctl published it"}
+    growth["slots"] = {"before": slots_before, "after": slots_after,
+                       "d6_before": d6_slots(size), "d6_after": d6_slots(grown),
+                       "source": "exomem_cloud_capacity.cell_slots for agent B as cellctl published it; d6_ from "
+                       f"design D6 on the drill's {drill_cluster.POOL_GIB} GiB pool"}
 
     # At the cap: the next backup measures the grown filesystem, and the
     # cell stays at its size.
@@ -1097,8 +1105,8 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
         problems.append("the filesystem inside the cell did not grow")
     if (at_cap["backup"].get("clone") or {}).get("size") != f"{grown}Gi":
         problems.append(f"the next backup's clone is {(at_cap['backup'].get('clone') or {}).get('size')}")
-    if slots_after != slots_before - expected_drop:
-        problems.append(f"the published slots went {slots_before} -> {slots_after}, not down by {expected_drop}")
+    if slots_after != d6_slots(grown):
+        problems.append(f"the published slots read {slots_after} after the growth, not D6's {d6_slots(grown)}")
     if at_cap["claim_capacity"] != f"{grown}Gi":
         problems.append(f"the claim at the cap reads {at_cap['claim_capacity']}")
     if problems:
