@@ -3056,14 +3056,30 @@ def guard_working_set(
     original_units = [
         item for item in guarded.get("units") or () if isinstance(item, Mapping)
     ]
-    guarded["units"] = [
-        unit
-        for unit in (
-            _guarded_unit(item, frozen, decisions, invalid_refs) for item in original_units
-        )
-        if unit is not None
-    ]
+    guarded["units"] = []
+    lost_unit_pages: set[str] = set()
+    for item in original_units:
+        unit = _guarded_unit(item, frozen, decisions, invalid_refs)
+        if unit is None:
+            lost_unit_pages.add(str((item.get("provenance") or {}).get("path") or ""))
+        else:
+            guarded["units"].append(unit)
     _note_removal("units", len(original_units), len(guarded["units"]))
+    # An anchor listed because a carried page's unit named it (`carried_link`)
+    # goes whenever that page loses any unit here: the removed unit may be the
+    # one that named it, and the caller must not learn that it existed.
+    if lost_unit_pages:
+        listed = len(guarded["anchors"])
+        guarded["anchors"] = [
+            anchor
+            for anchor in guarded["anchors"]
+            if not (
+                "carried_link" in (anchor.get("evidence") or ())
+                and str(anchor.get("via") or "") in lost_unit_pages
+            )
+        ]
+        if len(guarded["anchors"]) < listed:
+            removed["anchors"] = removed.get("anchors", 0) + listed - len(guarded["anchors"])
 
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)

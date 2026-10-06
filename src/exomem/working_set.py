@@ -2413,7 +2413,6 @@ def _carried_packet(
         evidence=evidence,
         visible=visible,
         contacts=contacts,
-        list_linked=True,
     )
     if carried_anchors:
         generation = {**generation, "carried_by": carried_by}
@@ -2427,20 +2426,42 @@ def _carried_packet(
         # why this packet exists at all. What the turn actually did is in
         # the anchor's own `status` (`retrieval_carried`, or `resolved` for
         # an agent-picked page) and in `generation.carried_by`.
-        return build_packet(
-            items=items,
-            anchors=tuple(anchor.as_dict() for anchor in carried_anchors) or (
-                tuple(unresolved_anchors) if not items else ()
-            ),
-            roles=roles,
-            current_state=current_state,
-            ambiguity=(),
-            missing=missing,
-            max_chars=limit,
-            generation=generation,
-            status="resolved" if items else "unresolved",
-            recent_context=recent_context,
-        )
+        def build(listed: Sequence[working_set_resolve.ResolvedAnchor] = ()) -> dict[str, Any]:
+            return build_packet(
+                items=items,
+                anchors=tuple(anchor.as_dict() for anchor in (*carried_anchors, *listed)) or (
+                    tuple(unresolved_anchors) if not items else ()
+                ),
+                roles=roles,
+                current_state=current_state,
+                ambiguity=(),
+                missing=missing,
+                max_chars=limit,
+                generation=generation,
+                status="resolved" if items else "unresolved",
+                recent_context=recent_context,
+            )
+
+        packet = build()
+        if index is None or not carried_anchors:
+            return packet
+        # Anchors the carried pages' SERVED units name. Listing them can cost
+        # the packet's budget (a conversation-inferred packet charges anchor
+        # headers), so rebuild and keep only those the units served after that
+        # still name, until nothing more drops.
+        room = max(0, working_set_resolve.MAX_ANCHORS - len(carried_anchors))
+        listed = _carried_links(index, carried_anchors, packet["units"], visible=visible)[:room]
+        while listed:
+            rebuilt = build(listed)
+            named = {
+                anchor.anchor_id
+                for anchor in _carried_links(index, carried_anchors, rebuilt["units"], visible=visible)
+            }
+            still = tuple(anchor for anchor in listed if anchor.anchor_id in named)
+            if len(still) == len(listed):
+                return rebuilt
+            listed = still
+        return packet
 
 
 def _carry_admission(
@@ -2546,7 +2567,6 @@ def _carried_material(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     selected_roles: Sequence[Mapping[str, str]] = (),
-    list_linked: bool = False,
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
     tuple[LaneItem, ...],
@@ -2562,11 +2582,6 @@ def _carried_material(
     their material shares the packet's item cap. Empty items means
     none of them read anything. Titles and lifecycles are taken as
     `_carried_packet` documents.
-
-    With `list_linked`, where the carried pages are the packet's only anchors,
-    each page that served units also lists the anchors those units name
-    through its links (`_carried_links`), after every carried page and
-    within the ordinary anchor allowance.
     """
     anchors: list[working_set_resolve.ResolvedAnchor] = []
     items: list[LaneItem] = []
@@ -2574,7 +2589,6 @@ def _carried_material(
     states: list[Mapping[str, Any]] = []
     page_roles: dict[str, tuple[str, tuple[dict[str, str], ...]]] = {}
     candidates: dict[str, dict[str, str]] = {}
-    served: dict[str, tuple[str, ...]] = {}
     admit = _carry_admission(vault_root, paths, analysis, index=index,
         contacts=contacts, visible=visible) if evidence == ("retrieval",) else None
     for path in paths:
@@ -2676,18 +2690,9 @@ def _carried_material(
                 break
         if got or admit is None or admit(path, None):
             anchors.append(carried)
-            served[path] = tuple(item.text for item in got if item.path == path)
         items.extend(got)
         states.extend(current_state)
         missing.extend(gap for gap in gaps if gap not in missing)
-    if list_linked and index is not None:
-        listed = {anchor.path for anchor in anchors}
-        for path, texts in served.items():
-            room = working_set_resolve.MAX_ANCHORS - len(anchors)
-            for linked in _carried_links(index, path, texts, visible=visible)[: max(0, room)]:
-                if linked.path not in listed:
-                    listed.add(linked.path)
-                    anchors.append(linked)
     return tuple(anchors), tuple(items), tuple(missing), tuple(states), tuple(used_roles.values())
 
 
@@ -2697,62 +2702,84 @@ CARRIED_LINK_MAX_PER_PAGE = 2
 
 def _carried_links(
     index: working_set_index.WorkingSetIndex,
-    path: str,
-    served: Sequence[str],
+    carried: Sequence[working_set_resolve.ResolvedAnchor],
+    units: Sequence[Mapping[str, Any]],
     *,
     visible: Callable[[str], bool] | None,
 ) -> tuple[working_set_resolve.ResolvedAnchor, ...]:
-    """Anchors linked to or from carried page `path` that its served units name.
+    """Anchors linked to or from a carried page that the page's served units name.
 
     A carried note about a person often names that person in its unit and
     links their page, while the turn that carried it never said the name.
     Such a row is listed `partial` on `carried_link` and never resolves: no
-    lane reads it, and the token never carries it forward. A row the page
-    links without naming it in what it served stays out, and so does a row
-    the reader may not see. `via` names the page, so the egress guard
-    removes the row whenever it removes the page.
+    lane reads it, and the token never carries it forward. `units` are the
+    units the packet serves; a unit turned into a pointer was never served
+    and names no one. A row the page links without naming it in a served unit
+    stays out, and so does a row the reader may not see, before any slot is
+    counted. Each page lists at most `CARRIED_LINK_MAX_PER_PAGE`, in the order
+    its units first name them. `via` names the page, so the egress guard
+    removes the row whenever it removes the page or a unit of it.
     """
-    if not served:
-        return ()
-    texts = tuple(working_set_index.tokens_of(working_set_index.normalize(text)) for text in served)
+    rows = index.anchors()
     out: list[working_set_resolve.ResolvedAnchor] = []
-    for row in index.anchors():
-        if not row.path or row.path == path:
+    for page in carried:
+        texts = [
+            working_set_index.tokens_of(working_set_index.normalize(str(unit.get("text") or "")))
+            for unit in units
+            if (unit.get("provenance") or {}).get("path") == page.path
+        ]
+        if not texts:
             continue
-        if path not in row.neighbourhood and path not in row.linked_by:
-            continue
-        if visible is not None and not working_set_resolve.anchor_visible(row, visible):
-            continue
-        names = tuple(
-            phrase
-            for phrase in (
-                working_set_index.tokens_of(working_set_index.normalize(name))
-                for name in (row.title, *row.aliases)
+        named: list[tuple[tuple[int, int], Any]] = []
+        for row in rows:
+            if not row.path or row.path == page.path or row.path in {a.path for a in carried}:
+                continue
+            if page.path not in row.neighbourhood and page.path not in row.linked_by:
+                continue
+            if visible is not None and not working_set_resolve.anchor_visible(row, visible):
+                continue
+            first = _first_mention(texts, (row.title, *row.aliases))
+            if first is not None:
+                named.append((first, row))
+        for _first, row in sorted(named, key=lambda pair: pair[0])[:CARRIED_LINK_MAX_PER_PAGE]:
+            if row.path in {anchor.path for anchor in out}:
+                continue
+            out.append(
+                working_set_resolve.ResolvedAnchor(
+                    anchor_id=row.anchor_id,
+                    path=row.path,
+                    ref=row.ref,
+                    title=row.title,
+                    kind=row.kind,
+                    lifecycle=row.lifecycle,
+                    status="partial",
+                    evidence=("carried_link",),
+                    categories=(),
+                    neighbourhood=frozenset({page.path}),
+                    via=page.path,
+                )
             )
-            if phrase
-        )
-        if not any(
-            working_set_resolve._phrase_spans(tokens, phrase) for tokens in texts for phrase in names
-        ):
-            continue
-        out.append(
-            working_set_resolve.ResolvedAnchor(
-                anchor_id=row.anchor_id,
-                path=row.path,
-                ref=row.ref,
-                title=row.title,
-                kind=row.kind,
-                lifecycle=row.lifecycle,
-                status="partial",
-                evidence=("carried_link",),
-                categories=(),
-                neighbourhood=frozenset({path}),
-                via=path,
-            )
-        )
-        if len(out) == CARRIED_LINK_MAX_PER_PAGE:
-            break
     return tuple(out)
+
+
+def _first_mention(
+    texts: Sequence[Sequence[str]], names: Sequence[str]
+) -> tuple[int, int] | None:
+    """(unit index, token index) where `texts` first spell one of `names`."""
+    phrases = [
+        phrase
+        for phrase in (
+            working_set_index.tokens_of(working_set_index.normalize(name)) for name in names
+        )
+        if phrase
+    ]
+    for unit_index, tokens in enumerate(texts):
+        starts = [
+            start for phrase in phrases for start, _end in working_set_resolve._phrase_spans(tokens, phrase)
+        ]
+        if starts:
+            return unit_index, min(starts)
+    return None
 
 
 def _follow_up_packet(
