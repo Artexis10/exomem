@@ -2642,6 +2642,7 @@ def _plan_presentation_revision(
             raise collections.CollectionError(
                 "SOURCE_NOT_FOUND", "item presentation source is unavailable"
             )
+        guard = _write_guard(root, guard, data)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -5213,6 +5214,31 @@ def _normalize_json(value: Any) -> Any:
 
 def _transition_id() -> str:
     return uuid.uuid4().hex[:24]
+
+
+def _write_guard(root: Path, guard: vault.PathGuard, data: bytes) -> vault.PathGuard:
+    """A guard that can bind a write to the exact bytes a snapshot read.
+
+    The item cache hands settled items a stat-generation guard. That proves a
+    read, but not a write: the batch writer restores a destination's
+    timestamps before replacing it, which moves its ctime and so its
+    generation. Prove the generation once, then bind the write to the content.
+    """
+    if guard.leaf_policy != "generation":
+        return guard
+    try:
+        guard.recheck(root)
+        return vault.PathGuard.capture(
+            root,
+            guard.target,
+            leaf_policy="content",
+            expected_content_hash=hashlib.sha256(data).hexdigest(),
+            expected_content_size=len(data),
+        )
+    except vault.PathGuardError as error:
+        raise collections.CollectionError(
+            "STALE_RECORD", "canonical record changed before commit"
+        ) from error
 
 
 def _read_record_bytes(root: Path, relative: str) -> tuple[bytes, vault.PathGuard]:

@@ -350,11 +350,13 @@ def test_stem_gates_read_cjk_and_folded_query_words(multilingual_vault: Path) ->
 
     from types import SimpleNamespace
 
+    # Excerpts read the page's search body, as `make_excerpt` always has, so an
+    # origin carrier never anchors or appears in one; the stand-in supplies it.
     long_body = "静かな記録。" * 60 + "東京タワーの高さは三百メートル。" + "別の話題。" * 60
-    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=long_body), "高さ")
+    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body_stripped=long_body), "高さ")
     assert "東京タワーの高さ" in excerpt
     folded_body = "x " * 200 + "Zölvarn prüft die Lieferung." + " y" * 200
-    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=folded_body), "zolvarn")
+    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body_stripped=folded_body), "zolvarn")
     assert "Zölvarn prüft" in excerpt
 
 

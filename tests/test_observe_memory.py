@@ -103,7 +103,9 @@ def _origin_block(root: Path, scope: dict) -> str:
     )
 
 
-def test_public_observe_detaches_origin_without_changing_generated_unit_identity(tmp_path: Path) -> None:
+def test_public_observe_detaches_origin_without_changing_generated_unit_identity(
+    tmp_path: Path,
+) -> None:
     """Authored metadata must neither violate compact shape nor seed the unit anchor."""
     page = _write_page(tmp_path)
     content = "Keep WAL enabled <!-- ordinary comment -->; sample `<!-- exomem-origin:v1 {} -->`."
@@ -113,7 +115,11 @@ def test_public_observe_detaches_origin_without_changing_generated_unit_identity
         )
         block = _origin_block(tmp_path, {"kind": "unit", "unit_ref": "#" + clean["unit"]["anchor"]})
         prepared = commands.op_observe_memory(
-            tmp_path, path=PAGE, operation="validate", category="rule", content=content + "\n\n" + block
+            tmp_path,
+            path=PAGE,
+            operation="validate",
+            category="rule",
+            content=content + "\n\n" + block,
         )
         result = commands.op_observe_memory(
             tmp_path, path=PAGE, category="rule", content=content + "\n\n" + block
@@ -149,13 +155,18 @@ def test_public_observe_update_detaches_new_origin_before_rendering(tmp_path: Pa
     block = _origin_block(tmp_path, {"kind": "unit", "unit_ref": "#existing"})
     with request_scope(owner_principal(surface="cli")):
         updated = commands.op_observe_memory(
-            tmp_path, path=PAGE, operation="update", category="rule", content="New rule\n\n" + block,
-            unit_ref=unit.unit_ref, expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+            tmp_path,
+            path=PAGE,
+            operation="update",
+            category="rule",
+            content="New rule\n\n" + block,
+            unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint,
+            expected_hash=_page_hash(page),
         )
     assert updated["unit"]["content"] == "New rule"
-    assert provenance.parse_origin(page.read_text(), managed=True, strict=True).payload["bindings"][0][
-        "scope"
-    ]["fingerprint"] == updated["unit"]["fingerprint"]
+    bound = provenance.parse_origin(page.read_text(), managed=True, strict=True).payload
+    assert bound["bindings"][0]["scope"]["fingerprint"] == updated["unit"]["fingerprint"]
 
 
 def test_public_observe_rich_origin_stays_outside_every_unit(tmp_path: Path) -> None:
@@ -175,9 +186,8 @@ def test_public_observe_rich_origin_stays_outside_every_unit(tmp_path: Path) -> 
     actual = document.resolve_unit(created["unit_ref"]).unit
     assert actual.content == "New rich body.\n\nSecond paragraph."
     assert all("exomem-origin" not in unit.span.text for unit in document.units)
-    assert provenance.parse_origin(page.read_text(), managed=True, strict=True).payload["bindings"][0][
-        "scope"
-    ]["fingerprint"] == actual.fingerprint
+    bound = provenance.parse_origin(page.read_text(), managed=True, strict=True).payload
+    assert bound["bindings"][0]["scope"]["fingerprint"] == actual.fingerprint
 
 
 def test_observe_origin_only_content_is_still_empty(tmp_path: Path) -> None:
@@ -189,7 +199,10 @@ def test_observe_origin_only_content_is_still_empty(tmp_path: Path) -> None:
         commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content=block)
     with pytest.raises(observe_memory.ObserveMemoryError) as invalid:
         observe_memory.observe_memory(
-            tmp_path, path=PAGE, category="rule", content="Valid text <!-- exomem-origin:v1 secret -->"
+            tmp_path,
+            path=PAGE,
+            category="rule",
+            content="Valid text <!-- exomem-origin:v1 secret -->",
         )
     assert invalid.value.code == "ORIGIN_METADATA_INVALID" and "secret" not in invalid.value.reason
     assert page.read_bytes() == before
