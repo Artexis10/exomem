@@ -1,7 +1,8 @@
-"""Vault-bound lifetime for admitted disposable preview stores.
+"""Vault-bound lifetime for admitted collection stores.
 
-The production create/adoption, mode, fence and custody producer is not present.
-An explicit trusted authority check is required; the preview flag supplies none.
+Admission comes only from a trusted producer session (``admission``) that holds
+custody, fence and takeover authority; the preview flag supplies none. Public
+routes and launcher support remain closed.
 """
 
 from __future__ import annotations
@@ -129,8 +130,18 @@ class CollectionStoreRuntime:
         self._bootstrap = _bootstrap
         self._acquisition = None
         self._admitted_token = None
-        initial = self.sample_head()
-        self._identity = (initial.store_id, initial.instance_id)
+        # A producer session resolves takeover/adoption for an unadmitted token;
+        # its unresolved outcome (sync pending or divergence) admits reads only.
+        self._resolver = None
+        self._takeover = None
+        # A producer re-derives custody for each publication, which writes into the vault.
+        self._publication_custody = None
+        # The last admitted token published its head when it released the lease.
+        self._handed_off = False
+        if not (_bootstrap and not self.path.exists()):
+            # Only a producer adopting a copied vault starts before its live store exists.
+            initial = self.sample_head()
+            self._identity = (initial.store_id, initial.instance_id)
         with manager._lock:
             if manager._collection_store is not None:
                 raise ValueError("the lease manager already owns a collection store runtime")
@@ -140,6 +151,60 @@ class CollectionStoreRuntime:
         if self._acquisition is None or self._acquisition.fencing_token != record.fencing_token:
             self._acquisition = record
             self._admitted_token = None
+
+    def record_admission(self, token):
+        self._admitted_token = token
+        self._takeover = None
+        self._handed_off = False
+
+    def releases_without_head(self, token):
+        """Whether an unadmitted producer token can hand the lease back without a head.
+
+        No store commit can wait on it while this runtime's takeover is unresolved
+        (writes refuse) or after its last admitted token published at release, for
+        every later token, unless a durable create intent still awaits its cutover.
+        """
+        from . import authority
+
+        if not (self._bootstrap and token is not None and token != self._admitted_token
+                and (self._takeover is not None or self._handed_off)):
+            return False
+        if not self.path.exists():
+            return True
+        with closing(connection.open_reader(self.path)) as reader:
+            return authority.pending_create(reader) is None
+
+    def status(self):
+        """Operator view of admission; an unresolved takeover reports its attention state."""
+        token = self.manager._fencing_token
+        if token is not None and self.reporting_ready(token):
+            return {"status": "admitted"}
+        return self._takeover.status() if self._takeover is not None else {"status": "unadmitted"}
+
+    def _retire_handle(self):
+        """Close the cached writer unless a transaction is open; callers exclude borrowers."""
+        handle = self._handle
+        if handle is not None:
+            if handle.connection.in_transaction:
+                return False
+            # Quiescent close is the only cross-thread handle operation.
+            self._handle = None
+            self._writer_token = None
+            handle.close()
+        return True
+
+    def retire_idle_handle(self):
+        """Close the cached writer so a direct writer may open, only while nothing borrows it."""
+        manager = self.manager
+        with manager._report_lock, manager._lock:
+            return not (manager._store_borrowers or manager._store_handoff) and self._retire_handle()
+
+    def _refusal(self):
+        if self._takeover is not None:
+            return self._takeover.error()
+        return connection.CollectionStoreError(
+            "COLLECTION_STORE_LEASE_REQUIRED", "trusted preview admission is unavailable"
+        )
 
     def reporting_ready(self, token):
         return ((not self._bootstrap or (self._admitted_token is not None and self._admitted_token == token))
@@ -176,48 +241,52 @@ class CollectionStoreRuntime:
                 )
             return head
 
-    def _admit(self, token):
+    def _admit(self, token, *, reads=False):
         if self.manager.config.enabled:
             self.manager.validate_fencing_token(token)
-        if not self.reporting_ready(token):
-            raise connection.CollectionStoreError(
-                "COLLECTION_STORE_LEASE_REQUIRED", "trusted preview admission is unavailable"
-            )
+        if not self.reporting_ready(token) and not (
+            reads and self._takeover is not None and self.path.exists()
+        ):
+            raise self._refusal()
         self.sample_head()
 
-    def _authority(self, token, *, progress=False):
+    def _authority(self, token, *, progress=False, reads=False):
         if progress:
             self.manager._renew_collection_store(token, due_only=True)
-        self._admit(token)
+        self._admit(token, reads=reads)
         return self.manager._mutation_coordinator_for(self.root).current_thread_holds_boundary()
 
     @contextmanager
     def checkout(self):
         if self._bootstrap and not self.reporting_ready(self.manager._fencing_token):
-            raise connection.CollectionStoreError(
-                "COLLECTION_STORE_LEASE_REQUIRED", "isolated recovery has not admitted this token"
-            )
+            if self._resolver is None:
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_LEASE_REQUIRED", "isolated recovery has not admitted this token"
+                )
+            # Takeover/adoption, rechecked every 10 s or on replica change; an unresolved
+            # takeover leaves reads of the local copy, and never closes a borrowed handle.
+            self._resolver()
         with self.manager._collection_store_checkout():
             lease = self.manager.ensure_writer()
-            self._admit(lease.fencing_token)
+            self._admit(lease.fencing_token, reads=True)
             if self._handle is None or self._writer_token != lease.fencing_token:
                 with self.manager.consistency_guard(self.root, operation="collection_store_open"):
                     with self.manager._lock:
                         if self._handle is not None and self._writer_token != lease.fencing_token:
                             if (self.manager._store_borrowers != {threading.get_ident(): 1}
-                                    or self._handle.connection.in_transaction):
+                                    or not self._retire_handle()):
                                 raise connection.CollectionStoreError(
                                     "COLLECTION_STORE_BUSY", "the stale writer is still borrowed"
                                 )
-                            # Quiescent close is the only cross-thread handle operation.
-                            self._handle.close()
-                            self._handle = None
-                            self._writer_token = None
                         if self._handle is None:
                             self.sample_head()
+                            # Opening may serve reads of an unadmitted copy; transactions never.
+                            opening = [True]
                             self._handle = connection.open_writer(
-                                self.path, lease_check=lambda: self._authority(lease.fencing_token)
+                                self.path, lease_check=lambda: self._authority(
+                                    lease.fencing_token, reads=opening[0])
                             )
+                            opening[0] = False
                             self._writer_token = lease.fencing_token
             with borrowed_writer(self.root, self._handle, self.manager) as writer:
                 yield writer
@@ -228,15 +297,14 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_LEASE_REQUIRED", "publication authority is unavailable"
             )
-        handle = self._handle
-        if handle is not None:
-            if handle.connection.in_transaction:
-                raise connection.CollectionStoreError(
-                    "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
-                )
-            self._handle = None
-            self._writer_token = None
-            handle.close()
+        if self._publication_custody is not None and not self._publication_custody(token):
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_CUSTODY_UNVERIFIED", "single-host custody no longer verifies; nothing was published"
+            )
+        if not self._retire_handle():
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
+            )
         with connection.open_writer(
             self.path, lease_check=lambda: self._authority(token, progress=True)
         ) as writer:

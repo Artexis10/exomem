@@ -25,6 +25,7 @@ ACTIONS = frozenset(
         "revise",
         "rebaseline",
         "discard",
+        "import",
     }
 )
 
@@ -89,6 +90,7 @@ _ACTION_FIELDS = {
     "rebaseline": frozenset(
         {"collection", "expected_manifest_hash", "expected_container_hash", "acknowledged_gap_codes", "why"}
     ),
+    "import": frozenset({"collection", "import_request"}),
 }
 _REQUIRED_FIELDS = {
     "describe": frozenset(),
@@ -116,6 +118,7 @@ _REQUIRED_FIELDS = {
     "rebaseline": frozenset(
         {"collection", "expected_manifest_hash", "expected_container_hash", "acknowledged_gap_codes", "why"}
     ),
+    "import": frozenset({"collection", "import_request"}),
 }
 _QUERY_SHAPING_FIELDS = frozenset(
     {
@@ -148,6 +151,7 @@ def record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "import",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -184,8 +188,9 @@ def record_memory(
     rows: list[dict[str, Any]] | None = None,
     source: str | None = None,
     on_reject: Literal["abort", "skip"] | None = None,
+    import_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Describe, validate, inspect, create, query, append, bulk_upsert, update, revise, rebaseline, or discard Records.
+    """Describe, validate, inspect, create, query, append, bulk_upsert, update, revise, rebaseline, discard or import Records.
 
     Records are human-owned event and state histories.  This command keeps the
     complete workflow on one product surface while routing mutations to guarded
@@ -237,6 +242,9 @@ def record_memory(
             Sources or Evidence page, for rows that name none.
         on_reject: bulk_upsert only: `abort` (default) writes nothing when any row
             is rejected and reports every would-be outcome; `skip` commits the rest.
+        import_request: import only, for a store-routed collection: a durable job
+            streams one preserved Sources/Evidence file in bounded batches; store-mode
+            `describe` carries its contract.
     """
     values = {
         "collection": collection,
@@ -274,6 +282,7 @@ def record_memory(
         "rows": rows,
         "source": source,
         "on_reject": on_reject,
+        "import_request": import_request,
     }
     _validate_arguments(action, values)
     try:
@@ -282,6 +291,10 @@ def record_memory(
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
+        if action == "import":
+            raise CollectionError(
+                "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
+            )
         if action == "describe":
             return parse_manifest_contract()
         if action == "validate":
@@ -455,11 +468,14 @@ def record_memory(
         ) from error
 
 
-def parse_manifest_contract() -> dict[str, Any]:
+def parse_manifest_contract(*, store_mode: bool = False) -> dict[str, Any]:
     """Project the parser-owned collection contract without vault content."""
     from .structured_collections import manifest_authoring_contract
 
-    return {**manifest_authoring_contract(), "bulk_upsert": _bulk_upsert_contract()}
+    return {
+        **manifest_authoring_contract(),
+        "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
+    }
 
 
 def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:

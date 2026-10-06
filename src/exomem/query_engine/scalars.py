@@ -11,10 +11,12 @@ MISSING = object()
 SCALAR_TYPES = frozenset({"string", "integer", "number", "boolean", "date", "datetime", "enum", "link"})
 MISSING_TAG, NULL_TAG, BOOLEAN_TAG, NUMBER_TAG = 0, 1, 2, 3
 STRING_TAG, DATE_TAG, DATETIME_TAG, LINK_TAG = 4, 5, 6, 7
+_OFFSET_GRAMMAR = r"Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]"
+_OFFSET = re.compile(_OFFSET_GRAMMAR)
 _INSTANT = re.compile(
     r"(?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[Tt ]"
     r"(?P<time>[0-9]{2}:[0-9]{2}:[0-9]{2})(?:[.,](?P<fraction>[0-9]+))?"
-    r"(?P<offset>Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+    rf"(?P<offset>{_OFFSET_GRAMMAR})"
 )
 
 
@@ -42,6 +44,22 @@ def parse_instant(value: object) -> dt.datetime:
         return dt.datetime.fromisoformat(text + matched["offset"]).astimezone(dt.UTC)
     except (ValueError, OverflowError) as error:
         raise ScalarValueError("scalar instant is invalid") from error
+
+
+def offset_minutes(value: object) -> int:
+    """Minutes east of UTC for a typed-v1 offset: ``Z`` or ``±HH:MM``."""
+    if type(value) is not str or not _OFFSET.fullmatch(value):
+        raise ScalarValueError("offset requires Z or a ±HH:MM UTC offset")
+    if value == "Z":
+        return 0
+    minutes = int(value[1:3]) * 60 + int(value[4:6])
+    return -minutes if value[0] == "-" else minutes
+
+
+def instant_offset_minutes(value: object) -> int:
+    """The UTC offset, in minutes, carried by a valid typed-v1 instant string."""
+    parse_instant(value)
+    return offset_minutes(_INSTANT.fullmatch(value)["offset"])
 
 
 def _number_key(value: int | float) -> str:

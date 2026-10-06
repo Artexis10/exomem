@@ -1,0 +1,176 @@
+{
+  "exomem_git_sha": "38798c7b7",
+  "python": "3.14.6",
+  "sqlite": "3.53.1",
+  "host": {
+    "cpu_count": 20,
+    "os_family": "Linux",
+    "kernel_release_family": "6.18.33.2",
+    "machine": "x86_64",
+    "filesystem": "ext2/ext3"
+  },
+  "pragmas": {
+    "journal_mode": "wal",
+    "synchronous": "FULL",
+    "foreign_keys": "ON",
+    "wal_autocheckpoint": "0 during runs (set by harness)"
+  },
+  "seed": 20261005,
+  "samples_per_metric": 30,
+  "bulk_samples": 5,
+  "scope": "dark store, invented data, single run, not a gate; latencies are load-confounded (three populations ran in parallel beside other sessions' test runs), so QUERY_TIMEOUT rows are the product's 200 ms deadline under load, not clean latency; WAL byte ratios are the usable baseline",
+  "wal_method": "wal_autocheckpoint=0; -wal file size delta around one mutation (frames x (page+24) bytes)",
+  "peak_rss_note": "process high-water mark (KiB); each variant/size ran in its own process (3 parallel processes on a shared machine)",
+  "runs": {
+    "N=1000,4_indexes": {
+      "append": {
+        "p50_ms": 40.641,
+        "p95_ms": 55.065,
+        "samples": 30
+      },
+      "bulk_500": {
+        "p50_ms": 18341.251,
+        "p95_ms": 19684.311,
+        "samples": 5
+      },
+      "wal_bytes_per_append": {
+        "p50": 140080.0,
+        "max": 164800
+      },
+      "wal_bytes_per_bulk_500": {
+        "p50": 4210640,
+        "max": 4750360
+      },
+      "legacy_page50_sorted": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "legacy_sum": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "typed_page50_sorted": {
+        "p50_ms": 2.603,
+        "p95_ms": 3.819,
+        "samples": 30
+      },
+      "rows_at_start": 1000,
+      "peak_rss_kib": 141424
+    },
+    "N=1000,no_index": {
+      "append": {
+        "p50_ms": 53.599,
+        "p95_ms": 61.133,
+        "samples": 30
+      },
+      "bulk_500": {
+        "p50_ms": 18521.242,
+        "p95_ms": 19456.807,
+        "samples": 5
+      },
+      "wal_bytes_per_append": {
+        "p50": 103000.0,
+        "max": 131840
+      },
+      "wal_bytes_per_bulk_500": {
+        "p50": 2537920,
+        "max": 2801600
+      },
+      "legacy_page50_sorted": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "legacy_sum": {
+        "p50_ms": 130.01,
+        "p95_ms": 159.568,
+        "samples": 30
+      },
+      "typed_page50_sorted": {
+        "refused": "QUERY_UNAVAILABLE",
+        "after_samples": 0
+      },
+      "rows_at_start": 1000,
+      "peak_rss_kib": 141424
+    },
+    "N=10000,4_indexes": {
+      "append": {
+        "p50_ms": 47.872,
+        "p95_ms": 60.882,
+        "samples": 30
+      },
+      "bulk_500": {
+        "p50_ms": 17988.878,
+        "p95_ms": 18343.997,
+        "samples": 5
+      },
+      "wal_bytes_per_append": {
+        "p50": 140080.0,
+        "max": 201880
+      },
+      "wal_bytes_per_bulk_500": {
+        "p50": 8590200,
+        "max": 9064000
+      },
+      "legacy_page50_sorted": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "legacy_sum": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "typed_page50_sorted": {
+        "p50_ms": 2.613,
+        "p95_ms": 3.302,
+        "samples": 30
+      },
+      "rows_at_start": 10000,
+      "peak_rss_kib": 167896
+    },
+    "N=10000,no_index": {
+      "append": {
+        "p50_ms": 27.52,
+        "p95_ms": 109.142,
+        "samples": 30
+      },
+      "bulk_500": {
+        "p50_ms": 19363.205,
+        "p95_ms": 22120.613,
+        "samples": 5
+      },
+      "wal_bytes_per_append": {
+        "p50": 103000.0,
+        "max": 131840
+      },
+      "wal_bytes_per_bulk_500": {
+        "p50": 4597920,
+        "max": 4902800
+      },
+      "legacy_page50_sorted": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "legacy_sum": {
+        "refused": "QUERY_TIMEOUT",
+        "after_samples": 0
+      },
+      "typed_page50_sorted": {
+        "refused": "QUERY_UNAVAILABLE",
+        "after_samples": 0
+      },
+      "rows_at_start": 10000,
+      "peak_rss_kib": 166928
+    }
+  },
+  "scoped_tests": {
+    "scope": "tests/test_collection_store_*.py tests/test_collection_query_*.py tests/test_query_engine_*.py tests/test_record_product_e2e.py",
+    "passed": 895,
+    "failed": 1,
+    "skipped": 0,
+    "errors": 0,
+    "failing_node_ids": [
+      "tests/test_collection_store_runtime.py::test_unavailable_head_does_not_kill_renewer_or_report_null"
+    ],
+    "note": "the one failure is a 2 s Event.wait timing assertion that failed under a 3-slot loaded machine (775 s run); the same node id passed alone in 3 s on rerun"
+  }
+}

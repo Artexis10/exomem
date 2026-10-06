@@ -38,7 +38,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -72,6 +72,8 @@ TABLES = (
     "query_cursor_state",
     "version_identity",
     "typed_encoding_mappings",
+    "import_jobs",
+    "import_rejections",
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
@@ -615,6 +617,41 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_7(conn: sqlite3.Connection) -> None:
+    """Add durable preserved-source import jobs and their rejected positions.
+
+    A job's checkpoint, counters and rejections change only inside the batch
+    transaction that commits its rows (``importer``); the binding JSON holds
+    identifiers and hashes, never credential material. ``identity`` is the
+    digest of what an identical start binds, so a retry finds its job.
+    """
+    conn.execute("""CREATE TABLE import_jobs(
+      job_id TEXT PRIMARY KEY,
+      identity TEXT NOT NULL,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+      state TEXT NOT NULL CHECK (state IN ('running', 'partial', 'failed', 'complete')),
+      reason TEXT CHECK (reason IN ('authority_lost', 'time_cap', 'cancelled', 'invalid_row',
+                                    'batch_error')),
+      checkpoint_json TEXT NOT NULL CHECK (json_valid(checkpoint_json)),
+      progress_json TEXT NOT NULL CHECK (json_valid(progress_json)),
+      window_started INTEGER NOT NULL,
+      window_expires INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("CREATE INDEX import_jobs_by_state ON import_jobs(state, created_at)")
+    conn.execute("CREATE INDEX import_jobs_by_identity ON import_jobs(identity, created_at)")
+    conn.execute("""CREATE TABLE import_rejections(
+      job_id TEXT NOT NULL REFERENCES import_jobs(job_id),
+      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+      byte_offset INTEGER NOT NULL CHECK (byte_offset >= 0),
+      code TEXT NOT NULL,
+      at TEXT NOT NULL,
+      PRIMARY KEY (job_id, ordinal)
+    ) STRICT, WITHOUT ROWID""")
+
+
+def _migrate_to_8(conn: sqlite3.Connection) -> None:
     """Admit declared exact rollups: versioned definitions, buckets and extreme members.
 
     A definition is building until bounded writer-owned backfill covers every
@@ -650,7 +687,7 @@ def _migrate_to_7(conn: sqlite3.Connection) -> None:
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5,
-    6: _migrate_to_6, 7: _migrate_to_7,
+    6: _migrate_to_6, 7: _migrate_to_7, 8: _migrate_to_8,
 }
 
 
