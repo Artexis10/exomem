@@ -4055,3 +4055,130 @@ def test_the_signature_moves_on_a_real_enqueue(vault) -> None:
         for entry, other in zip(before, after, strict=True)
         if entry is not None and other is not None
     ), "no st_mtime_ns component moved; the signature is relying on size alone"
+
+
+# --- The forced re-check backs off while the supervisor stays idle ---
+#
+# On a 0.108.0 cloud cell the forced re-check still opened the job store
+# through the full SQLite owner path every 5 s, forever: 63 of 954 profile
+# samples on an idle cell. While nothing changes it now doubles from 5 s up to
+# 60 s. Any work, any store change and any in-process enqueue put it back at
+# 5 s. These tests run the supervisor on a clock 100 times faster than real
+# time, so two real seconds are 200 s of idle at the shipped intervals.
+
+
+def _hundredfold_clock():
+    start = time.monotonic()
+    return lambda: start + (time.monotonic() - start) * 100.0
+
+
+def _record_store_checks(monkeypatch: pytest.MonkeyPatch, worker) -> list[float]:
+    """Record, on the supervisor's clock, every time it opens the store to ask for work."""
+    checks: list[float] = []
+    original = worker._store.needs_worker
+
+    def needs_worker():
+        checks.append(media_worker._clock())
+        return original()
+
+    monkeypatch.setattr(worker._store, "needs_worker", needs_worker)
+    return checks
+
+
+def test_an_idle_supervisor_backs_off_its_forced_store_recheck(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(media_worker, "_clock", _hundredfold_clock())
+    checks = _record_store_checks(monkeypatch, worker)
+
+    _run_supervisor_for(worker, 2.0)
+
+    gaps = [later - earlier for earlier, later in zip(checks, checks[1:], strict=False)]
+    # A fixed 5 s re-check opens the store about 40 times in 200 s of idle;
+    # doubling to a 60 s ceiling opens it 7 times (0, 5, 15, 35, 75, 135, 195).
+    assert len(checks) <= 10, f"idle store opens at {checks}"
+    assert gaps[-1] >= 40.0, f"the re-check interval did not grow: {gaps}"
+    # The ceiling keeps it a backstop: a write the signature misses still starts
+    # a worker within about a minute.
+    assert max(gaps) <= 70.0, f"the re-check outgrew its ceiling: {gaps}"
+
+
+def test_a_store_change_puts_the_backed_off_recheck_back_at_five_seconds(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(media_worker, "_clock", _hundredfold_clock())
+    checks = _record_store_checks(monkeypatch, worker)
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # 150 s of idle: the re-check has backed off to 60 s.
+        time.sleep(1.5)
+        # Another process writes the store without creating work for this one.
+        changed_at = media_worker._clock()
+        os.utime(worker._store.path)
+        # 30 s more: one re-check at the floor would land, a backed-off one not.
+        time.sleep(0.3)
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    after_change = [check for check in checks if check >= changed_at]
+    assert len(after_change) >= 3, (
+        f"after the store changed at {changed_at:.1f}s the store was checked at "
+        f"{after_change}; the re-check stayed backed off"
+    )
+
+
+def test_an_in_process_enqueue_after_a_long_idle_still_starts_promptly(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wake alone must start the job once the re-check has backed off.
+
+    The signature is frozen, as when the enqueue's write lands inside the
+    filesystem's mtime tick of the signature taken after an idle check. Before
+    the back-off the 5 s backstop covered that case; at a 60 s re-check only
+    the wake can.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: ("frozen",))
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    launched = threading.Event()
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(media_worker, "_clock", _hundredfold_clock())
+    checks = _record_store_checks(monkeypatch, worker)
+    result = _preserve_media_stub(vault, filename="after-long-idle.mp3")
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # Wait for the re-check at 135 s; the next one is due at 195 s.
+        deadline = time.monotonic() + 5.0
+        while len(checks) < 6 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert len(checks) >= 6, f"the supervisor never backed off: {checks}"
+        worker.enqueue(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+        # 0.3 real seconds are 30 s here: half the backed-off interval.
+        assert launched.wait(timeout=0.3), (
+            "an in-process enqueue waited for the backed-off re-check instead of its wake"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()

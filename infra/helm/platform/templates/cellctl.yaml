@@ -1,5 +1,11 @@
 {{- if .Values.cellctl.enabled }}
 {{- $shared := .Values.cellctl.sharedWorker }}
+{{- $storage := include "exomem.cellStorage" . | fromJson }}
+{{- $local := .Values.cellStorage.local.enabled }}
+{{- $cellClasses := list (printf "'%s'" .Values.cloudStorage.className) }}
+{{- if $local }}
+{{- $cellClasses = append $cellClasses (printf "'%s'" $storage.local.class_name) }}
+{{- end }}
 {{- if ne $shared.mode "off" }}
 {{- range $shared.cell_ids }}
 {{- if has . $.Values.cellctl.dedicatedCellIds }}
@@ -92,6 +98,26 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  {{- if $local }}
+  # move-cloud-cells-to-local-storage D4: relocation sets a cell's old volume
+  # to Retain before it deletes the claim; admission confines the patch to
+  # that one field.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["patch"]
+  # D3: an hourly backup's snapshot. D4: the deletion proof reads what
+  # remains of a deleted cell's snapshots.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+  # D6: pool size is the published free capacity plus the node's volumes.
+  - apiGroups: ["topolvm.io"]
+    resources: ["logicalvolumes"]
+    verbs: ["list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -101,6 +127,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: cellctl
+subjects:
+  - kind: ServiceAccount
+    name: cellctl
+    namespace: {{ .Values.cellctl.namespace }}
+---
+# Task 2.8: the backup-age alert reuses the platform's alert-delivery Secret.
+# cellctl may read that one Secret, in its own namespace, and nothing else there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cellctl-alert-delivery
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.observability.alertDeliverySecretName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cellctl-alert-delivery
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cellctl-alert-delivery
 subjects:
   - kind: ServiceAccount
     name: cellctl
@@ -176,6 +229,16 @@ spec:
               value: {{ .Values.cells.backupWindow | quote }}
             - name: CELLCTL_BACKUP_CONCURRENCY
               value: {{ .Values.cells.backupConcurrency | quote }}
+            # Task 2.8: the backup-age alert goes to the platform's existing
+            # alert receiver; the Role below lets cellctl read this one Secret.
+            - name: CELLCTL_ALERT_DELIVERY_SECRET
+              value: {{ printf "%s/%s/%s" .Release.Namespace .Values.observability.alertDeliverySecretName .Values.observability.alertDeliverySecretKey | quote }}
+            {{- if $local }}
+            # move-cloud-cells-to-local-storage: the classes a cell volume may
+            # be on and the one new claims take (_cell-storage.tpl).
+            - name: CELLCTL_CELL_STORAGE
+              value: {{ $storage | toJson | quote }}
+            {{- end }}
             {{- if .Values.artifactBroker.enabled }}
             - name: CELLCTL_ARTIFACT_BROKER_URL
               value: {{ .Values.artifactBroker.endpoint | quote }}
@@ -262,21 +325,27 @@ spec:
           # tighter bound (not pinned by the design) so a pod that has
           # stalled -- but not yet past the liveness threshold -- drops out
           # of Ready without yet triggering a restart.
+          # Each exec probe starts an interpreter. `-I -S` skips site-packages
+          # and the environment: about 8 ms of CPU a probe instead of 24 ms.
           readinessProbe:
             exec:
               command:
                 - python3
+                - -I
+                - -S
                 - -c
                 - "import os,sys,time; p='/tmp/cellctl-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 30 else 1)"
-            periodSeconds: 10
+            periodSeconds: 30
             failureThreshold: 3
           livenessProbe:
             exec:
               command:
                 - python3
+                - -I
+                - -S
                 - -c
                 - "import os,sys,time; p='/tmp/cellctl-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 120 else 1)"
-            periodSeconds: 15
+            periodSeconds: 30
             failureThreshold: 3
             initialDelaySeconds: 30
           resources:
@@ -359,7 +428,7 @@ spec:
       # a subresource (e.g. statefulsets/status) is confined too. Kubernetes
       # rejects "*/*" listed alongside any other resource, and "*" alone would
       # miss subresources.
-      - apiGroups: ["", "apps", "batch", "networking.k8s.io"]
+      - apiGroups: ["", "apps", "batch", "networking.k8s.io"{{ if $local }}, "snapshot.storage.k8s.io"{{ end }}]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["*/*"]
@@ -389,8 +458,10 @@ spec:
         variables.target.spec
   validations:
     # 1. Every write cellctl makes must land inside a namespace named
-    # exo-cell-<16 lowercase base32> (D4, D5's namespace_name convention).
+    # exo-cell-<16 lowercase base32> (D4, D5's namespace_name convention),
+    # but for the cluster-scoped Retain patch rule 11 confines.
     - expression: >-
+        {{ if $local }}request.resource.resource == 'persistentvolumes' || {{ end -}}
         variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$')
       message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>.
     # 2. A namespace cellctl creates or updates must carry the restricted
@@ -500,9 +571,19 @@ spec:
       message: cellctl may create or update a Service only as ClusterIP with no externalIPs.
     # 6. cellctl deletes only namespaces (D10) and hold Jobs (D8). Every
     # other object, a NetworkPolicy above all, goes only with its namespace.
+    # With local storage, an hourly backup's clone and snapshot go after it
+    # (D3), and relocation deletes the cell's claim once its volume is
+    # retained (D4, the exomem-cellctl-retained-delete policy).
     - expression: >-
         request.operation != 'DELETE' || request.resource.resource in ['namespaces', 'jobs']
-      message: cellctl may delete only a cell namespace or a Job.
+        {{- if $local }} ||
+        (request.resource.resource == 'persistentvolumeclaims' &&
+          (variables.target.metadata.name == 'cell-data' ||
+            variables.target.metadata.name.matches('^cell-clone-[0-9a-f]{10}$'))) ||
+        (request.resource.resource == 'volumesnapshots' &&
+          variables.target.metadata.name.matches('^cell-snapshot-[0-9a-f]{10}$'))
+        {{- end }}
+      message: cellctl may delete only a cell namespace{{ if $local }}, a Job, its claim, or a backup's clone and snapshot{{ else }} or a Job{{ end }}.
     # 7. The Secret is the cell's own Opaque credentials Secret, never a
     # service-account-token Secret the token controller would fill in.
     - expression: >-
@@ -510,17 +591,31 @@ spec:
         (variables.target.metadata.name == 'cell-credentials' &&
           (!has(variables.target.type) || variables.target.type == 'Opaque'))
       message: cellctl may write only the Opaque Secret cell-credentials.
-    # 8. The PVC is the cell's one encrypted volume, provisioned fresh: no
-    # other storage class, no data source and no pre-bound volume.
+    # 8. The PVC is the cell's one volume, provisioned fresh on a configured
+    # cell class: no data source and no pre-bound volume. With local storage,
+    # an hourly backup's clone is the other (D3): on the clone class, from the
+    # same hold's snapshot in the cell's own namespace.
     - expression: >-
         request.resource.resource != 'persistentvolumeclaims' || request.operation == 'DELETE' ||
-        (variables.target.metadata.name == 'cell-data' &&
-          variables.target.spec.storageClassName == 'exomem-cloud-encrypted' &&
-          !has(variables.target.spec.dataSource) && !has(variables.target.spec.dataSourceRef) &&
-          (!has(variables.target.spec.volumeName) ||
+        ((!has(variables.target.spec.volumeName) ||
             (request.operation == 'UPDATE' && has(oldObject.spec.volumeName) &&
-              oldObject.spec.volumeName == variables.target.spec.volumeName)))
-      message: cellctl may write only the PVC cell-data, on exomem-cloud-encrypted, with no data source or pre-bound volume.
+              oldObject.spec.volumeName == variables.target.spec.volumeName)) &&
+          ((variables.target.metadata.name == 'cell-data' &&
+              variables.target.spec.storageClassName in [{{ join ", " $cellClasses }}] &&
+              !has(variables.target.spec.dataSource) && !has(variables.target.spec.dataSourceRef))
+          {{- if $local }} ||
+            (variables.target.metadata.name.matches('^cell-clone-[0-9a-f]{10}$') &&
+              variables.target.spec.storageClassName == '{{ $storage.local.clone_class }}' &&
+              has(variables.target.spec.dataSourceRef) && !has(variables.target.spec.dataSourceRef.namespace) &&
+              variables.target.spec.dataSourceRef.apiGroup == 'snapshot.storage.k8s.io' &&
+              variables.target.spec.dataSourceRef.kind == 'VolumeSnapshot' &&
+              variables.target.spec.dataSourceRef.name == 'cell-snapshot-' + variables.target.metadata.name.substring(11) &&
+              (!has(variables.target.spec.dataSource) ||
+                (variables.target.spec.dataSource.apiGroup == 'snapshot.storage.k8s.io' &&
+                  variables.target.spec.dataSource.kind == 'VolumeSnapshot' &&
+                  variables.target.spec.dataSource.name == variables.target.spec.dataSourceRef.name)))
+          {{- end }}))
+      message: cellctl may write only the PVC cell-data, on a configured cell class with no data source or pre-bound volume{{ if $local }}, or a backup clone of the same hold's snapshot{{ end }}.
     # 9. The ResourceQuota is the cell's own, with one PVC and two pods and
     # no other kind of limit.
     - expression: >-
@@ -529,9 +624,9 @@ spec:
           !has(variables.target.spec.scopes) && !has(variables.target.spec.scopeSelector) &&
           variables.target.spec.hard.all(k, k in ['persistentvolumeclaims', 'requests.storage', 'pods',
             'requests.cpu', 'requests.memory', 'limits.cpu', 'limits.memory']) &&
-          variables.target.spec.hard['persistentvolumeclaims'] == '1' &&
+          variables.target.spec.hard['persistentvolumeclaims'] {{ if $local }}in ['1', '2']{{ else }}== '1'{{ end }} &&
           variables.target.spec.hard['pods'] == '2')
-      message: cellctl may write only the ResourceQuota cell-quota, with one PVC and two pods.
+      message: cellctl may write only the ResourceQuota cell-quota, with {{ if $local }}one PVC, or two for a backup clone,{{ else }}one PVC{{ end }} and two pods.
     # 10. NetworkPolicies are exactly the three cellctl renders (D5, D11),
     # each pinned to its rendered shape, so a policy can never open egress
     # or ingress. The cell id in runtime-ingress's selector is the one the
@@ -616,6 +711,39 @@ spec:
           size(variables.np.egress[1].ports) == 2 &&
           variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
       message: cellctl may write job-egress only as Job egress to TCP 443 outside the excepted ranges, plus kube-dns.
+    {{- if $local }}
+    # 11. move-cloud-cells-to-local-storage D4: cellctl's one PV write sets a
+    # cell volume's reclaim policy to Retain before relocation deletes its
+    # claim. Only on a PV claimed from a cell namespace, and nothing else in
+    # the PV may change.
+    - expression: >-
+        request.resource.resource != 'persistentvolumes' ||
+        (request.operation == 'UPDATE' &&
+          oldObject.spec.?claimRef.?namespace.orValue('').matches('^exo-cell-[a-z2-7]{16}$') &&
+          object.spec.persistentVolumeReclaimPolicy == 'Retain' &&
+          object.spec.?claimRef == oldObject.spec.?claimRef &&
+          object.spec.?capacity == oldObject.spec.?capacity &&
+          object.spec.?csi == oldObject.spec.?csi &&
+          object.spec.?accessModes == oldObject.spec.?accessModes &&
+          object.spec.?mountOptions == oldObject.spec.?mountOptions &&
+          object.spec.?nodeAffinity == oldObject.spec.?nodeAffinity &&
+          object.spec.?storageClassName == oldObject.spec.?storageClassName &&
+          object.spec.?volumeAttributesClassName == oldObject.spec.?volumeAttributesClassName &&
+          object.metadata.?labels == oldObject.metadata.?labels &&
+          object.metadata.?annotations == oldObject.metadata.?annotations &&
+          object.metadata.?finalizers == oldObject.metadata.?finalizers &&
+          object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences)
+      message: cellctl may only set a cell volume's reclaim policy to Retain, and change nothing else in it.
+    # 12. D3: an hourly backup's snapshot is of the cell's own claim, on the
+    # snapshot class, never bound to an existing snapshot's content.
+    - expression: >-
+        request.resource.resource != 'volumesnapshots' || request.operation == 'DELETE' ||
+        (variables.target.metadata.name.matches('^cell-snapshot-[0-9a-f]{10}$') &&
+          variables.target.spec.?volumeSnapshotClassName.orValue('') == '{{ $storage.local.snapshot_class }}' &&
+          variables.target.spec.source.?persistentVolumeClaimName.orValue('') == 'cell-data' &&
+          !has(variables.target.spec.source.volumeSnapshotContentName))
+      message: cellctl may write only a backup snapshot of its cell-data claim, on the cell snapshot class.
+    {{- end }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -681,4 +809,58 @@ spec:
   paramRef:
     name: default-deny
     parameterNotFoundAction: Deny
+{{- if $local }}
+---
+# move-cloud-cells-to-local-storage D4: relocation deletes a cell's claim only
+# after setting its volume to Retain, so the delete never takes the volume
+# with it. The binding takes every PV as a param, and the delete is admitted
+# only when each one claimed by this claim is retained. With no PV at all
+# nothing can be lost, so a missing param allows.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cellctl-retained-delete
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: PersistentVolume
+  matchConstraints:
+    # Params are resolved before matchConditions, so keep the PV listing to
+    # claim deletes in cell namespaces.
+    namespaceSelector:
+      matchExpressions:
+        - key: exomem.io/cloud-cell
+          operator: Exists
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["persistentvolumeclaims"]
+        scope: "Namespaced"
+  matchConditions:
+    - name: cellctl-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Values.cellctl.namespace }}:cellctl'
+    - name: cell-claim
+      expression: request.name == 'cell-data'
+  validations:
+    - expression: >-
+        params.spec.?claimRef.?namespace.orValue('') != request.namespace ||
+        params.spec.?claimRef.?name.orValue('') != request.name ||
+        params.spec.?persistentVolumeReclaimPolicy.orValue('') == 'Retain'
+      message: cellctl may delete a cell's claim only while every volume claimed by it is set to Retain.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cellctl-retained-delete
+spec:
+  policyName: exomem-cellctl-retained-delete
+  validationActions: [Deny]
+  paramRef:
+    selector: {}
+    parameterNotFoundAction: Allow
+{{- end }}
 {{- end }}

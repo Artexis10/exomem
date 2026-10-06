@@ -1,0 +1,266 @@
+{{- if .Values.cellStorage.local.enabled }}
+{{- $local := (include "exomem.cellStorage" . | fromJson).local }}
+# D1: a cell's own volume, on the node the scheduler picks for its pod.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $local.class_name }}
+  labels:
+    app.kubernetes.io/part-of: exomem-cloud
+provisioner: {{ $local.driver }}
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  csi.storage.k8s.io/fstype: ext4
+  {{ $local.driver }}/device-class: {{ $local.device_class }}
+---
+# D3: an hourly backup's clone binds at once, so TopoLVM pins its PV to the
+# source volume's node and the backup Job follows it there with no selector.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $local.clone_class }}
+  labels:
+    app.kubernetes.io/part-of: exomem-cloud
+provisioner: {{ $local.driver }}
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  csi.storage.k8s.io/fstype: ext4
+  {{ $local.driver }}/device-class: {{ $local.device_class }}
+---
+{{- if .Capabilities.APIVersions.Has "snapshot.storage.k8s.io/v1/VolumeSnapshotClass" }}
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: {{ $local.snapshot_class }}
+  labels:
+    app.kubernetes.io/part-of: exomem-cloud
+driver: {{ $local.driver }}
+deletionPolicy: Delete
+---
+{{- end }}
+# D3: k3s bundles neither the snapshot CRDs nor a controller (spike 1.1).
+# Vendored verbatim from external-snapshotter v8.6.0 (LOCAL_STORAGE_PROVENANCE.md).
+{{ .Files.Get "files/external-snapshotter/snapshot.storage.k8s.io_volumesnapshotclasses.yaml" }}
+{{ .Files.Get "files/external-snapshotter/snapshot.storage.k8s.io_volumesnapshotcontents.yaml" }}
+{{ .Files.Get "files/external-snapshotter/snapshot.storage.k8s.io_volumesnapshots.yaml" }}
+---
+# The release's controller RBAC, without the group-snapshot rules: that
+# feature is off by default and nothing here enables it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: snapshot-controller
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-snapshot-controller
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["create", "get", "list", "watch", "update", "delete", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents/status"]
+    verbs: ["patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots/status"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-snapshot-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-snapshot-controller
+subjects:
+  - kind: ServiceAccount
+    name: snapshot-controller
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snapshot-controller-leaderelection
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snapshot-controller-leaderelection
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: snapshot-controller-leaderelection
+subjects:
+  - kind: ServiceAccount
+    name: snapshot-controller
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snapshot-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: snapshot-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: snapshot-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: snapshot-controller
+    spec:
+      serviceAccountName: snapshot-controller
+      # On the server only, for the reason values.yaml gives for the TopoLVM
+      # controller: its token writes every VolumeSnapshot and VolumeSnapshotContent,
+      # and updates every claim, cluster-wide.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: snapshot-controller
+          image: {{ .Values.cellStorage.snapshotController.image | quote }}
+          args:
+            - --v=2
+            - --leader-election=true
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+{{- $nodeAgent := printf "system:serviceaccount:%s:%s-node" .Release.Namespace .Values.topolvm.fullnameOverride }}
+# D1: TopoLVM's node agent runs on every storage agent, and its chart grants it
+# write access to every Node and every LogicalVolume in the cluster. These two
+# policies confine each agent's token to its own node, which the API server
+# binds into the token as the node-name extra.
+# Prevents: one compromised agent deleting another node's LogicalVolume, which
+# makes that node's agent destroy a cell's data, or rewriting another Node's
+# labels, taints or capacity. Costs when it fires wrongly: that agent cannot
+# report capacity or finish a volume, so new and relocated cells wait for an
+# operator; running cells keep serving. The operator pays.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-topolvm-node-volumes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["topolvm.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["logicalvolumes", "logicalvolumes/status"]
+  matchConditions:
+    - name: topolvm-node-agent
+      expression: request.userInfo.username == '{{ $nodeAgent }}'
+  variables:
+    - name: nodeName
+      expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.?extra.orValue({}) &&
+        size(request.userInfo.extra['authentication.kubernetes.io/node-name']) == 1
+        ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''
+  validations:
+    - expression: variables.nodeName != ''
+      message: TopoLVM's node agent writes only with a token bound to its node.
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).spec.nodeName == variables.nodeName &&
+        (request.operation != 'UPDATE' || oldObject.spec.nodeName == variables.nodeName)
+      message: TopoLVM's node agent writes only the LogicalVolumes of its own node.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-topolvm-node-volumes
+spec:
+  policyName: exomem-topolvm-node-volumes
+  validationActions: [Deny]
+---
+# The agent's one Node write: its capacity annotations and TopoLVM's finalizer,
+# on its own Node. Status is not writable through this resource.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-topolvm-node-self
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["nodes"]
+  matchConditions:
+    - name: topolvm-node-agent
+      expression: request.userInfo.username == '{{ $nodeAgent }}'
+  variables:
+    - name: nodeName
+      expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.?extra.orValue({}) &&
+        size(request.userInfo.extra['authentication.kubernetes.io/node-name']) == 1
+        ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''
+    - name: oldAnnotations
+      expression: oldObject.metadata.?annotations.orValue({})
+    - name: newAnnotations
+      expression: object.metadata.?annotations.orValue({})
+  validations:
+    - expression: variables.nodeName != '' && request.name == variables.nodeName
+      message: TopoLVM's node agent writes only its own Node.
+    - expression: >-
+        object.spec == oldObject.spec &&
+        object.metadata.?labels == oldObject.metadata.?labels &&
+        object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences &&
+        variables.newAnnotations.all(key, key.startsWith('capacity.topolvm.io/') ||
+          (key in variables.oldAnnotations && variables.oldAnnotations[key] == variables.newAnnotations[key])) &&
+        variables.oldAnnotations.all(key, key.startsWith('capacity.topolvm.io/') || key in variables.newAnnotations) &&
+        object.metadata.?finalizers.orValue([]).filter(name, name != 'topolvm.io/node') ==
+          oldObject.metadata.?finalizers.orValue([]).filter(name, name != 'topolvm.io/node')
+      message: TopoLVM's node agent changes only its Node's capacity.topolvm.io/ annotations and the topolvm.io/node finalizer.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-topolvm-node-self
+spec:
+  policyName: exomem-topolvm-node-self
+  validationActions: [Deny]
+{{- end }}

@@ -42,7 +42,7 @@
 ## 6. Pair proposers and projections (slice 1)
 
 - [x] 6.1 A disposable projection file, `<vault state dir>/sensing/projection.sqlite`, kept apart from `dreamer.sqlite` so sensed rows never count against its size cap. It holds:
-  - `pages`: the seen signature, knowledge date, lifecycle, supersession partners, candidate count and capped flag;
+  - `pages`: the seen signature, knowledge date, lifecycle and supersession partners (the candidate count and capped flag went with the per-page cap in 8.3);
   - `units`: each page's in-scope units with text, hash and stored vector;
   - `links`: each page's normalised authored link targets;
   - `pairs`: every proposed pair with proposer, order key, state, verdict, priority, selection and queue flags.
@@ -51,9 +51,9 @@
 - [x] 6.2 Proposers:
   - structural (a graph edge either way);
   - temporal same-subject (at least two shared authored link targets, and different knowledge dates);
-  - cosine (stored vectors of the ranked encoder whose source hash matches, θ = 0.72 keyed by the exact encoder fingerprint, the matrix bounded at 16,384 units per tick).
+  - cosine (stored vectors of the ranked encoder whose source hash matches, θ = 0.72 keyed by the exact encoder fingerprint, 16,384 vectors held in memory; 8.3 replaced the per-tick matrix bound with one shared pass per tick).
 
-  Pairs are cross-page only, with no identical texts, capped at 128 per page in a fixed order, and a binding cap marks the page capped. Test per-pair monotonicity: a third page never adds or removes a pair.
+  Pairs are cross-page only, with no identical texts, and capped in a fixed order. Test per-pair monotonicity: a third page never adds or removes a pair. Task 8.3 replaced the cap of 128 per page, which marked a binding page capped, with 128 per page pair, and replaced the cosine matrix bound with a memory bound that never changes what is proposed.
 - [x] 6.3 Projection per pair: consumed readings become edges (state, verdict, direction, `p`, instrument, reading id, fingerprint over the inputs and verdict); `instruments_disagree` across active instruments; stale and migrating pairs are queued. Readings the worker appended between ticks are ingested at tick start.
 - [x] 6.4 Per-request projections over released edges: contradiction components (bounded at 32 pages) and refinement and supersession chains in time order (bounded at 8).
 - [x] 6.5 Replay test: rebuilding a fresh projection from the same ledger yields byte-identical edges, fingerprints and served statuses, independent of append order and `sensed_at`.
@@ -72,10 +72,14 @@
 ## 8. Egress (slice 1)
 
 - [x] 8.1 Twin tests under a governed policy with a restricted principal. A withheld contradicting page, a withheld refining page, a withheld page bridging a contradiction component and a withheld chain member each give byte-identical read and activation output to the absent twin.
-- [x] 8.2 Under a non-empty governed policy, sensed items are served to owner-bound principals only (`working_set.band_audience_allowed`), because the per-page cap and the cosine bound count withheld pages. A restricted caller gets no sensed field, and an owner gets its items. Pinned by the review twin, in which a withheld page pushes a visible hub over the cap and a restricted caller's read is byte-identical to the absent twin. A capped page's items still reach an owner. At request time, an edge whose page signature or instrument key is not live is dropped with `evidence_complete: false` (with zero counts when nothing survives), a supersession partner that is not live leaves the chain, and a read of a snapshot the projection did not model carries no status.
-- [ ] 8.3 Before slice 5: replace the per-page cap with a per-page-pair cap, whose selection depends only on the pair's own two pages, and bound the cosine proposer without counting withheld units. That restores D5's two-page property for selection. Then serve sensed items per caller again, and turn the owner-only twins into per-caller twins.
+- [x] 8.2 Slice 1 served sensed items to owner-bound principals only under a non-empty governed policy, because the per-page cap and the cosine bound counted withheld pages. Task 8.3 superseded that: items are served per caller, and the review twin is a per-caller test. At request time, an edge whose page signature or instrument key is not live is dropped with `evidence_complete: false` (with zero counts when nothing survives), a supersession partner that is not live leaves the chain, and a read of a snapshot the projection did not model carries no status.
+- [x] 8.3 Before slice 5: replace the per-page cap with a per-page-pair cap, whose selection depends only on the pair's own two pages, and bound the cosine proposer without counting withheld units. That restores D5's two-page property for selection. Then serve sensed items per caller again, and turn the owner-only twins into per-caller twins.
+  - Built: `PAIR_CAP = 128`, ranked within each page pair. The cosine bound now limits memory only: over 16,384 stored vectors, one block pass per tick is shared by that tick's pages, and hits are judged on the exact cosine. The owner-only gate is removed, and requests still route through `egress.release_walk_filter`. Projection schema 3 is rebuilt from the ledger, and a projection rebuilt from empty serves nothing until it is whole.
+  - Tests: `test_a_third_page_never_moves_a_pairs_selection`, `test_over_the_cache_bound_the_same_cosine_pairs_are_proposed`, `test_one_pass_over_the_vectors_serves_every_page_of_a_tick`, `test_a_withheld_page_cannot_decide_a_visible_pages_selection`, `test_a_rebuilt_projection_serves_nothing_until_every_page_is_projected`, `test_a_budget_spent_by_the_pass_still_applies_the_pages_it_was_read_for`, `test_pages_in_one_tick_find_the_cosine_pairs_separate_ticks_find`, and the contradicting, refining and bridge twins served per caller.
 - [ ] 8.4 Slice 3: close-memory-loop `design.md:212` condition (a). Build a fixture on the sensed family's real pairs showing the label improves disposition at a false-positive rate no worse than the family's structural evidence.
 - [x] 8.5 Close-memory-loop `design.md:212` condition (b): no read regression in the write-burst probes. `tests/test_sensed_write_burst_probe.py` measures `read_memory` and `activate_context` on a synthetic vault under a write burst, with sensing off and on, interleaved. The numbers are recorded under "Measured" in `design.md`.
+- [ ] 8.6 Before sensing is on by default, or slice 3 surfaces status widely: bound a hub's served-status cost ("Open items" in `design.md`). Filter neutral verdicts in the query and keep each partner's dropped count. Make any truncation count released edges only and report `evidence_complete: false`.
+- [ ] 8.7 Before sensing is enabled on any install, and before slice 5's ledger restore: close the three rebuild windows under "Open items" in `design.md`. Hold the sensed tick and its view while the dreamer reseeds. Write the `seeding` flag atomically with the schema row. Gate the view during a genesis-triggered reprojection.
 
 ## 9. Later slices (specified here, built later)
 
@@ -95,6 +99,7 @@
 
 - [x] 10.1 Scoped suites green: dreamer, upkeep, claims, audit, egress twins and the new sensing tests.
 - [x] 10.2 `uvx ruff check --select F src tests`, `validate-public-artifacts --repository` and `openspec validate --all --strict` pass.
-- [ ] 10.3 An independent review of the slice-1 diff. The first round's findings (H1, M2, M3, L4–L9) are corrected on this branch, and its informational items are recorded under "Open items" in `design.md`. A re-review closes this task.
+- [x] 10.3 An independent review of the slice-1 diff. The first round's findings (H1, M2, M3, L4–L9) are corrected on this branch, and its informational items are recorded under "Open items" in `design.md`. A re-review closes this task.
+  - Closed by the independent re-review of task 8.3 (two rounds, final verdict APPROVE). Round 1 verified each first-round finding in code and by test. The recheck verified the 8.3 corrections and recorded three latent rebuild windows as Open items (task 8.7).
 - [x] 10.4 Record known misses in `design.md` from the real-pin fixture run.
 - [x] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.

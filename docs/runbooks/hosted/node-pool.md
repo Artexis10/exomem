@@ -125,11 +125,15 @@ manual host reservation that can drift from that declaration.
 ## Remove a node
 
 Run the removal playbook first, while the entry and its inventory host still
-exist. It refuses while any cell holds a maintenance hold, and when the cluster's
-cell volumes would not fit the remaining nodes' slots (add a node first). It
-also refuses while any desired cell template selects the target reservation,
-including a stopped cell; relocate and clear that selection first. It
-cordons, drains without force, stops K3s and every container, deletes the Node,
+exist. It refuses while a cell whose volume is on the target holds a
+maintenance hold, and when the cluster's cell volumes would not fit the
+remaining nodes' slots (add a node first). It also refuses while any desired
+cell template selects the target reservation, including a stopped cell;
+relocate and clear that selection first. On an agent with local storage, it
+refuses while a cell's live volume is still on the target; relocate those cells
+first ([node loss](../cloud-node-loss.md)). Until the playbook relocates them
+itself, that means stopping the agent and relocating as for a lost node, which
+loses each cell's writes since its last hourly backup. It cordons, drains without force, stops K3s and every container, deletes the Node,
 and revokes the node's inter-node firewall rules. Remove nodes when no
 invitations are pending: rows admitted during the drain are not yet visible as
 volumes.
@@ -152,6 +156,9 @@ infra/scripts/plan.sh foundation /run/user/$UID/foundation-agents.tfplan
 infra/scripts/apply_saved_plan.sh foundation /run/user/$UID/foundation-agents.tfplan \
   --allow-destructive 'module.k3s_agents.hcloud_server.agent["01"]'
 ```
+
+A removed agent with a `cells` volume group ends with that device erased
+([erase a removed agent's cells device](../cloud-node-loss.md#erase-a-removed-agents-cells-device)).
 
 Regenerate the inventory afterwards. A removed host carries
 `/etc/rancher/k3s/removed`, and `site.yml` skips it, with a warning, rather than

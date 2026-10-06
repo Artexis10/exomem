@@ -2633,8 +2633,13 @@ def _cell_init_main(argv: list[str]) -> int:
         # home resolve there -- never for a bare local/dev invocation, which
         # would otherwise chmod a developer's actual home directory to 0700.
         host_root = cell_init.account_home() if cloud_cell.cloud_mode_enabled() else None
-        result = cell_init.run_cell_init(vault, host_root=host_root)
+        # Design D5: cellctl puts this key in the cell's Secret once the cell
+        # has a recorded backup; the init container reads it optionally.
+        backed_up = os.environ.get("EXOMEM_CLOUD_CELL_BACKED_UP") == "true"
+        result = cell_init.run_cell_init(vault, host_root=host_root, backed_up=backed_up)
     except cell_init.CellInitError as error:
+        if error.code == cell_init.EMPTY_VOLUME_REFUSED:
+            cell_init.report_refusal(error.code)
         _cell_init_failure_line(error.code, error.step)
         return 1
     except Exception:  # noqa: BLE001 - fail closed: no traceback, no absolute paths

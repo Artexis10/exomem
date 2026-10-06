@@ -15,6 +15,7 @@ deny contains message if {
   some volume in pod_spec.volumes
   volume.hostPath
   not approved_hcloud_csi_node
+  not approved_topolvm_node
   message := sprintf("%s/%s uses hostPath", [input.kind, input.metadata.name])
 }
 
@@ -40,17 +41,96 @@ deny contains message if {
   message := sprintf("%s/%s uses an unexpected CSI hostPath", [input.kind, input.metadata.name])
 }
 
+# Every container and init container. Charts render an absent list as `null`, which
+# array.concat rejects; an evaluation error there would silently skip the checks below.
+pod_containers contains container if {
+  some container in pod_spec.containers
+}
+
+pod_containers contains container if {
+  some container in pod_spec.initContainers
+}
+
+# TopoLVM's two privileged DaemonSets, named exactly as the platform chart's `topolvm`
+# subchart renders them: the node plugin (mounts volumes for kubelet) and the managed
+# lvmd (runs the host's LVM). Each entry names the one container that may be privileged
+# and the only hostPaths the DaemonSet may mount. Nothing else is exempted: another
+# workload, another container of these DaemonSets, or another path is still denied.
+approved_topolvm_chart := "topolvm-17.2.0"
+
+# The one image every container of those DaemonSets may run: the reference
+# the platform chart pins in values.yaml (`topolvm.image.reference`).
+approved_topolvm_image := "ghcr.io/topolvm/topolvm-with-sidecar:0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc"
+
+approved_topolvm_daemonsets := {
+  "exomem-platform-topolvm-node": {
+    "container": "topolvm-node",
+    "paths": {
+      "/dev",
+      "/run/topolvm",
+      "/var/lib/kubelet/plugins_registry/",
+      "/var/lib/kubelet/plugins/topolvm.io/node",
+      "/var/lib/kubelet/plugins/kubernetes.io/csi",
+      "/var/lib/kubelet/pods/",
+    },
+  },
+  "exomem-platform-topolvm-lvmd-0": {
+    "container": "lvmd",
+    "paths": {"/dev", "/run/topolvm"},
+  },
+}
+
+approved_topolvm_node if {
+  input.kind == "DaemonSet"
+  input.metadata.namespace == "exomem-platform"
+  input.metadata.labels["helm.sh/chart"] == approved_topolvm_chart
+  input.metadata.name in object.keys(approved_topolvm_daemonsets)
+}
+
+approved_topolvm_privileged(container) if {
+  approved_topolvm_node
+  container.name == approved_topolvm_daemonsets[input.metadata.name].container
+  container.image == approved_topolvm_image
+}
+
+# Every container of the two exempted DaemonSets, its sidecars and init
+# containers included, runs the pinned image: they share the host's devices.
 deny contains message if {
-  workload
-  some container in array.concat(object.get(pod_spec, "initContainers", []), pod_spec.containers)
-  not contains(container.image, "@sha256:")
-  message := sprintf("%s/%s uses a mutable image", [input.kind, input.metadata.name])
+  approved_topolvm_node
+  some container in pod_containers
+  container.image != approved_topolvm_image
+  message := sprintf("%s/%s runs a container on an image other than the pinned TopoLVM image", [input.kind, input.metadata.name])
+}
+
+deny contains message if {
+  approved_topolvm_node
+  some volume in pod_spec.volumes
+  volume.hostPath
+  not volume.hostPath.path in approved_topolvm_daemonsets[input.metadata.name].paths
+  message := sprintf("%s/%s uses an unexpected TopoLVM hostPath", [input.kind, input.metadata.name])
 }
 
 deny contains message if {
   workload
-  some container in array.concat(object.get(pod_spec, "initContainers", []), pod_spec.containers)
-  object.get(container.securityContext, "privileged", false)
+  some container in pod_containers
+  not contains(container.image, "@sha256:")
+  message := sprintf("%s/%s uses a mutable image", [input.kind, input.metadata.name])
+}
+
+# The hcloud CSI node plugin's driver container mounts volumes for kubelet and must be
+# privileged. No other container of that DaemonSet, and no other workload, is exempted.
+approved_hcloud_csi_privileged(container) if {
+  approved_hcloud_csi_node
+  container.name == "hcloud-csi-driver"
+  startswith(container.image, "docker.io/hetznercloud/hcloud-csi-driver:")
+}
+
+deny contains message if {
+  workload
+  some container in pod_containers
+  object.get(container, ["securityContext", "privileged"], false)
+  not approved_hcloud_csi_privileged(container)
+  not approved_topolvm_privileged(container)
   message := sprintf("%s/%s uses a privileged container", [input.kind, input.metadata.name])
 }
 

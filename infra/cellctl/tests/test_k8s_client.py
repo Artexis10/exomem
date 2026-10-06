@@ -472,6 +472,22 @@ def test_the_isolation_self_check_requires_a_param_ref_to_default_deny_in_the_re
     assert present(NS(**{**good, "name": None, "selector": NS(match_labels={})})) is False
 
 
+def test_the_retained_delete_self_check_requires_a_param_ref_over_every_persistent_volume() -> None:
+    # A binding narrowed to some PVs would let cellctl delete a claim whose
+    # volume, outside the selector, is still set to Delete.
+    def present(param_ref) -> bool:
+        client = ClusterClient.__new__(ClusterClient)
+        client._admission = _Admission(policy_name="guard", actions=["Deny"], param_ref=param_ref)
+        return client.admission_policy_present("guard", "guard", param_selects_all=True)
+
+    every = dict(name=None, namespace=None, selector=NS(match_labels=None, match_expressions=None),
+                 parameter_not_found_action="Allow")
+    assert present(NS(**every)) is True
+    assert present(None) is False
+    assert present(NS(**{**every, "selector": NS(match_labels={"exomem.io/cell": "x"}, match_expressions=None)})) is False
+    assert present(NS(**{**every, "name": "pv-one", "selector": None})) is False
+
+
 @pytest.mark.parametrize("labels,taints", [
     ({"exomem.io/dedicated-cell": "aaaaaaaaaaaaaaaa"}, []),
     ({}, [NS(key="exomem.io/dedicated-cell", value="aaaaaaaaaaaaaaaa", effect="NoSchedule")]),

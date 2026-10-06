@@ -129,6 +129,34 @@ def build(root: Path, *, with_denial: bool = True, with_winter: bool = True) -> 
     return vault
 
 
+HUB = f"{KB}/Notes/Insights/hub.md"
+LATER = f"{KB}/Notes/Insights/later.md"
+ASIDE = f"{KB}/Notes/Insights/w.md"
+HUB_REFINES = {("Hub fact 0 holds, most of all in winter.", "Hub fact 0 holds."): "refines"}
+
+
+def hub_vault(root: Path, *, with_page: bool) -> Path:
+    """The slice-1 reviewer's twin: a 12-unit hub, a 10-unit later note linking
+    it (120 pairs, one of them a refinement), and a 1-unit aside that links only
+    the hub. The aside's 12 pairs took the hub to 132, past the old per-page cap
+    of 128."""
+    vault = root / "vault"
+    hub_units = "".join(f"- [finding] Hub fact {i} holds.\n" for i in range(1, 12))
+    fx.write(vault, HUB, note("Hub", "2026-01-01", "Hub fact 0 holds.", extra=hub_units))
+    later_units = "".join(f"- [finding] Later point {i} stands.\n" for i in range(1, 10))
+    fx.write(vault, LATER, note("Later", "2026-02-01", "Hub fact 0 holds, most of all in winter.",
+                                links="[[Notes/Insights/hub]]", extra=later_units))
+    if with_page:
+        fx.write(vault, ASIDE, aside())
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    return vault
+
+
+def aside() -> str:
+    return note("W", "2026-03-01", "A withheld aside.", links="[[Notes/Insights/hub]]")
+
+
 def enable(monkeypatch, *identities: sensing.InstrumentIdentity, vectors=None) -> None:
     """Sensing on, with stub instruments active and stored vectors from `vectors`."""
     monkeypatch.setenv("EXOMEM_SENSING", "on")
