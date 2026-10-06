@@ -440,3 +440,23 @@ def test_a_withheld_conclusion_takes_no_conclusion_page_slot(vault: Path) -> Non
     assert restricted == clean
     read = [entry["ref"] for entry in (*clean["units"], *clean["pointers"])]
     assert any(ref.endswith("zz-ruling-2.md#z-2") for ref in read)
+
+
+def test_a_unit_withheld_at_a_notice_level_is_still_marked(vault: Path) -> None:
+    """At a notice level the caller may know that a section lost something,
+    so a unit linking a page released only at that level is removed and the
+    units section is marked `withheld`, as for any other notice-level item."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=1)
+    plain = "- [failure] The staging replica migration stalled twice last week. ^r-plain"
+    naming = (
+        "- [failure] The migration stalled on the staging replica last week "
+        "near [[Secret cluster]]. ^r-secret"
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{plain}\n{naming}"))
+
+    restricted = _ask(vault, TURN)
+
+    assert [unit["ref"][-8:] for unit in restricted["units"]] == ["#r-plain"]
+    assert {"role": "units", "reason": "withheld"} in restricted["missing"]
