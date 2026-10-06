@@ -282,10 +282,11 @@ upkeep and adoption excerpts, entity ledes and outbound links use it. Fields
 built once for every caller withhold for everyone: graph node and edge text,
 titles and metadata (at emission, so a stored graph needs no rebuild), find
 units (a unit overlapping a withheld span is dropped), category excerpts and
-activation's ranking text. The provenance report and the inbound-link index
-drop each carrier's characters and keep its line breaks: a carrier is never a
-provenance tag or a link. Semantic units keep the code exemption, so the write
-side keeps code examples literal. Reading over-hides
+activation's ranking text. The provenance report, the inbound-link index and
+the activation index's link edges drop each carrier's characters and keep its
+line breaks: a carrier is never a provenance tag or a link, so a carried page
+never lists a person only its carrier links. Semantic units keep the code
+exemption, so the write side keeps code examples literal. Reading over-hides
 a literal that HTML would not treat as a comment, which costs nothing; writing
 accepts exactly one designated block and refuses anything else (malformed,
 unterminated or more than one) with a typed `ORIGIN_METADATA_INVALID`. Origin

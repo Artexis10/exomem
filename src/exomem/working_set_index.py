@@ -1079,7 +1079,7 @@ def _walk_page_entries(
     caller that has not already loaded one this build) loads it fresh for
     this one vault — a cheap, memoised read, never a second vault walk.
     """
-    from . import activation_conventions, recall_policy
+    from . import activation_conventions, provenance, recall_policy
 
     if conventions is None:
         conventions = activation_conventions.load_conventions(Path(vault_root)).conventions
@@ -1117,10 +1117,12 @@ def _walk_page_entries(
             bucket = names.setdefault(key, [])
             if rel not in bucket:
                 bucket.append(rel)
+        # A carrier is attribution, not a link (`provenance.without_carriers`),
+        # exactly as in the inbound-link index: its links are never an edge.
         links = tuple(
             dict.fromkeys(
                 normalize(match)
-                for match in _WIKILINK.findall(page.body)
+                for match in _WIKILINK.findall(provenance.without_carriers(page.body))
                 + list(_strings(frontmatter.get("relations")))
                 + list(_strings(frontmatter.get("links")))
                 if normalize(match)
