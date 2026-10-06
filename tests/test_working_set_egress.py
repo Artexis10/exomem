@@ -3610,27 +3610,35 @@ def test_used_chars_drops_with_the_entries_the_guard_removed(vault: Path) -> Non
 
     `used_chars` is the caller's account of what it was charged for. The guard
     removes entries AFTER the compiler budgeted them, so a packet that loses
-    half its block to a policy must not still report paying for it — the
-    caller's own ceiling arithmetic is built on this number.
+    a recent entry, a unit, a pointer or a state line to a policy must not
+    still report paying for it — the caller's own ceiling arithmetic is built
+    on this number, and the leftover charge would measure the withheld entry.
     """
+
+    def charged(packet: Mapping[str, Any]) -> int:
+        return (
+            sum(len(e["title"]) + len(e["statement"]) for e in packet["recent_context"])
+            + sum(len(unit["text"]) for unit in packet["units"])
+            + sum(len(p["title"]) + len(p.get("why") or "") for p in packet["pointers"])
+            + sum(len(state["statement"]) for state in packet["current_state"])
+        )
+
     write_scope(vault)
     write_rule(vault, ceiling=0)
     hidden = _recent_entry(RESTRICTED_PATH, title="Hidden recent page", statement="state: hidden")
     shown = _recent_entry(OPEN_PATH, title="Open recent page", statement="state: open")
     packet = _recent_packet([hidden, shown])
-    packet["budget"] = {
-        "limit_chars": 4000,
-        "used_chars": sum(
-            len(entry["title"]) + len(entry["statement"]) for entry in (hidden, shown)
-        ),
-    }
+    packet["budget"] = {"limit_chars": 4000, "used_chars": charged(packet)}
 
     with request_scope(_external()):
         guarded = egress.guard_working_set(vault, packet, _release())
 
     assert guarded is not None
     assert [entry["path"] for entry in guarded["recent_context"]] == [OPEN_PATH]
-    assert guarded["budget"]["used_chars"] == len(shown["title"]) + len(shown["statement"])
+    assert [unit["ref"] for unit in guarded["units"]] == [UNIT_REF_OPEN, UNIT_REF_WIKILINK]
+    assert [pointer["ref"] for pointer in guarded["pointers"]] == [OPEN_PATH]
+    assert [state["anchor"] for state in guarded["current_state"]] == [OPEN_PATH]
+    assert guarded["budget"]["used_chars"] == charged(guarded)
 
 
 def test_used_chars_is_untouched_when_the_guard_removes_nothing(vault: Path) -> None:
@@ -3641,9 +3649,10 @@ def test_used_chars_is_untouched_when_the_guard_removes_nothing(vault: Path) -> 
     packet["budget"] = {"limit_chars": 4000, "used_chars": 1234}
 
     with request_scope(_external()):
-        guarded = egress.guard_working_set(vault, packet, _release())
+        guarded = egress.guard_working_set(vault, packet, _release(withheld=()))
 
     assert guarded is not None
+    assert len(guarded["units"]) == len(packet["units"])
     assert guarded["budget"]["used_chars"] == 1234
 
 
@@ -3794,12 +3803,13 @@ def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
     assert packet["units"], packet
 
 
-def test_a_withheld_named_page_is_removed_from_the_list(vault: Path) -> None:
-    """The pages listed for a turn that named several cross the guard like
-    any anchor: one the audience may not see is removed, and the rest stay.
+def test_a_withheld_named_page_is_never_counted_as_a_rival(vault: Path) -> None:
+    """Two pages answer the turn; the audience may see one. That one is
+    carried alone, exactly as in a vault without the other.
 
     Listing a page is telling the caller it exists and what it is called,
-    which is exactly what a release ceiling is for.
+    which is exactly what a release ceiling is for. Abstaining over a list of
+    one would tell the caller a rival exists without naming it.
     """
     from test_working_set_carry import _write, seed_ordinary_notes
     from test_working_set_index import _seed_planning, _seed_structure
@@ -3855,7 +3865,7 @@ updated: 2026-09-11
         "Knowledge Base/Notes/Research/girvan-slot-research.md",
     }
 
-    # One withheld: only the other is listed, and the withheld one is named
+    # One withheld: the other is carried alone, and the withheld one is named
     # nowhere in what is served.
     write_scope(vault, paths="Notes/Patterns/**", name="Patterns")
     write_rule(vault, ceiling=0)
@@ -3863,8 +3873,7 @@ updated: 2026-09-11
     with request_scope(_external()):
         guarded = commands.op_activate_context(vault, turn=turn)
 
-    assert guarded["abstained"] is True
-    assert guarded["abstention"] == {"reason": "unresolved"}
+    assert guarded["abstained"] is False
     assert [item["path"] for item in guarded["anchors"]] == [
         "Knowledge Base/Notes/Research/girvan-slot-research.md"
     ], guarded["anchors"]
