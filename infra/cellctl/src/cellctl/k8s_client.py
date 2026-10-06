@@ -33,6 +33,7 @@ from .manifests import (
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
     CLONE_CLAIM_NAME,
+    GROW_STORAGE_ANNOTATION,
     HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
@@ -340,7 +341,7 @@ class ClusterClient:
         update_revision = None
         hold_kind = hold_started_at = previous_image = pre_upgrade_snapshot = None
         target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
-        backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = None
+        backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
         started_raw = None
         if statefulset is not None:
             containers = statefulset.spec.template.spec.containers
@@ -363,6 +364,8 @@ class ClusterClient:
             restored_snapshot = annotations.get(RESTORED_SNAPSHOT_ANNOTATION) or None
             backup_outcome = annotations.get(BACKUP_OUTCOME_ANNOTATION) or None
             relocation_volume = annotations.get(RELOCATION_ANNOTATION) or None
+            grow_raw = annotations.get(GROW_STORAGE_ANNOTATION) or ""
+            grow_storage_gib = int(grow_raw) if grow_raw.isdecimal() else None
             backup_retry_after = _parse_timestamp(annotations.get(BACKUP_RETRY_AFTER_ANNOTATION))
             retry_minutes_raw = annotations.get(BACKUP_RETRY_MINUTES_ANNOTATION)
             backup_retry_minutes = int(retry_minutes_raw) if retry_minutes_raw else None
@@ -405,7 +408,7 @@ class ClusterClient:
         # different name until its TTL expires and is never read as this
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
-        backup_snapshot_id = None
+        backup_snapshot_id = backup_used_bytes = backup_total_bytes = None
         snapshot_steps: dict[str, bool] = {}
         if started_raw and hold_kind == SNAPSHOT_BACKUP:
             snapshot_steps = self._snapshot_steps(namespace, started_raw)
@@ -414,7 +417,8 @@ class ClusterClient:
             backup_job = self._get_job(namespace, backup_name)
             restore_job = self._get_job(namespace, hold_job_name(RESTORE_JOB_NAME, started_raw))
             if backup_job is not None and bool(backup_job.status.succeeded):
-                backup_snapshot_id = self._job_pod_termination_message(namespace, backup_name)
+                backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(
+                    self._job_pod_termination_message(namespace, backup_name))
 
         return ClusterObservation(
             namespace_exists=True,
@@ -444,6 +448,7 @@ class ClusterClient:
             statefulset_restored_snapshot=restored_snapshot,
             statefulset_backup_outcome=backup_outcome,
             statefulset_relocation_volume=relocation_volume,
+            statefulset_grow_storage_gib=grow_storage_gib,
             statefulset_backup_retry_after=backup_retry_after,
             statefulset_backup_retry_minutes=backup_retry_minutes,
             statefulset_render_digest=render_digest,
@@ -461,6 +466,8 @@ class ClusterClient:
             init_error_code=init_error_code,
             ready_pod_image=ready_pod_image,
             **_job_observation(backup_job, prefix="backup_job", snapshot_id=backup_snapshot_id),
+            backup_job_used_bytes=backup_used_bytes,
+            backup_job_total_bytes=backup_total_bytes,
             **_job_observation(restore_job, prefix="restore_job"),
             **snapshot_steps,
         )
@@ -898,6 +905,26 @@ def _init_rerun(pod) -> tuple[bool, datetime | None]:
         current = (state.running or state.terminated) if state else None
         return True, (current.started_at if current is not None else None)
     return False, None
+
+
+# D10: a backup that measured its filesystem appends "<used> <total>" bytes to
+# the snapshot id. Anything else is the snapshot id alone, which decide.py
+# still checks is a real one.
+_BACKUP_REPORT = re.compile(r"(?P<snapshot>[0-9a-f]{64}) (?P<used>[0-9]{1,19}) (?P<total>[0-9]{1,19})")
+
+
+def _backup_report(message: str | None) -> tuple[str | None, int | None, int | None]:
+    """The snapshot id, and the used and total bytes when the Job measured
+    them consistently. A use report that does not add up is dropped; the
+    backup it came with still counts."""
+
+    match = _BACKUP_REPORT.fullmatch(message or "")
+    if match is None:
+        return message, None, None
+    used, total = int(match["used"]), int(match["total"])
+    if not 0 <= used <= total or total == 0:
+        return match["snapshot"], None, None
+    return match["snapshot"], used, total
 
 
 def _parse_timestamp(value) -> datetime | None:

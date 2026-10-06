@@ -1,17 +1,17 @@
-"""The backup-age alert (move-cloud-cells-to-local-storage, task 2.8).
+"""The platform alerts cellctl raises (move-cloud-cells-to-local-storage).
 
-A running cell whose last successful backup is older than its schedule allows
-raises one platform alert through the existing alert receiver, as the same
-content-free transition the hosted scheduler evaluator sends
+One alert fires while a running cell's last successful backup is older than
+its schedule allows (task 2.8), and one while a local cell past 80% use has no
+room on its node to grow (D10). Each goes through the existing alert receiver
+as the same content-free transition the hosted scheduler evaluator sends
 (`infra/helm/platform/files/scheduler_runtime.py`). Substrate's receiver
 (`alert-receiver.ts`) is the contract both senders follow: it accepts exactly
 these five keys, and it emails only when an alert's state differs from the last
 one it delivered. So a restarted cellctl can resend the current state without a
-duplicate email, and keeps no alert state of its own.
+duplicate email.
 
-It is an alert, never a gate: nothing here changes what a pass does. The stale
-cells themselves go to the log, by id, because the transition carries no
-content.
+They are alerts, never gates: nothing here changes what a pass does. The cells
+themselves go to the log, by id, because the transition carries no content.
 """
 
 from __future__ import annotations
@@ -24,11 +24,13 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
-from .state import CellRow, ClusterObservation
+from .state import GROWTH_NO_ROOM, CellRow, ClusterObservation
 from .storage_config import StorageConfig
 
 JOB = "exomem-cloud-cells"
-ALERT = "backup-stale"
+BACKUP_ALERT = "backup-stale"
+# move-cloud-cells-to-local-storage D10.
+GROWTH_ALERT = "storage-growth-blocked"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
@@ -62,19 +64,44 @@ def stale_backups(
     return sorted(stale)
 
 
+def growth_blocked(
+    rows: Iterable[CellRow],
+    observations: Mapping[str, ClusterObservation],
+    verdicts: Mapping[str, str],
+    *,
+    storage: StorageConfig,
+) -> bool | None:
+    """D10: whether a serving cell past 80% use cannot grow because its node
+    has no room. `verdicts` holds what each local cell's latest measured
+    backup found, and lives only in cellctl's memory. After a restart the
+    answer is unknown (None), not "resolved", until every serving local cell
+    has been measured again; a cell that could not be observed this pass may
+    be local, so it counts as unmeasured unless it has a verdict."""
+
+    serving = [row for row in rows if row.desired_state in SERVING_STATES]
+    if any(verdicts.get(row.cell_id) == GROWTH_NO_ROOM for row in serving):
+        return True
+    unmeasured = [
+        row for row in serving
+        if row.cell_id not in verdicts
+        and ((observation := observations.get(row.cell_id)) is None or storage.is_local(observation.pv_storage_class))
+    ]
+    return None if unmeasured else False
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
         return None
 
 
-def deliver(webhook_url: str, *, active: bool, observed_at: datetime) -> None:
+def deliver(webhook_url: str, *, alert: str, active: bool, observed_at: datetime) -> None:
     """POST one transition to the receiver. The id binds the evaluation time,
     so a later firing is always new; the receiver folds a repeated state."""
 
     parsed = urlsplit(webhook_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         raise RuntimeError("alert delivery target is not an exact HTTPS URL")
-    transition = {"job": JOB, "alert": ALERT, "active": active}
+    transition = {"job": JOB, "alert": alert, "active": active}
     transition_id = hashlib.sha256(
         json.dumps({**transition, "observed_at": observed_at.isoformat()}, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()

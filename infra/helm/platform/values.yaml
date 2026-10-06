@@ -381,6 +381,10 @@ cellStorage:
     enabled: false
     # D3: hourly backups that may run at once on one node.
     backupConcurrencyPerNode: 2
+    # D10: a local cell past 80% use grows online by the 4 GiB default size, up
+    # to this many GiB. D6 reserves twice the largest cell per concurrent
+    # backup, so this cap also bounds each node's snapshot reserve.
+    maxCellGib: 20
   snapshotController:
     # external-snapshotter v8.6.0, the release the vendored CRDs in
     # files/external-snapshotter come from (LOCAL_STORAGE_PROVENANCE.md).

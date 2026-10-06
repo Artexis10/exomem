@@ -1264,6 +1264,14 @@ def test_the_storage_domain_switch_reaches_cellctl_only_with_local_storage_on(mo
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_per_cell_growth_cap_reaches_cellctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    # D10: a cap the chart sets but cellctl never reads would let a cell grow
+    # to cellctl's built-in default instead.
+    storage = _cellctl_storage(_helm_template("--set", "cellStorage.local.maxCellGib=12"), monkeypatch)
+    assert storage.local.max_cell_gib == 12
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_cellctl_may_read_the_alert_delivery_secret_it_is_told_and_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
     # Task 2.8: a Secret named in the env but not in the Role answers 403,
     # and the backup-age alert would never leave cellctl.

@@ -458,10 +458,11 @@
         "local": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "backupConcurrencyPerNode"],
+          "required": ["enabled", "backupConcurrencyPerNode", "maxCellGib"],
           "properties": {
             "enabled": {"type": "boolean"},
-            "backupConcurrencyPerNode": {"type": "integer", "minimum": 1}
+            "backupConcurrencyPerNode": {"type": "integer", "minimum": 1},
+            "maxCellGib": {"type": "integer", "minimum": 4}
           }
         },
         "snapshotController": {
