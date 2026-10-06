@@ -12,32 +12,62 @@ classes:
     - "tests/tui/__snapshots__/*"
     - "infra/*/tests/fixtures/*"
     - "fixture-vault/*"
+    - "plugins/hosted/*fixture*.json"
   tests:
     - "tests/*"
     - "infra/*/tests/*"
     - ".test_durations.json"
   eval:
     - "benchmarks/*"
+    - "plugins/cloud/evals/*"
+  # Regenerated plugin output: neither product nor proof.
+  generated:
+    - "plugins/*/generated/*"
+  # Product is whatever ships, is installed or run by users, or runs in a build, deploy or
+  # image: before scripts, so the install and service scripts count here; infra/scripts
+  # (operator tooling) stays in scripts.
+  product:
+    - "src/*"
+    - "plugins/*"
+    - "sidecar/*"
+    - "deploy/*"
+    - "contracts/*"
+    - ".claude-plugin/*"
+    - "infra/provisioner/*"
+    - "infra/cellctl/*"
+    - "infra/cloud-rehearsal/*"
+    - "infra/helm/*"
+    - "infra/ansible/*"
+    - "infra/terraform/*"
+    - "infra/secrets/*"
+    - "infra/contracts/*"
+    - "infra/operations/*"
+    - "infra/policy/*"
+    - "infra/runbooks/*"
+    - "infra/tool-versions.env"
+    - "scripts/install*"
+    - "scripts/upgrade.*"
+    - "scripts/restart.*"
+    - "scripts/_service-common.*"
+    - "scripts/service-transition-receipt.py"
+    - "scripts/*.service"
+    - "scripts/*.plist"
+    - "scripts/setup-*"
+    - "scripts/deploy.ps1"
+    - "scripts/cold-standby.ps1"
+    - "scripts/set-rest-key.py"
+    - "scripts/set-upload-token.py"
+    - "pyproject.toml"
+    - "uv.lock"
+    - "Dockerfile"
+    - "compose*.yaml"
+    - "server.json"
   scripts:
     - "scripts/*"
     - "infra/scripts/*"
     - ".github/*"
   specs:
     - "openspec/*"
-  # Before docs, so plugin skill text and shipped sample content count as product.
-  product:
-    - "src/*"
-    - "plugins/*"
-    - "infra/*"
-    - "sidecar/*"
-    - "deploy/*"
-    - "contracts/*"
-    - ".claude-plugin/*"
-    - "pyproject.toml"
-    - "uv.lock"
-    - "Dockerfile"
-    - "compose*.yaml"
-    - "server.json"
   docs:
     - "docs/*"
     - "examples/*"
@@ -47,17 +77,36 @@ classes:
 python:
   roots:
     - "src"
+    - "plugins/claude-code/hooks"
+    - "sidecar/diarizer"
     - "infra/provisioner/src"
     - "infra/cellctl/src"
     - "infra/cloud-rehearsal/src"
-  # Textual calls these handlers by name; pydantic reads model_config.
-  ignore_names: ["on_*", "action_*", "watch_*", "model_config"]
+  # Called by name from outside the code: Textual event and action handlers (watch_*
+  # included), watchdog file-event handlers, FastMCP middleware, pydantic model_config.
+  ignore_names:
+    - "on_mount"
+    - "on_resize"
+    - "on_screen_resume"
+    - "on_input_*"
+    - "on_option_list_*"
+    - "on_text_area_*"
+    - "on_recovery_panel_chosen"
+    - "on_packs_choice_confirmed"
+    - "on_rewind_request"
+    - "action_*"
+    - "watch_*"
+    - "on_created"
+    - "on_deleted"
+    - "on_modified"
+    - "on_moved"
+    - "on_call_tool"
+    - "model_config"
   # Registered with the MCP server, FastAPI or pydantic rather than called.
   ignore_decorators:
     - "@mcp_app.custom_route"
     - "@mcp.resource"
     - "@mcp.prompt"
-    - "@mcp.tool"
     - "@app.*"
     - "@field_validator"
     - "@model_validator"
@@ -67,6 +116,8 @@ python:
 duplicates:
   paths:
     - "src"
+    - "plugins/claude-code/hooks"
+    - "sidecar/diarizer"
     - "infra/provisioner/src"
     - "infra/cellctl/src"
     - "infra/cloud-rehearsal/src"
