@@ -26,6 +26,7 @@ disk is not the one this binary writes.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import os
@@ -431,14 +432,44 @@ _QUOTED = re.compile(
     r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019"
 )
 _SEPARATORS = re.compile(r"[\\/]")
+#: A slash run with no root: segments up to a final one, which may be empty.
+_SLASH_RUN = re.compile(
+    _STARTS_A_REFERENCE + r"""(?:[^\s"'`<>()\[\]{},\\/\u2018\u2019\u201c\u201d]+[\\/])+"""
+    + _REFERENCE_CHAR
+    + "*"
+)
+_FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
+
+
+@functools.lru_cache(maxsize=4)
+def _vault_path(kb: str) -> re.Pattern[str]:
+    """A path into the indexed folder (`kb_dirname`), up to a file name with
+    an extension, read as one reference even with spaces in its segments."""
+    return re.compile(
+        _STARTS_A_REFERENCE
+        + "(?:"
+        + _DOT_RELATIVE
+        + ")?"
+        + re.escape(kb)
+        + r"""[\\/][^\n"'`<>()\[\]{}\u2018\u2019\u201c\u201d]*?[^.\s\\/]\.[A-Za-z0-9]{1,8}"""
+        + r"(?=[" + re.escape(_CLOSERS) + r"]*(?:\s|$))"
+    )
+
+
+def _final_segment(reference: str) -> str:
+    return _SEPARATORS.split(reference.rstrip("\\/"))[-1]
+
+
+def _names_a_file(reference: str) -> bool:
+    """Is this unrooted slash run a path? Only when it ends in a file name:
+    `records/staging/prod` and `and/or` are prose."""
+    return bool(_FILE_EXTENSION.search(_final_segment(reference)))
 
 
 def _kept_words(reference: str, *, relative: bool) -> str:
-    """What a reference keeps of itself as words: a `./` or `../` path its
-    final segment, anything else nothing."""
-    if not relative:
-        return ""
-    return _SEPARATORS.split(reference.rstrip("\\/"))[-1]
+    """What a reference keeps of itself as words: a relative path its final
+    segment, anything else nothing."""
+    return _final_segment(reference) if relative else ""
 
 
 def subject_text(turn: str) -> str:
@@ -447,14 +478,15 @@ def subject_text(turn: str) -> str:
     A path is a reference to a file, not a sentence: read as words,
     `/home/<user>/handoffs/x.md` says `home`, and `home` named a project of
     that name. A rooted path, an environment-variable path, a URL with or
-    without a scheme, and an scp-style remote are removed whole. A path that
-    starts `./` or `../` keeps its final segment, so `./<Name>.md` still names
-    the page whose title is its file name. Any other slash run is prose:
-    `dev/staging/prod`, `and/or` and `TypeScript/Node.js` keep their words, and
-    a vault page path is matched as one by the vault-path lookup. A quoted or
-    backticked span is read as one reference, spaces included. An unquoted
-    rooted path with spaces in it is cut at the first space: nothing marks
-    where it ends.
+    without a scheme, and an scp-style remote are removed whole. A relative
+    path keeps its final segment, so `Projects/<Name>.md` still names the page
+    whose title is its file name; its directories are removed. A slash run is a
+    relative path when it starts `./` or `../` or ends in a file name, so
+    `dev/staging/prod` and `and/or` are prose, and `records/Node.js` loses
+    `records`. A path into the indexed folder (`Knowledge Base/...`) is one
+    reference up to its file name, spaces included. So is a quoted or
+    backticked span. Any other path with spaces in it is cut at the first
+    space: nothing marks where it ends.
 
     Text with no reference in it is returned as is.
     """
@@ -467,9 +499,11 @@ def subject_text(turn: str) -> str:
     def quoted(match: re.Match[str]) -> str:
         content = next(group for group in match.groups() if group is not None).strip()
         found = _QUOTED_REFERENCE.match(content)
-        if found is None:
-            return match.group(0)
-        return f" {_kept_words(content, relative=found.group('relative') is not None)} "
+        if found is not None:
+            return f" {_kept_words(content, relative=found.group('relative') is not None)} "
+        if _SEPARATORS.search(content) and _names_a_file(content):
+            return f" {_final_segment(content)} "
+        return match.group(0)
 
     def reference(match: re.Match[str]) -> str:
         whole = match.group(0)
@@ -478,7 +512,15 @@ def subject_text(turn: str) -> str:
         kept = _kept_words(core, relative=match.group("relative") is not None)
         return f"{kept or ' '}{tail}"
 
-    return _REFERENCE.sub(reference, _QUOTED.sub(quoted, text))
+    def slash_run(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        tail = trailing(whole)
+        core = whole[: len(whole) - len(tail)]
+        return f"{_final_segment(core)}{tail}" if _names_a_file(core) else whole
+
+    text = _QUOTED.sub(quoted, text)
+    text = _vault_path(kb_dirname()).sub(lambda match: _final_segment(match.group(0)), text)
+    return _SLASH_RUN.sub(slash_run, _REFERENCE.sub(reference, text))
 
 
 #: A shared term this rare in the catalogue's title/alias vocabulary is a weak
