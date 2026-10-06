@@ -9798,6 +9798,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "collections-store-adopt-local",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -9838,7 +9839,8 @@ def op_maintain_memory(
     Remote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.
     Run those writes with exomem maintain on the host; remote dry_run=true works.
 
-    structured-files and tag-variants apply needs the preview's `plan_id` and `why`.
+    structured-files, tag-variants and collections-store-adopt-local apply need the preview's
+    `plan_id` and `why`.
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
 
@@ -9854,9 +9856,9 @@ def op_maintain_memory(
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
         collection: Planning or Records collection for structured-files.
         apply: Omit to preview; true applies the reviewed plan.
-        plan_id: Preview identity required to apply (structured-files, tag-variants).
+        plan_id: Preview identity required to apply.
         source_snapshot: Preview snapshot required to apply structured-files.
-        why: Audit reason required to apply structured-files or tag-variants.
+        why: Audit reason required to apply.
         curation_action: Curation step when mode is curation.
         run_id: Curation run identity.
         plan: Closed agent-authored plan for curation propose.
@@ -10069,6 +10071,30 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "collections-store-adopt-local":
+        from .collection_store import admission as store_admission
+
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or (apply is None and (plan_id is not None or why is not None))
+            or (apply is not None and (apply is not True or plan_id is None or why is None))
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store-adopt-local previews without arguments; "
+                "apply needs true, plan_id and why"
+            )
+        if apply is None:
+            preview = store_admission.adopt_local_route(vault_root)
+            # This surface names the preview identity `plan_id`, as its other preview-first modes do.
+            preview["plan_id"] = preview.pop("preview_id")
+            return preview
+        return store_admission.adopt_local_route(vault_root, why=why, preview_id=plan_id)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10114,7 +10140,7 @@ def op_maintain_memory(
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, or tag-variants"
+        "backfill-ids, structured-files, curation, tag-variants, or collections-store-adopt-local"
     )
 
 

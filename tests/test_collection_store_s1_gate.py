@@ -742,6 +742,32 @@ def test_adopt_local_previews_the_fork_point_before_continuing(abc):
     assert "fork_point" in json.loads(result.stdout)["preview"]
 
 
+def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_the_coordinator(
+        abc, monkeypatch, capsys):
+    """Defect: the owner's real route cannot apply adopt-local with the configured lease and coordinator."""
+    from exomem import __main__ as cli
+    from exomem import commands
+    from exomem.governance.principal import library_scope
+
+    abc.release()
+    lease = {"URL": "http://localhost", "VAULT_ID": "gate", "REPLICA_ID": "host-a", "TOKEN": "lease",
+             "STATE_DIR": str(abc.manager.config.state_dir)}
+    for name, value in lease.items():
+        monkeypatch.setenv(f"EXOMEM_WRITER_LEASE_{name}", value)
+    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "operator")
+    path = replica.replica_path(abc.root)
+    foreign = path.read_bytes() + b"\0"
+    path.write_bytes(foreign)  # another copy published over this host's replica
+    with library_scope():
+        preview = commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local")
+    assert (preview["step"], preview["preview"]["state"]) == ("adopt-local", "foreign")
+    assert cli._collections_main(["adopt-local", "--vault", str(abc.root), "--why", "the other copy is stale",
+                                  "--preview-id", preview["plan_id"]]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "adopted"
+    assert [evidence.read_bytes() for evidence in path.parent.glob(".foreign-*")] == [foreign]
+    assert len(json.loads(abc.meta()[schema.META_FORKS])) == 1
+
+
 def _adopt(found, why):
     preview = admission.adopt_local(found.session, found.manager, why=why, fence_client=found.operator)
     refused(lambda: admission.adopt_local(found.session, found.manager, why=why, preview_id="0" * 64,

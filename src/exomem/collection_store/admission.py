@@ -13,7 +13,7 @@ import secrets
 import sqlite3
 import tempfile
 import time
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, suppress
 from pathlib import Path
 
 from .. import held_fs, state_migration, state_paths, vault, writer_lease
@@ -413,6 +413,64 @@ def reconcile_store(session, manager, *, why, fence_client, preview_id=None):
                 result = writer.hold_store_delta(
                     items, reconciled=[source["sha256"] for source in sealed["preview"]["sources"]], why=why)
     return {"status": "held", **result, **sealed}
+
+
+def _coordinator_head():
+    """The coordinator's recorded store head, or ``owner.UNKNOWN`` without a configured coordinator."""
+    config = writer_lease.LeaseConfig.from_env()
+    if not config.enabled:
+        return owner.UNKNOWN
+    return writer_lease.LeaseCoordinatorClient(config).status().collection_store_head
+
+
+def _route_step(root):
+    """Adopt-local while this store does not continue the vault's replica, then its reconcile step."""
+    adopt = owner.adopt_local_preview(root, recorded=_coordinator_head())
+    if adopt["preview"]["state"] == "in_sync":
+        with closing(connection.open_reader(connection.store_path(root))) as local:
+            reconcile = owner.reconcile_plan(root, local)[0]
+        if reconcile["preview"]["sources"]:
+            return "reconcile", reconcile
+    return "adopt-local", adopt
+
+
+def adopt_local_route(vault_root, *, why=None, preview_id=None):
+    """The one owner route behind `exomem collections adopt-local` and its maintain_memory mode (A3).
+
+    Preview-first: the preview reads without the writer lease and names its step,
+    adopt-local or, once this store continues, reconciling preserved foreign evidence
+    into held corrections. Applying runs that step's `adopt_local` or `reconcile_store`
+    with ``preview_id`` in this process's own producer session, under the configured
+    lease, and hands the lease back with the flushed head.
+    """
+    from ..governance.principal import OWNER_AUDIENCE, effective_principal
+
+    who = effective_principal()
+    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", "adopt-local is owner-only")
+    root = Path(vault_root).resolve()
+    step, sealed = _route_step(root)
+    if preview_id is None:
+        return {"step": step, **sealed}
+    fence_client = writer_lease.configured_schema_fence_operator_client()
+    if fence_client is None:
+        raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
+    with production_session(root) as session:
+        manager = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+        try:
+            if step == "adopt-local":
+                result = adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
+            else:
+                open_store(session, manager, fence_client=fence_client)
+                result = reconcile_store(session, manager, why=why, fence_client=fence_client,
+                                         preview_id=preview_id)
+        except BaseException:
+            # The refusal is the answer; an unadmitted token keeps its lease until it expires.
+            with suppress(Exception):
+                manager.close()
+            raise
+        manager.close()
+    return {"step": step, **result}
 
 
 def _custody_lost(session, token):
