@@ -368,6 +368,53 @@ cloudStorage:
   encryptionSecretName: exomem-cloud-volume-encryption
   encryptionSecretNamespace: exomem-platform
 
+# move-cloud-cells-to-local-storage: cell volumes on the agents' own disks
+# through TopoLVM. `local.enabled` installs TopoLVM (values under `topolvm`),
+# the CSI snapshot CRDs and controller, and the cell, clone and snapshot
+# classes, and configures cellctl and its admission for them. The
+# VolumeSnapshotClass renders once its CRD exists, so enabling takes two
+# upgrades. `domain` is the class new cell claims take; it stays hetzner until
+# the cutover (task 7.2), and existing cells keep the class they have.
+cellStorage:
+  domain: hetzner
+  local:
+    enabled: false
+    # D3: hourly backups that may run at once on one node.
+    backupConcurrencyPerNode: 2
+  snapshotController:
+    # external-snapshotter v8.6.0, the release the vendored CRDs in
+    # files/external-snapshotter come from (LOCAL_STORAGE_PROVENANCE.md).
+    image: registry.k8s.io/sig-storage/snapshot-controller:v8.6.0@sha256:81e79f205083f105e573ba2ebfe5964ede7f69a154e8627f53ebbbccd3ed9f70
+
+# TopoLVM 17.2.0 (installed with cellStorage.local.enabled): one thin device
+# class at overprovision ratio 1.0 on the `cells` volume group, as rehearsed
+# (infra/cloud-rehearsal/storage/topolvm-values.yaml). The chart's own image
+# reference is already tag@digest. Its node plugin and lvmd run only on agents
+# labelled exomem.io/local-storage=true, the ones with that volume group, and
+# tolerate every taint, as the Hetzner CSI node plugin does, so dedicated and
+# shared agents are served too. The platform renders the classes itself.
+topolvm:
+  lvmd:
+    managed: true
+    deviceClasses:
+      - name: thin
+        volume-group: cells
+        default: true
+        type: thin
+        thin-pool:
+          name: pool0
+          overprovision-ratio: 1.0
+    nodeSelector:
+      exomem.io/local-storage: "true"
+    tolerations:
+      - operator: Exists
+  node:
+    nodeSelector:
+      exomem.io/local-storage: "true"
+    tolerations:
+      - operator: Exists
+  storageClasses: []
+
 cloudIngress:
   enabled: false
   hostname: ""

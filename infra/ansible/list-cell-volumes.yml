@@ -1,0 +1,51 @@
+---
+# List every agent's cell logical volumes after an etcd restore
+# (openspec move-cloud-cells-to-local-storage D4; docs/runbooks/cloud-node-loss.md):
+#   ansible-playbook list-cell-volumes.yml -e cell_volumes_dir=<empty local directory>
+# Read-only. Each agent's listing lands in <cell_volumes_dir>/<node>.json for
+# `python -m cellctl.readopt`. An unreachable agent writes nothing, so its
+# cells read as relocations.
+- name: List each agent's cell logical volumes
+  hosts: k3s_agents
+  become: true
+  gather_facts: false
+  vars:
+    cell_volume_group: cells
+
+  tasks:
+    - name: Require a local output directory
+      ansible.builtin.assert:
+        that:
+          - cell_volumes_dir is defined
+        fail_msg: Pass -e cell_volumes_dir=<empty local directory>.
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Read the cell volume group's logical volumes
+      ansible.builtin.command:
+        argv:
+          - lvs
+          - --reportformat
+          - json
+          - --units
+          - b
+          - --nosuffix
+          - -o
+          - lv_name,lv_size,pool_lv,lv_attr
+          - "{{ cell_volume_group }}"
+      register: cell_volumes_lvs
+      changed_when: false
+      # An agent with no cell volume group holds no cell volumes.
+      failed_when:
+        - cell_volumes_lvs.rc != 0
+        - "'not found' not in cell_volumes_lvs.stderr"
+
+    - name: Save the listing on the operator machine
+      ansible.builtin.copy:
+        content: >-
+          {{ cell_volumes_lvs.stdout if cell_volumes_lvs.rc == 0 else '{"report": [{"lv": []}]}' }}
+        dest: "{{ cell_volumes_dir }}/{{ inventory_hostname }}.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

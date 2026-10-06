@@ -1194,3 +1194,90 @@ def test_csi_tolerates_existing_and_shared_worker_taints_with_shared_mode_off() 
                    and (not item.get("effect") or item["effect"] == effect)
                    and (item.get("operator") == "Exists" or item.get("value", "") == value)
                    for item in tolerations), (key, effect)
+
+
+# --- move-cloud-cells-to-local-storage: TopoLVM, snapshots and the cell classes ---------
+
+SNAPSHOT_CLASS_API = ("--api-versions", "snapshot.storage.k8s.io/v1/VolumeSnapshotClass")
+
+
+def _cellctl_storage(documents: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch):
+    """The StorageConfig cellctl builds from the env the chart gives it."""
+
+    from cellctl.main import build_storage_config
+
+    deployment = _find(documents, "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    if "CELLCTL_CELL_STORAGE" in env:
+        monkeypatch.setenv("CELLCTL_CELL_STORAGE", env["CELLCTL_CELL_STORAGE"])
+    else:
+        monkeypatch.delenv("CELLCTL_CELL_STORAGE", raising=False)
+    return build_storage_config()
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_told_only_classes_the_chart_renders_on_a_device_class_lvmd_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A name cellctl and the chart disagree on leaves every new cell's claim
+    # pending; a clone class that waits for its consumer leaves the backup
+    # Job's node to the scheduler instead of the source volume (D3).
+    documents = _helm_template(*SNAPSHOT_CLASS_API)
+    local = _cellctl_storage(documents, monkeypatch).local
+    assert local is not None
+
+    cell, clone = _find(documents, "StorageClass", local.class_name), _find(documents, "StorageClass", local.clone_class)
+    for storage_class, binding in ((cell, "WaitForFirstConsumer"), (clone, "Immediate")):
+        assert (storage_class["provisioner"], storage_class["volumeBindingMode"], storage_class["reclaimPolicy"]) == (
+            local.driver, binding, "Delete")
+        assert storage_class["parameters"][f"{local.driver}/device-class"] == local.device_class
+    snapshot_class = _find(documents, "VolumeSnapshotClass", local.snapshot_class)
+    assert (snapshot_class["driver"], snapshot_class["deletionPolicy"]) == (local.driver, "Delete")
+    lvmd = yaml.safe_load(_find(documents, "ConfigMap", "platform-header-test-topolvm-lvmd-0")["data"]["lvmd.yaml"])
+    assert local.device_class in {device["name"] for device in lvmd["device-classes"]}
+    for crd in ("volumesnapshots", "volumesnapshotcontents", "volumesnapshotclasses"):
+        _find(documents, "CustomResourceDefinition", f"{crd}.snapshot.storage.k8s.io")
+    _find(documents, "Deployment", "snapshot-controller")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_with_local_storage_off_production_renders_no_part_of_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cellctl.storage_config import DEFAULT_STORAGE
+
+    documents = _helm_template("--set", "cellStorage.local.enabled=false", *SNAPSHOT_CLASS_API)
+    assert _cellctl_storage(documents, monkeypatch) == DEFAULT_STORAGE
+    names = {doc["metadata"]["name"] for doc in documents}
+    assert not {name for name in names if any(part in name for part in ("topolvm", "snapshot", "retained-delete"))}
+    scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    assert "snapshot.storage.k8s.io" not in scope["spec"]["matchConstraints"]["resourceRules"][0]["apiGroups"]
+    assert not any("'persistentvolumes'" in rule["expression"] for rule in scope["spec"]["validations"])
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_storage_domain_switch_reaches_cellctl_only_with_local_storage_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Task 7.2's cutover: a switch that never reached cellctl would leave new
+    # cells on Hetzner volumes without a word.
+    storage = _cellctl_storage(_helm_template("--set", "cellStorage.domain=local"), monkeypatch)
+    assert storage.domain_is_local
+    refused = _helm_render("--set", "cellStorage.domain=local", "--set", "cellStorage.local.enabled=false")
+    assert refused.returncode != 0 and "cellStorage.local.enabled" in refused.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_may_read_the_alert_delivery_secret_it_is_told_and_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Task 2.8: a Secret named in the env but not in the Role answers 403,
+    # and the backup-age alert would never leave cellctl.
+    from cellctl.main import build_alert_delivery_secret
+
+    documents = _helm_template()
+    deployment = _find(documents, "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    monkeypatch.setenv("CELLCTL_ALERT_DELIVERY_SECRET", env["CELLCTL_ALERT_DELIVERY_SECRET"])
+    namespace, name, _key = build_alert_delivery_secret()
+
+    role = _find(documents, "Role", "cellctl-alert-delivery")
+    assert role["metadata"]["namespace"] == namespace
+    assert role["rules"] == [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": [name], "verbs": ["get"]}]
+    binding = _find(documents, "RoleBinding", "cellctl-alert-delivery")
+    assert binding["metadata"]["namespace"] == namespace
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "cellctl", "namespace": "exomem-cloud"}]

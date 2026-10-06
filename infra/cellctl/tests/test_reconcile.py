@@ -97,7 +97,9 @@ class FakeClusterGateway:
     def pv_absent_for_namespace(self, namespace: str) -> bool:
         return namespace not in self.pv_claims
 
-    def admission_policy_present(self, policy_name: str, binding_name: str, *, param_name: str | None = None) -> bool:
+    def admission_policy_present(
+        self, policy_name: str, binding_name: str, *, param_name: str | None = None, param_selects_all: bool = False
+    ) -> bool:
         self.admission_checks.append((policy_name, binding_name, param_name))
         return self.admission_confined and policy_name not in self.admission_missing
 

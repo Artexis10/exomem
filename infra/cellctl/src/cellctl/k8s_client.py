@@ -7,6 +7,7 @@ library. decide.py never sees it; reconcile.py is the only caller.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from datetime import datetime
@@ -18,6 +19,8 @@ from kubernetes.dynamic import DynamicClient
 from .capacity import (
     AttachmentReservation,
     CapacityObservation,
+    LocalCapacityObservation,
+    LogicalVolumeRecord,
     NodeObservation,
     PodReservation,
     SharedWorkerPolicy,
@@ -26,8 +29,10 @@ from .capacity import (
 )
 from .manifests import (
     BACKUP_JOB_NAME,
+    BACKUP_OUTCOME_ANNOTATION,
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
+    CLONE_CLAIM_NAME,
     HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
@@ -35,17 +40,22 @@ from .manifests import (
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
     PREVIOUS_IMAGE_ANNOTATION,
+    RELOCATION_ANNOTATION,
     RENDER_DIGEST_ANNOTATION,
     RENDER_DIGEST_APPLIED_AT_ANNOTATION,
     RESTORE_JOB_NAME,
     RESTORED_SNAPSHOT_ANNOTATION,
     ROW_GENERATION_ANNOTATION,
+    SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
     hold_job_name,
 )
-from .state import ClusterObservation
+from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
+from .storage.topolvm import LocalVolumeState, LogicalVolume
+from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
 FIELD_MANAGER = "cellctl"
+SNAPSHOT_GROUP = "snapshot.storage.k8s.io"
 CELL_LABEL = "exomem.io/cloud-cell"
 REVISION_LABEL = "controller-revision-hash"
 
@@ -77,14 +87,18 @@ def _not_found(error: ApiException) -> bool:
 
 
 class ClusterClient:
-    def __init__(self, api_client: k8s.ApiClient) -> None:
+    _storage_config: StorageConfig = DEFAULT_STORAGE
+
+    def __init__(self, api_client: k8s.ApiClient, *, storage_config: StorageConfig = DEFAULT_STORAGE) -> None:
         _bound_requests(api_client)
+        self._storage_config = storage_config
         self._api = api_client
         self._dynamic = DynamicClient(api_client)
         self._core = k8s.CoreV1Api(api_client)
         self._apps = k8s.AppsV1Api(api_client)
         self._batch = k8s.BatchV1Api(api_client)
         self._storage = k8s.StorageV1Api(api_client)
+        self._custom = k8s.CustomObjectsApi(api_client)
         self._admission = k8s.AdmissionregistrationV1Api(api_client)
 
     # -- apply / delete (D4 imperative shell) --
@@ -119,6 +133,44 @@ class ClusterClient:
     def run_job(self, manifest: dict) -> None:
         self.apply(manifest)
 
+    def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
+        """D3: an hourly hold's clone claim and snapshot. Already gone is done."""
+
+        try:
+            self._core.delete_namespaced_persistent_volume_claim(claim, namespace)
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+        try:
+            self._custom.delete_namespaced_custom_object(SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", snapshot)
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+
+    def retain_volume(self, name: str) -> None:
+        """D4: the only write cellctl makes to a PersistentVolume, which
+        admission confines to this field, on PVs claimed from a cell namespace."""
+
+        self._core.patch_persistent_volume(name, {"spec": {"persistentVolumeReclaimPolicy": "Retain"}})
+
+    def delete_claim(self, namespace: str) -> None:
+        """D4: admission allows this only while the bound PV is Retain."""
+
+        try:
+            self._core.delete_namespaced_persistent_volume_claim("cell-data", namespace)
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+
+    def read_secret_value(self, namespace: str, name: str, key: str) -> str:
+        """Task 2.8: one key of one platform Secret, the alert-delivery URL. The
+        chart grants `get` on that Secret alone."""
+
+        data = self._core.read_namespaced_secret(name, namespace).data or {}
+        if key not in data:
+            raise KeyError(f"secret {namespace}/{name} has no key {key}")
+        return base64.b64decode(data[key]).decode("utf-8").strip()
+
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
         # deleted without a policy orphans them.
@@ -130,12 +182,15 @@ class ClusterClient:
 
     # -- self-check (D4): confirm cellctl's own admission confinement exists --
 
-    def admission_policy_present(self, policy_name: str, binding_name: str, *, param_name: str | None = None) -> bool:
+    def admission_policy_present(
+        self, policy_name: str, binding_name: str, *, param_name: str | None = None, param_selects_all: bool = False
+    ) -> bool:
         """True only when the policy fails closed and validates something,
         and its binding names it with a Deny action and no matchResources: a
         policy set to Ignore or stripped of its validations, a binding
         downgraded to Audit, or one narrowed by matchResources all confine
-        less than the policy says (D4)."""
+        less than the policy says (D4). `param_selects_all` is the
+        retained-delete guard's binding, which must check every PV."""
 
         try:
             policy = self._admission.read_validating_admission_policy(policy_name)
@@ -159,6 +214,17 @@ class ClusterClient:
                 or param_ref.namespace
                 or param_ref.selector is not None
                 or param_ref.parameter_not_found_action != "Deny"
+            ):
+                return False
+        if param_selects_all:
+            param_ref = getattr(spec, "param_ref", None) if spec is not None else None
+            selector = getattr(param_ref, "selector", None)
+            if (
+                selector is None
+                or param_ref.name
+                or param_ref.namespace
+                or selector.match_labels
+                or selector.match_expressions
             ):
                 return False
         return (
@@ -213,6 +279,13 @@ class ClusterClient:
         pods: dict[str, list] = {}
         for pod in self._core.list_pod_for_all_namespaces(label_selector=f"!{JOB_KIND_LABEL}").items:
             pods.setdefault(pod.metadata.namespace, []).append(pod)
+        # D4: nodes the operator confirmed stopped, only read once local
+        # storage is configured, since only a local volume is relocated.
+        stopped_nodes = (
+            frozenset(node.metadata.name for node in self._core.list_node().items if _stop_confirmed(node))
+            if self._storage_config.local is not None
+            else frozenset()
+        )
 
         observations: dict[str, ClusterObservation | Exception] = {}
         for cell_id, namespace in cells.items():
@@ -230,12 +303,15 @@ class ClusterClient:
                     pvs.get(pv_name) if pv_name else None,
                     statefulsets.get(namespace),
                     pods.get(namespace, []),
+                    stopped_nodes,
                 )
             except Exception as error:  # noqa: BLE001 - H4: one cell's failure is that cell's alone
                 observations[cell_id] = error
         return observations
 
-    def _observation(self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list) -> ClusterObservation:
+    def _observation(
+        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, stopped_nodes: frozenset[str] = frozenset()
+    ) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
 
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
@@ -243,6 +319,11 @@ class ClusterClient:
         pvc_volume_id = None  # the underlying Hetzner volume id (PV spec.csi.volumeHandle), not the PV's own K8s name
         pv_claim_ref_uid = None
         pv_storage_class = None
+        pv_node = None
+        pvc_storage_class = getattr(pvc.spec, "storage_class_name", None) if pvc and pvc.spec else None
+        pvc_terminating = bool(pvc and pvc.metadata and getattr(pvc.metadata, "deletion_timestamp", None))
+        pv_name = pv.metadata.name if pv is not None else None
+        pv_reclaim_policy = getattr(pv.spec, "persistent_volume_reclaim_policy", None) if pv is not None and pv.spec else None
         if pv is not None:
             if pv.spec and pv.spec.claim_ref:
                 pv_claim_ref_uid = pv.spec.claim_ref.uid
@@ -250,13 +331,16 @@ class ClusterClient:
                 pv_storage_class = pv.spec.storage_class_name
             if pv.spec and pv.spec.csi:
                 pvc_volume_id = pv.spec.csi.volume_handle
+            local = self._storage_config.local
+            if local is not None and pv_storage_class == local.class_name:
+                pv_node = _pinned_node(pv, local.topology_key)
 
         statefulset_exists = statefulset is not None
         statefulset_image = None
         statefulset_replicas = None
         update_revision = None
         hold_kind = hold_started_at = previous_image = pre_upgrade_snapshot = None
-        target_applied_at = restored_snapshot = backup_retry_after = None
+        target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = None
         started_raw = None
         if statefulset is not None:
@@ -278,6 +362,8 @@ class ClusterClient:
             pre_upgrade_snapshot = annotations.get(PRE_UPGRADE_SNAPSHOT_ANNOTATION) or None
             target_applied_at = _parse_timestamp(annotations.get(TARGET_APPLIED_ANNOTATION))
             restored_snapshot = annotations.get(RESTORED_SNAPSHOT_ANNOTATION) or None
+            backup_outcome = annotations.get(BACKUP_OUTCOME_ANNOTATION) or None
+            relocation_volume = annotations.get(RELOCATION_ANNOTATION) or None
             backup_retry_after = _parse_timestamp(annotations.get(BACKUP_RETRY_AFTER_ANNOTATION))
             retry_minutes_raw = annotations.get(BACKUP_RETRY_MINUTES_ANNOTATION)
             backup_retry_minutes = int(retry_minutes_raw) if retry_minutes_raw else None
@@ -311,6 +397,7 @@ class ClusterClient:
         pod_created_at = current_pod.metadata.creation_timestamp if current_pod is not None else None
         pod_init_completed = current_pod is not None and _init_completed(current_pod)
         init_rerun, init_started_at = _init_rerun(current_pod) if current_pod is not None else (False, None)
+        init_error_code = _init_refusal(current_pod) if current_pod is not None else None
 
         # Only the current hold's Jobs count. Their names derive from the
         # hold-started annotation, which is the same string the Jobs were
@@ -320,6 +407,9 @@ class ClusterClient:
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
         backup_snapshot_id = None
+        snapshot_steps: dict[str, bool] = {}
+        if started_raw and hold_kind == SNAPSHOT_BACKUP:
+            snapshot_steps = self._snapshot_steps(namespace, started_raw)
         if started_raw:
             backup_name = hold_job_name(BACKUP_JOB_NAME, started_raw)
             backup_job = self._get_job(namespace, backup_name)
@@ -335,6 +425,13 @@ class ClusterClient:
             pvc_uid=pvc_uid,
             pv_claim_ref_uid=pv_claim_ref_uid,
             pv_storage_class=pv_storage_class,
+            pvc_storage_class=pvc_storage_class,
+            pvc_exists=pvc is not None,
+            pvc_terminating=pvc_terminating,
+            pv_name=pv_name,
+            pv_reclaim_policy=pv_reclaim_policy,
+            pv_node=pv_node,
+            pv_node_stop_confirmed=pv_node is not None and pv_node in stopped_nodes,
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,
@@ -344,6 +441,8 @@ class ClusterClient:
             statefulset_pre_upgrade_snapshot=pre_upgrade_snapshot,
             statefulset_target_applied_at=target_applied_at,
             statefulset_restored_snapshot=restored_snapshot,
+            statefulset_backup_outcome=backup_outcome,
+            statefulset_relocation_volume=relocation_volume,
             statefulset_backup_retry_after=backup_retry_after,
             statefulset_backup_retry_minutes=backup_retry_minutes,
             statefulset_render_digest=render_digest,
@@ -358,10 +457,37 @@ class ClusterClient:
             pod_init_completed=pod_init_completed,
             init_rerun=init_rerun,
             init_started_at=init_started_at,
+            init_error_code=init_error_code,
             ready_pod_image=ready_pod_image,
             **_job_observation(backup_job, prefix="backup_job", snapshot_id=backup_snapshot_id),
             **_job_observation(restore_job, prefix="restore_job"),
+            **snapshot_steps,
         )
+
+    def _snapshot_steps(self, namespace: str, started_raw: str) -> dict[str, bool]:
+        """D3: the current hourly hold's snapshot and clone, by the names its
+        start gave them; an earlier hold's never answer."""
+
+        try:
+            snapshot = self._custom.get_namespaced_custom_object(
+                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", hold_job_name(SNAPSHOT_NAME, started_raw)
+            )
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+            snapshot = None
+        try:
+            clone = self._core.read_namespaced_persistent_volume_claim(hold_job_name(CLONE_CLAIM_NAME, started_raw), namespace)
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+            clone = None
+        return {
+            "snapshot_exists": snapshot is not None,
+            "snapshot_ready": bool(snapshot and (snapshot.get("status") or {}).get("readyToUse")),
+            "clone_exists": clone is not None,
+            "clone_bound": bool(clone and clone.status and clone.status.phase == "Bound"),
+        }
 
     def _job_pod_termination_message(self, namespace: str, job_name: str) -> str | None:
         """D8 amendment: the backup Job has no ServiceAccount token, so it
@@ -438,16 +564,7 @@ class ClusterClient:
         # Unknown Nodes also contribute zero slots until positively observed
         # unreserved. Existing attachment counts remain visible below.
         nodes = self._core.list_node().items
-        general_nodes = {
-            node.metadata.name for node in nodes
-            if "exomem.io/dedicated-cell" not in (node.metadata.labels or {})
-            and not any(taint.key == "exomem.io/dedicated-cell" for taint in (node.spec.taints or []))
-            and not node.spec.unschedulable
-            and not any(taint.effect in {"NoSchedule", "NoExecute"} for taint in (node.spec.taints or []))
-            and node.status is not None
-            and any(condition.type == "Ready" and condition.status == "True"
-                    for condition in (node.status.conditions or []))
-        }
+        general_nodes = {node.metadata.name for node in nodes if _general_node(node)}
 
         pv_namespace: dict[str, str] = {}
         pvs = self._core.list_persistent_volume().items
@@ -534,10 +651,130 @@ class ClusterClient:
                                    reserved_nodes=frozenset(reserved_nodes))
 
 
+    def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation:
+        """D6: each node's published free bytes and the LogicalVolumes that
+        hold the rest of its pool (read-only `list`), and which node each
+        cell's volume is on. A node that is not open to general cells
+        publishes zero, as on Hetzner volumes."""
+
+        nodes = self._core.list_node().items
+        free: dict[str, int | None] = {}
+        for node in nodes:
+            raw = (node.metadata.annotations or {}).get(local.capacity_annotation)
+            try:
+                free[node.metadata.name] = int(quantity(raw)) if raw else None
+            except (ValueError, ArithmeticError):
+                free[node.metadata.name] = None
+        listed = self._custom.list_cluster_custom_object(local.driver, "v1", "logicalvolumes")
+        volumes = tuple(
+            LogicalVolumeRecord(
+                node=(item.get("spec") or {}).get("nodeName") or "",
+                size=int(quantity(str((item.get("spec") or {}).get("size") or "0"))),
+                device_class=(item.get("spec") or {}).get("deviceClass") or "",
+                created=bool((item.get("status") or {}).get("volumeID")),
+                deleting=bool((item.get("metadata") or {}).get("deletionTimestamp")),
+            )
+            for item in listed.get("items") or []
+        )
+        cell_nodes: dict[str, str] = {}
+        for pv in self._core.list_persistent_volume().items:
+            claim = pv.spec.claim_ref if pv.spec else None
+            cell_id = _capacity_cell_id(claim.namespace) if claim else None
+            node = _pinned_node(pv, local.topology_key) if pv.spec.storage_class_name == local.class_name else None
+            if cell_id and node and claim.name == "cell-data":
+                cell_nodes[cell_id] = node
+        return LocalCapacityObservation(
+            free_bytes=free,
+            volumes=volumes,
+            reserved_nodes=frozenset(node.metadata.name for node in nodes if not _general_node(node)),
+            cell_nodes=cell_nodes,
+        )
+
+
+    def local_volume_state(self, local: LocalStorage) -> LocalVolumeState:
+        """D4/2.5: every object that can still hold a deleted cell's local
+        data, from cluster-wide lists. A failed list raises: never absence."""
+
+        nodes = self._core.list_node().items
+        claimed = tuple(
+            (pv.spec.claim_ref.namespace,
+             _pinned_node(pv, local.topology_key) if pv.spec.storage_class_name == local.class_name else None)
+            for pv in self._core.list_persistent_volume().items
+            if pv.spec and pv.spec.claim_ref
+        )
+        volumes = tuple(
+            LogicalVolume(
+                name=item["metadata"]["name"],
+                volume_id=(item.get("status") or {}).get("volumeID"),
+                node=(item.get("spec") or {}).get("nodeName") or "",
+                source=(item.get("spec") or {}).get("source") or None,
+            )
+            for item in self._custom.list_cluster_custom_object(local.driver, "v1", "logicalvolumes").get("items") or []
+        )
+        node_of = {volume.volume_id: volume.node for volume in volumes if volume.volume_id}
+        contents = tuple(
+            (((item.get("spec") or {}).get("volumeSnapshotRef") or {}).get("namespace") or "",
+             node_of.get((item.get("status") or {}).get("snapshotHandle")))
+            for item in self._custom.list_cluster_custom_object(SNAPSHOT_GROUP, "v1", "volumesnapshotcontents").get("items")
+            or []
+        )
+        return LocalVolumeState(
+            claimed_pvs=claimed,
+            snapshot_contents=contents,
+            volumes=volumes,
+            live_nodes=frozenset(node.metadata.name for node in nodes if not _stop_confirmed(node)),
+        )
+
+
+OUT_OF_SERVICE_TAINT = "node.kubernetes.io/out-of-service"
+
+
+def _stop_confirmed(node) -> bool:
+    """D4: the operator confirmed this node stopped by the node-removal rule,
+    which ends in Kubernetes' own out-of-service taint, and it is not Ready.
+    A Ready node carrying the taint is a mistake, never a confirmation."""
+
+    tainted = any(taint.key == OUT_OF_SERVICE_TAINT for taint in (node.spec.taints or []))
+    ready = node.status is not None and any(
+        condition.type == "Ready" and condition.status == "True" for condition in (node.status.conditions or [])
+    )
+    return tainted and not ready
+
+
+def _general_node(node) -> bool:
+    """Open to general cells: no dedicated reservation, schedulable, untainted, Ready."""
+
+    taints = node.spec.taints or []
+    return (
+        "exomem.io/dedicated-cell" not in (node.metadata.labels or {})
+        and not any(taint.key == "exomem.io/dedicated-cell" for taint in taints)
+        and not node.spec.unschedulable
+        and not any(taint.effect in {"NoSchedule", "NoExecute"} for taint in taints)
+        and node.status is not None
+        and any(condition.type == "Ready" and condition.status == "True" for condition in (node.status.conditions or []))
+    )
+
+
 def _capacity_cell_id(namespace: str | None) -> str | None:
     if namespace and re.fullmatch(r"exo-cell-[a-z2-7]{16}", namespace):
         return namespace[len(NAMESPACE_PREFIX):]
     return None
+
+
+def _pinned_node(pv, topology_key: str) -> str | None:
+    """The one node a local PV's node affinity pins it to on `topology_key`,
+    or None when it does not name exactly one."""
+
+    affinity = getattr(pv.spec, "node_affinity", None)
+    required = affinity.required if affinity else None
+    nodes = {
+        value
+        for term in (required.node_selector_terms or [] if required else [])
+        for expression in term.match_expressions or []
+        if expression.key == topology_key and expression.operator == "In"
+        for value in expression.values or []
+    }
+    return nodes.pop() if len(nodes) == 1 else None
 
 
 def _pv_matches_node(pv, node) -> bool:
@@ -613,6 +850,21 @@ def _init_completed(pod) -> bool:
     return False
 
 
+def _init_refusal(pod) -> str | None:
+    """D5: the refusal code cell-init wrote as its termination message, from
+    its current or (while it crash-loops) its last run. Anything that is not
+    one of cell-init's own codes is ignored, never copied to the row."""
+
+    for status in pod.status.init_container_statuses or []:
+        if status.name != INIT_CONTAINER_NAME:
+            continue
+        for state in (status.state, status.last_state):
+            terminated = state.terminated if state else None
+            if terminated is not None and terminated.message in INIT_REFUSAL_CODES:
+                return terminated.message
+    return None
+
+
 def _init_rerun(pod) -> tuple[bool, datetime | None]:
     """N5/D4: whether cell-init runs again after it already completed in
     an earlier pod sandbox, and when this run started. A node reboot
@@ -655,3 +907,4 @@ def _job_observation(job, *, prefix: str, snapshot_id: str | None = None) -> dic
         result["backup_job_snapshot_id"] = snapshot_id if succeeded else None
         result["backup_job_started_at"] = job.status.start_time
     return result
+

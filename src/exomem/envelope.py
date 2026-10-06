@@ -39,9 +39,7 @@ every session start.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from pathlib import Path
 
 from . import mode
@@ -439,22 +437,10 @@ def _write_envelope(envelope_object: dict[str, str]) -> Path:
     because "absent means derived" is the rollback contract and an empty object
     should not be a second spelling of it.
     """
-    path = mode.config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = mode.read_config()
     data["schema"] = 1
     if envelope_object:
         data[_CONFIG_KEY] = envelope_object
     else:
         data.pop(_CONFIG_KEY, None)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=2), "utf-8")
-        os.replace(tmp, path)  # atomic swap
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    return path
+    return mode.write_config(data)

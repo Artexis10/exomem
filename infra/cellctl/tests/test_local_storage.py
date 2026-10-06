@@ -1,0 +1,960 @@
+"""move-cloud-cells-to-local-storage, phase 2: cellctl on TopoLVM local volumes.
+
+Each test names the behaviour only it pins. With no local class configured,
+cellctl must behave exactly as before; the unchanged-production test proves
+that on an existing cell's render digest and manifests.
+"""
+
+from __future__ import annotations
+
+import base64
+import dataclasses
+from datetime import UTC, datetime, timedelta
+
+import asyncpg
+import pytest
+
+from cellctl import reconcile
+from cellctl.decide import decide
+from cellctl.manifests import STORAGE_CLASS, namespace_name
+from cellctl.reconcile import ClusterConfig
+from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, RolloutRow
+from cellctl.storage.fake_b2 import FakeB2
+from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
+from cellctl.storage_config import LocalStorage, StorageConfig
+
+from .conftest import CellDatabase, tenant_uuid
+from .test_reconcile import FakeClusterGateway, _secrets_config, _seed_cell
+
+NOW = datetime(2026, 1, 1, 12, tzinfo=UTC)
+IMAGE_A = "registry.example/cell@sha256:" + "a" * 64
+LOCAL = LocalStorage()
+# The local class is configured, but Hetzner volumes stay the domain (phases 2-6).
+MIGRATING = StorageConfig(local=LOCAL)
+# After the cutover (7.2): new claims and published capacity are local.
+CUT_OVER = StorageConfig(domain=LOCAL.class_name, local=LOCAL)
+
+
+def _row(**overrides) -> CellRow:
+    defaults = dict(
+        cell_id="aaaaaaaaaaaaaaaa", tenant_id=tenant_uuid("tenant-a"), storage_gib=10, rollout_priority=1,
+        desired_state="running", desired_image=None, generation=1, observed_generation=1,
+        observed_state="running", observed_image=IMAGE_A, ready=True,
+    )
+    defaults.update(overrides)
+    return CellRow(**defaults)
+
+
+def _bound(storage_class: str, **overrides) -> ClusterObservation:
+    defaults = dict(
+        namespace_exists=True, namespace_cell_label="aaaaaaaaaaaaaaaa", pvc_bound=True, pvc_uid="pvc-1",
+        pv_claim_ref_uid="pvc-1", pv_storage_class=storage_class, pvc_storage_class=storage_class,
+        statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True,
+        ready_pod_image=IMAGE_A,
+    )
+    defaults.update(overrides)
+    return ClusterObservation(**defaults)
+
+
+def _decide(row: CellRow, observation: ClusterObservation, storage: StorageConfig):
+    return decide(row, RolloutRow(), observation, now=NOW, cell_image=IMAGE_A, start_upgrade=False, storage=storage)
+
+
+# --- 2.1: configured classes ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("storage", "bound_class"),
+    # After the cutover a cell still on a Hetzner volume, and before it a cell
+    # already on the local class: neither may fail as a foreign volume.
+    [(CUT_OVER, STORAGE_CLASS), (MIGRATING, LOCAL.class_name)],
+)
+def test_a_cell_bound_to_any_configured_class_is_not_an_identity_conflict(storage, bound_class) -> None:
+    decision = _decide(_row(), _bound(bound_class), storage)
+
+    assert decision.row_updates.get("last_error_code") != IDENTITY_CONFLICT
+    assert decision.row_updates.get("observed_state") != "failed"
+
+
+@pytest.mark.parametrize(("existing_claim_class", "rendered_class"), [(None, LOCAL.class_name), (STORAGE_CLASS, STORAGE_CLASS)])
+async def test_after_the_cutover_only_a_new_claim_takes_the_local_class(
+    cell_db: CellDatabase, existing_claim_class: str | None, rendered_class: str
+) -> None:
+    # storageClassName is immutable: re-rendering the domain over a cell that
+    # is still on a Hetzner volume would be refused on every pass.
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    observation = _bound(existing_claim_class) if existing_claim_class else ClusterObservation()
+    cluster = FakeClusterGateway()
+    cluster.observations["aaaaaaaaaaaaaaaa"] = observation
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await reconcile.reconcile_once(
+            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+            ClusterConfig(object_storage_bucket="exomem-cloud-backups", storage=CUT_OVER), now=NOW,
+        )
+    finally:
+        await connection.close()
+
+    claim = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "PersistentVolumeClaim", "cell-data")]
+    assert claim["spec"]["storageClassName"] == rendered_class
+
+
+def test_a_local_volume_is_matched_to_the_node_its_pv_is_pinned_to() -> None:
+    from types import SimpleNamespace as NS
+
+    from cellctl.k8s_client import ClusterClient
+
+    from .test_k8s_client import NAMESPACE, _client, _Core
+
+    affinity = NS(required=NS(node_selector_terms=[NS(match_expressions=[
+        NS(key=LOCAL.topology_key, operator="In", values=["agent-2"])], match_fields=None)]))
+    pvc = NS(metadata=NS(name="cell-data", namespace=NAMESPACE, uid="uid-1"),
+             spec=NS(volume_name="pv-1", storage_class_name=LOCAL.class_name), status=NS(phase="Bound"))
+    pv = NS(metadata=NS(name="pv-1"), spec=NS(claim_ref=NS(uid="uid-1"), storage_class_name=LOCAL.class_name,
+                                              csi=NS(volume_handle="lv-1"), node_affinity=affinity,
+                                              persistent_volume_reclaim_policy="Delete"))
+    client: ClusterClient = _client(hold_started_at=None, jobs={}, pods=[])
+    client._core = _Core([], pvcs=[pvc], pvs=[pv])
+    client._core.list_node = lambda: NS(items=[])
+    client._storage_config = MIGRATING
+
+    observed = client.observe_cells({"aaaaaaaaaaaaaaaa": NAMESPACE})["aaaaaaaaaaaaaaaa"]
+
+    assert observed.pv_node == "agent-2"
+
+
+def test_with_no_local_class_an_existing_cells_render_digest_does_not_move() -> None:
+    # The digest is every converged cell's restart trigger: a value that moves
+    # with no local class configured restarts every production cell on the
+    # next deploy. Captured from c298b7954, before local storage existed, for a
+    # Hetzner cell with production's chart defaults.
+    from cellctl.reconcile import _compute_render_digest
+
+    row = _row(generation=3, backup_key_version=1, b2_key_version=1)
+    config = ClusterConfig(
+        object_storage_bucket="b",
+        job_egress_except=("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"),
+    )
+
+    assert _compute_render_digest(row, config, _secrets_config(), STORAGE_CLASS) == (
+        "3a08b2c74eae86e9d927d4b127ee8e7f64703145889368dc1675c9ca0f0cd2e0"
+    )
+
+
+# --- 2.6: the empty-vault guard --------------------------------------------------
+
+
+def test_a_local_cells_first_backup_changes_its_secret_but_not_its_pod_template_or_digest() -> None:
+    # D5: the backed-up key reaches cell-init through an optional reference
+    # the template carries from the start, so recording the first backup
+    # restarts no cell.
+    from cellctl.manifests import CellManifestSpec, render_secret, render_statefulset
+    from cellctl.reconcile import _compute_render_digest
+
+    spec = CellManifestSpec(cell_id="aaaaaaaaaaaaaaaa", image=IMAGE_A, replicas=1, read_only=False,
+                            storage_class=LOCAL.class_name, local_volume=True)
+    backed_up = dataclasses.replace(spec, backed_up=True)
+    config = ClusterConfig(object_storage_bucket="b", storage=MIGRATING)
+
+    assert render_statefulset(backed_up) == render_statefulset(spec)
+    assert "backed-up" not in render_secret(spec)["data"]
+    assert base64.b64decode(render_secret(backed_up)["data"]["backed-up"]) == b"true"
+    assert _compute_render_digest(_row(last_backup_at=NOW), config, _secrets_config(), LOCAL.class_name) == (
+        _compute_render_digest(_row(), config, _secrets_config(), LOCAL.class_name)
+    )
+
+
+def test_a_refusing_cell_init_puts_its_code_on_the_row_before_the_init_deadline() -> None:
+    observation = _bound(LOCAL.class_name, pod_ready=False, pod_exists=True, pod_created_at=NOW,
+                         statefulset_row_generation=2, init_error_code="CELL_INIT_EMPTY_VOLUME_REFUSED")
+
+    decision = _decide(_row(ready=False, generation=2), observation, MIGRATING)
+
+    assert decision.row_updates["last_error_code"] == "CELL_INIT_EMPTY_VOLUME_REFUSED"
+    assert decision.row_updates["observed_state"] == "provisioning"
+
+
+@pytest.mark.parametrize(
+    ("message", "recorded"),
+    # Only cell-init's own fixed refusal reaches the row: the message is
+    # container output, never trusted as free text.
+    [("CELL_INIT_EMPTY_VOLUME_REFUSED", "CELL_INIT_EMPTY_VOLUME_REFUSED"), ("/data/vault: anything", None)],
+)
+def test_the_refusal_is_read_from_a_crash_looping_cell_init(message: str, recorded: str | None) -> None:
+    from types import SimpleNamespace as NS
+
+    from .test_k8s_client import CELL_ID, NAMESPACE, _cell_pod, _client
+
+    waiting = NS(terminated=None, running=None, waiting=NS(reason="CrashLoopBackOff"))
+    refused = NS(terminated=NS(exit_code=1, message=message, started_at=None), running=None, waiting=None)
+    pod = _cell_pod(init_state=waiting, last_state=refused)
+
+    observed = _client(hold_started_at=None, jobs={}, pods=[pod]).observe(CELL_ID, NAMESPACE)
+
+    assert observed.init_error_code == recorded
+
+
+# --- 2.2: capacity from the local pool ---------------------------------------------
+
+GIB = 1024**3
+
+
+def _volume(node: str, gib: int, *, created: bool = True, deleting: bool = False):
+    from cellctl.capacity import LogicalVolumeRecord
+
+    return LogicalVolumeRecord(node=node, size=gib * GIB, device_class=LOCAL.device_class, created=created,
+                               deleting=deleting)
+
+
+def test_a_pass_during_a_backup_publishes_the_same_slots() -> None:
+    # Recorded the way spike 1.1 measured TopoLVM at ratio 1.0: a snapshot and
+    # its clone each take their full size from the published free bytes, and
+    # a volume whose object exists before lvmd creates it has taken nothing.
+    from cellctl.capacity import LocalCapacityObservation, compute_local_capacity
+
+    cells = {"aaaaaaaaaaaaaaaa": 4, "bbbbbbbbbbbbbbbb": 4}
+    idle = LocalCapacityObservation(free_bytes={"agent-1": 92 * GIB}, volumes=(_volume("agent-1", 4), _volume("agent-1", 4)))
+    backing_up = LocalCapacityObservation(
+        free_bytes={"agent-1": 84 * GIB},
+        volumes=(*idle.volumes, _volume("agent-1", 4), _volume("agent-1", 4), _volume("agent-1", 4, created=False)),
+    )
+
+    # (100 GiB pool - 2 x 4 GiB x 2 concurrent backups) / the 4 GiB local default
+    assert compute_local_capacity(idle, local=LOCAL, cell_sizes=cells)["agent-1"].cell_slots == 21
+    assert compute_local_capacity(backing_up, local=LOCAL, cell_sizes=cells)["agent-1"].cell_slots == 21
+
+
+def test_a_cell_larger_than_the_default_takes_more_slots_and_a_larger_reserve() -> None:
+    from cellctl.capacity import LocalCapacityObservation, compute_local_capacity
+
+    observation = LocalCapacityObservation(free_bytes={"agent-1": 370 * GIB}, volumes=(_volume("agent-1", 30),),
+                                           cell_nodes={"aaaaaaaaaaaaaaaa": "agent-1"})
+
+    published = compute_local_capacity(observation, local=LOCAL, cell_sizes={"aaaaaaaaaaaaaaaa": 30})
+
+    # (400 - 2 x 30 x 2) / 4 = 70 default slots, of which the 30 GiB cell,
+    # counted as one row by admission, takes ceil(30 / 4) - 1 = 7 more.
+    assert published["agent-1"].cell_slots == 63
+
+
+async def test_once_local_is_the_domain_only_nodes_with_a_pool_publish_slots(cell_db: CellDatabase) -> None:
+    # The control-plane server keeps its Hetzner attachment allowance but has
+    # no cell pool; after the cutover it must publish nothing.
+    from cellctl.capacity import CapacityObservation, LocalCapacityObservation
+
+    cluster = FakeClusterGateway()
+    cluster.capacity_inputs = lambda **kwargs: CapacityObservation(allocatable={"server": 16}, attachments_used={"server": 3})
+    cluster.local_capacity_inputs = lambda local: LocalCapacityObservation(
+        free_bytes={"server": None, "agent-1": 100 * GIB})
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await reconcile.reconcile_once(
+            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+            ClusterConfig(object_storage_bucket="b", storage=CUT_OVER), now=NOW,
+        )
+        published = await connection.fetch("SELECT node, cell_slots FROM exomem_cloud_capacity")
+    finally:
+        await connection.close()
+
+    assert {record["node"]: record["cell_slots"] for record in published} == {"server": 0, "agent-1": 21}
+
+
+def test_a_shared_local_worker_publishes_the_same_slots_while_a_cell_backs_up() -> None:
+    # D3: the hourly backup Job runs beside the serving pod, so the qualified
+    # footprint carries one Job; otherwise every backup would close admission.
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from cellctl.capacity import (
+        CapacityConfig,
+        CapacityObservation,
+        NodeCapacity,
+        NodeObservation,
+        PodReservation,
+        SharedWorkerPolicy,
+        compute_shared_capacity,
+    )
+    from cellctl.manifests import ResourceSettings
+
+    policy = SharedWorkerPolicy(mode="all-shared", profile="qualified-test", topology_key="topology.kubernetes.io/zone",
+                                topology_value="test-zone", occupancy=6,
+                                resources=ResourceSettings(cpu_request="1", memory_request="2Gi"),
+                                reserve_cpu="500m", reserve_memory="1Gi")
+    node = NodeObservation(name="worker", cpu=Decimal("3.5"), memory=Decimal(8 * GIB),
+                           labels={"exomem.io/shared-profile": policy.profile, policy.topology_key: policy.topology_value},
+                           ready=True, schedulable=True, pressure=False,
+                           taints=(("exomem.io/shared-profile", policy.profile, "NoSchedule"),))
+    serving = PodReservation(node="worker", cell_id="aaaaaaaaaaaaaaaa", cpu=Decimal(1), memory=Decimal(2 * GIB))
+    backup_job = PodReservation(node="worker", cell_id="aaaaaaaaaaaaaaaa", cpu=Decimal("0.1"), memory=Decimal(256 * 1024**2))
+    idle = CapacityObservation(nodes={"worker": node}, pods=(serving,))
+    storage = {"worker": NodeCapacity(cell_slots=6, attachments_used=1, limit_known=True)}
+
+    def slots(observation) -> int:
+        return compute_shared_capacity(observation, policy=policy, config=CapacityConfig(),
+                                       committed=frozenset({"aaaaaaaaaaaaaaaa"}), storage_slots=storage)["worker"].cell_slots
+
+    assert slots(replace(idle, pods=(serving, backup_job))) == slots(idle) == 2
+
+
+def test_the_pool_is_read_from_topolvms_node_annotation_and_logical_volumes() -> None:
+    # Field names as TopoLVM 17.2.0's topolvm.io/v1 LogicalVolume CRD and
+    # node annotation publish them; a wrong name would read as an empty pool.
+    from types import SimpleNamespace as NS
+
+    from cellctl.k8s_client import ClusterClient
+
+    def node(name: str, annotations: dict) -> NS:
+        return NS(metadata=NS(name=name, labels={}, annotations=annotations),
+                  spec=NS(taints=None, unschedulable=False),
+                  status=NS(conditions=[NS(type="Ready", status="True")]))
+
+    pinned = NS(required=NS(node_selector_terms=[NS(match_expressions=[
+        NS(key=LOCAL.topology_key, operator="In", values=["agent-1"])], match_fields=None)]))
+    cell_pv = NS(metadata=NS(name="pv-1"), spec=NS(
+        claim_ref=NS(namespace="exo-cell-aaaaaaaaaaaaaaaa", name="cell-data"),
+        storage_class_name=LOCAL.class_name, node_affinity=pinned))
+
+    class Core:
+        def list_node(self):
+            return NS(items=[node("agent-1", {"capacity.topolvm.io/thin": "85899345920"}), node("server", {})])
+
+        def list_persistent_volume(self):
+            return NS(items=[cell_pv])
+
+    class Custom:
+        def list_cluster_custom_object(self, group, version, plural):
+            assert (group, version, plural) == ("topolvm.io", "v1", "logicalvolumes")
+            return {"items": [{"metadata": {"name": "pvc-1"},
+                               "spec": {"nodeName": "agent-1", "size": "10Gi", "deviceClass": "thin"},
+                               "status": {"volumeID": "7f6c"}}]}
+
+    client = ClusterClient.__new__(ClusterClient)
+    client._core, client._custom = Core(), Custom()
+
+    observed = client.local_capacity_inputs(LOCAL)
+
+    assert observed.free_bytes == {"agent-1": 80 * GIB, "server": None}
+    assert [(v.node, v.size, v.device_class, v.created) for v in observed.volumes] == [("agent-1", 10 * GIB, "thin", True)]
+    assert observed.cell_nodes == {"aaaaaaaaaaaaaaaa": "agent-1"}
+
+
+# --- 2.3: the hourly online backup ---------------------------------------------------
+
+STARTED = datetime(2026, 1, 1, 11, 58, tzinfo=UTC)
+SNAPSHOT_ID = "c" * 64
+
+
+def _local(**overrides) -> ClusterObservation:
+    return _bound(LOCAL.class_name, **{"statefulset_row_generation": 1, "pv_node": "agent-1", **overrides})
+
+
+def _in_hold(**overrides) -> ClusterObservation:
+    return _local(statefulset_hold_kind="snapshot-backup", statefulset_hold_started_at=STARTED, **overrides)
+
+
+def _step(observation: ClusterObservation, row: CellRow | None = None, now: datetime = NOW):
+    return decide(row or _row(hold_kind="backup", hold_started_at=STARTED), RolloutRow(), observation, now=now,
+                  cell_image=IMAGE_A, start_upgrade=False, storage=MIGRATING)
+
+
+def test_an_hourly_backup_starts_without_stopping_the_cell() -> None:
+    decision = decide(_row(last_backup_at=datetime(2026, 1, 1, 10, tzinfo=UTC)), RolloutRow(), _local(), now=NOW,
+                      cell_image=IMAGE_A, start_upgrade=False, start_backup=True, storage=MIGRATING)
+
+    assert (decision.hold_kind, decision.replicas, decision.create_snapshot) == ("snapshot-backup", 1, True)
+    # The row's hold column keeps the C1 vocabulary (upgrade, backup, restore).
+    assert decision.row_updates["hold_kind"] == "backup"
+
+
+def test_an_hourly_backup_reads_a_clone_of_its_snapshot_and_ends_once_both_are_gone() -> None:
+    assert _step(_in_hold(snapshot_exists=True)).create_clone is False  # not ready yet
+    assert _step(_in_hold(snapshot_exists=True, snapshot_ready=True)).create_clone is True
+    waiting = _step(_in_hold(snapshot_exists=True, snapshot_ready=True, clone_exists=True))
+    assert not waiting.run_backup_job  # the clone is not bound yet
+    copying = _step(_in_hold(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True))
+    assert copying.run_backup_job and copying.replicas == 1
+
+    done = _step(_in_hold(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True,
+                          backup_job_succeeded=True, backup_job_snapshot_id=SNAPSHOT_ID))
+    assert done.row_updates["last_backup_snapshot"] == SNAPSHOT_ID
+    assert (done.backup_outcome, done.delete_snapshot_backup, done.hold_kind) == (SNAPSHOT_ID, True, "snapshot-backup")
+
+    cleaning = _step(_in_hold(statefulset_backup_outcome=SNAPSHOT_ID, clone_exists=True),
+                     _row(hold_kind="backup", hold_started_at=STARTED, last_backup_at=NOW, last_backup_snapshot=SNAPSHOT_ID))
+    assert (cleaning.delete_snapshot_backup, cleaning.hold_kind) == (True, "snapshot-backup")
+    finished = _step(_in_hold(statefulset_backup_outcome=SNAPSHOT_ID),
+                     _row(hold_kind="backup", hold_started_at=STARTED, last_backup_at=NOW, last_backup_snapshot=SNAPSHOT_ID))
+    assert (finished.hold_kind, finished.row_updates["hold_kind"], finished.replicas) == (None, None, 1)
+
+
+def test_a_failed_hourly_backup_backs_off_and_still_removes_its_clone_and_snapshot() -> None:
+    late = STARTED.replace(hour=12, minute=20)  # past the 15-minute backup deadline
+
+    decision = _step(_in_hold(snapshot_exists=True, clone_exists=True), now=late)
+
+    assert decision.row_updates["last_error_code"] == "BACKUP_FAILED"
+    assert decision.backup_retry_after is not None
+    assert (decision.backup_outcome, decision.delete_snapshot_backup, decision.hold_kind) == ("failed", True, "snapshot-backup")
+
+
+def test_a_desired_state_change_during_an_hourly_backup_applies_at_once() -> None:
+    decision = _step(_in_hold(snapshot_exists=True), _row(desired_state="read_only", generation=2,
+                                                          hold_kind="backup", hold_started_at=STARTED))
+
+    assert (decision.read_only, decision.replicas, decision.hold_kind) == (True, 1, "snapshot-backup")
+
+
+@pytest.mark.parametrize(("last_backup", "prune"), [(datetime(2026, 1, 1, 1, 30, tzinfo=UTC), True),
+                                                    (datetime(2026, 1, 1, 10, 50, tzinfo=UTC), False)])
+def test_only_the_first_hourly_backup_after_0200_utc_prunes(last_backup: datetime, prune: bool) -> None:
+    decision = _step(_in_hold(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True),
+                     _row(hold_kind="backup", hold_started_at=STARTED, last_backup_at=last_backup))
+
+    assert decision.run_backup_job and decision.backup_prune is prune
+
+
+def test_hourly_backups_run_two_at_a_time_per_node_and_leave_hetzner_cells_to_the_nightly_window() -> None:
+    from cellctl.decide import ReconcileConfig
+    from cellctl.reconcile import _select_backup_candidates
+
+    an_hour_ago = datetime(2026, 1, 1, 10, 30, tzinfo=UTC)
+    ids = ["aaaaaaaaaaaaaaa" + c for c in "abcde"]
+    rows = [_row(cell_id=cell_id, last_backup_at=an_hour_ago) for cell_id in ids]
+    observations = {
+        ids[0]: _local(), ids[1]: _local(), ids[2]: _local(),
+        ids[3]: _local(pv_node="agent-2"),
+        ids[4]: _bound(STORAGE_CLASS),  # a Hetzner cell, outside its 02:00-05:00 window at noon
+    }
+
+    chosen = _select_backup_candidates(rows, observations, NOW, ReconcileConfig(), storage=MIGRATING)
+
+    assert chosen == {ids[0], ids[1], ids[3]}
+
+
+def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serving_pod() -> None:
+    from cellctl.manifests import CellManifestSpec, render_resource_quota
+
+    spec = CellManifestSpec(cell_id="aaaaaaaaaaaaaaaa", image=IMAGE_A, replicas=1, read_only=False, storage_gib=10,
+                            storage_class=LOCAL.class_name, local_volume=True)
+
+    hard = render_resource_quota(spec)["spec"]["hard"]
+
+    # Serving 250m/1Gi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
+    assert {key: hard[key] for key in ("persistentvolumeclaims", "requests.storage", "requests.cpu",
+                                       "requests.memory", "limits.cpu")} == {
+        "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "350m",
+        "requests.memory": "1280Mi", "limits.cpu": "3",
+    }
+
+
+def test_the_backup_job_reads_the_clone_read_only_and_carries_no_node_selector() -> None:
+    # D3: the clone's PV is pinned to the cell's node, so the Job follows it.
+    from cellctl.manifests import (
+        CellManifestSpec,
+        render_backup_job,
+        render_clone_claim,
+        render_volume_snapshot,
+    )
+
+    spec = CellManifestSpec(cell_id="aaaaaaaaaaaaaaaa", image=IMAGE_A, replicas=1, read_only=False,
+                            storage_class=LOCAL.class_name, local_volume=True, hold_kind="snapshot-backup",
+                            hold_started_at=STARTED.isoformat())
+    snapshot = render_volume_snapshot(spec, snapshot_class=LOCAL.snapshot_class)
+    clone = render_clone_claim(spec, clone_class=LOCAL.clone_class)
+    job = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example", claim_name=clone["metadata"]["name"],
+                            retention=None)
+
+    assert snapshot["spec"] == {"volumeSnapshotClassName": LOCAL.snapshot_class,
+                                "source": {"persistentVolumeClaimName": "cell-data"}}
+    assert clone["spec"]["storageClassName"] == LOCAL.clone_class
+    assert clone["spec"]["dataSourceRef"] == {"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot",
+                                              "name": snapshot["metadata"]["name"]}
+    pod = job["spec"]["template"]["spec"]
+    assert pod["volumes"][0]["persistentVolumeClaim"] == {"claimName": clone["metadata"]["name"], "readOnly": True}
+    assert "nodeSelector" not in pod and "affinity" not in pod
+    assert "forget" not in pod["containers"][0]["command"][2]
+
+
+def test_the_current_holds_snapshot_and_clone_are_observed_by_name() -> None:
+    from types import SimpleNamespace as NS
+
+    from kubernetes.client.rest import ApiException
+
+    from cellctl.manifests import CLONE_CLAIM_NAME, SNAPSHOT_NAME, hold_job_name
+
+    from .test_k8s_client import CELL_ID, CURRENT_HOLD, NAMESPACE, _client
+
+    snapshot_name, clone_name = hold_job_name(SNAPSHOT_NAME, CURRENT_HOLD), hold_job_name(CLONE_CLAIM_NAME, CURRENT_HOLD)
+
+    class Custom:
+        def get_namespaced_custom_object(self, group, version, namespace, plural, name):
+            if (group, plural, namespace, name) != ("snapshot.storage.k8s.io", "volumesnapshots", NAMESPACE, snapshot_name):
+                raise ApiException(status=404)
+            return {"status": {"readyToUse": True}}
+
+    client = _client(hold_started_at=CURRENT_HOLD, jobs={}, pods=[])
+    client._apps._statefulset.metadata.annotations["exomem.io/hold"] = "snapshot-backup"
+    client._custom = Custom()
+
+    def read_claim(name, namespace):
+        if (name, namespace) != (clone_name, NAMESPACE):
+            raise ApiException(status=404)
+        return NS(status=NS(phase="Bound"), metadata=NS(deletion_timestamp=None))
+
+    client._core.read_namespaced_persistent_volume_claim = read_claim
+
+    observed = client.observe(CELL_ID, NAMESPACE)
+
+    assert (observed.snapshot_exists, observed.snapshot_ready, observed.clone_exists, observed.clone_bound) == (True,) * 4
+
+
+async def test_an_hourly_backup_through_the_controller_records_the_backup_and_leaves_no_clone(cell_db: CellDatabase) -> None:
+    from cellctl import db
+    from cellctl.manifests import BACKUP_OUTCOME_ANNOTATION, HOLD_ANNOTATION
+
+    from .test_reconcile import _observed_from_applied
+
+    class Gateway(FakeClusterGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleaned: list[tuple[str, str, str]] = []
+
+        def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
+            self.cleaned.append((namespace, snapshot, claim))
+
+    cell_id, namespace = "aaaaaaaaaaaaaaaa", namespace_name("aaaaaaaaaaaaaaaa")
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    cluster = Gateway()
+    config = ClusterConfig(object_storage_bucket="b", storage=CUT_OVER)
+    local = dict(pv_storage_class=LOCAL.class_name, pvc_storage_class=LOCAL.class_name, pv_node="agent-1")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+
+    def observe(**overrides) -> None:
+        statefulset = cluster.applied[(namespace, "StatefulSet", "cell")]
+        outcome = statefulset["metadata"]["annotations"].get(BACKUP_OUTCOME_ANNOTATION)
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, **local, statefulset_backup_outcome=outcome, **overrides)
+
+    async def run(minute: int) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=NOW + timedelta(minutes=minute))
+
+    try:
+        await run(0)
+        observe()
+        await run(1)  # converged and running; never backed up, so due at once
+        observe()
+        await run(2)
+        statefulset = cluster.applied[(namespace, "StatefulSet", "cell")]
+        assert (statefulset["metadata"]["annotations"][HOLD_ANNOTATION], statefulset["spec"]["replicas"]) == (
+            "snapshot-backup", 1)
+        snapshot = cluster.jobs[-1]
+        assert snapshot["kind"] == "VolumeSnapshot"
+
+        observe(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True)
+        await run(3)
+        job = cluster.jobs[-1]
+        clone_name = job["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"]
+        assert job["kind"] == "Job" and clone_name.startswith("cell-clone-")
+
+        observe(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True,
+                backup_job_succeeded=True, backup_job_snapshot_id=SNAPSHOT_ID)
+        await run(4)
+        assert cluster.cleaned == [(namespace, snapshot["metadata"]["name"], clone_name)]
+        secret = cluster.applied[(namespace, "Secret", "cell-credentials")]
+        assert "backed-up" in secret["data"]
+
+        observe()  # the clone and snapshot are gone
+        await run(5)
+        statefulset = cluster.applied[(namespace, "StatefulSet", "cell")]
+        assert HOLD_ANNOTATION not in statefulset["metadata"]["annotations"]
+        row = (await db.select_all_rows(connection))[0]
+        assert (row.last_backup_snapshot, row.hold_kind) == (SNAPSHOT_ID, None)
+    finally:
+        await connection.close()
+
+
+# --- 2.5: the deletion proof on local storage -------------------------------------
+
+
+def _remaining(**overrides):
+    from cellctl.storage.topolvm import LocalVolumeState, LogicalVolume
+
+    defaults = dict(
+        claimed_pvs=(), snapshot_contents=(),
+        volumes=(LogicalVolume(name="lv-cell", volume_id="vol-1", node="agent-1"),
+                 LogicalVolume(name="lv-snap", volume_id="vol-2", node="agent-1", source="lv-cell"),
+                 LogicalVolume(name="lv-other", volume_id="vol-9", node="agent-1")),
+        live_nodes=frozenset({"agent-1"}),
+    )
+    defaults.update(overrides)
+    return LocalVolumeState(**defaults)
+
+
+@pytest.mark.parametrize("kept", ["volume", "snapshot volume", "snapshot content", "clone pv"])
+def test_a_deleted_cells_local_data_is_absent_only_when_its_volume_snapshots_and_clones_are(kept: str) -> None:
+    from cellctl.storage.topolvm import LogicalVolume, cell_data_absent
+
+    namespace = "exo-cell-aaaaaaaaaaaaaaaa"
+    other = LogicalVolume(name="lv-other", volume_id="vol-9", node="agent-1")
+    state = {
+        "volume": _remaining(volumes=(LogicalVolume(name="lv-cell", volume_id="vol-1", node="agent-1"), other)),
+        "snapshot volume": _remaining(volumes=(LogicalVolume(name="lv-snap", volume_id="vol-2", node="agent-1",
+                                                             source="lv-cell"),
+                                               LogicalVolume(name="lv-cell", volume_id="vol-1", node="agent-1"))),
+        "snapshot content": _remaining(volumes=(other,), snapshot_contents=((namespace, None),)),
+        "clone pv": _remaining(volumes=(other,), claimed_pvs=((namespace, "agent-1"),)),
+    }[kept]
+
+    assert cell_data_absent(state, namespace=namespace, volume_id="vol-1") is False
+    assert cell_data_absent(_remaining(volumes=(other,)), namespace=namespace, volume_id="vol-1") is True
+
+
+def test_a_deleted_cells_volume_on_a_destroyed_node_counts_as_absent() -> None:
+    # D4: a retained PV and its logical volume on a node confirmed destroyed
+    # can never be cleaned by the driver; they hold no reachable data.
+    from cellctl.storage.topolvm import cell_data_absent
+
+    namespace = "exo-cell-aaaaaaaaaaaaaaaa"
+    on_lost_node = _remaining(claimed_pvs=((namespace, "agent-1"),), live_nodes=frozenset({"agent-2"}))
+
+    assert cell_data_absent(on_lost_node, namespace=namespace, volume_id="vol-1") is True
+
+
+def test_with_local_storage_configured_a_deleting_cell_waits_for_its_logical_volume() -> None:
+    from cellctl.reconcile import _augment_deletion_observation
+    from cellctl.storage.topolvm import LogicalVolume
+
+    cluster = FakeClusterGateway()
+    cluster.local_volume_state = lambda local: _remaining(volumes=(LogicalVolume(name="lv", volume_id="vol-1", node="agent-1"),))
+
+    observation = _augment_deletion_observation(ClusterObservation(), _row(desired_state="deleted", volume_id="vol-1"),
+                                                cluster, FakeB2(), FakeHetznerVolumeProvider(), storage=MIGRATING)
+
+    assert observation.pv_absent_confirmed is False
+
+
+# --- 2.4: operator-triggered relocation -------------------------------------------------
+
+LAST_BACKUP = "d" * 64
+LOST = dict(pv_name="pv-old", pvc_volume_id="vol-old", pvc_exists=True, pv_node_stop_confirmed=True,
+            pod_exists=False, pod_ready=False)
+
+
+def _relocating(**overrides) -> ClusterObservation:
+    defaults = dict(statefulset_hold_kind="restore", statefulset_hold_started_at=STARTED,
+                    statefulset_relocation_volume="vol-old", statefulset_pre_upgrade_snapshot=LAST_BACKUP,
+                    statefulset_previous_image=IMAGE_A, statefulset_replicas=0, **LOST)
+    defaults.update(overrides)
+    return _local(**defaults)
+
+
+def _relocated_row(**overrides) -> CellRow:
+    defaults = dict(volume_id="vol-old", node="agent-1", last_backup_at=STARTED, last_backup_snapshot=LAST_BACKUP,
+                    hold_kind="restore", hold_started_at=STARTED)
+    defaults.update(overrides)
+    return _row(**defaults)
+
+
+def test_a_cell_whose_node_is_confirmed_stopped_is_relocated_from_its_last_backup() -> None:
+    decision = decide(_row(volume_id="vol-old", last_backup_at=STARTED, last_backup_snapshot=LAST_BACKUP), RolloutRow(),
+                      _local(**LOST), now=NOW, cell_image=IMAGE_A, start_upgrade=False, start_relocation=True,
+                      storage=MIGRATING)
+
+    assert (decision.hold_kind, decision.replicas) == ("restore", 0)
+    assert (decision.pre_upgrade_snapshot, decision.relocation_volume) == (LAST_BACKUP, "vol-old")
+
+
+def test_a_cell_with_no_backup_is_not_relocated_onto_an_empty_volume() -> None:
+    decision = _step(_local(**LOST), _row(volume_id="vol-old"))
+
+    assert decision.hold_kind is None
+    assert decision.row_updates["last_error_code"] == "RELOCATION_NO_BACKUP"
+
+
+def test_relocations_start_one_per_pass_owner_first_and_never_without_a_backup() -> None:
+    from cellctl.reconcile import _select_relocation_candidate
+
+    owner, tenant, unbacked = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
+    rows = [_row(cell_id=tenant, rollout_priority=5, last_backup_snapshot=LAST_BACKUP),
+            _row(cell_id=unbacked, rollout_priority=0),
+            _row(cell_id=owner, rollout_priority=1, last_backup_snapshot=LAST_BACKUP)]
+    observations = {cell_id: _local(**LOST) for cell_id in (owner, tenant, unbacked)}
+
+    assert _select_relocation_candidate(rows, observations, MIGRATING) == owner
+
+
+def test_relocation_retains_the_old_volume_before_it_deletes_the_claim() -> None:
+    dead_pod = _step(_relocating(pod_exists=True, pod_uses_volume=True, pv_reclaim_policy="Delete"), _relocated_row())
+    assert (dead_pod.retain_volume, dead_pod.delete_claim) == (None, False)
+
+    retain = _step(_relocating(pv_reclaim_policy="Delete"), _relocated_row())
+    assert (retain.retain_volume, retain.delete_claim) == ("pv-old", False)
+
+    delete = _step(_relocating(pv_reclaim_policy="Retain"), _relocated_row())
+    assert (delete.retain_volume, delete.delete_claim) == (None, True)
+    assert (delete.row_updates["volume_id"], delete.row_updates["node"]) == (None, None)
+
+
+def test_a_relocated_cell_starts_only_after_its_restore_succeeds() -> None:
+    claim_gone = dict(pvc_exists=False, pvc_bound=False, pvc_volume_id=None, pv_name=None, pv_node=None,
+                      pv_node_stop_confirmed=False)
+    row = _relocated_row(volume_id=None, node=None)
+
+    restoring = _step(_relocating(**claim_gone), row)
+    assert (restoring.run_restore_job_snapshot, restoring.replicas, restoring.relocation_volume) == (
+        LAST_BACKUP, 0, "vol-old")
+
+    failed = _step(_relocating(**claim_gone, restore_job_failed=True), row)
+    assert (failed.replicas, failed.hold_kind, failed.row_updates["last_error_code"]) == (0, "restore", "RESTORE_FAILED")
+    assert (failed.retain_volume, failed.delete_claim) == (None, False)
+
+    restored = _step(_relocating(**claim_gone, restore_job_succeeded=True), row)
+    starting = _step(_relocating(**claim_gone, statefulset_restored_snapshot=LAST_BACKUP), row)
+    assert (restored.replicas, starting.replicas) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("taints", "ready", "confirmed"),
+    [
+        ([("node.kubernetes.io/out-of-service", "NoExecute")], "False", True),
+        ([], "Unknown", False),  # only partitioned: never relocated
+        ([("node.kubernetes.io/out-of-service", "NoExecute")], "True", False),  # alive: a mistaken taint
+    ],
+)
+def test_a_node_counts_as_stopped_only_when_tainted_out_of_service_and_not_ready(taints, ready, confirmed) -> None:
+    from types import SimpleNamespace as NS
+
+    from cellctl.k8s_client import _stop_confirmed
+
+    node = NS(spec=NS(taints=[NS(key=key, effect=effect) for key, effect in taints]),
+              status=NS(conditions=[NS(type="Ready", status=ready)]))
+
+    assert _stop_confirmed(node) is confirmed
+
+
+async def test_a_relocation_through_the_controller_retains_the_old_volume_and_restores_into_a_local_claim(
+    cell_db: CellDatabase,
+) -> None:
+    from cellctl import db
+    from cellctl.manifests import HOLD_ANNOTATION, RELOCATION_ANNOTATION
+
+    from .test_reconcile import _observed_from_applied
+
+    class Gateway(FakeClusterGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.volume_writes: list[tuple[str, str]] = []
+
+        def retain_volume(self, name: str) -> None:
+            self.volume_writes.append(("retain", name))
+
+        def delete_claim(self, namespace: str) -> None:
+            self.volume_writes.append(("delete claim", namespace))
+
+    cell_id, namespace = "aaaaaaaaaaaaaaaa", namespace_name("aaaaaaaaaaaaaaaa")
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    await db.write_observed(connection, cell_id, {
+        "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A, "volume_id": "vol-old",
+        "node": "agent-1", "last_backup_at": STARTED, "last_backup_snapshot": LAST_BACKUP})
+    cluster = Gateway()
+    # Hetzner volumes are still the domain; the relocated claim must be local anyway.
+    config = ClusterConfig(object_storage_bucket="b", storage=MIGRATING)
+    local = dict(pv_storage_class=LOCAL.class_name, pvc_storage_class=LOCAL.class_name, pv_node="agent-1")
+    cluster.observations[cell_id] = _bound(LOCAL.class_name, statefulset_row_generation=1, **LOST, pv_node="agent-1",
+                                           pv_reclaim_policy="Delete")
+
+    def observe(**overrides) -> None:
+        annotations = cluster.applied[(namespace, "StatefulSet", "cell")]["metadata"]["annotations"]
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, **{**local, **LOST, "statefulset_relocation_volume": annotations.get(RELOCATION_ANNOTATION),
+                                 **overrides})
+
+    async def run(minute: int) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=NOW + timedelta(minutes=minute))
+
+    try:
+        await run(0)
+        annotations = cluster.applied[(namespace, "StatefulSet", "cell")]["metadata"]["annotations"]
+        assert (annotations[HOLD_ANNOTATION], annotations[RELOCATION_ANNOTATION]) == ("restore", "vol-old")
+
+        observe(pv_reclaim_policy="Delete", pod_exists=False, pod_uses_volume=False, pod_ready=False)
+        await run(1)
+        observe(pv_reclaim_policy="Retain", pod_exists=False, pod_uses_volume=False, pod_ready=False)
+        await run(2)
+        assert cluster.volume_writes == [("retain", "pv-old"), ("delete claim", namespace)]
+        assert (await db.select_all_rows(connection))[0].volume_id is None
+
+        observe(pvc_exists=False, pvc_bound=False, pvc_volume_id=None, pv_name=None, pv_node=None,
+                pv_node_stop_confirmed=False, pvc_storage_class=None, pod_exists=False, pod_uses_volume=False,
+                pod_ready=False)
+        await run(3)
+        claim = cluster.applied[(namespace, "PersistentVolumeClaim", "cell-data")]
+        assert claim["spec"]["storageClassName"] == LOCAL.class_name
+        assert cluster.jobs[-1]["metadata"]["labels"]["exomem.io/cell-job"] == "restore"
+    finally:
+        await connection.close()
+
+
+@pytest.mark.parametrize("storage,skipped", [(StorageConfig(), False), (MIGRATING, True)], ids=["hetzner", "local"])
+async def test_with_local_storage_a_pass_needs_the_guard_that_keeps_claim_deletes_to_retained_volumes(
+    cell_db: CellDatabase, storage: StorageConfig, skipped: bool
+) -> None:
+    # Relocation deletes a cell's claim, and only admission keeps that to a
+    # retained volume. A Hetzner-only chart renders no such guard, so
+    # requiring it there would stop every pass.
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    cluster.admission_missing = {reconcile.RETAINED_DELETE_POLICY_NAME}
+    try:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       ClusterConfig(object_storage_bucket="b", storage=storage), now=NOW)
+        assert (cluster.applied == {}) is skipped
+    finally:
+        await connection.close()
+
+
+# --- 2.8: the backup-age alert ----------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("storage_class", "age", "stale"),
+    [(LOCAL.class_name, timedelta(hours=2, minutes=1), True),
+     (STORAGE_CLASS, timedelta(hours=2, minutes=1), False),
+     (STORAGE_CLASS, timedelta(hours=26, minutes=1), True)],
+    ids=["hourly-past-2h", "nightly-at-2h", "nightly-past-26h"],
+)
+def test_a_running_cells_backup_is_stale_past_its_own_schedule(storage_class, age, stale) -> None:
+    from cellctl.alerts import stale_backups
+
+    row = _row(last_backup_at=NOW - age)
+    observations = {row.cell_id: _bound(storage_class)}
+
+    assert stale_backups([row], observations, NOW, storage=MIGRATING) == ([row.cell_id] if stale else [])
+
+
+def test_a_cell_never_backed_up_is_stale_from_its_creation() -> None:
+    # The case that matters most: backups that never worked leave no
+    # last_backup_at to age.
+    from cellctl.alerts import stale_backups
+
+    row = _row(last_backup_at=None, created_at=NOW - timedelta(hours=3))
+
+    assert stale_backups([row], {row.cell_id: _bound(LOCAL.class_name)}, NOW, storage=MIGRATING) == [row.cell_id]
+
+
+def test_the_alert_is_the_receivers_exact_transition_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Substrate's receiver answers anything else with 400, and the alert
+    # would never reach anyone.
+    import json
+    import re
+
+    from cellctl import alerts
+
+    sent = []
+
+    class Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def geturl(self):
+            return "https://receiver.example/api/exomem/alerts/token"
+
+    class Opener:
+        def open(self, request, timeout):
+            sent.append(request)
+            return Response()
+
+    monkeypatch.setattr(alerts.urllib.request, "build_opener", lambda *handlers: Opener())
+
+    alerts.deliver("https://receiver.example/api/exomem/alerts/token", active=True, observed_at=NOW)
+
+    (request,) = sent
+    body = json.loads(request.data)
+    assert sorted(body) == ["active", "alert", "job", "schema_version", "transition_id"]
+    assert body["schema_version"] == 1 and body["active"] is True
+    assert re.fullmatch(r"[0-9a-f]{64}", body["transition_id"])
+    assert request.get_header("X-exomem-alert-transition") == body["transition_id"]
+    for label in (body["job"], body["alert"]):
+        assert re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", label)
+
+
+async def test_a_stale_backup_fires_once_and_resolves_once_through_the_alert_receiver(
+    cell_db: CellDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cellctl import alerts, db
+
+    delivered: list[tuple[str, bool]] = []
+    monkeypatch.setattr(alerts, "deliver", lambda url, *, active, observed_at: delivered.append((url, active)))
+
+    class Gateway(FakeClusterGateway):
+        def read_secret_value(self, namespace: str, name: str, key: str) -> str:
+            assert (namespace, name, key) == ("exomem-platform", "exomem-hosted-alert-delivery", "url")
+            return "https://receiver.example/alerts/token"
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = Gateway()
+    cluster.observations[cell_id] = _bound(LOCAL.class_name, statefulset_row_generation=1)
+    config = ClusterConfig(object_storage_bucket="b", storage=MIGRATING,
+                           alert_delivery_secret=("exomem-platform", "exomem-hosted-alert-delivery", "url"))
+    memory = reconcile.LoopMemory()
+
+    async def run(at: datetime) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=at, memory=memory)
+
+    try:
+        await db.write_observed(connection, cell_id, {
+            "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A, "ready": True,
+            "last_backup_at": NOW - timedelta(hours=3)})
+        await run(NOW)
+        await run(NOW + timedelta(minutes=1))
+        await db.write_observed(connection, cell_id, {"last_backup_at": NOW + timedelta(minutes=2)})
+        await run(NOW + timedelta(minutes=3))
+    finally:
+        await connection.close()
+
+    assert delivered == [("https://receiver.example/alerts/token", True), ("https://receiver.example/alerts/token", False)]
+
+
+# --- 2.9: reconciling volumes after an etcd restore ---------------------------------------
+
+
+def test_after_an_etcd_restore_each_volume_on_disk_is_matched_to_its_row_or_reported(tmp_path) -> None:
+    # Recorded the way list-cell-volumes.yml saves `lvs --reportformat json`:
+    # the thin pool and its internal volumes are listed too, and only thin
+    # volumes in the pool are cell, snapshot or clone volumes.
+    import json
+
+    from cellctl.readopt import classify, read_host_volumes
+
+    def lv(name: str, attr: str = "Vwi-aotz--", pool: str = "pool0") -> dict:
+        return {"lv_name": name, "lv_size": "10737418240", "pool_lv": pool, "lv_attr": attr}
+
+    (tmp_path / "agent-1.json").write_text(json.dumps({"report": [{"lv": [
+        lv("pool0", "twi-aotz--", ""), lv("[pool0_tmeta]", "ewi-ao----", ""),
+        lv("vol-a"), lv("vol-b"), lv("vol-stray"), lv("vol-snapshot", "Vri---tz-k"),
+    ]}]}), encoding="utf-8")
+
+    report = classify(
+        host=read_host_volumes(tmp_path, pool="pool0"),
+        rows={"aaaaaaaaaaaaaaaa": "vol-a", "bbbbbbbbbbbbbbbb": "vol-b", "cccccccccccccccc": "vol-gone"},
+        objects={"vol-b", "vol-snapshot"},
+    )
+
+    # vol-a lost its LogicalVolume object with the older etcd: re-adopt it.
+    assert report.readopt == [("aaaaaaaaaaaaaaaa", "agent-1", "vol-a")]
+    assert report.in_place == ["bbbbbbbbbbbbbbbb"]
+    # No disk holds vol-gone: that cell is relocated from its backup.
+    assert report.relocate == ["cccccccccccccccc"]
+    # Neither a row nor an object claims it; only an operator on the host releases it.
+    assert report.unclaimed == [("agent-1", "vol-stray")]

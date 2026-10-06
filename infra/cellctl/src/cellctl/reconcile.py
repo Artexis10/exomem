@@ -22,12 +22,14 @@ from pathlib import Path
 import asyncpg
 from kubernetes.client.rest import ApiException
 
-from . import db
+from . import alerts, db
 from .capacity import (
     CapacityConfig,
     CapacityObservation,
+    LocalCapacityObservation,
     NodeCapacity,
     SharedWorkerPolicy,
+    compute_local_capacity,
     compute_node_capacity,
     compute_shared_capacity,
 )
@@ -35,11 +37,17 @@ from .decide import (
     DEFAULT_RECONCILE_CONFIG,
     ReconcileConfig,
     decide,
+    hourly_backup_due,
     nightly_backup_due,
 )
 from .manifests import (
     BACKUP_JOB_NAME,
+    CLONE_CLAIM_NAME,
+    HOURLY_RETENTION_ARGS,
     RENDER_VERSION,
+    RETENTION_ARGS,
+    SNAPSHOT_NAME,
+    STORAGE_CLASS,
     CellManifestSpec,
     ResourceSettings,
     check_artifact_broker_url,
@@ -48,18 +56,23 @@ from .manifests import (
     namespace_name,
     render_backup_job,
     render_cell_manifests,
+    render_clone_claim,
     render_restore_job,
+    render_volume_snapshot,
 )
 from .rollout import current_image, initial_image, parked_canary, select_upgrade_candidate
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
     CANARY_PARKED,
     MANIFEST_IMMUTABLE,
+    SNAPSHOT_BACKUP,
     TARGET_REJECTED,
     CellRow,
     ClusterObservation,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
+from .storage.topolvm import LocalVolumeState, cell_data_absent
+from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
 logger = logging.getLogger("cellctl")
 
@@ -82,6 +95,10 @@ DEFAULT_ADMISSION_BINDING_NAME = "exomem-cellctl-scope"
 DEFAULT_ISOLATION_POLICY_NAME = "exomem-cellctl-isolation"
 DEFAULT_ISOLATION_BINDING_NAME = "exomem-cellctl-isolation"
 ISOLATION_PARAM_NAME = "default-deny"
+# move-cloud-cells-to-local-storage D4: with local storage configured, the
+# third policy admits cellctl's delete of a cell's claim only while every PV
+# claimed by it is Retain (its binding takes every PV as a param).
+RETAINED_DELETE_POLICY_NAME = "exomem-cellctl-retained-delete"
 
 # D4: an apply answered with a 4xx other than these is a refusal. These three
 # are transient and retried at the normal cadence, like a 5xx or a timeout.
@@ -206,6 +223,10 @@ class LoopMemory:
     # capability the backup needs is never listed again by this process.
     object_storage_keys_verified: set[str] = field(default_factory=set)
     object_storage_key_checked_at: dict[str, datetime] = field(default_factory=dict)
+    # Task 2.8: the backup-age alert state last delivered (None: nothing yet
+    # this process) and the stale cells last logged.
+    backup_alert_delivered: bool | None = None
+    stale_backups: list[str] = field(default_factory=list)
 
 
 def _record_refusal(
@@ -294,6 +315,10 @@ class ClusterConfig:
     artifact_broker_cell_ids: tuple[str, ...] = ()
     dedicated_cell_ids: tuple[str, ...] = ()
     shared_worker: SharedWorkerPolicy | None = None
+    storage: StorageConfig = DEFAULT_STORAGE
+    # Task 2.8: (namespace, name, key) of the platform's alert-delivery
+    # Secret. None leaves the backup-age alert to the log.
+    alert_delivery_secret: tuple[str, str, str] | None = None
 
     def __post_init__(self) -> None:
         cell_ids = self.dedicated_cell_ids
@@ -344,16 +369,22 @@ class ClusterGateway:
     def apply_all(self, manifests: list[dict]) -> None: ...  # pragma: no cover
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
+    def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None: ...  # pragma: no cover
+    def retain_volume(self, name: str) -> None: ...  # pragma: no cover
+    def delete_claim(self, namespace: str) -> None: ...  # pragma: no cover
     def run_job(self, manifest: dict) -> None: ...  # pragma: no cover
     def namespace_absent(self, name: str) -> bool: ...  # pragma: no cover
     def pv_absent_for_namespace(self, namespace: str) -> bool: ...  # pragma: no cover
+    def local_volume_state(self, local: LocalStorage) -> LocalVolumeState: ...  # pragma: no cover
     def admission_policy_present(
-        self, policy_name: str, binding_name: str, *, param_name: str | None = None
+        self, policy_name: str, binding_name: str, *, param_name: str | None = None, param_selects_all: bool = False
     ) -> bool: ...  # pragma: no cover
     def list_cell_namespaces(self) -> dict[str, str]: ...  # pragma: no cover
     def capacity_inputs(
         self, *, csi_driver: str, shared_policy: SharedWorkerPolicy | None = None
     ) -> CapacityObservation: ...  # pragma: no cover
+    def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation: ...  # pragma: no cover
+    def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -402,6 +433,7 @@ def _augment_deletion_observation(
     volume_provider,
     now: datetime | None = None,
     memory: LoopMemory | None = None,
+    storage: StorageConfig = DEFAULT_STORAGE,
 ) -> ClusterObservation:
     """D10's absence proofs. The K8s Namespace's disappearance already shows
     up as `namespace_exists` on the base observation; the PV, the Hetzner
@@ -417,7 +449,16 @@ def _augment_deletion_observation(
     namespace = namespace_name(row.cell_id)
     # Probe in deletion order: an unavailable later service must not block
     # an earlier cleanup action. Unreached proofs stay false (fail closed).
-    no_pv_claims_namespace = namespace_absent_confirmed and cluster.pv_absent_for_namespace(namespace)
+    if storage.local is not None:
+        # move-cloud-cells-to-local-storage 2.5: with local storage configured,
+        # the PVs claimed from the namespace, the cell's logical volume, its
+        # snapshots and their clones must all be gone, unless they sit on a
+        # node confirmed destroyed. The Hetzner check below still applies.
+        no_pv_claims_namespace = namespace_absent_confirmed and cell_data_absent(
+            cluster.local_volume_state(storage.local), namespace=namespace, volume_id=row.volume_id
+        )
+    else:
+        no_pv_claims_namespace = namespace_absent_confirmed and cluster.pv_absent_for_namespace(namespace)
     # Hetzner is asked only once the namespace and every PV claim are gone,
     # since the volume cannot be released before that.
     hetzner_volume_absent = row.volume_id is None or (
@@ -668,7 +709,9 @@ def _delete_object_storage_key(object_storage, key_id: str, cell_id: str) -> Non
         logger.error("cellctl could not delete object-storage key %s for cell %s: %s", key_id, cell_id, _describe_error(error))
 
 
-def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_config: SecretsConfig) -> str:
+def _compute_render_digest(
+    row: CellRow, cluster_config: ClusterConfig, secrets_config: SecretsConfig, storage_class: str = STORAGE_CLASS
+) -> str:
     """D4: a SHA-256 over the non-secret render inputs -- the renderer
     version, chart-level cell settings, the set of cell_token_key versions
     in play, and the row's storage and key versions. Never a secret value
@@ -694,8 +737,20 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
     endpoint = cluster_config.artifact_broker_for_cell(row.cell_id)
     if endpoint:
         material["artifact_broker_url"] = endpoint
+    if cluster_config.storage.is_local(storage_class):
+        # Only a node-local cell's render depends on its class, so a cell on
+        # a Hetzner volume keeps the digest it had before local storage.
+        material["storage_class"] = storage_class
     blob = json.dumps(material, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation) -> str:
+    storage = cluster_config.storage
+    if observation.statefulset_relocation_volume and storage.local is not None:
+        # D4: a relocated cell's new claim is local, whatever the domain.
+        return storage.local.class_name
+    return storage.claim_class(observation.pvc_storage_class)
 
 
 def _select_backup_candidates(
@@ -706,13 +761,47 @@ def _select_backup_candidates(
     statefulset_blocked: frozenset[str] = frozenset(),
     *,
     unobserved: list[CellRow] | tuple[CellRow, ...] = (),
+    storage: StorageConfig = DEFAULT_STORAGE,
 ) -> set[str]:
     """D8: at most `backup_concurrency` backup holds run at once. Due cells
     go oldest `last_backup_at` first, never-backed-up cells first of all.
     D4: a refused row is still backed up, unless its own StatefulSet was
     refused and that refusal's backoff has not passed. A backup hold whose
     own StatefulSet is refused cannot exit until it applies, so it does not
-    occupy a slot the rest of the fleet needs."""
+    occupy a slot the rest of the fleet needs.
+
+    move-cloud-cells-to-local-storage D3: a cell on local storage is backed
+    up hourly instead, with up to the configured number at once on each
+    node; a cell on any other class keeps the nightly window and its slot."""
+
+    def local(row: CellRow) -> bool:
+        return storage.is_local(observations[row.cell_id].pv_storage_class)
+
+    def eligible(row: CellRow) -> bool:
+        return (
+            row.observed_state in ("running", "read_only")
+            and row.cell_id not in statefulset_blocked
+            and _active_hold(row, observations[row.cell_id]) is None
+        )
+
+    def oldest_first(row: CellRow) -> tuple:
+        return (row.last_backup_at is not None, row.last_backup_at or datetime.min.replace(tzinfo=UTC), row.cell_id)
+
+    chosen: set[str] = set()
+    if storage.local is not None:
+        running: dict[str | None, int] = {}
+        for row in rows:
+            if _active_hold(row, observations[row.cell_id]) == SNAPSHOT_BACKUP:
+                node = observations[row.cell_id].pv_node
+                running[node] = running.get(node, 0) + 1
+        for row in sorted((r for r in rows if local(r) and eligible(r)), key=oldest_first):
+            node = observations[row.cell_id].pv_node
+            if hourly_backup_due(row, observations[row.cell_id], now, config) and (
+                running.get(node, 0) < storage.local.backup_concurrency_per_node
+            ):
+                running[node] = running.get(node, 0) + 1
+                chosen.add(row.cell_id)
+        rows = [row for row in rows if not local(row)]
 
     active = sum(
         1
@@ -723,17 +812,28 @@ def _select_backup_candidates(
     active += sum(1 for row in unobserved if row.hold_kind == "backup")
     slots = config.backup_concurrency - active
     if slots <= 0:
-        return set()
-    due = [
+        return chosen
+    due = [row for row in rows if eligible(row) and nightly_backup_due(row, observations[row.cell_id], now, config)]
+    due.sort(key=lambda row: (row.last_backup_at is not None, row.last_backup_at or datetime.min.replace(tzinfo=UTC)))
+    return chosen | {row.cell_id for row in due[:slots]}
+
+
+def _select_relocation_candidate(
+    rows: list[CellRow], observations: dict[str, ClusterObservation], storage: StorageConfig
+) -> str | None:
+    """D4: the next cell to relocate off a node the operator confirmed
+    stopped: the owner's first, then by rollout priority, one a pass. A cell
+    with no backup to restore from is never a candidate."""
+
+    lost = [
         row
         for row in rows
-        if row.observed_state in ("running", "read_only")
-        and row.cell_id not in statefulset_blocked
-        and _active_hold(row, observations[row.cell_id]) is None
-        and nightly_backup_due(row, observations[row.cell_id], now, config)
+        if observations[row.cell_id].pv_node_stop_confirmed
+        and storage.is_local(observations[row.cell_id].pv_storage_class)
+        and _active_hold(row, observations[row.cell_id]) in (None, SNAPSHOT_BACKUP)
+        and row.last_backup_snapshot is not None
     ]
-    due.sort(key=lambda row: (row.last_backup_at is not None, row.last_backup_at or datetime.min.replace(tzinfo=UTC)))
-    return {row.cell_id for row in due[:slots]}
+    return min(lost, key=lambda row: (row.rollout_priority, row.cell_id)).cell_id if lost else None
 
 
 def _select_render_digest_candidate(
@@ -821,11 +921,15 @@ async def reconcile_once(
     # D4 self-check: without cellctl's own admission confinement in place,
     # its ClusterRole is close to cluster-admin. Do nothing this pass rather
     # than act unconfined.
-    for policy_name, binding_name, param_name in (
-        (cluster_config.admission_policy_name, cluster_config.admission_binding_name, None),
-        (cluster_config.isolation_policy_name, cluster_config.isolation_binding_name, ISOLATION_PARAM_NAME),
-    ):
-        if not cluster.admission_policy_present(policy_name, binding_name, param_name=param_name):
+    checks: list[tuple[str, str, dict]] = [
+        (cluster_config.admission_policy_name, cluster_config.admission_binding_name, {}),
+        (cluster_config.isolation_policy_name, cluster_config.isolation_binding_name,
+         {"param_name": ISOLATION_PARAM_NAME}),
+    ]
+    if cluster_config.storage.local is not None:
+        checks.append((RETAINED_DELETE_POLICY_NAME, RETAINED_DELETE_POLICY_NAME, {"param_selects_all": True}))
+    for policy_name, binding_name, param in checks:
+        if not cluster.admission_policy_present(policy_name, binding_name, **param):
             logger.error(
                 "cellctl admission policy/binding missing or not a Deny binding of that policy (%s/%s); skipping this pass",
                 policy_name,
@@ -841,6 +945,8 @@ async def reconcile_once(
     committed = frozenset(row.cell_id for row in rows if not (
         row.desired_state == "deleted" and row.observed_state == "deleted"
         and row.observed_generation == row.generation))
+    # D6: every non-deleted cell's size, observed this pass or not.
+    committed_sizes = {row.cell_id: row.storage_gib for row in rows if row.cell_id in committed}
     rollout = await db.read_rollout(connection)
     cell_image = await db.read_cell_image(connection)
     _log_orphan_namespaces(cluster, rows, now, memory)
@@ -867,6 +973,7 @@ async def reconcile_once(
     # upgrade or digest re-apply. Backups go on: its row's own backup hold
     # still counts as an occupied slot.
     unobserved_rows = [row for row in rows if row.cell_id not in observations and row.desired_state != "deleted"]
+    _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
 
@@ -877,7 +984,12 @@ async def reconcile_once(
     any_restoring = any(
         _restore_blocks_upgrades(row, observations[row.cell_id], rollout, now, config) for row in non_deleted_rows
     )
-    render_digests = {row.cell_id: _compute_render_digest(row, cluster_config, secrets_config) for row in rows}
+    render_digests = {
+        row.cell_id: _compute_render_digest(
+            row, cluster_config, secrets_config, _claim_class(cluster_config, observations[row.cell_id])
+        )
+        for row in rows
+    }
 
     # D4 refusal parking. A row is refused while its last refusal's key is
     # still its current (generation, render digest, image to render), and
@@ -899,10 +1011,12 @@ async def reconcile_once(
     statefulset_blocked = frozenset(cell_id for cell_id in parked if refusal_records[cell_id].statefulset_blocked)
 
     upgrade_candidate: str | None = None
+    relocation_candidate = _select_relocation_candidate(non_deleted_rows, observations, cluster_config.storage)
     backup_candidates: set[str] = set()
     render_digest_candidate: str | None = None
     backup_candidates = _select_backup_candidates(
-        non_deleted_rows, observations, now, config, statefulset_blocked, unobserved=unobserved_rows
+        non_deleted_rows, observations, now, config, statefulset_blocked, unobserved=unobserved_rows,
+        storage=cluster_config.storage,
     )
     if fleet_unobserved:
         logger.error(
@@ -930,6 +1044,7 @@ async def reconcile_once(
     fast = (
         fleet_unobserved
         or upgrade_candidate is not None
+        or relocation_candidate is not None
         or bool(backup_candidates)
         or render_digest_candidate is not None
         or any(_in_transition(row, observations[row.cell_id], row.cell_id in parked) for row in rows)
@@ -952,6 +1067,7 @@ async def reconcile_once(
                 render_digests[row.cell_id],
                 start_upgrade=row.cell_id == upgrade_candidate,
                 start_backup=row.cell_id in backup_candidates,
+                start_relocation=row.cell_id == relocation_candidate,
                 is_render_digest_candidate=row.cell_id == render_digest_candidate,
                 refusal_parked=row.cell_id in parked,
                 memory=memory,
@@ -973,19 +1089,31 @@ async def reconcile_once(
         if cluster_config.shared_worker:
             kwargs["shared_policy"] = cluster_config.shared_worker
         observation = cluster.capacity_inputs(**kwargs)
+        # D7: once local storage is the domain, only its pools publish slots.
+        storage = cluster_config.storage
+        local_slots = (
+            compute_local_capacity(
+                cluster.local_capacity_inputs(storage.local), local=storage.local, cell_sizes=committed_sizes
+            )
+            if storage.domain_is_local
+            else None
+        )
     except Exception as error:  # noqa: BLE001 - capacity must not take the pass down
         logger.error("cellctl: capacity read failed; keeping the last published capacity: %s", _describe_error(error))
         return True
     if cluster_config.shared_worker:
         capacities = compute_shared_capacity(observation, policy=cluster_config.shared_worker,
                                              config=cluster_config.capacity,
-                                             committed=committed - frozenset(cluster_config.dedicated_cell_ids))
+                                             committed=committed - frozenset(cluster_config.dedicated_cell_ids),
+                                             storage_slots=local_slots)
         if cluster_config.shared_worker.mode == "selected":
             capacities = {node: NodeCapacity(0, value.attachments_used, value.limit_known)
                           for node, value in capacities.items()}
         elif not any(value.cell_slots for value in capacities.values()):
             logger.warning("cellctl: shared capacity unavailable: require one Ready, schedulable, unpressured "
                            "profile/CSI-compatible worker with complete resource and volume observations")
+    elif local_slots is not None:
+        capacities = local_slots
     else:
         capacities = {}
         for node in sorted(set(observation.allocatable) | set(observation.attachments_used)):
@@ -1000,6 +1128,37 @@ async def reconcile_once(
     # freshness bound holds at the idle cadence too.
     await db.write_capacity_snapshot(connection, capacities=capacities, observed_at=now)
     return fast
+
+
+def _backup_age_alert(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    now: datetime,
+    memory: LoopMemory,
+) -> None:
+    """Task 2.8: one platform alert while any serving cell's backup is older
+    than its schedule allows. An alert, never a gate: a failure here is logged
+    and retried next pass, and changes nothing else the pass does."""
+
+    stale = alerts.stale_backups(rows, observations, now, storage=cluster_config.storage)
+    if stale != memory.stale_backups:
+        if stale:
+            logger.warning("cellctl: %d serving cell(s) have no backup within their schedule: %s",
+                           len(stale), ", ".join(stale))
+        else:
+            logger.info("cellctl: every serving cell has a backup within its schedule")
+        memory.stale_backups = stale
+    firing = bool(stale)
+    if cluster_config.alert_delivery_secret is None or memory.backup_alert_delivered == firing:
+        return
+    try:
+        alerts.deliver(cluster.read_secret_value(*cluster_config.alert_delivery_secret), active=firing, observed_at=now)
+    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
+        logger.error("cellctl: backup-age alert delivery failed; retrying next pass: %s", _describe_error(error))
+        return
+    memory.backup_alert_delivered = firing
 
 
 def _in_transition(row: CellRow, observation: ClusterObservation, refusal_parked: bool) -> bool:
@@ -1075,6 +1234,7 @@ async def _reconcile_row(
     is_render_digest_candidate: bool,
     refusal_parked: bool,
     memory: LoopMemory,
+    start_relocation: bool = False,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -1085,6 +1245,9 @@ async def _reconcile_row(
         and not backup_due
         and not start_upgrade
         and not is_render_digest_candidate
+        # D4: a converged cell whose node the operator confirmed stopped
+        # still has its relocation to start.
+        and not observation.pv_node_stop_confirmed
     )
     # D4: ready is an observation, never a memory. A served, converged row
     # whose only change is its pod's readiness is observed, not re-applied:
@@ -1111,7 +1274,7 @@ async def _reconcile_row(
 
     if row.desired_state == "deleted":
         observation = _augment_deletion_observation(
-            observation, row, cluster, object_storage, volume_provider, now, memory
+            observation, row, cluster, object_storage, volume_provider, now, memory, storage=cluster_config.storage
         )
 
     decision = decide(
@@ -1125,6 +1288,8 @@ async def _reconcile_row(
         render_digest=render_digest,
         config=config,
         refusal_parked=refusal_parked,
+        storage=cluster_config.storage,
+        start_relocation=start_relocation,
     )
 
     # D6 step 4.1: a pause is written before the apply it accompanies, so a
@@ -1141,6 +1306,22 @@ async def _reconcile_row(
             namespace_name(row.cell_id),
             hold_job_name(BACKUP_JOB_NAME, observation.statefulset_hold_started_at.isoformat()),
         )
+
+    if decision.delete_snapshot_backup and observation.statefulset_hold_started_at is not None:
+        # D3: whatever happens to the cell or its apply, the hold's clone and
+        # snapshot go. Named from the hold-started string they were made with.
+        started = observation.statefulset_hold_started_at.isoformat()
+        cluster.delete_snapshot_backup(
+            namespace_name(row.cell_id), hold_job_name(SNAPSHOT_NAME, started), hold_job_name(CLONE_CLAIM_NAME, started)
+        )
+
+    # D4 relocation: the old PV is set to Retain one pass, and its claim is
+    # deleted only on a later pass that observes Retain (admission checks it
+    # again). Neither depends on the StatefulSet's apply.
+    if decision.retain_volume:
+        cluster.retain_volume(decision.retain_volume)
+    if decision.delete_claim:
+        cluster.delete_claim(namespace_name(row.cell_id))
 
     refused: list[tuple[str, str]] = []
     applied_cleanly = False
@@ -1161,10 +1342,12 @@ async def _reconcile_row(
         # pass creates them, so the applied digest is computed from the
         # versions this pass resolved; hashing the row as read would change
         # the digest on the next pass and restart the pod for nothing.
+        storage_class = _claim_class(cluster_config, observation)
         render_digest = _compute_render_digest(
             dataclass_replace(row, backup_key_version=backup_key_version, b2_key_version=b2_key_version),
             cluster_config,
             secrets_config,
+            storage_class,
         )
         # D6/D8: the backup-retry-after backoff must survive a hold ending,
         # so unless this decision explicitly changes it, the currently
@@ -1193,12 +1376,19 @@ async def _reconcile_row(
             resources=resources,
             model_env=cluster_config.model_env or {},
             placement=placement,
+            storage_class=storage_class,
+            local_volume=cluster_config.storage.is_local(storage_class),
+            # D5: a backup this decision records counts at once, so the hold's
+            # own exit writes the key.
+            backed_up=row.last_backup_at is not None or "last_backup_at" in decision.row_updates,
             hold_kind=decision.hold_kind,
             hold_started_at=decision.hold_started_at.isoformat() if decision.hold_started_at else None,
             previous_image=decision.previous_image,
             pre_upgrade_snapshot=decision.pre_upgrade_snapshot,
             target_applied_at=decision.target_applied_at.isoformat() if decision.target_applied_at else None,
             restored_snapshot=decision.restored_snapshot,
+            backup_outcome=decision.backup_outcome,
+            relocation_volume=decision.relocation_volume,
             backup_retry_after=retry_after.isoformat() if retry_after else None,
             backup_retry_minutes=retry_minutes,
             render_digest=render_digest,
@@ -1275,10 +1465,17 @@ async def _reconcile_row(
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
-        if jobs_parked and (decision.run_backup_job or decision.run_restore_job_snapshot):
+        steps = decision.run_backup_job or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone
+        local = cluster_config.storage.local
+        if jobs_parked and steps:
             # A Job refused for this key waits out the backoff.
             job_refused.append(("Job", "parked"))
         else:
+            if decision.create_snapshot and local is not None:
+                _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
+                              job_refused)
+            if decision.create_clone and local is not None:
+                _run_cell_job(cluster, row.cell_id, render_clone_claim(spec, clone_class=local.clone_class), job_refused)
             if decision.run_backup_job:
                 _run_cell_job(
                     cluster,
@@ -1287,6 +1484,7 @@ async def _reconcile_row(
                         spec,
                         bucket_name=cluster_config.object_storage_bucket,
                         endpoint=cluster_config.object_storage_endpoint,
+                        **_backup_source(decision, spec),
                     ),
                     job_refused,
                 )
@@ -1332,6 +1530,22 @@ async def _reconcile_row(
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
+
+
+def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
+    """D3: the hourly hold reads its clone and prunes only on its first run
+    after 02:00 UTC; the stopped pre-upgrade backup of a local cell never
+    prunes. Every backup of a Hetzner cell keeps its claim and the nightly
+    prune, as before local storage."""
+
+    if decision.hold_kind == SNAPSHOT_BACKUP:
+        return {
+            "claim_name": hold_job_name(CLONE_CLAIM_NAME, spec.hold_started_at),
+            "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
+        }
+    if spec.local_volume and decision.hold_kind == "upgrade":
+        return {"retention": None}
+    return {"retention": RETENTION_ARGS}
 
 
 def _delete_all_backup_objects(object_storage, row: CellRow) -> None:

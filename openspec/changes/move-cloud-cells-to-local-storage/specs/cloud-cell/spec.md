@@ -250,6 +250,20 @@ A node-loss drill SHALL be run on disposable infrastructure before any tenant ce
 - **WHEN** etcd is restored from a snapshot older than the latest volume changes
 - **THEN** every logical volume recorded on a cell row is re-adopted with its data, and no logical volume is released except by an operator step on its host
 
+### Requirement: A local cell grows online before it fills
+
+cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
+
+#### Scenario: Cell passes 80% use
+
+- **WHEN** a local cell's hourly backup reports more than 80% filesystem use, and its node has room for the step
+- **THEN** cellctl expands the cell's claim by one default cell size without restarting the cell
+
+#### Scenario: Node has no room to grow
+
+- **WHEN** a local cell passes 80% use, but its node's free bytes do not cover the step and the larger reserve
+- **THEN** cellctl raises an alert and leaves the cell's size unchanged
+
 ### Requirement: A cell never initializes an empty vault over a lost volume
 
 A cell whose Secret records that it has a completed backup SHALL refuse to initialise an empty vault on an empty volume. It SHALL remain not ready, and SHALL report a value-free reason that reaches the cell's row. Recording the backup SHALL NOT change the cell's pod template. A cell with no recorded backup SHALL initialise an empty vault as before.

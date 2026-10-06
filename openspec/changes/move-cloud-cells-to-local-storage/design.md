@@ -100,7 +100,7 @@ Each hourly backup is a new hold kind, `snapshot-backup`, that does not stop the
   - restic: 2–4 s;
   - cleanup: 1.6–2.2 s.
   The cost is per cell, not per byte, so one node can back up about 200 lightly changed cells an hour, one at a time. The repository sat on the runner's disk, so upload to B2 is not in these numbers; the drill measures it. A second slot keeps one slow cell from delaying the rest.
-- **Alerting:** the existing alerting raises when any running cell's last successful backup is older than two hours.
+- **Alerting:** cellctl raises one platform alert while any serving cell's last successful backup is older than two hours. It posts the same content-free transition as the hosted scheduler evaluator to the existing alert receiver, which emails only on a change of state. The Role `cellctl-alert-delivery` lets cellctl read that receiver's URL from its one Secret. The stale cells go to cellctl's log by id.
 - **Cells on Hetzner volumes:** those volumes can't take CSI snapshots, and cells stay on them until their own migration, which waits on the hardware purchase. A cell whose class has no snapshot support therefore keeps the nightly stopped backup, its window, concurrency 1 and its prune, and its backup-age alert fires at 26 hours.
 
 **Targets:**
@@ -175,6 +175,13 @@ and a cell larger than the default consumes `ceil(size / default)` slots of it.
 
 - **Pool size, not free bytes:** free bytes fall while a backup's snapshot and clone exist, so a term built on them would dip on every backup.
 - **Observing the pool size:** TopoLVM publishes free capacity, not pool size: its CSIStorageCapacity and node annotation both report the pool less every volume's virtual size (spike 1.1). At ratio 1.0, pool size is therefore that free capacity plus the sizes of the node's LogicalVolume objects. cellctl gains read-only `list` on LogicalVolumes for this.
+- **Default cell size:** 4 GiB on the local class. Hetzner volumes stay 10 GiB, the provider's minimum volume size.
+  - At ratio 1.0 a local cell charges its full size, so the default sets density. On 2026-10-06 the live cells used 4.28 GiB (the owner's), about 0.01 GiB and about 0 GiB of their 10 GiB volumes.
+  - A RAID1 pool of about 476 GiB holds about 43 cells at 10 GiB, while CPU and memory allow about 98.
+  - cellctl counts local slots in the local default, which is configuration.
+  - A cell's size is its row's `storage_gib`, which Substrate owns (column default 10). New cells take 4 GiB when the cutover (task 7.2) changes Substrate's default for new cells.
+  - A migrating cell keeps its row's size unless the operator lowers it before the restore, never below what the cell uses.
+  - A cell grows online through TopoLVM expansion: a larger `storage_gib` expands its claim without a restart. D10 makes that automatic.
 - **Snapshot reserve:** 2 × the largest cell's size × the node's backup concurrency. In spike 1.1, a snapshot and its clone of a 4 GiB volume each took the full 4 GiB from published free capacity.
 - **Scheduler backstop:** the scheduler refuses a claim larger than a node's published free capacity ("did not have enough free storage"), and the capacity object followed the node within half a second in the spike. A miscount in this term therefore stops a cell from scheduling; it does not overfill a pool.
 - **Published slots:** the minimum of the qualified occupancy, CPU, memory and storage terms.
@@ -240,6 +247,17 @@ The promise is therefore a consistent state no newer than the snapshot, not the 
 - It answered recall for the seed note and the newest write.
 - It reported the same governance-schema status as its source.
 - It accepted a governed write.
+
+### D10. A local cell grows online before it fills
+
+A 4 GiB default only holds if a cell that fills grows without an operator. cellctl therefore expands a local cell's claim when its filesystem passes 80% use.
+
+- **Observed use:** the hourly backup Job already mounts the cell's filesystem, as the clone. It reports the filesystem's used and total bytes in its termination message, value-free, and cellctl reads them from the finished Job. This needs no new privilege; kubelet volume statistics would need `nodes/proxy`, which reaches every pod on the node.
+- **Step and cap:** each growth adds one default cell size (4 GiB), up to a configured cap per cell. One growth runs per cell per hourly backup, so a cell never grows faster than its use is observed.
+- **Room first:** cellctl grows a cell only while its node's published free bytes cover the step and the larger snapshot reserve that the new size implies (D6). Otherwise it raises an alert through the alert receiver, the same path as the backup-age alert, and leaves the size as it is.
+- **Recorded on the row:** cellctl records the grown size on the cell's row, in a column it owns, and renders the claim at the larger of that and `storage_gib`. A later pass therefore never renders a smaller claim, which Kubernetes refuses. The column needs a Substrate migration.
+- **Capacity:** a grown cell consumes `ceil(size / default)` slots, as any larger cell does (D6), so admission sees the growth on the next capacity pass.
+- **Not shrunk:** a cell never shrinks automatically. Kubernetes cannot shrink a claim, and a smaller size needs a backup and a restore.
 
 ### Archive order
 
