@@ -84,10 +84,14 @@ SHALL keep their order and repetitions for n-gram construction so that two ancho
 sharing a word in their names can both receive `exact_alias` from one turn. `usage_prior` SHALL only break ties between
 otherwise equal candidates and SHALL never contribute to the two-kinds rule.
 A path or URL quoted in a turn SHALL be one reference, not words: a rooted path (`/`,
-`\\`, `~/` or a drive letter) or a URL SHALL contribute no term to any subject
-evidence, and a relative path SHALL contribute only its final segment, so a quoted
-vault page path still names that page as its file name always did. Whether a turn only
-points back or is a follow-up SHALL still read the turn as written.
+`\\`, `~/`, a drive letter or an environment variable), a URL with or without a
+scheme, and an scp-style remote SHALL contribute no term to any subject evidence, and
+a relative path SHALL contribute only its final segment, so a quoted vault page path
+still names that page as its file name always did. A slash run is a relative path only
+when it starts `./` or `../` or its final segment has a file extension; any other slash
+run is prose. A quoted or backticked span SHALL be read as one reference, spaces
+included. Whether a turn only points back or is a follow-up SHALL still read the turn
+as written.
 `claims_match` SHALL be computed with the existing collection-claims routing and
 `graph_corroboration` SHALL count a typed edge between two candidates even when both
 already appear in ordinary recall.
@@ -166,6 +170,8 @@ derived only from the caller's released view.
   drive path or a URL whose segments spell a project key such as `home` or `records`
 - **THEN** no project anchor is reached through those segments and none of its material
   is served, while a turn naming the same project in prose still resolves it
+- **AND** slash-joined words without a file extension, such as `records/staging/prod`,
+  stay prose
 
 #### Scenario: Two same-kind domains named apart are both served
 - **WHEN** a turn spells the names of two same-kind anchors that share no anchor
@@ -717,13 +723,14 @@ stays `retrieval_carried` on `retrieval` alone. Admission SHALL NOT change: a ph
 two pages answer to still asks, and only a current page is carried. No evidence kind
 or status clause is added for this. Recorded as Hugo's ruling of 2026-10-05.
 
-Where the carried pages are the packet's only anchors, each page that served units
-SHALL also list, at most two per page and within the ordinary six-anchor allowance,
-the anchor rows wikilinked to or from it whose title or alias a served unit names.
-Each SHALL be `partial` on `carried_link`, SHALL name the page in `via`, and SHALL
-never resolve, run a lane or be carried forward by a continuity token. A row the reader
-may not see SHALL NOT be listed, and the egress guard SHALL remove a listed row
-whenever it removes the page named in its `via`.
+Where the carried pages are the packet's only anchors, each page SHALL also list, at
+most two per page and within the ordinary six-anchor allowance, the anchor rows
+wikilinked to or from it whose title or alias a unit the packet serves names, in the
+order the units first name them. A unit turned into a pointer is not served. Each SHALL
+be `partial` on `carried_link`, SHALL name the page in `via`, and SHALL never resolve,
+run a lane or be carried forward by a continuity token. A row the reader may not see
+SHALL NOT be listed or take a slot. The egress guard SHALL remove a listed row whenever
+it removes the page named in its `via` or any unit of that page.
 
 #### Scenario: A page the turn names by its title is resolved
 - **WHEN** a turn names a current ordinary page by two words of its title, such as
@@ -737,7 +744,9 @@ whenever it removes the page named in its `via`.
   person and links their page
 - **THEN** the person's anchor is listed `partial` on `carried_link`, never `resolved`
 - **AND** a person the note links but the unit does not name, or one withheld from the
-  reader, is not listed
+  reader, is not listed, and the restricted packet equals the packet of a vault
+  without that person
+- **AND** when the guard removes a unit of the note, no person is listed through it
 
 ### Requirement: A carried page is read through the lenses its own units answer
 The retrieval carry SHALL read each carried page through the `units` lenses that select

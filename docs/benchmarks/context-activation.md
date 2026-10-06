@@ -248,6 +248,34 @@ fresh run. After a deliberate product or corpus change, re-record it:
 CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-10-v5.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 ```
 
+### Round 6 on corpus v5 (2026-10-06): carried-page naming, 10/18 raw, 12/18 under A8, 14/18 under v5
+
+Three compiler changes and no fixture, threshold or scorer line:
+
+- **M1.** A page the retrieval carry admits and the turn names by two or more of
+  its own title words resolves through the existing soundness rule, with
+  `[lexical_overlap, retrieval]`. A page reached by a body phrase or one title word
+  stays `retrieval_carried`.
+- **E1.** An entity that a carried page's served unit names, and that the page
+  links, is listed `partial` on `carried_link` with `via` naming the page. It never
+  resolves. Each page lists at most two, first named first; a row the caller may
+  not see takes no slot.
+- **E2.** A path, URL or remote in the turn contributes no words to subject
+  evidence; a relative path keeps only its file name. Slash-joined words without
+  a file extension stay prose.
+
+| Case | Raw | A8 | v5 | Change |
+|------|-----|----|----|--------|
+| C4 | red | pass | pass | the failure note resolves by its title and lists its colleague |
+| C8 | red | pass | pass | the current approach note resolves by its title |
+| T8 | red | red | pass | the support rota page resolves by its title |
+| the other fifteen | same | same | same | unchanged |
+
+Raw is 10, A8 12 and v5 14. Raw still fails C4, C8 and T8 on precision 0.50,
+because it reads a gold page's own unit fragment as a second ref. M1 carries the
+weight: with its title rule removed, v5 falls to 11 and C4, C8 and T8 fail again.
+E2 moves no case on this corpus.
+
 ### Round 5 on corpus v5 (2026-10-05): the v5 instrument, 10/18 raw, 11/18 under v5
 
 No compiler line changes. Hugo ruled three instrument corrections on 2026-10-05

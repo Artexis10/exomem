@@ -596,8 +596,8 @@ carry's, unchanged; no evidence kind or status clause is added, and a page named
 only by a body phrase or one title word stays `retrieval_carried`. Beside the
 carried pages, an anchor row linked to or from one of them and named by a unit it
 served is listed `partial` on `carried_link`, at most two per page, never resolved;
-its `via` names the page, so the egress guard removes it with that page and the
-every-anchor-withheld rule still holds. A path or URL quoted in a turn is one
+its `via` names the page, so the egress guard removes it with that page, or when it
+removes any unit of that page, and the every-anchor-withheld rule still holds. A path or URL quoted in a turn is one
 reference rather than words, so its directories never reach subject evidence.
 
 Within that existing title fallback, a complete current title stated in one
