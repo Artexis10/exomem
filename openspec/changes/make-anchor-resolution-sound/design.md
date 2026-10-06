@@ -33,7 +33,10 @@ itself is one.
 threshold is a tuned float with no meaning across vaults, and the neighbourhood clause
 would still admit candidates the turn never named.
 
-*Amended by `close-memory-loop` D3, retrieval-carried packets.* Nothing above changes:
+*Amended by `close-memory-loop` D3, retrieval-carried packets, and Hugo's ruling of
+2026-10-05:* a carried page the turn names by two or more of its own title words is
+reported `resolved` through the existing rule (`lexical_overlap` plus `retrieval`).
+Otherwise nothing above changes:
 retrieval alone still never resolves an ANCHOR, whatever it scores and however many
 retrieved kinds and qualifiers stack. The one retrieval-alone case sits outside this rule
 rather than inside it, and only reaches a turn this rule has already abstained on. When

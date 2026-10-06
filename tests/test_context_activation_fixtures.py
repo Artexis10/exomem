@@ -117,6 +117,28 @@ def test_corpus_has_no_verbatim_fixture_turns(tmp_path) -> None:
     assert find_verbatim_leaks(tmp_path) == ()
 
 
+def test_t1_is_a_negative_twin_no_corpus_page_answers(tmp_path) -> None:
+    # A10's question, asked of every knowledge page of the padded tree rather
+    # than of one listed page: T1 shares C1's frame ("I keep hitting ... again
+    # this week") and must name a subject no page records. v4's step count goal
+    # was recorded by C1's own poison page, which made the twin invalid. The
+    # vault's own `.exomem/` schema docs are scaffolding, not notes.
+    import re
+
+    t1, c1 = fixture_by_id("T1"), fixture_by_id("C1")
+    frame = set(re.findall(r"[a-z]+", c1.turn.casefold())) | {"the", "my", "a"}
+    subject = set(re.findall(r"[a-z]+", t1.turn.casefold())) - frame
+    assert subject
+    build_corpus(tmp_path)
+    answering = {
+        (page.relative_to(tmp_path).as_posix(), word)
+        for page in (tmp_path / "Knowledge Base").rglob("*.md")
+        for word in subject
+        if re.search(rf"\b{word}\b", page.read_text(encoding="utf-8").casefold())
+    }
+    assert not answering
+
+
 def test_build_corpus_maps_every_gold_and_poison_key_to_a_real_page(tmp_path) -> None:
     manifest = build_corpus(tmp_path, distractor_count=5)
     referenced_keys = {key for fixture in FIXTURES for key in (*fixture.gold, *fixture.poison)}
