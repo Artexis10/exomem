@@ -1042,6 +1042,9 @@ class OperationAuthorization:
             cursor = self.conn.execute(f"SELECT * FROM items WHERE row_id IN ({','.join('?' for _ in batch)})", batch)
             names = [column[0] for column in cursor.description]
             rows.extend(dict(zip(names, row, strict=True)) for row in cursor)
+        from .typed_storage import hydrate
+
+        hydrate(self.conn, rows)
         rows.sort(key=lambda row: row["view_path"])
         return rows, self.visible_snapshot(cid, allowed), {
             subject.row_id for subject in allowed if isinstance(subject.row_id, str)

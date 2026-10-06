@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import record_formats
 from .. import structured_collections as collections
-from ..collection_store import connection, governance
+from ..collection_store import connection, governance, typed_storage
 from ..governance import membership
 from ..governance.principal import effective_principal
 
@@ -69,12 +69,15 @@ class AdmittedCollection:
     visible_count: int
     input_order: str
     membership_sql: str
+    layout: typed_storage.Layout | None
     _seal: object
 
     @property
     def values_sql(self) -> str:
         self.check()
-        return f"CASE WHEN {self.membership_sql} THEN exomem_query_values(i.collection_id,i.values_json) END"
+        # Typed rows decode by row_id, so SQL function arity never grows with field count.
+        raw = "i.values_json" if self.layout is None else "exomem_typed_values(i.collection_id,i.row_id)"
+        return f"CASE WHEN {self.membership_sql} THEN exomem_query_values(i.collection_id,{raw}) END"
 
     def check(self) -> None:
         if self._seal is not _ADMISSION_SEAL or self.session._admitted.get(self.collection_id) is not self:
@@ -155,6 +158,45 @@ class ReadSession:
             self._failure = QueryError("QUERY_COST_LIMIT")
             raise self._failure from error
 
+    def _typed_values(self, collection_id, row_id):
+        """Decode one admitted typed row to its canonical JSON text for the value UDF."""
+        try:
+            self.check()
+            admitted = self._admitted.get(collection_id)
+            if admitted is None or admitted.layout is None:
+                raise QueryError("COLLECTION_NOT_FOUND")
+            encoded = typed_storage.canonical_json(
+                typed_storage.current_values(self.connection, admitted.layout, row_id))
+            if len(encoded.encode()) > min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes):
+                raise QueryError("QUERY_COST_LIMIT")
+            self.check()
+            return encoded
+        except QueryError as error:
+            self._failure = error
+            raise
+        except (typed_storage.TypedStorageError, ValueError, TypeError, RecursionError) as error:
+            self._failure = QueryError("QUERY_UNAVAILABLE")
+            raise self._failure from error
+
+    def selected_values(self, row_id, layout, fields, *, max_bytes, check):
+        """Selected top-level values of one admitted row under either encoding."""
+        from .selected_values import read_selected_values
+
+        if layout is None:
+            with self.connection.blobopen("items", "values_json", row_id, readonly=True) as blob:
+                return read_selected_values(blob, fields, max_bytes=max_bytes, check=check)
+        check()
+        try:
+            values = typed_storage.current_values(self.connection, layout, row_id)
+        except typed_storage.TypedStorageError as error:
+            raise QueryError("QUERY_UNAVAILABLE") from error
+        fields = frozenset(fields)
+        selected = {name: value for name, value in values.items() if name in fields}
+        if len(typed_storage.canonical_json(selected).encode()) > max_bytes:
+            raise QueryError("QUERY_RESULT_TOO_LARGE")
+        check()
+        return selected
+
     def check_temp(self) -> None:
         self.check()
         pages = self.connection.execute("PRAGMA temp.page_count").fetchone()[0]
@@ -216,11 +258,22 @@ class ReadSession:
                 if self._estimated_visits > self.limits.max_row_visits:
                     raise QueryError("QUERY_COST_LIMIT")
                 self.check_temp()
-                result = AdmittedCollection(self, collection_id, fields, count, order, predicate, _ADMISSION_SEAL)
+                layout = self.typed_layout(collection_id)
+                result = AdmittedCollection(self, collection_id, fields, count, order, predicate, layout,
+                                            _ADMISSION_SEAL)
                 self._admitted[collection_id] = result
                 return result
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
+
+    def typed_layout(self, collection_id) -> typed_storage.Layout | None:
+        """The published typed layout of an admitted collection, or None for json-v1."""
+        try:
+            if typed_storage.collection_encoding(self.connection, collection_id) == typed_storage.JSON_V1:
+                return None
+            return typed_storage.require_layout(self.connection, collection_id)
+        except typed_storage.TypedStorageError as error:
+            raise QueryError("QUERY_UNAVAILABLE") from error
 
     @contextmanager
     def _manifest(self, collection_id):
@@ -276,6 +329,7 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
         token = _CURRENT_SESSION.set(session)
         conn.set_progress_handler(session._progress, 1000)
         conn.create_function("exomem_query_values", 2, session._values)
+        conn.create_function("exomem_typed_values", 2, session._typed_values)
         page_size = conn.execute("PRAGMA temp.page_size").fetchone()[0]
         conn.execute(f"PRAGMA temp.max_page_count={max(1, limits.max_temp_bytes // page_size)}")
         conn.execute("BEGIN")

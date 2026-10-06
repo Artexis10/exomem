@@ -14,7 +14,6 @@ from ..collection_store import query_freshness
 from . import ir, typed_sql
 from .runtime import _MAX_DECODE_BYTES, QueryError
 from .scalars import parse_instant
-from .selected_values import read_selected_values
 from .typed_rows import AdmittedQuery, execute_rows
 
 _MAX_TOKEN_BYTES = 4096
@@ -101,11 +100,10 @@ def _visible(admitted, dependencies):
                 if key is None:
                     raise QueryError("QUERY_COST_LIMIT")
                 try:
-                    with session.connection.blobopen("items", "values_json", row_id, readonly=True) as blob:
-                        values = read_selected_values(
-                            blob, set(dependencies) - {"item_key"},
-                            max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
-                        )
+                    values = session.selected_values(
+                        row_id, admitted.layout, set(dependencies) - {"item_key"},
+                        max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
+                    )
                     selected = [(path, path in values, values.get(path)) for path in sorted(dependencies) if path != "item_key"]
                     digest.update(_json([key, selected]).encode() + b"\n")
                 except (ValueError, TypeError, RecursionError) as error:

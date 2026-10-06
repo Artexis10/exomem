@@ -8,9 +8,13 @@ Contract held here, not in the writers:
 
 - every table is ``STRICT``;
 - ``txns``, ``audit_effects``, ``item_versions``, ``item_sources``,
-  ``collection_manifests`` and ``collection_type_versions`` are append-only:
-  conflicting ``BEFORE INSERT``, ``BEFORE UPDATE`` and ``BEFORE DELETE``
-  triggers abort the statement;
+  ``collection_manifests``, ``collection_type_versions`` and
+  ``version_identity`` are append-only: conflicting ``BEFORE INSERT``,
+  ``BEFORE UPDATE`` and ``BEFORE DELETE`` triggers abort the statement;
+- ``version_identity`` is the version spine (schema 5): every JSON or typed
+  item version has exactly one identity, and ``item_sources`` references it.
+  A JSON payload mints its identity in the same statement; a typed-v1 identity
+  requires its typed payload (``typed_storage``);
 - ``items`` rows are never deleted (Records and Planning have no delete);
 - a natural key is unique per collection when complete (a partial unique
   index), and a view path is unique across the store;
@@ -34,7 +38,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -66,8 +70,10 @@ TABLES = (
     "projection_state",
     "query_projection_mappings",
     "query_cursor_state",
+    "version_identity",
+    "typed_encoding_mappings",
 )
-APPEND_ONLY_TABLES = (
+_V1_APPEND_ONLY_TABLES = (
     "txns",
     "audit_effects",
     "item_versions",
@@ -75,6 +81,7 @@ APPEND_ONLY_TABLES = (
     "collection_manifests",
     "collection_type_versions",
 )
+APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity")
 
 _TABLES_V1 = (
     """
@@ -263,6 +270,7 @@ _CONFLICT_KEYS = {
     "collection_manifests": (("collection_id", "manifest_version"),),
     "collection_type_versions": (("name", "version"),),
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
+    "version_identity": (("row_id", "row_version"),),
 }
 
 
@@ -297,7 +305,7 @@ def _append_only_triggers(table: str) -> tuple[str, str, str]:
 
 
 _TRIGGERS_V1 = (
-    *(statement for table in APPEND_ONLY_TABLES for statement in _append_only_triggers(table)),
+    *(statement for table in _V1_APPEND_ONLY_TABLES for statement in _append_only_triggers(table)),
     """
     CREATE TRIGGER IF NOT EXISTS items_never_deleted BEFORE DELETE ON items
     BEGIN SELECT RAISE(ABORT, 'items rows are never deleted'); END
@@ -444,9 +452,136 @@ def _migrate_to_4(conn: sqlite3.Connection) -> None:
                  (Fernet.generate_key().decode("ascii"),))
 
 
+_ITEMS_V5 = """
+    CREATE TABLE items_v5(
+      row_id INTEGER PRIMARY KEY,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      item_key TEXT NOT NULL,
+      natural_key TEXT,
+      row_version INTEGER NOT NULL,
+      schema_version INTEGER NOT NULL,
+      values_json TEXT,
+      body TEXT NOT NULL DEFAULT '',
+      payload_hash TEXT NOT NULL,
+      view_path TEXT,
+      created_txn INTEGER NOT NULL,
+      updated_txn INTEGER NOT NULL,
+      governance_json TEXT,
+      encoding TEXT NOT NULL DEFAULT 'json-v1' CHECK (encoding IN ('json-v1', 'typed-v1')),
+      UNIQUE (collection_id, item_key),
+      UNIQUE (view_path),
+      CHECK ((encoding = 'json-v1') = (values_json IS NOT NULL))
+    ) STRICT
+    """
+_ITEM_COLUMNS_V4 = ("row_id,collection_id,item_key,natural_key,row_version,schema_version,values_json,"
+                    "body,payload_hash,view_path,created_txn,updated_txn,governance_json")
+
+_TRIGGERS_V5 = (
+    *_append_only_triggers("version_identity"),
+    # A JSON payload mints its identity; a JSON identity needs its payload.
+    """
+    CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
+    BEGIN
+      INSERT INTO version_identity VALUES (NEW.row_id, NEW.row_version, 'json-v1', NEW.payload_hash,
+        NEW.txn_id, (SELECT schema_version FROM items WHERE row_id = NEW.row_id));
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
+    WHEN NEW.encoding = 'json-v1' AND NOT EXISTS (
+      SELECT 1 FROM item_versions WHERE row_id = NEW.row_id AND row_version = NEW.row_version)
+    BEGIN SELECT RAISE(ABORT, 'version_identity requires its JSON payload'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
+    WHEN NEW.encoding = 'typed-v1' AND NOT EXISTS (
+      SELECT 1 FROM items i JOIN collections c ON c.collection_id = i.collection_id
+      WHERE i.row_id = NEW.row_id AND i.encoding = 'typed-v1' AND c.encoding = 'typed-v1')
+    BEGIN SELECT RAISE(ABORT, 'version_identity requires its typed payload in a typed-v1 collection'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
+    WHEN EXISTS (SELECT 1 FROM items WHERE row_id = NEW.row_id AND encoding <> 'json-v1')
+    BEGIN SELECT RAISE(ABORT, 'typed-v1 rows take typed versions, not JSON payloads'); END
+    """,
+    # One collection, one encoding authority; typed-v1 has no in-place reverse.
+    """
+    CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON items
+    WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
+    BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection
+    BEFORE UPDATE OF encoding, collection_id ON items
+    WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
+    BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
+    WHEN OLD.encoding = 'typed-v1' AND NEW.encoding <> 'typed-v1'
+    BEGIN SELECT RAISE(ABORT, 'collection encoding typed-v1 has no in-place reverse'); END
+    """,
+)
+
+
+def _migrate_to_5(conn: sqlite3.Connection) -> None:
+    """Add the version spine, encoding discriminators and nullable view paths.
+
+    ``ensure_schema`` runs this with foreign keys off (SQLite's table-rebuild
+    procedure) and checks every foreign key before commit. Existing item,
+    version, source and audit rows keep their bytes; JSON history is not copied.
+    """
+    conn.execute("ALTER TABLE collections ADD COLUMN encoding TEXT NOT NULL DEFAULT 'json-v1' "
+                 "CHECK (encoding IN ('json-v1', 'typed-v1'))")
+    conn.execute(_ITEMS_V5)
+    conn.execute(f"INSERT INTO items_v5({_ITEM_COLUMNS_V4},encoding) "
+                 f"SELECT {_ITEM_COLUMNS_V4},'json-v1' FROM items")
+    conn.execute("DROP TABLE items")
+    conn.execute("ALTER TABLE items_v5 RENAME TO items")
+    conn.execute("CREATE UNIQUE INDEX items_natural_key ON items(collection_id, natural_key) "
+                 "WHERE natural_key IS NOT NULL")
+    conn.execute("CREATE INDEX items_by_collection_row ON items(collection_id,row_id)")
+    conn.execute("""CREATE TABLE version_identity(
+      row_id INTEGER NOT NULL REFERENCES items(row_id),
+      row_version INTEGER NOT NULL CHECK (row_version >= 1),
+      encoding TEXT NOT NULL CHECK (encoding IN ('json-v1', 'typed-v1')),
+      payload_hash TEXT NOT NULL,
+      txn_id INTEGER NOT NULL REFERENCES txns(txn_id) DEFERRABLE INITIALLY DEFERRED,
+      schema_version INTEGER NOT NULL,
+      PRIMARY KEY (row_id, row_version)
+    ) STRICT, WITHOUT ROWID""")
+    # Revise refuses a schema-version change, so every version of an item was
+    # hashed under the item's own recorded schema version.
+    conn.execute("INSERT INTO version_identity SELECT v.row_id, v.row_version, 'json-v1', v.payload_hash, "
+                 "v.txn_id, i.schema_version FROM item_versions v JOIN items i ON i.row_id = v.row_id")
+    conn.execute("""CREATE TABLE item_sources_v5(
+      row_id INTEGER NOT NULL,
+      row_version INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      source_ref TEXT NOT NULL,
+      PRIMARY KEY (row_id, row_version, ordinal),
+      FOREIGN KEY (row_id, row_version) REFERENCES version_identity(row_id, row_version)
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("INSERT INTO item_sources_v5 SELECT row_id,row_version,ordinal,source_ref FROM item_sources")
+    conn.execute("DROP TABLE item_sources")
+    conn.execute("ALTER TABLE item_sources_v5 RENAME TO item_sources")
+    conn.execute("""CREATE TABLE typed_encoding_mappings(
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      state TEXT NOT NULL CHECK (state IN ('building', 'ready', 'failed')),
+      layout_json TEXT NOT NULL CHECK (json_valid(layout_json)),
+      layout_hash TEXT NOT NULL,
+      last_row_id INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (collection_id, generation)
+    ) STRICT, WITHOUT ROWID""")
+    for state in ("ready", "building"):
+        conn.execute(f"CREATE UNIQUE INDEX typed_encoding_one_{state} "
+                     f"ON typed_encoding_mappings(collection_id) WHERE state='{state}'")
+
+
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
-    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4,
+    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5,
 }
 
 
@@ -481,26 +616,42 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
 
     Every missing step runs in order, then the version is recorded, all or
     nothing. A store newer than this release refuses rather than downgrading.
+    Migrations run with foreign keys off, as SQLite's table-rebuild procedure
+    requires, and commit only after a full foreign-key check.
     """
     target = SCHEMA_VERSION
-    conn.execute("BEGIN IMMEDIATE")
+    migrating = schema_version(conn) < target
+    enforced = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    if migrating and enforced:
+        conn.execute("PRAGMA foreign_keys=OFF")
     try:
-        current = schema_version(conn)
-        if current > target:
-            raise SchemaVersionError(current, target)
-        for version in range(current + 1, target + 1):
-            MIGRATIONS[version](conn)
-        # Repair missing protections even when the recorded version is current.
-        for statement in _TRIGGERS_V1:
-            conn.execute(statement)
-        conn.execute(
-            "INSERT INTO store_meta(key, value) VALUES (?, ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (META_SCHEMA_VERSION, str(target)),
-        )
-        conn.execute("COMMIT")
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = schema_version(conn)
+            if current > target:
+                raise SchemaVersionError(current, target)
+            for version in range(current + 1, target + 1):
+                MIGRATIONS[version](conn)
+            # Repair missing protections even when the recorded version is current.
+            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ())):
+                conn.execute(statement)
+            if target >= 5:
+                from . import typed_storage
+
+                typed_storage.repair_triggers(conn)
+            conn.execute(
+                "INSERT INTO store_meta(key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (META_SCHEMA_VERSION, str(target)),
+            )
+            if migrating and conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("FOREIGN KEY constraint failed during schema migration")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        if migrating and enforced:
+            conn.execute("PRAGMA foreign_keys=ON")
     return target
