@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.109.0](https://github.com/Artexis10/exomem/compare/v0.108.0...v0.109.0) (2026-10-06)
+
+
+### Features
+
+* **cloud:** run cloud cells on local disks with hourly snapshot backups ([#1597](https://github.com/Artexis10/exomem/issues/1597)) ([622a8fa](https://github.com/Artexis10/exomem/commit/622a8faf62491b5061561bf6e8a252b6203a1baf))
+* **graph:** land relation targets with a #fragment on the unit ([#1587](https://github.com/Artexis10/exomem/issues/1587)) ([a441291](https://github.com/Artexis10/exomem/commit/a441291506470e6c7bae06fa74d87bf1107e5640))
+* **infra:** bootstrap dedicated K3s agents that Terraform does not create ([#1595](https://github.com/Artexis10/exomem/issues/1595)) ([f242d54](https://github.com/Artexis10/exomem/commit/f242d5434e6487b685b4fcba180e9c7e819d5849))
+
+
+### Bug Fixes
+
+* **policy:** check every container when a chart renders a null container list ([#1593](https://github.com/Artexis10/exomem/issues/1593)) ([fd86426](https://github.com/Artexis10/exomem/commit/fd8642666fddc45b8f88e0bf7f87062a4bfe7cd4))
+* **sensing:** cap sensed pairs per page pair and serve every caller ([#1599](https://github.com/Artexis10/exomem/issues/1599)) ([24a35d9](https://github.com/Artexis10/exomem/commit/24a35d9eb43133712e7ed31b125da1d0862e1058))
+
+
+### Performance
+
+* **cloud:** cut the idle CPU left in cells and cellctl ([#1601](https://github.com/Artexis10/exomem/issues/1601)) ([9a5bcf1](https://github.com/Artexis10/exomem/commit/9a5bcf178b4460437d13c63956ede9918e1f570e))
+* **k3s:** prune expired etcd snapshot records and age out unused images ([#1594](https://github.com/Artexis10/exomem/issues/1594)) ([06ae915](https://github.com/Artexis10/exomem/commit/06ae9150d8fa67559304c5d2d4987c5bcd0be2b7))
+
 ## [0.108.0](https://github.com/Artexis10/exomem/compare/v0.107.0...v0.108.0) (2026-10-06)
 
 
