@@ -295,8 +295,13 @@ class Drill:
         return evidence
 
     def pause_cellctl(self) -> None:
-        """Runbook "Restore etcd" step 6."""
+        """Runbook "Restore etcd" step 6. cellctl's log so far is kept for
+        the diagnostics, which run when its pod may be gone."""
 
+        logs = self.kubectl("--namespace", platform.CLOUD_NAMESPACE, "logs", "deployment/cellctl", "--tail=400", check=False)
+        kept = self.stack.workdir / "diagnostics" / f"cellctl-before-pause-{len(self.report.checks)}.txt"
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_text(logs.stdout + logs.stderr, encoding="utf-8")
         self.kubectl("--namespace", platform.CLOUD_NAMESPACE, "scale", "deployment", "cellctl", "--replicas=0")
         wait_for(
             lambda: not self.kube_json("get", "pods", "--namespace", platform.CLOUD_NAMESPACE, "--selector=app.kubernetes.io/name=cellctl")["items"],
@@ -322,7 +327,9 @@ class Drill:
             self.kubectl("patch", "persistentvolume", volume, "--type=merge",
                          "--patch", '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}')
             self.retained_pvs.append(volume)
-        self.kubectl("--namespace", cell.namespace, "delete", "persistentvolumeclaim", "cell-data", "--timeout=180s")
+        # A finished Job's pod that mounted the claim holds it until the Job
+        # expires, five minutes after finishing (runbook step 4.3).
+        self.kubectl("--namespace", cell.namespace, "delete", "persistentvolumeclaim", "cell-data", "--timeout=420s")
         if volume:
             wait_for(lambda: (self.kube_json("get", "persistentvolume", volume).get("status") or {}).get("phase") == "Released",
                      timeout=120, interval=2, description=f"PV {volume} to be released")
@@ -533,6 +540,9 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
     )
     look()
     seen["row"] = row_summary(row)
+    if seen["hold_started_at"]:
+        # The drill's clock when it read the hold's end from the row: an upper bound.
+        seen["hold_seconds"] = round((_now() - dt.datetime.fromisoformat(seen["hold_started_at"])).total_seconds(), 1)
     if row.get("last_error_code") == BACKUP_FAILED:
         raise StepFailure(f"cellctl recorded BACKUP_FAILED for cell {cell.label}: {seen}")
     return seen
@@ -616,6 +626,10 @@ async def check_hourly_backups(drill: Drill, record: StepRecord) -> None:
             problems.append(f"backup {number}: the cell read not ready on {backup['polls_not_ready']} of {backup['polls']} polls")
         if backup["leftovers_gone_after_seconds"] is None:
             problems.append(f"backup {number}: its clone or snapshot outlived the hold")
+        # A finished Job's pod pinning the clone kept a hold for the Job's
+        # five-minute TTL, which caps a node at about 22 backups an hour.
+        if backup.get("hold_seconds", 0) > 180:
+            problems.append(f"backup {number}: the hold lasted {backup['hold_seconds']}s")
     if problems:
         raise StepFailure("; ".join(problems))
 

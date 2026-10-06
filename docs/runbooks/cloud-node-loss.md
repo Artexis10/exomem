@@ -129,7 +129,8 @@ etcd snapshots are taken every 30 minutes. A restore loses the cluster objects o
       kubectl -n "exo-cell-$CELL_ID" delete persistentvolumeclaim cell-data
       ```
 
-      Expect the delete to return once the pod is gone.
+      Expect the delete to return once no pod mounts the claim. A finished restore Job's pod mounts it too, until
+      its Job expires five minutes after finishing.
 
       Then create the PersistentVolume, copying the spec of a surviving cell's PV: the PV name from step 1, `capacity`, `csi.volumeHandle: $NEW_ID`, the node in its node affinity, and `claimRef` set to namespace `exo-cell-<cell id>`, name `cell-data`.
    4. Release the row's old identity, so cellctl records the new one under its usual class and claim checks:
