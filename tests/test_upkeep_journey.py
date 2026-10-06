@@ -28,6 +28,7 @@ from exomem import commands, dreamer, dreamer_families, dreamer_store, freshness
 from exomem.writer_lease import invoke_command
 
 HOUR = 3600.0
+MINUTE = 60.0
 
 
 @pytest.fixture(autouse=True)
@@ -393,3 +394,128 @@ def test_a_stale_decision_on_an_evicted_twin_holds_only_until_it_is_proposed_aga
     view = dreamer_store.read_view(vault)
     offered = {row["subject_path"] for row in upkeep.deliverable_rows(vault, view)}
     assert offered_path in offered, offered
+
+
+def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 8.5, end to end through the shared tool dispatcher.
+
+    The worker thread is live (operator-paused, so this test drives its ticks
+    at chosen clocks); nothing calls `review_memory`. A tool-only caller's own
+    `activate_context` call is the only way an item reaches it: the server
+    pushes nothing. Quiet (the owner's `structural_suggestions` envelope) and
+    defer (a fingerprint-bound snooze) hold items back; the agent disposes of
+    what it receives through the item's own routes, the next pass resolves an
+    applied route, and the live worker records every delivery.
+    """
+    import datetime as dt
+
+    from exomem import capture_sweep, envelope
+
+    class Clock:
+        mono, wall = 1_000_000.0, time.time() + 3 * HOUR
+
+    def advance(seconds: float) -> None:
+        Clock.mono += seconds
+        Clock.wall += seconds
+
+    monkeypatch.setattr(upkeep, "_monotonic", lambda: Clock.mono)
+    monkeypatch.setattr(upkeep, "_wall", lambda: Clock.wall)
+    upkeep.reset_delivery_state()
+    vault = fx.build(tmp_path)
+    monkeypatch.setenv(dreamer.ENV, "paused")
+    assert dreamer.start(vault) is not None and dreamer.delivering()
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+
+    def activate(turn: str, session: str | None = None) -> dict:
+        args = {"turn": turn} if session is None else {"turn": turn, "session": session}
+        return _tool(vault, "activate_context", **args)
+
+    def offered(packet: dict) -> dict | None:
+        items = (packet.get("upkeep") or {}).get("items") or []
+        assert len(items) <= 1
+        return items[0] if items else None
+
+    envelope_ref = envelope.envelope_ref("structural_suggestions")
+    try:
+        # Quiet: with structural suggestions off, a session start carries no
+        # item, though the explicit list still has it.
+        _tool(vault, "triage_memory", ref=envelope_ref, action="off")
+        assert offered(activate("how is the orbit pump doing")) is None
+        assert _tool(vault, "review_memory", mode="upkeep")["items"]
+        _tool(vault, "triage_memory", ref=envelope_ref, action="reset")
+
+        # A tool-only caller's next session (30 minutes of quiet) receives one
+        # item in its own activation packet; its second turn receives none.
+        advance(capture_sweep.QUIET_SECONDS)
+        item = offered(activate("how is the orbit pump doing"))
+        assert item is not None and item["family"] == dreamer_families.HYDRATION_FAMILY
+        assert offered(activate("and the seals?")) is None
+        # Defer: the agent snoozes it, bound to the fingerprint it was served.
+        until = (dt.date.today() + dt.timedelta(days=30)).isoformat()
+        snoozed = _tool(
+            vault,
+            item["dispose"]["tool"],
+            **item["dispose"]["args"],
+            action="snooze",
+            until=until,
+            why="deferred: revisit after the next field report",
+            expected_fingerprint=item["fingerprint"],
+        )
+        assert snoozed["state"] == "snoozed", snoozed
+
+        # A hook conversation past the vault spacing is offered the link, and
+        # the agent applies its route.
+        advance(upkeep.VAULT_SPACING_SECONDS + MINUTE)
+        item = offered(activate("what about cavitation", session="conversation-b"))
+        assert item is not None and item["family"] == dreamer_families.LINK_FAMILY
+        context = _tool(vault, item["context_route"]["tool"], **item["context_route"]["args"])
+        assert context["mutated"] is False
+        accepted = _tool(
+            vault,
+            item["route"]["tool"],
+            **item["route"]["args"],
+            why="both notes come from the same field report",
+            expected_hash=context["subject"]["content_hash"],
+        )
+        assert accepted["status"] in {"applied", "committed", "accepted"}, accepted
+        _observed(vault, item["route"]["args"]["path"])
+        _quiet(vault, start + 3 * HOUR)
+        assert not [row for row in _open(vault) if row["family"] == dreamer_families.LINK_FAMILY]
+
+        # A week on, the deferred item would be due its second delivery and
+        # ranks first; the snooze holds it, so the next conversation is
+        # offered the entity's missing summary. The agent writes it through
+        # the route's own writer and hash guard.
+        advance(8 * 86400)
+        _quiet(vault, start + 5 * HOUR)  # the worker's passes go on meanwhile
+        item = offered(activate("anything else on the pump", session="conversation-c"))
+        assert item is not None and item["family"] == dreamer_families.PROFILE_FAMILY
+        context = _tool(vault, item["context_route"]["tool"], **item["context_route"]["args"])
+        route = item["route"]
+        _tool(
+            vault,
+            route["tool"],
+            path=route["args"]["path"],
+            operation={
+                **route["args"]["operation"],
+                "value": "The circulation pump on the test rig.",
+                "expected_hash": context["subject"]["content_hash"],
+            },
+            why="the upkeep item asked for the page's summary",
+        )
+        _observed(vault, route["args"]["path"])
+        _quiet(vault, start + 6 * HOUR)
+
+        # Nothing is left to offer.
+        advance(upkeep.VAULT_SPACING_SECONDS + MINUTE)
+        assert offered(activate("is the pump done", session="conversation-d")) is None
+        # The live worker recorded every delivery in its ledger.
+        _quiet(vault, start + 6 * HOUR + 60)
+        ledger = dreamer_store.read_view(vault).deliveries
+        assert len({(cid, caller) for cid, _fp, caller, _at in ledger}) == 3, ledger
+    finally:
+        dreamer.stop()
