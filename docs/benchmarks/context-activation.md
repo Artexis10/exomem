@@ -261,8 +261,9 @@ Three compiler changes and no fixture, threshold or scorer line:
   resolves. Each page lists at most two, first named first; a row the caller may
   not see, or one an earlier carried page listed, takes no slot.
 - **E2.** A path, URL or remote in the turn contributes no words to subject
-  evidence; a `./` or `../` path keeps only its file name. Any other slash run,
-  such as `records/staging/prod` or `Node.js/React`, stays prose.
+  evidence; a relative path keeps only its file name, and a `Knowledge Base/` path
+  runs to its file name even with spaces in it. Slash-joined words that end in no
+  file name, such as `records/staging/prod` or `Node.js/React`, stay prose.
 
 | Case | Raw | A8 | v5 | Change |
 |------|-----|----|----|--------|

@@ -616,10 +616,11 @@ carried pages, an anchor row linked to or from one of them and named by a unit i
 served is listed `partial` on `carried_link`, at most two per page, never resolved;
 its `via` names the page, so the egress guard removes it with that page, and the
 every-anchor-withheld rule still holds. When the guard removes a unit of a carried
-page, it lists again from the units it lets through, by the compiler's own rule. A
-path or URL quoted in a turn is one reference rather than words, so its directories
-never reach subject evidence; a slash run is a path only from a root or after `./`
-or `../`.
+page, it lists again from the units it lets through, by the compiler's own rule,
+and decides each row it lists. A path or URL quoted in a turn is one reference rather
+than words, so its directories never reach subject evidence; a slash run is a path
+from a root, after `./` or `../`, or when it ends in a file name, and a
+`Knowledge Base/` path runs to its file name even with spaces in it.
 
 Within that existing title fallback, a complete current title stated in one
 sentence qualifies only its own occurrence, provided it contains an already

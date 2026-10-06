@@ -88,10 +88,14 @@ A path or URL quoted in a turn SHALL be one reference, not words: a rooted path 
 without one whose host ends in a common lowercase top-level domain, starts `www.` or
 has a port, and an scp-style remote SHALL contribute no term to any subject evidence.
 A reference starts after whitespace, a bracket, a quote, a backtick, markdown emphasis,
-`=` or `,`. A path that starts `./` or `../` SHALL contribute only its final segment;
-any other slash run, such as `records/staging/prod` or `TypeScript/Node.js`, is prose,
-and a vault page path still names its page. A quoted or backticked span SHALL be read
-as one reference, spaces included. Whether a turn only points back or is a follow-up
+`=` or `,`. A relative path SHALL contribute only its final segment. A slash run is a
+relative path when it starts `./` or `../` or its final segment has a file extension,
+and a path into the indexed `Knowledge Base/` folder SHALL be one reference up to its
+file name, spaces included, so a vault page path names its page and none of its folder
+names. Any other slash run, such as `records/staging/prod`, is prose. A run whose final
+segment is a dotted name, such as `records/Node.js`, loses its other words: an
+accepted residual. A quoted or backticked span SHALL be read as one reference, spaces
+included. Whether a turn only points back or is a follow-up
 SHALL still read the turn as written.
 `claims_match` SHALL be computed with the existing collection-claims routing and
 `graph_corroboration` SHALL count a typed edge between two candidates even when both
@@ -171,8 +175,10 @@ derived only from the caller's released view.
   drive path or a URL whose segments spell a project key such as `home` or `records`
 - **THEN** no project anchor is reached through those segments and none of its material
   is served, while a turn naming the same project in prose still resolves it
-- **AND** slash-joined words without a root or a leading `./` or `../`, such as
-  `records/staging/prod` or `Node.js/records`, stay prose
+- **AND** slash-joined words without a root, a leading `./` or `../`, or a file name at
+  the end, such as `records/staging/prod` or `Node.js/records`, stay prose
+- **AND** an unquoted `Knowledge Base/.../<Name>.md` reaches that page and no other
+  anchor
 
 #### Scenario: Two same-kind domains named apart are both served
 - **WHEN** a turn spells the names of two same-kind anchors that share no anchor
@@ -734,7 +740,8 @@ or one an earlier carried page already listed, SHALL NOT be listed or take a slo
 the egress guard removes the page named in its `via`, the row goes with it. When the
 guard removes a unit of a carried page, it SHALL list again by this rule from the units
 it lets through, so the restricted packet lists exactly what a vault without the
-removed material lists.
+removed material lists, and it SHALL decide each row it lists for the caller as it
+decides every path the packet names.
 
 #### Scenario: A page the turn names by its title is resolved
 - **WHEN** a turn names a current ordinary page by two words of its title, such as
