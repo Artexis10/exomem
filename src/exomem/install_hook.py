@@ -1639,14 +1639,6 @@ def _write_unique_at(directory, name: str, raw: bytes, mode: int) -> None:
         os.close(fd)
 
 
-def _write_unique(path: Path, raw: bytes, mode: int) -> None:
-    from ._hooks import exomem_continuation_checkpoint as safe
-
-    with safe._open_secure_directory(path.parent, create=True) as directory:
-        _require_trusted_directory(directory)
-        _write_unique_at(directory, path.name, raw, mode)
-
-
 def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
     """Fail-closed, drift-aware, same-directory atomic hook-config migration.
 

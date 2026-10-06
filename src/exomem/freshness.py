@@ -2153,12 +2153,6 @@ def _ensure_custody_seams() -> None:
         _custody_seams_loaded = loaded
 
 
-def custody_seams() -> tuple[str, ...]:
-    _ensure_custody_seams()
-    with _custody_lock:
-        return tuple(_custody_seams)
-
-
 def note_custody_rebuild(name: str) -> None:
     """Record that a substrate cache re-derived itself from the whole scope.
 
