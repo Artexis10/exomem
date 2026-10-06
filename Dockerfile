@@ -138,10 +138,11 @@ print('offline load verified', MODEL_NAME, v.shape)"
 ########################################################################
 # builder-cloud-model — the multilingual recall model a cloud cell encodes
 # with: bge-m3's pinned int8 artefact and its tokenizer, the model a personal
-# server runs. Fetched into the same model root through the same backend, then
-# loaded once more with the network closed, as `builder-hosted` does for the
-# English model. It fetches into a root of its own, so the cloud stage copies
-# bge-m3 alone: every cloud cell has cut over, and none loads the English model.
+# server runs. Fetched through the same backend, then loaded once more with
+# the network closed, as `builder-hosted` does for the English model. It
+# fetches into a root of its own, so the cloud stage copies bge-m3 alone: a
+# cloud cell never loads the English model, and re-embeds a legacy sidecar
+# with bge-m3.
 ########################################################################
 FROM builder-hosted AS builder-cloud-model
 ENV HF_HOME=/opt/exomem-cloud-models \
@@ -246,11 +247,11 @@ CMD ["--transport", "http", "--port", "8765"]
 # cell-runtime, and final: hosted (target `hosted`). `cell-runtime` is what
 # the hosted and cloud images share; each adds its own model. The platform
 # mounts only the bound vault/state/log roots plus native Secret/operator
-# projections. Kubernetes
-# supplies readOnlyRootFilesystem; this image supplies the matching fixed
-# runtime identity and avoids bytecode writes to the image layer.
+# projections. Kubernetes supplies readOnlyRootFilesystem; this image supplies
+# the matching fixed runtime identity and avoids bytecode writes to the image
+# layer.
 #
-# This carries the embedding runtime and pre-baked weights, not the lean venv:
+# The cell images carry the embedding runtime and pre-baked weights, not the lean venv:
 # a paying tenant gets the same semantic recall as the free local runtime.
 # The cell has no egress and no writable root, so the weights are a read-only
 # image layer under HF_HOME and the hub client is pinned offline — an
@@ -325,7 +326,6 @@ LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
 FROM cell-runtime AS cloud
 COPY --from=restic-fetch /usr/local/bin/restic /usr/local/bin/restic
 COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models
-
 USER root
 RUN usermod --home /data/host exomem
 
@@ -347,6 +347,19 @@ ENV EXOMEM_CONTAINER_VARIANT=cloud \
     EXOMEM_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_SHOW_SERVER_BANNER=false
+
+# The builder's gate loaded the model at its fetch root. Load the model this
+# image names once more where the cell reads it, offline, so a broken copy
+# fails the build rather than a tenant's first query. Cloud mode resolves the
+# model as a cell does; HOME and the temporary files stay in /tmp, which the
+# step empties, so the gate leaves nothing in the image.
+RUN HOME=/tmp EXOMEM_CLOUD_CELL=1 python -c "\
+from exomem.embeddings import MODEL_NAME; \
+from exomem import embedding_backend as backend, recall_space; \
+v = backend.load_encoder(MODEL_NAME, backend=backend.ONNX).encode(['image gate'], batch_size=1); \
+assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
+print('image load verified', MODEL_NAME, v.shape)" \
+ && find /tmp -mindepth 1 -delete
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
