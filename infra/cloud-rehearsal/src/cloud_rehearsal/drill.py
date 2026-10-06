@@ -834,13 +834,24 @@ async def check_interrupted_restore(drill: Drill, record: StepRecord) -> None:
 
         pod = wait_for(restore_running, timeout=600, interval=2, description="cell X's restore to start")
         await asyncio.sleep(5)
-        drill.kubectl("delete", "pod", pod["metadata"]["name"], "--namespace", x.namespace, "--grace-period=5", "--wait=false")
+        interrupted: list[str] = []
+
+        def interrupt() -> None:
+            # Every restore pod that runs is stopped, a replacement included,
+            # so no restore can finish while object storage is paused.
+            running = restore_running()
+            if running and running["metadata"]["name"] not in interrupted:
+                interrupted.append(running["metadata"]["name"])
+                drill.kubectl("delete", "pod", running["metadata"]["name"], "--namespace", x.namespace,
+                              "--grace-period=5", "--wait=false")
+
         failed = await drill.wait_row(x, lambda r: r.get("last_error_code") == RESTORE_FAILED, timeout=600,
+                                      during=interrupt, interval=5,
                                       description="cell X's row to report the failed restore")
         statefulset = drill.kube_json("get", "statefulset", "cell", "--namespace", x.namespace)
         after = drill.retained_state(agent_b)
         record.evidence.update({
-            "interrupted_restore_pod": {"name": pod["metadata"]["name"], "node": pod["spec"].get("nodeName")},
+            "interrupted_restore_pods": interrupted, "restore_node": pod["spec"].get("nodeName"),
             "row": row_summary(failed),
             "statefulset_replicas": statefulset["spec"].get("replicas"),
             "cell_pod": (drill.cell_pod(x) or {}).get("metadata", {}).get("name"),
