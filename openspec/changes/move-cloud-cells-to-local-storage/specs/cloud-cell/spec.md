@@ -291,7 +291,7 @@ While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for 
 #### Scenario: Backup of a volume that holds no vault
 
 - **WHEN** a cell's backup runs over a volume that holds no vault, such as one emptied under a serving cell
-- **THEN** the backup fails before it reads the volume, the cell's last backup stays as it was, and its row shows the backup failure
+- **THEN** the backup fails before it reads the volume, the cell's last backup stays as it was, and its row shows the backup failure and then the cell's initialisation refusal
 
 #### Scenario: First backup recorded
 
