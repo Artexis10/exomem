@@ -321,7 +321,8 @@ jobs:
       # The one run also drives the S1 summary-collection journey
       # (scripts/e2e_s1_summary_journey.py): dark and released phases on the same
       # installed wheel, preserved-source import with a mid-job restart, daily queries
-      # against an independent reference, and file collections left unchanged.
+      # against an independent reference, recipient field release/revocation,
+      # fresh copy/restore, old-reader refusal, rollback, and unchanged file collections.
       - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
       # The harness prints the tail inline; this keeps the whole log for the

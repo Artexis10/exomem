@@ -2740,7 +2740,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
         )
         # Its own module: the wheel is built once above, and this journey restarts the
         # service, rewrites one installed file and imports a large export.
-        print("product-e2e: S1 Records summary journey (dark, released, import, restart, query)")
+        print("product-e2e: S1 Records summary journey (dark, released, import, fields, copy, restore, rollback)")
         s1_journey = _run(
             [
                 str(python),

@@ -19,6 +19,10 @@ The journey runs twice on the same installed bytes:
 All data is invented and generated here from a fixed seed. The expected values
 come from `reference_daily` below, written from the raw rows with `datetime`
 arithmetic; nothing in it reads a response from the product.
+
+The recipient reads metrics through authenticated MCP. The owner releases and
+revokes the invented location fields through REST on the same running writer.
+Field release never releases the preserved original.
 """
 
 from __future__ import annotations
@@ -1099,6 +1103,136 @@ async def compare_queries(journey: Journey, service: Session) -> None:
     )
 
 
+async def field_release_journey(journey: Journey) -> None:
+    """Step 5: one live recipient keeps metrics across the owner's release and revocation."""
+    import yaml
+
+    with journey.step("5. recipient metrics, owner field release and live revocation"):
+        async with journey.recipient_service() as (base_url, recipient):
+            owner = RestOwner(base_url, journey)
+            await recipient.call("bootstrap")
+            await compare_queries(journey, recipient)
+            await file_collections_unchanged(journey, recipient, "before the field release")
+            # S1 fixes this managed summary page name; this is the fixture's declared Items source.
+            summary_path = (Path(WORKOUTS_PATH).parent / "Items" / "_summary.md").as_posix()
+
+            async def shared_summary() -> dict[str, Any]:
+                page = await recipient.call("read_memory", path=summary_path)
+                metadata = page["frontmatter"]
+                expect(metadata["metric"] == "released rows"
+                       and metadata["value"] == len(reference_rows(journey.rows))
+                       and metadata["window"] == "all released rows"
+                       and metadata["source"] == "collection store"
+                       and metadata["completeness"] == "complete at basis"
+                       and set(metadata["basis"]) == {"released_rows"}
+                       and metadata["basis"]["released_rows"]
+                       and "exomem_view" not in metadata,
+                       "the shared summary did not report its admitted count and basis", page)
+                return page
+
+            summary_before = await shared_summary()
+            default = await recipient.query({"version": 1, "page": {"limit": 3}})
+            expect(default["rows"], "default projection returned no admitted metrics", default)
+            withheld = {"route", "place", "place_label", "extra_context"}
+            for row in default["rows"]:
+                expect(not withheld.intersection(row), "default projection disclosed a withheld field", row)
+                source = reference_rows(journey.rows)[row["exercise_id"]]
+                expect(row["calories"] == source["metrics"]["calories"],
+                       "default projection changed the admitted metric", row)
+            for field in ("route", "route.fixes", "place", "place.label", "place_label", "extra_context"):
+                await recipient.refused("QUERY_FIELD_UNAVAILABLE", "record_memory", action="query",
+                                        collection=WORKOUTS_ID, query={"version": 1, "select": [field]})
+            for field in ("place_label", "absent_location_field"):
+                for request in (
+                    {"select": [field], "mode": "explain"},
+                    {"select": ROW_FIELDS, "where": {"field": field, "op": "eq", "value": "Invented place 0"}},
+                    {"select": ROW_FIELDS, "order_by": [{"field": field}]},
+                    {"group_by": [{"field": field}], "aggregates": {"n": {"op": "count"}}},
+                    {"aggregates": {"n": {"op": "count", "field": field}}},
+                ):
+                    await recipient.refused("QUERY_FIELD_UNAVAILABLE", "record_memory", action="query",
+                                            collection=WORKOUTS_ID, query={"version": 1, **request})
+            await recipient.refused("NOT_FOUND", "read_memory", path=journey.export_path)
+            metric = {"version": 1, "select": ROW_FIELDS,
+                      "order_by": [{"field": "local_date"}], "page": {"limit": 2}}
+            first = await recipient.query(metric)
+            expect(first["has_more"] and first["next_cursor"], "the metric query has no second page", first)
+            second_query = {**metric, "page": {"limit": 2, "after": first["next_cursor"]}}
+            second = await recipient.query(second_query)
+            location_query = {"version": 1, "select": ["exercise_id", "route", "place", "place_label"],
+                              "where": {"field": "exercise_id", "op": "eq", "value": "wk-00000"}}
+            expected_location = reference_rows(journey.rows)["wk-00000"]
+
+            def check_location(result: dict[str, Any]) -> None:
+                expect(len(result["rows"]) == 1, "the released location query changed its row membership", result)
+                row = result["rows"][0]
+                expect(row["exercise_id"] == "wk-00000" and row["route"] == expected_location["route"]
+                       and row["place"] == expected_location["place"]
+                       and row["place_label"] == expected_location["place"]["label"],
+                       "released location differs from the independent source", row)
+
+            check_location(await owner.query(location_query))
+            inspected = await owner.records(action="inspect", collection=WORKOUTS_ID)
+            basis = inspected["field_release_basis"]
+            expect(basis["collection_id"] == WORKOUTS_ID and basis["ref"] == basis["path"],
+                   "owner discovery returned a different canonical collection", basis)
+            issuer_key = hashlib.sha256(base_url.rstrip("/").encode()).hexdigest()
+            audience_key = hashlib.sha256(f"{base_url.rstrip('/')}\0{RECIPIENT_ID}".encode()).hexdigest()
+            grant_id = "01J000000000000000000000S1"  # Invented immutable ULID in this fresh vault.
+            document = {
+                "governance_version": 1, "kind": "collection-fields", "id": grant_id,
+                "ref": basis["ref"], "path": basis["path"], "content_hash": basis["classification_basis"],
+                "to_audience": f"principal:{audience_key}", "released_at": datetime.now(UTC).isoformat(),
+                "why": "Release the invented location fields to the authenticated test recipient",
+                "field_release": {
+                    "version": 1, "store_id": basis["store_id"], "collection_id": basis["collection_id"],
+                    "classification_basis": basis["classification_basis"],
+                    "paths": [{"path": "route", "subtree": True}, {"path": "place", "subtree": True},
+                              {"path": "place_label", "subtree": False}],
+                    "surface": "mcp", "issuer_family": f"mcp-oauth:{issuer_key}", "purpose": None,
+                    "release_version": 1,
+                },
+            }
+            proposal_args = {
+                "documents": {"grants/s1-installed-location.yaml": yaml.safe_dump(document, sort_keys=False)},
+                "selector_paths": [basis["path"]], "target_ceiling": 6, "duration": "standing",
+                "intent": "Release only the invented route, place and derived label to this MCP recipient",
+            }
+            await recipient.refused("GOVERNANCE_OWNER_REQUIRED", "govern_memory",
+                                    operation="propose", **proposal_args)
+            proposal = await owner.mutate("govern_memory", operation="propose", **proposal_args)
+            committed = await owner.mutate("govern_memory", operation="commit", proposal_id=proposal["proposal_id"])
+            expect(committed["status"] == "committed", "the owner field release did not commit", committed)
+            check_location(await recipient.query(location_query))
+            expect((await shared_summary())["frontmatter"] == summary_before["frontmatter"],
+                   "a field release changed the summary's row membership basis")
+            expect((await recipient.query(second_query))["rows"] == second["rows"],
+                   "an unrelated location release invalidated or changed the second metric page")
+            await recipient.refused("NOT_FOUND", "read_memory", path=journey.export_path)
+            location_page = {"version": 1, "select": ["exercise_id", "place_label"], "page": {"limit": 2}}
+            location_first = await recipient.query(location_page)
+            expect(location_first["has_more"] and location_first["next_cursor"],
+                   "the released location query has no second page", location_first)
+            revoked = await owner.mutate("govern_memory", operation="revoke", scope="standing", grant_id=grant_id)
+            expect(revoked["status"] == "committed", "the owner field revocation did not commit", revoked)
+            expect((await shared_summary())["frontmatter"] == summary_before["frontmatter"],
+                   "a field revocation changed the summary's row membership basis")
+            await recipient.refused("QUERY_FIELD_UNAVAILABLE", "record_memory", action="query",
+                                    collection=WORKOUTS_ID, query=location_query)
+            await recipient.refused("QUERY_FIELD_UNAVAILABLE", "record_memory", action="query",
+                                    collection=WORKOUTS_ID, query={**location_page,
+                                        "page": {"limit": 2, "after": location_first["next_cursor"]}})
+            expect((await recipient.query(second_query))["rows"] == second["rows"],
+                   "an unrelated location revocation invalidated or changed the second metric page")
+            await compare_queries(journey, recipient)
+            check_location(await owner.query(location_query))
+            owner_summary = await owner.call("read_memory", path=summary_path)
+            expect("exomem_view" in owner_summary["frontmatter"],
+                   "the owner summary lost its full-state view stamp", owner_summary)
+            await recipient.refused("NOT_FOUND", "read_memory", path=journey.export_path)
+            await file_collections_unchanged(journey, recipient, "after the field revocation")
+
+
 def adopt_fresh(journey: Journey) -> None:
     """Use the owner's public preview/apply route on a copy with no live store."""
     expect(not list(journey.state_root.rglob("collections.sqlite")), "the fresh copy already has a live store")
@@ -1415,6 +1549,7 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(released_phase_enrol(journey))
         continuation, imported = asyncio.run(create_and_start_import(journey))
         asyncio.run(resume_import(journey, continuation, imported))
+        asyncio.run(field_release_journey(journey))
         asyncio.run(copy_and_restore(journey))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
