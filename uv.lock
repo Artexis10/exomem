@@ -632,7 +632,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.109.0" # x-release-please-version
+version = "0.110.0" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

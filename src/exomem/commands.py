@@ -142,6 +142,7 @@ from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
 from . import working_set_learning as working_set_learning_module
 from . import working_set_runtime as working_set_runtime_module
+from ._hooks.exomem_continuation_checkpoint import MEMORY_CITATION_GUIDANCE
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
     GUARDED_WRITE_FIELDS,  # noqa: F401 - re-exported for server.py
@@ -1690,17 +1691,7 @@ def op_bootstrap(
                 ] if not frozen_profile and "activate_context" in active_product_names else []),
                 "ask_memory for cheap product recall",
                 "read_memory or reasoning_lookup for more context",
-                (
-                    "show the note title by default in normal user-facing prose and do not "
-                    "expose the raw canonical ref by default; add the current vault-relative "
-                    "path for clarity or disambiguation, or use the path or file name as the "
-                    "visible fallback when the title is unusable; keep the canonical "
-                    "exomem://memory/<uuid> ref for tool arguments, durable machine state, "
-                    "and machine-readable automation; show it only when the user explicitly "
-                    "asks for it or the identifier itself is being inspected or debugged; "
-                    "do not embed the canonical ref as a Markdown link target; use a plain "
-                    "title-first citation"
-                ),
+                MEMORY_CITATION_GUIDANCE,
                 "reason in the agent",
                 (
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
