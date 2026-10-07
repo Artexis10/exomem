@@ -719,7 +719,8 @@ def _require_owner(root, operation):
     from ..governance.principal import effective_principal
 
     who = effective_principal()
-    if not raw_protection.has_unrestricted_access(root, who):
+    # RAW exempts hosted tenants from owner-only reads; that exemption grants no maintenance role.
+    if not (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(root, who)):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 

@@ -861,6 +861,16 @@ def _lease_environment(found, monkeypatch):
     monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "operator")
 
 
+def test_hosted_tenant_cannot_preview_owner_adoption(abc):
+    """RAW's hosted tenant exemption cannot grant owner maintenance authority."""
+    from exomem import commands
+    from exomem.governance.principal import request_scope, resolve_hosted_principal
+
+    with request_scope(resolve_hosted_principal("tenant:unrelated")):
+        refused(lambda: commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local"),
+                "COLLECTION_STORE_OWNER_REQUIRED")
+
+
 def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_the_coordinator(
         abc, monkeypatch, capsys):
     """Defect: the owner's real route cannot apply adopt-local with the configured lease and coordinator."""

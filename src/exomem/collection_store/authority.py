@@ -131,9 +131,10 @@ def require_selected(conn, marker, entry, *, root):
         "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version "
         "WHERE c.collection_id=?", (entry["collection_id"],),
     ).fetchone()
-    if sid is None or sid[0] != marker["store_id"] or (row is not None and row[0] != entry["manifest_path"]):
+    # Missing canon cannot verify routing or profile; a false refusal delays C, while A/B remain available.
+    if sid is None or sid[0] != marker["store_id"] or row is None or row[0] != entry["manifest_path"]:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "store differs from authority marker")
-    if row is not None and entry.get("semantic_profile") is not None:
+    if entry.get("semantic_profile") is not None:
         manifest = collections.parse_manifest_bytes(root, row[0], row[1].encode())
         if manifest.semantic_profile != entry["semantic_profile"]:
             # A false refusal costs a marker repair; accepting hides rows from profile sweeps.

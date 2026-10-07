@@ -188,9 +188,6 @@ def adopt_replica_preview(vault_root, *, recorded=UNKNOWN) -> dict:
             raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the vault replica is incomplete or invalid")
         for entry in marker["collections"]:
             authority.require_selected(conn, marker, entry, root=root)
-            if conn.execute("SELECT 1 FROM collections WHERE collection_id=?",
-                            (entry["collection_id"],)).fetchone() is None:
-                raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the replica lacks a marker collection")
         head = _head(meta)
     recorded_view = recorded if recorded in (UNKNOWN, None) else {
         "store_id": recorded.store_id, "instance_id": recorded.instance_id,

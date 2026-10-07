@@ -1465,7 +1465,10 @@ def prepare_restore(
             if collection.storage.strategy == "markdown-items":
                 # ZIP files carry no empty directories. Their declared source is canonical;
                 # recreating it keeps an empty file collection writable after restore.
-                (temporary / collection.storage.source).mkdir(parents=True, exist_ok=True)
+                try:
+                    (temporary / collection.storage.source).mkdir(parents=True, exist_ok=True)
+                except (FileExistsError, NotADirectoryError):
+                    pass  # Preserve conflicting canonical files; restore does not repair the collection.
         if os.path.lexists(destination):
             _fail("STAGING_ROOT_EXISTS", "restore staging root was claimed concurrently")
         os.rename(temporary, destination)
