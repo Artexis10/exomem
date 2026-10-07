@@ -361,14 +361,20 @@ def test_validation_cancellation_is_reported_as_cancellation(genesis, monkeypatc
     root, stage, writer = genesis
     _commit(writer, initial=True)
     validating = False
+    interrupted = []
     original_connect = sqlite3.connect
+    monotonic = time.monotonic
 
     class ValidationConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):
             nonlocal validating
             if sql == "PRAGMA integrity_check":
                 validating = True
-            return super().execute(sql, *args, **kwargs)
+            try:
+                return super().execute(sql, *args, **kwargs)
+            except sqlite3.OperationalError:
+                interrupted.append(sql)
+                raise
 
     def connect(*args, **kwargs):
         if not kwargs.get("uri"):
@@ -376,12 +382,16 @@ def test_validation_cancellation_is_reported_as_cancellation(genesis, monkeypatc
         return original_connect(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", connect)
+    # The integrity check outlasts one recheck interval, so the handler consults ``cancelled``.
+    monkeypatch.setattr(
+        time, "monotonic", lambda: monotonic() + (snapshot._RECHECK_SECONDS if validating else 0)
+    )
     with pytest.raises(connection.CollectionStoreError, match="COLLECTION_SNAPSHOT_CANCELLED"):
         with snapshot.staged_snapshot(
             root, directory=stage, deadline=time.monotonic() + 10, cancelled=lambda: validating
         ):
             pytest.fail("cancelled validation was yielded")
-    assert validating
+    assert interrupted == ["PRAGMA integrity_check"]
     assert list(stage.iterdir()) == []
     assert writer.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
 
