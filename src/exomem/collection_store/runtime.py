@@ -839,6 +839,10 @@ class StoreServer:
             if fence_client is None:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
+            if not fence_client.collection_store_fence().enrolled:
+                # A copied vault meeting a coordinator that never enrolled it: the first fence
+                # cut is the owner's offline step, which the writer credential cannot make.
+                raise admission.enrollment_required()
             try:
                 admission.open_store(session, self.manager, fence_client=fence_client)
             except (OpError, connection.CollectionStoreError):
@@ -873,6 +877,10 @@ class StoreServer:
                 raise OpError(code, message, "Retry once the service serves the collection store.")
             request.result = request.context.run(bound)
         except BaseException as error:  # noqa: BLE001 - raised again on the caller's thread
+            if isinstance(error, connection.CollectionStoreError) and error.code == "COLLECTION_STORE_BUSY":
+                # One shape for every BUSY a caller sees: retryable, nothing committed.
+                error = OpError("COLLECTION_STORE_BUSY", str(error).removeprefix("COLLECTION_STORE_BUSY: "),
+                                "Retry shortly.", details={"status": "retryable", "committed": False})
             request.error = error
         finally:
             request.done.set()

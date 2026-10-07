@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import time
 from contextlib import ExitStack, closing, contextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 
 from .. import held_fs, state_migration, state_paths, vault, writer_lease
@@ -175,11 +176,10 @@ class _ProducerSession:
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
                fence_client, scaffold=True):
-    if session.production and not capability.records_summary_enabled():
-        # A NEW summary collection is records-summary-v1; its manifest says whether this is one.
-        manifest = collections.parse_manifest_bytes(session.root, manifest_path, manifest_text.encode())
-        if manifest.view_mode == "summary":
-            capability.require_records_summary()
+    if session.production:
+        # The first create enrols the vault in the store, irreversibly; only a release that
+        # enables records-summary-v1 may do that, whatever the manifest's view mode.
+        capability.require_records_summary()
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
@@ -536,6 +536,15 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
             raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
         return {"step": step, **_apply_step(serving, serving.manager, fence_client, step, why=why,
                                             preview_id=preview_id, acknowledge_skipped=acknowledge_skipped)}
+    from .runtime import _SERVED, _SERVERS
+
+    if root in _SERVED:
+        # This process serves the vault but its store is not open: answer as its routes do,
+        # never with the offline step that needs the operator credential.
+        server = _SERVERS.get(root)
+        code, message = server.refusal if server is not None else (
+            "COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
+        raise CollectionStoreError(code, message)
     return {"step": step, **_offline_owner(root, "adopt-local", lambda session, manager, fence_client: _apply_step(
         session, manager, fence_client, step, why=why, preview_id=preview_id,
         acknowledge_skipped=acknowledge_skipped))}
@@ -550,6 +559,7 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
     service's route does. It hands the lease back with the flushed head.
     """
     _require_owner("create")
+    capability.require_records_summary()  # before any lease, fence or operator credential
     return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
         session, manager, manifest_path, manifest_text, why=why, request_id=request_id,
         fence_client=fence_client))
@@ -585,6 +595,9 @@ def _offline_owner(root, operation, work):
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
     config = writer_lease.LeaseConfig.from_env()
     _require_no_service(config)
+    # Its own holder, so the coordinator arbitrates against an idle-released service that
+    # re-acquires mid-step rather than handing both processes one token.
+    config = replace(config, replica_id=f"{config.replica_id}-owner")
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
         try:

@@ -55,6 +55,12 @@ def bound_writer(vault_root: Path) -> CollectionWriter | None:
     return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
 
 
+def production_bound(vault_root: Path) -> bool:
+    """Whether a production session serves ``vault_root`` here, so its routes answer to the release."""
+    binding = _BOUND.get()
+    return binding is not None and binding[0] == Path(vault_root).resolve() and binding[2]
+
+
 def selected_writer(vault_root, selector):
     from . import authority
 

@@ -2078,6 +2078,7 @@ def _collections_main(argv: list[str]) -> int:
     from .collection_store import admission, owner
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
+    from .structured_collections import CollectionError
 
     try:
         if args.command == "backup":
@@ -2100,7 +2101,7 @@ def _collections_main(argv: list[str]) -> int:
                 result = admission.adopt_local_route(Path(args.vault), why=args.why, preview_id=args.preview_id,
                                                      acknowledge_skipped=args.acknowledge_skipped)
             print(json.dumps(result, sort_keys=True))
-    except (CollectionStoreError, OpError, OSError) as error:
+    except (CollectionError, CollectionStoreError, OpError, OSError) as error:
         code, message = getattr(error, "code", type(error).__name__), str(error)
         print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
         return 1

@@ -24,7 +24,13 @@ from . import (
     vault,
 )
 from . import structured_collections as collections
-from .collection_store.preview import bound_writer, canonical_read, selected_writer
+from .collection_store import capability
+from .collection_store.preview import (
+    bound_writer,
+    canonical_read,
+    production_bound,
+    selected_writer,
+)
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -1784,34 +1790,6 @@ def _presentation_inspection(
     }
 
 
-@canonical_read
-def _unserved_store_collections(
-    root: Path,
-    discovered: tuple[collections.CollectionManifest, ...],
-    unreadable: tuple[collections.UnreadableManifest, ...],
-    semantic_profile: str,
-) -> tuple[tuple[collections.CollectionManifest, ...], tuple[collections.UnreadableManifest, ...]]:
-    """Without the store bound, a collection the vault's marker routes to it is unread.
-
-    Its manifest under the vault is a generated view, never a file collection, so its
-    view files must not be counted as rows. It is named as unreadable instead.
-    """
-    from .collection_store import authority
-
-    raw = authority.read_marker(root)
-    if raw is None:
-        return discovered, unreadable
-    marker = authority.parse_marker(root, raw)
-    routed = [m for m in discovered if authority.selected_entry(root, marker, m) is not None]
-    return tuple(m for m in discovered if m not in routed), (*unreadable, *(
-        collections.UnreadableManifest(
-            m.path, "COLLECTION_STORE_UNAVAILABLE",
-            "this collection lives in the collection store, which only the running Exomem service serves",
-        )
-        for m in routed if m.semantic_profile == semantic_profile
-    ))
-
-
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1834,16 +1812,21 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         discovered, unreadable = collections.discover_collections_with_errors(
             root, authorize_path=authorize
         )
-        if bound_writer(root) is None:
-            discovered, unreadable = _unserved_store_collections(
-                root, discovered, unreadable, semantic_profile
-            )
         manifests = [
             manifest
             for manifest in discovered
             if manifest.semantic_profile == semantic_profile
             and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
         ]
+        if production_bound(root) and not capability.records_summary_enabled():
+            # A summary collection is records-summary-v1: while the release keeps it off,
+            # the inventory names it as unavailable rather than reading its counts.
+            dark = [m for m in manifests if m.view_mode == "summary" and selected_writer(root, m) is not None]
+            manifests = [m for m in manifests if m not in dark]
+            unreadable = (*unreadable, *(
+                collections.UnreadableManifest(m.path, capability.UNAVAILABLE,
+                                               f"this release has not enabled {capability.RECORDS_SUMMARY_V1}")
+                for m in dark))
         legacy: tuple[collections.LegacyCollection, ...] = ()
         legacy_truncated = False
         if semantic_profile == "records":

@@ -32,6 +32,7 @@ from exomem.cli_ops import OpError
 from exomem.collection_store import (
     admission,
     authority,
+    capability,
     connection,
     custody,
     replica,
@@ -50,6 +51,7 @@ B_PATH = manifest_path("planning").replace("Work", "Legacy")
 ROW = "33333333-3333-4333-8333-333333333333"
 LATER = "44444444-4444-4444-8444-444444444444"
 ONLY_ON_COPY = "55555555-5555-4555-8555-555555555555"
+RELEASED = frozenset({capability.RECORDS_SUMMARY_V1})
 OLDER = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
 
 
@@ -126,6 +128,7 @@ def _host_main(sender, state, base, name, action, root, database, vault_id):
     os.environ["EXOMEM_STATE_ROOT"] = str(state)
     # The parent's `ab` fixture patches these; a spawned interpreter applies them again.
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
+    capability.RELEASED = RELEASED
     try:
         with coordinator(database), host(root, base, name, vault_id=vault_id) as found:
             sender.send(("ok", action(found)))
@@ -187,10 +190,11 @@ def refused(call, code):
 @pytest.fixture
 def ab(tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
     monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
+    # Only a release that enables the slice may enrol a vault in the store.
+    monkeypatch.setattr(capability, "RELEASED", RELEASED)
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     (root / "Knowledge Base/log.md").write_text("# Activity\n")

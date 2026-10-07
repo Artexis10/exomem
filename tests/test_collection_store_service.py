@@ -144,7 +144,9 @@ def service(tmp_path, monkeypatch):
         monkeypatch.setenv(name, value)
     (tmp_path / "c.md").write_text(manifest_text())
     with coordinator(tmp_path / "coordinator.sqlite"):
-        assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
+        with pytest.MonkeyPatch.context() as release:  # only a release that enables the slice enrols a vault
+            release.setattr(capability, "RELEASED", ON)
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
         started = Service(root, writer_lease.start_server_lifecycle())
         try:
             _until(lambda: started.manager.status().get("collection_store", {}).get("status") == "admitted")
@@ -182,6 +184,8 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
     assert inventory["unreadable_manifests"] == []
     with request_scope(OWNER):  # no store bound, as in a process that does not serve the vault
         unserved = record_governance.inventory_collections(root)
+        discovered, _ = collections.discover_collections_with_errors(root)
+    assert CID not in {manifest.collection_id for manifest in discovered}
     assert [row["collection_id"] for row in unserved["collections"]] == [KEY]
     assert [(row["path"], row["error_code"]) for row in unserved["unreadable_manifests"]] == [
         (manifest_path(), "COLLECTION_STORE_UNAVAILABLE")]
@@ -195,11 +199,17 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
         service, tmp_path, monkeypatch, capsys):
     """Defect: the service creates, imports into or answers a summary collection before the release
     enables records-summary-v1, a disabled summary route answers as empty, the gate also stops C's
-    items-mode reads, an unenrolled vault's summary create needs no operator step, or the offline
-    create runs beside the service."""
+    items-mode reads, an unenrolled vault's summary create needs no operator step, the offline
+    create runs beside the service, or the offline create enrols a vault the release keeps dark."""
     root = service.root
     write_source(root, ndjson({"title": f"Row {i}", "count": i} for i in range(3)), SOURCE)
     marker = authority.read_marker(root)
+    unreleased = tmp_path / "unreleased"
+    (unreleased / "Knowledge Base/_Schema").mkdir(parents=True)
+    (tmp_path / "items.md").write_text(manifest_text().replace(CID, DAILY))
+    assert offline_create(unreleased, tmp_path / "items.md", DAILY_PATH, why="before the release") == 1
+    assert capability.UNAVAILABLE in capsys.readouterr().err
+    assert authority.read_marker(unreleased) is None and not connection.store_path(unreleased).exists()
 
     def create_daily(vault=root):
         return call(vault, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
@@ -225,6 +235,10 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     monkeypatch.setattr(capability, "RELEASED", frozenset())
     refused(lambda: titles(root, DAILY))
     refused(lambda: call(root, "record_memory", action="inspect", collection=DAILY))
+    inventory = call(root, "record_memory", action="inspect")
+    assert DAILY not in {row["collection_id"] for row in inventory["collections"]}
+    assert (DAILY_PATH, capability.UNAVAILABLE) in {
+        (row["path"], row["error_code"]) for row in inventory["unreadable_manifests"]}
     assert titles(root, CID) == ["Canonical"]
 
 

@@ -1191,8 +1191,8 @@ def discover_collections_with_errors(
     from .collection_store.preview import bound_writer
 
     writer = bound_writer(root)
-    marker = authority.routing_marker(writer) if writer is not None else None
     if writer is not None:
+        marker = authority.routing_marker(writer)
         stored, store_errors = writer.discover_collections(
             authorize_path=authorize_path, max_candidates=max_candidates,
             max_raw_candidates=max_raw_candidates,
@@ -1200,6 +1200,8 @@ def discover_collections_with_errors(
         if marker is None:
             return stored, store_errors
     else:
+        raw = authority.read_marker(root)
+        marker = None if raw is None else authority.parse_marker(root, raw)
         stored, store_errors = (), ()
     kb = vault.kb_root(root)
     if not kb.is_dir():
@@ -1210,11 +1212,21 @@ def discover_collections_with_errors(
     candidates = []
     for candidate in kb.rglob("_collection.md"):
         safe = _safe_candidate_rel(root, candidate)
-        if (safe is None or (marker is not None and authority.selected_entry(root, marker, safe[1]) is not None)
-                or not authorize(safe[1])):
+        if safe is None:
+            continue
+        if marker is not None and authority.selected_entry(root, marker, safe[1]) is not None:
+            if writer is None and authorize(safe[1]):
+                # A routed manifest is the store's generated view, never a file collection,
+                # and only the service that serves the store can read it.
+                unreadable.append(UnreadableManifest(
+                    safe[1], "COLLECTION_STORE_UNAVAILABLE",
+                    "this collection lives in the collection store, which only the running Exomem service serves",
+                ))
+            continue
+        if not authorize(safe[1]):
             continue
         candidates.append(candidate)
-        if len(candidates) + len(stored) + len(store_errors) > max_raw_candidates:
+        if len(candidates) + len(stored) + len(unreadable) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
