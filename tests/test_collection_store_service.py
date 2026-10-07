@@ -332,6 +332,23 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
     created = create()
     assert created["status"] == "committed" and created["warnings"][0].startswith("collection_publication_pending")
     refused(append, "COLLECTION_STORE_BUSY")  # retryable while the service keeps resuming the create
+    # A restart while the create is still pending: the stop cannot hand off, so a new
+    # process's service starts beside it, and its requests for the create stay busy.
+    refused(service.stop, "COLLECTION_STORE_FLUSH_PENDING")
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    service = Service(root, writer_lease.start_server_lifecycle())
+    codes = []
+
+    def busy():
+        try:
+            call(root, "record_memory", action="inspect", collection=DAILY)
+        except OpError as error:
+            codes.append(error.code)
+        return codes[-1:] == ["COLLECTION_STORE_BUSY"]
+
+    _until(busy)
+    assert "COLLECTION_NOT_FOUND" not in codes, codes
     late[0] = False
 
     def written():

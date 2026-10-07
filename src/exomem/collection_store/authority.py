@@ -161,10 +161,14 @@ def pending_create(conn):
 
 
 def marker_status(writer, intent):
+    return intent_status(writer.root, writer.connection, intent)
+
+
+def intent_status(root, conn, intent):
+    """Whether a pending create's marker is admitted, still pending, or in conflict; any connection reads it."""
     try:
-        root = writer.root
         target_marker = parse_marker(root, intent["target_marker"])
-        sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+        sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
         if target_marker["store_id"] != sid or not any(
                 routes(entry, intent["collection_id"], intent["manifest_path"], sid)
                 for entry in target_marker["collections"]):

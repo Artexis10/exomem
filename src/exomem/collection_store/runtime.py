@@ -692,6 +692,12 @@ def _creating(root, selector):
 
     server = _SERVERS.get(root)
     pending = None if server is None else server.pending_create
+    if pending is None and server is not None and server.session is None and connection.store_path(root).exists():
+        # Not open yet, as after a restart: a create left pending is only on disk so far.
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            intent = authority.pending_create(reader)
+        pending = None if intent is None else {"collection_id": intent["collection_id"],
+                                               "manifest_path": intent["manifest_path"]}
     return pending is not None and authority.selected_entry(root, {"collections": [pending]}, selector) is not None
 
 
@@ -890,7 +896,7 @@ class StoreServer:
 
     def _open(self):
         from ..cli_ops import OpError
-        from . import admission
+        from . import admission, authority
 
         stack = ExitStack()
         try:
@@ -904,6 +910,14 @@ class StoreServer:
                 # A copied vault, or a replaced coordinator, that never enrolled this store: the
                 # fence cut is the owner's offline step, which the writer credential cannot make.
                 raise admission.adoption_required()
+            intent = None
+            if session.path.exists():
+                with closing(connection.open_reader(session.path)) as reader:
+                    intent = authority.pending_create(reader)
+            if intent is not None:
+                # A create left pending before a restart: its requests are busy, not missing.
+                self.pending_create = {"collection_id": intent["collection_id"],
+                                       "manifest_path": intent["manifest_path"]}
             try:
                 admission.open_store(session, self.manager, fence_client=fence_client)
             except (OpError, connection.CollectionStoreError):
