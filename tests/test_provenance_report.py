@@ -102,3 +102,16 @@ def test_provenance_path_filter_scopes_to_one_file(vault: Path) -> None:
     assert rel1 in paths and rel2 in paths  # global walk finds both
     only1 = provenance_module.scan_provenance(vault, key="xfeed", path=rel1)
     assert {f.path for f in only1} == {rel1}  # path filter narrows
+
+
+def test_provenance_comments_share_escape_and_container_ownership(vault: Path) -> None:
+    """Legacy tag queries must not activate escaped or list-fenced examples."""
+    rel = _make_page(
+        vault,
+        "literal-tags",
+        "\\<!-- platform:escaped -->\n\n"
+        "- ```\n  <!-- platform:example -->\n  ```\n\n"
+        "- real <!-- platform:actual -->\n",
+    )
+    findings = provenance_module.scan_provenance(vault, key="platform", path=rel)
+    assert [finding.tags["platform"] for finding in findings] == ["actual"]

@@ -193,9 +193,16 @@ def test_revision_removes_owned_presentation_from_every_item_without_touching_pr
     assert snapshot.records[0].body.endswith("Authored prose.\n")
 
 
+# A settled item (older than the item cache's racy window, as almost every
+# stored item is) carries a stat-generation read guard into the revision.
+@pytest.mark.parametrize("settled", [False, True], ids=["fresh-item", "settled-item"])
 def test_revision_converts_legacy_presentation_to_shared_in_one_guarded_batch(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settled: bool
 ) -> None:
+    from exomem import record_item_cache
+
+    if settled:
+        monkeypatch.setattr(record_item_cache, "RACY_WINDOW_NS", -1)
     manifest = setup_collection(tmp_path)
     _append(tmp_path, manifest)
     _snapshot, record, item_path = _item(tmp_path, manifest)

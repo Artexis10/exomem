@@ -171,7 +171,9 @@ def test_live_request_and_continuation_pin_their_exact_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = _runtime(_key(7))
+    runtime = _runtime(
+        projections.ProjectionNamespaceKey("a" * 64, projections.PROJECTOR_SCHEMA_VERSION, 7)
+    )
     projection_runtime._clear_projected_continuations_for_tests()
     projection_runtime._clear_projection_request_pins_for_tests()
 
@@ -218,7 +220,9 @@ def test_public_projected_find_holds_and_releases_the_request_pin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = _runtime(_key(7))
+    runtime = _runtime(
+        projections.ProjectionNamespaceKey("a" * 64, projections.PROJECTOR_SCHEMA_VERSION, 7)
+    )
     projection_runtime._clear_projected_continuations_for_tests()
     projection_runtime._clear_projection_request_pins_for_tests()
     observed: list[frozenset[str]] = []
@@ -247,6 +251,44 @@ def test_public_projected_find_holds_and_releases_the_request_pin(
 
     assert observed == [frozenset({runtime.namespace.namespace_key.namespace_id})]
     assert projection_runtime.projection_namespace_runtime_pins(tmp_path) == frozenset()
+
+
+def test_projected_continuation_refuses_cached_obsolete_projector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_governance_projection_wire_gate import _active_runtime
+
+    runtime = _active_runtime(
+        visible_count=3,
+        visible_body="visible projected pagination",
+        hidden_count=0,
+        graph_edge_count=1,
+    )
+    projection_runtime._clear_projected_continuations_for_tests()
+    request = {
+        "query": "visible",
+        "limit": 1,
+        "mode": "keyword",
+        "graph": False,
+        "rerank": False,
+        "principal": RequestPrincipal("wire-external-principal", resolved=True),
+        "purpose": None,
+    }
+    first = projection_runtime.find_projected_hits(tmp_path, runtime, **request)
+    assert first.continuation is not None
+    monkeypatch.setattr(
+        projections,
+        "PROJECTOR_SCHEMA_VERSION",
+        runtime.namespace.namespace_key.projector_schema_version + 1,
+    )
+
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="^governed projected retrieval is unavailable$",
+    ):
+        projection_runtime.find_projected_hits(
+            tmp_path, runtime, continuation=first.continuation, **request
+        )
 
 
 def test_exact_tuple_collector_retains_every_authoritative_pin(

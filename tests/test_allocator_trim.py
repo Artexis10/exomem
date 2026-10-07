@@ -228,12 +228,13 @@ def test_sensor_worker_children_inherit_the_arena_bound() -> None:
 
 
 def test_hosted_and_cloud_images_bound_glibc_arenas() -> None:
-    """The cloud stage derives from hosted, so it inherits the bound unless it overrides it."""
+    """Both cell images derive from cell-runtime, so they inherit the bound unless they override it."""
     text = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
 
     def stage(header: str) -> str:
         return text.split(header, 1)[1].split("\nFROM ", 1)[0]
 
-    assert "MALLOC_ARENA_MAX=2" in stage("FROM python:3.12-slim AS hosted")
-    cloud = stage("FROM hosted AS cloud")
-    assert "MALLOC_ARENA_MAX" not in cloud or "MALLOC_ARENA_MAX=2" in cloud
+    assert "MALLOC_ARENA_MAX=2" in stage("FROM python:3.12-slim AS cell-runtime")
+    for image in ("FROM cell-runtime AS hosted", "FROM cell-runtime AS cloud"):
+        part = stage(image)
+        assert "MALLOC_ARENA_MAX" not in part or "MALLOC_ARENA_MAX=2" in part

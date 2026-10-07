@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.108.0" # x-release-please-version
+version = "0.109.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,6 +41,7 @@ dependencies = [
     "httpx2>=2.12,<3",         # FastMCP provider clients use a distinct exception family
     "jsonschema>=4.23,<5",     # portable cloud package manifest validation
     "ijson>=3.5.1,<4",        # bounded, lossless selection from stored JSON streams
+    "markdown-it-py==4.2.0",   # shared CommonMark syntax and exact original-region adapter
     "pyyaml>=6.0",
     "python-slugify>=8.0",
     "python-dotenv>=1.0",

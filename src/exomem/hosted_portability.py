@@ -152,12 +152,13 @@ def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
         return False
     classification = reserved_paths.classify_logical(path)
     if classification.descriptor_id == "collection-replica":
+        from . import record_history
         from .collection_store import authority, replica
 
         if path in {
             authority.marker_path(Path()).as_posix(),
             replica.replica_path(Path()).as_posix(),
-        }:
+        } or path.startswith(record_history.history_root() + "/"):
             return False
     return classification.disposition is reserved_paths.PathDisposition.RESERVED
 

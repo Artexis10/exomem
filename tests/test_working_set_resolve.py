@@ -1098,6 +1098,9 @@ def test_evidence_vocabulary_is_closed() -> None:
         # ref named the anchor. A qualifier, never a candidate.
         "conversation",
         "agent_choice",
+        # Added by `close-memory-loop` (carried links): an anchor a carried
+        # page's served unit names through its link. Listed, never resolved.
+        "carried_link",
     )
     with pytest.raises(ValueError):
         resolve_module.resolve((_facts("a", evidence=("made_up_kind",)),))

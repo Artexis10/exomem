@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from pathlib import Path
 
 import pytest
 import yaml
 
-from exomem import entity_candidates
+from exomem import commands, entity_candidates, provenance
 from exomem import link as link_module
+from exomem.governance.principal import owner_principal, request_scope
 
 TODAY = dt.date(2026, 5, 25)
 
@@ -66,6 +68,57 @@ def test_link_creates_person_entity(vault: Path) -> None:
     assert fm["affiliation"] == "Jane Goodall Institute"
     assert fm["relationship"] == "referenced"
     assert "# Jane Goodall" in _read(written)
+
+
+def test_public_link_detaches_origin_from_summary_and_binds_selected_field(vault: Path) -> None:
+    """Origin data must not become Summary prose or a fingerprinted field value."""
+    identity = uuid.uuid4()
+    original = vault / "Knowledge Base/Sources/entity-original.md"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    source = f"---\ntype: source\nexomem_id: {identity}\n---\n\nA researcher at Field Institute.\n"
+    original.write_text(source, encoding="utf-8")
+    block = provenance.encode_origin(
+        {
+            "inputs": {"original": {
+                "reference": f"exomem://memory/{identity}", "version": provenance.evidence_version(source),
+            }},
+            "assessments": [],
+            "bindings": [{"inputs": ["original"], "scope": {"kind": "field", "field": "affiliation"}}],
+        },
+        authoring=True,
+    )
+    summary = "A researcher <!-- ordinary comment -->; example `<!-- exomem-origin:v1 {} -->`."
+    with request_scope(owner_principal(surface="cli")):
+        result = commands.op_link(
+            vault, entity_type="person", name="Field Researcher", summary=summary + "\n\n" + block,
+            affiliation="Field Institute", why_in_kb="Current collaborator.",
+        )
+    written = _read(vault / result["path"])
+    assert written.split("## Summary", 1)[1].split("## Why in the KB", 1)[0].strip() == summary
+    metadata = provenance.parse_origin(written, managed=True, strict=True)
+    assert metadata.spans[0][0] < written.index("# Field Researcher")
+    assert provenance.match_origin_scope(
+        metadata.payload["bindings"][0]["scope"], fields=_fm(vault / result["path"])
+    ).status == "found"
+
+
+def test_link_origin_only_summary_is_still_empty(vault: Path) -> None:
+    """A metadata-only summary cannot create an otherwise empty entity."""
+    block = provenance.encode_origin({"inputs": {}, "assessments": [], "bindings": []})
+    with pytest.raises(link_module.LinkError) as error:
+        link_module.link(vault, entity_type="person", name="Metadata Only", summary=block)
+    assert error.value.code == "INVALID_LINK" and "summary" in error.value.missing
+    assert not (vault / "Knowledge Base/Entities/People/Metadata Only.md").exists()
+
+
+def test_link_translates_invalid_origin_into_its_existing_error(vault: Path) -> None:
+    """Early extraction errors must retain the adapter's content-free refusal type."""
+    with pytest.raises(link_module.LinkError) as error:
+        link_module.link(
+            vault, entity_type="person", name="Invalid Origin", summary="Description\n\n<!-- exomem-origin:v1 secret -->",
+        )
+    assert error.value.code == "ORIGIN_METADATA_INVALID"
+    assert "secret" not in error.value.reason
 
 
 def test_link_creates_concept_entity_with_domain(vault: Path) -> None:
@@ -228,13 +281,14 @@ def test_link_rejects_missing_name(vault: Path) -> None:
     assert "name" in exc.value.missing
 
 
-def test_link_rejects_missing_summary(vault: Path) -> None:
+@pytest.mark.parametrize("summary", ["", None])
+def test_link_rejects_missing_summary(vault: Path, summary) -> None:
     with pytest.raises(link_module.LinkError) as exc:
         link_module.link(
             vault,
             entity_type="concept",
             name="X",
-            summary="",
+            summary=summary,
             today=TODAY,
         )
     assert exc.value.code == "INVALID_LINK"

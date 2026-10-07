@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from . import (
     vault,
 )
 from . import find as find_module
+from .governance import egress
 
 _SAFE_FRONTMATTER = frozenset(
     {
@@ -104,10 +106,11 @@ def assemble(
     parsed = find_module._CACHE.get(vault_root / page_result.path, vault_root)
     if parsed is None:
         raise ValueError(f"NOT_FOUND: no readable page at {page_result.path}")
+    parsed = _prose_page(vault_root, page_result, parsed)
 
     ref_resolver = _ReferenceResolver(vault_root)
     truncation: list[str] = []
-    body, body_truncated = _bounded(page_result.body, limits["max_body_chars"])
+    body, body_truncated = _bounded(parsed.body, limits["max_body_chars"])
     if body_truncated:
         truncation.append(
             f"target body capped at {limits['max_body_chars']} characters"
@@ -120,12 +123,12 @@ def assemble(
         "status": parsed.status,
         "frontmatter": {
             key: _json_value(value)
-            for key, value in page_result.frontmatter.items()
+            for key, value in parsed.frontmatter.items()
             if key in _SAFE_FRONTMATTER
         },
         "body": body,
         "body_truncated": body_truncated,
-        "body_chars": len(page_result.body),
+        "body_chars": len(parsed.body),
         "content_hash": page_result.content_hash,
         "mtime": page_result.mtime,
     }
@@ -153,7 +156,7 @@ def assemble(
         )
     provenance = _provenance_section(
         vault_root,
-        page_result.frontmatter,
+        parsed.frontmatter,
         ref_resolver=ref_resolver,
     )
     history = _history_section(
@@ -333,6 +336,18 @@ def _unavailable_graph(reason: str) -> dict[str, Any]:
     }
 
 
+def _prose_page(
+    vault_root: Path, result: get_page.GetResult, parsed: find_module.ParsedPage
+) -> find_module.ParsedPage:
+    """Project complete held text for this caller before bounding; keep snapshot identity."""
+    source = egress.prose_for_caller(vault_root, result.content, owner_path=result.path)
+    if source == result.content:
+        frontmatter, body = result.frontmatter, result.body
+    else:
+        frontmatter, body, _ = vault.parse_frontmatter(source)
+    return replace(parsed, frontmatter=frontmatter, body=body)
+
+
 def _related_section(
     vault_root: Path,
     *,
@@ -375,7 +390,8 @@ def _related_section(
         parsed = find_module._CACHE.get(vault_root / result.path, vault_root)
         if parsed is None:
             continue
-        excerpt = " ".join(result.body.split())[:320]
+        parsed = _prose_page(vault_root, result, parsed)
+        excerpt = " ".join(parsed.body.split())[:320]
         rows.append(
             {
                 "path": result.path,

@@ -1022,6 +1022,7 @@ def _retained_v4_policy_components(
         if schema not in {
             "exomem.governance-policy-proposal/v3",
             "exomem.governance-policy-proposal/v4",
+            "exomem.governance-policy-proposal/v5",
         }:
             continue
         proposal_ids.add(str(proposal_id))

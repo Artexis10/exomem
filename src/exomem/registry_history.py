@@ -20,6 +20,11 @@ governed save with its own history entry.
 
 A save made while no override existed snapshots `NO_OVERRIDE`, the smallest
 override that changes nothing, so every version is restorable the same way.
+
+The version naming, newest-first listing and guarded single-file read are the
+shared per-object history store: `record_history` keeps corrected Records and
+Planning rows through the same three functions (`version_id`, `kept_names`,
+`read_kept`) under its own directory and suffix.
 """
 
 from __future__ import annotations
@@ -43,11 +48,16 @@ HISTORY_KEEP = 20
 NO_OVERRIDE = "schema_version: 1\n"
 _NO_ROLES_OVERRIDE = "schema_version: 1\nroles: {}\n"
 _HEADER_PREFIX = "# exomem-history: "
-_VERSION_RE = re.compile(r"^\d{8}T\d{12}Z-[0-9a-f]{8}$")
+VERSION_RE = re.compile(r"^\d{8}T\d{12}Z-[0-9a-f]{8}$")
 
 
 def history_dir(vault_root: Path, stem: str) -> Path:
     return Path(vault_root) / kb_dirname() / "_Schema" / "history" / stem
+
+
+def version_id(moment: dt.datetime, tag: str) -> str:
+    """A kept version's name: its UTC moment, then eight hex of `tag`."""
+    return f"{moment.strftime('%Y%m%dT%H%M%S%f')}Z-{tag[:8]}"
 
 
 def _one_line(text: str) -> str:
@@ -101,7 +111,7 @@ def commit(
     root = Path(vault_root)
     previous = _read_previous(root, path)
     moment = dt.datetime.now(dt.UTC)
-    version = f"{moment.strftime('%Y%m%dT%H%M%S%f')}Z-{before_hash[:8]}"
+    version = version_id(moment, before_hash)
     reason = _one_line(why) if why else ""
     header = json.dumps(
         {
@@ -150,7 +160,7 @@ def commit(
 
 
 def _snapshot_names(
-    filesystem: held_fs.HeldFilesystem, directory: held_fs.HeldDirectory
+    filesystem: held_fs.HeldFilesystem, directory: held_fs.HeldDirectory, suffix: str = ".yaml"
 ) -> list[str]:
     children = filesystem.children(directory)
     if not children.ok:
@@ -161,19 +171,66 @@ def _snapshot_names(
             for child in children.require()
             if child.identity.kind == "file"
             and child.identity.link_count == 1
-            and child.relative_path.endswith(".yaml")
-            and _VERSION_RE.match(child.relative_path[:-5])
+            and child.relative_path.endswith(suffix)
+            and VERSION_RE.match(child.relative_path[: -len(suffix)])
         ),
         reverse=True,
     )
+
+
+def _open_parent(
+    filesystem: held_fs.HeldFilesystem, relative: str, *, mutate: bool = False
+) -> held_fs.HeldDirectory | None:
+    opened = filesystem.parent(relative, access="mutate" if mutate else "read")
+    return opened.require() if opened.ok else None
 
 
 def _history_parent(
     filesystem: held_fs.HeldFilesystem, vault_root: Path, stem: str, *, mutate: bool = False
 ) -> held_fs.HeldDirectory | None:
     relative = history_dir(vault_root, stem).relative_to(vault_root).as_posix()
-    opened = filesystem.parent(relative, access="mutate" if mutate else "read")
-    return opened.require() if opened.ok else None
+    return _open_parent(filesystem, relative, mutate=mutate)
+
+
+def kept_names(vault_root: Path, relative_dir: str, *, suffix: str) -> list[str] | None:
+    """Every kept version's file name under `relative_dir`, newest first.
+
+    Names only: no kept payload is opened. `None` when the directory does not
+    exist or cannot be opened safely, so a caller can tell "nothing kept" from
+    an empty list it could not read.
+    """
+    acquired = held_fs.acquire(Path(vault_root))
+    if not acquired.ok:
+        return None
+    with acquired.require() as filesystem:
+        directory = _open_parent(filesystem, relative_dir)
+        if directory is None:
+            return None
+        with directory:
+            return _snapshot_names(filesystem, directory, suffix)
+
+
+def read_kept(vault_root: Path, relative_dir: str, name: str) -> str | None:
+    """One kept file's text, read through the held vault root, or None."""
+    acquired = held_fs.acquire(Path(vault_root))
+    if not acquired.ok:
+        return None
+    with acquired.require() as filesystem:
+        directory = _open_parent(filesystem, relative_dir)
+        if directory is None:
+            return None
+        with directory:
+            opened = filesystem.file(directory, name)
+            if not opened.ok:
+                return None
+            with opened.require() as file:
+                read = filesystem.read(file) if file.identity.link_count == 1 else None
+                if read is None or not read.ok or not filesystem.validate_directory(directory).ok:
+                    return None
+                try:
+                    return read.require().decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
 
 
 def _prune(vault_root: Path, stem: str) -> None:
@@ -259,26 +316,11 @@ def versions(vault_root: Path, *, stem: str) -> list[dict[str, Any]]:
 def read_version(vault_root: Path, *, stem: str, version: str) -> str:
     """The override bytes one kept version holds, without its header line."""
     clean = str(version or "").strip()
-    if not _VERSION_RE.match(clean):
+    if not VERSION_RE.match(clean):
         raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} is not a kept version")
     root = Path(vault_root)
-    acquired = held_fs.acquire(root)
-    if acquired.ok:
-        with acquired.require() as filesystem:
-            directory = _history_parent(filesystem, root, stem)
-            if directory is not None:
-                with directory:
-                    opened = filesystem.file(directory, f"{clean}.yaml")
-                    if opened.ok:
-                        with opened.require() as file:
-                            read = filesystem.read(file) if file.identity.link_count == 1 else None
-                            if (
-                                read is not None
-                                and read.ok
-                                and filesystem.validate_directory(directory).ok
-                            ):
-                                try:
-                                    return _split(read.require().decode("utf-8"))[1]
-                                except UnicodeDecodeError:
-                                    pass
-    raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} is not a kept version")
+    relative = history_dir(root, stem).relative_to(root).as_posix()
+    text = read_kept(root, relative, f"{clean}.yaml")
+    if text is None:
+        raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} is not a kept version")
+    return _split(text)[1]

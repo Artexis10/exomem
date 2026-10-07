@@ -25,6 +25,8 @@ from . import (
     freshness,
     memory_schema,
     metrics,
+    origin_bindings,
+    provenance,
     relation_registry,
     relation_review,
     semantic_authoring,
@@ -115,7 +117,10 @@ def _reject_generic_structured_item_write(path: str, source: str) -> None:
 
 
 def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:
-    """Pure canonical path-only rewrite shared by move staging and review carry."""
+    """Pure canonical path-only rewrite shared by move staging and review carry.
+
+    An origin carrier is recorded data, so a link inside one keeps its bytes.
+    """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
     prefix = kb_prefix()
@@ -126,9 +131,12 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     old_basename = old_no_ext.rsplit("/", 1)[-1]
     new_basename = new_no_ext.rsplit("/", 1)[-1]
     changed = 0
+    inside_carrier = provenance.in_carrier(text)
 
     def replace(match: re.Match[str]) -> str:
         nonlocal changed
+        if inside_carrier(match.start(), match.end()):
+            return match.group(0)
         target = match.group(1).strip()
         alias = match.group(2) or ""
         target_path, marker, anchor = target.partition("#")
@@ -904,6 +912,7 @@ class CreationPreflight:
     source_closure_plan: source_closure.SourceClosurePlan | None = None
     vocabulary_binding: Any | None = None
     vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
+    origin_inputs: origin_bindings.PreparedOriginInputs | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -1030,6 +1039,7 @@ class ExistingPreflight:
     committed_replay: bool
     census_token: tuple | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
+    origin_inputs: origin_bindings.PreparedOriginInputs | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1373,6 +1383,88 @@ def _existing_transition_token(
         "utf-8"
     )
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _place_origin_source(path: str, source: str, *, before_source: str | None = None) -> str:
+    if source_closure._eligible_path(path):  # noqa: SLF001 -- raw capture stays uninterpreted
+        return source
+    try:
+        return origin_bindings.place_authored_origin(source, before_source=before_source)
+    except provenance.OriginError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
+
+
+def _prepare_origin_inputs(
+    root: Path, path: str, source: str, *, before_source: str | None = None
+) -> origin_bindings.PreparedOriginInputs | None:
+    if source_closure._eligible_path(path):  # noqa: SLF001 -- raw capture stays uninterpreted
+        return None
+    try:
+        return origin_bindings.prepare_origin_inputs(root, source, before_source=before_source)
+    except provenance.OriginError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
+
+
+def _validate_origin_inputs(root: Path, prepared: origin_bindings.PreparedOriginInputs) -> None:
+    try:
+        prepared.revalidate(root)
+    except provenance.OriginError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
+
+
+def _origin_commit_guards(
+    root: Path,
+    prepared: origin_bindings.PreparedOriginInputs | None,
+    writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite],
+) -> tuple[vault.PathGuard, ...]:
+    if prepared is None:
+        return ()
+    try:
+        return prepared.required_guards(root, writes)
+    except provenance.OriginError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
+
+
+def _recheck_origin_guards(root: Path, guards: tuple[vault.PathGuard, ...]) -> None:
+    try:
+        vault.recheck_path_guards(root, guards)
+    except vault.PathGuardError as error:
+        raise SemanticWriteError(
+            "ORIGIN_INPUT_STALE", "retained input changed during commit"
+        ) from error
+
+
+def _normalize_origin_source(
+    source: str,
+    *,
+    state: semantic_contract.SemanticPageState,
+    corpus: semantic_contract.SemanticCorpusContext,
+    before_source: str | None = None,
+) -> str:
+    if source_closure._eligible_path(state.path):  # noqa: SLF001
+        return source
+    try:
+        if origin_bindings._authored_origin(source, before_source) is None:  # noqa: SLF001
+            return source
+        corpus = corpus.with_candidate(state)
+        fields, _body, _ = vault.parse_frontmatter(source)
+        return origin_bindings.normalize_origin_scopes(
+            source,
+            document=state.document,
+            fields=fields,
+            owner_ref=_page_reference(state),
+            relations=(
+                (
+                    fact,
+                    _page_reference(corpus.pages.get(fact.logical_source_path)),
+                    _page_reference(corpus.pages.get(fact.logical_target_path)),
+                )
+                for fact in corpus.relation_facts
+            ),
+            before_source=before_source,
+        )
+    except provenance.OriginError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
 
 
 def _recovery_token_path(trash_path: str, restore_path: str) -> str:
@@ -1815,6 +1907,8 @@ def _preflight_existing(
     # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
     # on Windows so CRLF alone never looks like concurrent semantic drift.
     before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
+    after_source = _place_origin_source(path, after_source, before_source=before_source)
+    origin_inputs = _prepare_origin_inputs(root, path, after_source, before_source=before_source)
     before_hash = vault.content_hash(before_source)
     if expected_before_hash is not None and expected_before_hash not in {
         raw_before_hash,
@@ -1886,6 +1980,22 @@ def _preflight_existing(
             language_registry=language,
         )
         after_corpus = before_corpus.with_candidate(after)
+        normalized_source = _normalize_origin_source(
+            after_source, state=after, corpus=after_corpus, before_source=before_source
+        )
+        if normalized_source != after_source:
+            after_source = normalized_source
+            after = semantic_contract.build_page_state(
+                root,
+                path,
+                after_source,
+                relation_registry=registry,
+                language_registry=language,
+            )
+            after_corpus = before_corpus.with_candidate(after)
+            origin_inputs = _prepare_origin_inputs(
+                root, path, after_source, before_source=before_source
+            )
     before_contracts = memory_schema.resolve_contracts(
         loaded_contracts,
         projects=before.projects,
@@ -2033,6 +2143,7 @@ def _preflight_existing(
         committed_replay,
         census_token,
         closure_plan,
+        origin_inputs,
     )
 
 
@@ -2210,6 +2321,7 @@ def _commit_existing_locked(
             guard=preflight.primary_guard,
         )
     writes.append(primary_write)
+    origin_guards = _origin_commit_guards(root, preflight.origin_inputs, writes)
     from .governance import catalog_publication, graph_producer
 
     planned_writes = tuple(writes)
@@ -2241,14 +2353,21 @@ def _commit_existing_locked(
         primary=primary_write,
         derived=(*derived_auxiliaries, *(("lifecycle-review", item) for item in lifecycle_writes)),
     )
-    written = vault.batch_atomic_write(
-        writes,
-        vault_root=root,
-        required_guards=required_guards,
-        index_reports=reports,
-        semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
-        _vocabulary_auxiliaries=manifest,
-    )
+    try:
+        written = vault.batch_atomic_write(
+            writes,
+            vault_root=root,
+            required_guards=(*required_guards, *origin_guards),
+            index_reports=reports,
+            semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
+            _vocabulary_auxiliaries=manifest,
+            _validate_prepared_bindings=(
+                lambda: _validate_origin_inputs(root, preflight.origin_inputs)
+            ) if preflight.origin_inputs is not None else None,
+        )
+    except vault.PathGuardError:
+        _recheck_origin_guards(root, origin_guards)
+        raise
     try:
         catalog_publication.publish_markdown_batch(catalog_target)
     except catalog_publication.CatalogPublicationError as error:
@@ -3939,8 +4058,9 @@ def _evaluate_structural(
     semantic_contract.SemanticPageState,
     tuple | None,
     semantic_contract.SemanticCorpusContext,
+    str,
 ]:
-    """Returns ``(result, state, corpus_census, before_corpus)``.
+    """Returns ``(result, state, corpus_census, before_corpus, normalized_source)``.
 
     ``corpus_census`` is the exact census that validated the ``before`` corpus
     context this evaluation just built, for a preflight caller to thread
@@ -3951,6 +4071,7 @@ def _evaluate_structural(
     caller can retain it for advisory post-write analysis. It is the corpus as
     it stood before this write, which is what a destination lookup wants.
     """
+    source = _place_origin_source(destination, source)
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
@@ -3964,6 +4085,18 @@ def _evaluate_structural(
         relation_registry=registry,
         language_registry=language,
     )
+    normalized_source = _normalize_origin_source(
+        source, state=candidate, corpus=before
+    )
+    if normalized_source != source:
+        source = normalized_source
+        candidate = semantic_contract.build_page_state(
+            root,
+            destination,
+            source,
+            relation_registry=registry,
+            language_registry=language,
+        )
     resolved = memory_schema.resolve_contracts(
         contracts,
         projects=candidate.projects,
@@ -3986,6 +4119,7 @@ def _evaluate_structural(
         candidate,
         before_census,
         before,
+        source,
     )
 
 
@@ -4005,6 +4139,7 @@ def preflight_creation(
     vocabulary_binding: Any | None = None,
 ) -> CreationPreflight:
     root = Path(vault_root)
+    origin_inputs = _prepare_origin_inputs(root, path, source)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
     if relation_disposition not in {None, "reviewed_none"}:
         raise SemanticWriteError(
@@ -4035,9 +4170,10 @@ def preflight_creation(
             details=closure_plan.inspection.public_details(),
         )
     entry_generation = _entry_commit_generation(root)
-    result, state, corpus_census, before_corpus = _evaluate_structural(
+    result, state, corpus_census, before_corpus, source = _evaluate_structural(
         root, destination=path, source=source, operation=operation
     )
+    origin_inputs = _prepare_origin_inputs(root, path, source)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
@@ -4071,6 +4207,7 @@ def preflight_creation(
                 vocabulary_binding.registry_guard,
                 vocabulary_binding.parent_guard,
             ) if vocabulary_binding is not None else (),
+            origin_inputs,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4096,6 +4233,7 @@ def preflight_creation(
             vocabulary_binding.registry_guard,
             vocabulary_binding.parent_guard,
         ) if vocabulary_binding is not None else (),
+        origin_inputs,
     )
 
 
@@ -4417,6 +4555,12 @@ def _commit_creation(
                 predecessor_content_hash=predecessor_content_hash,
                 semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
                 extra_required_guards=vocabulary_guards,
+                origin_required_guards=_origin_commit_guards(
+                    root, preflight.origin_inputs, catalog_writes
+                ),
+                _validate_prepared_bindings=(
+                    lambda: _validate_origin_inputs(root, preflight.origin_inputs)
+                ) if preflight.origin_inputs is not None else None,
             )
             try:
                 catalog_publication.publish_markdown_batch(catalog_target)
@@ -4444,7 +4588,7 @@ def _commit_creation(
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, catalog_state, _fresh_census, catalog_corpus = _evaluate_structural(
+            contract_result, catalog_state, _fresh_census, catalog_corpus, _source = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,
@@ -4485,6 +4629,7 @@ def _commit_creation(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 str(error),
             ) from error
+        origin_guards = _origin_commit_guards(root, preflight.origin_inputs, writes)
         token = semantic_index.set_parent_states(
             {preflight.destination: semantic_index.from_semantic_page_state(catalog_state)}
         )
@@ -4497,10 +4642,14 @@ def _commit_creation(
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
-                required_guards=vocabulary_guards,
+                required_guards=(*vocabulary_guards, *origin_guards),
                 _vocabulary_auxiliaries=manifest,
+                _validate_prepared_bindings=(
+                    lambda: _validate_origin_inputs(root, preflight.origin_inputs)
+                ) if preflight.origin_inputs is not None else None,
             )
         except vault.PathGuardError as error:
+            _recheck_origin_guards(root, origin_guards)
             if vocabulary_guards:
                 raise SemanticWriteError(
                     "STALE_VOCABULARY_BINDING",

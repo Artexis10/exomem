@@ -259,7 +259,10 @@ from exomem import embeddings  # noqa: E402
 
 
 def _page(title: str, body: str, media_type=None, media_file=None) -> SimpleNamespace:
-    return SimpleNamespace(title=title, body=body, media_type=media_type, media_file=media_file)
+    # Chunks read the page's search body (origin carriers withheld); these bodies have none.
+    return SimpleNamespace(
+        title=title, body=body, search_body=body, media_type=media_type, media_file=media_file
+    )
 
 
 def test_seam_non_media_page_identical_to_chunk_text(vault, monkeypatch) -> None:

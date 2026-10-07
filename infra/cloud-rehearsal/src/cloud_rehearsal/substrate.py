@@ -39,10 +39,9 @@ from .infra import PG_DATABASE, PG_ROLES, Stack
 from .shell import run, wait_for
 
 SUBSTRATE_REPOSITORY = "https://github.com/substrate-systems/substrate.git"
-# Substrate with #214 (exomem_cloud_cells.grown_storage_gib, which cellctl
-# reads since online growth). This is #214's head commit until it merges; then
-# pin its merge commit on main. Bump deliberately.
-SUBSTRATE_COMMIT = "ff964f3a0c6a124e4c7f55b505b31290215c50f2"
+# Substrate #214 supplies the observed growth column that cellctl reads.
+# Pin its main merge commit so the rehearsal uses the shipped schema.
+SUBSTRATE_COMMIT = "370597b136518540de374bc376b06b59a3fb3c9e"
 NODE_IMAGE = "node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 MCP_PATH = "/mcp"
 MCP_URL = f"https://{tls.MCP_HOST}{MCP_PATH}"

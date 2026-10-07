@@ -265,6 +265,51 @@ The episode ledger SHALL distinguish attempted work, pending continuation and co
 
 Source/episode/span origin identity SHALL propagate through every compiled destination, recurrence detector, write-time carrier and relevant relation/hydration evidence. Compilation SHALL NOT increase the number of independently established input origins. Conversation-only fan-out SHALL inherit one episode origin; independently established original sources discussed in that episode SHALL retain their distinct identities. Copy-equivalent projections SHALL add no independent origin. If independence cannot be determined, evidence SHALL be labelled unassessed rather than treated as independent page mentions. Supported important first mentions SHALL remain independently eligible for semantic promotion.
 
+An explicit attributed active-agent assessment bound to exact retained inputs,
+their versions and relevant spans MAY establish independence for recurrence
+advice. The server SHALL validate those bindings and SHALL NOT represent the
+assessment as server-certified semantic independence. Distinct identifiers,
+URLs, hashes, sessions or pages alone SHALL NOT establish independence. Invalid,
+stale or unavailable input bindings SHALL NOT contribute assessed independent
+support. Assessments SHALL NOT grant capture, promotion or disclosure authority.
+
+Managed origin metadata SHALL pass the existing disclosure boundary for every
+retained input before it is exposed in a permitted parent's body, raw content,
+unit context or projections. An unavailable or insufficiently released input
+SHALL withhold the whole payload, including attribution and free-text reasons.
+Disclosure SHALL depend only on release and availability: a stale input binding
+is accounting state and SHALL NOT hide the payload, and with no configured file
+policy no origin projection SHALL run. Redaction SHALL NOT rewrite canonical
+bytes or claim an exact raw representation. An exact semantic-unit read SHALL
+succeed when the removed payload intersects neither the unit nor its returned
+context, and SHALL NOT report an existing page as missing. Existing drift guards
+SHALL remain unchanged.
+
+Before returning a whole managed payload, the reader SHALL retain its bounded
+input proofs, perform a final fresh release/selected-text check of each snapshot,
+recheck any verified authorization-session context, and then recheck all input
+and episode-journal byte guards. A change observed at these checkpoints SHALL
+remove the whole payload without withholding otherwise permitted parent prose.
+This SHALL preserve the existing observational read guarantee, not claim an
+atomic snapshot across filesystem, policy, session and external custody state.
+
+The managed v1 envelope SHALL keep retained input bindings, attributed
+assessments and selected output scopes distinct. Page-local input labels SHALL
+NOT establish original identity or authority. A malformed, unsupported,
+ambiguous or over-limit envelope SHALL NOT establish assessed support; new
+authoring SHALL receive a typed refusal rather than silent truncation. Existing
+unsupported metadata SHALL remain unassessed, and its reserved payload SHALL
+remain identifiable for the existing disclosure boundary.
+
+Origin-bearing authoring SHALL freshly validate exact input/version/scope and
+episode-root bindings under current applicable authority before first publication
+and at the existing rollback-capable completion checkpoint. Byte guards, saved
+disclosure receipts and an earlier permission verdict SHALL NOT satisfy current
+authorization. Same-batch Source bookkeeping that preserves the material version
+SHALL NOT invalidate its own binding. Ordinary refusal at either checkpoint SHALL
+leave no committed origin-bearing effect and SHALL preserve existing rollback
+and interruption semantics, without promising cross-file power-loss atomicity.
+
 #### Scenario: One turn becomes four pages
 
 - **WHEN** a single episode is preserved as a Source, entity facet, focused note and Records item
@@ -275,6 +320,115 @@ Source/episode/span origin identity SHALL propagate through every compiled desti
 - **WHEN** an episode uses two sources whose independence is established by provenance
 - **THEN** their compiled outputs retain those two source origins
 - **AND** copying either source into additional destinations contributes no further independent origin
+
+#### Scenario: Agent-assessed independence remains attributed
+
+- **WHEN** the agent explicitly assesses two retained original inputs as independent and supplies their exact input/version/span bindings
+- **THEN** recurrence advice identifies the assessment as agent-attributed after validating the bindings
+- **AND** the server neither certifies the semantic judgment nor changes any capture or disclosure permission
+
+#### Scenario: A synthesis preserves origins without linking their independence
+
+- **WHEN** a synthesis combines two assessed independent original inputs and later pages copy that synthesis
+- **THEN** the supporting claim retains two origins, not one merged origin or an extra synthesis origin
+- **AND** unrelated claims on those pages do not inherit that support
+- **AND** separate assessments do not establish an additional independence claim that was not assessed
+
+#### Scenario: Unassessed or stale inputs do not inflate recurrence
+
+- **WHEN** legacy provenance lists distinct sources without an adequate independence assessment, or an assessment's exact retained-input binding is stale or unavailable
+- **THEN** that evidence is explicitly unassessed and cannot add assessed independent recurrence
+- **AND** supported important first mentions remain eligible through the existing governed path without requiring a recurrence quota
+
+#### Scenario: Recap labels cannot forge an episode origin
+
+- **WHEN** a retained recap has episode labels but lacks an exact canonical-parent/digest binding in the current audience's existing episode ledger
+- **THEN** it supplies no episode root and receives no fallback root from those labels or its page identity
+- **AND** missing, digest-only, corrupt, mismatched and foreign-owned history remain unavailable for that proof without searching or repairing another audience's ledger
+
+#### Scenario: Input permission changes during publication
+
+- **WHEN** applicable input release permission narrows or expires after preparation, including after one destination has been installed
+- **THEN** fresh checks before first publication and at rollback-capable completion refuse the origin-bearing effect and roll back installed auxiliaries
+- **AND** unchanged input bytes or a saved disclosure receipt cannot preserve the earlier authority
+
+#### Scenario: Source bookkeeping preserves a valid prepared origin
+
+- **WHEN** the same atomic batch adds an `ingested_into` backref while preserving the input's material version, selected scope and current permission
+- **THEN** the complete post-image retains that origin without an old-byte guard invalidating the batch's own replacement
+- **AND** changing input body, lifecycle metadata, selected scope or applicable authority still refuses rather than rebinds it
+
+#### Scenario: A permitted parent does not disclose a withheld origin
+
+- **WHEN** a reader may read a compiled page but cannot fully read one of the retained inputs named by its managed origin block
+- **THEN** public page, raw, unit-context and projection output do not disclose that block's input references, versions, counts, attribution or reasons
+- **AND** the canonical page and its drift guard remain unchanged, while a redacted response does not claim exact raw content
+
+#### Scenario: A projector upgrade refreshes stored origin representations
+
+- **WHEN** the owner explicitly proposes an empty document mapping through the existing governance proposal operation against an obsolete active projector
+- **THEN** preparation reads the exact active immutable policy and every canonical catalog item, including low-only and zero-variant items, and stages the running projector's complete namespace and required vector, CLIP and graph measurement families
+- **AND** commit publishes through the existing tuple owner with a new policy-generation identity, unchanged policy fingerprint and unchanged catalog generation when the descriptor is unchanged
+- **AND** canonical bytes, pending authoring workspace, unchanged grant identities/status/expiry/applicability, concurrent grant lifecycle and historical receipts remain intact
+- **AND** omitted documents are invalid, while an already-current empty-document refresh reports no refresh required and publishes nothing
+
+#### Scenario: Obsolete stored representations cannot be served during refresh
+
+- **WHEN** an upgrade starts or a warm runtime encounters an obsolete projector, or a committed refresh awaits runtime installation
+- **THEN** content serving remains unavailable with content-free pending readiness, without crashing the service, rebuilding in a query or substituting predecessor fields
+- **AND** the authorized owner refresh operation remains reachable and runtime activation occurs outside the query after publication acknowledgement
+- **AND** missing required measurements leave the predecessor tuple unchanged; interruption recovers only an exact receipt-proven publication without rerunning pinned measurements
+- **AND** old uncommitted projector proposals require fresh preparation, while committed historical receipts retain exact replay and recovery
+
+#### Scenario: An earlier input changes during a multi-input carrier read
+
+- **WHEN** an earlier retained input changes or loses permission while a later input is being resolved
+- **THEN** the final retained-snapshot and guard checkpoints remove the complete origin payload while keeping otherwise permitted parent prose
+- **AND** canonical bytes and hashes stay unchanged, and the result does not claim exact raw content or cross-system linearizability
+
+#### Scenario: Malformed or literal metadata does not establish support
+
+- **WHEN** a designated origin block has duplicate keys or blocks, dangling inputs, an unsupported variant or invalid scope, or provenance-looking text appears only in a code example
+- **THEN** it establishes no assessed independent support
+- **AND** invalid new authoring is refused, while existing unsupported reserved payload remains identifiable for whole-payload disclosure filtering
+- **AND** authored attribution or reasons cannot terminate a valid canonical origin comment
+
+#### Scenario: Markdown ownership cannot hide or activate reserved metadata
+
+- **WHEN** a page contains unmatched backticks across block boundaries, fences inside comments, container-owned code examples, escaped comment openers or malformed reserved comments
+- **THEN** only actual authored comments outside code may establish origin metadata, and every malformed or unsupported reserved comment remains locatable without hiding later comments
+- **AND** removable spans retain exact original character offsets for Unicode and CRLF text
+- **AND** an offset-mapping failure refuses the operation rather than silently returning absent metadata or assessed support
+
+#### Scenario: Reserved openers outside code are carriers
+
+- **WHEN** a reserved origin opener appears anywhere outside Markdown code and is not backslash-escaped, including inside HTML attributes, raw text, a link title or an earlier unterminated comment
+- **THEN** reading treats it as a removable carrier running to its first terminator or the end of the text, so it is withheld rather than disclosed as prose
+- **AND** writing accepts only exactly one valid designated block and refuses every other reserved carrier with a typed `ORIGIN_METADATA_INVALID`
+- **AND** link normalization and move rewrites leave every byte inside a carrier as written
+- **AND** fenced, indented and inline code examples remain literal at their original offsets for writers and for readers to whom the page's valid carrier is released
+
+#### Scenario: A carrier pushed into code is still withheld
+
+- **WHEN** an unclosed fence or an indent above a carrier makes it code, and its bound input is not released to the reader
+- **THEN** reading withholds every reserved opener on the page, in code and escapes included, to its first terminator or the end of the text
+- **AND** an opener inside code with no terminator before that code ends is withheld only to the end of the code, unless its terminator follows with no blank line between, so prose and links after a documented opener stay readable and linkable
+- **AND** search fields, context packs and excerpts never match or show its payload for any audience
+- **AND** no door that reader can call shows its payload: page, unit and link reads, find at every level, activation, graph context, review context, suggestions or the provenance report
+- **AND** classification and writing still treat only openers outside code as carriers, and the owner reads the page as written
+
+#### Scenario: Normalized Records provenance survives interrupted commitment
+
+- **WHEN** preparation fills an omitted origin target fingerprint for a Records append and commitment is interrupted before episode reconciliation
+- **THEN** preparation, commitment and receipt lookup bind the same normalized payload
+- **AND** resumption reuses the original committed receipt without another append or origin
+
+#### Scenario: Original authored Records arguments retain their committed effect
+
+- **WHEN** a caller repeats the original omitted-fingerprint Records leaf or retains it beside a new leaf, after commitment through the episode or its bound curation plan
+- **THEN** preparation recognizes the exact retained normalization without current Source or target reads for that historical leaf, preserves its binding and effect revision, and does not append it again
+- **AND** changed authored prose, input bindings, output scopes or supplied fingerprints cannot borrow that retained effect identity
+- **AND** historical input permission is not recertified, while every genuinely new leaf still passes current preparation and authorization
 
 ### Requirement: Bounded partial work resumes honestly
 

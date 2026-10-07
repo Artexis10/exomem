@@ -67,7 +67,13 @@ from . import policy as policy_module
 from .decisions import Decision, decide
 from .decisions import _meet_decisions as _meet_decisions
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
-from .principal import OWNER_AUDIENCE, RequestPrincipal, current_principal, effective_principal
+from .principal import (
+    OWNER_AUDIENCE,
+    RequestPrincipal,
+    current_principal,
+    effective_principal,
+    request_scope,
+)
 
 log = logging.getLogger(__name__)
 
@@ -742,6 +748,7 @@ _FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
         "record_manifest",
         "record_template",
         "record_mutation",
+        "record_history",
         "planning_query",
         "planning_inspection",
         "planning_mutation",
@@ -2905,56 +2912,64 @@ def guard_working_set(
     }
 
     decisions: dict[str, Decision | None] = {}
-    if not _file_policy_empty(vault_root, policy):
+    policy_decides = not _file_policy_empty(vault_root, policy)
+    if policy_decides:
         grants_hash = _grants_hash(policy)
         declared_purpose = _declared_purpose(vault_root, who, purpose)
-        for rel_path in sorted(path for path in named_paths if path):
-            decision = _decide_path(
-                vault_root,
-                rel_path,
-                policy=policy,
-                audience=who.audience_id,
-                purpose=declared_purpose,
-                grants_hash=grants_hash,
-                authorization_session=who.authorization_session_id,
-                authorization_context=who.verified_authorization_session,
-            )
-            decisions[rel_path] = decision
-            if decision is not None:
-                if decision.level < RELEASE_FLOOR:
-                    withheld.add(rel_path)
-            elif rel_path in tombstoned or (vault_root / rel_path).exists():
-                # `_decide_path` returns `None` for BOTH a genuinely
-                # tombstoned/unreadable/unclassifiable EXISTING path and a
-                # path that simply does not exist. The latter is expected
-                # for a PHANTOM interpretation reading (R3): `named_paths`
-                # is the union of every candidate's readings
-                # (`_interpretations_for`), and an ambiguous candidate's
-                # non-real readings are validated as safe relative paths
-                # (`_is_safe_relative_path`) but never claimed to exist.
-                # Adding a phantom reading to `withheld` corrupts
-                # `frozen`'s canonical-key comparisons (`_names_withheld`)
-                # against every OTHER field in the packet -- and a phantom
-                # reading is frequently IDENTICAL to the candidate's own
-                # original text (`path.md#current`'s literal-reading IS
-                # `ref` itself), so it falsely matched its own item, as
-                # though a real withheld page shared that exact spelling --
-                # dropping a unit under a policy scoped to an entirely
-                # different folder. Only an existing-but-undecidable path is
-                # withheld here; the invalid_refs computation below makes
-                # the identical existence check for the phantom-vs-denied
-                # distinction, against `decisions`/`tombstoned`/the
-                # filesystem.
+
+    def decide(rel_path: str) -> None:
+        """Decide `rel_path` for this caller, record the outcome, and add it to
+        `withheld` when it may not be released. Only with a file policy."""
+        decision = _decide_path(
+            vault_root,
+            rel_path,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+            authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
+        )
+        decisions[rel_path] = decision
+        if decision is not None:
+            if decision.level < RELEASE_FLOOR:
                 withheld.add(rel_path)
-            _outcome_for_decision(
-                vault_root,
-                rel_path,
-                decision=decision,
-                policy=policy,
-                audience=who.audience_id,
-                outcome="withheld" if rel_path in withheld else "released",
-                purpose=declared_purpose,
-            )
+        elif rel_path in tombstoned or (vault_root / rel_path).exists():
+            # `_decide_path` returns `None` for BOTH a genuinely
+            # tombstoned/unreadable/unclassifiable EXISTING path and a
+            # path that simply does not exist. The latter is expected
+            # for a PHANTOM interpretation reading (R3): `named_paths`
+            # is the union of every candidate's readings
+            # (`_interpretations_for`), and an ambiguous candidate's
+            # non-real readings are validated as safe relative paths
+            # (`_is_safe_relative_path`) but never claimed to exist.
+            # Adding a phantom reading to `withheld` corrupts
+            # `frozen`'s canonical-key comparisons (`_names_withheld`)
+            # against every OTHER field in the packet -- and a phantom
+            # reading is frequently IDENTICAL to the candidate's own
+            # original text (`path.md#current`'s literal-reading IS
+            # `ref` itself), so it falsely matched its own item, as
+            # though a real withheld page shared that exact spelling --
+            # dropping a unit under a policy scoped to an entirely
+            # different folder. Only an existing-but-undecidable path is
+            # withheld here; the invalid_refs computation below makes
+            # the identical existence check for the phantom-vs-denied
+            # distinction, against `decisions`/`tombstoned`/the
+            # filesystem.
+            withheld.add(rel_path)
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=who.audience_id,
+            outcome="withheld" if rel_path in withheld else "released",
+            purpose=declared_purpose,
+        )
+
+    if policy_decides:
+        for rel_path in sorted(path for path in named_paths if path):
+            decide(rel_path)
 
     # A candidate the guard could not resolve to a single real page has
     # a SET of interpretations instead (R3): a plain string containing `#`
@@ -3056,14 +3071,55 @@ def guard_working_set(
     original_units = [
         item for item in guarded.get("units") or () if isinstance(item, Mapping)
     ]
-    guarded["units"] = [
-        unit
-        for unit in (
-            _guarded_unit(item, frozen, decisions, invalid_refs) for item in original_units
-        )
-        if unit is not None
-    ]
+    guarded["units"] = []
+    lost_unit_pages: set[str] = set()
+    for item in original_units:
+        unit = _guarded_unit(item, frozen, decisions, invalid_refs)
+        if unit is None:
+            lost_unit_pages.add(str((item.get("provenance") or {}).get("path") or ""))
+        else:
+            guarded["units"].append(unit)
     _note_removal("units", len(original_units), len(guarded["units"]))
+    _charge_back_removed(guarded, "units", original_units, guarded["units"])
+    # The anchors a carried page's units name (`carried_link`) were listed from
+    # the units the compiler served. When a unit goes here, the listing is
+    # rebuilt from the units that stay, by the compiler's own rule: dropping
+    # only the rows the removed unit named would leave its slots empty, and
+    # dropping every row of that page would hide a person a surviving unit
+    # names. Either tells the caller the page lost a unit; the rebuilt listing
+    # is the one a vault without the removed material produces.
+    if lost_unit_pages and any(
+        "carried_link" in (anchor.get("evidence") or ()) for anchor in guarded["anchors"]
+    ):
+        from .. import working_set
+
+        relisted = working_set.relist_carried_links(
+            vault_root, guarded["anchors"], guarded["units"], purpose=purpose
+        )
+        # A relisted row may be one this packet never named, so nothing above
+        # decided it. It is decided here for this caller, like every named path,
+        # rather than trusted to the compiler's own view of the reader.
+        for entry in relisted:
+            rel_path = str(entry.get("path") or "")
+            if not rel_path or rel_path in decisions or rel_path in withheld:
+                continue
+            if lifecycle.is_tombstoned(vault_root, rel_path):
+                withheld.add(rel_path)
+            elif policy_decides:
+                decide(rel_path)
+        guarded["anchors"] = [
+            anchor
+            for anchor in guarded["anchors"]
+            if "carried_link" not in (anchor.get("evidence") or ())
+        ] + [
+            anchor
+            for anchor in (
+                _guarded_anchor(entry, frozen, decisions, invalid_refs)
+                for entry in relisted
+                if str(entry.get("path") or "") not in withheld
+            )
+            if anchor is not None
+        ]
 
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)
@@ -3076,6 +3132,7 @@ def guard_working_set(
             ]
             if section in ("pointers", "current_state"):
                 _note_removal(section, len(values), len(kept))
+                _charge_back_removed(guarded, section, values, kept)
             guarded[section] = kept
 
     # Appended AFTER the `missing` filter runs, never before: `missing[]` entries
@@ -3147,7 +3204,7 @@ def guard_working_set(
 #: under every existing reading, and withholding its item if none exists.
 #: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
 #: and only on an item that ALSO carries one of these (T2).
-_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor")
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via")
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
@@ -3716,6 +3773,10 @@ def _guarded_anchor(
         # `guard_working_set` -- so it is checked by exact match here instead.
         or anchor.get("path") in invalid_refs
         or anchor.get("ref") in invalid_refs
+        # An anchor listed through a carried page (`via`) was reached only
+        # through that page: it goes wherever the page goes.
+        or _names_withheld(anchor.get("via"), withheld)
+        or anchor.get("via") in invalid_refs
     ):
         return None
     anchor_ref = str(anchor.get("ref") or "")
@@ -3781,6 +3842,33 @@ def _charge_back_removed_recent(
 ) -> None:
     """Subtract the removed recent entries' characters from `used_chars`."""
     removed = sum(map(_recent_entry_chars, before)) - sum(map(_recent_entry_chars, after))
+    if removed <= 0:
+        return
+    budget = guarded.get("budget")
+    if isinstance(budget, Mapping):
+        used = budget.get("used_chars")
+        if isinstance(used, int):
+            guarded["budget"] = {**dict(budget), "used_chars": max(0, used - removed)}
+
+
+def _charge_back_removed(
+    guarded: dict[str, Any],
+    section: str,
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+) -> None:
+    """Subtract what the removed `section` entries were charged from `used_chars`.
+
+    The compiler charged each served unit, pointer and state entry against the
+    budget (`working_set.served_chars`), so leaving the charge in place after
+    removing one would tell the caller how long the withheld entry was. A
+    conversation-inferred packet recounts its whole budget at the end instead.
+    """
+    from .. import working_set
+
+    removed = sum(working_set.served_chars(section, entry) for entry in before) - sum(
+        working_set.served_chars(section, entry) for entry in after
+    )
     if removed <= 0:
         return
     budget = guarded.get("budget")
@@ -4004,6 +4092,110 @@ def _attach_raw_content(
     return out
 
 
+def projects_origin(vault_root: Path, policy: Policy, principal: RequestPrincipal) -> bool:
+    """Whether a read withholds origin carriers from `principal`.
+
+    With no configured audience nothing is projected, and nothing is ever
+    withheld from the owner, so the owner reads every page as written.
+    """
+    return not _file_policy_empty(vault_root, policy) and not (
+        principal.resolved and principal.audience_id == OWNER_AUDIENCE
+    )
+
+
+def prose_for_caller(
+    vault_root: Path,
+    text: str,
+    *,
+    owner_path: str,
+    principal: RequestPrincipal | None = None,
+) -> str:
+    """Page prose for the current caller; an origin carrier is never prose.
+
+    The one helper every door that serves page prose to one caller uses. The
+    owner, and every caller of a vault with no configured audience, keeps the
+    code exemption, so a fenced carrier example stays literal. Every other
+    caller gets `provenance.withheld_prose`: each reserved opener is withheld
+    wherever it sits, code and escapes included. Prose every audience shares is
+    computed once, before any caller is known, and uses `withheld_prose`
+    directly (search fields, units, packs, graph fields).
+    """
+    from .. import provenance
+
+    if projects_origin_for_caller(vault_root, principal):
+        return provenance.withheld_prose(text, owner_path=owner_path)
+    return provenance.origin_prose(text, owner_path=owner_path)
+
+
+def carrier_spans_for_caller(
+    vault_root: Path,
+    text: str,
+    *,
+    owner_path: str,
+    principal: RequestPrincipal | None = None,
+) -> tuple[tuple[int, int], ...]:
+    """The carrier spans this caller is never shown: `prose_for_caller`'s rule as spans.
+
+    For units, which keep their offsets: a projected reader loses every reserved
+    span (`provenance.withheld_spans`), and the owner loses only the page's own
+    carrier, so a carrier example in a unit's code stays literal for them.
+    """
+    from .. import provenance
+
+    if projects_origin_for_caller(vault_root, principal):
+        return provenance.withheld_spans(text, owner_path=owner_path)
+    return provenance.parse_owned_origin(text, owner_path=owner_path).spans
+
+
+def projects_origin_for_caller(
+    vault_root: Path, principal: RequestPrincipal | None = None
+) -> bool:
+    """Whether this caller reads origin projected (`projects_origin`). A cache
+    of anything `prose_for_caller` or `carrier_spans_for_caller` shaped keys on it."""
+    who = principal if principal is not None else effective_principal()
+    return projects_origin(vault_root, policy_module.load(vault_root), who)
+
+
+def _project_page_origin(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    policy: Policy,
+    principal: RequestPrincipal,
+    purpose: str | None,
+    snapshot_content: str | bytes | None,
+) -> tuple[dict[str, Any], bool]:
+    if not projects_origin(vault_root, policy, principal):
+        return page, False
+    text = snapshot_content if snapshot_content is not None else page.get("body")
+    if isinstance(text, bytes):
+        try:
+            text = text.decode("utf-8")
+        except UnicodeDecodeError:
+            return page, False  # Existing raw-content and snapshot owners refuse these bytes.
+    if not isinstance(text, str) or "<!--" not in text or "exomem-origin" not in text.lower():
+        return page, False
+    from .. import origin_bindings, source_closure
+
+    if source_closure._eligible_path(str(page.get("path") or "")):  # noqa: SLF001
+        return page, False  # Captured evidence is not managed attribution.
+    with request_scope(principal.with_purpose(_declared_purpose(vault_root, principal, purpose))):
+        projected = origin_bindings.project_origin_text(vault_root, text)
+    if projected == text:
+        return page, False
+    out = dict(page)
+    if snapshot_content is not None:
+        frontmatter, body, _ = vault.parse_frontmatter(projected)
+        if "frontmatter" in out:
+            out["frontmatter"] = frontmatter
+        if "body" in out:
+            out["body"] = body
+    elif "body" in out:
+        out["body"] = projected
+    out.pop("content", None)  # A redacted projection is never an exact raw read.
+    return out, True
+
+
 @canonical_read
 def annotate_page(
     vault_root: Path,
@@ -4030,6 +4222,7 @@ def annotate_page(
     who = principal if principal is not None else effective_principal()
 
     if _file_policy_empty(vault_root, policy):
+        # No configured audience: the owner reads origin metadata as written.
         return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
@@ -4218,6 +4411,14 @@ def annotate_page(
             bridge_abstraction=decision.bridge_abstraction,
         )
 
+    page, origin_redacted = _project_page_origin(
+        vault_root,
+        page,
+        policy=policy,
+        principal=who,
+        purpose=declared_purpose,
+        snapshot_content=snapshot_content,
+    )
     # L5/L6: the page is released. Its own provenance must still not name a
     # sub-notice item (D3 applies the strip at EVERY level, not just below
     # full), so decide the items this page points at before answering.
@@ -4257,6 +4458,11 @@ def annotate_page(
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
     if level == LEVEL_EXCERPT:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        from .. import provenance
+
+        # An excerpt is prose: no origin carrier, released or not, starts it,
+        # and none pushed into code reaches this restricted reader either.
+        body = provenance.withheld_prose(body, owner_path=rel_path)
         body = redact_withheld_references(
             vault_root,
             body,
@@ -4284,7 +4490,7 @@ def annotate_page(
             decision.release_strip,
             direct_page=True,
         )
-    return _attach_raw_content(out, snapshot_content) if include_raw else out
+    return _attach_raw_content(out, snapshot_content) if include_raw and not origin_redacted else out
 
 
 def _iter_reference_targets(value: Any) -> Iterable[str]:
@@ -4483,6 +4689,9 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    evidence_projection = (
+        result if isinstance(result, dict) and "evidence_version" in result else None
+    )
     issuance_context = scrubber._issuance_projection_context(result)
     if issuance_context is not None:
         # `rotate` has already invalidated the request's prior credential by
@@ -4520,6 +4729,15 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
+    # A material version requires an unchanged requested page or exact unit.
+    # Later filtering can turn that response into a projection; keep its
+    # canonical hash, but withdraw the binding without scanning unreturned text.
+    if (
+        evidence_projection is not None
+        and isinstance(cleaned, dict)
+        and cleaned != evidence_projection
+    ):
+        cleaned.pop("evidence_version", None)
     return (canonical_governance._seal_inspection_projection(cleaned, inspection_evidence)
             if inspection_evidence is not None else cleaned)
 
@@ -4955,6 +5173,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+        "history": "structure",
     },
     ("episode_memory", "action"): {
         "record": "mutation",
@@ -4979,6 +5198,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "triage": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
+        "history": "structure",
     },
 }
 

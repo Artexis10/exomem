@@ -15,6 +15,8 @@ from . import (
     access,
     edit,
     kbdir,
+    origin_bindings,
+    provenance,
     semantic_contract,
     semantic_index,
     semantic_language_registry,
@@ -168,6 +170,13 @@ def observe_memory(
             "INVALID_OBSERVE_INPUT",
             f"{op} requires non-empty category and content fields",
         )
+
+    origin_block = None
+    if content is not None:
+        try:
+            content, origin_block = origin_bindings.extract_origin_metadata(str(content))
+        except provenance.OriginError as error:
+            raise ObserveMemoryError(error.code, error.reason) from error
 
     try:
         editable = edit.load_editable(vault_root, path, expected_hash=expected_hash)
@@ -341,6 +350,8 @@ def observe_memory(
                 else _append_rich(body, rendered)
             )
 
+    if origin_block is not None:
+        after_body = origin_block + "\n\n" + after_body
     after_source = _rebuild_source(
         editable.original_text,
         editable.fm_text,
@@ -432,7 +443,7 @@ def observe_memory(
             operation=op,
             path=editable.rel_path,
             before_hash=editable.raw_hash,
-            after_hash=vault.content_hash(after_source),
+            after_hash=vault.content_hash(preflight.after_source),
             mutated=False,
             unit=proposed_unit,
             removed_unit=removed_unit,
@@ -486,10 +497,10 @@ def observe_memory(
         # emits and `load_editable` compares. `final.parent_source_hash` is the
         # semantic index's hash of the *normalized* logical source, so reporting
         # it here handed the caller a value its own guard would then refuse on
-        # any CRLF page. `after_source` is written verbatim by
-        # `commit_existing`, so hashing it names exactly the committed bytes.
+        # any CRLF page. The preflight's authoritative source includes origin
+        # normalization and is written verbatim by `commit_existing`.
         before_hash=editable.raw_hash,
-        after_hash=vault.content_hash(after_source),
+        after_hash=vault.content_hash(preflight.after_source),
         mutated=committed.mutated,
         unit=final_unit,
         removed_unit=removed_unit,

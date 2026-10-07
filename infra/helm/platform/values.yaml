@@ -127,12 +127,25 @@ hcloud-csi:
         name: docker.io/hetznercloud/hcloud-csi-driver
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
+      # The chart's own sidecar tags, pinned by digest.
+      csiAttacher:
+        tag: v4.11.0@sha256:b74b05b39501565022883fc128002b4cb857a7bb6c858606bcb3fdedba0b0b80
+      csiResizer:
+        tag: v2.1.0@sha256:589e525cddef6d768e68da1f0bc9ffd0a24bf3add3dd010648eb7189976fde79
+      csiProvisioner:
+        tag: v6.2.0@sha256:6be9f63ca4caa6c46aae55aa372500949d8a21473d72f819da1f746076b32d4e
+      livenessProbe:
+        tag: v2.18.0@sha256:c4cc074199c045dd73ab85f28897e2a32f4d6f38ffdba4f3b13b8007ccbd3570
   node:
     image:
       hcloudCSIDriver:
         name: docker.io/hetznercloud/hcloud-csi-driver
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
+      csiNodeDriverRegistrar:
+        tag: v2.16.0@sha256:ab482308a4921e28a6df09a16ab99a457e9af9641ff44fb1be1a690d07ce8b70
+      livenessProbe:
+        tag: v2.18.0@sha256:c4cc074199c045dd73ab85f28897e2a32f4d6f38ffdba4f3b13b8007ccbd3570
 
 # harden-exomem-cloud-operator-access D1 (task 1.6): the edge namespace's
 # NetworkPolicy lets Traefik reach the API server only at these addresses on
@@ -273,15 +286,15 @@ cellctl:
   # databaseEgressCidrs pattern.
   databaseEgressCidrs: []
   # memoryLimit is 3Gi because the first index build over a large restored vault
-  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The owner's cell (about
-  # 9,300 files, 3.6 GB) then settled at 1.7 GiB resident at idle after
-  # indexing, so memoryRequest (1Gi) understates a large vault's steady state
-  # and lets several large cells overcommit a node. The request is left as is
-  # here; sizing it is a separate decision.
+  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The requests are what an
+  # idle 0.108+ cell needs: about 226 MiB private memory with the model weights
+  # shared across cells, and 14-28 m CPU. The 0.108 matched pair qualified
+  # 512Mi/125m: a large owner-sized cell saved and queried the same as at
+  # 1Gi/250m on the same host (add-cloud-service-resource-policy task 3.9).
   cellResources:
-    cpuRequest: 250m
+    cpuRequest: 125m
     cpuLimit: "2"
-    memoryRequest: 1Gi
+    memoryRequest: 512Mi
     memoryLimit: 3Gi
   resources:
     requests: {cpu: 100m, memory: 128Mi}

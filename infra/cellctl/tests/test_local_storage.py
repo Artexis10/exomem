@@ -16,7 +16,7 @@ import pytest
 
 from cellctl import reconcile
 from cellctl.decide import StorageRoom, decide
-from cellctl.manifests import STORAGE_CLASS, namespace_name
+from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import ClusterConfig
 from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, RolloutRow
 from cellctl.storage.fake_b2 import FakeB2
@@ -147,6 +147,8 @@ def test_with_no_local_class_an_existing_cells_render_digest_does_not_move() -> 
     config = ClusterConfig(
         object_storage_bucket="b",
         job_egress_except=("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"),
+        # Production's live chart values still set the resources it was captured with.
+        resources=ResourceSettings(cpu_request="250m", memory_request="1Gi"),
     )
 
     assert _compute_render_digest(row, config, _secrets_config(), STORAGE_CLASS) == (
@@ -467,11 +469,11 @@ def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serv
 
     hard = render_resource_quota(spec)["spec"]["hard"]
 
-    # Serving 250m/1Gi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
+    # Serving 125m/512Mi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
     assert {key: hard[key] for key in ("persistentvolumeclaims", "requests.storage", "requests.cpu",
                                        "requests.memory", "limits.cpu")} == {
-        "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "350m",
-        "requests.memory": "1280Mi", "limits.cpu": "3",
+        "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "225m",
+        "requests.memory": "768Mi", "limits.cpu": "3",
     }
 
 

@@ -26,3 +26,5 @@ None.
 - The owner's cloud cell does one full re-embed after the release that carries this, with dense recall off for its length. Resident memory rises ~95 MiB, plus a third more for the vector matrix (1024 against 768 dimensions), inside the 3 GiB cloud-cell limit. `bound-cell-memory` owns the budget.
 - The cloud image carries both models, since it builds on the hosted image: about 0.55 GB larger.
 - No heavy optional capability is added. The encoder was already loaded on every cell, and a load failure soft-fails the vector lane as before. The model is the substrate for dense recall, which cells already ran.
+
+> **Superseded on 2026-10-06 (#1608):** the cloud image no longer builds on the hosted image. Both build on a shared `cell-runtime` stage; the cloud image carries bge-m3 alone, so `EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5` on a cloud cell no longer serves an old sidecar.

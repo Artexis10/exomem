@@ -130,12 +130,10 @@
       {
         "case_id": "C4",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
           "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 2
         },
         "hedged": false,
@@ -256,8 +254,7 @@
       {
         "case_id": "C8",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -269,14 +266,13 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "T8",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
           "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -288,7 +284,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "C9",
@@ -456,12 +452,10 @@
       {
         "case_id": "C4",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
           "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 2
         },
         "hedged": false,
@@ -582,8 +576,7 @@
       {
         "case_id": "C8",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -595,14 +588,13 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "T8",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
           "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -614,7 +606,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "C9",
@@ -780,15 +772,13 @@
       },
       {
         "case_id": "C4",
-        "failure_reasons": [
-          "gold recall 0.50 below the 0.9 floor"
-        ],
+        "failure_reasons": [],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 2
         },
         "hedged": false,
-        "passed": false,
+        "passed": true,
         "poison": {
           "hit": 0,
           "total": 2
@@ -920,9 +910,8 @@
       {
         "case_id": "T8",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
           "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -934,7 +923,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "C9",
@@ -1099,15 +1088,13 @@
       },
       {
         "case_id": "C4",
-        "failure_reasons": [
-          "A9: 1 gold page(s) not served under an honest label"
-        ],
+        "failure_reasons": [],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 2
         },
         "hedged": false,
-        "passed": false,
+        "passed": true,
         "poison": {
           "hit": 0,
           "total": 2
@@ -1234,14 +1221,13 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "T8",
         "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
           "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -1253,7 +1239,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "C9",
@@ -1725,7 +1711,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 0,
+            "hit": 1,
             "total": 1
           },
           "kind": "entity",
@@ -1749,27 +1735,25 @@
       "case_id": "C4",
       "expected_status": "resolved",
       "failure_reasons": [
-        "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.50 below the 0.9 floor",
         "precision 0.50 below the 0.8 floor"
       ],
       "gold": {
-        "hit": 1,
+        "hit": 2,
         "total": 2
       },
       "hedged": false,
       "is_twin": false,
       "must_exclude_present": [],
       "must_include_missing": [],
-      "observed_status": "unresolved",
-      "packet_chars": 187,
+      "observed_status": "resolved",
+      "packet_chars": 202,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 2
       },
       "precision": 0.5,
-      "status_match": false,
+      "status_match": true,
       "twin_false_activation": false
     },
     {
@@ -2072,8 +2056,7 @@
       "case_id": "C8",
       "expected_status": "resolved",
       "failure_reasons": [
-        "expected status 'resolved', observed 'unresolved'",
-        "precision 0.00 below the 0.8 floor"
+        "precision 0.50 below the 0.8 floor"
       ],
       "gold": {
         "hit": 1,
@@ -2083,15 +2066,15 @@
       "is_twin": false,
       "must_exclude_present": [],
       "must_include_missing": [],
-      "observed_status": "unresolved",
+      "observed_status": "resolved",
       "packet_chars": 111,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 2
       },
-      "precision": 0.0,
-      "status_match": false,
+      "precision": 0.5,
+      "status_match": true,
       "twin_false_activation": false
     },
     {
@@ -2112,9 +2095,8 @@
       "case_id": "T8",
       "expected_status": "resolved",
       "failure_reasons": [
-        "expected status 'resolved', observed 'unresolved'",
         "twin surfaced a ref outside its own gold",
-        "precision 0.00 below the 0.8 floor"
+        "precision 0.50 below the 0.8 floor"
       ],
       "gold": {
         "hit": 1,
@@ -2124,15 +2106,15 @@
       "is_twin": true,
       "must_exclude_present": [],
       "must_include_missing": [],
-      "observed_status": "unresolved",
+      "observed_status": "resolved",
       "packet_chars": 112,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 2
       },
-      "precision": 0.0,
-      "status_match": false,
+      "precision": 0.5,
+      "status_match": true,
       "twin_false_activation": true
     },
     {

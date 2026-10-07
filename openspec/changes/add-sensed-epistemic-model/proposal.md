@@ -39,7 +39,7 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
   - A point-of-use status line on activation and read, such as "refined by 2 later notes; 1 open contradiction". It never ranks and counts released pages only.
   - Tensions on active work ride the existing upkeep block under its caps.
   - Nothing new pushes.
-- **Egress.** A reading is consumable for a caller only when every input unit is released. Counts, components and chains are recomputed from released edges. Selection is monotone per pair. A binding per-page sensing cap makes that page's sensed items owner-only.
+- **Egress.** A reading is consumable for a caller only when every input unit is released. Counts, components and chains are recomputed from released edges. Whether a pair is proposed and selected for sensing depends only on its own two pages, so sensed items are served per caller.
 - **Placement:**
   - Local models by default.
   - API instruments are an opt-in placement per vault, flagged `unpinned_weights`.

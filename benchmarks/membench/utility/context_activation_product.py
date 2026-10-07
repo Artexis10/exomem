@@ -561,6 +561,9 @@ AMBIGUITY_AMENDMENTS: tuple[str, ...] = (audit.AMBIGUITY_PRECISION,)
 CARRIED_GOLD_AMENDMENTS: tuple[str, ...] = (audit.CARRIED_GOLD,)
 #: Amendment A9 (agent-choice scoring), its own column.
 AGENT_CHOICE_AMENDMENTS: tuple[str, ...] = (audit.AGENT_CHOICE,)
+#: The v5 scorer (a unit counts as its page; a partial-only abstention is the
+#: run's hedge), its own column beside raw v4.
+V5_AMENDMENTS: tuple[str, ...] = audit.V5_AMENDMENTS
 
 
 def score_trees(
@@ -670,6 +673,7 @@ def recorded_report(
     amended_a7: audit.AuditReport,
     amended_a8: audit.AuditReport,
     amended_a9: audit.AuditReport,
+    amended_v5: audit.AuditReport,
 ) -> dict[str, Any]:
     """The reproducible part of one product run (task 4.2).
 
@@ -677,7 +681,8 @@ def recorded_report(
     packets scored under :data:`REPORTED_AMENDMENTS`, ``amended_a7`` under
     :data:`AMBIGUITY_AMENDMENTS` and ``amended_a8`` under
     :data:`CARRIED_GOLD_AMENDMENTS` and ``amended_a9`` under
-    :data:`AGENT_CHOICE_AMENDMENTS`, each recorded beside it.
+    :data:`AGENT_CHOICE_AMENDMENTS` and ``amended_v5`` under
+    :data:`V5_AMENDMENTS`, each recorded beside it.
 
     Everything here is a function of the fixtures, the thresholds, the
     logical corpus and the compiler. Exact corpus bytes carry writer-minted
@@ -738,6 +743,7 @@ def recorded_report(
             **amended_block(AGENT_CHOICE_AMENDMENTS, amended_a9),
             "agent_choice_digest": audit.agent_choice_digest(),
         },
+        "amended_v5": amended_block(V5_AMENDMENTS, amended_v5),
         "fixture_mechanisms": dict(FIXTURE_MECHANISMS),
         "mechanism_removal": {
             mechanism: {
@@ -777,6 +783,7 @@ __all__ = [
     "RECORDED_CASE_FIELDS",
     "REPORTED_AMENDMENTS",
     "TREES",
+    "V5_AMENDMENTS",
     "PrerequisiteError",
     "Publication",
     "PublishedAnchor",

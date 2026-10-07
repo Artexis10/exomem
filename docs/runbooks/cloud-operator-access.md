@@ -598,8 +598,10 @@ Kernel-cache control is a separate node adoption. The existing K3s role defaults
 `k3s_memory_qos_enabled` to false; enable it only for a dedicated staged node
 after exact-source acceptance and sibling-capacity verification. On the pinned
 K3s 1.35.6, the owned kubelet drop-in enables MemoryQoS with a 0.625 throttling
-factor. A 1 GiB request / 3 GiB limit produces `memory.min=1 GiB` and
-`memory.high=2.25 GiB`, with the same hard limit. This protects requested memory
+factor. The controls follow `cellctl.cellResources`: production's 1 GiB request /
+3 GiB limit produces `memory.min=1 GiB` and `memory.high=2.25 GiB`; the chart
+default 512 MiB request produces `memory.min=512 MiB` and `memory.high=2.06 GiB`;
+`memory.max` is the 3 GiB limit either way. This protects requested memory
 as well as throttling allocations; it affects every pod on that node. It requires
 cgroup v2 and kernel 5.9 or later. Image selection does not enable the setting.
 

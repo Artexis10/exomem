@@ -327,6 +327,12 @@ def test_find_body_wikilinks_excludes_code_blocks(vault: Path) -> None:
     assert targets == ["A", "C"]
 
 
+def test_an_unclosed_backtick_does_not_hide_links_on_later_lines() -> None:
+    """A stray backtick is not inline code: the real link after it stays a link."""
+    matches = find_body_wikilinks("`unclosed\n\n[[Actual]] with `unclosed")
+    assert [match.group(1) for match in matches] == ["Actual"]
+
+
 def test_unresolved_body_links_pass_through_with_warning(vault: Path) -> None:
     body = "Forward ref [[Knowledge Base/Notes/Insights/does-not-exist-yet]]."
     new_body, warnings = normalize_body_wikilinks(body, vault)
