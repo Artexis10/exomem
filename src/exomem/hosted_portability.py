@@ -1447,6 +1447,28 @@ def prepare_restore(
     try:
         _extract_verified_archive(verified.archive_path, records, temporary)
         _verify_staged_files(temporary, verified.manifest)
+        from . import structured_collections as collections
+        from .collection_store import authority
+
+        raw_marker = authority.read_marker(temporary)
+        marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
+        for record in records:
+            relative = record["path"]
+            # The manifest filename and storage strategy are fixed by structured-collections.
+            if PurePosixPath(relative).name != "_collection.md" or (
+                    marker is not None and authority.selected_entry(temporary, marker, relative) is not None):
+                continue
+            try:
+                collection = collections.parse_manifest_bytes(temporary, relative, (temporary / relative).read_bytes())
+            except collections.CollectionError:
+                continue  # Preserve invalid manifests too; a restore does not repair their contracts.
+            if collection.storage.strategy == "markdown-items":
+                # ZIP files carry no empty directories. Their declared source is canonical;
+                # recreating it keeps an empty file collection writable after restore.
+                try:
+                    (temporary / collection.storage.source).mkdir(parents=True, exist_ok=True)
+                except (FileExistsError, NotADirectoryError):
+                    pass  # Preserve conflicting canonical files; restore does not repair the collection.
         if os.path.lexists(destination):
             _fail("STAGING_ROOT_EXISTS", "restore staging root was claimed concurrently")
         os.rename(temporary, destination)

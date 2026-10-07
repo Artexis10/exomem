@@ -124,13 +124,21 @@ def selected_entry(root, marker, selector):
                      == collections._portable_path_key(path))), None)
 
 
-def require_selected(conn, marker, entry):
+def require_selected(conn, marker, entry, *, root):
     sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
     row = conn.execute(
-        "SELECT manifest_path FROM collections WHERE collection_id=?", (entry["collection_id"],),
+        "SELECT c.manifest_path,m.manifest_text FROM collections c JOIN collection_manifests m "
+        "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version "
+        "WHERE c.collection_id=?", (entry["collection_id"],),
     ).fetchone()
-    if sid is None or sid[0] != marker["store_id"] or (row is not None and row[0] != entry["manifest_path"]):
+    # Missing canon cannot verify routing or profile; a false refusal delays C, while A/B remain available.
+    if sid is None or sid[0] != marker["store_id"] or row is None or row[0] != entry["manifest_path"]:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "store differs from authority marker")
+    if entry.get("semantic_profile") is not None:
+        manifest = collections.parse_manifest_bytes(root, row[0], row[1].encode())
+        if manifest.semantic_profile != entry["semantic_profile"]:
+            # A false refusal costs a marker repair; accepting hides rows from profile sweeps.
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "marker profile differs from canonical manifest")
 
 
 def required_state_compatibility_ids(root):

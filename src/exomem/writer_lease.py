@@ -6313,19 +6313,25 @@ class LeaseManager:
                     self._stop.set()
                     return
                 token = self._fencing_token if self.config.enabled else 0
-            if token is None or not self._release_collection_store(
-                token, deadline=(time.monotonic() + self._mutation_timeout_seconds
-                                 if deadline is None else deadline),
-                cancelled=cancelled, closing=True,
-            ):
+            try:
+                handed_off = token is not None and self._release_collection_store(
+                    token, deadline=(time.monotonic() + self._mutation_timeout_seconds
+                                     if deadline is None else deadline),
+                    cancelled=cancelled, closing=True,
+                )
+            finally:
+                # Keep custody until flush finishes, then let even a failed handoff's
+                # lease expire. A surviving process must not fence the next writer forever.
+                self._stop.set()
+            if not handed_off:
                 raise OpError("COLLECTION_STORE_FLUSH_PENDING", "replica handoff remains pending")
-            self._stop.set()
             return
         with self._store_condition:
             if self._store_bound:
                 if self._store_closed:
                     return
                 if self._store_handoff or threading.get_ident() in self._store_borrowers:
+                    self._stop.set()
                     raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
                 self._store_handoff = True
                 try:
@@ -6333,6 +6339,7 @@ class LeaseManager:
                                 if deadline is None else deadline)
                     while True:
                         if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                            self._stop.set()
                             raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
                         if not self._store_borrowers:
                             self._store_closed = True

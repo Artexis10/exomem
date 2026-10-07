@@ -8,10 +8,12 @@ import itertools
 import json
 import math
 import re
+import sqlite3
 import stat
 import unicodedata
 import uuid
 from collections.abc import Callable, Container, Iterable, Mapping
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -1190,12 +1192,14 @@ def discover_collections_with_errors(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
-    from .collection_store import authority
+    from .collection_store import authority, connection
     from .collection_store.connection import CollectionStoreError
     from .collection_store.preview import bound_writer
 
     writer = bound_writer(root)
     marker_error = None
+    store_error = None
+    profiles_verified = False
     if writer is not None:
         marker = authority.routing_marker(writer)
         stored, store_errors = writer.discover_collections(
@@ -1211,6 +1215,17 @@ def discover_collections_with_errors(
         except CollectionStoreError as error:
             # Which collections the store owns is unknown, so none can be read as a file.
             marker, marker_error = None, error
+        if marker is not None and connection.store_path(root).exists():
+            try:
+                with closing(connection.open_reader(connection.store_path(root))) as reader:
+                    reader.execute("BEGIN")
+                    for entry in marker["collections"]:
+                        authority.require_selected(reader, marker, entry, root=root)
+                    profiles_verified = True
+            except CollectionStoreError as error:
+                store_error = error
+            except (sqlite3.Error, OSError, CollectionError):
+                store_error = CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "canonical collection store is unreadable")
         stored, store_errors = (), ()
     kb = vault.kb_root(root)
     if not kb.is_dir():
@@ -1228,17 +1243,21 @@ def discover_collections_with_errors(
             if writer is None and authorize(safe[1]):
                 # A routed manifest is the store's generated view, never a file collection,
                 # and only the service that serves the store can read it. Its profile comes
-                # from the marker, never from that editable view. Under an unreadable marker,
-                # any manifest may be one, with no known profile.
-                if marker_error is None:
+                # from a marker checked against canon, never from that editable view.
+                # Without canon, an unknown profile keeps every affected sweep partial.
+                if marker_error is None and store_error is None:
                     code, message = "COLLECTION_STORE_UNAVAILABLE", (
                         "this collection lives in the collection store, which only the running Exomem service serves")
+                elif marker_error is None:
+                    # A valid marker still separates A/B from C when C's canonical state is unavailable.
+                    code, message = store_error.code, str(store_error)
                 else:
                     code, message = marker_error.code, (
                         "the collection store's authority marker is unreadable, so no collection here can be "
                         "told apart from one the store owns")
                 unreadable.append(UnreadableManifest(
-                    safe[1], code, message, None if entry is None else entry.get("semantic_profile")))
+                    safe[1], code, message,
+                    entry.get("semantic_profile") if entry is not None and profiles_verified else None))
                 if len(stored) + len(unreadable) > max_raw_candidates:
                     raise CollectionError(
                         "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"

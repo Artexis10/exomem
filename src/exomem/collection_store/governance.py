@@ -1101,7 +1101,7 @@ class OperationAuthorization:
                 return ()
             owners = {cid for cid, entry in entries.items() if entry is not None}
             for cid in owners:
-                collection_authority.require_selected(self.conn, marker, entries[cid])
+                collection_authority.require_selected(self.conn, marker, entries[cid], root=self.root)
             entry = collection_authority.selected_entry(self.root, marker, path)
             if entry is not None and owners != {entry["collection_id"]}:
                 return ()

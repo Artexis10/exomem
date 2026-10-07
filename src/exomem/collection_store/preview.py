@@ -87,7 +87,7 @@ def selected_writer(vault_root, selector):
     entry = authority.selected_entry(vault_root, marker, selector)
     if entry is None:
         return None
-    authority.require_selected(writer.connection, marker, entry)
+    authority.require_selected(writer.connection, marker, entry, root=vault_root)
     return writer
 
 
