@@ -24,7 +24,13 @@ from . import (
     vault,
 )
 from . import structured_collections as collections
-from .collection_store.preview import bound_writer, canonical_read, selected_writer
+from .collection_store import capability
+from .collection_store.preview import (
+    bound_writer,
+    canonical_read,
+    production_bound,
+    selected_writer,
+)
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -1729,22 +1735,24 @@ def _inventory_coverage(
     writer = selected_writer(root, manifest)
     if writer is not None:
         limited = False
-        try:
-            release = writer._operation.summary_release(manifest.collection_id)
-        except collections.CollectionError as error:
-            if error.code != RELEASE_LIMIT:
-                raise
-            release, limited = None, True
-        if limited:
-            # Row policy varies past the release bound: the counts are unknown, not zero.
-            committed = held = None
-        elif release is not None:
-            # Summary counts come from the store without reading a row.
-            committed = release.released
-            held = sum(decision.level >= 6 for _subject, decision in release.held)
-        else:
-            items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
-            committed, held = len(items), len(held_ids)
+        # One snapshot and the caller's authorization for this collection's counts.
+        with writer.read_snapshot():
+            try:
+                release = writer._operation.summary_release(manifest.collection_id)
+            except collections.CollectionError as error:
+                if error.code != RELEASE_LIMIT:
+                    raise
+                release, limited = None, True
+            if limited:
+                # Row policy varies past the release bound: the counts are unknown, not zero.
+                committed = held = None
+            elif release is not None:
+                # Summary counts come from the store without reading a row.
+                committed = release.released
+                held = sum(decision.level >= 6 for _subject, decision in release.held)
+            else:
+                items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
+                committed, held = len(items), len(held_ids)
         observations = due_state.collection_observation_coverage(
             root, str(manifest.path), authorize_path=authorize
         )
@@ -1791,7 +1799,6 @@ def _presentation_inspection(
     }
 
 
-@canonical_read
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1820,6 +1827,15 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             if manifest.semantic_profile == semantic_profile
             and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
         ]
+        if production_bound(root) and not capability.records_summary_enabled():
+            # A summary collection is records-summary-v1: while the release keeps it off,
+            # the inventory names it as unavailable rather than reading its counts.
+            dark = [m for m in manifests if m.view_mode == "summary" and selected_writer(root, m) is not None]
+            manifests = [m for m in manifests if m not in dark]
+            unreadable = (*unreadable, *(
+                collections.UnreadableManifest(m.path, capability.UNAVAILABLE,
+                                               f"this release has not enabled {capability.RECORDS_SUMMARY_V1}")
+                for m in dark))
         legacy: tuple[collections.LegacyCollection, ...] = ()
         legacy_truncated = False
         if semantic_profile == "records":

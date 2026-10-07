@@ -30,7 +30,7 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import commands, mutation_terminal, records
 from exomem.cli_ops import OpError
-from exomem.collection_store import chain, connection, schema, typed_storage
+from exomem.collection_store import capability, chain, connection, schema, typed_storage
 from exomem.collection_store.preview import preview_store
 from exomem.governance import authorization_custody, authorization_session_lifecycle
 from exomem.governance import store as authority_store
@@ -670,8 +670,10 @@ def _import_request(found, **body):
 
 
 def _finish_on_host_b(found, continuation, rows):
-    # A spawned host: the parent's monkeypatch does not reach it, so set the batch size here.
+    # A spawned host: the parent's monkeypatch does not reach it, so set the batch size and
+    # the release capability (imports on a production session are records-summary-v1) here.
     importer().MAX_BATCH_ROWS = rows
+    capability.RELEASED = frozenset({capability.RECORDS_SUMMARY_V1})
     admitted = found.open()
     _on(found, lambda: importer().run_jobs(found.root))
     result = _import_request(found, mode="status", continuation=continuation)
@@ -686,6 +688,7 @@ def test_a_job_continues_on_the_host_that_takes_over_its_store(abc, tmp_path, mo
         abc.root, ndjson({"title": f"Imported {i}", "count": i} for i in range(30)), source
     )
     small(monkeypatch, rows=10)
+    monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1}))
     job = _import_request(
         abc,
         mode="start",

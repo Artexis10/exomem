@@ -14,12 +14,13 @@ import sqlite3
 import tempfile
 import time
 from contextlib import ExitStack, closing, contextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 
 from .. import held_fs, state_migration, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
-from . import authority, chain, connection, custody, owner, replica, schema, takeover
+from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
 from .connection import CollectionStoreError
 
 
@@ -175,6 +176,10 @@ class _ProducerSession:
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
                fence_client, scaffold=True):
+    if session.production:
+        # The first create enrols the vault in the store, irreversibly; only a release that
+        # enables records-summary-v1 may do that, whatever the manifest's view mode.
+        capability.require_records_summary()
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
@@ -511,11 +516,7 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
     with the flushed head. ``acknowledge_skipped`` (the CLI only) applies the reconcile
     step's owner acknowledgement of changes it cannot hold.
     """
-    from ..governance.principal import OWNER_AUDIENCE, effective_principal
-
-    who = effective_principal()
-    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
-        raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", "adopt-local is owner-only")
+    _require_owner("adopt-local")
     root = Path(vault_root).resolve()
     step, sealed = _route_step(root)
     if acknowledge_skipped and step != "reconcile":
@@ -529,28 +530,85 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
         return {"step": step, **sealed}
     serving = _serving_session(root)
     if serving is not None:
-        fence_client = serving.fence_client or writer_lease.configured_schema_fence_operator_client()
+        # In the service: its own session and writer credential, never the operator's.
+        fence_client = serving.fence_client or serving.manager.client
         if fence_client is None:
             raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
         return {"step": step, **_apply_step(serving, serving.manager, fence_client, step, why=why,
                                             preview_id=preview_id, acknowledge_skipped=acknowledge_skipped)}
+    from .runtime import _SERVED, _SERVERS
+
+    if root in _SERVED:
+        # This process serves the vault but its store is not open: answer as its routes do,
+        # never with the offline step that needs the operator credential.
+        server = _SERVERS.get(root)
+        code, message = server.refusal if server is not None else (
+            "COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
+        raise CollectionStoreError(code, message)
+    return {"step": step, **_offline_owner(root, "adopt-local", lambda session, manager, fence_client: _apply_step(
+        session, manager, fence_client, step, why=why, preview_id=preview_id,
+        acknowledge_skipped=acknowledge_skipped))}
+
+
+def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
+    """The owner's offline create behind `exomem collections create` (S1.8 enrolment).
+
+    It runs with the service stopped, in its own producer session under the configured
+    lease and the operator credential, so it may make the coordinator's first store fence
+    cut that enrols the vault; on an enrolled vault it adds the collection as the
+    service's route does. It hands the lease back with the flushed head.
+    """
+    _require_owner("create")
+    capability.require_records_summary()  # before any lease, fence or operator credential
+    return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
+        session, manager, manifest_path, manifest_text, why=why, request_id=request_id,
+        fence_client=fence_client))
+
+
+ENROLLMENT_COMMAND = ("exomem collections create --manifest-path PATH --manifest-file FILE --why REASON, "
+                      "with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+
+
+def enrollment_required():
+    """The refusal for a summary create that needs the coordinator's operator fence cut."""
+    return CollectionStoreError(
+        "COLLECTION_STORE_ENROLLMENT_REQUIRED",
+        f"enrolling this vault's collection store is the owner's offline step: run {ENROLLMENT_COMMAND}")
+
+
+def _require_owner(operation):
+    from ..governance.principal import OWNER_AUDIENCE, effective_principal
+
+    who = effective_principal()
+    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
+
+
+def _offline_owner(root, operation, work):
+    """Run ``work(session, manager, operator_client)`` as the owner's offline store step.
+
+    It refuses while any service holds the lease, then holds its own producer session and
+    lease, which it hands back with the flushed head.
+    """
     fence_client = writer_lease.configured_schema_fence_operator_client()
     if fence_client is None:
-        raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
+        raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
     config = writer_lease.LeaseConfig.from_env()
     _require_no_service(config)
+    # Its own holder, so the coordinator arbitrates against an idle-released service that
+    # re-acquires mid-step rather than handing both processes one token.
+    config = replace(config, replica_id=f"{config.replica_id}-owner")
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
         try:
-            result = _apply_step(session, manager, fence_client, step, why=why, preview_id=preview_id,
-                                 acknowledge_skipped=acknowledge_skipped)
+            result = work(session, manager, fence_client)
         except BaseException:
             # The refusal is the answer; an unadmitted token keeps its lease until it expires.
             with suppress(Exception):
                 manager.close()
             raise
         manager.close()
-    return {"step": step, **result}
+    return result
 
 
 def _custody_lost(session, token):

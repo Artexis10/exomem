@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
 import sqlite3
 import uuid
 from collections import ChainMap
@@ -106,10 +105,6 @@ class CollectionWriter:
     """Generic store writer parameterized by the persisted built-in declaration."""
 
     def __init__(self, vault_root: Path, handle: connection.WriterConnection) -> None:
-        if os.environ.get("EXOMEM_COLLECTION_STORE_PREVIEW") != "1":
-            raise connection.CollectionStoreError(
-                "COLLECTION_STORE_PREVIEW_REQUIRED", "collection store writers are dark"
-            )
         self.root = Path(vault_root)
         self.handle = handle
         self.connection = handle.connection

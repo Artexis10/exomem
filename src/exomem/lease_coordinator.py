@@ -640,7 +640,10 @@ def create_app(
         return JSONResponse(result)
 
     async def collection_store_fence(request: Request) -> JSONResponse:
-        if not operator_authorized(request):
+        # A serving writer reads the fence it opens its store against; only the
+        # operator may move it, so the running service never holds that credential.
+        reader = request.method == "GET" and authorized(request)
+        if not (reader or operator_authorized(request)):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         vault_id = request.path_params["vault_id"]
         if request.method == "GET":
