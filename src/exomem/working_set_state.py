@@ -60,6 +60,22 @@ CANONICAL_CATEGORIES = ("fact", "config")
 CANONICAL_UNIT_LIMIT = 64
 
 
+def bounded_statement(text: str, limit: int = STATEMENT_MAX_CHARS) -> str:
+    """`text` cut to at most `limit` characters, never inside a `[[link]]`.
+
+    A cut inside a link leaves part of a page name with no closing brackets,
+    which the egress guard cannot read as a link any more, so a withheld page's
+    name would be served. The cut moves back to before the link instead.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    opened = cut.rfind("[[")
+    if opened != -1 and cut.find("]]", opened) == -1:
+        return cut[:opened].rstrip()
+    return cut
+
+
 def _named_current_page(
     vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
 ) -> str:
@@ -151,7 +167,7 @@ def _from_canonical_page(
         "source": CANONICAL,
         "path": named,
         "as_of": working_set_currency.own_time(getattr(lead, "context", None)),
-        "statement": content[:STATEMENT_MAX_CHARS],
+        "statement": bounded_statement(content),
     }
     page_updated = str(getattr(lead, "parent_updated", "") or "")
     if not entry["as_of"] and page_updated:
@@ -457,7 +473,7 @@ def _statement_from(
     for name in state_fields:
         value = row.get(name)
         if isinstance(value, (str, int, float)) and str(value).strip():
-            return f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS]
+            return bounded_statement(f"{name}: {str(value).strip()}")
     parts = [
         f"{name}: {str(row[name]).strip()}"
         for name in fields
@@ -465,7 +481,7 @@ def _statement_from(
         and isinstance(row[name], (str, int, float))
         and str(row[name]).strip()
     ]
-    return " · ".join(parts)[:STATEMENT_MAX_CHARS]
+    return bounded_statement(" · ".join(parts))
 
 
 def _from_profile(
@@ -486,7 +502,7 @@ def _from_profile(
                 "source": PROFILE,
                 "path": rel,
                 "as_of": str(frontmatter.get("updated") or ""),
-                "statement": f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS],
+                "statement": bounded_statement(f"{name}: {str(value).strip()}"),
             }
     return None
 
@@ -517,7 +533,7 @@ def _from_neighbourhood(
         "source": NOTE,
         "path": best[2],
         "as_of": best[0],
-        "statement": best[1][:STATEMENT_MAX_CHARS],
+        "statement": bounded_statement(best[1]),
     }
 
 

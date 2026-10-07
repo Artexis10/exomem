@@ -598,7 +598,9 @@ def build_packet(
             # time or a published compiler input. Charge the visible label too.
             if not entry.get("as_of") and page_updated:
                 label = f" (page updated {page_updated})"
-                statement = statement[: working_set_state.STATEMENT_MAX_CHARS - len(label)] + label
+                statement = working_set_state.bounded_statement(
+                    statement, working_set_state.STATEMENT_MAX_CHARS - len(label)
+                ) + label
                 entry["statement"] = statement
             for key in working_set_currency.INTERNAL_PROVENANCE:
                 entry.pop(key, None)
@@ -1587,7 +1589,7 @@ def _records_lane(
             level="page",
             ref=f"{entry.get('anchor')}#current",
             path=str(entry.get("path") or ""),
-            title=str(entry.get("statement") or "")[:80],
+            title=working_set_state.bounded_statement(str(entry.get("statement") or ""), 80),
             text=str(entry.get("statement") or ""),
             lifecycle="active",
             updated=str(entry.get("as_of") or ""),
@@ -4913,7 +4915,7 @@ def _recent_episode_fields(vault_root: Path, rel: str) -> dict[str, str]:
         fields["title"] = " ".join(title.split())
     summary = frontmatter.get("summary")
     if isinstance(summary, str) and summary.strip():
-        fields["statement"] = f"summary: {summary.strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+        fields["statement"] = working_set_state.bounded_statement(f"summary: {summary.strip()}")
     key = frontmatter.get("episode")
     if isinstance(key, str) and episode_capture.EPISODE_KEY_RE.fullmatch(key):
         fields["episode"] = key
@@ -4958,7 +4960,7 @@ def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
             continue
         if name == "status" and working_set_index.normalize(str(value)) in _lifecycle_statuses():
             continue
-        return f"{name}: {str(value).strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+        return working_set_state.bounded_statement(f"{name}: {str(value).strip()}")
     return ""
 
 
