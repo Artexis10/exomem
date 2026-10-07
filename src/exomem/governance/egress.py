@@ -323,12 +323,13 @@ def _outcome_for_decision(
     size: int | None = None,
     ref: str | None = None,
     purpose_is_bound: bool = False,
+    reread: bool = True,
+    prepared_dimensions: Mapping[str, Any] | None = None,
 ) -> None:
     """Project a decision into the receipt union without carrying a path/title.
 
-    Only inside a disclosure boundary, and once per path, outcome and level:
-    the claim comes before the page is hashed, so a path decided again (by the
-    compiler, then by the guard) is neither hashed nor recorded twice.
+    With `reread=False`, only supplied held-byte evidence can add a content hash.
+    A refused acquisition has no hash or pathname read fallback.
     """
     if (decision is not None and _file_policy_empty(vault_root, policy)
             and not raw_protection.marked(rel_path)):
@@ -338,7 +339,7 @@ def _outcome_for_decision(
         collector, rel_path, outcome, decision.level if decision is not None else None,
     ):
         return
-    value = _decision_receipt_dimensions(
+    value = dict(prepared_dimensions) if prepared_dimensions is not None else _decision_receipt_dimensions(
         vault_root, decision=decision, policy=policy, audience=audience,
         outcome=outcome, purpose=purpose, purpose_is_bound=purpose_is_bound,
     )
@@ -348,7 +349,7 @@ def _outcome_for_decision(
             value["size"] = size
         if ref is not None:
             value["ref"] = ref
-    else:
+    elif reread:
         # Defence in depth: `rel_path` is expected to already be a decided,
         # vault-relative candidate, but this hash is the last thing that
         # touches the filesystem before the receipt is written. Confining it
@@ -1536,6 +1537,7 @@ def _resolve_l4_bridge(
     *,
     policy: Policy,
     audience: str,
+    reader: reserved_paths.GenericReadBatch | None = None,
 ) -> Decision:
     """Bind an L4 decision to live approved content, never to its opaque id.
 
@@ -1554,6 +1556,7 @@ def _resolve_l4_bridge(
             bridge_id,
             policy=policy,
             audience=audience,
+            reader=reader,
         )
         if bridge_id
         else None
@@ -1801,8 +1804,51 @@ def _file_policy_empty(vault_root: Path, policy: Policy) -> bool:
     return policy.empty and bound_writer(vault_root) is None
 
 
+@dataclass
+class _DecisionReadBatch:
+    reader: reserved_paths.GenericReadBatch
+    memo: dict[tuple, Decision] = field(default_factory=dict)
+    observations: dict[str, reserved_paths.GenericReadObservation] = field(default_factory=dict)
+    outcomes: list[tuple[Path, str, dict[str, Any]]] = field(default_factory=list)
+
+
+@contextmanager
+def _decision_read_batch(vault_root: Path, paths: Iterable[str]):
+    def publish() -> None:
+        for key, decision in batch.memo.items():
+            _DECISION_MEMO[key] = decision
+            _DECISION_MEMO.move_to_end(key)
+        while len(_DECISION_MEMO) > _DECISION_MEMO_MAX:
+            _DECISION_MEMO.popitem(last=False)
+        for root, path, arguments in batch.outcomes:
+            _outcome_for_decision(root, path, **arguments, reread=False)
+
+    with reserved_paths.generic_read_batch(vault_root, paths, publish=publish) as reader:
+        batch = _DecisionReadBatch(reader)
+        yield batch
+
+
 @canonical_read
 def _decide_path(
+    vault_root: Path, rel_path: str, *,
+    acquired_paths: dict[str, str] | None = None,
+    **kwargs: Any,
+) -> Decision | None:
+    if not _is_markdown_path(rel_path) or _file_policy_empty(vault_root, kwargs["policy"]):
+        return _decide_path_acquired(vault_root, rel_path, **kwargs)
+    try:
+        with _decision_read_batch(vault_root, (rel_path,)) as batch:
+            result = _decide_path_acquired(vault_root, rel_path, batch=batch, **kwargs)
+        if acquired_paths is not None:
+            acquired_paths.update((path, observed.relative_path) for path, observed in batch.observations.items()
+                                  if observed.relative_path is not None)
+        return result
+    except reserved_paths.ReservedPathLeafError:
+        return None
+
+
+@canonical_read
+def _decide_path_acquired(
     vault_root: Path,
     rel_path: str,
     *,
@@ -1816,63 +1862,58 @@ def _decide_path(
     expected_content_hash: str | None = None,
     tombstones: frozenset[str] | None = None,
     principal: RequestPrincipal | None = None,
+    batch: _DecisionReadBatch | None = None,
 ) -> Decision | None:
-    """Decide one path, memoized per request identity AND page identity.
-
-    The key must close over BOTH ends of the decision:
-
-    - **Page identity** (`st_mtime_ns`, `st_size`). Without it, retagging a
-      note into a restricted scope is a no-op for any principal already
-      served: the policy fingerprint has not moved (the policy did not
-      change — the *page* did), so a stale permissive decision is replayed
-      for the process lifetime and revocation never takes effect. The
-      kernel's own `membership._MEMO` already keys on `mtime_ns` for exactly
-      this reason; this matches that precedent.
-    - **`vault_root`**. `policy._content_fingerprint` hashes only each
-      document's relative path and bytes, so two vaults sharing a
-      `_Governance/` tree produce the SAME fingerprint. Without the root in
-      the key, whichever vault is decided first wins, and vault A's
-      restricted page is served at vault B's permissive level (or the
-      reverse).
-
-    The `stat()` is taken BEFORE the memo lookup — it is the cache-validity
-    probe, not an afterthought — and a stat failure fails closed with `None`
-    rather than falling through to a decision.
-    """
+    """Decide from acquired Markdown bytes; publish memo entries after validation."""
+    markdown = _is_markdown_path(rel_path)
+    observed = None
+    if batch is not None and markdown:
+        observed = batch.reader.read(rel_path)
+        batch.observations[rel_path] = observed
+        rel_path = observed.relative_path or rel_path
     if (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
             else lifecycle.is_tombstoned_in(tombstones, rel_path)):
         return None
     who = principal if principal is not None else effective_principal()
     if who.audience_id != audience:
         who = RequestPrincipal(audience_id=audience)
-    if not raw_protection.permits(vault_root, rel_path, who):
+    if not raw_protection.permits(
+        vault_root, rel_path, who,
+        snapshot=observed.snapshot.data if observed is not None and observed.snapshot is not None else None,
+    ):
         return Decision(DISCLOSURE_MIN)
     if _file_policy_empty(vault_root, policy):
         return Decision(DISCLOSURE_MAX)
     full_path = vault_root / rel_path
-    try:
-        st = full_path.stat()
-    except OSError:
-        return None
-
     raw: bytes | None = None
     live_content_hash: str | None = None
-    if _is_markdown_path(rel_path):
-        try:
-            raw = full_path.read_bytes()
-        except OSError:
+    reader = batch.reader if batch is not None else None
+    if markdown:
+        assert batch is not None
+        assert observed is not None
+        snapshot = observed.snapshot
+        if snapshot is None:
             return None
+        raw = snapshot.data
+        mtime = snapshot.mtime
+        page_identity = snapshot.identity
         live_content_hash = hashlib.sha256(raw).hexdigest()
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
+    else:
+        try:
+            st = full_path.stat()
+        except OSError:
+            return None
+        mtime = st.st_mtime
+        page_identity = (st.st_mtime_ns, st.st_size)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
         authorization_context=authorization_context, content=raw if raw is not None else b"",
     )
     if canonical is not None:
-        return _resolve_l4_bridge(vault_root, canonical, policy=policy, audience=audience)
-    mtime = st.st_mtime
-    if not _is_markdown_path(rel_path):
+        return _resolve_l4_bridge(vault_root, canonical, policy=policy, audience=audience, reader=reader)
+    if not markdown:
         # NON-MARKDOWN. Never hand a binary to the markdown parser: it cannot
         # decode one, and its failure used to arrive here as `None` — a value
         # meaning BOTH "unreadable" and "not permitted". That single
@@ -1889,7 +1930,7 @@ def _decide_path(
         except membership_module.MembershipUnresolved:
             return None
     else:
-        page = find_corpus.parse_page(full_path, mtime, vault_root, content=raw)
+        page = find_corpus.parse_page(full_path, mtime, vault_root, content=raw, resolved_relative=rel_path)
         if page is None:
             # A `.md` that will not decode IS a genuine read failure, which is
             # the one meaning `None` still carries.
@@ -1929,18 +1970,20 @@ def _decide_path(
         purpose,
         grants_hash,
         session_identity,
-        st.st_mtime_ns,
-        st.st_size,
+        page_identity,
         live_content_hash,
     )
     cached = _DECISION_MEMO.get(key)
-    if cached is not None and (raw is None or not bridges.maybe_bridge(raw)):
-        _DECISION_MEMO.move_to_end(key)
+    bridge_metadata = bridges.parse_bridge_frontmatter(page.frontmatter) if raw is not None else (None, None)
+    if cached is not None and bridge_metadata == (None, None):
+        if batch is not None:
+            batch.memo[key] = cached
         return _resolve_l4_bridge(
             vault_root,
             cached,
             policy=policy,
             audience=audience,
+            reader=reader,
         )
     decision = decide(
         scope_ids,
@@ -1949,11 +1992,13 @@ def _decide_path(
         policy=policy,
         active_grants=active_grants,
     )
-    if raw is not None:
-        admission = bridges.admit(
+    if raw is not None and bridge_metadata != (None, None):
+        admission = bridges._admit_parsed(
             vault_root,
-            rel_path,
             raw,
+            page,
+            bridge_metadata=bridge_metadata,
+            reader=reader,
             policy=policy,
             audience=audience,
         )
@@ -1975,15 +2020,19 @@ def _decide_path(
                     release_dependency_digest=admission.dependency_digest,
                 )
 
-    _DECISION_MEMO[key] = decision
-    _DECISION_MEMO.move_to_end(key)
-    while len(_DECISION_MEMO) > _DECISION_MEMO_MAX:
-        _DECISION_MEMO.popitem(last=False)
+    if batch is not None:
+        batch.memo[key] = decision
+    else:
+        _DECISION_MEMO[key] = decision
+        _DECISION_MEMO.move_to_end(key)
+        while len(_DECISION_MEMO) > _DECISION_MEMO_MAX:
+            _DECISION_MEMO.popitem(last=False)
     return _resolve_l4_bridge(
         vault_root,
         decision,
         policy=policy,
         audience=audience,
+        reader=reader,
     )
 
 
@@ -2333,6 +2382,7 @@ def annotate_hits(
     permitted: list[Any] = []
     pending_notices: list[tuple[str, Decision, dict[str, Any]]] = []
     withheld: set[str] = set()
+    acquired_paths: dict[str, str] = {}
 
     for hit in hits:
         rel_path = _hit_path(hit)
@@ -2349,6 +2399,7 @@ def annotate_hits(
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
             expected_content_hash=getattr(hit, "snapshot_hash", None),
+            acquired_paths=acquired_paths,
         )
         if decision is None:
             # The page vanished or would not parse: it cannot be shown to
@@ -2357,6 +2408,11 @@ def annotate_hits(
             continue
         if decision.level >= RELEASE_FLOOR:
             hit.decision = decision
+            if rel_path in acquired_paths:
+                if getattr(hit, "path", None):
+                    hit.path = acquired_paths[rel_path]
+                else:
+                    hit.parent_path = acquired_paths[rel_path]
             permitted.append(hit)
             continue
         withheld.add(rel_path)
@@ -2375,7 +2431,7 @@ def annotate_hits(
                 )
             )
 
-    frozen_withheld = frozenset(withheld)
+    frozen_withheld = frozenset(withheld | {acquired_paths[path] for path in withheld if path in acquired_paths})
     permitted = [h for h in permitted if not _seeded_only_by_withheld(h, frozen_withheld)]
     released = permitted[:effective_limit]
     # D4: notices occupy a slot only once the over-fetch pool is exhausted —
@@ -2384,6 +2440,7 @@ def annotate_hits(
     spare = max(0, effective_limit - len(released))
     notices: list[dict[str, Any]] = []
     for rel_path, decision, notice in pending_notices[:spare]:
+        rel_path = acquired_paths.get(rel_path, rel_path)
         # Mint only for notices that are actually returned.  Session-aware
         # clients get an approval capability for the requested releasable
         # representation, capped by the applicable organization ceiling;
@@ -2916,59 +2973,49 @@ class _PacketRelease:
     declared_purpose: str | None = None
     grants_hash: str | None = None
 
-    def decide(self, rel_path: str) -> None:
-        """Decide `rel_path` for this caller, record the outcome, and add it to
-        `withheld` when it may not be released. Only with a file policy."""
-        vault_root = self.vault_root
-        decision = _decide_path(
-            vault_root,
-            rel_path,
-            policy=self.policy,
-            principal=self.who,
-            audience=self.who.audience_id,
-            purpose=self.declared_purpose,
+    def decide(self, rel_path: str, batch: _DecisionReadBatch | None = None) -> None:
+        """Decide a packet path, staging its receipt until held mappings validate."""
+        if batch is None:
+            try:
+                with _decision_read_batch(self.vault_root, (rel_path,)) as scalar:
+                    self.decide(rel_path, scalar)
+            except reserved_paths.ReservedPathLeafError:
+                self.decisions[rel_path] = None
+                self.withheld.add(rel_path)
+            return
+        decision = _decide_path_acquired(
+            self.vault_root, rel_path, policy=self.policy, principal=self.who,
+            audience=self.who.audience_id, purpose=self.declared_purpose,
             grants_hash=self.grants_hash,
             authorization_session=self.who.authorization_session_id,
             authorization_context=self.who.verified_authorization_session,
+            batch=batch,
         )
         self.decisions[rel_path] = decision
-        if decision is not None:
-            if decision.level < RELEASE_FLOOR:
-                self.withheld.add(rel_path)
-        elif rel_path in self.tombstoned or (vault_root / rel_path).exists():
-            # `_decide_path` returns `None` for BOTH a genuinely
-            # tombstoned/unreadable/unclassifiable EXISTING path and a
-            # path that simply does not exist. The latter is expected
-            # for a PHANTOM interpretation reading (R3): `named_paths`
-            # is the union of every candidate's readings
-            # (`_interpretations_for`), and an ambiguous candidate's
-            # non-real readings are validated as safe relative paths
-            # (`_is_safe_relative_path`) but never claimed to exist.
-            # Adding a phantom reading to `withheld` corrupts
-            # `frozen`'s canonical-key comparisons (`_names_withheld`)
-            # against every OTHER field in the packet -- and a phantom
-            # reading is frequently IDENTICAL to the candidate's own
-            # original text (`path.md#current`'s literal-reading IS
-            # `ref` itself), so it falsely matched its own item, as
-            # though a real withheld page shared that exact spelling --
-            # dropping a unit under a policy scoped to an entirely
-            # different folder. Only an existing-but-undecidable path is
-            # withheld here; the invalid_refs computation below makes
-            # the identical existence check for the phantom-vs-denied
-            # distinction, against `decisions`/`tombstoned`/the
-            # filesystem.
+        observed = batch.observations.get(rel_path)
+        if observed is None:
+            observed = batch.reader.read(rel_path)
+            batch.observations[rel_path] = observed
+        acquired_path = observed.relative_path or rel_path
+        if (decision is not None and decision.level < RELEASE_FLOOR) or (
+            decision is None and (_floor_withholds(self.vault_root, acquired_path, self.who) or not observed.missing)
+        ):
             self.withheld.add(rel_path)
         outcome = "withheld" if rel_path in self.withheld else "released"
-        if self.record == "all" or outcome == "withheld":
-            _outcome_for_decision(
-                vault_root,
-                rel_path,
-                decision=decision,
-                policy=self.policy,
-                audience=self.who.audience_id,
-                outcome=outcome,
-                purpose=self.declared_purpose,
-            )
+        if _collector() is not None and (self.record == "all" or outcome == "withheld"):
+            snapshot = observed.snapshot if decision is not None and outcome == "released" else None
+            batch.outcomes.append((self.vault_root, acquired_path, dict(
+                decision=decision, policy=self.policy, audience=self.who.audience_id,
+                outcome=outcome, purpose=self.declared_purpose,
+                # Receipt secret I/O precedes the final private-identity lock.
+                prepared_dimensions=_decision_receipt_dimensions(
+                    self.vault_root, decision=decision, policy=self.policy,
+                    audience=self.who.audience_id, outcome=outcome,
+                    purpose=self.declared_purpose, purpose_is_bound=True,
+                ),
+                content_hash=hashlib.sha256(snapshot.data).hexdigest() if snapshot else None,
+                size=len(snapshot.data) if snapshot else None,
+            )))
 
     def noticed(self, rel_path: str) -> bool:
         """Was `rel_path` withheld at a notice level, which the caller may know of?"""
@@ -2983,6 +3030,7 @@ def _floor_withholds(vault_root: Path, rel_path: str, who: RequestPrincipal) -> 
     )
 
 
+@canonical_read
 def _packet_release(
     vault_root: Path,
     packet: Mapping[str, Any],
@@ -2990,12 +3038,13 @@ def _packet_release(
     *,
     policy: Policy,
     release_gate_active: bool,
-    who: RequestPrincipal,
+    principal: RequestPrincipal,
     purpose: str | None,
     record: str,
 ) -> _PacketRelease | None:
     """Decide every path `packet` names for `who`, or `None` when there is
     nothing to decide: no governance, no gate and nothing withheld."""
+    who = principal
     named_paths, prose_names, interpretations, unresolvable = _working_set_paths(packet)
     tombstoned = {
         path for path in named_paths if path and _floor_withholds(vault_root, path, who)
@@ -3035,46 +3084,38 @@ def _packet_release(
         withheld=withheld,
         prose_resolved=prose_resolved,
     )
+    invalid_refs: set[str] = set(unresolvable)
+    acquired_paths: dict[str, str] = {}
     if ctx.policy_decides:
         ctx.grants_hash = _grants_hash(policy)
         ctx.declared_purpose = _declared_purpose(vault_root, who, purpose)
-        for rel_path in sorted(path for path in named_paths if path):
-            ctx.decide(rel_path)
-
-    # A candidate the guard could not resolve to a single real page has
-    # a SET of interpretations instead (R3): a plain string containing `#`
-    # or `|` is genuinely ambiguous between "a filename with that
-    # character" and "a path plus a fragment/alias", so every reading is a
-    # hypothesis, not a guess to make. `invalid_refs` starts from
-    # `unresolvable` -- a candidate with no safety-valid interpretation at
-    # all, a pure syntax fact independent of policy -- and, only when an
-    # actual policy exists to decide against, ALSO gains any candidate
-    # whose readings are not every-one-admitted: none of them existed, or
-    # at least one that did was not released. An interpretation the decide
-    # loop above already decided is read from `decisions`; one it never
-    # reached (unresolved names, or simply undecided under an empty
-    # policy) is checked for existence directly -- never `stat()` on one
-    # that failed `_is_safe_relative_path`, since `interpretations` never
-    # contains one. Withheld by exact text match on the ORIGINAL candidate
-    # (`_value_names_an_invalid_reference`, applied per item below), not
-    # through `frozen`/`_names_withheld`: that matcher compares CANONICAL
-    # keys, and `_canonical_reference` returns `None` for a candidate that
-    # unwraps to an empty string, which can never equal any canonical key,
-    # including its own.
-    invalid_refs: set[str] = set(unresolvable)
-    if ctx.policy_decides:
-        for candidate, readings in interpretations.items():
-            existing_decisions: list[Decision | None] = []
-            for reading in readings:
-                decision = ctx.decisions.get(reading)
-                if decision is not None:
-                    existing_decisions.append(decision)
-                elif reading in tombstoned or (vault_root / reading).exists():
-                    existing_decisions.append(None)
-            if not existing_decisions or any(
-                d is None or d.level < RELEASE_FLOOR for d in existing_decisions
-            ):
-                invalid_refs.add(candidate)
+        paths = sorted(path for path in named_paths if path)
+        try:
+            with _decision_read_batch(vault_root, paths) as batch:
+                for rel_path in paths:
+                    ctx.decide(rel_path, batch)
+                for candidate, readings in interpretations.items():
+                    existing_decisions: list[Decision | None] = []
+                    for reading in readings:
+                        decision = ctx.decisions.get(reading)
+                        if decision is not None:
+                            existing_decisions.append(decision)
+                        else:
+                            observed = batch.observations.get(reading)
+                            if observed is None:
+                                observed = batch.reader.read(reading)
+                            if _floor_withholds(vault_root, observed.relative_path or reading, who) or not observed.missing:
+                                existing_decisions.append(None)
+                    if not existing_decisions or any(
+                        d is None or d.level < RELEASE_FLOOR for d in existing_decisions
+                    ):
+                        invalid_refs.add(candidate)
+            acquired_paths = {path: observed.relative_path for path, observed in batch.observations.items()
+                              if observed.relative_path is not None}
+        except reserved_paths.ReservedPathLeafError:
+            ctx.decisions = dict.fromkeys(paths)
+            ctx.withheld.update(paths)
+            invalid_refs.update(interpretations)
     ctx.invalid_refs = frozenset(invalid_refs)
 
     # The match set is wider than the withheld PATH set on purpose. `_withheld_keys`
@@ -3091,6 +3132,7 @@ def _packet_release(
     # there changes what every consumer strips; that root cause gets its own change.
     ctx.frozen = frozenset(
         withheld
+        | {acquired_paths[path] for path in withheld if path in acquired_paths}
         | {
             name
             for name, paths in prose_resolved.items()
@@ -3158,7 +3200,7 @@ def classify_units(
         AnnotatedHits(hits=[]),
         policy=policy,
         release_gate_active=release_gate_active,
-        who=who,
+        principal=who,
         purpose=purpose,
         record="withheld",
     )
@@ -3213,7 +3255,7 @@ def guard_working_set(
         release,
         policy=policy,
         release_gate_active=release_gate_active,
-        who=who,
+        principal=who,
         purpose=purpose,
         record="all",
     )

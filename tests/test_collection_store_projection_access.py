@@ -357,3 +357,31 @@ def test_owner_walk_treats_an_unbound_projection_directory_as_absent(store):
         assert _through_dispatcher(store.root, "suggest_relations") == {
             "available": False, "reason": "audience_restricted",
         }
+
+
+def test_bound_collection_scalar_and_packet_reads_keep_canonical_admission(store):
+    """Compiler and hit reads cannot borrow another caller's canonical snapshot."""
+    from test_governance_egress import _hit
+
+    store.create_collection(manifest_path(), manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
+    path = receipt["affected_paths"][0]
+    alias = path.replace("Records", "Ｒecords")
+    units = [{"ref": candidate, "text": "Current", "provenance": {"path": candidate}}
+             for candidate in (path, alias)]
+    with preview_store(store.root, store.handle) as writer, request_scope(owner_principal()):
+        with writer.read_snapshot():
+            assert [hit.path for hit in egress.annotate_hits(
+                store.root, [_hit(path)], principal=owner_principal(), limit=1,
+            ).hits] == [path]
+            assert egress.classify_units(store.root, units) == [egress.UNIT_KEPT] * 2
+            with request_scope(_external()):
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.annotate_hits(store.root, [_hit(path)], principal=_external(), limit=1)
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.classify_units(store.root, units)
+            assert egress.classify_units(store.root, units) == [egress.UNIT_KEPT] * 2
+        page = store.root / path
+        page.write_text(page.read_text() + "\nUnaccepted edit.\n")
+        assert egress.annotate_hits(store.root, [_hit(path), _hit(alias)], limit=2).hits == []
+        assert egress.classify_units(store.root, units) == [egress.UNIT_WITHHELD_SILENTLY] * 2
