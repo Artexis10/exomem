@@ -988,7 +988,7 @@ def run_lanes(
                     request_anchors=request_anchors,
                     visible=visible,
                 )
-                result = LaneResult(_reader_admitted(result.items, visible), result.truncated)
+                result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
             except egress.ReaderViewUnavailable:
