@@ -443,6 +443,7 @@ These must match the companion Substrate change byte for byte. The Substrate mig
 - `backup_key_wrapped bytea` and `backup_key_version int`, written once.
 - `b2_key_id text`, `b2_key_wrapped bytea` and `b2_key_version int`, written once.
 - `hold_kind text check (hold_kind in ('upgrade','backup','restore'))` and `hold_started_at timestamptz`.
+- `grown_storage_gib int check (grown_storage_gib is null or grown_storage_gib > 0)` (Substrate migration `0059`): the size cellctl grew a local cell's volume to (`move-cloud-cells-to-local-storage` D10). It is null until the cell first grows. The cell's claim renders at the larger of it and `storage_gib`.
 
 **Control-plane bookkeeping, written by Substrate** (Substrate migration `0057`)
 - `cancellation_notice_sent_at timestamptz`: set once when the cancellation notice is sent. It is not a desired column, so it neither bumps `generation` nor notifies cellctl.

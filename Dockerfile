@@ -341,9 +341,12 @@ RUN usermod --home /data/host exomem
 #
 # EXOMEM_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
 # a personal server runs; a hosted cell keeps the English one.
+# ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
+# database from entering the tenant volume without changing the custody home.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
     EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
     EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
+    ORT_DISABLE_TELEMETRY=1 \
     EXOMEM_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_SHOW_SERVER_BANNER=false

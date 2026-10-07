@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from .backup_source import VAULT_CHECK_COMMAND
 from .storage_config import LEGACY_CLASS
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
@@ -54,6 +55,8 @@ BACKUP_RETRY_MINUTES_ANNOTATION = "exomem.io/backup-retry-minutes"
 BACKUP_OUTCOME_ANNOTATION = "exomem.io/backup-outcome"
 # D4: a restore hold that relocates the cell, naming the volume it leaves.
 RELOCATION_ANNOTATION = "exomem.io/relocation-volume"
+# D10: the size an hourly hold grows its cell to once its clone is gone.
+GROW_STORAGE_ANNOTATION = "exomem.io/grow-storage-gib"
 # D4: the render digest, compared against on every pass so a change that is
 # not a row change (bearer rotation, chart-level cell settings) still
 # reaches a converged cell.
@@ -131,6 +134,8 @@ class CellManifestSpec:
     image: str
     replicas: int
     read_only: bool
+    # The size the claim and quota render at: CellRow.size_gib for a local
+    # claim, storage_gib for a Hetzner one (reconcile.py).
     storage_gib: int = 10
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     model_env: dict[str, str] = field(default_factory=dict)
@@ -164,6 +169,7 @@ class CellManifestSpec:
     restored_snapshot: str | None = None
     backup_outcome: str | None = None
     relocation_volume: str | None = None
+    grow_storage_gib: int | None = None
 
     # D6/D8: the backup-retry-after backoff. Unlike the hold annotations
     # above, these must survive a hold ending, so render_statefulset writes
@@ -632,6 +638,8 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
             annotations[BACKUP_OUTCOME_ANNOTATION] = spec.backup_outcome
         if spec.relocation_volume:
             annotations[RELOCATION_ANNOTATION] = spec.relocation_volume
+        if spec.grow_storage_gib is not None:
+            annotations[GROW_STORAGE_ANNOTATION] = str(spec.grow_storage_gib)
 
     # D6/D8: the backup-retry-after backoff must survive a hold ending, so
     # it is written unconditionally rather than only inside the `if
@@ -804,6 +812,15 @@ HOURLY_RETENTION_ARGS = ["--keep-hourly", "24", *RETENTION_ARGS]
 # D8: what a backup covers and a restore rewrites. The volume root, including
 # lost+found, is never in scope.
 BACKUP_PATHS = ("/data/vault", "/data/host")
+
+# move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
+# total bytes, appended to the termination message after the snapshot id. Every
+# cell image is a Python image; statvfs needs no privilege and no tool whose
+# output format differs between images.
+FILESYSTEM_USE_COMMAND = (
+    "python3 -c 'import os; s = os.statvfs(\"/data\"); "
+    "print(\" %d %d\" % ((s.f_blocks - s.f_bfree) * s.f_frsize, s.f_blocks * s.f_frsize), end=\"\")'"
+)
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
 
 
@@ -974,6 +991,11 @@ def render_backup_job(
     # Job) directly on either a non-zero `restic backup` or an id that does
     # not match a real 64-hex-character snapshot id.
     commands = [
+        # D5: no backup of a source that holds no vault (backup_source.py).
+        # The Job fails, the hold records BACKUP_FAILED, and cellctl logs the
+        # Job's code. An emptied volume's cell then leaves serving, and its
+        # row shows cell-init's refusal.
+        VAULT_CHECK_COMMAND,
         "restic snapshots || restic init",
         f"restic backup --json {' '.join(BACKUP_PATHS)} > /tmp/backup.json || exit 1",
         (
@@ -983,6 +1005,9 @@ def render_backup_job(
         '[ -n "$SNAPSHOT_ID" ] || exit 1',
         *([f"restic forget {' '.join(retention)} --prune"] if retention is not None else []),
         "printf '%s' \"$SNAPSHOT_ID\" > /dev/termination-log",
+        # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
+        # the id alone and the Job successful: the backup itself succeeded.
+        f"{{ {FILESYSTEM_USE_COMMAND} >> /dev/termination-log || true; }}",
     ]
     return {
         "apiVersion": "batch/v1",

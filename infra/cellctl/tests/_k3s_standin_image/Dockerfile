@@ -7,5 +7,7 @@ FROM python:3.12-alpine
 RUN apk add --no-cache restic
 COPY exomem.py /usr/local/bin/exomem
 RUN chmod +x /usr/local/bin/exomem
+# The backup Job imports exomem.vault before restic reads /data (manifests.py).
+COPY vault.py /usr/local/lib/python3.12/site-packages/exomem/vault.py
 ENV PYTHONDONTWRITEBYTECODE=1
 USER 10001:10001

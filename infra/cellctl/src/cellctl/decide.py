@@ -17,9 +17,14 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from .capacity import GIB, snapshot_reserve_bytes
 from .rollout import current_image, target_image
 from .state import (
     BACKUP_FAILED,
+    GROWTH_AT_CAP,
+    GROWTH_NO_ROOM,
+    GROWTH_NOT_NEEDED,
+    GROWTH_PLANNED,
     IDENTITY_CONFLICT,
     INIT_DEADLINE_EXCEEDED,
     INIT_FAILURE_CODES,
@@ -37,6 +42,9 @@ from .state import (
 from .storage_config import DEFAULT_STORAGE, StorageConfig
 
 _SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
+# move-cloud-cells-to-local-storage D10: a local cell grows once its backup
+# finds the filesystem past this share of its size.
+GROWTH_THRESHOLD_PERCENT = 80
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,17 @@ class ReconcileConfig:
 DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
 
 
+@dataclass(frozen=True)
+class StorageRoom:
+    """D10: what a growth needs to know of the cells' nodes. reconcile.py
+    reads it only in a pass where an hourly backup reported its use."""
+
+    # Each node's published free bytes; None where its driver publishes none.
+    free_bytes: dict[str, int | None]
+    # D6: the largest non-deleted cell's size in GiB, which sets the reserve.
+    largest_cell_gib: int
+
+
 def _identity_conflict(row: CellRow, observation: ClusterObservation, storage: StorageConfig) -> bool:
     # Fail-closed (D4): an existing namespace this cell doesn't already own,
     # or a bound PV whose binding identity or storage class doesn't match,
@@ -117,6 +136,7 @@ def decide(
     refusal_parked: bool = False,
     storage: StorageConfig = DEFAULT_STORAGE,
     start_relocation: bool = False,
+    storage_room: StorageRoom | None = None,
 ) -> Decision:
     """`refusal_parked` is reconcile.py's in-memory refusal park (D4): the
     row's last apply was refused for its current generation, render digest
@@ -169,7 +189,9 @@ def decide(
             "observed_generation": row.generation,
         })
     elif active_hold == SNAPSHOT_BACKUP:
-        decision = _continue_snapshot_backup(row, rollout, observation, now, config, cell_image, changes_live)
+        decision = _continue_snapshot_backup(
+            row, rollout, observation, now, config, cell_image, changes_live, storage, storage_room
+        )
     elif active_hold == "upgrade":
         decision = _continue_upgrade(row, rollout, observation, now, config, cell_image)
     elif active_hold == "backup":
@@ -346,7 +368,10 @@ def _routine_converge(
     changes_live: bool,
     refusal_parked: bool,
 ) -> Decision:
-    if observation.statefulset_exists:
+    # A cell that has served restarts on the image it ran, even when its
+    # StatefulSet is gone: the rollout target would be an upgrade with no
+    # pre-upgrade backup. Only a cell that never served starts on the target.
+    if observation.statefulset_exists or row.observed_image is not None:
         image = current_image(row, observation)
     else:
         image, error = _initial_image(row, rollout, cell_image)
@@ -728,12 +753,20 @@ def _continue_snapshot_backup(
     config: ReconcileConfig,
     cell_image: str | None,
     changes_live: bool,
+    storage: StorageConfig,
+    storage_room: StorageRoom | None,
 ) -> Decision:
     """D3: snapshot, read-only clone, restic on the clone, then remove the
     clone and the snapshot whatever the outcome. The outcome is recorded on
     the StatefulSet the pass it is seen, and the hold ends only once both
     are gone, so a clone never outlives its hold and the quota's second
-    claim is free for the next one."""
+    claim is free for the next one.
+
+    D10: the pass that records the outcome also plans the cell's growth from
+    the use the backup measured, on the StatefulSet beside the outcome, so a
+    retried pass plans the same size. The hold's exit records it on the row,
+    and the larger claim is applied then: until the clone is gone it holds
+    the quota's second share, which the larger claim needs."""
 
     hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
 
@@ -743,17 +776,29 @@ def _continue_snapshot_backup(
         )
 
     outcome = observation.statefulset_backup_outcome
+    grow_to = observation.statefulset_grow_storage_gib
     if outcome is not None:
         if observation.snapshot_exists or observation.clone_exists:
-            return step(backup_outcome=outcome, delete_snapshot_backup=True)
+            # Once the outcome is on the StatefulSet the Job has served: its
+            # finished pod would hold the clone's claim until the Job's TTL.
+            return step(
+                backup_outcome=outcome,
+                grow_storage_gib=grow_to,
+                delete_snapshot_backup=True,
+                delete_backup_job=True,
+            )
         decision = step()
         decision.hold_kind = None
         decision.row_updates = {**decision.row_updates, "hold_kind": None, "hold_started_at": None}
+        if grow_to is not None and grow_to > row.size_gib:
+            decision.row_updates["grown_storage_gib"] = grow_to
         return decision
 
     snapshot_id = observation.backup_job_snapshot_id
     if observation.backup_job_succeeded and _valid_snapshot_id(snapshot_id):
-        decision = step(backup_outcome=snapshot_id, clear_backup_retry_after=True, delete_snapshot_backup=True)
+        verdict, grow_to = plan_growth(row, observation, storage, storage_room)
+        decision = step(backup_outcome=snapshot_id, grow_storage_gib=grow_to, storage_growth=verdict,
+                        clear_backup_retry_after=True, delete_snapshot_backup=True)
         # The backup holds the volume as of its snapshot, not the upload's end.
         # A snapshot that reports no time is dated by its hold, which began first.
         decision.row_updates = {
@@ -778,6 +823,31 @@ def _continue_snapshot_backup(
     if not observation.clone_bound:
         return step()
     return step(run_backup_job=True, backup_prune=prune_due(row, hold_started_at))
+
+
+def plan_growth(
+    row: CellRow, observation: ClusterObservation, storage: StorageConfig, room: StorageRoom | None
+) -> tuple[str | None, int | None]:
+    """D10: what one hourly backup's measured use asks of a local cell, as
+    (verdict, size to grow to). Past 80% use the cell grows one default size,
+    never past the cap, and only while its node's published free bytes cover
+    the step and the snapshot reserve the new size implies (D6). No verdict
+    when nothing was measured or the node pools could not be read."""
+
+    local = storage.local
+    used, total = observation.backup_job_used_bytes, observation.backup_job_total_bytes
+    if local is None or not storage.is_local(observation.pv_storage_class) or used is None or not total or room is None:
+        return None, None
+    if used * 100 <= total * GROWTH_THRESHOLD_PERCENT:
+        return GROWTH_NOT_NEEDED, None
+    if row.size_gib >= local.max_cell_gib:
+        return GROWTH_AT_CAP, None
+    grown = min(row.size_gib + local.default_cell_gib, local.max_cell_gib)
+    needed = (grown - row.size_gib) * GIB + snapshot_reserve_bytes(local, max(room.largest_cell_gib, grown))
+    free = room.free_bytes.get(observation.pv_node) if observation.pv_node else None
+    if free is None or free < needed:
+        return GROWTH_NO_ROOM, None
+    return GROWTH_PLANNED, grown
 
 
 def _continue_backup(
