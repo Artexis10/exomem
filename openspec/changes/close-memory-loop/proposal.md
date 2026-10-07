@@ -41,6 +41,7 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 
 - `context-activation`: bounded, query-matched material within already admitted contexts and truthful project-registry freshness.
 - `context-roles`: one explicit material lens, preserving owner overrides and the existing six-role ceiling.
+- `conversation-aware-activation`: replace frozen task-word licensing with one admitted subject-unit witness; preserve subject selection, bounded carry and agent focus recovery.
 - `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
 
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.
