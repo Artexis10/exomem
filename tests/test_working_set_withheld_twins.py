@@ -640,3 +640,30 @@ def test_an_l0_unit_beside_a_notice_unit_is_still_absent(vault: Path) -> None:
 
     assert restricted == clean
     assert {"role": "units", "reason": "withheld"} in clean["missing"]
+
+
+def test_an_l0_unit_on_a_page_superseded_by_a_notice_page_is_still_absent(vault: Path) -> None:
+    """A unit links a page withheld at L0, on a page superseded by one withheld
+    at a notice level. The guard strips that pointer and keeps a unit, so the
+    pointer is no reason to report the unit's removal: it is absent."""
+    _write(vault, ILSE, _person("Ilse Vandermeer"))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _write(vault, NOTICE_BOARD, _note("Notice board", "- [fact] Posted. ^n-1"))
+    _withhold_at_two_levels(vault)
+    ruling = "Knowledge Base/Notes/Decisions/gauge-ruling.md"
+    silent = "- [decision] Gauge reviews moved off the [[Secret cluster]] rota. ^g-a"
+    kept = "- [decision] Gauge reviews stay weekly. ^g-b"
+
+    def superseded(units: str) -> str:
+        return _note("Gauge ruling", units, "Related: [[Ilse Vandermeer]]").replace(
+            "status: active\n", f"status: active\nsuperseded_by: [{NOTICE_BOARD}]\n", 1
+        )
+
+    _write(vault, ruling, superseded(f"{silent}\n{kept}"))
+    restricted = _ask(vault, ILSE_TURN)
+
+    _write(vault, ruling, superseded(kept))
+    clean = _ask(vault, ILSE_TURN)
+
+    assert restricted == clean
+    assert [unit["ref"][-4:] for unit in clean["units"]] == ["#g-b"]
