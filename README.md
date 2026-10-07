@@ -313,6 +313,19 @@ file-change freshness, inbound links, and resolver state stay live; expensive
 semantic/CLIP reindex work can be deferred and is reported in resource status.
 Run `exomem index` or `kb reconcile` later to heal deferred semantic work.
 
+Automatic quiet switching is optional. Its watcher skips GPU pressure queries
+when you select `quiet` manually, pin a mode with `EXOMEM_MODE`, or disable
+`EXOMEM_AUTO_QUIET`. Automatic quiet still monitors pressure so it can restore
+the previous mode.
+
+On affected WSL/NVIDIA systems, repeated Linux `nvidia-smi` processes can grow
+the Windows driver's kernel memory and disrupt foreground work.
+[Microsoft WSL issue #12756](https://github.com/microsoft/WSL/issues/12756)
+records a reproduction. For older Exomem versions, a service configured with
+`EXOMEM_AUTO_QUIET=0` stops its watcher after that service restarts.
+An empty `CUDA_VISIBLE_DEVICES` also disables GPU work and GPU headroom queries.
+These settings do not require a Windows reboot; existing driver state may remain.
+
 ## What it does
 
 - **Searches the vault you already own.** Markdown stays in place; exomem does
