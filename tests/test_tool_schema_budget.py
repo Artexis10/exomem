@@ -40,15 +40,15 @@ TOOL_CEILINGS: dict[str, int] = {
     "observe_memory": 3850,
     "maintain_memory": 3825,
     "adoption_studio": 3400,
-    "capture_source": 3400,
+    "capture_source": 3475,
     "review_memory": 3375,
-    "activate_context": 3300,
+    "activate_context": 3000,
     "triage_memory": 3100,
-    "govern_memory": 3025,
-    "plan_memory": 2400,
-    "preserve_artifacts": 2300,
-    "configure_memory": 1700,
-    "read_memory": 1600,
+    "govern_memory": 3225,
+    "plan_memory": 2425,
+    "preserve_artifacts": 2425,
+    "configure_memory": 1675,
+    "read_memory": 1550,
     "adopt_vault": 1500,
     "preserve_evidence": 1500,
     "review_item_context": 1500,
@@ -109,7 +109,7 @@ def test_every_tool_stays_under_its_ceiling(server) -> None:
 
 
 def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) -> None:
-    marker = re.compile(r"Semantic authoring \[exomem\.semantic-authoring:v4 sha256:[0-9a-f]{64}\]")
+    marker = re.compile(r"Semantic authoring \[exomem\.semantic-authoring:v5 sha256:[0-9a-f]{64}\]")
     for wire in _wires(server):
         in_description = len(marker.findall(wire["description"]))
         in_parameters = len(marker.findall(str(wire["inputSchema"])))

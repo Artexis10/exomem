@@ -35,6 +35,7 @@ from .working_set_index import (
     fold_plural,
     fold_possessive,
     normalize,
+    subject_text,
     tokens_of,
 )
 
@@ -53,6 +54,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "continuity",
     "conversation",
     "agent_choice",
+    "carried_link",
 )
 
 #: `RARE_TERM_MAX_ANCHORS` lives in `working_set_index` (re-exported here):
@@ -530,9 +532,12 @@ class ResolvedAnchor:
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
+    #: The carried page this anchor is listed through (`carried_link`), or
+    #: `""`. Served, so the egress guard removes the anchor with that page.
+    via: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "ref": self.ref or self.path or self.anchor_id,
             "path": self.path,
             "title": self.title,
@@ -541,6 +546,9 @@ class ResolvedAnchor:
             "status": self.status,
             "evidence": list(self.evidence),
         }
+        if self.via:
+            out["via"] = self.via
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -1006,6 +1014,12 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     """
     if vocabulary is None:
         vocabulary = shipped_vocabulary()
+    # A quoted path or URL is a reference, not words (`subject_text`): every
+    # field that feeds subject evidence reads the turn without it. Whether
+    # the turn only points back, or is a follow-up, still reads the turn as
+    # written: a turn that quotes a path has said what it is about.
+    written = turn
+    turn = subject_text(turn)
     # Calls the shared `normalize()` rather than restating its formula: a
     # hand-rolled copy here once skipped `normalize()`'s typographic-
     # apostrophe fold, so a turn spelled with a curly quote matched none of
@@ -1033,13 +1047,14 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
                 if phrase not in seen:
                     seen.add(phrase)
                     ngrams.append(phrase)
-    token_text = f" {' '.join(_spell_out_cues(tokens, vocabulary))} "
+    written_tokens = tokens if written == turn else tokens_of(normalize(written))
+    token_text = f" {' '.join(_spell_out_cues(written_tokens, vocabulary))} "
     # A declared cue, and nothing else said (close-memory-loop D2, as
     # narrowed twice): the turn has to say it points back, and must not also
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
-    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(turn)
+    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(written)
     anaphora_text = f" {' '.join(_spell_out_cues(anaphora_tokens, vocabulary))} "
     anaphora_cue = any(f" {phrase} " in anaphora_text for phrase in vocabulary.phrases)
     pointing = working_set_anaphora.points_back(
@@ -1054,7 +1069,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         referential_cue=referential_cue,
         acronyms=_acronyms_of(turn, vocabulary.filler),
         follow_up=is_follow_up(
-            tokens, referential_cue=referential_cue, filler=vocabulary.filler
+            written_tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
         words=embedded_words(tokens, _word_edges(vocabulary)),
         capitalised=_capitalised_terms(turn),
@@ -1228,6 +1243,112 @@ def row_lexicon(row: AnchorFacts) -> RowLexicon:
     )
 
 
+def _turn_terms_folded(analysis: TurnAnalysis, stopwords: frozenset[str]) -> frozenset[str]:
+    """The turn's lexical terms, folded for comparison with an anchor's.
+
+    R4 (fix/activation-competing-senses): possessive fold, applied on the
+    TURN side of the lexical comparison -- "gamma's" must contribute the
+    term "gamma" the same way a plural turn token already folds to its
+    singular. `_fold_lexical_term` (C1, correction round 1) is
+    `fold_plural(fold_possessive(term))` with one guard: a term whose
+    possessive fold alone lands on a STOPWORD ("it's" -> "it") is dropped
+    rather than folded, so an ordinary contraction of a common pronoun or
+    auxiliary verb can never manufacture a turn term that was never typed.
+    """
+    return frozenset(
+        folded
+        for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords
+        if (folded := _fold_lexical_term(term)) is not None
+    )
+
+
+def _turn_phrases(analysis: TurnAnalysis, stopwords: frozenset[str]) -> frozenset[str]:
+    """Every phrase of the turn an indexed name can equal exactly.
+
+    A single turn TOKEN is a phrase too (it also feeds unigram `exact_alias`
+    matches), so its de-possessived spelling joins the verbatim one -- "dana's"
+    reaches a plain single-word `exact_alias` on "Dana" exactly as "dana"
+    does. `analysis.ngrams` already carries the de-possessived MULTI-token
+    phrases; this adds the one-token case. A fold that lands on a STOPWORD is
+    dropped, never added (the verbatim spelling is already covered, so nothing
+    is lost by not also adding its unsound fold).
+    """
+    return (
+        frozenset(analysis.ngrams)
+        | frozenset(analysis.tokens)
+        | frozenset(analysis.words)
+        | frozenset(
+            folded
+            for token in analysis.tokens
+            if (folded := fold_possessive(token)) not in stopwords
+        )
+    )
+
+
+def _consumed_embedded_words(analysis: TurnAnalysis, rows: Sequence[AnchorFacts]) -> frozenset[str]:
+    """Embedded words that only spell the head of a longer one.
+
+    An embedded word that only spells the head of a longer embedded word some
+    indexed name equals (`サクラ` inside `サクラもち本舗`) is consumed: the
+    turn wrote the longer name, the same way containment consumes a name.
+    """
+    embedded_only = (
+        frozenset(analysis.words) - frozenset(analysis.tokens) - frozenset(analysis.ngrams)
+    )
+    if not embedded_only:
+        return frozenset()
+    matched_words = {
+        word
+        for row in rows
+        for word in ({normalize(row.title), *row.aliases} & frozenset(analysis.words))
+    }
+    return frozenset(
+        word for word in embedded_only if _inside_longer_words(word, matched_words, analysis.tokens)
+    )
+
+
+def _exact_alias_phrases(
+    lexicon: RowLexicon, phrases: frozenset[str], consumed: frozenset[str]
+) -> frozenset[str]:
+    """The turn phrases a row's own name equals, less consumed embedded words:
+    `exact_alias` when any. The one rule `candidates_for` and
+    `entry_named_anchors` both read."""
+    return (lexicon.names & phrases) - consumed
+
+
+def _min_lexical_terms(config: RankingConfig) -> int:
+    """A floor of 2, whatever `RankingConfig` says (design.md decision 2a): the
+    two-shared-terms minimum is part of the soundness argument, so it lives in
+    code, not in an operator-tunable file. The shipped default is already 2."""
+    return max(2, int(config.working_set_lexical_min_terms))
+
+
+def _lexical_overlap(
+    shared_broad: frozenset[str], shared_name: frozenset[str], min_terms: int
+) -> bool:
+    """`lexical_overlap`: `min_terms` shared words over the broad vocabulary AND
+    two shared authored name terms. The one rule `candidates_for` and
+    `entry_named_anchors` both read."""
+    return len(shared_broad) >= min_terms and len(shared_name) >= 2
+
+
+def title_names(
+    analysis: TurnAnalysis, title: str, *, stopwords: frozenset[str] = _STOPWORDS
+) -> bool:
+    """Does the turn make name contact with a page by its own `title`?
+
+    The anchor rule (`_lexical_overlap`) applied to a page that is not an
+    anchor: its title is its only authored name and its only vocabulary.
+    """
+    terms = frozenset(
+        folded for term in tokens_of(title) if (folded := _fold_lexical_term(term)) is not None
+    )
+    turn_terms = _turn_terms_folded(analysis, stopwords)
+    return _lexical_overlap(
+        turn_terms & terms, turn_terms & terms, _min_lexical_terms(DEFAULT_RANKING)
+    )
+
+
 def candidates_for(
     analysis: TurnAnalysis,
     rows: Sequence[AnchorFacts],
@@ -1286,18 +1407,7 @@ def candidates_for(
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
-    turn_terms = frozenset((*analysis.tokens, *analysis.words)) - stopwords
-    # R4 (fix/activation-competing-senses): possessive fold, applied on the
-    # TURN side of the lexical comparison -- "gamma's" must contribute the
-    # term "gamma" the same way a plural turn token already folds to its
-    # singular. `_fold_lexical_term` (C1, correction round 1) is
-    # `fold_plural(fold_possessive(term))` with one guard: a term whose
-    # possessive fold alone lands on a STOPWORD ("it's" -> "it") is dropped
-    # rather than folded, so an ordinary contraction of a common pronoun or
-    # auxiliary verb can never manufacture a turn term that was never typed.
-    turn_terms_folded = frozenset(
-        folded for term in turn_terms if (folded := _fold_lexical_term(term)) is not None
-    )
+    turn_terms_folded = _turn_terms_folded(analysis, stopwords)
     # Terms only an embedded word supplies (`analysis.words`: a Latin word glued
     # to Japanese). They hold no position in `analysis.tokens`, so a name span
     # over the tokens cannot see them, and a contact that rests on one has no
@@ -1307,26 +1417,7 @@ def candidates_for(
         for term in frozenset(analysis.tokens) - stopwords
         if (folded := _fold_lexical_term(term)) is not None
     )
-    # A single turn TOKEN is a phrase too (`phrases` also feeds unigram
-    # `exact_alias` matches), so its de-possessived spelling joins the
-    # phrase set alongside the verbatim one -- "dana's" must reach a plain
-    # single-word `exact_alias` on "Dana" exactly as "dana" already would.
-    # `analysis.ngrams` already carries the de-possessived MULTI-token
-    # phrases (`analyze_turn`); this adds the one-token case `analyze_turn`
-    # never builds n-grams for. Same C1 guard: a fold that lands on a
-    # STOPWORD is dropped, never added as a phrase (the verbatim spelling is
-    # already covered by `frozenset(analysis.tokens)` above, so nothing is
-    # lost by not also adding its unsound fold).
-    phrases = (
-        frozenset(analysis.ngrams)
-        | frozenset(analysis.tokens)
-        | frozenset(analysis.words)
-        | frozenset(
-            folded
-            for token in analysis.tokens
-            if (folded := fold_possessive(token)) not in stopwords
-        )
-    )
+    phrases = _turn_phrases(analysis, stopwords)
     cue_categories = eligible_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     if bands is None:
@@ -1335,7 +1426,7 @@ def candidates_for(
     # the two-shared-terms minimum is part of the soundness argument, so it
     # lives in code, not in an operator-tunable file. The shipped default is
     # already 2, so this never changes shipped behaviour.
-    min_terms = max(2, int(config.working_set_lexical_min_terms))
+    min_terms = _min_lexical_terms(config)
 
     # R2 (fix/activation-competing-senses), pass 1 of 2: each row's own
     # matched `exact_alias` phrases, and the turn TOKEN POSITIONS any
@@ -1357,24 +1448,10 @@ def candidates_for(
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
-    # An embedded word that only spells the head of a longer embedded word some
-    # indexed name equals (`サクラ` inside `サクラもち本舗`) is consumed: the
-    # turn wrote the longer name, the same way containment consumes a name.
-    embedded_only = frozenset(analysis.words) - frozenset(analysis.tokens) - frozenset(analysis.ngrams)
-    matched_words = {
-        word
-        for row in rows
-        for word in ({normalize(row.title), *row.aliases} & frozenset(analysis.words))
-    }
-    consumed_words = frozenset(
-        word
-        for word in embedded_only
-        if _inside_longer_words(word, matched_words, analysis.tokens)
-    )
+    consumed_words = _consumed_embedded_words(analysis, rows)
     for row in rows:
-        names = lexicon_of(row).names
-        matched = (names & phrases) - consumed_words
-        row_exact_phrases[row.anchor_id] = frozenset(matched)
+        matched = _exact_alias_phrases(lexicon_of(row), phrases, consumed_words)
+        row_exact_phrases[row.anchor_id] = matched
         positions: set[int] = set()
         for phrase in matched:
             phrase_tokens = phrase.split(" ")
@@ -1454,7 +1531,7 @@ def candidates_for(
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
         name_contact: frozenset[str] = frozenset()
-        if len(shared_broad) >= min_terms and len(shared_name) >= 2:
+        if _lexical_overlap(shared_broad, shared_name, min_terms):
             evidence.add("lexical_overlap")
             name_contact = shared_name
         elif len(shared_name) == 1:
@@ -1591,6 +1668,23 @@ def _row_may_be_named(
     return runs and any(len(name) >= 2 and _continua_class(name) for name in lexicon.names)
 
 
+def _rows_maybe_named(
+    rows: Sequence[AnchorFacts],
+    known: Mapping[str, RowLexicon],
+    terms: frozenset[str],
+    phrases: frozenset[str],
+    runs: bool,
+) -> list[tuple[AnchorFacts, RowLexicon]]:
+    """Each row that passes `_row_may_be_named` for these words, with its
+    lexicon (from `known` when supplied), derived once per row."""
+    reachable: list[tuple[AnchorFacts, RowLexicon]] = []
+    for row in rows:
+        lexicon = known.get(row.anchor_id) or row_lexicon(row)
+        if _row_may_be_named(lexicon, terms, phrases, runs):
+            reachable.append((row, lexicon))
+    return reachable
+
+
 def candidates_for_each(
     analyses: Sequence[TurnAnalysis], rows: Sequence[AnchorFacts], **keywords: Any
 ) -> tuple[tuple[CandidateFacts, ...], ...]:
@@ -1609,31 +1703,69 @@ def candidates_for_each(
     if any(keywords.get(name) for name in _WORDLESS_CONTACT_ARGUMENTS):
         return tuple(candidates_for(analysis, rows, **keywords) for analysis in analyses)
     stopwords = keywords.get("stopwords", _STOPWORDS)
-    terms: set[str] = set()
-    phrases: set[str] = set()
-    runs = False
-    for analysis in analyses:
-        for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords:
-            folded = _fold_lexical_term(term)
-            if folded is not None:
-                terms.add(folded)
-        phrases.update(analysis.ngrams, analysis.tokens, analysis.words)
-        phrases.update(
-            folded for token in analysis.tokens if (folded := fold_possessive(token)) not in stopwords
-        )
-        runs = runs or any(_continua_runs(token) for token in analysis.tokens)
-    frozen_terms, frozen_phrases = frozenset(terms), frozenset(phrases)
-    known = keywords.pop("row_lexicons", None) or {}
-    lexicons: dict[str, RowLexicon] = {}
-    named: list[AnchorFacts] = []
-    for row in rows:
-        lexicon = known.get(row.anchor_id) or row_lexicon(row)
-        if _row_may_be_named(lexicon, frozen_terms, frozen_phrases, runs):
-            lexicons[row.anchor_id] = lexicon
-            named.append(row)
+    runs = any(_continua_runs(token) for analysis in analyses for token in analysis.tokens)
+    reachable = _rows_maybe_named(
+        rows,
+        keywords.pop("row_lexicons", None) or {},
+        frozenset().union(*(_turn_terms_folded(analysis, stopwords) for analysis in analyses)),
+        frozenset().union(*(_turn_phrases(analysis, stopwords) for analysis in analyses)),
+        runs,
+    )
+    named = [row for row, _lexicon in reachable]
+    lexicons = {row.anchor_id: lexicon for row, lexicon in reachable}
     return tuple(
         candidates_for(analysis, named, row_lexicons=lexicons, **keywords) for analysis in analyses
     )
+
+
+def entry_named_anchors(
+    analyses: Sequence[TurnAnalysis],
+    rows: Sequence[AnchorFacts],
+    *,
+    row_lexicons: Mapping[str, RowLexicon] | None = None,
+    stopwords: frozenset[str] = _STOPWORDS,
+    config: RankingConfig | None = None,
+) -> frozenset[str]:
+    """The ids of the rows ANY analysis reaches by `exact_alias` or
+    `lexical_overlap` -- exactly the anchors `candidates_for` would return with
+    one of those kinds, without building a `CandidateFacts` (and its name
+    spans) for each. A qualifier that only asks "does an earlier turn name
+    this anchor?" over a whole candidate set reads this instead of
+    `candidates_for_each`. Words only: no band, recall, routing or recency.
+    """
+    if not analyses:
+        return frozenset()
+    min_terms = _min_lexical_terms(config or DEFAULT_RANKING)
+    worded = [
+        (_turn_terms_folded(analysis, stopwords), _turn_phrases(analysis, stopwords))
+        for analysis in analyses
+    ]
+    # Only a row whose own name shares a phrase or a term with SOME entry can
+    # be named (or name the longer embedded word that consumes another's), so
+    # narrow once, as `candidates_for_each` does. Containment runs only ever
+    # earn `rare_term`, never a name, so they do not widen this set.
+    reachable = _rows_maybe_named(
+        rows,
+        row_lexicons or {},
+        frozenset().union(*(terms for terms, _phrases in worded)),
+        frozenset().union(*(phrases for _terms, phrases in worded)),
+        runs=False,
+    )
+    reachable_rows = [row for row, _lexicon in reachable]
+    entries = [
+        (terms, phrases, _consumed_embedded_words(analysis, reachable_rows))
+        for analysis, (terms, phrases) in zip(analyses, worded, strict=True)
+    ]
+    return frozenset(
+        row.anchor_id
+        for row, lexicon in reachable
+        if any(
+            _exact_alias_phrases(lexicon, phrases, consumed)
+            or _lexical_overlap(terms & lexicon.terms, terms & lexicon.name_terms, min_terms)
+            for terms, phrases, consumed in entries
+        )
+    )
+
 
 def _token_folds(tokens: Sequence[str], stopwords: frozenset[str]) -> tuple[str | None, ...]:
     """Each token's lexical fold, `None` for a stopword: what `_name_spans`

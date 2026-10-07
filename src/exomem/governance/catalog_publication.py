@@ -9,6 +9,7 @@ one full-tuple CAS before returning success.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import sqlite3
 import time
@@ -30,6 +31,7 @@ from . import (
     schema_v4,
     store,
 )
+from .policy import Policy
 
 
 class CatalogPublicationError(RuntimeError):
@@ -87,6 +89,18 @@ class PreparedMeasurementPublication:
     family: projection_measurement_store.MeasurementFamilyKey
     measurements: tuple[projection_measurement_store.ProjectionMeasurement, ...]
     manifest: projection_measurement_store.MeasurementStoreManifest
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPolicyProjection:
+    """Complete canonical target rows and measurements awaiting tuple publication."""
+
+    catalog: schema_v4.CatalogGenerationSeed | None
+    predecessor_items: tuple[projection_store.ProjectionItemVariants, ...]
+    items: tuple[projection_store.ProjectionItemVariants, ...]
+    manifest: projection_store.VariantStoreManifest
+    evidence: bytes
+    ready_at: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,7 +468,7 @@ def _replacement_item(
     vault_root: Path,
     path: str,
     source: str,
-    snapshot: schema_v4.ActivePolicySnapshot,
+    policy: Policy,
     target_key: projections.ProjectionNamespaceKey,
 ) -> projection_store.ProjectionItemVariants:
     content = source.encode("utf-8")
@@ -473,7 +487,7 @@ def _replacement_item(
             sorted(
                 membership.evaluate_snapshot(
                     parsed,
-                    snapshot.policy,
+                    policy,
                     content_hash=content_hash,
                 )
             )
@@ -482,7 +496,7 @@ def _replacement_item(
             item_identity=path,
             content_hash=content_hash,
             scope_ids=scope_ids,
-            policy=snapshot.policy,
+            policy=policy,
             projector_schema_version=target_key.projector_schema_version,
             full_search_fields=_search_fields(parsed),
         )
@@ -600,6 +614,8 @@ def _target_vector_measurements(
     active_namespace: projection_store.VerifiedProjectionNamespace,
     active_root: projection_store.ProjectionMeasurementRoot,
     target_namespace: projection_store.PreparedProjectionNamespace,
+    reuse_staged: bool = False,
+    prepared_root: projection_store.ProjectionMeasurementRoot | None = None,
 ) -> PreparedMeasurementPublication:
     """Carry content-addressed vectors forward and rebuild only new variants."""
 
@@ -651,6 +667,58 @@ def _target_vector_measurements(
         extractor_version=active_root.extractor_version,
         model_version=active_root.model_version,
     )
+    staged = None
+    if prepared_root is not None:
+        staged = projection_measurement_store.load_prepared_measurement_store(
+            vault_root,
+            namespace=target_namespace,
+            family=target_family,
+            expected_rows_digest=prepared_root.rows_digest,
+        )
+    elif reuse_staged:
+        try:
+            staged = projection_measurement_store.load_prepared_measurement_store(
+                vault_root,
+                namespace=target_namespace,
+                family=target_family,
+            )
+        except FileNotFoundError:
+            pass
+    if staged is not None:
+        target_manifest, target_rows = staged
+        expected_dimension = (
+            active_root.vector_dimension
+            if active_root.vector_dimension is not None
+            else recall_space.declared_dim(embeddings.MODEL_NAME)
+        )
+        if (
+            prepared_root is not None
+            and projection_measurement_store.measurement_root(target_manifest)
+            != prepared_root
+        ) or (
+            target_manifest.vector_dimension is not None
+            and expected_dimension != target_manifest.vector_dimension
+        ):
+            raise CatalogPublicationError(
+                "the staged vector measurement family does not match target inputs"
+            )
+        if any(
+            not isinstance(row, projected_retrieval.ProjectionVectorMeasurement)
+            or (
+                (active_row := active_by_id.get(row.measurement_key.projection_variant_id))
+                is not None
+                and active_row.vector != row.vector
+            )
+            for row in target_rows
+        ):
+            raise CatalogPublicationError(
+                "the staged vector measurement family changed unchanged inputs"
+            )
+        return PreparedMeasurementPublication(
+            family=target_family,
+            measurements=target_rows,
+            manifest=target_manifest,
+        )
     target_variants = tuple(
         variant
         for item in target_namespace.items
@@ -802,6 +870,7 @@ def _target_clip_measurements(
         raise CatalogPublicationError(
             "the active CLIP measurement family is incomplete"
         )
+    active_items = {item.item_identity: item for item in active_namespace.items}
 
     if type(replacements) is not tuple:
         raise CatalogPublicationError(
@@ -842,6 +911,27 @@ def _target_clip_measurements(
                 if not projected_retrieval.clip_variant_applicable(variant):
                     continue
                 active = active_by_id.get(variant.projection_variant_id)
+                if (
+                    replacement is None
+                    and active is None
+                    and target_namespace.namespace_key.projector_schema_version
+                    != active_namespace.namespace_key.projector_schema_version
+                    and (predecessor := active_items.get(item.item_identity)) is not None
+                    and predecessor.content_hash == item.content_hash
+                ):
+                    candidates = tuple(
+                        active_by_id[old.projection_variant_id]
+                        for old in predecessor.variants
+                        if projected_retrieval.clip_variant_applicable(old)
+                        and old.search_fields.get("media_type")
+                        == variant.search_fields.get("media_type")
+                        and old.search_fields.get("parent_media")
+                        == variant.search_fields.get("parent_media")
+                    )
+                    if candidates and all(
+                        row.samples == candidates[0].samples for row in candidates
+                    ):
+                        active = candidates[0]
                 if replacement is None and active is None:
                     raise CatalogPublicationError(
                         "the target CLIP measurement family is incomplete"
@@ -1067,6 +1157,8 @@ def _prepare_target_measurements(
         [], tuple[GraphMeasurementReplacement, ...]
     ]
     | None = None,
+    reuse_staged: bool = False,
+    prepared_roots: tuple[projection_store.ProjectionMeasurementRoot, ...] | None = None,
 ) -> tuple[PreparedMeasurementPublication, ...]:
     if graph_replacement_provider is not None and graph_replacements:
         raise CatalogPublicationError(
@@ -1120,6 +1212,12 @@ def _prepare_target_measurements(
                     active_namespace=active_namespace,
                     active_root=active_root,
                     target_namespace=target_namespace,
+                    reuse_staged=reuse_staged,
+                    prepared_root=(
+                        next(root for root in prepared_roots if root.lane == "vector")
+                        if prepared_roots is not None
+                        else None
+                    ),
                 )
             )
         elif active_root.lane == "clip":
@@ -1147,6 +1245,217 @@ def _prepare_target_measurements(
                 "content publication requires rebuilt model and graph measurements"
             )
     return tuple(prepared)
+
+
+def prepare_policy_projection(
+    vault_root: Path,
+    *,
+    active_snapshot: schema_v4.ActivePolicySnapshot,
+    target_policy: Policy,
+    ready_at: int,
+    prepared_evidence: bytes | None = None,
+) -> PreparedPolicyProjection:
+    """Prepare current canonical representations without publishing authority."""
+
+    from .. import semantic_contract
+    from . import graph_producer
+
+    if (
+        not isinstance(active_snapshot, schema_v4.ActivePolicySnapshot)
+        or not isinstance(target_policy, Policy)
+        or type(ready_at) is not int
+        or ready_at < 0
+    ):
+        raise CatalogPublicationError("policy projection preparation input is invalid")
+    root = Path(vault_root)
+    try:
+        active_evidence = projection_store.namespace_evidence_from_snapshot(active_snapshot)
+        if any(
+            not isinstance(entry, projection_store.ProjectionMeasurementRoot)
+            for entry in active_evidence.required_measurement_roots
+        ):
+            raise CatalogPublicationError("the active measurement roots cannot be verified")
+        if any(
+            entry.lane == "graph"
+            and (
+                entry.extractor_version != graph_producer.EXTRACTOR_VERSION
+                or entry.model_version != graph_producer.MODEL_VERSION
+            )
+            for entry in active_evidence.required_measurement_roots
+        ):
+            raise CatalogPublicationError(
+                "policy projection requires a supported canonical graph producer family"
+            )
+        active_manifest, active_items = projection_store.load_projection_catalog(
+            root,
+            key=active_evidence.manifest.namespace_key,
+            expected_rows_digest=active_evidence.manifest.rows_digest,
+        )
+        active_namespace = projection_store.bind_active_projection_namespace(
+            active_snapshot, manifest=active_manifest, items=active_items
+        )
+        key = projections.ProjectionNamespaceKey(
+            policy_fingerprint=target_policy.fingerprint,
+            projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
+            catalog_generation=active_snapshot.active.catalog_generation,
+        )
+        target_items: list[projection_store.ProjectionItemVariants] = []
+        for item in active_items:
+            if PurePosixPath(item.item_identity).suffix.casefold() != ".md":
+                raise CatalogPublicationError(
+                    "the catalog item has no canonical projection field owner"
+                )
+            held = reserved_paths.read_generic_bytes(root, item.item_identity)
+            if not hmac.compare_digest(hashlib.sha256(held.data).hexdigest(), item.content_hash):
+                raise CatalogPublicationError(
+                    "the canonical corpus no longer matches the active catalog"
+                )
+            target_items.append(
+                _replacement_item(
+                    vault_root=root,
+                    path=item.item_identity,
+                    source=held.data.decode("utf-8"),
+                    policy=target_policy,
+                    target_key=key,
+                )
+            )
+        membership_changed = any(
+            before.scope_ids != after.scope_ids
+            for before, after in zip(active_items, target_items, strict=True)
+        )
+        if membership_changed:
+            key = projections.ProjectionNamespaceKey(
+                policy_fingerprint=key.policy_fingerprint,
+                projector_schema_version=key.projector_schema_version,
+                catalog_generation=key.catalog_generation + 1,
+            )
+        items = tuple(target_items)
+        descriptor = projection_store.catalog_descriptor_bytes(key, items)
+        if not membership_changed and not hmac.compare_digest(
+            descriptor, active_snapshot.catalog_descriptor
+        ):
+            raise CatalogPublicationError(
+                "the target catalog does not match the active catalog authority"
+            )
+        manifest = projection_store.preview_variant_store(key=key, items=items)
+        target_namespace = projection_store.prepare_projection_namespace(
+            key=key, manifest=manifest, items=items
+        )
+        target_evidence = None
+        if prepared_evidence is not None:
+            target_evidence = projection_store.decode_projection_namespace_evidence(
+                prepared_evidence, expected_key=key
+            )
+            if target_evidence.manifest != manifest or {
+                (entry.lane, entry.extractor_version, entry.model_version)
+                for entry in target_evidence.required_measurement_roots
+            } != {
+                (entry.lane, entry.extractor_version, entry.model_version)
+                for entry in active_evidence.required_measurement_roots
+            }:
+                raise CatalogPublicationError(
+                    "the prepared projection evidence does not bind every required lane"
+                )
+            projection_store.verify_variant_store(
+                root, key=key, expected_rows_digest=manifest.rows_digest
+            )
+        else:
+            projection_store.stage_variant_store(root, key=key, items=items)
+
+        def graph_replacements() -> tuple[GraphMeasurementReplacement, ...]:
+            if not items:
+                return ()
+            corpus = semantic_contract.build_corpus_context(root)
+            replacements = graph_producer.replacements_for_current_markdown(
+                root,
+                current_corpus=corpus,
+                paths=tuple(item.item_identity for item in items),
+            )
+            identities = {item.item_identity for item in items}
+            return tuple(
+                GraphMeasurementReplacement(
+                    item_identity=replacement.item_identity,
+                    content_hash=replacement.content_hash,
+                    edges=tuple(
+                        edge
+                        for edge in replacement.edges
+                        if edge.target_item_identity in identities
+                    ),
+                )
+                for replacement in replacements
+            )
+
+        measurements = _prepare_target_measurements(
+            root,
+            active_namespace=active_namespace,
+            active_roots=active_evidence.required_measurement_roots,
+            target_namespace=target_namespace,
+            graph_replacement_provider=graph_replacements,
+            reuse_staged=prepared_evidence is None,
+            prepared_roots=(
+                target_evidence.required_measurement_roots if target_evidence is not None else None
+            ),
+        )
+        roots = tuple(
+            projection_measurement_store.measurement_root(prepared.manifest)
+            for prepared in measurements
+        )
+        evidence = projection_store.projection_namespace_evidence_bytes(
+            manifest, required_measurement_roots=roots
+        )
+        if prepared_evidence is not None:
+            if not hmac.compare_digest(evidence, prepared_evidence):
+                raise CatalogPublicationError(
+                    "the prepared measurement evidence no longer matches target inputs"
+                )
+            for prepared in measurements:
+                projection_measurement_store.verify_measurement_store(
+                    root,
+                    namespace=target_namespace,
+                    family=prepared.family,
+                    expected_rows_digest=prepared.manifest.rows_digest,
+                )
+        else:
+            for prepared in measurements:
+                projection_measurement_store.stage_measurement_store(
+                    root,
+                    namespace=target_namespace,
+                    family=prepared.family,
+                    measurements=prepared.measurements,
+                )
+        return PreparedPolicyProjection(
+            catalog=(
+                schema_v4.CatalogGenerationSeed(
+                    catalog_generation=key.catalog_generation,
+                    descriptor=descriptor,
+                    artifact_count=len(items),
+                    created_at=ready_at,
+                )
+                if membership_changed
+                else None
+            ),
+            predecessor_items=active_items,
+            items=items,
+            manifest=manifest,
+            evidence=evidence,
+            ready_at=ready_at,
+        )
+    except CatalogPublicationError:
+        raise
+    except (
+        membership.MembershipUnresolved,
+        projection_store.ProjectionStoreError,
+        projection_measurement_store.MeasurementStoreError,
+        projections.ProjectionError,
+        schema_v4.SchemaV4Error,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ):
+        raise CatalogPublicationError(
+            "the canonical policy projection cannot be prepared"
+        ) from None
 
 
 def _prepare_markdown_batch(
@@ -1238,6 +1547,10 @@ def _prepare_markdown_batch(
             expected_activation_state_digest=control.activation_state_digest,
         )
         connection.commit()
+        if snapshot.active.projector_schema_version != projections.PROJECTOR_SCHEMA_VERSION:
+            raise CatalogPublicationError(
+                "content publication requires a current projector namespace"
+            )
         evidence = projection_store.namespace_evidence_from_snapshot(snapshot)
         manifest, active_items = projection_store.load_projection_catalog(
             root,
@@ -1334,7 +1647,7 @@ def _prepare_markdown_batch(
             vault_root=root,
             path=relative,
             source=mutation.source,
-            snapshot=snapshot,
+            policy=snapshot.policy,
             target_key=target_key,
         )
     target_items = tuple(by_identity.values())

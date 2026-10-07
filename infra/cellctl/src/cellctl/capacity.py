@@ -8,12 +8,16 @@ separate charge for every outstanding database commitment.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from kubernetes.utils.quantity import parse_quantity
 
-from .manifests import ResourceSettings
+from .manifests import JOB_CPU_REQUEST, JOB_MEMORY_REQUEST, ResourceSettings
+from .storage_config import LocalStorage
+
+GIB = 1024**3
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,88 @@ def compute_node_capacity(
         return NodeCapacity(cell_slots=0, attachments_used=attachments_used, limit_known=False)
     cell_slots = limit - config.headroom - non_cell_attachments
     return NodeCapacity(cell_slots=cell_slots, attachments_used=attachments_used, limit_known=True)
+
+
+@dataclass(frozen=True)
+class LogicalVolumeRecord:
+    """One TopoLVM LogicalVolume object, as capacity needs it."""
+
+    node: str
+    size: int
+    device_class: str
+    # lvmd has created the volume on the host (TopoLVM recorded its ID).
+    created: bool
+    deleting: bool
+
+
+@dataclass(frozen=True)
+class LocalCapacityObservation:
+    """What TopoLVM publishes for the cell pool on each node (D6)."""
+
+    # Every node, with its published free bytes, or None when its storage
+    # driver publishes no pool (the control-plane server has none).
+    free_bytes: dict[str, int | None] = field(default_factory=dict)
+    volumes: tuple[LogicalVolumeRecord, ...] = ()
+    reserved_nodes: frozenset[str] = frozenset()
+    # cell id -> the node its local volume is pinned to.
+    cell_nodes: dict[str, str] = field(default_factory=dict)
+
+
+def snapshot_reserve_bytes(local: LocalStorage, largest_cell_gib: int) -> int:
+    """D6: the pool kept free for hourly backups on one node: a snapshot and
+    its clone, each the largest cell's full size, for every backup the node
+    may run at once."""
+
+    return 2 * max(local.default_cell_gib, largest_cell_gib) * GIB * local.backup_concurrency_per_node
+
+
+def compute_local_capacity(
+    observation: LocalCapacityObservation, *, local: LocalStorage, cell_sizes: dict[str, int]
+) -> dict[str, NodeCapacity]:
+    """D6: floor((pool size - snapshot reserve) / default cell size) per node.
+
+    TopoLVM publishes free bytes, not the pool's size, and at overprovision
+    ratio 1.0 the pool is those free bytes plus the size of every volume in
+    it. Snapshots and clones are volumes too, so a backup moves bytes from
+    free to used and the slots stay put. The reserve is twice the largest
+    cell for each backup the node may run at once. `cell_sizes` holds every
+    non-deleted cell's size in GiB: admission counts each as one row, so a
+    cell larger than the default takes its extra slots here.
+    """
+
+    default = local.default_cell_gib * GIB
+    reserve = snapshot_reserve_bytes(local, max(cell_sizes.values(), default=0))
+    used: Counter[str] = Counter()
+    for volume in observation.volumes:
+        # A volume whose object exists before lvmd creates it has taken no
+        # free bytes yet, and one being deleted may already have given them
+        # back. Leaving both out can only under-count.
+        if volume.device_class == local.device_class and volume.created and not volume.deleting:
+            used[volume.node] += volume.size
+    cells_on = Counter(observation.cell_nodes.values())
+    result: dict[str, NodeCapacity] = {}
+    for node, free in observation.free_bytes.items():
+        if free is None:
+            result[node] = NodeCapacity(cell_slots=0, attachments_used=cells_on[node], limit_known=False)
+            continue
+        slots = 0 if node in observation.reserved_nodes else max(0, (free + used[node] - reserve) // default)
+        result[node] = NodeCapacity(cell_slots=slots, attachments_used=cells_on[node], limit_known=True)
+
+    unattributed = 0
+    for cell_id, gib in sorted(cell_sizes.items()):
+        extra = -(-gib // local.default_cell_gib) - 1
+        node = observation.cell_nodes.get(cell_id)
+        if extra > 0 and node in result and node not in observation.reserved_nodes:
+            charged = min(extra, result[node].cell_slots)
+            result[node] = replace(result[node], cell_slots=result[node].cell_slots - charged)
+            extra -= charged
+        unattributed += max(0, extra)
+    # A larger cell whose volume is not on a general node yet still counts.
+    for node in sorted(result, key=lambda name: (-result[name].cell_slots, name)):
+        charged = min(unattributed, result[node].cell_slots)
+        result[node] = replace(result[node], cell_slots=result[node].cell_slots - charged)
+        unattributed -= charged
+    return result
 
 
 def admits_new_cell(*, non_deleted_cell_count: int, cell_slots_by_node: dict[str, int]) -> bool:
@@ -197,7 +283,11 @@ def effective_pod_requests(pod) -> tuple[Decimal, Decimal]:
 def compute_shared_capacity(
     observation: CapacityObservation, *, policy: SharedWorkerPolicy,
     config: CapacityConfig, committed: frozenset[str],
+    storage_slots: dict[str, NodeCapacity] | None = None,
 ) -> dict[str, NodeCapacity]:
+    """`storage_slots` is the local pool's storage term (D6), given once local
+    storage is the domain. It then replaces the attachment term, and the
+    footprint carries the hourly backup Job that runs beside a serving cell."""
     present = set(observation.nodes) | set(observation.allocatable) | set(observation.attachments_used)
     result = {name: NodeCapacity(0, observation.attachments_used.get(name, 0), True) for name in present}
     workers = [node for node in observation.nodes.values()
@@ -213,10 +303,16 @@ def compute_shared_capacity(
             or any(taint[0] == "exomem.io/dedicated-cell" or
                    (taint[2] in {"NoSchedule", "NoExecute"} and taint != allowed_taint) for taint in node.taints)):
         return result
-    if node.attachment_limit is None:
+    storage = storage_slots.get(node.name) if storage_slots is not None else None
+    if storage_slots is not None and (storage is None or not storage.limit_known):
+        result[node.name] = NodeCapacity(0, storage.attachments_used if storage else 0, False)
+        return result
+    if storage_slots is None and node.attachment_limit is None:
         result[node.name] = NodeCapacity(0, observation.attachments_used.get(node.name, 0), False)
         return result
     footprint = (quantity(policy.resources.cpu_request), quantity(policy.resources.memory_request))
+    if storage is not None:
+        footprint = (footprint[0] + quantity(JOB_CPU_REQUEST), footprint[1] + quantity(JOB_MEMORY_REQUEST))
     other = [Decimal(0), Decimal(0)]
     cells: dict[str, list[Decimal]] = {}
     for pod in observation.pods:
@@ -244,7 +340,11 @@ def compute_shared_capacity(
     extra_attachments += sum(max(0, len(names) - 1) for names in volumes.values())
     cpu_slots = int((node.cpu - other[0] - quantity(policy.reserve_cpu)) // footprint[0])
     memory_slots = int((node.memory - other[1] - quantity(policy.reserve_memory)) // footprint[1])
-    slots = max(0, min(policy.occupancy, cpu_slots, memory_slots,
-                       node.attachment_limit - config.headroom - extra_attachments))
-    result[node.name] = NodeCapacity(slots, observation.attachments_used.get(node.name, 0), True)
+    if storage is not None:
+        storage_term, used = storage.cell_slots, storage.attachments_used
+    else:
+        storage_term = node.attachment_limit - config.headroom - extra_attachments
+        used = observation.attachments_used.get(node.name, 0)
+    slots = max(0, min(policy.occupancy, cpu_slots, memory_slots, storage_term))
+    result[node.name] = NodeCapacity(slots, used, True)
     return result

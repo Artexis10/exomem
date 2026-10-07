@@ -22,6 +22,11 @@ from .manifests import ResourceSettings, check_model_env
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
+from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
+
+# cellctl's own cell resources when CELLCTL_CELL_* is unset (the chart always
+# sets them); manifests.py owns the values.
+DEFAULT_RESOURCES = ResourceSettings()
 
 
 def _versioned_keys_env(name: str) -> dict[int, bytes]:
@@ -82,6 +87,32 @@ def build_reconcile_config() -> ReconcileConfig:
     return ReconcileConfig(**kwargs)
 
 
+def build_storage_config() -> StorageConfig:
+    """CELLCTL_CELL_STORAGE holds {"domain": <class>, "local": {LocalStorage fields}};
+    unset means Hetzner volumes only, as before local storage."""
+
+    raw = os.environ.get("CELLCTL_CELL_STORAGE")
+    if not raw:
+        return DEFAULT_STORAGE
+    value = json.loads(raw)
+    if not isinstance(value, dict) or not set(value) <= {"domain", "local"} or not isinstance(value.get("local"), dict):
+        raise ValueError("cell storage must be a JSON object with a local object and an optional domain")
+    return StorageConfig(domain=value.get("domain", LEGACY_CLASS), local=LocalStorage(**value["local"]))
+
+
+def build_alert_delivery_secret() -> tuple[str, str, str] | None:
+    """CELLCTL_ALERT_DELIVERY_SECRET is `namespace/name/key` of the platform's
+    alert-delivery Secret (task 2.8); unset leaves the backup-age alert to the log."""
+
+    raw = os.environ.get("CELLCTL_ALERT_DELIVERY_SECRET")
+    if not raw:
+        return None
+    parts = tuple(raw.split("/"))
+    if len(parts) != 3 or not all(parts):
+        raise ValueError("the alert delivery secret must be namespace/name/key")
+    return parts
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -111,10 +142,10 @@ def build_cluster_config() -> ClusterConfig:
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
         resources=ResourceSettings(
-            cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", "250m"),
-            cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", "2"),
-            memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", "1Gi"),
-            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi"),
+            cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
+            cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
+            memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
+            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
         ),
         model_env=model_env,
         dedicated_cell_ids=tuple(dedicated_cell_ids),
@@ -122,6 +153,8 @@ def build_cluster_config() -> ClusterConfig:
         artifact_broker_url=os.environ.get("CELLCTL_ARTIFACT_BROKER_URL", ""),
         artifact_broker_cell_ids=tuple(artifact_cell_ids),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
+        storage=build_storage_config(),
+        alert_delivery_secret=build_alert_delivery_secret(),
         capacity=CapacityConfig(
             csi_driver=os.environ.get("CELLCTL_CSI_DRIVER", "csi.hetzner.cloud"),
             headroom=int(os.environ.get("CELLCTL_ATTACHMENTS_HEADROOM", "5")),
@@ -145,7 +178,8 @@ def run() -> None:
     else:
         k8s_config.load_kube_config()
 
-    cluster = ClusterClient(k8s.ApiClient())
+    cluster_config = build_cluster_config()
+    cluster = ClusterClient(k8s.ApiClient(), storage_config=cluster_config.storage)
     object_storage = B2ObjectStorage(
         B2Config(
             key_management_key_id=os.environ["CELLCTL_B2_KEY_MANAGEMENT_KEY_ID"],
@@ -163,7 +197,7 @@ def run() -> None:
             object_storage,
             volume_provider,
             build_secrets_config(),
-            build_cluster_config(),
+            cluster_config,
             config=build_reconcile_config(),
             heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
         )

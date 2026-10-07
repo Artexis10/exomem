@@ -93,7 +93,7 @@ def test_public_planning_read_guards_support_update_triage_and_reject_stale(tmp_
     assert plan_memory(tmp_path, "query", collection=collection)["rows"][0]["status"] == "completed"
 
 
-def test_plan_memory_exposes_exactly_the_nine_planning_actions() -> None:
+def test_plan_memory_exposes_exactly_the_ten_planning_actions() -> None:
     from exomem.plan_memory import ACTIONS
 
     assert ACTIONS == frozenset(
@@ -107,6 +107,7 @@ def test_plan_memory_exposes_exactly_the_nine_planning_actions() -> None:
             "triage",
             "revise",
             "rebaseline",
+            "history",
         }
     )
 

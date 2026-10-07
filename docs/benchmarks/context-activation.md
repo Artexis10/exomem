@@ -232,20 +232,89 @@ product_activate_context`) and binding, then the eighteen scores are read as
 one report. The scorer and its thresholds are unchanged.
 
 The reproducible part of that run is recorded in
-`docs/benchmarks/context-activation-product-2026-09-v4.json` (corpus v4; the
-v3 report `context-activation-product-2026-09.json` is kept as history):
+`docs/benchmarks/context-activation-product-2026-10-v5.json` (corpus v5; the
+v4 report `context-activation-product-2026-09-v4.json` and the v3 report
+`context-activation-product-2026-09.json` are kept as history):
 fixture-set digest
-`a49d85f4…`, threshold digest `7b2785cf…`, the logical corpus digest of each
+`9d15d155…`, threshold digest `7b2785cf…`, the logical corpus digest of each
 tree, per-case duals, the mechanism-removal outcomes, the topology findings,
-and the amended column (A2 and A4) beside the raw one.
+and the amended columns (A2+A4, A7, A8, A9 and v5) beside the raw one.
 Exact corpus bytes carry writer-minted identities, so each run's manifest
 carries its own exact digest and binding, and the recorded report binds the
 logical ones. The test fails when the recorded report no longer matches a
 fresh run. After a deliberate product or corpus change, re-record it:
 
 ```
-CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09-v4.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
+CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-10-v5.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 ```
+
+### Round 6 on corpus v5 (2026-10-06): carried-page naming, 10/18 raw, 12/18 under A8, 14/18 under v5
+
+Three compiler changes and no fixture, threshold or scorer line:
+
+- **M1.** A page the retrieval carry admits and the turn names by two or more of
+  its own title words resolves through the existing soundness rule, with
+  `[lexical_overlap, retrieval]`. A page reached by a body phrase or one title word
+  stays `retrieval_carried`.
+- **E1.** An entity that a carried page's served unit names, and that the page
+  links, is listed `partial` on `carried_link` with `via` naming the page. It never
+  resolves. Each page lists at most two, first named first; a row the caller may
+  not see, or one an earlier carried page listed, takes no slot.
+- **E2.** A path, URL or remote in the turn contributes no words to subject
+  evidence; a relative path keeps only its file name, and a `Knowledge Base/` path
+  runs to its file name even with spaces in it. Slash-joined words that end in no
+  file name, such as `records/staging/prod` or `Node.js/React`, stay prose.
+
+| Case | Raw | A8 | v5 | Change |
+|------|-----|----|----|--------|
+| C4 | red | pass | pass | the failure note resolves by its title and lists its colleague |
+| C8 | red | pass | pass | the current approach note resolves by its title |
+| T8 | red | red | pass | the support rota page resolves by its title |
+| the other fifteen | same | same | same | unchanged |
+
+Raw is 10, A8 12 and v5 14. Raw still fails C4, C8 and T8 on precision 0.50,
+because it reads a gold page's own unit fragment as a second ref. M1 carries the
+weight: with its title rule removed, v5 falls to 11 and C4, C8 and T8 fail again.
+E2 moves no case on this corpus.
+
+### Round 5 on corpus v5 (2026-10-05): the v5 instrument, 10/18 raw, 11/18 under v5
+
+No compiler line changes. Hugo ruled three instrument corrections on 2026-10-05
+(design.md D9, A4, A10); the raw v4 scorer stays computable and is reported
+unchanged beside the new `amended_v5` column.
+
+- **S1.** A `<page>#unit-` fragment whose parent is in the frozen canonical parent
+  map counts as that page in recall, precision, poison and the twin rule. Unbound
+  fragments stay distinct. Raw never mapped a served unit to its page, so serving
+  the right unit halved precision or tripped the twin rule.
+- **T6.** A twin expected `unresolved` that abstains with only `partial` anchors is
+  the run's one allowed hedge, as the spec pre-registered. Two exceed the ceiling;
+  any unit or pointer disqualifies it. The product's partial-only packet abstains
+  and reads `unresolved`, so the raw hedge (observed `partial`) never fired.
+- **T1.** Re-authored for corpus v5 ("I keep hitting the snooze button again this
+  week."): no knowledge page records anything it names, so it leaves A10's list.
+  Its v4 turn was answered by C1's poison page.
+
+The same real-compiler packets scored three ways. On the v4 fixtures (T1 as it was)
+raw is 9, A8 10 and v5 10. Every case green on raw stays green on v5, and no case
+goes red under any column. A8 passes C8 and v5 does not, by design:
+
+| Case | Raw | A8 | v5 | What v5 changes |
+|------|-----|----|----|-----------------|
+| C1 | red | red | red | precision 0.67 cleared; recall 2/3 and `capacity ceiling` remain |
+| C4 | red | red | red | precision 0.50 cleared; recall 1/2 and the status remain |
+| C8 | red | pass | red | precision 0.00 cleared; status `unresolved` remains (v5 has no A8 status clause) |
+| T6 | red | red | pass (hedge) | the lone partial grill candidate is the hedge, not poison |
+| T8 | red | red | red | the twin's own unit is no false activation; status remains |
+| T1 (v4 turn) | red | red | red | unchanged: the turn is answered by a fixture page |
+| T1 (v5 turn) | pass | pass | pass | valid negative twin |
+| the other nine | pass or red | same | same | unchanged |
+
+On corpus v5 the passing sets are raw 10 (the nine and the new T1), A8 11 (adds C8)
+and v5 11 (adds T6). The audit stays red under every column: C1, C2, C3, C4, C8,
+C9 and T8 fail for the status or recall reasons in the recorded report. `must_include`
+stays case-sensitive (S2 was not approved), so C2, C3 and C9 stay red on their
+lowercase facts even if their retrieval moves.
 
 ### Round 4 on corpus v4 (2026-09-28): recall breadth, 9/18 raw, 10/18 under A8
 
@@ -520,8 +589,9 @@ referent and for the `recent_context` block. The earlier session's acts go
 through supported doors (an `anchor` pick, an `episode_memory` record, an
 `edit_memory` commit), then one fresh `activate_context` call is made.
 
-The current group is v3 (digest `8c6eb814…`, pinned in a commit before its
-first run). It keeps v1's cases and gold. Everything a packet serves must
+The current group is v3 (its digest is the `CONTINUITY_SHA256` pin in
+`tests/test_context_activation_continuity.py`, pinned before its first run and
+re-pinned when corpus v5 relabelled the corpus). It keeps v1's cases and gold. Everything a packet serves must
 belong to a referent page: anchors of every status, ambiguity candidates,
 units, pointers and current-state entries. A unit or state entry of the
 referent page is fine; one of any other page fails. The keyless K3 must serve

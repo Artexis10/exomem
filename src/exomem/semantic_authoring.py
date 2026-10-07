@@ -17,7 +17,7 @@ from typing import Any
 
 from . import semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 4
+AUTHORING_CONTRACT_VERSION = 5
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 
@@ -296,7 +296,9 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "A heading at level N owns content until the next non-fenced heading at level "
             "N or shallower; deeper headings remain in its body."
         ),
-        "relation_rule": "Typed unit relations require the rich form.",
+        "relation_rule": (
+            "Typed unit relations require the rich form. A `#anchor` target addresses a unit."
+        ),
     }
     semantic_roles = {
         "category": (

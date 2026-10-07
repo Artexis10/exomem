@@ -1,0 +1,107 @@
+---
+- name: Probe the open mapping for a volume group
+  ansible.builtin.command:
+    argv: [/usr/sbin/blkid, --probe, --output, export, "/dev/mapper/{{ dedicated_host_luks_name }}"]
+  register: dedicated_host_mapping_blkid
+  changed_when: false
+  failed_when: dedicated_host_mapping_blkid.rc not in [0, 2]
+
+- name: Read the volume group on the open mapping
+  ansible.builtin.command:
+    argv: [/usr/sbin/pvs, --noheadings, --options, vg_name, "/dev/mapper/{{ dedicated_host_luks_name }}"]
+  register: dedicated_host_mapping_pvs
+  changed_when: false
+  failed_when: false
+
+- name: Refuse a mapping that holds anything but the cell volume group
+  ansible.builtin.assert:
+    that: >-
+      dedicated_host_mapping_blkid.stdout_lines | select('match', '^(PT)?TYPE=') | list | length == 0
+      or (dedicated_host_mapping_pvs.rc == 0
+          and dedicated_host_mapping_pvs.stdout | trim == dedicated_host_volume_group)
+    fail_msg: "/dev/mapper/{{ dedicated_host_luks_name }} holds something other than {{ dedicated_host_volume_group }}; nothing was changed."
+
+- name: Create the cell volume group
+  ansible.builtin.command:
+    argv: [/usr/sbin/vgcreate, "{{ dedicated_host_volume_group }}", "/dev/mapper/{{ dedicated_host_luks_name }}"]
+  when: dedicated_host_mapping_pvs.rc != 0 or dedicated_host_mapping_pvs.stdout | trim | length == 0
+  changed_when: true
+
+- name: Look for the thin pool
+  ansible.builtin.command:
+    argv: [/usr/sbin/lvs, --noheadings, --options, lv_attr, "{{ dedicated_host_volume_group }}/{{ dedicated_host_thin_pool }}"]
+  register: dedicated_host_pool
+  changed_when: false
+  failed_when: false
+
+- name: Read the volume group's free extents
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/vgs
+      - --noheadings
+      - --units=b
+      - --nosuffix
+      - --options=vg_free_count,vg_extent_size
+      - "{{ dedicated_host_volume_group }}"
+  register: dedicated_host_vg_free
+  changed_when: false
+  when: dedicated_host_pool.rc != 0
+
+# Design D1: 64 bytes of metadata per chunk of the largest pool the group can
+# hold, at least LVM's 2 MiB and at most its 15.81 GiB, unless overridden. The
+# group keeps the metadata's spare and a reserve of twice the metadata free.
+- name: Size the thin pool and its metadata
+  ansible.builtin.set_fact:
+    dedicated_host_pool_geometry: >-
+      {%- set free, extent = dedicated_host_vg_free.stdout.split() | map('int') | list -%}
+      {%- set mib = 1048576 -%}
+      {%- set chunk = dedicated_host_thin_chunk_kib | int * 1024 -%}
+      {%- if dedicated_host_thin_metadata_mib | string | length > 0 -%}
+        {%- set metadata = (dedicated_host_thin_metadata_mib | int * mib + extent - 1) // extent -%}
+      {%- else -%}
+        {%- set metadata = [[(64 * free + chunk - 1) // chunk, (2 * mib + extent - 1) // extent] | max,
+                            (16192 * mib) // extent] | min -%}
+      {%- endif -%}
+      {%- if dedicated_host_vg_reserve_mib | string | length > 0 -%}
+        {%- set reserve = (dedicated_host_vg_reserve_mib | int * mib + extent - 1) // extent -%}
+      {%- else -%}
+        {%- set reserve = 2 * metadata -%}
+      {%- endif -%}
+      {{ {'pool_extents': free - 2 * metadata - reserve, 'metadata_kib': metadata * extent // 1024,
+          'reserve_kib': reserve * extent // 1024} }}
+  when: dedicated_host_pool.rc != 0
+
+- name: Require room for the pool beside its metadata and reserve
+  ansible.builtin.assert:
+    that: dedicated_host_pool_geometry.pool_extents | int > 0
+    fail_msg: >-
+      {{ dedicated_host_volume_group }} cannot hold {{ dedicated_host_pool_geometry.metadata_kib }} KiB of
+      metadata, its spare and a {{ dedicated_host_pool_geometry.reserve_kib }} KiB reserve; nothing was changed.
+  when: dedicated_host_pool.rc != 0
+
+# --zero=y: a newly provisioned chunk never shows data a deleted volume left.
+- name: Create the thin pool
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/lvcreate
+      - --yes
+      - --type=thin-pool
+      - --extents={{ dedicated_host_pool_geometry.pool_extents }}
+      - --chunksize={{ dedicated_host_thin_chunk_kib }}k
+      - --poolmetadatasize={{ dedicated_host_pool_geometry.metadata_kib }}k
+      - --zero=y
+      - --name={{ dedicated_host_thin_pool }}
+      - "{{ dedicated_host_volume_group }}"
+  when: dedicated_host_pool.rc != 0
+  changed_when: true
+
+- name: Read the thin pool
+  ansible.builtin.command:
+    argv: [/usr/sbin/lvs, --noheadings, --options, lv_attr, "{{ dedicated_host_volume_group }}/{{ dedicated_host_thin_pool }}"]
+  register: dedicated_host_pool_after
+  changed_when: false
+
+- name: Require the pool to be a thin pool
+  ansible.builtin.assert:
+    that: dedicated_host_pool_after.stdout | trim is match('t')
+    fail_msg: "{{ dedicated_host_volume_group }}/{{ dedicated_host_thin_pool }} exists but is not a thin pool."

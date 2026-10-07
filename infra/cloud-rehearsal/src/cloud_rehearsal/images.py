@@ -21,6 +21,8 @@ S3_DOUBLE = "versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361
 TRAEFIK = "traefik:v3.5@sha256:16acb89c6db341182970d6fdafece31303b0a380a8ed7aa51682e225229bf1d2"
 HELM = "alpine/helm:3.19@sha256:b1a7293aa1f89f1c234d223b9cfc441abe4af4b4534ae6ba11a4824f647771be"
 BUSYBOX = "rancher/mirrored-library-busybox:1.37.0@sha256:101b4afd76732482eff9b95cae5f94bcf295e521fbec4e01b69c5421f3f3f3e5"
+# The local-storage drill's agents take LVM and the thin-pool tools from here.
+ALPINE = "alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
 
 # What K3s v1.35 itself runs with traefik, servicelb and metrics-server
 # disabled. Imported by tag: K3s's own manifests reference them by tag.

@@ -1,6 +1,7 @@
 ---
-base_admin_ssh_cidrs:
-  - 192.0.2.1/32
+# Administration arrives over the company NetBird (wt0). List a CIDR only for
+# a temporary break-glass run; the next run without it retires the rule.
+base_admin_ssh_cidrs: []
 base_administrator_authorized_keys:
   - ssh-ed25519 replace-with-operator-public-key
 
@@ -13,3 +14,6 @@ k3s_etcd_s3_region: eu-central-003
 k3s_etcd_s3_bucket: replace-with-database-backup-bucket
 k3s_etcd_s3_access_key: replace-with-database-backup-key-id
 k3s_etcd_s3_secret_key: replace-with-database-backup-application-key
+# Dedicated agents (docs/runbooks/hosted/dedicated-host.md) add, from SOPS:
+#   dedicated_host_tang_keys <- tang-keys.{version}.sops.json
+#   dedicated_host_recovery_passphrase_<host, - as _> <- one file per host

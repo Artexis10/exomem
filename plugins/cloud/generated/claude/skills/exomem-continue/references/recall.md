@@ -155,13 +155,13 @@ abstained packet; `anchors` (partial, `retrieval_named`, competing candidates),
 - `follow_up`: a short follow-up naming nothing new ("and the results?") with one
   page clearly ahead in this conversation's thread is carried as one `partial`
   anchor; if two are close, both go under `ambiguity`.
-- `retrieval`, `status: "retrieval_carried"`: no anchor was named but the turn's
-  distinctive words clearly reach one compiled page. Nothing was resolved; recall
-  alone put it there, and the continuity token now names it. A turn with nothing
-  distinctive abstains `unresolved`.
+- `retrieval`: the turn's distinctive words reach one compiled page; the
+  continuity token names it. Named by its title it is `resolved`
+  (`lexical_overlap`, `retrieval`), else `retrieval_carried` (recall alone).
+  Entities its served units name and link are `partial`
+  (`carried_link`, `via` that page). Nothing distinctive abstains `unresolved`.
 - `retrieval_named`: several pages reached this way; nothing is carried, the
-  packet abstains `unresolved` and lists them under `anchors[]`. Unlike
-  `ambiguity` (two anchors that both resolved), nothing resolved. Pass one as
+  packet abstains `unresolved` and lists them under `anchors[]`. Pass one as
   `anchor`.
 
 **`continuity`.** Every packet returns one token (abstentions too) identifying

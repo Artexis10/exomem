@@ -11,6 +11,7 @@ The production PostgreSQL host serves Substrate authentication, billing and mult
 - Make Exomem consume a versioned, non-secret infrastructure dependency contract instead of managing the host. Keep the current Hetzner project and shared private network for this ownership split.
 - Preserve canonical Bitwarden bindings, existing encrypted database credentials, backup lineage and key-only managed SSH. Separate host administration from application-owned migrations.
 - Establish a shared, code-managed NetBird Cloud administration standard for our own infrastructure: restricted peer groups, ordinary managed OpenSSH over the private mesh and verified recovery access. Begin with the control host; Q, Exomem and Substrate consume the shared policy rather than copying it. Extend adoption to the owner phone, workstations and Moshi connections. Retain Tailscale only during staged migration, retiring each dependency after its NetBird replacement is verified.
+- After the handover, move the control host to its own Substrate Hetzner project. Exomem's cellctl and gateway then reach the database over `verify-full` TLS from one allowlisted address instead of the private network (design decision 10).
 - Keep migration execution disabled until access, recovery, independent review and exact saved-plan gates pass. No optional runtime capability or model is introduced.
 
 ## Capabilities
@@ -22,7 +23,9 @@ The production PostgreSQL host serves Substrate authentication, billing and mult
 
 ### Modified Capabilities
 
-None. The existing private-alpha infrastructure change remains evidence for the deployment contracts inherited by this extraction; its unarchived requirements are not silently rewritten here.
+- `cloud-node-pool`: an agent node's firewall admits SSH only during a declared break-glass window; routine administration uses the company NetBird.
+
+The existing private-alpha infrastructure change remains evidence for the deployment contracts inherited by this extraction; its unarchived requirements are not silently rewritten here.
 
 ## Impact
 

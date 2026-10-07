@@ -28,6 +28,13 @@ def _k3s_tasks() -> str:
     )
 
 
+def _no_dedicated_hosts(tmp_path: Path) -> str:
+    """The explicit empty host list the generator requires when there are none."""
+    path = tmp_path / "no-dedicated-hosts.json"
+    path.write_text("{}", encoding="utf-8")
+    return str(path)
+
+
 def test_node_memory_qos_is_opt_in_and_renders_the_measured_kubelet_configuration() -> None:
     # Catch accidental shared-node activation and a misrendered runtime bundle;
     # the live isolated gate separately proves effective kernel controls.
@@ -69,7 +76,6 @@ def test_base_role_hardens_ssh_firewall_time_logging_and_disk_support() -> None:
 
     for package in ("cryptsetup", "fail2ban", "ufw", "unattended-upgrades"):
         assert package in defaults
-    assert "base_admin_ssh_cidrs" in tasks
     assert "ansible.builtin.apt" in tasks
     assert "ansible.builtin.systemd_service" in tasks
     assert "PermitRootLogin prohibit-password" in ssh
@@ -119,8 +125,6 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert names.index(reset["name"]) > names.index("Wait for the local Kubernetes API readiness endpoint")
     assert "disable:\n  - traefik\n  - servicelb\n  - local-storage" in config
     assert "service-account-max-token-expiration=24h" in config
-    assert "image-gc-high-threshold=75" in config
-    assert "container-log-max-size=10Mi" in config
     assert "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log" in config
     assert "admission-control-config-file=/etc/rancher/k3s/admission-config.yaml" in config
     assert 'etcd-snapshot-schedule-cron: "*/30 * * * *"' in config
@@ -174,6 +178,8 @@ def test_inventory_generator_emits_only_non_sensitive_host_coordinates(tmp_path:
             str(generator),
             str(terraform_output),
             str(inventory),
+            "--dedicated-hosts",
+            _no_dedicated_hosts(tmp_path),
             "--user",
             "alpha-admin",
         ],
@@ -207,7 +213,10 @@ def test_site_playbook_provisions_control_database_server_separately() -> None:
     assert "- postgres" in site
     # Independent plays, so a control-database failure never touches the
     # fleet-node plays (harden, server, agents), and vice versa.
-    assert site.count("any_errors_fatal: true") == 4
+    import yaml
+    plays = yaml.safe_load(site)
+    assert [play["hosts"] for play in plays].count("control_nodes") == 1
+    assert all(play["any_errors_fatal"] is True for play in plays)
 
 
 def test_postgres_role_pins_version_and_separates_public_from_private_roles() -> None:
@@ -669,6 +678,8 @@ def test_inventory_generator_optionally_emits_the_control_database_host(
             str(generator),
             str(terraform_output),
             str(inventory),
+            "--dedicated-hosts",
+            _no_dedicated_hosts(tmp_path),
             "--user",
             "alpha-admin",
         ],
@@ -684,6 +695,95 @@ def test_inventory_generator_optionally_emits_the_control_database_host(
         "ansible_user": "alpha-admin",
         "postgres_private_ip": "10.50.1.20",
     }
+
+
+def test_inventory_generator_addresses_hosts_by_their_administration_address(
+    tmp_path: Path,
+) -> None:
+    generator = ROOT / "infra/scripts/generate_ansible_inventory.py"
+    terraform_output = tmp_path / "foundation.json"
+    terraform_output.write_text(
+        json.dumps(
+            {
+                "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
+                "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
+                "control_db_server_ipv4": {"sensitive": False, "value": "192.0.2.20"},
+                "control_db_private_ip": {"sensitive": False, "value": "10.50.1.20"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    terraform_output.chmod(0o600)
+    addresses = tmp_path / "admin-addresses.json"
+
+    # One private map serves every flow, including ones whose inventory omits
+    # some of the hosts it names.
+    addresses.write_text(
+        json.dumps({"exomem-alpha": "100.64.0.10", "exomem-agent-01": "100.64.0.31"}),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "python3",
+            str(generator),
+            str(terraform_output),
+            str(tmp_path / "inventory.json"),
+            "--dedicated-hosts",
+            _no_dedicated_hosts(tmp_path),
+            "--admin-addresses",
+            str(addresses),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    children = json.loads((tmp_path / "inventory.json").read_text(encoding="utf-8"))[
+        "all"
+    ]["children"]
+    assert children["hosted_nodes"]["hosts"]["exomem-alpha"]["ansible_host"] == "100.64.0.10"
+    # A host the mapping does not name keeps its public address.
+    assert (
+        children["control_nodes"]["hosts"]["substrate-control-01"]["ansible_host"]
+        == "192.0.2.20"
+    )
+
+
+def test_a_module_result_cannot_shadow_an_inventory_variable(tmp_path: Path) -> None:
+    # Root on any host can make a module return arbitrary ansible_facts. Peers
+    # render inventory variables such as private_node_ip into wg-quick files
+    # they execute as root, so a returned fact must never replace one.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN to run pinned Ansible")
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "hostile_facts.py").write_text(
+        "#!/usr/bin/python3\nimport json\n"
+        "print(json.dumps({'changed': False, 'ansible_facts': "
+        "{'private_node_ip': '10.0.0.9/32 dev wgexomem; touch /tmp/owned; true'}}))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "inventory.ini").write_text(
+        "node ansible_connection=local private_node_ip=10.0.0.1\n", encoding="utf-8"
+    )
+    (tmp_path / "play.yml").write_text(
+        "- hosts: node\n  gather_facts: false\n  become: false\n  tasks:\n"
+        "    - hostile_facts: {}\n"
+        "    - ansible.builtin.assert: {that: \"private_node_ip == '10.0.0.1'\"}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "-i", "inventory.ini", "play.yml"],
+        cwd=tmp_path,
+        env={**os.environ, "ANSIBLE_CONFIG": str(ANSIBLE / "ansible.cfg"),
+             "ANSIBLE_LIBRARY": str(library)},
+        check=False,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_ansible_syntax_with_pinned_binary() -> None:

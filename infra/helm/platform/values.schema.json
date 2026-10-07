@@ -449,6 +449,57 @@
         "encryptionSecretNamespace": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
       }
     },
+    "cellStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "local", "snapshotController"],
+      "properties": {
+        "domain": {"enum": ["hetzner", "local"]},
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "backupConcurrencyPerNode", "maxCellGib"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "backupConcurrencyPerNode": {"type": "integer", "minimum": 1},
+            "maxCellGib": {"type": "integer", "minimum": 4}
+          }
+        },
+        "snapshotController": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image"],
+          "properties": {
+            "image": {"type": "string", "pattern": "^[^@\\s]+@sha256:[a-f0-9]{64}$"}
+          }
+        }
+      }
+    },
+    "topolvm": {
+      "type": "object",
+      "required": ["fullnameOverride"],
+      "properties": {
+        "fullnameOverride": {"type": "string", "minLength": 1},
+        "lvmd": {
+          "type": "object",
+          "properties": {
+            "deviceClasses": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "thin-pool": {
+                    "type": "object",
+                    "required": ["overprovision-ratio"],
+                    "properties": {"overprovision-ratio": {"const": 1.0}}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "edge": {
       "type": "object",
       "additionalProperties": false,

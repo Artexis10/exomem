@@ -52,6 +52,7 @@ def test_record_memory_exposes_the_twelve_declared_actions() -> None:
             "rebaseline",
             "discard",
             "import",
+            "history",
         }
     )
 

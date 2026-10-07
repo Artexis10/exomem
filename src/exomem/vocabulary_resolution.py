@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +19,7 @@ import yaml
 from yaml.resolver import BaseResolver
 
 from . import source_taxonomy, vault
+from .text_scripts import comparison_words
 from .vault import kb_root
 
 #: Families whose resolution a public receipt may carry. Each family keeps its
@@ -547,7 +547,7 @@ def _nearby_definitions(
 
 
 def _terms(value: str) -> tuple[str, ...]:
-    return tuple(part for part in re.findall(r"[a-z0-9]+", _fold(value)) if len(part) > 2)
+    return tuple(part for part in comparison_words(value) if len(part) > 2)
 
 
 def _reject_equivalent_owners(taxonomy: source_taxonomy.SourceTaxonomy) -> None:

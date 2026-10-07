@@ -183,17 +183,17 @@ def test_an_unreadable_markdown_page_still_fails_closed(tmp_path: Path, monkeypa
 
 
 def _fail_read_of(monkeypatch, name: str, error: OSError) -> list[str]:
-    """Make `read_text` raise for one page, after its stat has already passed."""
+    """Refuse acquisition of one page after its stat has already passed."""
     reads: list[str] = []
-    real_read_text = Path.read_text
+    real_read_bytes = Path.read_bytes
 
-    def read_text(self, *args, **kwargs):  # noqa: ANN001, ANN202
+    def read_bytes(self, *args, **kwargs):  # noqa: ANN001, ANN202
         if self.name == name:
             reads.append(self.name)
             raise error
-        return real_read_text(self, *args, **kwargs)
+        return real_read_bytes(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
     return reads
 
 

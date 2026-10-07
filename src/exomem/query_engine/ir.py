@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,10 +166,3 @@ class Query:
     mode: str = "execute"
     execution_profile: str = "interactive"
     version: int = 1
-
-
-class BackendAdapter(Protocol):
-    """Trusted capability advertisement, not an executor for logical queries."""
-
-    @property
-    def capabilities(self) -> frozenset[str]: ...

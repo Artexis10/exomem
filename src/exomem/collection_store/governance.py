@@ -1202,6 +1202,10 @@ class OperationAuthorization:
         rereading a large file. A callable proves it only when an active session
         grant names the path, so a file nothing else releases is refused unread.
         """
+        from ..governance import raw_protection
+
+        if not raw_protection.permits(self.root, path, self.who):
+            return False
         projection = self.projection_decision(path)
         if projection is not None:
             return projection.level >= 6
@@ -1209,6 +1213,10 @@ class OperationAuthorization:
 
     def allows_history_path(self, path: str) -> bool:
         """Gate audit topology, not file bytes, including deleted legacy paths."""
+        from ..governance import raw_protection
+
+        if not raw_protection.permits(self.root, path, self.who):
+            return False
         targets = self.projection_subjects(path)
         if targets:
             return all(self.decision(subject).level >= 6 for subject in targets)

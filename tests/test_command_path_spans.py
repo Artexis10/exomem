@@ -12,11 +12,11 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from exomem import call_spans, commands, due_state, lexstore
+from exomem.governance.principal import RequestPrincipal
 
 PAGE = "Knowledge Base/Notes/Insights/one.md"
 
@@ -53,7 +53,7 @@ def test_a_served_miss_names_the_build_and_a_hit_names_its_rechecks(
     tmp_path: Path, token: str
 ) -> None:
     _persist(tmp_path)
-    who = SimpleNamespace(audience_id="a", authorization_session_id="s", resolved=True)
+    who = RequestPrincipal(audience_id="a", authorization_session_id="s", issuer_family="test")
     now = dt.datetime(2026, 9, 18, 9, tzinfo=dt.UTC)
     due_state.served_entries(tmp_path, now=now, principal=who)
     first = _names(token)

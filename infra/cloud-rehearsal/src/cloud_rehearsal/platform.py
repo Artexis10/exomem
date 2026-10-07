@@ -29,6 +29,9 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import os
+import re
+import secrets
 import shutil
 from dataclasses import dataclass, field
 from typing import Any
@@ -66,27 +69,26 @@ class Platform:
     overlays: list[str] = field(default_factory=list)
 
 
+def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[str, Any]:
+    """The chart's `cellctl` values for a rehearsal stack: its image, the S3
+    double as B2, and the control database's one address."""
+
+    return {
+        "enabled": True,
+        "image": image,
+        "cellImageRepository": cell_repository,
+        "b2BucketName": BACKUP_BUCKET,
+        "b2BucketId": "rehearsal-bucket-id",
+        "b2AccountId": "rehearsal-account-id",
+        "b2Endpoint": stack.object_store.endpoint(from_host=False),
+        "databaseEgressCidrs": [f"{stack.postgres.ip}/32"],
+    }
+
+
 def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
-    chart = stack.workdir / "platform-chart"
-    if chart.exists():
-        shutil.rmtree(chart)
-    shutil.copytree(PLATFORM_CHART, chart, ignore=shutil.ignore_patterns("charts", "*.tgz"))
-    chart_yaml = yaml.safe_load((chart / "Chart.yaml").read_text(encoding="utf-8"))
-    chart_yaml.pop("dependencies", None)
-    (chart / "Chart.yaml").write_text(yaml.safe_dump(chart_yaml, sort_keys=False), encoding="utf-8")
-    (chart / "Chart.lock").unlink(missing_ok=True)
     pg_cidr = f"{stack.postgres.ip}/32"
     values = {
-        "cellctl": {
-            "enabled": True,
-            "image": config.cellctl_image,
-            "cellImageRepository": config.cell_repository,
-            "b2BucketName": BACKUP_BUCKET,
-            "b2BucketId": "rehearsal-bucket-id",
-            "b2AccountId": "rehearsal-account-id",
-            "b2Endpoint": stack.object_store.endpoint(from_host=False),
-            "databaseEgressCidrs": [pg_cidr],
-        },
+        "cellctl": cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository),
         "capacity": {"attachmentsLimitFallback": config.attachments_limit_fallback},
         "cells": {
             "backupWindow": config.backup_window,
@@ -106,23 +108,90 @@ def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
         },
         "cloudIngress": {"enabled": False},
         "cert-manager": {"enabled": False},
+        # As production today: Hetzner-class cells only. values.validation.yaml
+        # enables local storage to render its templates, but P3 installs no
+        # TopoLVM; the local-storage drill rehearses that domain.
+        "cellStorage": {"local": {"enabled": False}},
     }
+    show_only = (
+        "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
+        "templates/namespaces.yaml",
+    )
+    # cellctl's alert-delivery Role lives in the release namespace; of the
+    # chart's namespaces only that one is needed here.
+    return [
+        doc for source, doc in render_chart(stack, values, show_only=show_only)
+        if source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE
+    ]
+
+
+def render_chart(
+    stack: Stack,
+    values: dict[str, Any],
+    *,
+    show_only: tuple[str, ...] = (),
+    dependencies: bool = False,
+    api_versions: tuple[str, ...] = (),
+) -> list[tuple[str, dict[str, Any]]]:
+    """`helm template` of the platform chart over values.validation.yaml and
+    `values`, as (source template, document) pairs.
+
+    Without `dependencies` the subcharts are dropped, which only templates
+    that read no subchart tolerate. With them, `helm dependency build`
+    fetches every subchart Chart.lock pins, as infra/scripts/validate.sh does.
+    """
+
+    chart = stack.workdir / "platform-chart"
+    if chart.exists():
+        shutil.rmtree(chart)
+    shutil.copytree(PLATFORM_CHART, chart, ignore=shutil.ignore_patterns("charts", "*.tgz"))
+    chart_yaml = yaml.safe_load((chart / "Chart.yaml").read_text(encoding="utf-8"))
+    if not dependencies:
+        chart_yaml.pop("dependencies", None)
+        (chart / "Chart.yaml").write_text(yaml.safe_dump(chart_yaml, sort_keys=False), encoding="utf-8")
+        (chart / "Chart.lock").unlink(missing_ok=True)
     (stack.workdir / "platform-values.yaml").write_text(yaml.safe_dump(values), encoding="utf-8")
+    template = [
+        "helm", "template", "exomem-platform", "/chart",
+        "--namespace", PLATFORM_NAMESPACE,
+        "--values", "/chart/values.validation.yaml",
+        "--values", "/values.yaml",
+        *(arg for path in show_only for arg in ("--show-only", path)),
+        *(arg for version in api_versions for arg in ("--api-versions", version)),
+    ]
+    # Only the template goes to stdout; the fetches report on stderr.
+    script = [
+        *([f"helm repo add {dep['name']} {dep['repository']} >&2" for dep in chart_yaml.get("dependencies", [])]
+          if dependencies else []),
+        *(["helm dependency build /chart >&2"] if dependencies else []),
+        " ".join(template),
+    ]
     rendered = run(
         [
-            "docker", "run", "--rm",
-            "--mount", f"type=bind,source={chart},target=/chart,readonly",
+            # As this user, so the chart copy stays removable; Helm keeps its
+            # repositories and cache in the container's /tmp.
+            "docker", "run", "--rm", "--entrypoint", "sh", "--user", f"{os.getuid()}:{os.getgid()}", "--env", "HOME=/tmp",
+            "--mount", f"type=bind,source={chart},target=/chart",
             "--mount", f"type=bind,source={stack.workdir / 'platform-values.yaml'},target=/values.yaml,readonly",
-            images.HELM, "template", "exomem-platform", "/chart",
-            "--namespace", PLATFORM_NAMESPACE,
-            "--values", "/chart/values.validation.yaml",
-            "--values", "/values.yaml",
-            "--show-only", "templates/cellctl.yaml",
-            "--show-only", "templates/cloud-gateway.yaml",
-            "--show-only", "templates/cloud-storage-class.yaml",
-        ]
+            images.HELM, "-ec", " && ".join(script),
+        ],
+        timeout=600,
     ).stdout
-    return [doc for doc in yaml.safe_load_all(rendered) if isinstance(doc, dict)]
+    return documents_by_source(rendered)
+
+
+def documents_by_source(rendered: str) -> list[tuple[str, dict[str, Any]]]:
+    """Splits `helm template` output into (source template, document) pairs.
+    The source is the path after the chart name, e.g. `templates/cellctl.yaml`
+    or `charts/topolvm/templates/node/daemonset.yaml`."""
+
+    pairs = []
+    for chunk in re.split(r"^---\s*$", rendered, flags=re.MULTILINE):
+        source = re.search(r"^# Source: [^/]+/(.+)$", chunk, flags=re.MULTILINE)
+        document = yaml.safe_load(chunk)
+        if source and isinstance(document, dict):
+            pairs.append((source.group(1).strip(), document))
+    return pairs
 
 
 def _find(documents: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any]:
@@ -151,8 +220,7 @@ def missing_gateway_env(container: dict[str, Any]) -> list[str]:
     return [name for name in GATEWAY_REQUIRED_ENV if name not in present]
 
 
-def apply(stack: Stack, config: PlatformConfig, *, s3_access_key: str, s3_secret_key: str,
-          cellctl_secrets: dict[str, dict[str, str]],
+def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, dict[str, str]],
           pki: tls.RehearsalPki, ingress_source_value: str, ingress_image: str) -> Platform:
     documents = _render(stack, config)
     platform = Platform(rendered=copy.deepcopy(documents))
@@ -165,19 +233,7 @@ def apply(stack: Stack, config: PlatformConfig, *, s3_access_key: str, s3_secret
         f"reclaimPolicy {storage.get('reclaimPolicy')} and volumeBindingMode {storage.get('volumeBindingMode')} kept"
     )
 
-    cellctl = _find(documents, "Deployment", "cellctl")
-    container = cellctl["spec"]["template"]["spec"]["containers"][0]
-    container["command"] = ["python3", "-m", "rehearsal_cellctl"]
-    container.setdefault("env", []).extend(
-        [
-            {"name": "REHEARSAL_S3_ACCESS_KEY", "valueFrom": {"secretKeyRef": {"name": "rehearsal-s3", "key": "accessKey"}}},
-            {"name": "REHEARSAL_S3_SECRET_KEY", "valueFrom": {"secretKeyRef": {"name": "rehearsal-s3", "key": "secretKey"}}},
-        ]
-    )
-    platform.overlays.append(
-        "cellctl Deployment: command `python3 -m rehearsal_cellctl` (real run_loop; B2 key management and "
-        "Hetzner volume listing doubled) and the S3 double's credential from Secret rehearsal-s3"
-    )
+    platform.overlays.append(overlay_cellctl(documents))
 
     gateway = _find(documents, "Deployment", "exomem-cloud-gateway")
     gateway_container = gateway["spec"]["template"]["spec"]["containers"][0]
@@ -197,14 +253,58 @@ def apply(stack: Stack, config: PlatformConfig, *, s3_access_key: str, s3_secret
     others = [doc for doc in documents if doc["kind"] != "Deployment"]
     _kubectl_apply(stack, others)
 
-    secrets = [
-        _secret(CLOUD_NAMESPACE, "rehearsal-s3", {"accessKey": s3_access_key, "secretKey": s3_secret_key}),
-        *(_secret(CLOUD_NAMESPACE, name, data) for name, data in cellctl_secrets.items()),
-    ]
-    _kubectl_apply(stack, secrets)
+    _kubectl_apply(stack, cellctl_secret_documents(stack, cellctl_secrets))
     _apply_ingress(stack, pki, ingress_source_value, ingress_image)
     _kubectl_apply(stack, workloads)
     return platform
+
+
+def overlay_cellctl(documents: list[dict[str, Any]]) -> str:
+    """Runs the rendered cellctl Deployment as `rehearsal_cellctl` with the S3
+    double's credential; returns the overlay's description for the report."""
+
+    cellctl = _find(documents, "Deployment", "cellctl")
+    container = cellctl["spec"]["template"]["spec"]["containers"][0]
+    container["command"] = ["python3", "-m", "rehearsal_cellctl"]
+    container.setdefault("env", []).extend(
+        [
+            {"name": "REHEARSAL_S3_ACCESS_KEY", "valueFrom": {"secretKeyRef": {"name": "rehearsal-s3", "key": "accessKey"}}},
+            {"name": "REHEARSAL_S3_SECRET_KEY", "valueFrom": {"secretKeyRef": {"name": "rehearsal-s3", "key": "secretKey"}}},
+        ]
+    )
+    return (
+        "cellctl Deployment: command `python3 -m rehearsal_cellctl` (real run_loop; B2 key management and "
+        "Hetzner volume listing doubled) and the S3 double's credential from Secret rehearsal-s3"
+    )
+
+
+def cellctl_secrets(stack: Stack, *, cell_token_key: bytes, control_plane_key: str) -> dict[str, dict[str, str]]:
+    """The Secrets the chart's cellctl and gateway read, by name."""
+
+    return {
+        "exomem-cellctl-database-dsn": {"dsn": stack.postgres.dsn("exomem_cellctl", from_host=False)},
+        "exomem-cloud-gateway-database": {"url": stack.postgres.dsn("exomem_gateway", from_host=False)},
+        # D7: 64 hex characters, read by both cellctl and the gateway.
+        "exomem-cloud-cell-token-key": {"current": cell_token_key.hex(), "currentVersion": "1"},
+        "exomem-cloud-gateway-control-plane-key": {"key": control_plane_key},
+        "exomem-cloud-backup-master-key": {
+            "keys": json.dumps({"1": base64.b64encode(secrets.token_bytes(32)).decode()}),
+            "currentVersion": "1",
+        },
+        # Doubled in rehearsal_cellctl; present only because the chart requires them.
+        "exomem-cloud-b2-key-management": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
+        "exomem-cloud-hetzner-read-token": {"token": "rehearsal-double"},
+    }
+
+
+def cellctl_secret_documents(stack: Stack, values: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+    """`values` from cellctl_secrets, plus the S3 double's credential for rehearsal_cellctl."""
+
+    store = stack.object_store
+    return [
+        _secret(CLOUD_NAMESPACE, "rehearsal-s3", {"accessKey": store.access_key, "secretKey": store.secret_key}),
+        *(_secret(CLOUD_NAMESPACE, name, data) for name, data in values.items()),
+    ]
 
 
 def platform_env(platform: Platform, deployment: str) -> list[dict[str, Any]]:

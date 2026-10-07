@@ -21,6 +21,7 @@ from typing import Any
 
 from . import held_fs, reserved_paths
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
+from .vault import _FM_PATTERN
 
 PENDING = "pending"
 RUNNING = "running"
@@ -159,13 +160,11 @@ def is_compute_runtime_error(error: object) -> bool:
 
 def _blocked_presentation_is_current(content: str, error: object) -> bool:
     """Sidecar presentation is current only when it exactly mirrors ledger authority."""
-    if not content.startswith("---\n"):
-        return False
-    end = content.find("\n---\n", 4)
-    if end < 0:
+    match = _FM_PATTERN.match(content)
+    if match is None:
         return False
     fields: dict[str, str] = {}
-    for line in content[4:end].splitlines():
+    for line in match.group(1).splitlines():
         if ":" not in line:
             continue
         key, value = line.split(":", 1)
@@ -1583,15 +1582,6 @@ class MediaJobStore:
         out = {state: 0 for state in STATES}
         out.update({str(row["state"]): int(row["n"]) for row in rows})
         return out
-
-    def has_pending(self) -> bool:
-        conn = self._connect()
-        try:
-            return conn.execute(
-                "SELECT 1 FROM jobs WHERE state = 'pending' LIMIT 1"
-            ).fetchone() is not None
-        finally:
-            conn.close()
 
     def worker_pid(self) -> int | None:
         conn = self._connect()

@@ -20,13 +20,14 @@ the agent calls under that leaf's own authority.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_store, find_corpus
+from . import dreamer_store, episode_capture, find_corpus
 from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
@@ -317,6 +318,10 @@ class Family:
     #: members that caller may see, or None when the family's minimum does not
     #: hold on them. Families without it are served from the stored row.
     release: Callable[[Context, dict[str, Any], Any], dict[str, Any] | None] | None = None
+    #: The stored row is `release` with nothing withheld, so a caller who can be
+    #: withheld nothing is served it as stored. Alias and convention store a
+    #: superset row instead, recomputed for every caller.
+    stores_whole_view: bool = False
 
 
 def _status(page: Any) -> str:
@@ -590,10 +595,17 @@ _HYDRATION_TYPES = (
 
 _ENTITY_TARGETS_SQL = (
     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
-    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+    "ON d.node_key = e.dst_page_key "
     "WHERE e.source_path = ? AND d.page_type = 'entity' AND d.path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     "ORDER BY d.path LIMIT ?"
+)
+
+#: A graph file node `f` dated after the bound date, as `_date` reads its
+#: dates. In SQL, so a row limit applies to qualifying rows only: a page that
+#: many older pages link is still reached by the newer ones.
+_NEWER_THAN = (
+    "substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) > ?"
 )
 
 _CONTRIBUTORS_SQL = (
@@ -601,13 +613,14 @@ _CONTRIBUTORS_SQL = (
     "f.title "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_key = ? AND e.source_path <> ? "
+    "WHERE e.dst_page_key = ? AND e.source_path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    f"AND {_NEWER_THAN} "
     f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
     f"AND COALESCE(f.lifecycle_status, '') NOT IN "
     f"({','.join('?' for _ in _INACTIVE_STATUSES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
-    "AND b.dst_key = ('file:' || e.source_path)) "
+    "AND b.dst_page_key = ('file:' || e.source_path)) "
     "ORDER BY e.source_path, e.src_key LIMIT ?"
 )
 
@@ -645,6 +658,30 @@ def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
     return [*entities, *(path for path in linked if path not in entities)]
 
 
+def _declared_sources(
+    graph: sqlite3.Connection,
+    paths: list[str],
+    visible: Callable[[str], bool] | None = None,
+) -> dict[str, set[str]]:
+    """The Sources each page in ``paths`` declares in frontmatter, by page path.
+
+    ``visible`` drops a Source the caller may not see, so it reads as absent.
+    """
+    sources: dict[str, set[str]] = {path: set() for path in paths}
+    if not paths:
+        return sources
+    marks = ",".join("?" for _ in paths)
+    for src_key, source_key in graph.execute(
+        f"SELECT src_key, dst_page_key FROM graph_edges WHERE src_key IN ({marks}) "
+        "AND origin = 'frontmatter' AND source_anchor = 'sources' "
+        "AND relation_type = 'derived_from'",
+        [f"file:{path}" for path in paths],
+    ):
+        if visible is None or visible(str(source_key).removeprefix("file:")):
+            sources[str(src_key).removeprefix("file:")].add(str(source_key))
+    return sources
+
+
 def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     """The hydration proposal for one entity, from the graph snapshot alone.
 
@@ -670,6 +707,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
         (
             f"file:{entity}",
             entity,
+            entity_date,
             *_HYDRATION_TYPES,
             *sorted(_INACTIVE_STATUSES),
             entity,
@@ -677,11 +715,8 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
         ),
     ).fetchall()
     contributors: dict[str, dict[str, Any]] = {}
-    for path, src_key, updated, origin, exomem_id, title in rows:
+    for path, src_key, _updated, _origin, exomem_id, title in rows:
         path = str(path)
-        fact_date = _date(updated, origin)
-        if not fact_date or fact_date <= entity_date:
-            continue
         entry = contributors.setdefault(
             path,
             {"exomem_id": exomem_id, "title": title, "units": set(), "page_level": False},
@@ -695,7 +730,6 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             ).fetchone()
             if unit is not None:
                 entry["units"].add(str(unit[0]))
-    sources: dict[str, set[str]] = {}
     for path, entry in list(contributors.items()):
         if entry["page_level"]:
             entry["units"].update(
@@ -708,18 +742,9 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             )
         if not entry["units"]:
             contributors.pop(path)
-            continue
-        sources[path] = {
-            str(row[0])
-            for row in graph.execute(
-                "SELECT dst_key FROM graph_edges WHERE src_key = ? "
-                "AND origin = 'frontmatter' AND source_anchor = 'sources' "
-                "AND relation_type = 'derived_from'",
-                (f"file:{path}",),
-            )
-        }
     if not contributors:
         return None
+    sources = _declared_sources(graph, list(contributors))
     # Pages that declare no Source count as ONE origin between them. The graph
     # carries no session key to tell their conversations apart, so the
     # conservative reading is a single conversation-only fan-out.
@@ -914,7 +939,7 @@ def _released(view: dict[str, Any] | None, row: dict[str, Any]) -> dict[str, Any
         return None
     released = {**row, **view}
     released["evidence"] = sorted(view["evidence"], key=lambda item: str(item.get("path") or ""))
-    released["fingerprint"] = dreamer_store.proposal_fingerprint(
+    released["fingerprint"] = view.get("fingerprint") or dreamer_store.proposal_fingerprint(
         family=view["family"],
         subject_ref=view["subject_ref"],
         signal_version=view["signal_version"],
@@ -1611,6 +1636,368 @@ CONVENTION = Family(
 )
 
 
+# ----------------------------------------------------------------------
+# episode-recap fold `upkeep_fold`, and profile `upkeep_profile`
+# ----------------------------------------------------------------------
+#
+# Both are per-subject counts over the published graph: the pages that link
+# one governed page P, grouped into independent origins. Neither keeps page
+# contributions of its own. Each is served per caller (`release`): every
+# served field, count and fingerprint is recomputed from the pages that caller
+# may see, so a withheld page equals an absent one. The stored row is the
+# owner's view, a superset that exists whenever some caller could be served.
+
+FOLD_FAMILY = "upkeep_fold"
+FOLD_KIND = "episode.fold"
+PROFILE_FAMILY = "upkeep_profile"
+PROFILE_KIND = "profile.summary"
+
+#: Independent origins either family needs: two episodes, or two Source origins.
+FOLD_MIN_ORIGINS = 2
+PROFILE_MIN_ORIGINS = 2
+
+#: Governed pages a changed page links that are examined again, per page.
+_LINKED_SUBJECTS_PER_PAGE = PER_PAGE_TERMS
+#: Linking pages read per subject; on the request path, released ones only.
+_LINKER_ROW_LIMIT = 64
+
+_LINKED_SUBJECTS_SQL = (
+    "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
+    "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
+    "WHERE e.source_path = ? AND d.path <> ? AND d.review_eligible = 1 "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "ORDER BY d.path LIMIT ?"
+)
+
+#: Live episode recaps recorded after the subject's date that link the subject
+#: and that it neither links nor cites.
+_RECAPS_SQL = (
+    "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date "
+    "FROM graph_edges e JOIN graph_nodes f "
+    "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
+    "WHERE e.dst_page_key = ? AND substr(e.source_path, 1, ?) = ? "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    f"AND {_NEWER_THAN} "
+    f"AND COALESCE(f.lifecycle_status, '') NOT IN ({','.join('?' for _ in _INACTIVE_STATUSES)}) "
+    "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
+    "AND b.dst_page_key = ('file:' || e.source_path)) "
+    "ORDER BY e.source_path"
+)
+
+#: Active governed pages that link the subject.
+_REFERRERS_SQL = (
+    "SELECT DISTINCT e.source_path FROM graph_edges e JOIN graph_nodes f "
+    "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
+    "WHERE e.dst_page_key = ? AND e.source_path <> ? AND f.review_eligible = 1 "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "ORDER BY e.source_path"
+)
+
+#: The `## Summary` section the entity page shape carries (`link.py`), and
+#: the next heading of its level or above, which ends it.
+_SUMMARY_SECTION = re.compile(r"^##[ \t]+summary[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_SECTION_END = re.compile(r"^#{1,2}[ \t]", re.MULTILINE)
+
+
+def _episodes_prefix() -> str:
+    from . import source_taxonomy
+    from .kbdir import kb_dirname
+
+    return f"{kb_dirname()}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}/"
+
+
+def _subject_node(ctx: Context, subject: str, keep) -> tuple[Any, ...] | None:
+    """The subject's graph row when it is an active governed page the caller may see."""
+    if not _visible(keep, subject):
+        return None
+    node = (
+        ctx.graph()
+        .execute(
+            "SELECT review_eligible, updated_date, origin_date, exomem_id, title "
+            "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+            (f"file:{subject}",),
+        )
+        .fetchone()
+    )
+    return node if node is not None and node[0] else None
+
+
+def _visible(keep, path: str) -> bool:
+    return keep is None or bool(keep(path))
+
+
+def _basis_fingerprint(family: str, subject_ref: str, signal: str) -> str:
+    """A proposal's fingerprint over its subject and signal alone, not its
+    evidence paths, which move without the proposal changing."""
+    return dreamer_store.proposal_fingerprint(
+        family=family, subject_ref=subject_ref, signal_version=signal, evidence=[]
+    )
+
+
+def subject_rows_touched(ctx: Context, paths: list[str]) -> set[str]:
+    """Fold and profile rows the given pages may be members of, by candidate id:
+    the rows on each page and on each governed page it links. A superset."""
+    linked: set[str] = set()
+    if paths:
+        marks = ",".join("?" for _ in paths)
+        try:
+            linked = {
+                str(row[0])
+                for row in ctx.graph().execute(
+                    "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
+                    "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
+                    f"WHERE e.source_path IN ({marks}) AND d.review_eligible = 1",
+                    paths,
+                )
+            }
+        except (sqlite3.Error, Deferred):
+            linked = set()
+    return {
+        dreamer_store.candidate_id(kind, subject, "")
+        for subject in {*paths, *linked}
+        for kind in (FOLD_KIND, PROFILE_KIND)
+    }
+
+
+def _released_rows(cursor, keep) -> list[tuple[Any, ...]]:
+    """The first `_LINKER_ROW_LIMIT` rows whose page the caller may see, in path order."""
+    out: list[tuple[Any, ...]] = []
+    for row in cursor:
+        if _visible(keep, str(row[0])):
+            out.append(row)
+            if len(out) >= _LINKER_ROW_LIMIT:
+                break
+    return out
+
+
+def _linked_subjects(ctx: Context, rel_path: str) -> list[str]:
+    """The page itself and the governed pages it links (at most 16)."""
+    linked = [
+        str(row[0])
+        for row in ctx.graph().execute(
+            _LINKED_SUBJECTS_SQL, (rel_path, rel_path, _LINKED_SUBJECTS_PER_PAGE)
+        )
+    ]
+    return [rel_path, *linked]
+
+
+def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
+    """The fold proposal on one page, as a caller whose predicate is `keep` sees it.
+
+    Two or more episodes recorded recaps that link the page after it was last
+    updated, and the page neither links nor cites them: what was decided or
+    worked on in those conversations may not have reached its home. Revisions
+    of one episode are one origin; superseded revisions are not live.
+    """
+    node = _subject_node(ctx, subject, keep)
+    if node is None:
+        return None
+    since = _date(node[1], node[2])
+    prefix = _episodes_prefix()
+    rows = _released_rows(
+        ctx.graph().execute(
+            _RECAPS_SQL,
+            (
+                f"file:{subject}",
+                len(prefix),
+                prefix,
+                since,
+                *sorted(_INACTIVE_STATUSES),
+                subject,
+            ),
+        ),
+        keep,
+    )
+    episodes: dict[str, tuple[str, str, str]] = {}
+    for path, updated, origin in rows:
+        path = str(path)
+        page = ctx.page(path)
+        frontmatter = page.frontmatter if page is not None else {}
+        key = frontmatter.get("episode") if isinstance(frontmatter, dict) else None
+        origin_key = review_state_digest(["episode", key if isinstance(key, str) else path])
+        # The newest revision speaks for its episode: the recorder's order
+        # token in the filename decides among revisions of one day.
+        parts = episode_capture.filename_parts(Path(path).name)
+        newer = (_date(updated, origin), parts[1] if parts else "", path)
+        if origin_key not in episodes or newer > episodes[origin_key]:
+            episodes[origin_key] = newer
+    if len(episodes) < FOLD_MIN_ORIGINS:
+        return None
+    chosen = sorted((path, origin) for origin, (_d, _o, path) in episodes.items())
+    chosen = chosen[:_OTHER_MEMBERS]
+    subject_entry = _member_entry(ctx, subject, "subject")
+    # Bound to the episodes, not to their revisions' paths: a new revision of
+    # a counted episode neither reopens a dismissal nor restarts delivery.
+    signal = review_state_digest([subject, sorted(episodes)])
+    return {
+        "family": FOLD_FAMILY,
+        "kind": FOLD_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": "",
+        "evidence": [
+            subject_entry,
+            *(_member_entry(ctx, path, "recap", origin=origin) for path, origin in chosen),
+        ],
+        "evidence_count": len(episodes) + 1,
+        "route": {
+            "tool": "maintain_memory",
+            "args": {
+                "mode": "curation",
+                "curation_action": "work-item",
+                "paths": [subject, *(path for path, _origin in chosen)],
+            },
+        },
+        "reason_code": "recaps_newer_than_page",
+        "signal_version": signal,
+        "fingerprint": _basis_fingerprint(FOLD_FAMILY, subject_entry["ref"], signal),
+        "measures": {"episodes": len(episodes)},
+    }
+
+
+def _self_described(page: Any) -> bool:
+    """True when the page says what it is: a `summary` field, or a `## Summary`
+    section with text outside code."""
+    from .vault import _mask_code_spans
+
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    value = frontmatter.get("summary")
+    if isinstance(value, str) and value.strip():
+        return True
+    masked = _mask_code_spans(str(getattr(page, "body", "") or ""))
+    heading = _SUMMARY_SECTION.search(masked)
+    if heading is None:
+        return False
+    following = _SECTION_END.search(masked, heading.end())
+    return bool(masked[heading.end() : following.start() if following else None].strip())
+
+
+def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
+    """The profile proposal on one page, as a caller whose predicate is `keep` sees it.
+
+    Pages of two or more independent origins link the page, and it carries no
+    summary of itself. Origins are the union-find over the referrers' declared
+    Sources the caller may see; referrers that declare none are one origin.
+    """
+    from . import provenance
+
+    if _subject_node(ctx, subject, keep) is None:
+        return None
+    page = ctx.page(subject)
+    if page is None or _self_described(page):
+        return None
+    graph = ctx.graph()
+    referrers = [
+        str(row[0])
+        for row in _released_rows(graph.execute(_REFERRERS_SQL, (f"file:{subject}", subject)), keep)
+    ]
+    if len(referrers) < PROFILE_MIN_ORIGINS:
+        return None
+    # A Source the caller may not see is no origin: the referrer reads as
+    # declaring only the Sources it may see, as on a vault without that Source.
+    sources = _declared_sources(graph, referrers, lambda path: _visible(keep, path))
+    unsourced = {path: _UNSOURCED_ORIGIN for path, declared in sources.items() if not declared}
+    origins = provenance.origin_keys(sources, fallback=unsourced)
+    if len(set(origins.values())) < PROFILE_MIN_ORIGINS:
+        return None
+    firsts: dict[str, str] = {}
+    for path in sorted(referrers, key=lambda path: (origins[path], path)):
+        firsts.setdefault(origins[path], path)
+    chosen = sorted(firsts.values())[:_OTHER_MEMBERS]
+    subject_entry = _member_entry(ctx, subject, "subject")
+    # Bound to the origins: a new referrer of a counted origin changes nothing.
+    signal = review_state_digest([subject, sorted(set(origins.values()))])
+    return {
+        "family": PROFILE_FAMILY,
+        "kind": PROFILE_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": "",
+        "evidence": [
+            subject_entry,
+            *(_member_entry(ctx, path, "referrer", origin=origins[path]) for path in chosen),
+        ],
+        "evidence_count": len(referrers) + 1,
+        "route": {
+            "tool": "edit_memory",
+            "args": {
+                "path": subject,
+                "operation": {"kind": "patch_frontmatter", "field": "summary"},
+            },
+        },
+        "reason_code": "linked_without_summary",
+        "signal_version": signal,
+        "fingerprint": _basis_fingerprint(PROFILE_FAMILY, subject_entry["ref"], signal),
+        "measures": {"origins": len(set(origins.values())), "referrers": len(referrers)},
+    }
+
+
+def _subject_family(
+    name: str,
+    kind: str,
+    view: Callable[..., dict[str, Any] | None],
+    *,
+    linked_from: Callable[[str], bool],
+) -> Family:
+    """A family whose one proposal per subject page is `view` of that page.
+
+    A changed page recomputes its own proposal, and those of the governed
+    pages it links when `linked_from(path)` says it can count toward them.
+    """
+
+    def refresh(ctx: Context, subject: str) -> None:
+        kwargs = view(ctx, subject, keep=None) if _sig(ctx, subject) else None
+        if kwargs is None:
+            ctx.store.resolve(
+                ctx.conn,
+                dreamer_store.candidate_id(kind, subject, ""),
+                producer=PRODUCER,
+                now=ctx.now,
+            )
+            return
+        ctx.store.upsert_proposal(
+            ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, **kwargs
+        )
+
+    def on_page(ctx: Context, rel_path: str) -> None:
+        subjects = _linked_subjects(ctx, rel_path) if linked_from(rel_path) else [rel_path]
+        for subject in subjects:
+            refresh(ctx, subject)
+
+    def on_delete(ctx: Context, rel_path: str) -> None:
+        refresh(ctx, rel_path)
+
+    def revalidate(ctx: Context, row: dict[str, Any]) -> None:
+        refresh(ctx, str(row.get("subject_path") or ""))
+
+    def propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+        subject = str(row.get("subject_path") or "")
+        return view(ctx, subject, keep=None) if _sig(ctx, subject) else None
+
+    def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+        return _released(view(ctx, str(row.get("subject_path") or ""), keep=keep), row)
+
+    return Family(
+        name=name,
+        kinds=(kind,),
+        on_page=on_page,
+        on_delete=on_delete,
+        revalidate=revalidate,
+        propose=propose,
+        release=release,
+        stores_whole_view=True,
+    )
+
+
+FOLD = _subject_family(
+    FOLD_FAMILY,
+    FOLD_KIND,
+    _fold_view,
+    linked_from=lambda path: path.startswith(_episodes_prefix()),
+)
+PROFILE = _subject_family(PROFILE_FAMILY, PROFILE_KIND, _profile_view, linked_from=lambda _p: True)
+
+
 def tick_start(ctx: Context) -> None:
     """Once per tick: resume after the size cap, and follow a registry change.
 
@@ -1644,17 +2031,34 @@ def tick_start(ctx: Context) -> None:
         ctx.store.set_meta(ctx.conn, _REGISTRY_META, registry.content_hash)
 
 
-def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
-    """One stored row as a caller whose release predicate is `keep` may see it.
+def served_per_caller(row: dict[str, Any], *, withheld: bool) -> bool:
+    """Whether `row` is recomputed for a caller, rather than served as stored.
 
-    A family without per-item egress is served from its stored row. A global
-    family recomputes the row from the members that caller may see, so a
-    withheld page equals an absent one in every served field, count and
-    fingerprint. None when the family's minimum does not hold on them, or the
-    sidecar cannot be read without waiting.
+    `withheld` says whether any page can be withheld from that caller. Alias
+    and convention rows are always recomputed. Fold and profile rows are
+    recomputed only when something can be withheld: otherwise the stored row
+    is that caller's exact view.
     """
     family = family_for(str(row.get("family") or ""))
     if family is None or family.release is None:
+        return False
+    return withheld or not family.stores_whole_view
+
+
+def release(
+    ctx: Context, row: dict[str, Any], keep, *, withheld: bool = True
+) -> dict[str, Any] | None:
+    """One stored row as a caller whose release predicate is `keep` may see it.
+
+    A row that `served_per_caller` does not recompute is served as stored.
+    The others (alias and convention always, fold and profile when a page can
+    be withheld from the caller) are recomputed from the pages and Sources
+    that caller may see. A withheld page then equals an absent one in every
+    served field, count and fingerprint. None when the family's minimum does
+    not hold on them, or the sidecar cannot be read without waiting.
+    """
+    family = family_for(str(row.get("family") or ""))
+    if family is None or family.release is None or not served_per_caller(row, withheld=withheld):
         return row
     try:
         return family.release(ctx, row, keep)
@@ -1663,7 +2067,7 @@ def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
 
 
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION]
+REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE]
 
 
 def family_names() -> tuple[str, ...]:

@@ -75,7 +75,9 @@ def main() -> None:
     asyncio.run(
         run_loop(
             os.environ["CELLCTL_DATABASE_DSN"],
-            ClusterClient(k8s.ApiClient()),
+            # As cellctl.main.run: without its storage configuration the
+            # client reads no local PV's node, so no cell's node is ever lost.
+            ClusterClient(k8s.ApiClient(), storage_config=cluster_config.storage),
             object_storage,
             FakeHetznerVolumeProvider(),
             build_secrets_config(),

@@ -17,6 +17,31 @@ from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
 
 
+def test_a_guest_is_refused_the_audit_before_and_after_a_raw_source_lands(vault: Path) -> None:
+    """The audit's link-existence walks and index checks read every file, so a
+    guest is refused it on a vault with no policy too; the owner's audit
+    counts a protected source."""
+    from exomem import commands
+    from exomem.governance import principal
+
+    guest = principal.RequestPrincipal(
+        "principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic",
+    )
+    owner = principal.owner_principal(surface="library")
+    with principal.request_scope(owner):
+        before = commands.op_audit(vault, categories=["unprocessed_source"])
+    with principal.request_scope(guest):
+        refused = commands.op_audit(vault, categories=["unprocessed_source"])
+    hidden = vault / "Knowledge Base/Sources/__exomem_raw_v1__private.md"
+    hidden.write_text("---\ntype: source\ncreated: 2020-01-01\ningested_into: []\n---\nPrivate source\n", encoding="utf-8")
+    with principal.request_scope(guest):
+        assert commands.op_audit(vault, categories=["unprocessed_source"]) == refused
+    with principal.request_scope(owner):
+        after = commands.op_audit(vault, categories=["unprocessed_source"])
+    assert refused == {"available": False, "reason": "audience_restricted"}
+    assert after["summary"]["unprocessed_source"] == before["summary"].get("unprocessed_source", 0) + 1
+
+
 def test_audit_and_reconcile_import_in_fresh_process() -> None:
     imported = subprocess.run(
         [sys.executable, "-c", "import exomem.audit; import exomem.reconcile"],
@@ -766,3 +791,20 @@ def test_embedding_drift_flags_never_embedded_file(vault: Path) -> None:
     assert "Knowledge Base/Notes/Insights/brand-new-out-of-band.md" in flagged, flagged
     assert embedded_rel not in flagged  # already embedded + fresh → not flagged
     assert all(f.category == "embedding_drift" for f in findings)
+
+
+def test_a_link_inside_an_origin_carrier_does_not_adopt_an_orphan_entity(tmp_path: Path) -> None:
+    """A carrier is recorded data, not a use of the entity it names."""
+    entity = _write_entity(tmp_path, folder="Places", name="Aster Hall", entity_type="place")
+    note = tmp_path / "Knowledge Base" / "Notes" / "Insights" / "carrier-only.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n"
+        '<!-- exomem-origin:v1 {"reason":"Met at [[Entities/Places/Aster Hall]]."} -->\n\n'
+        "No prose link.\n",
+        encoding="utf-8",
+    )
+
+    findings = audit_module.audit(tmp_path, categories=["orphan_entity"]).findings
+
+    assert [finding.path for finding in findings] == [entity.relative_to(tmp_path).as_posix()]

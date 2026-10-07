@@ -350,13 +350,13 @@ def _mebibytes(quantity: str) -> int:
     return int(quantity.removesuffix("Mi"))
 
 
-def test_default_cell_memory_limit_is_3gi_with_a_1gi_request() -> None:
+def test_default_cell_memory_limit_is_3gi_with_a_512mi_request() -> None:
     """The first index build over a large restored vault peaked above 1.2 GiB and
     was OOM-killed at 1536Mi; the request stays at what an idle cell needs."""
     statefulset = _find(render_cell_manifests(_spec()), "StatefulSet")
     resources = statefulset["spec"]["template"]["spec"]["containers"][0]["resources"]
     assert resources["limits"]["memory"] == "3Gi"
-    assert resources["requests"]["memory"] == "1Gi"
+    assert resources["requests"]["memory"] == "512Mi"
 
 
 def test_quota_memory_limit_has_headroom_for_a_job_pod_beside_the_serving_pod() -> None:

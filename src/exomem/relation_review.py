@@ -9,7 +9,7 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -2052,27 +2052,6 @@ def cleanup_stale_lifecycle_prepared_batch(
     return LifecyclePreparedCleanupBatch(tuple(cleaned), tuple(blocked))
 
 
-def cleanup_stale_lifecycle_prepared(
-    vault_root: Path,
-    inspection: LifecyclePreparedInspection,
-) -> str:
-    """Compatibility wrapper routed through the guarded batch cleanup path."""
-    result = cleanup_stale_lifecycle_prepared_batch(vault_root, (inspection,))
-    if result.cleaned:
-        return result.cleaned[0]
-    issue = result.blocked[0]
-    raise RelationReviewError(
-        issue.code,
-        "prepared lifecycle cleanup was blocked by changed or unsafe state",
-    )
-
-
-def lifecycle_identity_reserved(vault_root: Path, page_identity: str) -> bool:
-    """Return whether any exact lifecycle identity directory reserves the UUID."""
-    _, _, census = _inspect_lifecycle_identity(vault_root, page_identity)
-    return census.directory_identity is not None
-
-
 def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
     inspected = _inspect_lifecycle_identity(root, page_identity)
     _, names, census = inspected
@@ -3803,6 +3782,8 @@ def commit_prepared_creation_draft(
     predecessor_content_hash: str | None = None,
     semantic_state: Any | None = None,
     extra_required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
+    origin_required_guards: tuple[vault.PathGuard, ...] = (),
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> CreationDraftCommit:
     """Commit a draft already validated by ``prepare_commit_creation_draft``.
 
@@ -3869,7 +3850,7 @@ def commit_prepared_creation_draft(
             resumed = False
             required_guards: tuple[
                 vault.PathGuard | vault.DirectoryCensusGuard, ...
-            ] = tuple(extra_required_guards)
+            ] = (*extra_required_guards, *origin_required_guards)
             writes: list[vault.PlannedWrite] = []
             if existing_artifact is not None:
                 if attempt.artifact_bytes_hash is None:
@@ -3953,6 +3934,7 @@ def commit_prepared_creation_draft(
                         vault_root=root,
                         required_guards=required_guards,
                         _vocabulary_auxiliaries=manifest,
+                        _validate_prepared_bindings=_validate_prepared_bindings,
                     )
                 else:
                     from . import semantic_index
@@ -3966,6 +3948,7 @@ def commit_prepared_creation_draft(
                             vault_root=root,
                             required_guards=required_guards,
                             _vocabulary_auxiliaries=manifest,
+                            _validate_prepared_bindings=_validate_prepared_bindings,
                         )
                     finally:
                         semantic_index.reset_parent_states(state_token)
@@ -3978,6 +3961,12 @@ def commit_prepared_creation_draft(
                     "DRAFT_ID_IN_USE", "draft identity became reserved"
                 ) from error
             except vault.PathGuardError:
+                try:
+                    vault.recheck_path_guards(root, origin_required_guards)
+                except vault.PathGuardError as origin_error:
+                    raise RelationReviewError(
+                        "ORIGIN_INPUT_STALE", "retained input changed during commit"
+                    ) from origin_error
                 if extra_required_guards:
                     raise RelationReviewError(
                         "STALE_VOCABULARY_BINDING",

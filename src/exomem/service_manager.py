@@ -428,6 +428,7 @@ class Supervisor:
             return
         target = self.records.active() or self.initial_target
         target = await self.runtime.inspect(target)
+        self._migration_declared(target)
         # A window shorter than the cold worker's warm stops it mid-warm, and
         # the unit restarts into the same cold catalog.
         client = await self.runtime.start(target, timeout=self._replacement_budget())
@@ -1253,8 +1254,10 @@ class WorkerRuntime:
             return True, "vault binding unavailable"
         from . import state_migration
         from .collection_store.authority import required_state_compatibility_ids
+        from .governance import raw_protection
 
         required = required_state_compatibility_ids(Path(vault))
+        required |= raw_protection.required_compatibility(Path(vault))
         recorded = state_migration.recorded_descriptor_ids(Path(vault))
         physical, optional = state_migration.partition_state_descriptor_ids(recorded or ())
         required |= optional

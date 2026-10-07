@@ -158,7 +158,7 @@ def _note_pairs(connection, path, known_types, after):
         comparison = ">=" if inclusive else ">"
         return connection.execute(
             "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
-            "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_key "
+            "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND e.relation_type IN ('links_to', 'relates_to') AND t.kind='file' "
             "AND t.lifecycle_status='active' "
             f"AND t.page_type IN ({placeholders}) AND t.path {comparison} ? "
@@ -199,7 +199,7 @@ def _candidate_rows(connection, path, known_types, anchor, after):
             "SELECT s.path, s.source_hash, s.exomem_id, s.page_type, "
             "t.path, t.source_hash, t.exomem_id, t.page_type "
             "FROM graph_edges e JOIN graph_nodes s ON s.node_key=e.src_key "
-            "JOIN graph_nodes t ON t.node_key=e.dst_key "
+            "JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND e.relation_type='relates_to' "
             "AND s.kind='file' AND t.kind='file' "
             "AND s.lifecycle_status='active' AND t.lifecycle_status='active' "

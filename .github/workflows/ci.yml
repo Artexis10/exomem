@@ -724,6 +724,29 @@ jobs:
           echo "then re-run this job (docs/release.md, release flow)" >&2
           exit 1
 
+  # Engineering-practices quality check (https://github.com/Artexis10/engineering-practices):
+  # fails on dead code a pull request adds and posts the Quality report. It informs
+  # review and is deliberately outside the required CI gate below.
+  quality:
+    if: ${{ github.event_name == 'pull_request' && !cancelled() }}
+    # The test jobs named in .github/quality.yml, so their runtime is known.
+    needs: [core-tests, harness-tests, windows-held-filesystem, tui, product-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Artexis10/engineering-practices@v1
+
   gate:
     name: required CI gate
     # Surface dependency failures, but let superseded PR runs release the runner.

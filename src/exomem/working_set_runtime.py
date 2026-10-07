@@ -717,14 +717,15 @@ _UNDECIDED = object()
 
 
 def _heat_release_filter(
-    vault_root: Path, *, purpose: str | None = None
+    vault_root: Path, profile: working_set_heat.HeatProfile, *, purpose: str | None = None
 ) -> Callable[[str], bool] | None:
     """The request's one release decision for heat, or `None` when every page
-    is released (a vault that withholds nothing)."""
+    `profile` ranks or marks is released (a vault that withholds nothing)."""
     from .governance import egress
 
+    pages = [*profile.all_rows, *(path for mark in profile.sessions.values() for path in mark.paths)]
     try:
-        return egress.page_release_filter(vault_root, purpose=purpose)
+        return egress.page_release_filter(vault_root, purpose=purpose, pages=pages)
     except Exception:  # noqa: BLE001 - undecidable is not released
         log.warning("heat release decision unavailable; releasing nothing", exc_info=True)
         return lambda _path: False
@@ -775,7 +776,9 @@ def visible_marks(
     if released is _UNDECIDED:
         from .governance import egress
 
-        released = egress.page_release_filter(vault_root, purpose=purpose) if wanted else None
+        released = egress.page_release_filter(
+            vault_root, purpose=purpose, pages=[path for mark in wanted for path in mark.paths]
+        ) if wanted else None
 
     out: dict[str, working_set_heat.SessionMark] = {}
     workspace_marks = 0
@@ -970,6 +973,7 @@ def lexical_evidence(
     by_path = {row.path: row for row in rows if row.path}
     if not by_path:
         return [], "available"
+    turn = working_set_index.subject_text(turn)
     try:
         # A full-page match on the same single name word is not a second fact.
         # Require two distinct content units (words or unspaced runs); exact
@@ -1394,6 +1398,9 @@ def carry_named_groups(
     """
     from . import find, lexstore
 
+    # The resolver's own reading of the turn (`analyze_turn`): pair positions
+    # are kept in its token coordinates, so both must read the same text.
+    turn = working_set_index.subject_text(turn)
     try:
         stems = pairable_stems(turn)
         skipped = frozenset(pairable_stems(skip_terms)) if skip_terms else frozenset()
@@ -1455,7 +1462,7 @@ def carry_named_groups(
                     for path, _score in hits:
                         page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
                         if page is not None:
-                            found = frozenset(content_stems(page.title + " " + page.body))
+                            found = frozenset(content_stems(page.title + " " + page.search_body))
                             contacts.setdefault(path, set()).update(
                                 (left, right) for left, right, pair in occurrences
                                 if pair in component and set(pair) <= found
@@ -1889,7 +1896,8 @@ def serve(
         owner = working_set_heat._owner_request()
         keyed = attribution is not None and bool(attribution.session or attribution.workspace)
         released = (
-            _heat_release_filter(root, purpose=purpose) if keyed or not owner else None
+            _heat_release_filter(root, heat_profile, purpose=purpose)
+            if keyed or not owner else None
         )
         restricted_view = released is not None and not owner
         if restricted_view:

@@ -62,16 +62,6 @@ _QUESTION_KANJI = "\u4f55"
 #: Snowball stemmer for a word whose letters are all in one of these scripts.
 _SCRIPT_STEMMERS = {"cyrillic": "russian", "greek": "greek", "armenian": "armenian"}
 
-#: Unicode planes searched when the character tables are built. Every
-#: combining mark, symbol and variation selector in Unicode sits in the Basic
-#: or Supplementary Multilingual Plane or in plane 14.
-_MARK_PLANES = ((0x0000, 0x1FFFF), (0xE0000, 0xEFFFF))
-
-#: Variation selectors choose a glyph (text or emoji presentation, an
-#: ideographic variant); they carry no letter, so they are dropped before
-#: tokenizing rather than kept as marks that would glue a keycap to its digit.
-_VARIATION_SELECTORS = ((0x180B, 0x180D), (0x180F, 0x180F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
-
 # Above this fraction of the retained corpus, bounded per-path repair gives way
 # to the existing full walk. The measurement supporting the value lives in the
 # worker result for the change that introduced incremental corpus repair.
@@ -134,44 +124,9 @@ class TokenUnit(NamedTuple):
     run: bool
 
 
-def _in_mark_planes(code_point: int) -> bool:
-    return any(start <= code_point <= end for start, end in _MARK_PLANES)
-
-
-@lru_cache(maxsize=1)
-def _character_tables() -> tuple[str, dict[int, str | None]]:
-    """(regex class body of every combining mark, raw-text translation table).
-
-    The table runs before NFKC on non-ASCII text. It maps every non-ASCII
-    symbol (S*) and enclosing mark (Me) to a space, so NFKC can never turn one
-    into letters that join the word beside it ("Zorblex™" would otherwise
-    become `zorblextm`, "20℃" `20c`), and it deletes variation selectors.
-    Built once, from the running interpreter's Unicode data.
-    """
-    ranges: list[list[int]] = []
-    table: dict[int, str | None] = {}
-    for start, end in _MARK_PLANES:
-        for code_point in range(start, end + 1):
-            category = unicodedata.category(chr(code_point))
-            if category[0] == "M":
-                if ranges and ranges[-1][1] == code_point - 1:
-                    ranges[-1][1] = code_point
-                else:
-                    ranges.append([code_point, code_point])
-                if category == "Me":
-                    table[code_point] = " "
-            elif category[0] == "S" and code_point > 0x7F:
-                table[code_point] = " "
-    for low, high in _VARIATION_SELECTORS:
-        for code_point in range(low, high + 1):
-            table[code_point] = None
-    marks = "".join(f"\\U{low:08x}-\\U{high:08x}" for low, high in ranges)
-    return marks, table
-
-
 def _mark_class() -> str:
     """Regex class body of every combining mark (Unicode M*)."""
-    return _character_tables()[0]
+    return text_scripts.character_tables()[0]
 
 
 @lru_cache(maxsize=1)
@@ -247,7 +202,7 @@ _STRETCH_RE = re.compile("[A-Za-z0-9\u0080-\U0010ffff]+")
 def _normalized_tokens(stretch: str) -> list[str]:
     """Letter/number tokens of one non-ASCII stretch, after the raw-text
     table, NFKC and casefolding."""
-    table = _character_tables()[1]
+    table = text_scripts.character_tables()[1]
     normalized = unicodedata.normalize("NFKC", stretch.translate(table)).casefold()
     return _scanner()[0].findall(normalized)
 
@@ -323,7 +278,7 @@ def word_forms(word: str) -> tuple[str, ...]:
     before NFKC, as in `tokenize`, so "Zorblex™" is `zorblex`."""
     if word.isascii():
         return (stem_word(word),)
-    table = _character_tables()[1]
+    table = text_scripts.character_tables()[1]
     parts = unicodedata.normalize("NFKC", word.translate(table)).casefold().split()
     return tuple(
         dict.fromkeys(stem for part in parts for stem in _word_unit(part, False).stems)
@@ -411,6 +366,25 @@ def _unknown_error_streak(vault_root: Path, error_class: str | None) -> int:
         return streak
 
 
+def score_token_corpus(
+    tokens_by_path: dict[str, list[str]],
+    query_tokens: list[str],
+    k: int,
+    *,
+    allowed_paths: set[str] | None = None,
+) -> list[tuple[str, float]]:
+    """Score one admitted corpus; candidate filters never change its statistics."""
+    if not query_tokens or not any(tokens_by_path.values()):
+        return []
+    ranker, paths = BM25Index._derive_bm25({path: tokens_by_path[path] for path in sorted(tokens_by_path)})
+    wanted = set(query_tokens)
+    return sorted(
+        ((path, float(score)) for path, score in zip(paths, ranker.get_scores(query_tokens), strict=True)
+         if (allowed_paths is None or path in allowed_paths) and wanted.intersection(tokens_by_path[path])),
+        key=lambda item: (-item[1], item[0]),
+    )[:max(0, k)]
+
+
 class BM25Index:
     """Per-process BM25 corpus over KB markdown files.
 
@@ -445,7 +419,7 @@ class BM25Index:
         if cached is not None and cached[0] == page.mtime:
             self.last_reused += 1
             return cached[1]
-        tokens = _tokenize(page.title + " " + page.body)
+        tokens = _tokenize(page.title + " " + page.search_body)
         self._tokens[path] = (page.mtime, tokens)
         self.last_tokenized += 1
         return tokens
@@ -636,6 +610,7 @@ class BM25Index:
         scope: str = "kb",
         freshness: tuple | None = None,
         allowed_paths: set[str] | None = None,
+        admitted_paths: set[str] | None = None,
         repair: bool = True,
     ) -> list[tuple[str, float]]:
         """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → [].
@@ -658,6 +633,7 @@ class BM25Index:
             scope=scope,
             freshness=freshness,
             allowed_paths=allowed_paths,
+            admitted_paths=admitted_paths,
             repair=repair,
         )
         if indexed is not None:
@@ -671,6 +647,12 @@ class BM25Index:
         tokens = tokenize(query, query=True)
         if not tokens:
             return []
+        if admitted_paths is not None:
+            corpus = self._cache[(vault_root, scope)].tokens_by_path
+            return score_token_corpus(
+                {path: doc for path, doc in corpus.items() if path in admitted_paths},
+                tokens, k, allowed_paths=allowed_paths,
+            )
         scores = bm25.get_scores(tokens)
         ranked = sorted(
             (
@@ -784,6 +766,7 @@ def search(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     repair: bool = True,
 ) -> list[tuple[str, float]]:
     """Module-level convenience using the per-process singleton."""
@@ -794,6 +777,7 @@ def search(
         scope=scope,
         freshness=freshness,
         allowed_paths=allowed_paths,
+        admitted_paths=admitted_paths,
         repair=repair,
     )
 

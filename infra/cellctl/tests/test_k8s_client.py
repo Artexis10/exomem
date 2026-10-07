@@ -173,6 +173,23 @@ def test_the_current_holds_job_and_only_its_own_pod_answer() -> None:
     assert observation.backup_job_snapshot_id == "fresh-snapshot"
 
 
+@pytest.mark.parametrize(
+    ("message", "reported"),
+    # The vault check's own code reaches the operator; any other message a
+    # failed Job leaves (restic's, a shell's) may name vault content, so none does.
+    [("BACKUP_SOURCE_NOT_A_VAULT", "BACKUP_SOURCE_NOT_A_VAULT"), ("open /data/vault/notes/private.md: denied", None)],
+)
+def test_a_failed_backup_reports_only_its_value_free_code(message: str, reported: str | None) -> None:
+    current_backup = hold_job_name("cell-backup", CURRENT_HOLD)
+    pod = _job_pod(current_backup, snapshot_id=message)
+    pod.status.container_statuses[0].state.terminated.exit_code = 1
+
+    observation = _client(hold_started_at=CURRENT_HOLD, jobs={current_backup: _job(failed=True)},
+                          pods=[pod]).observe(CELL_ID, NAMESPACE)
+
+    assert (observation.backup_job_failed, observation.backup_job_failure_code) == (True, reported)
+
+
 def test_the_current_holds_failed_backup_is_observed() -> None:
     jobs = {
         hold_job_name("cell-backup", EARLIER_HOLD): _job(succeeded=True),
@@ -470,6 +487,22 @@ def test_the_isolation_self_check_requires_a_param_ref_to_default_deny_in_the_re
     assert present(NS(**{**good, "name": "something-else"})) is False
     assert present(NS(**{**good, "namespace": "exomem-cloud"})) is False
     assert present(NS(**{**good, "name": None, "selector": NS(match_labels={})})) is False
+
+
+def test_the_retained_delete_self_check_requires_a_param_ref_over_every_persistent_volume() -> None:
+    # A binding narrowed to some PVs would let cellctl delete a claim whose
+    # volume, outside the selector, is still set to Delete.
+    def present(param_ref) -> bool:
+        client = ClusterClient.__new__(ClusterClient)
+        client._admission = _Admission(policy_name="guard", actions=["Deny"], param_ref=param_ref)
+        return client.admission_policy_present("guard", "guard", param_selects_all=True)
+
+    every = dict(name=None, namespace=None, selector=NS(match_labels=None, match_expressions=None),
+                 parameter_not_found_action="Allow")
+    assert present(NS(**every)) is True
+    assert present(None) is False
+    assert present(NS(**{**every, "selector": NS(match_labels={"exomem.io/cell": "x"}, match_expressions=None)})) is False
+    assert present(NS(**{**every, "name": "pv-one", "selector": None})) is False
 
 
 @pytest.mark.parametrize("labels,taints", [

@@ -101,3 +101,13 @@ output "k3s_agent_nodes" {
     }
   }
 }
+
+output "vswitch" {
+  description = "The optional vSwitch subnet dedicated Hetzner servers join on, consumed by the generated Ansible inventory; null when off."
+  value = var.vswitch == null ? null : {
+    vlan_id      = var.vswitch.vlan_id
+    subnet_cidr  = hcloud_network_subnet.vswitch[0].ip_range
+    gateway      = hcloud_network_subnet.vswitch[0].gateway
+    network_cidr = var.private_network_cidr
+  }
+}

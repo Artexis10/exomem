@@ -18,8 +18,9 @@ import datetime as dt
 import hashlib
 import logging
 import os
+import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
@@ -215,6 +216,7 @@ def add(
     extra_frontmatter: Mapping[str, object] | None = None,
     supersede: Sequence[tuple[str, str]] = (),
     defer_fanout_to_terminal: bool = False,
+    raw_protection: bool = False,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -240,6 +242,25 @@ def add(
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
+    from .governance import raw_protection as raw_guard
+    from .governance.principal import effective_principal
+
+    if raw_protection and not raw_guard.applies_to(effective_principal()):
+        raise AddError(
+            code="RAW_PROTECTION_UNAVAILABLE", missing=["raw_protection"], reason=raw_guard.UNAVAILABLE_REASON
+        )
+    if raw_protection and artifact is None:
+        with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
+            original = Path(staging) / "source.txt"
+            original.write_bytes(content.encode("utf-8"))
+            return add(
+                vault_root, source_schema, content="", title=title, source_type=source_type,
+                slug=slug, url=url, tags=tags, why_captured=why_captured, domain=domain,
+                projects=projects, today=today, artifact=SourceArtifact(original, "source.txt", "text/plain"),
+                adoption_seed=adoption_seed, extra_frontmatter=extra_frontmatter,
+                supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
+                raw_protection=True,
+            )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
     # `schema.validate_source` refuses an empty body.
@@ -383,9 +404,15 @@ def add(
         )
     project_keys_clean = list(dict.fromkeys(projects or ()))
     project_plan = project_keys.plan_project_keys(vault_root, project_keys_clean)
+    if raw_protection:
+        # Private capture metadata does not enroll shared vocabulary.
+        taxonomy_plan = replace(taxonomy_plan, writes=(), introductions=())
+        project_plan = replace(project_plan, writes=(), introductions=())
 
     supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
     stem = f"{date_iso}-{filename_slug}"
+    if raw_protection:
+        stem = raw_guard.PREFIX + stem
     # No directory is created here: the batch creates the folder with the page
     # and removes it again if the commit is refused.
     if artifact is None:
@@ -447,6 +474,11 @@ def add(
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
     )
+    if raw_protection:
+        source_md = raw_guard.protect(
+            source_md, artifact_path=artifact_path.relative_to(vault_root).as_posix(),
+            digest=artifact_digest,
+        )
 
     # Plan the source file write so the counts in compute_updates() are
     # *post*-creation: compute_updates re-scans, the folder may not exist
@@ -517,6 +549,9 @@ def add(
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
     writes.extend(supersede_writes)
+    if raw_protection:
+        # Global index/log prose cannot carry the protected title or byte identity.
+        writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
 
     warnings: list[str] = list(slug_warnings) + tag_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:

@@ -1843,3 +1843,24 @@ def test_unmanaged_activation_ignores_identity_inventory_readiness(
     assert state == working_set_runtime.READY
     assert index is not None
     assert warmed == []
+
+
+def test_an_entity_signature_reads_its_public_lede_and_never_its_carrier(vault: Path) -> None:
+    """The writer puts an entity's carrier first (`link`); the signature skips it."""
+    from exomem import find as find_module
+
+    entity = vault / "Knowledge Base" / "Entities" / "People" / "Quorin Vale.md"
+    entity.write_text(
+        "---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n"
+        '<!-- exomem-origin:v1 {"reason":"PRIVATEREASON"} -->\n\n'
+        "# Quorin Vale\n\n## Summary\n\nQuorin Vale is a public cartographer.\n",
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    signature = _by_title(index.anchors(), "Quorin Vale").signature
+
+    assert "public cartographer" in signature
+    assert "exomem-origin" not in signature and "PRIVATEREASON" not in signature

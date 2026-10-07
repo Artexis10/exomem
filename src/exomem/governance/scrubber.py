@@ -30,7 +30,7 @@ import hmac
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -927,8 +927,3 @@ def enabled(vault_root: Path) -> bool:
     """The terminal credential scrubber is not a policy-controlled option."""
     del vault_root
     return True
-
-
-def scrub_sequence(values: Sequence[Any]) -> tuple[list[Any], bool]:
-    cleaned, blocked = scrub_value(list(values))
-    return cleaned, blocked

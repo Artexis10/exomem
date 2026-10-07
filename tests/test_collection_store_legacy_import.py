@@ -364,20 +364,23 @@ def test_planning_uses_complete_hierarchy_without_append_defaults(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 0
 
 
-def test_managed_presentation_refuses_payload_check_c_and_rolls_back(tmp_path):
-    # The unresolved shared-managed-body hash must not be blessed by import.
+def test_managed_presentation_imports_under_the_file_mode_payload_identity(tmp_path):
+    # File mode now resolves a shared managed body before hashing, so check(c)
+    # agrees with the store instead of refusing: both modes give one identity.
     text = manifest_text().replace(
         "item_schema:\n", "item_presentation:\n  version: 1\n  title: title\nitem_schema:\n"
     )
     root, path = _items(tmp_path, text=text, values={"title": "One"})
     before = (path.parent / "Items/Original.md").read_bytes()
     with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
-        with pytest.raises(CollectionStoreError, match=r"check\(c\).*payload_hash"):
-            with conn:
-                conn.execute("BEGIN")
-                legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
-        assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 0
+        with conn:
+            conn.execute("BEGIN")
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        (record,) = captured.snapshot.records
+        stored = conn.execute("SELECT payload_hash FROM items WHERE item_key=?", (KEY,)).fetchone()
+        assert stored == (
+            records._payload_hash(captured.manifest, KEY, record.values, record.body),
+        )
         assert (path.parent / "Items/Original.md").read_bytes() == before
 
 

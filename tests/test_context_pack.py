@@ -234,6 +234,52 @@ def test_claims_ignore_fenced_code(cluster: Path) -> None:
     assert all("NotALink" not in n["path"] for n in pack["neighborhood"])
 
 
+def test_public_find_pack_excludes_origin_carriers_before_display_caps(cluster: Path) -> None:
+    from exomem import commands
+
+    carrier = "<!-- exomem-origin:v9 " + "private-attribution " * 80 + "-->"
+    _write(
+        cluster,
+        ALPHA_P,
+        ALPHA.replace("Alpha is the lede", carrier + "\n\nAlpha is the lede").replace(
+            "- Alpha summarizes", carrier + "\n\n- Alpha summarizes"
+        ),
+    )
+    _write(cluster, CHARLIE_P, CHARLIE.replace("Charlie lede", carrier + "\n\nCharlie lede"))
+    find_module.clear_cache()
+
+    result = commands.op_find(
+        cluster, query="Alpha summarizes", mode="keyword", graph=False, pack=True
+    )
+
+    assert result["hits"][0]["path"] == ALPHA_P
+    assert "Alpha is the lede" in result["hits"][0]["excerpt"]
+    pack = result["pack"]
+    assert pack["claims"][ALPHA_P]["lede"].startswith("Alpha is the lede")
+    assert pack["claims"][ALPHA_P]["sections"][0].startswith("Summary: Alpha summarizes")
+    neighbor = next(item for item in pack["neighborhood"] if item["path"] == CHARLIE_P)
+    assert neighbor["lede"] == "Charlie lede sentence."
+    assert "private-attribution" not in json.dumps(result)
+
+
+def test_public_find_pack_title_does_not_use_h1_inside_origin_carrier(cluster: Path) -> None:
+    from exomem import commands
+
+    carrier = "<!-- exomem-origin:v9\n# private-attribution\n-->\n\n"
+    _write(cluster, ALPHA_P, ALPHA.replace("# Alpha Insight", carrier + "# Alpha Insight"))
+    find_module.clear_cache()
+
+    result = commands.op_find(
+        cluster, query="Alpha summarizes", mode="keyword", graph=False, pack=True
+    )
+
+    assert result["hits"][0]["title"] == "Alpha Insight"
+    assert result["pack"]["claims"][ALPHA_P]["title"] == "Alpha Insight"
+    assert "private-attribution" not in json.dumps(result)
+    page = find_module._CACHE.get(cluster / ALPHA_P, cluster)
+    assert carrier in page.body
+
+
 def test_claim_lede_capped(cluster: Path) -> None:
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P)], )
     # Force a tiny cap and confirm an ellipsis marks the truncation (not silent).

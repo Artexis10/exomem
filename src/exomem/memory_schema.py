@@ -1190,7 +1190,12 @@ def _scan_category_observations(
                 page_type=page.page_type,
                 preferred_project=project,
             )
-            excerpt, truncated = _bounded_excerpt(unit.content)
+            # Examples are served to callers: a carrier in a unit's code is withheld.
+            from .provenance import withheld_prose
+
+            excerpt, truncated = _bounded_excerpt(
+                withheld_prose(unit.content, owner_path=page.rel_path)
+            )
             observations.append(
                 {
                     "category_raw": unit.category_raw,
@@ -2393,11 +2398,17 @@ def contract_path(vault_root: Path, name: str) -> Path:
 
 
 def _select_pages(vault_root: Path, scope: ContractScope):
+    from .governance import raw_protection
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
     kb = Path(vault_root) / kb_dirname()
     if not kb.is_dir():
         return []
     pages = []
     for path in find_module._walk_md(kb):
+        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+            continue
         page = find_module._CACHE.get(path, vault_root)
         if page is None:
             continue

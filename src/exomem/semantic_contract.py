@@ -1151,6 +1151,12 @@ def build_page_state(
     normalized_id = normalize_id(frontmatter.get(ID_FIELD))
     registry = relation_registry or globals()["relation_registry"].core_registry()
     language = language_registry or semantic_language_registry.core_registry()
+    from . import provenance
+
+    # Reserved attribution is not authored semantic content. Blank it before
+    # parsing, retaining positions and line numbers for the surrounding prose.
+    for start, end in reversed(provenance.parse_owned_origin(body, owner_path=rel_path).spans):
+        body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
     document = semantic_units.parse_semantic_units(
         body,
         path=rel_path,
@@ -2078,7 +2084,7 @@ def _identity_guarded_delta_source(root: Path, rel_path: str) -> str | None:
             f"could not safely inspect stable identity at {rel_path}",
         ) from error
     try:
-        source = source_path.read_text(encoding="utf-8")
+        source = source_path.read_bytes().decode("utf-8")
         guard.recheck(root)
     except (OSError, UnicodeDecodeError, vault.PathGuardError) as error:
         governed_writable = (
@@ -2127,7 +2133,7 @@ def _reconcile_markdown_delta(
             source = _identity_guarded_delta_source(root, rel_path)
         else:
             try:
-                source = source_path.read_text(encoding="utf-8")
+                source = source_path.read_bytes().decode("utf-8")
             except FileNotFoundError:
                 source = None
         if source is None:
@@ -2905,7 +2911,7 @@ def _build_corpus_context_uncached(
         if rel_path.startswith(kb_prefix):
             continue
         try:
-            source = disk_path.read_text(encoding="utf-8")
+            source = disk_path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as error:
             if (
                 activation.is_managed_governed_path(root, disk_path)
@@ -3006,7 +3012,7 @@ def _build_identity_census(
                 )
             rel = path.relative_to(root).as_posix()
             try:
-                source = path.read_text(encoding="utf-8")
+                source = path.read_bytes().decode("utf-8")
             except FileNotFoundError:
                 # Deleted between the stat and the read: the same window #528
                 # closed one call earlier, and the same answer. Splitting the

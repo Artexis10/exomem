@@ -27,9 +27,10 @@ from typing import get_args
 
 import pytest
 
-from exomem import commands, curation, episode_workflow
+from exomem import commands, curation, episode_workflow, provenance, record_formats, records
 from exomem import episode_model as model
 from exomem import schema as schema_module
+from exomem import structured_collections as collections
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
@@ -232,6 +233,16 @@ def test_two_corrections_preserve_history_and_old_replay_keeps_latest_value(
     history = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
     assert history.count('"operation":"append"') == 1
     assert history.count('"operation":"update"') == 2
+    manifest = collections.load_manifest(vault, COLLECTION)
+    (row,) = record_formats.load_adapter(vault, manifest).read().records
+    kept = commands.op_record_memory(
+        vault, action="history", collection=COLLECTION, item_key=row.identity.key
+    )
+    # Each kept prior payload names the curation run that corrected it.
+    assert [revision["prior"]["values"]["temperature_c"] for revision in kept["revisions"]] == [
+        14, READING["temperature_c"]
+    ]
+    assert all(revision["binding"]["curation_run"] for revision in kept["revisions"])
 
 
 def _plan(kind: str, args: dict) -> dict:
@@ -410,6 +421,432 @@ def test_the_records_receipt_is_the_witness(vault: Path, owner, enabled) -> None
     assert [item["readback"] for item in passed["receipts"]] == ["changed"]
     with pytest.raises(ValueError, match="EPISODE_OUTCOME_UNCERTAIN"):
         _resume(vault, executed, postcommit=True)
+
+
+def _origin_reading_body(vault: Path, *, unit: bool = False) -> str:
+    from test_origin_bindings import _write
+
+    manifest = collections.load_manifest(vault, COLLECTION)
+    key = collections.derived_item_key(manifest, READING)
+    block = provenance.encode_origin(
+        {
+            "inputs": {"reading": _write(vault, "The north vat was forty-one degrees.\n")},
+            "assessments": [],
+            "bindings": [
+                {
+                    "scope": {
+                        "kind": "record_field",
+                        "collection_id": manifest.collection_id,
+                        "item_key": key,
+                        "field": "temperature_c",
+                    },
+                    "inputs": ["reading"],
+                },
+                *(
+                    [{"scope": {"kind": "unit", "unit_ref": "#reading"}, "inputs": ["reading"]}]
+                    if unit else []
+                ),
+            ],
+        },
+        authoring=True,
+    )
+    prose = (
+        "## Claim\n- id: reading\n\nThe vat reading was retained.\n\n"
+        if unit else "- [finding] The vat reading was retained. ^reading\n\n"
+    )
+    return prose + block
+
+
+def test_record_origin_preparation_and_receipt_bind_the_same_rendered_effect(
+    vault: Path, owner
+) -> None:
+    """Filling an omitted fingerprint must not strand a prepared payload's receipt."""
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    prepared = records.prepare_append(
+        vault,
+        COLLECTION,
+        item=READING,
+        item_key=None,
+        body=body,
+        expected_container_hash=_container(vault),
+        why="Preserve the observed reading.",
+    )
+    assert _entries(vault) == []
+    normalized = prepared["body"]
+    metadata = provenance.parse_origin(normalized, managed=True)
+    assert metadata.status == "valid"
+    result = records.append_record(
+        vault,
+        COLLECTION,
+        item=READING,
+        item_key=prepared["item_key"],
+        body=normalized,
+        expected_container_hash=_container(vault),
+        why="Preserve the observed reading.",
+    )
+    manifest = collections.load_manifest(vault, COLLECTION)
+    record = record_formats.load_adapter(vault, manifest).read().records[0]
+    assert provenance.match_origin_scope(
+        metadata.payload["bindings"][0]["scope"],
+        fields=record.values,
+        record_identity=(manifest.collection_id, record.identity.key),
+    ).status == "found"
+    receipt = records.append_receipt(
+        vault, COLLECTION, item_key=prepared["item_key"], payload_hash=prepared["payload_hash"]
+    )
+    assert receipt is not None
+    assert result["payload_hash"] == prepared["payload_hash"] == receipt["payload_hash"]
+
+
+def test_record_origin_unit_fingerprint_matches_the_final_rendered_body(vault: Path, owner) -> None:
+    """Moving a new carrier out of its unit must avoid binding its own fingerprint."""
+    from exomem.semantic_units import parse_semantic_units
+    from exomem.vault import parse_frontmatter
+
+    _collection(vault)
+    manifest_path = vault / COLLECTION
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "item_schema:\n",
+            "item_presentation:\n  version: 1\n  title: vat\n  summary: [temperature_c]\n"
+            "item_schema:\n",
+        ),
+        encoding="utf-8",
+    )
+    result = records.append_record(
+        vault,
+        COLLECTION,
+        item=READING,
+        body=_origin_reading_body(vault, unit=True),
+        expected_container_hash=_container(vault),
+        why="Preserve the observed reading.",
+    )
+    (entry,) = _entries(vault)
+    source = entry.read_text(encoding="utf-8")
+    metadata = provenance.parse_origin(source, managed=True)
+    assert metadata.status == "valid"
+    document = parse_semantic_units(parse_frontmatter(source)[1], path=result["affected_paths"][0])
+    assert len(document.units) == 1
+    assert "exomem-origin" not in document.units[0].span.text
+    scope = next(
+        binding["scope"] for binding in metadata.payload["bindings"]
+        if binding["scope"]["kind"] == "unit"
+    )
+    assert provenance.match_origin_scope(
+        scope,
+        document=document,
+        owner_ref=document.parent_ref,
+        record_identity=(
+            metadata.payload["bindings"][0]["scope"]["collection_id"], result["item_key"]
+        ),
+    ).status == "found"
+    assert records.append_receipt(
+        vault, COLLECTION, item_key=result["item_key"], payload_hash=result["payload_hash"]
+    ) is not None
+
+
+def test_sealed_record_origin_recovers_after_the_writer_committed(
+    vault: Path, owner, enabled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost episode reconciliation must reuse the normalized Records receipt once."""
+    from exomem.episode_store import EpisodeStore
+
+    _collection(vault)
+    _record(vault)
+    original_leaf = _leaf(vault, body=_origin_reading_body(vault))
+    reviewed = _prepared(vault, original_leaf)
+    repeated = _episode(
+        vault, action="prepare", candidate="reading",
+        proposal=_proposal("records", [original_leaf]),
+    )
+    for field in ("revision", "input_revision", "journal_digest", "candidates"):
+        assert repeated[field] == reviewed[field]
+    leaf = reviewed["candidates"][0]["leaves"][0]
+    store = curation.CurationStore(vault)
+    sealed = store.load_plan(leaf["run_id"])
+    assert provenance.parse_origin(sealed["steps"][0]["args"]["body"], managed=True).status == "valid"
+    prepared = sealed["binding_manifest"][0]["prepared"]
+    transition = EpisodeStore.transition
+
+    def interrupt_reconciliation(self, identity, **kwargs):
+        if kwargs.get("action") == "reconcile_curation_leaf":
+            raise KeyboardInterrupt("session interrupted after the Records commit")
+        return transition(self, identity, **kwargs)
+
+    monkeypatch.setattr(EpisodeStore, "transition", interrupt_reconciliation)
+    with pytest.raises(KeyboardInterrupt):
+        _resume(vault, reviewed)
+    monkeypatch.setattr(EpisodeStore, "transition", transition)
+    (entry,) = _entries(vault)
+    committed = entry.read_bytes()
+    receipts = store.reconstruct(leaf["run_id"])["receipts"]
+    assert len(receipts) == 1
+    assert records.append_receipt(
+        vault, COLLECTION, item_key=prepared["item_key"], payload_hash=prepared["payload_hash"]
+    ) is not None
+
+    resumed = _resume(vault, _episode(vault, action="candidates"))
+    assert resumed["status"] == "ok", (resumed["blocked"], resumed["stale"])
+    assert entry.read_bytes() == committed
+    assert store.reconstruct(leaf["run_id"])["receipts"] == receipts
+    assert [item["readback"] for item in _episode(vault, action="coverage")["receipts"]] == ["verified"]
+
+
+def test_record_origin_retry_replays_the_original_body_without_recertifying_inputs(
+    vault: Path
+) -> None:
+    """A lost append acknowledgement must replay even after its input is withheld."""
+    from test_episode_recovery import _write_source_rule
+
+    from exomem.vault import parse_frontmatter
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    _write_source_rule(vault, ceiling=6)
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        first = records.append_record(
+            vault, COLLECTION, item=READING, body=body,
+            expected_container_hash=_container(vault), why="Preserve the observed reading.",
+        )
+        (entry,) = _entries(vault)
+        committed = entry.read_bytes()
+        assert provenance.parse_origin(entry.read_text(encoding="utf-8"), managed=True).status == "valid"
+        _write_source_rule(vault, ceiling=0)
+        for retry_body in (body, parse_frontmatter(committed.decode("utf-8"))[1]):
+            replay = records.append_record(
+                vault, COLLECTION, item=READING, body=retry_body,
+                expected_container_hash=first["after_container_hash"], why="Retry the same observation.",
+            )
+            assert replay["outcome"] == "replayed"
+            assert replay["payload_hash"] == first["payload_hash"]
+            assert entry.read_bytes() == committed
+
+
+def _update_body(vault: Path, body: str, why: str) -> dict:
+    manifest = collections.load_manifest(vault, COLLECTION)
+    (record,) = record_formats.load_adapter(vault, manifest).read().records
+    return records.update_record(
+        vault, COLLECTION, item_key=record.identity.key, changes={},
+        expected_container_hash=_container(vault), expected_item_version=record.source.hash,
+        why=why, body=body,
+    )
+
+
+def test_an_update_resending_authored_origin_keeps_it_valid(vault: Path, owner) -> None:
+    """An update normalizes origin exactly like append, so a typo fix cannot degrade it."""
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    records.append_record(
+        vault, COLLECTION, item=READING, body=body,
+        expected_container_hash=_container(vault), why="Preserve the observed reading.",
+    )
+    (entry,) = _entries(vault)
+
+    _update_body(vault, body.replace("was retained", "was kept"), "Fix the wording.")
+
+    stored = entry.read_text(encoding="utf-8")
+    assert "was kept" in stored
+    assert provenance.parse_origin(stored, managed=True).status == "valid"
+
+
+@pytest.mark.parametrize(
+    "authored, plain",
+    [
+        ("\n\n\n  Indented start.\n\n{B}\n", "\n\n\n  Indented start.\n\n"),
+        ("- first\n  {B}\n- second\n", "- first\n- second\n"),
+        ("Intro.\n\n{B}\n\nTail.\n", "Intro.\n\nTail.\n"),
+    ],
+    ids=["leading-blank-lines", "inside-a-list-item", "own-paragraph"],
+)
+def test_attaching_origin_changes_no_authored_byte(
+    vault: Path, owner, authored: str, plain: str
+) -> None:
+    """Removing the carrier's line must give back exactly what the author wrote without it."""
+    from exomem.vault import parse_frontmatter
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    block = body[body.index("<!--"):].strip()
+    plain_item = {**READING, "vat": "south"}
+    for item, text in ((READING, authored.replace("{B}", block)), (plain_item, plain)):
+        records.append_record(
+            vault, COLLECTION, item=item, body=text,
+            expected_container_hash=_container(vault), why="Log the reading.",
+        )
+    bodies = {}
+    for entry in _entries(vault):
+        fields, stored, _ = parse_frontmatter(entry.read_text(encoding="utf-8"))
+        bodies[fields["vat"]] = stored
+    attached = provenance.parse_origin(bodies["north"], managed=True)
+    assert attached.status == "valid"
+    assert attached.without_metadata(bodies["north"]) == bodies["south"]
+
+
+@pytest.mark.parametrize("fault", ["malformed", "stale-input"])
+def test_an_update_refuses_the_origin_an_append_refuses(vault: Path, owner, fault: str) -> None:
+    """No update leaf may store origin metadata the append writer would refuse."""
+    from test_origin_bindings import _PATH
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    if fault == "malformed":
+        body = body + "\n" + body[body.index("<!--"):]
+    else:
+        source = vault / _PATH
+        source.write_text(source.read_text(encoding="utf-8") + "Edited.\n", encoding="utf-8")
+    with pytest.raises(collections.CollectionError) as appended:
+        records.append_record(
+            vault, COLLECTION, item=READING, body=body,
+            expected_container_hash=_container(vault), why="Log the reading.",
+        )
+    records.append_record(
+        vault, COLLECTION, item=READING, body="Plain body.\n",
+        expected_container_hash=_container(vault), why="Log the reading.",
+    )
+    (entry,) = _entries(vault)
+    before = entry.read_bytes()
+
+    with pytest.raises(collections.CollectionError) as updated:
+        _update_body(vault, body, "Attach the origin.")
+
+    assert updated.value.code == appended.value.code
+    assert entry.read_bytes() == before
+
+
+@pytest.mark.parametrize("commit_door", ["episode", "curation"])
+def test_original_record_origin_proposal_preserves_committed_leaf_when_adding_another(
+    vault: Path, enabled, commit_door: str
+) -> None:
+    """Raw authored args must recover both episode and externally committed bindings."""
+    from test_episode_recovery import _write_source_rule
+
+    _collection(vault)
+    _write_source_rule(vault, ceiling=6)
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        _record(vault)
+        original = _leaf(vault, body=_origin_reading_body(vault, unit=True))
+        reviewed = _prepared(vault, original)
+        bound = reviewed["candidates"][0]["leaves"][0]
+        if commit_door == "episode":
+            committed = _resume(vault, reviewed)
+            assert committed["status"] == "ok"
+        else:
+            plan_id, fingerprint = curation.CurationStore(vault).identities(bound["run_id"])
+            commands.op_maintain_memory(
+                vault, mode="curation", curation_action="apply", run_id=bound["run_id"],
+                plan_id=plan_id, expected_plan_fingerprint=fingerprint,
+                why="Retain the observation through its existing curation plan.",
+            )
+        (entry,) = _entries(vault)
+        stored = entry.read_bytes()
+        receipt = curation.CurationStore(vault).reconstruct(bound["run_id"])["receipts"]
+        assert len(receipt) == 1
+        _write_source_rule(vault, ceiling=0)
+        before = _episode(vault, action="candidates")
+        repeated = _episode(
+            vault, action="prepare", candidate="reading",
+            proposal=_proposal("records", [original]),
+        )
+        for field in ("revision", "input_revision", "journal_digest", "candidates"):
+            assert repeated[field] == before[field]
+
+        metadata = provenance.parse_origin(original["args"]["body"], managed=True, authoring=True)
+        changed_input = json.loads(json.dumps(metadata.payload))
+        changed_input["inputs"]["reading"]["version"] = "f" * 64
+        wrong_scope = json.loads(json.dumps(metadata.payload))
+        wrong_scope["bindings"][0]["scope"]["fingerprint"] = "f" * 64
+        for changed_body in (
+            original["args"]["body"].replace("was retained", "was changed"),
+            original["args"]["body"].replace(
+                provenance.encode_origin(metadata.payload, authoring=True),
+                provenance.encode_origin(changed_input, authoring=True),
+            ),
+            original["args"]["body"].replace(
+                provenance.encode_origin(metadata.payload, authoring=True),
+                provenance.encode_origin(wrong_scope, authoring=True),
+            ),
+        ):
+            changed = {**original, "effect_revision": 2, "args": {**original["args"], "body": changed_body}}
+            with pytest.raises((model.EpisodeError, curation.CurationError)):
+                _episode(
+                    vault, action="prepare", candidate="reading",
+                    proposal=_proposal("records", [changed]),
+                )
+            assert _episode(vault, action="candidates")["journal_digest"] == before["journal_digest"]
+            assert entry.read_bytes() == stored
+
+        second = _leaf(vault, item={**READING, "vat": "south"})
+        second["leaf_key"] = "second"
+        mixed = _episode(
+            vault, action="prepare", candidate="reading",
+            proposal=_proposal("records", [original, second]),
+        )
+        old = next(leaf for leaf in mixed["candidates"][0]["leaves"] if leaf["leaf_key"] == "append")
+        assert old["run_id"] == bound["run_id"]
+        assert old["effect_revision"] == bound["effect_revision"]
+        assert entry.read_bytes() == stored
+        assert curation.CurationStore(vault).reconstruct(bound["run_id"])["receipts"] == receipt
+        reviewed = _episode(
+            vault, action="disposition", candidate="reading",
+            disposition="routed", reason="Also retain the south reading.",
+        )
+        resumed = _resume(vault, reviewed)
+        assert resumed["status"] == "ok", (resumed["blocked"], resumed["stale"])
+        assert len(_entries(vault)) == 2
+        assert entry.read_bytes() == stored
+        assert curation.CurationStore(vault).reconstruct(bound["run_id"])["receipts"] == receipt
+
+
+@pytest.mark.parametrize("checkpoint", ["preparation", "before-publication", "after-publication"])
+def test_record_origin_refuses_current_source_narrowing_without_an_append(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    """Preparation and both atomic checkpoints must reacquire Source permission."""
+    from test_episode_recovery import _write_source_rule
+
+    from exomem import record_governance
+    from exomem import vault as vault_module
+
+    _collection(vault)
+    body = _origin_reading_body(vault)
+    _write_source_rule(vault, ceiling=6)
+    before_manifest = (vault / COLLECTION).read_bytes()
+    before_log = (vault / "Knowledge Base/log.md").read_bytes()
+    if checkpoint == "preparation":
+        _write_source_rule(vault, ceiling=0)
+    elif checkpoint == "before-publication":
+        authorize = record_governance.precommit_authorize_mutation
+
+        def narrow_after_authorization(*args, **kwargs):
+            authorize(*args, **kwargs)
+            _write_source_rule(vault, ceiling=0)
+
+        monkeypatch.setattr(record_governance, "precommit_authorize_mutation", narrow_after_authorization)
+    else:
+        published = vault_module._after_batch_destination_published
+
+        def narrow_after_publication(path: Path) -> None:
+            published(path)
+            if path.parent.name == "Entries":
+                _write_source_rule(vault, ceiling=0)
+
+        monkeypatch.setattr(vault_module, "_after_batch_destination_published", narrow_after_publication)
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        with pytest.raises(collections.CollectionError, match="ORIGIN_INPUT_UNAVAILABLE"):
+            if checkpoint == "preparation":
+                records.prepare_append(
+                    vault, COLLECTION, item=READING, item_key=None, body=body,
+                    expected_container_hash=_container(vault), why="Preserve the observed reading.",
+                )
+            else:
+                records.append_record(
+                    vault, COLLECTION, item=READING, body=body,
+                    expected_container_hash=_container(vault), why="Preserve the observed reading.",
+                )
+    assert _entries(vault) == []
+    assert (vault / COLLECTION).read_bytes() == before_manifest
+    assert (vault / "Knowledge Base/log.md").read_bytes() == before_log
 
 
 @pytest.mark.parametrize("kind", ["append-record", "update-record"])

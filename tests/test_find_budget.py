@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem.governance.principal import library_scope
+
 from exomem import commands, request_budget
 from exomem import context_pack as context_pack_module
 
@@ -119,6 +121,7 @@ def test_a_cold_reranker_needs_the_larger_reserve(
     assert budget.skipped == ["rerank"]
 
 
+@library_scope()
 def test_skipped_rerank_does_not_cache_an_incomplete_result(
     vault: Path, bind_budget, reversing_reranker, monkeypatch: pytest.MonkeyPatch
 ) -> None:

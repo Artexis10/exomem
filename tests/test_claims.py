@@ -1,10 +1,9 @@
-"""Tests for claim-level hygiene (extraction + .claims.sqlite sidecar + polarity).
+"""Tests for claim-level hygiene (extraction + .claims.sqlite sidecar).
 
 Three lanes, all torch-free unless noted:
 - extraction: claim-bearing sections → a claim string (deterministic).
 - sidecar: checksum-keyed upsert / incremental skip / delete, exercised with
   FAKE vectors (monkeypatched `embeddings.embed_texts`) so no model loads.
-- polarity: the deterministic heuristic backend + the classify dispatch seam.
 - wiring: `detect_contradictions` attaches polarity under the gate, and stays
   byte-identical to baseline when the gate is off.
 
@@ -131,52 +130,6 @@ def test_checksum_stable_and_changes() -> None:
     a = claims._checksum("X\n\nclaim one")
     assert a == claims._checksum("X\n\nclaim one")   # stable
     assert a != claims._checksum("X\n\nclaim two")   # sensitive to the claim
-
-
-# ---------------- polarity heuristic (deterministic, torch-free) ----------------
-
-
-def test_polarity_contradict_via_antonym() -> None:
-    r = claims._heuristic_polarity("Caching improves latency", "Caching degrades latency")
-    assert r.label == "contradict"
-    assert r.method == "heuristic"
-
-
-def test_polarity_contradict_via_negation() -> None:
-    r = claims._heuristic_polarity("Batching helps focus", "Batching does not help focus")
-    assert r.label == "contradict"
-
-
-def test_polarity_duplicate_on_identical() -> None:
-    r = claims._heuristic_polarity("Retrieval needs owned files", "Retrieval needs owned files")
-    assert r.label == "duplicate"
-
-
-def test_polarity_refine_same_topic_added_detail() -> None:
-    r = claims._heuristic_polarity("Batching helps focus", "Batching helps focus in the morning")
-    assert r.label == "refine"
-
-
-def test_polarity_unrelated_on_disjoint() -> None:
-    r = claims._heuristic_polarity("Cats are mammals", "Batching helps focus")
-    assert r.label == "unrelated"
-
-
-def test_classify_polarity_dispatches_to_heuristic_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_NLI", raising=False)
-    r = claims.classify_polarity("Caching improves latency", "Caching degrades latency")
-    assert r.method == "heuristic"
-    assert r.label == "contradict"
-
-
-def test_classify_polarity_score_bounded() -> None:
-    for a, b in [
-        ("Caching improves latency", "Caching degrades latency"),
-        ("X is true", "Y is unrelated"),
-        ("same claim", "same claim"),
-    ]:
-        r = claims.classify_polarity(a, b)
-        assert 0.0 <= r.score <= 1.0
 
 
 # ---------------- gate ----------------
@@ -669,3 +622,20 @@ def test_rebuild_all_builds_real_claim_vectors(vault: Path, monkeypatch) -> None
     assert row is not None
     assert row[1].shape == (recall_space.declared_dim(embeddings.MODEL_NAME),)
     assert np.isfinite(row[1]).all()
+
+
+def test_a_claim_never_falls_back_to_an_origin_carrier(vault: Path) -> None:
+    """With no claim section the lead paragraph is the claim, and a carrier is not prose."""
+    page_path = vault / "Knowledge Base" / "Notes" / "Insights" / "carrier-lead.md"
+    page_path.write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n# Carrier lead\n\n"
+        '<!-- exomem-origin:v1 {"reason":"PRIVATEREASON"} -->\n\n'
+        "Plain lead paragraph.\n",
+        encoding="utf-8",
+    )
+    page = find_module._CACHE.get(page_path, vault)
+
+    claim = claims.extract_claim_for_page(page)
+
+    assert "Plain lead paragraph." in claim
+    assert "PRIVATEREASON" not in claim

@@ -3,11 +3,39 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from .find_types import ParsedPage
+from .semantic_units import SemanticUnit
 
 EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
+
+
+def prose_units(
+    vault_root: Path, page: ParsedPage, units: tuple[SemanticUnit, ...]
+) -> tuple[SemanticUnit, ...]:
+    """Keep canonical identities, omitting units whose fields overlap a carrier.
+
+    The carriers are the ones this caller is never shown
+    (`egress.carrier_spans_for_caller`): for a projected reader a carrier that
+    a hand edit moved into a unit's code withholds that unit, and for the owner
+    a carrier example in a unit's code stays a literal unit.
+    """
+    from .governance import egress
+
+    spans = egress.carrier_spans_for_caller(vault_root, page.body, owner_path=page.rel_path)
+    if not spans:
+        return units
+    return tuple(
+        unit
+        for unit in units
+        if page.body[unit.span.start_offset:unit.span.end_offset] == unit.span.text
+        and not any(
+            start < unit.span.end_offset and unit.span.start_offset < end
+            for start, end in spans
+        )
+    )
 
 
 def transcript_ts_for_hit(
@@ -95,7 +123,7 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
     """Snippet anchored on the first body word whose stem matches the query."""
     from . import bm25 as bm25_module
 
-    body = page.body.strip()
+    body = page.body_stripped
     if not body:
         return ""
     anchor_idx = -1
@@ -138,6 +166,9 @@ def semantic_excerpt(
     keyword_excerpt: str | None,
 ) -> str:
     """Prefer the matching chunk text, then fall back to the keyword excerpt."""
+    if page.search_body != page.body:
+        # A stored chunk may start inside a carrier, without its opening marker.
+        return make_excerpt(page, query_norm) or stem_anchored_excerpt(page, query_norm)
     if best_chunk:
         body = best_chunk
         title_prefix = (page.title or "").strip()

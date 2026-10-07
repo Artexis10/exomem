@@ -69,6 +69,22 @@ def _state(
     )
 
 
+def test_managed_origin_references_are_not_ordinary_graph_links(tmp_path: Path) -> None:
+    body = (
+        "<!-- exomem-origin:future [[Private source]]\n"
+        "## Relations\n- supports [[Private source]]\n"
+        "- [decision] Private assessment.\n-->\n\nOrdinary [[Visible source]] prose.\n"
+    )
+    source = _source(body=body)
+    state = _state(tmp_path, "Knowledge Base/Notes/Insights/page.md", source)
+    assert state.body_wikilinks == (("Visible source", 7),)
+    assert not state.document.note_relations
+    assert state.source_hash == vault.content_hash(source)
+    raw = _state(tmp_path, "Knowledge Base/Sources/Articles/raw.md", source)
+    assert {target for target, _line in raw.body_wikilinks} == {"Private source", "Visible source"}
+    assert raw.document.note_relations
+
+
 def _corpus(
     tmp_path: Path, *states: semantic_contract.SemanticPageState
 ) -> semantic_contract.SemanticCorpusContext:
@@ -960,7 +976,7 @@ def test_build_corpus_reads_and_parses_each_page_once_and_reuses_pure_census(
         path.write_text(_source(title=str(index)), encoding="utf-8")
     reads: dict[str, int] = {}
     parses = 0
-    original_read = Path.read_text
+    original_read = Path.read_bytes
     original_parse = semantic_contract.semantic_units.parse_semantic_units
 
     def counted_read(path: Path, *args, **kwargs):
@@ -976,7 +992,7 @@ def test_build_corpus_reads_and_parses_each_page_once_and_reuses_pure_census(
     def forbidden_census(*_args, **_kwargs):
         raise AssertionError("corpus context must use the pure census factory")
 
-    monkeypatch.setattr(Path, "read_text", counted_read)
+    monkeypatch.setattr(Path, "read_bytes", counted_read)
     monkeypatch.setattr(semantic_contract.semantic_units, "parse_semantic_units", counted_parse)
     monkeypatch.setattr(activation_manifest, "build_census", forbidden_census)
 
@@ -1056,6 +1072,7 @@ def test_candidate_insertion_reresolves_forward_and_ambiguous_facts_without_io(
         raise AssertionError("candidate patching must not touch disk or parse")
 
     monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
     monkeypatch.setattr(semantic_units, "parse_semantic_units", forbidden)
     ambiguous = unique_context.with_candidate(duplicate)
 
@@ -2011,6 +2028,7 @@ def test_evaluate_is_pure_over_supplied_state(
         raise AssertionError("pure evaluator crossed an adapter boundary")
 
     monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
     monkeypatch.setattr(semantic_contract.semantic_units, "parse_semantic_units", forbidden)
     monkeypatch.setattr(semantic_contract.relation_registry, "load_registry", forbidden)
 
@@ -2544,14 +2562,14 @@ def test_identity_census_consumes_text_before_reading_next_page(tmp_path, monkey
         path.parent.mkdir(exist_ok=True)
         path.write_text(_source(title=name), encoding="utf-8")
     consumed = []
-    original = Path.read_text
+    original = Path.read_bytes
 
     def read(path, *args, **kwargs):
         if path.name == "b.md":
             assert consumed == ["Knowledge Base/a.md"]
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "read_bytes", read)
     census, sources = semantic_contract._build_identity_census(
         tmp_path, consume=lambda rel, source: consumed.append(rel)
     )
@@ -2573,12 +2591,12 @@ def test_streaming_corpus_reads_outside_kb_once_and_skips_scan_exclusions(tmp_pa
     excluded.parent.mkdir(parents=True)
     excluded.write_text('invalid: [', encoding='utf-8')
     reads = []
-    original = Path.read_text
+    original = Path.read_bytes
     def read(path, *args, **kwargs):
         if path.suffix == '.md':
             reads.append(path)
         return original(path, *args, **kwargs)
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(Path, 'read_bytes', read)
     corpus = semantic_contract.build_corpus_context(tmp_path)
     assert sorted(reads) == sorted(paths)
     assert set(corpus.pages) == {path.relative_to(tmp_path).as_posix() for path in paths}

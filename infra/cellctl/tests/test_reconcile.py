@@ -8,6 +8,7 @@ import asyncio
 import base64
 import contextlib
 import dataclasses
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -97,7 +98,9 @@ class FakeClusterGateway:
     def pv_absent_for_namespace(self, namespace: str) -> bool:
         return namespace not in self.pv_claims
 
-    def admission_policy_present(self, policy_name: str, binding_name: str, *, param_name: str | None = None) -> bool:
+    def admission_policy_present(
+        self, policy_name: str, binding_name: str, *, param_name: str | None = None, param_selects_all: bool = False
+    ) -> bool:
         self.admission_checks.append((policy_name, binding_name, param_name))
         return self.admission_confined and policy_name not in self.admission_missing
 
@@ -1640,6 +1643,34 @@ def test_a_refused_row_starts_no_upgrade_but_is_backed_up_unless_its_statefulset
     assert parked not in reconcile._select_backup_candidates(rows, observations, now, config, frozenset({parked}))
 
 
+async def test_a_failed_backups_own_code_is_logged_with_its_cell(cell_db: CellDatabase, caplog) -> None:
+    # D5: the vault check's code is the operator's only clue to why a backup
+    # failed, and cellctl deletes the failed Job a pass later.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    window = datetime(2026, 1, 1, 2, tzinfo=UTC)
+    try:
+        for _ in range(3):
+            await _pass(connection, cluster, window - timedelta(hours=3))
+            cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
+        await _pass(connection, cluster, window)
+        assert (await db.select_all_rows(connection))[0].hold_kind == "backup"
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, pod_exists=False, pod_uses_volume=False, pod_ready=False,
+            backup_job_failed=True, backup_job_failure_code="BACKUP_SOURCE_NOT_A_VAULT",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cellctl"):
+            await _pass(connection, cluster, window + timedelta(minutes=1))
+
+        assert (await db.select_all_rows(connection))[0].last_error_code == "BACKUP_FAILED"
+        assert f"cell {cell_id}'s backup failed: BACKUP_SOURCE_NOT_A_VAULT" in caplog.text
+    finally:
+        await connection.close()
+
+
 async def test_a_pod_stuck_terminating_cannot_hold_the_only_backup_slot_all_night(cell_db: CellDatabase) -> None:
     # NEW7 / D8 "Bounded": the backup deadline runs from hold-started-at, so
     # it also bounds the wait for the volume; the failed hold deletes its
@@ -2878,6 +2909,59 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
         assert (row.ready, row.observed_state) == (True, "running")
         assert writes == [{"ready": True, "observed_at": now + timedelta(seconds=25)}]
         assert cluster.applies == applies_before
+    finally:
+        await connection.close()
+
+
+async def test_a_converged_cell_left_scaled_down_is_applied_again(cell_db: CellDatabase) -> None:
+    # An operator who scales a served cell down (the node-loss runbook's
+    # step 4.3, or the vault import's swap) relies on cellctl starting it
+    # again when it resumes. The readiness shortcut only observed such a row,
+    # so the cell stayed down with its claim in place (drill 4.2).
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    namespace = namespace_name(cell_id)
+    try:
+        await _converge(connection, cluster, cell_id, now)
+        cluster.observations[cell_id] = dataclasses.replace(
+            cluster.observations[cell_id], statefulset_replicas=0,
+            pod_exists=False, pod_uses_volume=False, pod_ready=False, ready_pod_image=None,
+        )
+        events_before = len(cluster.events)
+
+        await _pass(connection, cluster, now + timedelta(seconds=10))
+
+        assert ("apply_statefulset", namespace, 1) in cluster.events[events_before:]
+    finally:
+        await connection.close()
+
+
+async def test_a_converged_cell_whose_claim_is_gone_reports_its_volume_missing(cell_db: CellDatabase) -> None:
+    # D4: a cell whose row records a volume never gets a fresh claim; its row
+    # says VOLUME_MISSING so an operator looks. The readiness shortcut kept a
+    # served row from ever reaching that decision.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        for _ in range(3):
+            await _pass(connection, cluster, now)
+            cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id, pvc_volume_id="vol-1")
+        assert (await db.select_all_rows(connection))[0].volume_id == "vol-1"
+        cluster.observations[cell_id] = dataclasses.replace(
+            cluster.observations[cell_id], pvc_exists=False, pvc_bound=False, pvc_volume_id=None,
+            pod_exists=False, pod_uses_volume=False, pod_ready=False, ready_pod_image=None,
+        )
+
+        await _pass(connection, cluster, now + timedelta(seconds=10))
+
+        row = (await db.select_all_rows(connection))[0]
+        assert (row.last_error_code, row.volume_id) == ("VOLUME_MISSING", "vol-1")
     finally:
         await connection.close()
 

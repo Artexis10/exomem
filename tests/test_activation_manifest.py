@@ -555,6 +555,7 @@ def test_supplied_census_avoids_rescans_and_page_rereads(
     monkeypatch.setattr(activation_manifest, "_eligible_candidates", forbidden)
     manifest = activation_manifest.ensure_manifest(tmp_path, census=census)
     monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
 
     assert all(
         activation_manifest.is_grandfathered(

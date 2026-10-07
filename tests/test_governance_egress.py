@@ -693,9 +693,9 @@ def test_op_find_never_leaks_a_withheld_path_in_graph_provenance(vault: Path) ->
 
 
 def test_find_hot_cache_stays_principal_free(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two audiences, second call served from the hot cache: decisions are
-    recomputed per request and NO cached candidate copy carries a prior
-    audience's decision."""
+    """Owner cold and warm recall share principal-free candidates. Restricted
+    recall bypasses that cache and cannot inherit the owner's release decisions;
+    every request resolves its own referents."""
     write_scope(vault)
     write_rule(vault, ceiling=0)
     query = "kill switch risky releases for two people"
@@ -709,21 +709,26 @@ def test_find_hot_cache_stays_principal_free(vault: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(referent_runtime, "resolve_for_find", counted_resolver)
 
-    with request_scope(_external()):
-        commands.op_find(vault, query=query, limit=10)
-    with request_scope(RequestPrincipal(audience_id="owner", surface="cli")):
-        second = commands.op_find(vault, query=query, limit=10)
+    with request_scope(owner_principal(surface="cli")):
+        cold = commands.op_find(vault, query=query, limit=10, include_timings=True)
+        warm = commands.op_find(vault, query=query, limit=10, include_timings=True)
+    assert cold["timings"]["cache"]["hit"] is False
+    assert warm["timings"]["cache"]["hit"] is True
+    owner_paths = [hit["path"] for hit in warm["hits"]]
+    assert owner_paths == [hit["path"] for hit in cold["hits"]]
+    assert RESTRICTED_PATH in owner_paths
 
-    # The owner sees the restricted page the external audience could not.
-    second_hits = second["hits"] if isinstance(second, dict) else second
-    assert RESTRICTED_PATH in [h["path"] for h in second_hits]
+    with request_scope(_external()):
+        restricted = commands.op_find(vault, query=query, limit=10)
+    restricted_hits = restricted["hits"] if isinstance(restricted, dict) else restricted
+    assert RESTRICTED_PATH not in [hit["path"] for hit in restricted_hits]
 
     # Every Hit sitting in the shared hot cache is principal-free.
     cached_hits = [hit for cached in find_module._FIND_CACHE.values() for hit in cached]
     assert cached_hits, "expected the hot cache to be populated"
     assert all(getattr(hit, "decision", None) is None for hit in cached_hits)
     assert all("referents" not in hit.as_dict() for hit in cached_hits)
-    assert resolver_calls == 2, "referents must be recomputed on the hot-cache hit"
+    assert resolver_calls == 3, "referents must be recomputed for every request"
 
 
 def test_referents_never_name_withheld_entity_pages(vault: Path) -> None:

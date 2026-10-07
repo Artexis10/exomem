@@ -26,6 +26,7 @@ disk is not the one this binary writes.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import os
@@ -347,8 +348,8 @@ def normalize(value: object) -> str:
     than "every working-set comparison key": `collection_claims.
     normalize_text` and `structure_promotion._terms` (used for
     `claims_match` and Records current-state routing) keep their own,
-    separate term splitter (`text_scripts.vocabulary_words` for non-ASCII
-    text) and do not call this function.
+    separate term splitter (`text_scripts.comparison_words`) and do not
+    call this function.
 
     Locale-specific case rules are never applied: `str.casefold()` treats a
     Turkish dotted capital İ and a plain I as different letters, which is
@@ -394,6 +395,132 @@ def tokens_of(text: str) -> tuple[str, ...]:
 def terms_of(text: str) -> tuple[str, ...]:
     """Deterministic lexical terms: NFKC-casefolded word tokens, deduplicated."""
     return tuple(dict.fromkeys(tokens_of(text)))
+
+
+#: What may sit just before a reference: whitespace, the start of the turn,
+#: or one of these (brackets, quotes, backticks, markdown emphasis, `=`, `,`).
+_OPENERS = "([{<\"'`=*_,\u2018\u2019\u201c\u201d"
+#: What may follow a reference without being part of it.
+_CLOSERS = ".,;:!?)]}>\"'`*_\u2018\u2019\u201c\u201d"
+#: A character a reference never contains: whitespace, quotes, backticks,
+#: brackets, angle brackets and commas.
+_REFERENCE_CHAR = r"""[^\s"'`<>()\[\]{},\u2018\u2019\u201c\u201d]"""
+_STARTS_A_REFERENCE = r"(?<![^\s" + re.escape(_OPENERS) + r"])"
+#: A URL with a scheme, anywhere in the turn.
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://" + _REFERENCE_CHAR + "*")
+#: A short list of top-level domains, lowercase as hosts are written. A dotted
+#: name before a slash is a host only with one of these, a `www.` or a port:
+#: `Node.js/React` and `ASP.NET/Core` are prose.
+_HOST_TLDS = "com|org|net|io|dev|ai|app|co|uk|de|eu|info|me|sh|so|gg|xyz"
+#: The start of a reference that names its own place: a URL without a scheme
+#: (`host.tld/...`), an scp-style remote (`user@host:...`), or a path from a
+#: root (`/`, `\`, `~`, a drive letter, or an environment variable).
+_ROOTED = (
+    r"(?:www\.(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+(?::\d+)?"
+    r"|(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:\d+"
+    r"|(?:[A-Za-z0-9-]+\.)+(?:" + _HOST_TLDS + r"))/"
+    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)*:"
+    r"|(?:~|[A-Za-z]:|\$\{\w+\}|\$\w+|%\w+%)?[\\/]"
+)
+#: A path relative to the current place, which keeps its final segment.
+_DOT_RELATIVE = r"\.\.?[\\/]"
+_REFERENCE_START = r"(?:(?P<rooted>" + _ROOTED + r")|(?P<relative>" + _DOT_RELATIVE + r"))"
+_REFERENCE = re.compile(_STARTS_A_REFERENCE + _REFERENCE_START + _REFERENCE_CHAR + "*")
+_QUOTED_REFERENCE = re.compile(_REFERENCE_START)
+#: A quoted or backticked span, which may hold a path with spaces in it.
+_QUOTED = re.compile(
+    r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019"
+)
+_SEPARATORS = re.compile(r"[\\/]")
+#: A slash run with no root: segments up to a final one, which may be empty.
+_SLASH_RUN = re.compile(
+    _STARTS_A_REFERENCE + r"""(?:[^\s"'`<>()\[\]{},\\/\u2018\u2019\u201c\u201d]+[\\/])+"""
+    + _REFERENCE_CHAR
+    + "*"
+)
+_FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
+
+
+@functools.lru_cache(maxsize=4)
+def _vault_path(kb: str) -> re.Pattern[str]:
+    """A path into the indexed folder (`kb_dirname`), up to a file name with
+    an extension, read as one reference even with spaces in its segments."""
+    return re.compile(
+        _STARTS_A_REFERENCE
+        + "(?:"
+        + _DOT_RELATIVE
+        + ")?"
+        + re.escape(kb)
+        + r"""[\\/][^\n"'`<>()\[\]{}\u2018\u2019\u201c\u201d]*?[^.\s\\/]\.[A-Za-z0-9]{1,8}"""
+        + r"(?=[" + re.escape(_CLOSERS) + r"]*(?:\s|$))"
+    )
+
+
+def _final_segment(reference: str) -> str:
+    return _SEPARATORS.split(reference.rstrip("\\/"))[-1]
+
+
+def _names_a_file(reference: str) -> bool:
+    """Is this unrooted slash run a path? Only when it ends in a file name:
+    `records/staging/prod` and `and/or` are prose."""
+    return bool(_FILE_EXTENSION.search(_final_segment(reference)))
+
+
+def _kept_words(reference: str, *, relative: bool) -> str:
+    """What a reference keeps of itself as words: a relative path its final
+    segment, anything else nothing."""
+    return _final_segment(reference) if relative else ""
+
+
+def subject_text(turn: str) -> str:
+    """The turn with each quoted path or URL removed from its words.
+
+    A path is a reference to a file, not a sentence: read as words,
+    `/home/<user>/handoffs/x.md` says `home`, and `home` named a project of
+    that name. A rooted path, an environment-variable path, a URL with or
+    without a scheme, and an scp-style remote are removed whole. A relative
+    path keeps its final segment, so `Projects/<Name>.md` still names the page
+    whose title is its file name; its directories are removed. A slash run is a
+    relative path when it starts `./` or `../` or ends in a file name, so
+    `dev/staging/prod` and `and/or` are prose, and `records/Node.js` loses
+    `records`. A path into the indexed folder (`Knowledge Base/...`) is one
+    reference up to its file name, spaces included. So is a quoted or
+    backticked span. Any other path with spaces in it is cut at the first
+    space: nothing marks where it ends.
+
+    Text with no reference in it is returned as is.
+    """
+
+    def trailing(reference: str) -> str:
+        return reference[len(reference.rstrip(_CLOSERS)) :]
+
+    text = _URL.sub(lambda match: " " + trailing(match.group(0)), str(turn or ""))
+
+    def quoted(match: re.Match[str]) -> str:
+        content = next(group for group in match.groups() if group is not None).strip()
+        found = _QUOTED_REFERENCE.match(content)
+        if found is not None:
+            return f" {_kept_words(content, relative=found.group('relative') is not None)} "
+        if _SEPARATORS.search(content) and _names_a_file(content):
+            return f" {_final_segment(content)} "
+        return match.group(0)
+
+    def reference(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        tail = trailing(whole)
+        core = whole[: len(whole) - len(tail)]
+        kept = _kept_words(core, relative=match.group("relative") is not None)
+        return f"{kept or ' '}{tail}"
+
+    def slash_run(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        tail = trailing(whole)
+        core = whole[: len(whole) - len(tail)]
+        return f"{_final_segment(core)}{tail}" if _names_a_file(core) else whole
+
+    text = _QUOTED.sub(quoted, text)
+    text = _vault_path(kb_dirname()).sub(lambda match: _final_segment(match.group(0)), text)
+    return _SLASH_RUN.sub(slash_run, _REFERENCE.sub(reference, text))
 
 
 #: A shared term this rare in the catalogue's title/alias vocabulary is a weak
@@ -805,7 +932,13 @@ def _sections(body: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _signature(title: str, body: str, *, extra: Iterable[str] = ()) -> str:
+def _signature(title: str, body: str, *, owner_path: str = "", extra: Iterable[str] = ()) -> str:
+    """Title, lede and headline sections. A signature is shared by every caller,
+    so a page body is read withheld: an origin carrier is never its lede."""
+    if body:
+        from . import provenance
+
+        body = provenance.withheld_prose(body, owner_path=owner_path)
     parts = [title.strip(), lede(body), *_sections(body), *extra]
     return "\n".join(part for part in parts if part)[:SIGNATURE_MAX_CHARS]
 
@@ -952,7 +1085,7 @@ def _walk_page_entries(
     caller that has not already loaded one this build) loads it fresh for
     this one vault — a cheap, memoised read, never a second vault walk.
     """
-    from . import activation_conventions, recall_policy
+    from . import activation_conventions, provenance, recall_policy
 
     if conventions is None:
         conventions = activation_conventions.load_conventions(Path(vault_root)).conventions
@@ -990,10 +1123,12 @@ def _walk_page_entries(
             bucket = names.setdefault(key, [])
             if rel not in bucket:
                 bucket.append(rel)
+        # A carrier is attribution, not a link (`provenance.without_carriers`),
+        # exactly as in the inbound-link index: its links are never an edge.
         links = tuple(
             dict.fromkeys(
                 normalize(match)
-                for match in _WIKILINK.findall(page.body)
+                for match in _WIKILINK.findall(provenance.without_carriers(page.body))
                 + list(_strings(frontmatter.get("relations")))
                 + list(_strings(frontmatter.get("links")))
                 if normalize(match)
@@ -1176,7 +1311,7 @@ def _finalize_anchor_aliases(
                 title=title,
                 kind=entry["kind"],
                 lifecycle=entry["lifecycle"],
-                signature=_signature(title, entry["body"]),
+                signature=_signature(title, entry["body"], owner_path=entry["path"]),
                 aliases=aliases,
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
                 categories=_categories(sections, tags, semantic_registry=semantic_registry),

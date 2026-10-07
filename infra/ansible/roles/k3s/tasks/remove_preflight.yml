@@ -9,22 +9,75 @@
 # Inputs (parsed `kubectl get -o json` documents): k3s_remove_nodes_doc,
 # k3s_remove_csinodes_doc, k3s_remove_attachments_doc, k3s_remove_pvs_doc,
 # k3s_remove_pvcs_doc, k3s_remove_statefulsets_doc; and k3s_remove_node.
-- name: Find cell maintenance holds in flight
+- name: Find the cells whose volume is on the target
+  ansible.builtin.set_fact:
+    # A cell's local volume is pinned to one node, and only its pods and Jobs
+    # run there; a Hetzner volume is on the node it is attached to.
+    k3s_remove_local_cells: >-
+      {%- set cells = [] -%}
+      {%- for pv in k3s_remove_pvs_doc['items'] if pv.spec.claimRef is defined
+          and (pv.spec.claimRef.namespace | default('')).startswith(k3s_cell_namespace_prefix)
+          and (pv.spec.csi | default({})).driver | default('') == k3s_local_storage_driver -%}
+        {%- for term in ((pv.spec.nodeAffinity | default({})).required | default({})).nodeSelectorTerms | default([]) -%}
+          {%- for expression in term.matchExpressions | default([])
+              if expression.key == k3s_local_storage_topology_key and expression.operator == 'In'
+              and k3s_remove_node in expression['values'] | default([]) -%}
+            {%- set _ = cells.append({'namespace': pv.spec.claimRef.namespace,
+                                      'retained': (pv.status | default({})).phase | default('') == 'Released'}) -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ cells }}
+    k3s_remove_attached_cells: >-
+      {%- set claims = {} -%}
+      {%- for pv in k3s_remove_pvs_doc['items'] if pv.spec.claimRef is defined -%}
+        {%- set _ = claims.update({pv.metadata.name: pv.spec.claimRef.namespace | default('')}) -%}
+      {%- endfor -%}
+      {%- set cells = [] -%}
+      {%- for attachment in k3s_remove_attachments_doc['items']
+          if attachment.spec.attacher == k3s_csi_driver and attachment.spec.nodeName == k3s_remove_node
+          and (attachment.status.attached | default(false)) -%}
+        {%- set namespace = claims.get(attachment.spec.source.persistentVolumeName | default(''), '') -%}
+        {%- if namespace.startswith(k3s_cell_namespace_prefix) -%}
+          {%- set _ = cells.append(namespace) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ cells }}
+
+- name: Find cell maintenance holds in flight on the target
   ansible.builtin.set_fact:
     k3s_remove_holds: >-
       {{ k3s_remove_statefulsets_doc['items']
-         | selectattr('metadata.namespace', 'match', k3s_cell_namespace_prefix)
+         | selectattr('metadata.namespace', 'in',
+                      k3s_remove_local_cells | map(attribute='namespace') | list + k3s_remove_attached_cells)
          | selectattr('metadata.annotations', 'defined')
          | selectattr('metadata.annotations', 'contains', 'exomem.io/hold')
          | map(attribute='metadata.namespace') | list }}
 
-- name: Refuse a removal while a cell backup, restore or upgrade holds a cell
+- name: Refuse a removal while a cell backup, restore or upgrade holds a cell on the target
   ansible.builtin.assert:
     that:
       - k3s_remove_holds | length == 0
     fail_msg: >-
       Cell maintenance is in flight ({{ k3s_remove_holds | join(', ') }}); a drain
       would evict its Job. Retry once no exomem.io/hold annotation remains.
+
+# move-cloud-cells-to-local-storage D4. Prevents: deleting the Node of an agent
+# that still holds a cell's live local volume, which makes cellctl relocate that
+# cell from its last backup and lose up to an hour of its writes, from a node
+# that may be healthy. When it fires wrongly, the removal waits until the
+# operator relocates those cells first; the operator pays, and no tenant does.
+# A volume a relocation retained (Released) holds no live cell.
+- name: Refuse a removal while a cell still lives on the target's local storage
+  ansible.builtin.assert:
+    that:
+      - k3s_remove_live_local | length == 0
+    fail_msg: >-
+      {{ k3s_remove_node }} still holds the live local volume of {{ k3s_remove_live_local | join(', ') }}.
+      Relocate those cells first (docs/runbooks/cloud-node-loss.md).
+  vars:
+    k3s_remove_live_local: >-
+      {{ k3s_remove_local_cells | rejectattr('retained') | map(attribute='namespace') | unique | list }}
 
 - name: Find desired cell templates selecting the target reservation
   ansible.builtin.set_fact:

@@ -1023,11 +1023,17 @@ def _promote_owned(
     )
     carried = _carried_at_promotion(record)
     record["carried_from_standby"] = sorted(carried)
+    from . import runtime_readiness
+
     with _lock:
         _promoted = True
         _standby = False
         _carried = carried
         activation = _activation
+        # Under the same lock as the flip: a readiness proof that reads
+        # `standby: false` measured part of its state as a standby, and the
+        # supervisor reads readiness as soon as this POST returns.
+        runtime_readiness.invalidate_cached_readiness()
     # Everything this process owes the handoff is settled above. `release()`
     # starts the promoted worker's own warm, which reads `_carried` on its way
     # through `begin_warm`, so nothing below may still be deciding what it holds.

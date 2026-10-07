@@ -127,12 +127,25 @@ hcloud-csi:
         name: docker.io/hetznercloud/hcloud-csi-driver
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
+      # The chart's own sidecar tags, pinned by digest.
+      csiAttacher:
+        tag: v4.11.0@sha256:b74b05b39501565022883fc128002b4cb857a7bb6c858606bcb3fdedba0b0b80
+      csiResizer:
+        tag: v2.1.0@sha256:589e525cddef6d768e68da1f0bc9ffd0a24bf3add3dd010648eb7189976fde79
+      csiProvisioner:
+        tag: v6.2.0@sha256:6be9f63ca4caa6c46aae55aa372500949d8a21473d72f819da1f746076b32d4e
+      livenessProbe:
+        tag: v2.18.0@sha256:c4cc074199c045dd73ab85f28897e2a32f4d6f38ffdba4f3b13b8007ccbd3570
   node:
     image:
       hcloudCSIDriver:
         name: docker.io/hetznercloud/hcloud-csi-driver
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
+      csiNodeDriverRegistrar:
+        tag: v2.16.0@sha256:ab482308a4921e28a6df09a16ab99a457e9af9641ff44fb1be1a690d07ce8b70
+      livenessProbe:
+        tag: v2.18.0@sha256:c4cc074199c045dd73ab85f28897e2a32f4d6f38ffdba4f3b13b8007ccbd3570
 
 # harden-exomem-cloud-operator-access D1 (task 1.6): the edge namespace's
 # NetworkPolicy lets Traefik reach the API server only at these addresses on
@@ -273,15 +286,15 @@ cellctl:
   # databaseEgressCidrs pattern.
   databaseEgressCidrs: []
   # memoryLimit is 3Gi because the first index build over a large restored vault
-  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The owner's cell (about
-  # 9,300 files, 3.6 GB) then settled at 1.7 GiB resident at idle after
-  # indexing, so memoryRequest (1Gi) understates a large vault's steady state
-  # and lets several large cells overcommit a node. The request is left as is
-  # here; sizing it is a separate decision.
+  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The requests are what an
+  # idle 0.108+ cell needs: about 226 MiB private memory with the model weights
+  # shared across cells, and 14-28 m CPU. The 0.108 matched pair qualified
+  # 512Mi/125m: a large owner-sized cell saved and queried the same as at
+  # 1Gi/250m on the same host (add-cloud-service-resource-policy task 3.9).
   cellResources:
-    cpuRequest: 250m
+    cpuRequest: 125m
     cpuLimit: "2"
-    memoryRequest: 1Gi
+    memoryRequest: 512Mi
     memoryLimit: 3Gi
   resources:
     requests: {cpu: 100m, memory: 128Mi}
@@ -367,6 +380,88 @@ cloudStorage:
   className: exomem-cloud-encrypted
   encryptionSecretName: exomem-cloud-volume-encryption
   encryptionSecretNamespace: exomem-platform
+
+# move-cloud-cells-to-local-storage: cell volumes on the agents' own disks
+# through TopoLVM. `local.enabled` installs TopoLVM (values under `topolvm`),
+# the CSI snapshot CRDs and controller, and the cell, clone and snapshot
+# classes, and configures cellctl and its admission for them. The
+# VolumeSnapshotClass renders once its CRD exists, so enabling takes two
+# upgrades. `domain` is the class new cell claims take; it stays hetzner until
+# the cutover (task 7.2), and existing cells keep the class they have.
+cellStorage:
+  domain: hetzner
+  local:
+    enabled: false
+    # D3: hourly backups that may run at once on one node.
+    backupConcurrencyPerNode: 2
+    # D10: a local cell past 80% use grows online by the 4 GiB default size, up
+    # to this many GiB. D6 reserves twice the largest cell per concurrent
+    # backup, so this cap also bounds each node's snapshot reserve.
+    maxCellGib: 20
+  snapshotController:
+    # external-snapshotter v8.6.0, the release the vendored CRDs in
+    # files/external-snapshotter come from (LOCAL_STORAGE_PROVENANCE.md).
+    image: registry.k8s.io/sig-storage/snapshot-controller:v8.6.0@sha256:81e79f205083f105e573ba2ebfe5964ede7f69a154e8627f53ebbbccd3ed9f70
+
+# TopoLVM 17.2.0 (installed with cellStorage.local.enabled): one thin device
+# class at overprovision ratio 1.0 on the `cells` volume group, as the storage
+# spike rehearsed it (task 1.1). This is the only TopoLVM configuration: a drill
+# installs TopoLVM from these values. Its image is pinned here,
+# not left to the chart's default, and infra/policy/kubernetes.rego admits every
+# container of the privileged node plugin and lvmd only with this exact
+# reference. Its node
+# plugin and lvmd run only on agents labelled
+# node-restriction.kubernetes.io/exomem-local-storage=true, the ones with that
+# volume group. The server applies that label at join; a kubelet cannot set a
+# node-restriction.kubernetes.io/ label on itself, so a compromised agent cannot
+# draw the privileged pods onto itself. They tolerate every taint, as the
+# Hetzner CSI node plugin does, so dedicated and shared agents are served too.
+# The controller keeps a deleted Node's volumes and claims (nodeFinalize
+# skipped): cellctl relocates a cell off a lost node itself, retaining its old
+# volume first (D4). The platform renders the classes itself. The fixed full
+# name keeps the node agent's service account, which
+# templates/cell-local-storage.yaml confines to its own node, the same under
+# any release name; the values schema requires it.
+topolvm:
+  fullnameOverride: exomem-platform-topolvm
+  image:
+    reference: 0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc
+  lvmd:
+    managed: true
+    deviceClasses:
+      - name: thin
+        volume-group: cells
+        default: true
+        type: thin
+        thin-pool:
+          name: pool0
+          overprovision-ratio: 1.0
+    nodeSelector:
+      node-restriction.kubernetes.io/exomem-local-storage: "true"
+    tolerations:
+      - operator: Exists
+  node:
+    nodeSelector:
+      node-restriction.kubernetes.io/exomem-local-storage: "true"
+    tolerations:
+      - operator: Exists
+  controller:
+    nodeFinalize:
+      skipped: true
+    # The controller's token can create PVs, patch every Node and write every
+    # LogicalVolume, and no admission policy confines it. It runs on the server
+    # only, which a kubelet cannot claim: the label below is one only K3s sets.
+    # Prevents: a compromised agent reading that token from a controller pod
+    # scheduled beside its cells. Costs when it fires wrongly: no volume is
+    # provisioned, resized or snapshotted while the server is down, when the
+    # API is down anyway. Who pays: tenants whose cell is created, relocated or
+    # backed up during a server outage, already waiting on the API. One
+    # replica: two would need two servers to satisfy the chart's anti-affinity.
+    replicaCount: 1
+    affinity: ""
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
+  storageClasses: []
 
 cloudIngress:
   enabled: false

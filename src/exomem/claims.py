@@ -34,10 +34,7 @@ whose resolved weights match its sha256 digest, whose label map is a version
 this build ships, and whose verification fixture set is green at that exact
 pair, with `EXOMEM_CLAIM_POLARITY_NLI` set. Anything short of all of that
 refuses the verifier, and refusal degrades to ABSENCE: the entry carries no
-label. The deterministic lexical heuristic below is retired from queue
-enrichment — it had no admission control — and survives only as the comparison
-arm of the fixture-set precision table and as `classify_polarity`'s fallback for
-callers that are not writing an admitted, provenance-marked label.
+label.
 """
 
 from __future__ import annotations
@@ -259,10 +256,14 @@ def extract_claim_text(
 
 
 def extract_claim_for_page(page) -> str | None:
-    """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type)."""
+    """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type).
+
+    Claims feed a shared sidecar, so they read the withheld search body: an
+    origin carrier is never a claim, nor the lead-paragraph fallback.
+    """
     return extract_claim_text(
         page.title,
-        page.body,
+        page.search_body,
         page_type=page.page_type,
         entity_type=page.frontmatter.get("entity_type"),
     )
@@ -1170,97 +1171,6 @@ class PolarityResult:
     method: str
 
 
-# Deterministic-heuristic lexicon. Coarse by design — a lexical stand-in for a
-# real NLI model, chosen so v1 was REAL and testable without a model download.
-# RETIRED from queue enrichment (it has no admission control); it remains the
-# comparison arm of `VERIFICATION_FIXTURES` and `classify_polarity`'s fallback.
-_STOPWORDS = frozenset(
-    """a an the this that these those of for to in on at by with from as is are be
-    been being it its and or but if then so than into over under about we you they
-    i he she our your their them his her one two use used using via per each any all
-    should must can may might will would could do does did done has have had""".split()
-)
-_NEGATIONS = frozenset(
-    """not no never cannot cant can't dont don't doesnt doesn't isnt isn't arent
-    aren't wont won't without neither nor fails fail false wrong avoid lacks lack
-    unless""".split()
-)
-_ANTONYM_PAIRS = [
-    ("increase", "decrease"), ("increases", "decreases"), ("increase", "reduce"),
-    ("increases", "reduces"), ("improve", "degrade"), ("improves", "degrades"),
-    ("improved", "degraded"), ("better", "worse"), ("faster", "slower"),
-    ("works", "fails"), ("work", "fail"), ("true", "false"), ("more", "less"),
-    ("higher", "lower"), ("enable", "disable"), ("enables", "disables"),
-    ("help", "hurt"), ("helps", "hurts"), ("gain", "loss"), ("up", "down"),
-    ("add", "remove"), ("adds", "removes"), ("positive", "negative"),
-    ("win", "lose"), ("succeed", "fail"), ("beneficial", "harmful"),
-    ("necessary", "unnecessary"), ("required", "optional"), ("always", "never"),
-    ("accept", "reject"), ("include", "exclude"), ("safe", "unsafe"),
-]
-_ANTONYMS: dict[str, set[str]] = {}
-for _a, _b in _ANTONYM_PAIRS:
-    _ANTONYMS.setdefault(_a, set()).add(_b)
-    _ANTONYMS.setdefault(_b, set()).add(_a)
-
-# Overlap thresholds over content-word Jaccard.
-_DUP_JACCARD = 0.80      # near-total topical overlap, same polarity → restatement
-_REL_JACCARD = 0.20      # shared enough to be "about the same thing"
-_NEG_MIN_JACCARD = 0.40  # negation-only contradiction needs a strong shared topic
-
-_WORD_RE = re.compile(r"[a-z0-9']+")
-
-
-def _tokens(text: str) -> list[str]:
-    return _WORD_RE.findall((text or "").lower())
-
-
-def _content_words(tokens: list[str]) -> set[str]:
-    """Topic words: drop stopwords + negation cues so overlap measures SUBJECT,
-    not stance (a negated and an asserted claim about the same thing still share
-    their topic words)."""
-    return {t for t in tokens if t not in _STOPWORDS and t not in _NEGATIONS}
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    return inter / union if union else 0.0
-
-
-def _heuristic_polarity(
-    claim_a: str, claim_b: str, *, cosine: float | None = None
-) -> PolarityResult:
-    """Deterministic lexical polarity: negation-parity + antonym cues over a
-    shared-topic gate. REAL and unit-tested (the v1 default backend).
-
-    - **duplicate**: near-total topic overlap, same negation parity, no antonym.
-    - **contradict**: same topic AND (an antonym pair spans the two claims, OR one
-      claim negates and the other asserts).
-    - **refine**: same topic, same stance, but not a restatement (differing detail).
-    - **unrelated**: little shared topic and no polarity signal.
-    """
-    ta, tb = _tokens(claim_a), _tokens(claim_b)
-    ca, cb = _content_words(ta), _content_words(tb)
-    overlap = _jaccard(ca, cb)
-
-    neg_a = any(t in _NEGATIONS for t in ta)
-    neg_b = any(t in _NEGATIONS for t in tb)
-    neg_diff = neg_a != neg_b
-    antonym_hit = any(w in _ANTONYMS and (_ANTONYMS[w] & cb) for w in ca)
-
-    if overlap >= _DUP_JACCARD and not neg_diff and not antonym_hit:
-        return PolarityResult("duplicate", round(overlap, 4), "heuristic")
-    if antonym_hit and overlap >= _REL_JACCARD:
-        return PolarityResult("contradict", round(min(1.0, 0.5 + overlap / 2), 4), "heuristic")
-    if neg_diff and overlap >= _NEG_MIN_JACCARD:
-        return PolarityResult("contradict", round(min(1.0, 0.5 + overlap / 2), 4), "heuristic")
-    if overlap >= _REL_JACCARD:
-        return PolarityResult("refine", round(overlap, 4), "heuristic")
-    return PolarityResult("unrelated", round(1.0 - overlap, 4), "heuristic")
-
-
 # ---------------------------------------------------------------------------
 # Label map v2 — the frozen verifier's logit → NLI-relation contract
 # ---------------------------------------------------------------------------
@@ -1640,19 +1550,13 @@ def reset_verifier_cache() -> None:
 
 @dataclass(frozen=True)
 class FixturePair:
-    """One golden claim pair with the label an admitted verifier must produce.
-
-    `heuristic_fails` records whether the retired lexical stand-in gets this
-    pair wrong. It is documentation of WHY the tier exists, and the input to
-    the fixture-set precision table — not something admission consults.
-    """
+    """One golden claim pair with the label an admitted verifier must produce."""
 
     claim_a: str
     claim_b: str
     expected: str
     note: str
     language_shape: str
-    heuristic_fails: bool = False
 
 
 #: Bounded multilingual admission evidence. The English pairs preserve the
@@ -1674,7 +1578,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "contradict",
             "genuine contradiction across differing surface forms",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Caching improves latency for repeat reads.",
@@ -1689,7 +1592,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "duplicate",
             "restatement, reordered surface",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Batching similar work helps focus.",
@@ -1704,7 +1606,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "compatible but non-entailing evidence remains neutral",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Batching does not hurt focus.",
@@ -1712,7 +1613,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "refine",
             "concordant evidence: negation parity differs, one stance",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Tesseract is required for image OCR on Windows.",
@@ -1720,7 +1620,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "disjoint topics are inside NLI's neutral fallback",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The upload route parses multipart bodies through Starlette.",
@@ -1728,7 +1627,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "disjoint topics with shared house vocabulary remain neutral",
             "en/en",
-            heuristic_fails=True,
         ),
         FixturePair(
             "Der Cache reduziert die Latenz.",
@@ -1736,7 +1634,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "contradict",
             "same-language German contradiction",
             "de/de",
-            heuristic_fails=True,
         ),
         FixturePair(
             "La sauvegarde démarre chaque nuit.",
@@ -1751,7 +1648,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "duplicate",
             "same-language Estonian reordered restatement",
             "et/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The cache reduces latency.",
@@ -1759,7 +1655,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "contradict",
             "mixed English/Estonian contradiction",
             "en/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The backup runs every night.",
@@ -1767,7 +1662,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "duplicate",
             "mixed English/Estonian equivalence",
             "en/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The backup runs every night.",
@@ -1775,7 +1669,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "refine",
             "mixed English/Estonian added detail",
             "en/et",
-            heuristic_fails=True,
         ),
         FixturePair(
             "The cache reduces latency.",
@@ -1783,7 +1676,6 @@ VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
             "neutral",
             "mixed English/Estonian neutral pair",
             "en/et",
-            heuristic_fails=True,
         ),
     ),
 }
@@ -2054,20 +1946,3 @@ def verifier_polarity(claim_a: str, claim_b: str) -> PolarityResult | None:
     if predict is None:
         return None
     return label_map.apply(predict([(claim_a, claim_b), (claim_b, claim_a)]))
-
-
-def classify_polarity(
-    claim_a: str, claim_b: str, *, cosine: float | None = None
-) -> PolarityResult:
-    """Polarity of two claims behind ONE stable interface.
-
-    The admitted frozen verifier when it is admitted, else the deterministic
-    lexical heuristic. NOT the review-queue channel: the queue calls
-    `verifier_polarity` directly, precisely so a heuristic verdict can never
-    reach queue metadata (design D3). This seam remains for callers that want a
-    best-effort verdict and are not writing an admitted, provenance-marked label.
-    """
-    verdict = verifier_polarity(claim_a, claim_b)
-    if verdict is not None:
-        return verdict
-    return _heuristic_polarity(claim_a, claim_b, cosine=cosine)

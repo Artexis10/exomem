@@ -1,0 +1,14 @@
+# Managed by the k3s role: the vSwitch VLAN coupling this dedicated server to
+# the Hetzner Cloud network (move-cloud-cells-to-local-storage D8). A vSwitch
+# carries at most 1400-byte frames.
+network:
+  version: 2
+  vlans:
+    vlan{{ k3s_vswitch.vlan_id }}:
+      id: {{ k3s_vswitch.vlan_id }}
+      link: {{ (k3s_vswitch_parent_interface or ansible_facts['default_ipv4']['interface']) | to_json }}
+      mtu: 1400
+      addresses: [{{ k3s_vswitch.address | to_json }}]
+      routes:
+        - to: {{ k3s_vswitch.network | to_json }}
+          via: {{ k3s_vswitch.gateway | to_json }}

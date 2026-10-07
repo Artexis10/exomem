@@ -20,7 +20,9 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(1800)
 
-CONTINUITY_SHA256 = "8c6eb8140e5929f59ed2ff7bd701f85b7dded2fc0c24e0e8c277a406b0a7624a"
+#: Re-pinned when corpus v5 relabelled the corpus (the digest covers `corpus_id`);
+#: the cases, checks and scorer source are unchanged.
+CONTINUITY_SHA256 = "f5c3ce85e042bdf908c1737530dbb7500fc542256174fa5893e01bbf6e6cb72b"
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 #: v1 (digest ``de5e7900…``, scorer too lenient per the integrity review),

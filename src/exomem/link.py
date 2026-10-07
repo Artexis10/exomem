@@ -22,6 +22,8 @@ from . import (
     entity_candidates,
     indexes,
     memory_refs,
+    origin_bindings,
+    provenance,
     semantic_writes,
     tag_variants,
     temporal,
@@ -40,7 +42,6 @@ from .vault import (
     InvalidSlugError,
     PlannedWrite,
     WikilinkResolver,
-    batch_atomic_write,
     canonical_vault_rel,
     escape_wikilinks_for_log,
     kb_root,
@@ -50,7 +51,6 @@ from .vault import (
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
-    rotate_log_if_needed,
     writer_link_visibility,
     yaml_scalar,
 )
@@ -237,7 +237,7 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
     """
     from .governance import egress
 
-    if egress.governed_release_filter(vault_root) is not None:
+    if egress.caller_restricted(vault_root):
         return (
             "an entity page already exists at this name's path. Entities are "
             "create-only via `link`; use `replace` to supersede."
@@ -245,242 +245,6 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
     return (
         f"{rel_entity!r} already exists. Entities are create-only via `link`; "
         "use `replace` to supersede."
-    )
-
-
-def _legacy_link(
-    vault_root: Path,
-    *,
-    entity_type: str,
-    name: str,
-    slug: str | None = None,
-    summary: str,
-    why_in_kb: str | None = None,
-    tags: list[str] | None = None,
-    connections: list[str] | None = None,
-    # person
-    affiliation: str | None = None,
-    relationship: str | None = None,
-    # concept
-    domain: str | None = None,
-    # library
-    language: str | None = None,
-    repo: str | None = None,
-    license: str | None = None,
-    used_in: list[str] | None = None,
-    # decision
-    decided: str | None = None,
-    project: str | None = None,
-    decision_status: str | None = None,
-    today: dt.date | None = None,
-) -> LinkResult:
-    """Create a typed entity page + update top index + log."""
-    registry = load_entity_types(vault_root)
-    definition = registry.resolve(entity_type)
-    if definition is None:
-        raise LinkError(
-            code="ENTITY_TYPE_UNKNOWN",
-            missing=["entity_type"],
-            reason=(
-                f"entity_type {entity_type!r} is not active. "
-                f"Active ids: {list(registry.active_ids)}"
-            ),
-        )
-    entity_type = definition.id
-    slug_warnings: list[str] = []
-    filename_slug: str | None = None
-    if slug is not None:
-        try:
-            filename_slug, slug_warnings = resolve_filename_slug(name, slug)
-        except InvalidSlugError as e:
-            raise LinkError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
-    err = _validate(
-        entity_type=entity_type,
-        name=name,
-        summary=summary,
-        decision_status=decision_status,
-    )
-    if err is not None:
-        raise LinkError(code=err.code, missing=err.missing, reason=err.reason)
-
-    # Decision entities carry a `project:` field — route it through the
-    # same auto-register + typo-distance guard the other writers use.
-    # Without this, `link(entity_type="decision", project="helath")` would
-    # land a broken decision page silently.
-    if entity_type == "decision" and project:
-        from . import project_keys as project_keys_module
-        registry = project_keys_module.load_project_registry(vault_root)
-        if project not in registry.project_to_folder:
-            try:
-                project_keys_module.register_project_key(vault_root, project)
-            except project_keys_module.ProjectKeyTypoError as e:
-                raise LinkError(
-                    code="PROJECT_KEY_TYPO",
-                    missing=["project"],
-                    reason=str(e),
-                ) from e
-            except ValueError:
-                # Invalid slug — let it land; downstream audit will flag via
-                # unregistered_project_key.
-                pass
-
-    now = today or temporal.now()
-    date_iso = temporal.render_date(now)
-    stamp_iso = temporal.stamp(now)
-    tags_clean = _clean_tags(tags)
-    exomem_id = memory_refs.new_id()
-
-    display_name = name.strip()
-    name_safe = _sanitize_name(name)
-    folder = kb_root(vault_root) / "Entities" / definition.folder
-    entity_path = folder / f"{filename_slug or name_safe}.md"
-
-    if entity_path.exists():
-        raise LinkError(
-            code="ENTITY_EXISTS",
-            missing=["name"],
-            reason=_entity_exists_reason(
-                vault_root, entity_path.relative_to(vault_root).as_posix()
-            ),
-        )
-
-    folder.mkdir(parents=True, exist_ok=True)
-
-    rel_entity_no_ext = entity_path.relative_to(vault_root).with_suffix("").as_posix()
-    # Shared, freshness-checked resolver (see find.shared_resolver) — never a
-    # fresh O(vault) build per write. Pending entry re-synced by index_sync
-    # post-write; purged in the except-path below on failure.
-    from . import find as find_module
-    resolver = find_module.shared_resolver(vault_root)
-    resolver.add_pending(rel_entity_no_ext, title=display_name)
-
-    connections_norm, conn_warnings = _normalize_connections(
-        connections, vault_root=vault_root, resolver=resolver
-    )
-
-    # Normalize wikilinks inside the summary and why_in_kb prose so the
-    # entity body lands in canonical form even when written via the bare
-    # `link` API.
-    summary_clean, summary_warnings = normalize_body_wikilinks(
-        summary, vault_root, resolver=resolver
-    )
-    why_clean: str | None = None
-    why_warnings: list[str] = []
-    if why_in_kb:
-        why_clean, why_warnings = normalize_body_wikilinks(
-            why_in_kb, vault_root, resolver=resolver
-        )
-
-    entity_md = _render_entity(
-        entity_type=entity_type,
-        name=display_name,
-        summary=summary_clean,
-        why_in_kb=why_clean,
-        date_iso=stamp_iso,
-        tags=tags_clean,
-        connections=[
-            render_wikilink_target(connection, vault_root)
-            for connection in connections_norm
-        ],
-        affiliation=affiliation,
-        relationship=relationship,
-        domain=domain,
-        language=language,
-        repo=repo,
-        license=license,
-        used_in=used_in,
-        decided=decided,
-        project=project,
-        decision_status=decision_status,
-        exomem_id=exomem_id,
-        definition=definition,
-    )
-
-    rel_entity = entity_path.relative_to(vault_root).as_posix()
-
-    writes: list[PlannedWrite] = [PlannedWrite(path=entity_path, content=entity_md)]
-    warnings: list[str] = (
-        list(slug_warnings)
-        + list(conn_warnings)
-        + list(summary_warnings)
-        + list(why_warnings)
-        + tag_variants.advise_authored(vault_root, tags_clean)
-    )
-
-    # Index + log updates.
-    kb = kb_root(vault_root)
-    activity_summary = _activity_summary(
-        rel_entity_no_ext=rel_entity_no_ext,
-        name=display_name,
-        entity_type=entity_type,
-        domain=domain,
-        project=project,
-    )
-    log_body = _log_entry_body(
-        entity_type=entity_type,
-        name=display_name,
-        domain=domain,
-        project=project,
-        decision_status=decision_status,
-        tags=tags_clean,
-    )
-
-    top_index = kb / "index.md"
-    if top_index.exists():
-        new_top, _trim_note = indexes._prepend_recent_activity(
-            top_index.read_text(encoding="utf-8"),
-            date_iso=date_iso,
-            summary=activity_summary,
-        )
-        # Refresh Entities sub-index + top-index Counts. Pass the new
-        # entity's path so counts reflect post-write state.
-        sub_writes, new_top_with_counts = indexes.compute_subindex_writes(
-            vault_root,
-            top_index_text=new_top,
-            pending_paths=[rel_entity_no_ext],
-        )
-        if new_top_with_counts is not None:
-            new_top = new_top_with_counts
-        # Cap-50 trim is recorded in log.md; no per-write warning needed.
-        writes.append(PlannedWrite(path=top_index, content=new_top))
-        writes.extend(sub_writes)
-    else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
-
-    log_file = kb / "log.md"
-    if log_file.exists():
-        new_log = _prepend_log_entry(
-            log_file.read_text(encoding="utf-8"),
-            date_iso=stamp_iso,
-            rel_path=rel_entity_no_ext,
-            body=log_body,
-        )
-        writes.append(PlannedWrite(path=log_file, content=new_log))
-    else:
-        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
-
-    try:
-        batch_atomic_write(writes, vault_root=vault_root)
-    except Exception as e:
-        log.exception("partial write during link(); some files may be updated")
-        warnings.append(f"partial write — reconcile on desktop: {e}")
-        try:  # purge the add_pending phantom — the entity never landed
-            find_module.on_resolver_files_changed(
-                vault_root, [rel_entity_no_ext + ".md"], []
-            )
-        except Exception:  # noqa: BLE001 — purge is best-effort cleanup
-            log.debug("resolver pending-purge failed", exc_info=True)
-        raise
-
-    rotate_note = rotate_log_if_needed(vault_root)
-    if rotate_note:
-        warnings.append(rotate_note)
-
-    return LinkResult(
-        path=rel_entity,
-        ref=memory_refs.memory_ref(exomem_id),
-        warnings=warnings,
-        slug=filename_slug or "",
     )
 
 
@@ -561,6 +325,7 @@ def _render_entity(
     definition: EntityTypeDefinition,
     facets: list[tuple[str, list[str], bool]] | None = None,
     aliases: list[str] | None = None,
+    origin_metadata: str | None = None,
 ) -> str:
     lines = ["---"]
     lines.append("type: entity")
@@ -606,6 +371,8 @@ def _render_entity(
         lines.append("tags: []")
     lines.append("---")
     lines.append("")
+    if origin_metadata is not None:
+        lines.extend([origin_metadata, ""])
     lines.append(f"# {name}")
     lines.append("")
     lines.append("## Summary")
@@ -862,6 +629,12 @@ def link(
             filename_slug, slug_warnings = resolve_filename_slug(name, slug)
         except InvalidSlugError as error:
             raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
+    origin_block = None
+    if isinstance(summary, str):
+        try:
+            summary, origin_block = origin_bindings.extract_origin_metadata(summary)
+        except provenance.OriginError as error:
+            raise LinkError(error.code, [], error.reason) from error
     err = _validate(
         entity_type=entity_type,
         name=name,
@@ -1040,6 +813,7 @@ def link(
         definition=definition,
         facets=facet_values,
         aliases=aliases_clean,
+        origin_metadata=origin_block,
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)

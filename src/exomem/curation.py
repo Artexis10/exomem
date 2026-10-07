@@ -1302,6 +1302,8 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     expected_container_hash=args["expected_container_hash"],
                     why=args["why"],
                 )
+                if appended["body"] != (args.get("body") or ""):
+                    step["args"]["body"] = appended["body"]
             else:
                 appended = records_module.prepare_update(
                     vault_root,
@@ -2080,6 +2082,7 @@ def _dispatch_step(
     step: Mapping[str, Any],
     binding: Mapping[str, Any],
     runtime_args: Mapping[str, Any] | None = None,
+    run: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     from . import commands
 
@@ -2167,6 +2170,8 @@ def _dispatch_step(
                 manifest,
                 **{name: value for name, value in args.items() if name != "collection"},
                 hold=False,
+                # The kept prior payload names the run that corrected it.
+                _history_binding=run,
             )
         return {**result, "path": prepared["destination"]}
     if kind == "move":
@@ -2676,7 +2681,11 @@ def _execute_next(
             ),
         ) as pending:
             leaf_result = _dispatch_step(
-                vault_root, step, execution_binding, runtime_args=runtime_args
+                vault_root,
+                step,
+                execution_binding,
+                runtime_args=runtime_args,
+                run={"curation_run": run_identity, "operation": operation_identity},
             )
             if not pending.consumed:
                 raise _error(

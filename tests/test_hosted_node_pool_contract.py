@@ -45,6 +45,13 @@ def _block(text: str, header: str) -> str:
     return text.split(header, 1)[1].split("\nresource ", 1)[0]
 
 
+def _no_dedicated_hosts(tmp_path: Path) -> str:
+    """The explicit empty host list the generator requires when there are none."""
+    path = tmp_path / "no-dedicated-hosts.json"
+    path.write_text("{}", encoding="utf-8")
+    return str(path)
+
+
 # --- Terraform --------------------------------------------------------------
 
 
@@ -103,9 +110,6 @@ def test_agent_module_is_keyed_disposable_and_exposes_only_443_and_admin_ssh() -
     firewall = _block(main, 'resource "hcloud_firewall" "agents"')
     ports = re.findall(r'port\s*=\s*"([^"]+)"', firewall)
     assert ports == ["22", "443"]
-    assert firewall.count("rule {") == 2
-    ssh = firewall.split('port        = "22"', 1)[1].split("}", 1)[0]
-    assert "source_ips  = var.admin_ssh_cidrs" in ssh
     for forbidden in ('"6443"', '"10250"', '"8472"', '"80"', '"5432"'):
         assert forbidden not in main
 
@@ -147,9 +151,29 @@ def test_validate_script_formats_validates_and_tests_the_agent_module() -> None:
 def test_site_hardens_every_node_first_then_runs_server_then_agents() -> None:
     plays = _yaml(ANSIBLE / "site.yml")
     hosts = [play["hosts"] for play in plays]
-    assert hosts[:3] == ["hosted_nodes", "hosted_nodes:!k3s_agents", "k3s_agents"]
+    assert hosts[:6] == [
+        "hosted_nodes",
+        "hosted_nodes",
+        "hosted_nodes:!k3s_agents",
+        "hosted_nodes:!k3s_agents",
+        "dedicated_hosts",
+        "k3s_agents",
+    ]
 
-    harden, server, agents = plays[:3]
+    link, harden, server, tang, storage, agents = plays[:6]
+    # Every WireGuard key exists before any node lists its peers only when the
+    # private-link play runs each task on every node: no serial.
+    assert "serial" not in link
+    assert link["tasks"][0]["ansible.builtin.include_role"] == {
+        "name": "k3s",
+        "tasks_from": "private_link.yml",
+    }
+    # Tang serves before a dedicated agent binds to it, and that agent's
+    # storage is unlocked before its K3s agent starts.
+    assert storage["roles"] == ["dedicated_host"]
+    # Several storage tasks pass the recovery passphrase on stdin; without
+    # pipelining it lands in module files on the host's unencrypted root.
+    assert storage["vars"]["ansible_pipelining"] is True
     # Same hardening for every K3s node, and every node's inter-node firewall
     # converged before any agent joins (a join requires its peers to admit it).
     assert harden["roles"] == ["base"]
@@ -160,7 +184,7 @@ def test_site_hardens_every_node_first_then_runs_server_then_agents() -> None:
     assert server["roles"] == ["k3s"]
     assert agents["roles"] == ["k3s"]
     assert agents["vars"] == {"k3s_node_role": "agent"}
-    for play in (harden, server, agents):
+    for play in (harden, server, tang, storage, agents):
         assert play["serial"] == 1
         assert play["become"] is True
         assert play["any_errors_fatal"] is True
@@ -230,7 +254,8 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
     terraform_output.chmod(0o600)
 
     result = subprocess.run(
-        ["python3", str(generator), str(terraform_output), str(inventory), "--user", "ops"],
+        ["python3", str(generator), str(terraform_output), str(inventory), "--user", "ops",
+         "--dedicated-hosts", _no_dedicated_hosts(tmp_path)],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -282,7 +307,8 @@ def test_inventory_generator_refuses_malformed_agents(tmp_path: Path, agents: di
     )
     terraform_output.chmod(0o600)
     result = subprocess.run(
-        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml")],
+        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml"),
+         "--dedicated-hosts", _no_dedicated_hosts(tmp_path)],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -307,13 +333,339 @@ def test_inventory_generator_refuses_sensitive_agent_output(tmp_path: Path) -> N
     )
     terraform_output.chmod(0o600)
     result = subprocess.run(
-        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml")],
+        ["python3", str(generator), str(terraform_output), str(tmp_path / "inventory.yml"),
+         "--dedicated-hosts", _no_dedicated_hosts(tmp_path)],
         cwd=ROOT,
         check=False,
         capture_output=True,
         text=True,
     )
     assert result.returncode != 0
+
+
+# --- Inventory: hosts Terraform does not create --------------------------------
+
+_VSWITCH_OUTPUT = {
+    "sensitive": False,
+    "value": {
+        "vlan_id": 4000,
+        "subnet_cidr": "10.50.2.0/24",
+        "gateway": "10.50.2.1",
+        "network_cidr": "10.50.0.0/16",
+    },
+}
+
+
+def _dedicated(name: str, private_ip: str, link: str, **extra: object) -> dict:
+    host = {
+        "ipv4": "203.0.113.40",
+        "admin_address": "100.64.0.40",
+        "private_ip": private_ip,
+        "link": link,
+        "data_disks": ["/dev/disk/by-id/nvme-a-part4", "/dev/disk/by-id/nvme-b-part4"],
+    }
+    return {name: {**host, **extra}}
+
+
+def _generate_with_dedicated(tmp_path: Path, dedicated: dict) -> subprocess.CompletedProcess:
+    terraform_output = tmp_path / "foundation.json"
+    terraform_output.write_text(
+        json.dumps(
+            {
+                "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
+                "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
+                "k3s_agent_nodes": {
+                    "sensitive": False,
+                    "value": {
+                        "01": {"name": "exomem-agent-01", "ipv4": "192.0.2.31", "private_ip": "10.50.1.31"},
+                    },
+                },
+                "vswitch": _VSWITCH_OUTPUT,
+            }
+        ),
+        encoding="utf-8",
+    )
+    terraform_output.chmod(0o600)
+    hosts = tmp_path / "dedicated-hosts.json"
+    hosts.write_text(json.dumps(dedicated), encoding="utf-8")
+    return subprocess.run(
+        [
+            "python3",
+            str(ROOT / "infra/scripts/generate_ansible_inventory.py"),
+            str(terraform_output),
+            str(tmp_path / "inventory.json"),
+            "--user",
+            "ops",
+            "--dedicated-hosts",
+            str(hosts),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_inventory_generator_joins_hosts_terraform_does_not_create(tmp_path: Path) -> None:
+    # Catches a dedicated host that lands outside k3s_agents (it would never
+    # join) or outside dedicated_hosts (its disks would never be encrypted),
+    # and a Terraform agent whose coordinates change because one was added.
+    wipe = ["/dev/disk/by-id/nvme-a-part4"]
+    dedicated = {
+        **_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wipe=wipe),
+        **_dedicated("exomem-agent-dx2", "10.50.2.41", "vswitch"),
+    }
+    result = _generate_with_dedicated(tmp_path, dedicated)
+    assert result.returncode == 0, result.stderr
+
+    hosted = json.loads((tmp_path / "inventory.json").read_text(encoding="utf-8"))["all"][
+        "children"
+    ]["hosted_nodes"]
+    agents = hosted["children"]["k3s_agents"]
+    assert agents["hosts"] == {
+        "exomem-agent-01": {
+            "ansible_host": "192.0.2.31",
+            "ansible_user": "ops",
+            "private_node_ip": "10.50.1.31",
+        }
+    }
+    disks = ["/dev/disk/by-id/nvme-a-part4", "/dev/disk/by-id/nvme-b-part4"]
+    common = {"ansible_host": "100.64.0.40", "ansible_user": "ops", "public_ipv4": "203.0.113.40",
+              "dedicated_host_data_disks": disks}
+    assert agents["children"]["dedicated_hosts"]["hosts"] == {
+        "exomem-agent-dx1": {**common, "private_node_ip": "10.51.0.40",
+                             "k3s_private_link": "wireguard", "dedicated_host_wipe_disks": wipe},
+        "exomem-agent-dx2": {**common, "private_node_ip": "10.50.2.41", "k3s_private_link": "vswitch",
+                             "k3s_vswitch": {"vlan_id": 4000, "address": "10.50.2.41/24",
+                                             "gateway": "10.50.2.1", "network": "10.50.0.0/16"}},
+    }
+
+
+def test_inventory_generator_requires_the_dedicated_host_list(tmp_path: Path) -> None:
+    # An inventory that omits dedicated hosts makes site.yml retire their
+    # WireGuard link, firewall rules and Tang access on every other node.
+    terraform_output = tmp_path / "foundation.json"
+    terraform_output.write_text(json.dumps({
+        "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
+        "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
+    }), encoding="utf-8")
+    terraform_output.chmod(0o600)
+    result = subprocess.run(
+        ["python3", str(ROOT / "infra/scripts/generate_ansible_inventory.py"),
+         str(terraform_output), str(tmp_path / "inventory.json")],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == 2 and "--dedicated-hosts" in result.stderr
+    assert not (tmp_path / "inventory.json").exists()
+
+
+@pytest.mark.parametrize(
+    "dedicated,reason",
+    [
+        # Two inventory entries for one name would converge one machine as both.
+        (_dedicated("exomem-agent-01", "10.51.0.40", "wireguard"), "reuses another node's name"),
+        # A second node on an existing node's address breaks the overlay.
+        (_dedicated("exomem-agent-dx1", "10.50.1.31", "wireguard"), "own private address"),
+        (_dedicated("exomem-agent-dx1", "fd00::40", "wireguard"), "dx1: private_ip must be an IPv4"),
+        ({"exomem-agent-dx1": {**_dedicated("x", "10.51.0.40", "wireguard")["x"], "private_ip": None}},
+         "dx1: private_ip must be an IPv4"),
+        # Kernel names move between boots; the wrong disk would be encrypted.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    data_disks=["/dev/nvme0n1p4", "/dev/nvme1n1p4"]), "not kernel names"),
+        # Two partitions of one disk mirror nothing.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    data_disks=["/dev/disk/by-id/nvme-a-part4", "/dev/disk/by-id/nvme-a-part5"]),
+         "two different disks"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    data_disks=[{"path": "/dev/disk/by-id/nvme-a"}, "/dev/disk/by-id/nvme-b"]),
+         "dx1: data_disks must be a list"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wipe=[{"path": "/dev/sda"}]),
+         "dx1: wipe must be a list"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wipe=["/dev/disk/by-id/nvme-c"]),
+         "wipe may only name its own data_disks"),
+        # A vSwitch address must be a host in the Terraform vSwitch subnet.
+        (_dedicated("exomem-agent-dx1", "10.50.3.40", "vswitch"), "other than its gateway"),
+        (_dedicated("exomem-agent-dx1", "10.50.2.1", "vswitch"), "other than its gateway"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "ipsec"), "link must be wireguard or vswitch"),
+    ],
+)
+def test_inventory_generator_refuses_malformed_dedicated_hosts(
+    tmp_path: Path, dedicated: dict, reason: str
+) -> None:
+    result = _generate_with_dedicated(tmp_path, dedicated)
+    # 1 is a refused input; argparse's usage error is 2. The reason names the
+    # host and field, so a traceback never stands in for a refusal.
+    assert result.returncode == 1, result.stderr
+    assert reason in result.stderr
+    assert not (tmp_path / "inventory.json").exists()
+
+
+def test_escrowed_tang_keys_reach_the_variable_the_role_reads() -> None:
+    # A renamed variable on either side leaves Tang and every Clevis binding
+    # without keys; per-host passphrases follow one naming rule.
+    matrix = json.loads(_read(ROOT / "infra/contracts/secret-destinations-v1.json"))
+    destinations = matrix["secrets"]["dedicated_host_tang_keys"]["destinations"]
+    assert destinations["ansible.hosted-node.tang-keys.active"]["variable"] == "dedicated_host_tang_keys"
+    assert destinations["escrow.tang-keys.active"]["kind"] == "sops_escrow"
+    defaults = _yaml(ANSIBLE / "roles/dedicated_host/defaults/main.yml")
+    assert defaults["dedicated_host_tang_keys"] == ""
+
+
+_TERRAFORM_ONLY = {
+    "hosted_nodes": {
+        "hosts": {"exomem-alpha": {"private_node_ip": "10.50.1.10"}},
+        "children": {"k3s_agents": {"hosts": {"exomem-agent-01": {"private_node_ip": "10.50.1.31"}}}},
+    }
+}
+_WITH_DEDICATED = json.loads(json.dumps(_TERRAFORM_ONLY))
+_WITH_DEDICATED["hosted_nodes"]["children"]["k3s_agents"]["children"] = {
+    "dedicated_hosts": {
+        "hosts": {
+            # A WireGuard host's private address sits on its WireGuard interface.
+            "exomem-agent-dx1": {"private_node_ip": "10.51.0.40", "k3s_private_link": "wireguard",
+                                 "public_ipv4": "203.0.113.40",
+                                 "k3s_resolved_private_interface": "wgexomem"},
+            "exomem-agent-dx2": {"private_node_ip": "10.50.2.41", "k3s_private_link": "vswitch",
+                                 "k3s_resolved_private_interface": "vlan4000"},
+        }
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "groups,expected",
+    [
+        # An inventory of Terraform hosts turns every new branch off, so
+        # site.yml converges them exactly as before.
+        (_TERRAFORM_ONLY, {
+            "exomem-alpha": [[], {"10.50.1.31": "priv"}, False],
+            "exomem-agent-01": [[], {"10.50.1.10": "priv"}, False],
+        }),
+        # A WireGuard agent peers with every node and every node with it;
+        # firewall rules for it name the WireGuard interface. Dedicated hosts
+        # wait for their TopoLVM pool.
+        (_WITH_DEDICATED, {
+            "exomem-alpha": [["exomem-agent-dx1"],
+                             {"10.50.1.31": "priv", "10.51.0.40": "wgexomem", "10.50.2.41": "priv"}, False],
+            "exomem-agent-01": [["exomem-agent-dx1"],
+                                {"10.50.1.10": "priv", "10.51.0.40": "wgexomem", "10.50.2.41": "priv"}, False],
+            "exomem-agent-dx1": [["exomem-agent-01", "exomem-agent-dx2", "exomem-alpha"],
+                                 {"10.50.1.10": "wgexomem", "10.50.1.31": "wgexomem",
+                                  "10.50.2.41": "wgexomem"}, True],
+            "exomem-agent-dx2": [["exomem-agent-dx1"],
+                                 {"10.50.1.10": "vlan4000", "10.50.1.31": "vlan4000",
+                                  "10.51.0.40": "wgexomem"}, True],
+        }),
+    ],
+)
+def test_private_link_and_storage_defaults_follow_the_inventory(
+    tmp_path: Path, groups: dict, expected: dict
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local",
+                                                      "k3s_resolved_private_interface": "priv"},
+                                             "children": groups}}))
+    play = tmp_path / "defaults.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "hosted_nodes", "gather_facts": False,
+        "vars": {"expected": expected}, "tasks": [
+            {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+            {"ansible.builtin.assert": {"that": [
+                "[k3s_wireguard_peers | sort, k3s_peer_interfaces, k3s_agent_local_storage | bool]"
+                " == expected[inventory_hostname]",
+            ]}},
+        ]}]))
+    # --limit leaves a node out of the run, never out of its peers' firewall,
+    # WireGuard or Tang configuration: they read the inventory's groups.
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), "--limit", "!exomem-agent-01",
+                             str(play)], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+_WIREGUARD_KEY = "HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw="
+
+
+@pytest.mark.parametrize(
+    "published,private_ip,refusal",
+    [
+        (_WIREGUARD_KEY, "10.51.0.40", None),
+        # Root on one node must not write wg-quick configuration, which runs
+        # PreUp and PostUp commands as root, on every other node.
+        (_WIREGUARD_KEY + "\n[Interface]\nPreUp = touch /tmp/owned", "10.51.0.40",
+         "other than one public key"),
+        (_WIREGUARD_KEY, "10.51.0.40/32 dev wgexomem; touch /tmp/owned; true",
+         "not exactly one IPv4 address"),
+    ],
+)
+def test_a_peer_cannot_inject_wireguard_configuration(
+    tmp_path: Path, published: str, private_ip: str, refusal: str | None
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    groups = json.loads(json.dumps(_WITH_DEDICATED))
+    dedicated = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]
+    dedicated["hosts"]["exomem-agent-dx1"]["k3s_wireguard_public_key"] = published
+    dedicated["hosts"]["exomem-agent-dx1"]["private_node_ip"] = private_ip
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    link = next(task for task in _yaml(K3S_ROLE / "tasks/private_link.yml")
+                if task["name"] == "Converge the WireGuard private link")
+    checks = [task for task in link["block"] if task["name"] in (
+        "Refuse a WireGuard key that is not exactly one public key",
+        "Refuse a peer address that is not exactly one IPv4 address",
+    )]
+    assert len(checks) == 2
+    play = tmp_path / "keys.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "exomem-alpha", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        *checks,
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    "free_extents,overrides,expected",
+    [
+        # 2 x 3.84 TB in RAID1: 64 B per 64 KiB chunk is 895 extents (3.5 GiB),
+        # and twice that stays free. A fixed 2 GiB would starve this pool.
+        (915527, {}, {"pool_extents": 915527 - 4 * 895, "metadata_kib": 895 * 4096,
+                      "reserve_kib": 2 * 895 * 4096}),
+        # Past about 15.8 TiB the metadata stops at LVM's 15.81 GiB limit.
+        (5242880, {}, {"pool_extents": 5242880 - 4 * 4048, "metadata_kib": 4048 * 4096,
+                       "reserve_kib": 2 * 4048 * 4096}),
+        # An operator's sizes replace the computed ones.
+        (1000, {"dedicated_host_thin_metadata_mib": 64, "dedicated_host_vg_reserve_mib": 128},
+         {"pool_extents": 1000 - 32 - 32, "metadata_kib": 65536, "reserve_kib": 131072}),
+    ],
+)
+def test_thin_pool_metadata_grows_with_the_pool(
+    tmp_path: Path, free_extents: int, overrides: dict, expected: dict
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    role = ANSIBLE / "roles/dedicated_host"
+    size = next(task for task in _yaml(role / "tasks/volume_group.yml")
+                if task["name"] == "Size the thin pool and its metadata")
+    play = tmp_path / "size.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
+        # What `vgs` reports for the group: free extents of 4 MiB each.
+        "dedicated_host_vg_free": {"stdout": f"  {free_extents} 4194304"},
+        "dedicated_host_pool": {"rc": 5}, "expected": expected,
+    }, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(role / "defaults/main.yml")}},
+        *([{"ansible.builtin.set_fact": overrides}] if overrides else []),
+        size,
+        {"ansible.builtin.assert": {"that": ["dedicated_host_pool_geometry == expected"]}},
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # --- Ansible: the k3s role --------------------------------------------------
@@ -357,27 +709,15 @@ def test_join_playbook_skips_a_host_that_removal_marked() -> None:
     assert "path: /etc/rancher/k3s/removed" in validate
     assert "ansible.builtin.meta: end_host" in validate
     assert "dest: /etc/rancher/k3s/removed" in stop
-    harden = site[0]["pre_tasks"]
+    harden = next(play for play in site if play["name"].startswith("Harden"))["pre_tasks"]
     assert harden[0]["ansible.builtin.stat"]["path"] == "/etc/rancher/k3s/removed"
     assert harden[1]["ansible.builtin.meta"] == "end_host"
     assert harden[1]["when"] == "k3s_removed_marker.stat.exists"
 
 
-def _kubelet_args(text: str) -> list[str]:
-    block = text.split("kubelet-arg:\n", 1)[1]
-    arguments = []
-    for line in block.splitlines():
-        if not line.startswith("  - "):
-            break
-        arguments.append(line[4:])
-    return arguments
-
-
-def test_agent_kubelet_limits_match_the_server_exactly() -> None:
-    server = _kubelet_args(_read(K3S_ROLE / "templates/config.yaml.j2"))
-    agent = _kubelet_args(_read(K3S_ROLE / "templates/agent-config.yaml.j2"))
-    assert "image-gc-high-threshold=75" in server
-    assert server == agent
+def test_every_node_keeps_the_image_and_log_limits() -> None:
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    assert {"image-gc-high-threshold=75", "container-log-max-size=10Mi"} <= set(defaults["k3s_kubelet_args"])
 
 
 def test_server_gains_a_distinct_agent_token_only_when_set() -> None:
@@ -431,7 +771,6 @@ def test_inter_node_firewall_names_peer_addresses_never_the_subnet() -> None:
     assert "community.general.ufw" in firewall
     assert "map('extract', hostvars, 'private_node_ip')" in defaults
     assert "k3s_firewall_peer_ips" in firewall
-    assert "interface: \"{{ k3s_resolved_private_interface }}\"" in firewall
     assert "direction: in" in firewall
     for port, proto in (("8472", "udp"), ("10250", "tcp"), ("6443", "tcp")):
         assert f'port: "{port}"' in firewall
@@ -676,6 +1015,63 @@ def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Pa
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _local_volume(cell: str, node: str, phase: str) -> dict:
+    return {"metadata": {"name": f"pv-{cell}"},
+            "spec": {"csi": {"driver": "topolvm.io", "volumeHandle": f"lv-{cell}"},
+                     "claimRef": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                     "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [
+                         {"key": "topology.topolvm.io/node", "operator": "In", "values": [node]}]}]}}},
+            "status": {"phase": phase}}
+
+
+@pytest.mark.parametrize(("hold_on", "volume_phase", "refusal"), [
+    # An hourly backup on another node's cell no longer blocks the removal...
+    ("shared", "Bound", None),
+    # ...one on a cell whose volume is on the target still does.
+    ("target", "Released", "maintenance is in flight"),
+    # A cell still living on the target refuses it: deleting the Node would
+    # relocate that cell from its last backup.
+    (None, "Bound", "still holds"),
+    # A volume a relocation retained holds no live cell.
+    (None, "Released", None),
+], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "retained-volume-on-target"])
+def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
+    tmp_path: Path, hold_on: str | None, volume_phase: str, refusal: str | None
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+             for name in ("target", "shared")]
+    held = "aaaaaaaaaaaaaaaa"
+    volumes = [_local_volume(held, hold_on or "target", volume_phase)]
+    statefulsets = [] if hold_on is None else [{
+        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": "snapshot-backup"}},
+        "spec": {"replicas": 1, "template": {"spec": {}}},
+    }]
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        "k3s_local_storage_driver": "topolvm.io", "k3s_local_storage_topology_key": "topology.topolvm.io/node",
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
+            "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
+            for n in nodes]},
+        "k3s_remove_statefulsets_doc": {"items": statefulsets},
+        "k3s_remove_pvs_doc": {"items": volumes},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvcs")},
+    }
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])
 def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: Path, cell_id: str, profile: str) -> None:
     if ANSIBLE_PLAYBOOK is None:
@@ -695,6 +1091,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
         "k3s_server_private_ip": "10.0.0.1", "k3s_agent_join_token": "test-token",
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
         "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
+        "k3s_kubelet_args": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_kubelet_args"],
     }, "tasks": [
         _yaml(K3S_ROLE / "tasks/validate.yml")[0],
         {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),

@@ -15,6 +15,9 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from .backup_source import VAULT_CHECK_COMMAND
+from .storage_config import LEGACY_CLASS
+
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
 # already converged.
@@ -27,12 +30,15 @@ GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
 ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
-STORAGE_CLASS = "exomem-cloud-encrypted"
+STORAGE_CLASS = LEGACY_CLASS
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
 JOB_KIND_LABEL = "exomem.io/cell-job"
 INIT_CONTAINER_NAME = "cell-init"
 POD_SECURITY_VERSION = "v1.35"
+
+# D5: the Secret key that tells cell-init the cell has a recorded backup.
+BACKED_UP_KEY = "backed-up"
 
 HOLD_ANNOTATION = "exomem.io/hold"
 HOLD_STARTED_ANNOTATION = "exomem.io/hold-started-at"
@@ -44,6 +50,13 @@ RESTORED_SNAPSHOT_ANNOTATION = "exomem.io/restored-snapshot"
 # double per consecutive failure and reset on success, without a DB column.
 BACKUP_RETRY_AFTER_ANNOTATION = "exomem.io/backup-retry-after"
 BACKUP_RETRY_MINUTES_ANNOTATION = "exomem.io/backup-retry-minutes"
+# D3 (move-cloud-cells-to-local-storage): an hourly hold's outcome, kept on the
+# StatefulSet while the hold removes its clone and snapshot.
+BACKUP_OUTCOME_ANNOTATION = "exomem.io/backup-outcome"
+# D4: a restore hold that relocates the cell, naming the volume it leaves.
+RELOCATION_ANNOTATION = "exomem.io/relocation-volume"
+# D10: the size an hourly hold grows its cell to once its clone is gone.
+GROW_STORAGE_ANNOTATION = "exomem.io/grow-storage-gib"
 # D4: the render digest, compared against on every pass so a change that is
 # not a row change (bearer rotation, chart-level cell settings) still
 # reaches a converged cell.
@@ -83,9 +96,9 @@ def check_artifact_broker_url(endpoint: str) -> None:
 
 @dataclass(frozen=True)
 class ResourceSettings:
-    cpu_request: str = "250m"
+    cpu_request: str = "125m"
     cpu_limit: str = "2"
-    memory_request: str = "1Gi"
+    memory_request: str = "512Mi"
     memory_limit: str = "3Gi"
 
 
@@ -95,6 +108,10 @@ class ResourceSettings:
 # it: requests.cpu, requests.memory and limits.cpu still equal the serving pod's
 # values, so a Job next to the serving pod is bounded by those.
 JOB_MEMORY_LIMIT_MIB = 1024
+# Requests of one backup/restore Job pod.
+JOB_CPU_REQUEST = "100m"
+JOB_MEMORY_REQUEST = "256Mi"
+JOB_CPU_LIMIT = "1"
 
 
 def _memory_mib(quantity: str) -> int:
@@ -106,8 +123,7 @@ def _memory_mib(quantity: str) -> int:
 
 
 def _quota_memory_limit(memory_limit: str) -> str:
-    mib = _memory_mib(memory_limit) + JOB_MEMORY_LIMIT_MIB
-    return f"{mib // 1024}Gi" if mib % 1024 == 0 else f"{mib}Mi"
+    return _memory(_memory_mib(memory_limit) + JOB_MEMORY_LIMIT_MIB)
 
 
 @dataclass(frozen=True)
@@ -118,11 +134,23 @@ class CellManifestSpec:
     image: str
     replicas: int
     read_only: bool
+    # The size the claim and quota render at: CellRow.size_gib for a local
+    # claim, storage_gib for a Hetzner one (reconcile.py).
     storage_gib: int = 10
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     model_env: dict[str, str] = field(default_factory=dict)
     dedicated_node: bool = False
     placement: dict = field(default_factory=dict)
+    # D7: the class of the cell's claim, kept until the cell migrates.
+    storage_class: str = STORAGE_CLASS
+    # A cell on a node-local volume (move-cloud-cells-to-local-storage): its
+    # cell-init carries the empty-vault guard (D5) and its quota admits the
+    # hourly backup's clone and Job (D3). Cells on Hetzner volumes render as
+    # before.
+    local_volume: bool = False
+    # D5: the cell has a recorded backup. Written into the Secret only, so
+    # the first backup changes neither the pod template nor the digest.
+    backed_up: bool = False
 
     # Secret material (D7). cellctl renders these from the row and its master
     # keys on every pass; it never reads the Secret back.
@@ -139,6 +167,9 @@ class CellManifestSpec:
     pre_upgrade_snapshot: str | None = None
     target_applied_at: str | None = None
     restored_snapshot: str | None = None
+    backup_outcome: str | None = None
+    relocation_volume: str | None = None
+    grow_storage_gib: int | None = None
 
     # D6/D8: the backup-retry-after backoff. Unlike the hold annotations
     # above, these must survive a hold ending, so render_statefulset writes
@@ -212,25 +243,52 @@ def render_namespace(spec: CellManifestSpec) -> dict:
     }
 
 
+def _cpu_millicores(quantity: str) -> int:
+    """A whole-millicore CPU quantity; anything else is a chart-value error."""
+    if quantity.endswith("m") and quantity.removesuffix("m").isdigit():
+        return int(quantity.removesuffix("m"))
+    if quantity.isdigit():
+        return int(quantity) * 1000
+    raise ValueError(f"cpu quantity must be whole cores or millicores, got {quantity!r}")
+
+
+def _cpu(millicores: int) -> str:
+    return str(millicores // 1000) if millicores % 1000 == 0 else f"{millicores}m"
+
+
+def _memory(mib: int) -> str:
+    return f"{mib // 1024}Gi" if mib % 1024 == 0 else f"{mib}Mi"
+
+
 def render_resource_quota(spec: CellManifestSpec) -> dict:
     r = spec.resources
+    hard = {
+        "persistentvolumeclaims": "1",
+        "requests.storage": f"{spec.storage_gib}Gi",
+        # One serving pod, plus a second pod slot for a backup/restore Job
+        # that briefly overlaps it during a hold transition.
+        "pods": "2",
+        "requests.cpu": r.cpu_request,
+        "requests.memory": r.memory_request,
+        "limits.cpu": r.cpu_limit,
+        "limits.memory": _quota_memory_limit(r.memory_limit),
+    }
+    if spec.local_volume:
+        # D3: the hourly backup runs beside the serving pod, so the quota
+        # admits its clone claim (a second claim of the same size) and one
+        # backup Job's requests and CPU limit on top of the serving pod's.
+        hard.update({
+            "persistentvolumeclaims": "2",
+            "requests.storage": f"{2 * spec.storage_gib}Gi",
+            "requests.cpu": _cpu(_cpu_millicores(r.cpu_request) + _cpu_millicores(JOB_CPU_REQUEST)),
+            "requests.memory": _memory(_memory_mib(r.memory_request) + _memory_mib(JOB_MEMORY_REQUEST)),
+            "limits.cpu": _cpu(_cpu_millicores(r.cpu_limit) + _cpu_millicores(JOB_CPU_LIMIT)),
+        })
     return {
         "apiVersion": "v1",
         "kind": "ResourceQuota",
         "metadata": {"name": "cell-quota", "namespace": spec.namespace, "labels": _labels(spec)},
-        "spec": {
-            "hard": {
-                "persistentvolumeclaims": "1",
-                "requests.storage": f"{spec.storage_gib}Gi",
-                # One serving pod, plus a second pod slot for a backup/restore Job
-                # that briefly overlaps it during a hold transition.
-                "pods": "2",
-                "requests.cpu": r.cpu_request,
-                "requests.memory": r.memory_request,
-                "limits.cpu": r.cpu_limit,
-                "limits.memory": _quota_memory_limit(r.memory_limit),
-            }
-        },
+        "spec": {"hard": hard},
     }
 
 
@@ -341,6 +399,8 @@ def render_secret(spec: CellManifestSpec) -> dict:
     }
     if spec.bearer_previous:
         data["cell-token-previous"] = _b64(spec.bearer_previous)
+    if spec.local_volume and spec.backed_up:
+        data[BACKED_UP_KEY] = _b64("true")
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -366,7 +426,7 @@ def render_pvc(spec: CellManifestSpec) -> dict:
         },
         "spec": {
             "accessModes": ["ReadWriteOnce"],
-            "storageClassName": STORAGE_CLASS,
+            "storageClassName": spec.storage_class,
             "resources": {"requests": {"storage": f"{spec.storage_gib}Gi"}},
         },
     }
@@ -529,6 +589,24 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     return env
 
 
+def _init_env(spec: CellManifestSpec) -> list[dict]:
+    env = [
+        # Cloud mode makes cell-init create the /data/host
+        # custody root and redact its own output.
+        {"name": "EXOMEM_CLOUD_CELL", "value": "1"},
+        {"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
+        {"name": "TMPDIR", "value": "/tmp"},
+    ]
+    if spec.local_volume:
+        # D5: optional, and present from the cell's first render, so the key
+        # appearing after the first backup changes nothing here.
+        env.append({
+            "name": "EXOMEM_CLOUD_CELL_BACKED_UP",
+            "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": BACKED_UP_KEY, "optional": True}},
+        })
+    return env
+
+
 def dedicated_placement(cell_id: str) -> dict:
     return {
         "nodeSelector": {"exomem.io/dedicated-cell": cell_id},
@@ -556,6 +634,12 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
             annotations[TARGET_APPLIED_ANNOTATION] = spec.target_applied_at
         if spec.restored_snapshot:
             annotations[RESTORED_SNAPSHOT_ANNOTATION] = spec.restored_snapshot
+        if spec.backup_outcome:
+            annotations[BACKUP_OUTCOME_ANNOTATION] = spec.backup_outcome
+        if spec.relocation_volume:
+            annotations[RELOCATION_ANNOTATION] = spec.relocation_volume
+        if spec.grow_storage_gib is not None:
+            annotations[GROW_STORAGE_ANNOTATION] = str(spec.grow_storage_gib)
 
     # D6/D8: the backup-retry-after backoff must survive a hold ending, so
     # it is written unconditionally rather than only inside the `if
@@ -607,13 +691,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                             "imagePullPolicy": "IfNotPresent",
                             "command": ["exomem", "cell-init"],
                             "args": ["--vault", "/data/vault", "--json"],
-                            "env": [
-                                # Cloud mode makes cell-init create the /data/host
-                                # custody root and redact its own output.
-                                {"name": "EXOMEM_CLOUD_CELL", "value": "1"},
-                                {"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
-                                {"name": "TMPDIR", "value": "/tmp"},
-                            ],
+                            "env": _init_env(spec),
                             "resources": {
                                 "requests": {"cpu": "100m", "memory": "256Mi"},
                                 "limits": {"cpu": "1", "memory": "1Gi"},
@@ -725,10 +803,24 @@ JOB_KIND_BACKUP = "backup"
 JOB_KIND_RESTORE = "restore"
 BACKUP_JOB_NAME = "cell-backup"
 RESTORE_JOB_NAME = "cell-restore"
+# D3: an hourly hold's VolumeSnapshot and the read-only clone claim made from it.
+SNAPSHOT_NAME = "cell-snapshot"
+CLONE_CLAIM_NAME = "cell-clone"
 RETENTION_ARGS = ["--keep-daily", "7", "--keep-weekly", "4"]
+# D3: cells backed up hourly also keep the last day's hourly snapshots.
+HOURLY_RETENTION_ARGS = ["--keep-hourly", "24", *RETENTION_ARGS]
 # D8: what a backup covers and a restore rewrites. The volume root, including
 # lost+found, is never in scope.
 BACKUP_PATHS = ("/data/vault", "/data/host")
+
+# move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
+# total bytes, appended to the termination message after the snapshot id. Every
+# cell image is a Python image; statvfs needs no privilege and no tool whose
+# output format differs between images.
+FILESYSTEM_USE_COMMAND = (
+    "python3 -c 'import os; s = os.statvfs(\"/data\"); "
+    "print(\" %d %d\" % ((s.f_blocks - s.f_bfree) * s.f_frsize, s.f_blocks * s.f_frsize), end=\"\")'"
+)
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
 
 
@@ -788,6 +880,39 @@ def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
     ]
 
 
+def render_volume_snapshot(spec: CellManifestSpec, *, snapshot_class: str) -> dict:
+    """D3: a crash-consistent snapshot of the cell's own volume, named for its hold."""
+
+    return {
+        "apiVersion": "snapshot.storage.k8s.io/v1",
+        "kind": "VolumeSnapshot",
+        "metadata": {"name": _job_name_for_hold(spec, SNAPSHOT_NAME), "namespace": spec.namespace, "labels": _labels(spec)},
+        "spec": {"volumeSnapshotClassName": snapshot_class, "source": {"persistentVolumeClaimName": spec.pvc_name}},
+    }
+
+
+def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
+    """D3: the claim the backup Job reads, cloned from this hold's snapshot.
+    Its class binds at once, and TopoLVM pins the clone's PV to the source's
+    node, so the Job lands there with no node selector of its own."""
+
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": _job_name_for_hold(spec, CLONE_CLAIM_NAME), "namespace": spec.namespace, "labels": _labels(spec)},
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "storageClassName": clone_class,
+            "resources": {"requests": {"storage": f"{spec.storage_gib}Gi"}},
+            "dataSourceRef": {
+                "apiGroup": "snapshot.storage.k8s.io",
+                "kind": "VolumeSnapshot",
+                "name": _job_name_for_hold(spec, SNAPSHOT_NAME),
+            },
+        },
+    }
+
+
 def _job_volumes(*, data_read_only: bool, pvc_name: str) -> list[dict]:
     return [
         {"name": "data", "persistentVolumeClaim": {"claimName": pvc_name, "readOnly": data_read_only}},
@@ -805,7 +930,8 @@ def _job_volume_mounts(*, data_read_only: bool) -> list[dict]:
 
 
 def _job_pod_spec(
-    spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str
+    spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str,
+    claim_name: str | None = None,
 ) -> dict:
     return {
         **_dedicated_placement(spec),
@@ -820,8 +946,8 @@ def _job_pod_spec(
                 "command": ["sh", "-c", " && ".join(command)],
                 "env": _restic_env(spec, repo),
                 "resources": {
-                    "requests": {"cpu": "100m", "memory": "256Mi"},
-                    "limits": {"cpu": "1", "memory": "1Gi"},
+                    "requests": {"cpu": JOB_CPU_REQUEST, "memory": JOB_MEMORY_REQUEST},
+                    "limits": {"cpu": JOB_CPU_LIMIT, "memory": "1Gi"},
                 },
                 "securityContext": {
                     "runAsNonRoot": True,
@@ -832,11 +958,22 @@ def _job_pod_spec(
                 "volumeMounts": _job_volume_mounts(data_read_only=data_read_only),
             }
         ],
-        "volumes": _job_volumes(data_read_only=data_read_only, pvc_name=spec.pvc_name),
+        "volumes": _job_volumes(data_read_only=data_read_only, pvc_name=claim_name or spec.pvc_name),
     }
 
 
-def render_backup_job(spec: CellManifestSpec, *, bucket_name: str, endpoint: str) -> dict:
+def render_backup_job(
+    spec: CellManifestSpec,
+    *,
+    bucket_name: str,
+    endpoint: str,
+    claim_name: str | None = None,
+    retention: list[str] | None = RETENTION_ARGS,
+) -> dict:
+    """`claim_name` is the hourly hold's clone; by default the Job reads the
+    stopped cell's own claim. `retention` None skips `forget --prune`, the
+    expensive call that needs restic's exclusive lock (D3)."""
+
     job_name = _job_name_for_hold(spec, BACKUP_JOB_NAME)
     repo = _restic_repo(spec, bucket_name, endpoint)
     # D8 amendment: the Job has no ServiceAccount token and cannot call back
@@ -854,6 +991,11 @@ def render_backup_job(spec: CellManifestSpec, *, bucket_name: str, endpoint: str
     # Job) directly on either a non-zero `restic backup` or an id that does
     # not match a real 64-hex-character snapshot id.
     commands = [
+        # D5: no backup of a source that holds no vault (backup_source.py).
+        # The Job fails, the hold records BACKUP_FAILED, and cellctl logs the
+        # Job's code. An emptied volume's cell then leaves serving, and its
+        # row shows cell-init's refusal.
+        VAULT_CHECK_COMMAND,
         "restic snapshots || restic init",
         f"restic backup --json {' '.join(BACKUP_PATHS)} > /tmp/backup.json || exit 1",
         (
@@ -861,8 +1003,11 @@ def render_backup_job(spec: CellManifestSpec, *, bucket_name: str, endpoint: str
             "| tail -n 1 | cut -d'\"' -f4)"
         ),
         '[ -n "$SNAPSHOT_ID" ] || exit 1',
-        f"restic forget {' '.join(RETENTION_ARGS)} --prune",
+        *([f"restic forget {' '.join(retention)} --prune"] if retention is not None else []),
         "printf '%s' \"$SNAPSHOT_ID\" > /dev/termination-log",
+        # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
+        # the id alone and the Job successful: the backup itself succeeded.
+        f"{{ {FILESYSTEM_USE_COMMAND} >> /dev/termination-log || true; }}",
     ]
     return {
         "apiVersion": "batch/v1",
@@ -879,7 +1024,8 @@ def render_backup_job(spec: CellManifestSpec, *, bucket_name: str, endpoint: str
             "template": {
                 "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_BACKUP}},
                 "spec": _job_pod_spec(
-                    spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True, repo=repo
+                    spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True, repo=repo,
+                    claim_name=claim_name,
                 ),
             },
         },

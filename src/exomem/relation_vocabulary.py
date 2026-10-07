@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from . import relation_registry
+from .text_scripts import comparison_words
 
 RELATION_CANDIDATE_LIMIT_MIN = 1
 RELATION_CANDIDATE_LIMIT_MAX = 64
@@ -289,8 +289,7 @@ def _observation_page(
 
 
 def _terms(value: str | None) -> list[str]:
-    normalized = relation_registry.normalize_relation(value or "")
-    return re.findall(r"[a-z0-9]+", normalized)
+    return comparison_words(value or "")
 
 
 def _candidate_sort_key(item: Mapping[str, Any]) -> tuple[int, int, str]:

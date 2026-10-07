@@ -18,8 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, memory_refs
-from ..vault import VaultPathError, resolve_under_vault
+from .. import find_corpus, memory_refs, reserved_paths
 from . import membership
 from .policy import Policy, ReleaseGrant
 
@@ -747,23 +746,29 @@ def restriction_signature(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _parse_exact(vault_root: Path, rel_path: str, raw: bytes):
+def _read_exact_snapshot(
+    vault_root: Path, rel_path: str, expected_raw: bytes | None = None
+) -> tuple[bytes, find_corpus.ParsedPage | None] | None:
+    """Acquire one unique held leaf, retaining the logical approval path."""
+    if Path(rel_path).suffix.casefold() != ".md":
+        return None
     try:
-        target, canonical = resolve_under_vault(
-            vault_root, rel_path, must_exist=True, must_be_file=True
+        physical = reserved_paths.resolve_physical_relative(vault_root, rel_path)
+        snapshot = reserved_paths.read_generic_bytes(
+            vault_root, physical, physical=True
         )
-    except VaultPathError:
+    except (OSError, reserved_paths.ReservedPathLeafError):
         return None
-    if canonical != rel_path or target.suffix.casefold() != ".md":
+    if expected_raw is not None and snapshot.data != expected_raw:
         return None
-    try:
-        mtime = target.stat().st_mtime
-    except OSError:
-        return None
-    parsed = find_corpus.parse_page(target, mtime, vault_root, content=raw)
-    if parsed is None or parsed.rel_path != canonical:
-        return None
-    return parsed
+    parsed = find_corpus.parse_page(
+        vault_root / rel_path,
+        snapshot.mtime,
+        vault_root,
+        content=snapshot.data,
+        resolved_relative=rel_path,
+    )
+    return snapshot.data, parsed
 
 
 def _reference_resolves_exactly_to(
@@ -785,13 +790,12 @@ def _dependency_snapshot(
 ) -> tuple[str, str, str, str, str] | None:
     try:
         resolved = memory_refs.resolve_identifier_read_only(vault_root, ref)
-        target, canonical = resolve_under_vault(
-            vault_root, resolved, must_exist=True, must_be_file=True
-        )
-        raw = target.read_bytes()
-    except (memory_refs.ReferenceError, VaultPathError, OSError):
+    except memory_refs.ReferenceError:
         return None
-    parsed = _parse_exact(vault_root, canonical, raw)
+    snapshot = _read_exact_snapshot(vault_root, resolved)
+    if snapshot is None:
+        return None
+    raw, parsed = snapshot
     if parsed is None:
         return None
     parsed_ref = memory_refs.parse_memory_ref(ref)
@@ -809,10 +813,10 @@ def _dependency_snapshot(
         return None
     live_ref = memory_refs.memory_ref(live_id)
     if not _identity_canonicalizes_nonempty(
-        StripIdentity(path=canonical, ref=live_ref, title=parsed.title)
+        StripIdentity(path=resolved, ref=live_ref, title=parsed.title)
     ):
         return None
-    return canonical, digest, signature, parsed.title, live_ref
+    return resolved, digest, signature, parsed.title, live_ref
 
 
 def admit(
@@ -824,9 +828,10 @@ def admit(
     audience: str,
 ) -> BridgeAdmission:
     """Validate the exact bridge bytes and every dependency snapshot."""
-    parsed = _parse_exact(Path(vault_root), rel_path, raw)
-    if parsed is None:
+    snapshot = _read_exact_snapshot(Path(vault_root), rel_path, expected_raw=raw)
+    if snapshot is None or snapshot[1] is None:
         return BridgeAdmission(True, False, RELEASE_STALE)
+    _raw, parsed = snapshot
     metadata, error = parse_bridge_frontmatter(parsed.frontmatter)
     bridge_shaped = metadata is not None or error is not None
     if not bridge_shaped:
@@ -838,7 +843,7 @@ def admit(
 
     candidates = [
         grant
-        for grant in policy.release_grants
+        for grant in policy.release_grants if grant.raw_protection is None
         if grant.path == rel_path
         and grant.ref == metadata.ref
         and grant.to_audience == audience
@@ -914,11 +919,12 @@ def resolve_approved_abstraction(
     Resolution rereads the grant-bound bridge bytes and delegates all path,
     ref, audience, byte-hash, dependency, restriction-signature, and
     provenance checks to :func:`admit`.  Only the approved bridge body after
-    release-bound provenance stripping is returned to the caller.
+    release-bound provenance stripping is returned to the caller. Structured
+    attribution is never part of this prose-only abstraction.
     """
     candidates = [
         grant
-        for grant in policy.release_grants
+        for grant in policy.release_grants if grant.raw_protection is None
         if grant.id == bridge_id and grant.to_audience == audience
     ]
     if not candidates:
@@ -926,22 +932,14 @@ def resolve_approved_abstraction(
     if len(candidates) != 1:
         return BridgeProjection(False, RELEASE_STALE)
     grant = candidates[0]
-    try:
-        target, canonical = resolve_under_vault(
-            Path(vault_root),
-            grant.path,
-            must_exist=True,
-            must_be_file=True,
-        )
-        if canonical != grant.path:
-            return BridgeProjection(False, RELEASE_STALE)
-        raw = target.read_bytes()
-    except (VaultPathError, OSError):
+    snapshot = _read_exact_snapshot(Path(vault_root), grant.path)
+    if snapshot is None or snapshot[1] is None:
         return BridgeProjection(False, RELEASE_STALE)
+    raw, parsed = snapshot
 
     admission = admit(
         Path(vault_root),
-        canonical,
+        grant.path,
         raw,
         policy=policy,
         audience=audience,
@@ -952,11 +950,10 @@ def resolve_approved_abstraction(
         or admission.grant.id != bridge_id
     ):
         return BridgeProjection(False, admission.reason or RELEASE_STALE)
-    parsed = _parse_exact(Path(vault_root), canonical, raw)
-    if parsed is None:
-        return BridgeProjection(False, RELEASE_STALE)
+    from .. import provenance
+
     projected = strip_provenance(
-        {"body": parsed.body},
+        {"body": provenance.withheld_prose(parsed.body, owner_path=grant.path)},
         admission.strip_identities,
         direct_page=True,
     )
@@ -981,20 +978,12 @@ def review_signal(
     today: dt.date,
 ) -> BridgeReviewSignal | None:
     """Derive one approval-bound review signal without writing sidecars."""
+    if grant.raw_protection is not None:
+        return None
     unavailable_hash = hashlib.sha256(b"bridge-unavailable").hexdigest()
-    try:
-        target, canonical = resolve_under_vault(
-            vault_root,
-            grant.path,
-            must_exist=True,
-            must_be_file=True,
-        )
-        raw = target.read_bytes()
-    except (VaultPathError, OSError):
-        raw = b""
-        canonical = ""
-    bridge_hash = hashlib.sha256(raw).hexdigest() if raw else unavailable_hash
-    parsed = _parse_exact(vault_root, grant.path, raw) if raw else None
+    snapshot = _read_exact_snapshot(vault_root, grant.path)
+    raw, parsed = snapshot if snapshot is not None else (None, None)
+    bridge_hash = hashlib.sha256(raw).hexdigest() if raw is not None else unavailable_hash
     metadata: BridgeMetadata | None = None
     if parsed is not None:
         metadata, _error = parse_bridge_frontmatter(parsed.frontmatter)
@@ -1036,8 +1025,8 @@ def review_signal(
     ).hexdigest()
 
     bridge_exact = (
-        canonical == grant.path
-        and _reference_resolves_exactly_to(vault_root, canonical, grant.ref)
+        snapshot is not None
+        and _reference_resolves_exactly_to(vault_root, grant.path, grant.ref)
         and bridge_hash == grant.content_hash
         and metadata is not None
         and metadata.ref == grant.ref

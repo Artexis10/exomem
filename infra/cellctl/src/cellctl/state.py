@@ -13,6 +13,25 @@ from datetime import datetime
 DESIRED_STATES = ("running", "read_only", "stopped", "deleted")
 TERMINAL_OBSERVED_STATES = frozenset({"running", "read_only", "stopped", "deleted", "failed"})
 HOLD_KINDS = ("upgrade", "backup", "restore")
+# move-cloud-cells-to-local-storage D3: the hourly backup of a cell on local
+# storage, a hold that does not stop the cell.
+SNAPSHOT_BACKUP = "snapshot-backup"
+
+
+def row_hold_kind(kind: str | None) -> str | None:
+    """The hold kind as the row records it. The C1 schema Substrate owns
+    allows only upgrade, backup and restore, so the hourly hold is recorded
+    as the backup it is; its StatefulSet annotation keeps the exact kind."""
+
+    return "backup" if kind == SNAPSHOT_BACKUP else kind
+
+# move-cloud-cells-to-local-storage D10: what one measured hourly backup found.
+# GROWTH_NO_ROOM and GROWTH_AT_CAP each raise the storage-growth alert: the
+# cell is past 80% use and cannot grow.
+GROWTH_PLANNED = "grow"
+GROWTH_NO_ROOM = "no-room"
+GROWTH_AT_CAP = "at-cap"
+GROWTH_NOT_NEEDED = "fits"
 
 IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
 INIT_DEADLINE_EXCEEDED = "INIT_DEADLINE_EXCEEDED"
@@ -24,6 +43,25 @@ UPGRADE_STALLED = "UPGRADE_STALLED"
 MANIFEST_IMMUTABLE = "MANIFEST_IMMUTABLE"
 # D4/D6: the rollout waits on an owner cell whose last apply was refused.
 CANARY_PARKED = "CANARY_PARKED"
+# move-cloud-cells-to-local-storage D4: a cell on a node confirmed stopped has
+# no backup to relocate from, so it stays where it is for the operator.
+RELOCATION_NO_BACKUP = "RELOCATION_NO_BACKUP"
+# The row records a volume, but the cell has no claim. cellctl never creates a
+# fresh one then: it would be empty, and a cell without the D5 guard would
+# initialise a blank vault over the tenant's. The operator re-adopts the volume
+# or marks it lost (docs/runbooks/cloud-node-loss.md).
+VOLUME_MISSING = "VOLUME_MISSING"
+# D4: a relocation step before the restore (the Retain patch or the claim
+# delete) was refused. A refusal does not resolve itself, so the relocation
+# ends for the operator, like RESTORE_FAILED, and no longer holds back others.
+RELOCATION_REFUSED = "RELOCATION_REFUSED"
+# move-cloud-cells-to-local-storage D5: cell-init's own value-free refusal,
+# read from its termination message. Only these codes ever reach the row.
+EMPTY_VOLUME_REFUSED = "CELL_INIT_EMPTY_VOLUME_REFUSED"
+INIT_REFUSAL_CODES = frozenset({EMPTY_VOLUME_REFUSED})
+# A cell failed by its init container stays observed, not re-applied, until
+# its generation changes or its pod becomes Ready.
+INIT_FAILURE_CODES = frozenset({INIT_DEADLINE_EXCEEDED}) | INIT_REFUSAL_CODES
 
 
 @dataclass(frozen=True)
@@ -54,6 +92,20 @@ class CellRow:
     b2_key_version: int | None = None
     hold_kind: str | None = None
     hold_started_at: datetime | None = None
+    # move-cloud-cells-to-local-storage D10: the size cellctl grew the cell's
+    # local volume to, or None while it has never grown.
+    grown_storage_gib: int | None = None
+    # Read only: a cell never backed up ages its backup alert from here.
+    created_at: datetime | None = None
+
+    @property
+    def size_gib(self) -> int:
+        """D10: the cell's size, the larger of what Substrate asked for and
+        what cellctl grew it to. A local cell's claim and quota render at this,
+        so a later pass never renders a smaller claim, and capacity charges it
+        (D6). A claim on a Hetzner volume renders storage_gib."""
+
+        return max(self.storage_gib, self.grown_storage_gib or 0)
 
     def is_dirty(self, *, refusal_parked: bool = False) -> bool:
         # D4: a refused row (MANIFEST_IMMUTABLE) is dirty unless cellctl holds
@@ -88,12 +140,31 @@ class ClusterObservation:
 
     namespace_exists: bool = False
     namespace_cell_label: str | None = None
+    # D4: the operator's `exomem.io/volume-lost` mark on the namespace, naming
+    # the recorded volume that no disk holds, so the cell is relocated.
+    namespace_volume_lost: str | None = None
 
     pvc_bound: bool = False
     pvc_volume_id: str | None = None
     pvc_uid: str | None = None
     pv_claim_ref_uid: str | None = None
     pv_storage_class: str | None = None
+    pvc_storage_class: str | None = None
+    pvc_exists: bool = False
+    pvc_terminating: bool = False
+    pv_name: str | None = None
+    pv_reclaim_policy: str | None = None
+    # A local volume's node, from its PV's node affinity on the configured
+    # topology key. None for a volume that is not node-local.
+    pv_node: str | None = None
+    # D4, observed this pass: the operator tainted that node out of service
+    # by the node-removal rule and it is not Ready.
+    pv_node_stop_confirmed: bool = False
+    # D4, observed this pass: that node is not in the API.
+    pv_node_absent: bool = False
+    # D4, set by reconcile.py from the two above: the node is lost, so its
+    # cells relocate. Stop-confirmed, or absent for NODE_ABSENCE_GRACE.
+    pv_node_lost: bool = False
 
     statefulset_exists: bool = False
     statefulset_image: str | None = None
@@ -107,6 +178,13 @@ class ClusterObservation:
     statefulset_backup_retry_after: datetime | None = None
     statefulset_backup_retry_minutes: int | None = None
     statefulset_render_digest: str | None = None
+    # D3: an hourly backup's recorded outcome (its snapshot id, or "failed").
+    # While set, the hold only removes its clone and snapshot.
+    statefulset_backup_outcome: str | None = None
+    # D4: a restore hold that relocates the cell off the volume with this id.
+    statefulset_relocation_volume: str | None = None
+    # D10: the size an hourly hold's backup planned to grow the cell to.
+    statefulset_grow_storage_gib: int | None = None
     statefulset_render_digest_applied_at: datetime | None = None
     statefulset_row_generation: int | None = None
 
@@ -133,6 +211,21 @@ class ClusterObservation:
     backup_job_succeeded: bool = False
     backup_job_failed: bool = False
     backup_job_snapshot_id: str | None = None
+    # D10: the backed-up filesystem's used and total bytes, as the finished
+    # backup Job reported them. None when it reported none.
+    backup_job_used_bytes: int | None = None
+    backup_job_total_bytes: int | None = None
+    # D5: a failed backup Job's own value-free code (backup_source.py), or
+    # None when it left none.
+    backup_job_failure_code: str | None = None
+
+    # D3: the current hourly hold's VolumeSnapshot and its clone claim.
+    snapshot_exists: bool = False
+    snapshot_ready: bool = False
+    # The instant the snapshot holds the volume as of: what its backup is worth.
+    snapshot_created_at: datetime | None = None
+    clone_exists: bool = False
+    clone_bound: bool = False
 
     restore_job_running: bool = False
     restore_job_succeeded: bool = False
@@ -176,6 +269,26 @@ class Decision:
     delete_b2_key: bool = False
     run_backup_job: bool = False
     run_restore_job_snapshot: str | None = None
+
+    # D3, the hourly hold's steps. `backup_prune` makes its Job apply the
+    # retention policy and prune; `backup_outcome` records the result on the
+    # StatefulSet so the cleanup that follows never re-runs the backup.
+    create_snapshot: bool = False
+    create_clone: bool = False
+    backup_prune: bool = False
+    backup_outcome: str | None = None
+    delete_snapshot_backup: bool = False
+
+    # D4 relocation: the old volume's id while the hold runs, the PV to set
+    # to Retain, and the claim delete that only a Retain PV allows.
+    relocation_volume: str | None = None
+    retain_volume: str | None = None
+    delete_claim: bool = False
+
+    # D10: the size this hourly hold grows the cell to once its clone is gone,
+    # and what this pass's measured backup found (one of the GROWTH_ values).
+    grow_storage_gib: int | None = None
+    storage_growth: str | None = None
 
     row_updates: dict[str, object] = field(default_factory=dict)
     rollout_updates: dict[str, object] = field(default_factory=dict)

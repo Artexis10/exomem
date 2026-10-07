@@ -18,11 +18,12 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 import tempfile
 
 import pytest
 
-from exomem import capabilities, commands
+from exomem import capabilities, commands, hosted_legacy_schemas
 
 LEGACY_PROFILES = tuple(f"hosted-alpha-agent-v{n}" for n in range(1, 5))
 LEVELS = ("off", "light", "balanced", "maximal")
@@ -94,6 +95,25 @@ def test_a_released_profile_serves_the_pre_split_payload(monkeypatch, profile, l
     assert payload["profile"] == "compact"
     assert "sections" not in payload
     assert normalised_digest(payload) == GOLDEN[profile][level]
+
+
+@pytest.mark.parametrize("profile", LEGACY_PROFILES)
+def test_a_released_profile_teaches_one_authoring_contract(monkeypatch, profile):
+    """Bootstrap and the pinned tool descriptions name the same contract identity.
+
+    GOLDEN pins the bootstrap bytes and the legacy schema pin pins the tool
+    descriptions; neither notices a client being told two contract versions.
+    """
+    contract = legacy_compact(monkeypatch, profile, "balanced")["semantic_authoring"]
+    published = {
+        match
+        for command in hosted_legacy_schemas.LEGACY_PROFILE_CONTRACTS[profile].values()
+        for match in re.findall(
+            r"exomem\.semantic-authoring:v(\d+) (sha256:[0-9a-f]{64})", command.description
+        )
+    }
+
+    assert published == {(str(contract["version"]), contract["content_digest"])}
 
 
 @pytest.mark.parametrize("profile", LEGACY_PROFILES)

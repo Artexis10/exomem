@@ -39,6 +39,8 @@ from . import (
     corpus_aware,
     epistemic_graph,
     find_corpus,
+    find_results,
+    provenance,
     recall_policy,
     semantic_index,
     semantic_units,
@@ -233,7 +235,8 @@ def _outline(lines: list[str]) -> list[str]:
 
 
 def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS) -> dict:
-    lines = _strip_fences(page.body)
+    # Packs serve every audience: a carrier pushed into code is withheld too.
+    lines = _strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path))
     return {
         "title": page.title,
         "type": page.page_type,
@@ -527,7 +530,12 @@ def _neighborhood(
         directions = entry["directions"]
         direction = "both" if len(directions) > 1 else next(iter(directions))
         lede = (
-            _cap(_first_sentence(_lede(_strip_fences(page.body))), _NEIGHBOR_LEDE_CHARS)
+            _cap(
+                _first_sentence(
+                    _lede(_strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path)))
+                ),
+                _NEIGHBOR_LEDE_CHARS,
+            )
             if page
             else ""
         )
@@ -731,6 +739,7 @@ def assemble_pack(
     deadline: float | None = None,
     graph_enrich_reserve_seconds: float = 0.0,
     timings: find_module.FindTimings | None = None,
+    purpose: str | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -832,8 +841,9 @@ def assemble_pack(
         plans: list[_UnitPackPlan] = []
         for page in packed_pages:
             document = semantic_states[page.rel_path].document
+            units = find_results.prose_units(vault_root, page, document.units)
             by_ref = {
-                unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
+                unit.unit_ref: unit for unit in units if unit.unit_ref is not None
             }
             selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
             unresolved = 0
@@ -858,7 +868,7 @@ def assemble_pack(
                     parent=parent,
                     selected=selected,
                     fillers=[
-                        unit for unit in document.units if id(unit) not in selected_ids
+                        unit for unit in units if id(unit) not in selected_ids
                     ],
                     dropped_provenance=dropped_provenance,
                 )
@@ -1001,18 +1011,25 @@ def assemble_pack(
             truncation.append(GRAPH_ENRICH_BUDGET_SKIP)
         else:
             with find_module._span(timings, "graph_enrich"):
-                result["graph"] = _graph_enrichment(vault_root, packed_pages)
+                result["graph"] = _graph_enrichment(vault_root, packed_pages, purpose=purpose)
     return result
 
 
-def _graph_enrichment(vault_root: Path, packed_pages: list[ParsedPage]) -> dict:
+def _graph_enrichment(
+    vault_root: Path, packed_pages: list[ParsedPage], *, purpose: str | None = None
+) -> dict:
     if not packed_pages:
         return {"available": False, "reason": "no packed pages", "nodes": [], "edges": []}
+    from .governance import egress
+
+    # The neighbourhood's own release decision: a page the caller may not see
+    # is never a node, an edge endpoint or a hop (`graph_context`'s `keep`).
+    visible = egress.visible_page_filter(vault_root, purpose=purpose)
     nodes: dict[str, dict] = {}
     edges: dict[str, dict] = {}
     unavailable: list[str] = []
     for page in packed_pages:
-        ctx = epistemic_graph.graph_context(vault_root, path=page.rel_path, depth=1)
+        ctx = epistemic_graph.graph_context(vault_root, path=page.rel_path, depth=1, keep=visible)
         if not ctx.get("available"):
             unavailable.append(str(ctx.get("reason") or "graph unavailable"))
             continue

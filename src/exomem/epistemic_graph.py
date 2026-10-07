@@ -23,7 +23,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     access,
@@ -70,7 +70,7 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _DEPENDENCY_FORMAT = 1
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
@@ -280,12 +280,12 @@ class GraphNode:
             "kind": self.kind,
             "path": self.path,
             "anchor": self.anchor,
-            "title": self.title,
-            "text": self.text,
+            "title": _served(self.path, self.title),
+            "text": _served(self.path, self.text),
             "source_hash": self.source_hash,
             "line_start": self.line_start,
             "line_end": self.line_end,
-            "metadata": dict(self.metadata or {}),
+            "metadata": _served(self.path, dict(self.metadata or {})),
         }
 
 
@@ -310,6 +310,12 @@ class GraphEdge:
     resolver_target_kind: str | None = None
     resolver_origin: str | None = None
     review_evidence: dict[str, Any] | None = None
+    #: The page the destination belongs to, as a `file:` key. The destination
+    #: itself is a unit when a relation target carries a `#fragment`; every
+    #: page-level reader asks for this instead of `dst_key`, so a unit-precise
+    #: edge still counts as an edge to its page. None means the destination is
+    #: already a page.
+    dst_page_key: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -325,7 +331,7 @@ class GraphEdge:
             "origin": self.origin,
             "source_path": self.source_path,
             "source_anchor": self.source_anchor,
-            "metadata": dict(self.metadata or {}),
+            "metadata": _served(self.source_path, dict(self.metadata or {})),
         }
 
 
@@ -2031,6 +2037,7 @@ class EpistemicGraphIndex:
     ) -> sqlite3.Connection:
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         required_edge_columns = {
+            "dst_page_key",
             "raw_relation",
             "resolver_project",
             "resolver_page_type",
@@ -2085,6 +2092,7 @@ class EpistemicGraphIndex:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_edges (
                 edge_key TEXT PRIMARY KEY, src_key TEXT NOT NULL, dst_key TEXT NOT NULL,
+                dst_page_key TEXT NOT NULL,
                 relation_type TEXT, raw_relation TEXT NOT NULL, parent_relation TEXT,
                 registry_status TEXT NOT NULL, registry_version INTEGER NOT NULL,
                 registry_hash TEXT NOT NULL, origin TEXT NOT NULL, source_path TEXT NOT NULL,
@@ -2152,6 +2160,9 @@ class EpistemicGraphIndex:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_dst_page ON graph_edges(dst_page_key)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_path ON graph_edges(source_path)"
         )
@@ -5394,7 +5405,7 @@ class EpistemicGraphIndex:
                 str(row[0])
                 for row in conn.execute(
                     "SELECT DISTINCT source_path FROM graph_edges "
-                    f"WHERE src_key IN ({placeholders}) OR dst_key IN ({placeholders})",
+                    f"WHERE src_key IN ({placeholders}) OR dst_page_key IN ({placeholders})",
                     (*changed_keys, *changed_keys),
                 ).fetchall()
             }
@@ -5453,6 +5464,36 @@ class EpistemicGraphIndex:
                 )
             )
         return rows
+
+    def _fragment_dependants(
+        self, rels: set[str], resolver: vault_module.WikilinkResolver
+    ) -> set[str] | None:
+        """Pages whose `[[Page#unit]]` targets name one of `rels`; None when unreadable.
+
+        Read from the persisted raw dependencies, so it is as conservative as
+        the topology widening beside it (a shared stem over-matches, never
+        under-matches) and needs the same proof that those rows cover every page.
+        """
+        if not rels or not self.path.exists():
+            return set()
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect_existing(readonly=True)
+            conn.execute("BEGIN")
+            # Dependants found from rows that do not cover every page would be a
+            # guess, and a missed one publishes a stale edge as available.
+            if not self._dependency_index_complete(conn):
+                return None
+            sources = self._dependency_sources_for_keys(
+                conn, _dependency_changed_keys(rels, resolver)
+            )
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.rollback()
+                conn.close()
+        return {source for source, raw_target in sources if "#" in raw_target} - rels
 
     def _resolver_affected_sources(
         self,
@@ -6134,6 +6175,16 @@ class EpistemicGraphIndex:
             self._mark_unavailable()
             return fallback("caller_path_outside_delta")
         refresh_paths = set(delta_paths)
+        # A `[[Page#unit]]` relation lands on a unit key that the page's own
+        # bytes decide -- the rich key hashes the body, and an edit can add,
+        # remove or duplicate the anchor -- so the pages that point at a changed
+        # page re-derive even when no resolver topology moved.
+        fragment_dependants = self._fragment_dependants(delta_rels, resolver)
+        if fragment_dependants is None:
+            self._mark_unavailable()
+            return fallback("stored_topology_unreadable")
+        refresh_paths.update(str(self.vault_root / rel) for rel in fragment_dependants)
+        deferred_scope.update(fragment_dependants)
         topology_versions: dict[str, GraphSourceSignature] = {}
         resolver_versions: dict[str, GraphSourceSignature] = {}
         expected_membership: frozenset[str] | None = None
@@ -6450,7 +6501,7 @@ class EpistemicGraphIndex:
             affected.update(
                 str(row[0])
                 for row in conn.execute(
-                    "SELECT DISTINCT source_path FROM graph_edges WHERE dst_key = ?",
+                    "SELECT DISTINCT source_path FROM graph_edges WHERE dst_page_key = ?",
                     (_file_key(rel),),
                 )
             )
@@ -6760,7 +6811,7 @@ class EpistemicGraphIndex:
                         file_key = f"file:{path}"
                         changed += conn.execute(
                             "DELETE FROM graph_edges WHERE source_path = ? "
-                            "OR src_key = ? OR dst_key = ?",
+                            "OR src_key = ? OR dst_page_key = ?",
                             (path, file_key, file_key),
                         ).rowcount
                         changed += conn.execute(
@@ -7021,7 +7072,7 @@ class EpistemicGraphIndex:
     ) -> int:
         with conn if commit else nullcontext():
             conn.execute(
-                "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_key = ?",
+                "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_page_key = ?",
                 (rel_path, _file_key(rel_path), _file_key(rel_path)),
             )
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
@@ -7601,7 +7652,7 @@ class EpistemicGraphIndex:
                 "AS producer_order, EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e.source_path) "
-                "AND p.dst_key = e.dst_key AND p.raw_relation = 'links_to') "
+                "AND p.dst_page_key = e.dst_key AND p.raw_relation = 'links_to') "
                 "AS authored_match, "
                 f"{target_identity} FROM graph_edges e "
                 "JOIN graph_nodes d ON d.node_key = e.dst_key AND d.kind = 'file' "
@@ -7623,29 +7674,28 @@ class EpistemicGraphIndex:
             ).fetchall()
             unit_rows = conn.execute(
                 "WITH ranked AS (SELECT e.source_path, "
-                "COALESCE(d.path, SUBSTR(e.dst_key, 6)) AS target_path, "
+                "COALESCE(d.path, SUBSTR(e.dst_page_key, 6)) AS target_path, "
                 "e.raw_relation, e.relation_type, e.source_anchor, n.unit_ref, "
                 f"{target_identity}, CASE WHEN d.node_key IS NULL THEN 0 ELSE 1 END "
                 "AS target_exists, EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e.source_path) "
-                "AND p.dst_key = e.dst_key AND p.raw_relation = "
+                "AND p.dst_page_key = e.dst_page_key AND p.raw_relation = "
                 "LOWER(REPLACE(TRIM(e.raw_relation), '-', '_'))) AS authored_match, "
                 "ROW_NUMBER() OVER ("
                 "PARTITION BY e.source_path ORDER BY d.path, e.raw_relation, "
                 "e.source_anchor) AS source_rank, COUNT(*) OVER ("
                 "PARTITION BY e.source_path) AS source_total FROM graph_edges e "
                 "LEFT JOIN graph_nodes n ON n.node_key = e.src_key "
-                "LEFT JOIN graph_nodes d ON d.node_key = e.dst_key AND d.kind = 'file' "
+                "LEFT JOIN graph_nodes d ON d.node_key = e.dst_page_key "
                 f"WHERE e.source_path IN ({placeholders}) "
                 "AND e.origin = 'semantic_relation' "
                 "AND e.src_key <> ('file:' || e.source_path) "
-                "AND e.dst_key <> ('file:' || e.source_path) "
-                "AND e.dst_key LIKE 'file:%' "
+                "AND e.dst_page_key <> ('file:' || e.source_path) "
                 "AND e.registry_status IN ('core', 'alias', 'extension') "
                 "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.src_key = ('file:' || e.source_path) "
-                "AND p.dst_key = e.dst_key AND p.relation_type = e.relation_type)) "
+                "AND p.dst_page_key = e.dst_page_key AND p.relation_type = e.relation_type)) "
                 "SELECT source_path, target_path, raw_relation, relation_type, "
                 "source_anchor, unit_ref, exomem_id, "
                 "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
@@ -7680,7 +7730,7 @@ class EpistemicGraphIndex:
                 "EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || mine.path) "
-                "AND p.dst_key = ('file:' || theirs.path) "
+                "AND p.dst_page_key = ('file:' || theirs.path) "
                 "AND p.raw_relation = 'relates_to') AS authored_match "
                 "FROM selected_questions mine JOIN other_questions theirs "
                 "ON theirs.question = mine.question AND theirs.path <> mine.path "
@@ -7688,7 +7738,7 @@ class EpistemicGraphIndex:
                 "WHERE mine.question <> '' AND NOT EXISTS ("
                 "SELECT 1 FROM graph_edges p "
                 "WHERE p.src_key = ('file:' || mine.path) "
-                "AND p.dst_key = ('file:' || theirs.path) "
+                "AND p.dst_page_key = ('file:' || theirs.path) "
                 "AND p.relation_type = 'relates_to')), "
                 "ranked AS (SELECT *, ROW_NUMBER() OVER ("
                 "PARTITION BY source_path ORDER BY target_path, question, unit_ref) "
@@ -7715,7 +7765,7 @@ class EpistemicGraphIndex:
                 "EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e1.source_path) "
-                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.dst_page_key = ('file:' || e2.source_path) "
                 "AND p.raw_relation = 'relates_to') AS authored_match "
                 "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
                 "LEFT JOIN graph_nodes n1 ON n1.node_key = e1.src_key "
@@ -7731,7 +7781,7 @@ class EpistemicGraphIndex:
                 "AND e2.src_key <> ('file:' || e2.source_path) "
                 "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.src_key = ('file:' || e1.source_path) "
-                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.dst_page_key = ('file:' || e2.source_path) "
                 "AND p.relation_type = 'relates_to')), "
                 "ranked AS (SELECT *, ROW_NUMBER() OVER ("
                 "PARTITION BY source_path ORDER BY target_path, dst_key, other_anchor) "
@@ -7746,6 +7796,10 @@ class EpistemicGraphIndex:
                 "ORDER BY source_path, target_path, dst_key, other_anchor LIMIT ?",
                 (*selected, _STRUCTURAL_ROW_LIMIT, branch_cap + 1),
             ).fetchall()
+            # A shared target can be a unit; the page it belongs to is the label.
+            resolution_targets = {
+                str(row[2]): _path_for_node_key(conn, str(row[2])) for row in resolution_rows
+            }
             frontmatter_rows = conn.execute(
                 "WITH ranked AS (SELECT e.source_path, "
                 "COALESCE(d.path, SUBSTR(e.dst_key, 6)) AS target_path, "
@@ -7757,7 +7811,7 @@ class EpistemicGraphIndex:
                 "EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e.source_path) "
-                "AND p.dst_key = e.dst_key AND p.raw_relation = 'derived_from') "
+                "AND p.dst_page_key = e.dst_key AND p.raw_relation = 'derived_from') "
                 "AS authored_match, "
                 "ROW_NUMBER() OVER (PARTITION BY e.source_path ORDER BY "
                 "COALESCE(CAST(json_extract(e.review_evidence, "
@@ -7771,7 +7825,7 @@ class EpistemicGraphIndex:
                 "AND e.source_anchor = 'sources' AND e.relation_type = 'derived_from' "
                 "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.src_key = ('file:' || e.source_path) "
-                "AND p.dst_key = e.dst_key AND p.origin = 'markdown_relation' "
+                "AND p.dst_page_key = e.dst_key AND p.origin = 'markdown_relation' "
                 "AND p.relation_type = 'derived_from')) "
                 "SELECT source_path, target_path, exomem_id, "
                 "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
@@ -7791,7 +7845,7 @@ class EpistemicGraphIndex:
                 "EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e1.source_path) "
-                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.dst_page_key = ('file:' || e2.source_path) "
                 "AND p.raw_relation = 'relates_to') AS authored_match, "
                 "ROW_NUMBER() OVER (PARTITION BY e1.source_path "
                 "ORDER BY e2.source_path, e1.dst_key) AS source_rank, "
@@ -7806,7 +7860,7 @@ class EpistemicGraphIndex:
                 "AND e2.source_path <> e1.source_path "
                 "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.src_key = ('file:' || e1.source_path) "
-                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.dst_page_key = ('file:' || e2.source_path) "
                 "AND p.relation_type = 'relates_to')) "
                 "SELECT source_path, target_path, dst_key, exomem_id, "
                 "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
@@ -8054,7 +8108,7 @@ class EpistemicGraphIndex:
             resolution_authored[key] = bool(authored_match)
             resolution_matches.setdefault(key, []).append(
                 {
-                    "target": _with_md(str(target_key or "").removeprefix("file:")),
+                    "target": _with_md(resolution_targets.get(str(target_key or "")) or ""),
                     "relation": relation,
                     "anchor": anchor,
                     "unit_ref": unit_ref,
@@ -10124,6 +10178,30 @@ def _block_anchor(unit: semantic_units.SemanticUnit) -> str:
     return unit.anchor or semantic_blocks.normalize_label(unit.title or "") or f"line-{unit.line}"
 
 
+def _served(path: str, value: Any) -> Any:
+    """A graph field as every audience is served it: no reserved origin opener.
+
+    Unit fields, contexts and titles reach node and edge metadata verbatim, and
+    a stored graph predates any later fix, so every emitted node and edge
+    passes through here. Strings are withheld wherever they nest.
+    """
+    if isinstance(value, str):
+        from . import provenance
+
+        return provenance.withheld_prose(value, owner_path=path)
+    if isinstance(value, dict):
+        return {key: _served(path, item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_served(path, item) for item in value]
+    return value
+
+
+def _node_text(page, text: str) -> str:
+    """Unit text as stored: withheld before it is written, because node text is
+    what a graph query's `LIKE` matches, so a payload must not decide a match."""
+    return _served(page.rel_path, text)
+
+
 def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> GraphNode:
     return GraphNode(
         node_key=_block_key(page, unit),
@@ -10131,7 +10209,7 @@ def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> Graph
         path=page.rel_path,
         anchor=_block_anchor(unit),
         title=unit.title,
-        text=unit.body or unit.title or "",
+        text=_node_text(page, unit.body or unit.title or ""),
         source_hash=vault_module.content_hash(raw_text),
         line_start=unit.line,
         line_end=unit.end_line,
@@ -10195,7 +10273,7 @@ def _unit_node(
         path=page.rel_path,
         anchor=unit.anchor,
         title=None,
-        text=unit.content,
+        text=_node_text(page, unit.content),
         source_hash=state.parent_source_hash,
         line_start=unit.line,
         line_end=unit.end_line,
@@ -10274,10 +10352,7 @@ def _edges_for_page(
             )
         )
         for relation in unit.relations:
-            target = relation.target
-            if target.startswith("[[") and target.endswith("]]"):
-                target = target[2:-2]
-            target = target.split("|", 1)[0].split("#", 1)[0].strip()
+            target, fragment = _split_target_fragment(relation.target)
             try:
                 canonical, warning = vault_module.normalize_wikilink(
                     target, vault_root, resolver=resolver, strict=False, visible=visible
@@ -10286,15 +10361,19 @@ def _edges_for_page(
                 continue
             if not canonical:
                 continue
+            dst_key, dst_page_key, fragment_metadata = _relation_destination(
+                vault_root, canonical, warning, fragment
+            )
             edges.append(
                 page_edge(
                     block_key,
-                    _file_key(_with_md(canonical)),
+                    dst_key,
                     relation.kind,
                     "semantic_relation",
                     source_path=rel,
                     source_anchor=block_anchor,
                     raw_relation=relation.raw.split(":", 1)[0].strip(),
+                    dst_page_key=dst_page_key,
                     source_kind=unit.kind,
                     target_kind=_target_kind(vault_root, canonical),
                     metadata={
@@ -10302,6 +10381,7 @@ def _edges_for_page(
                         "line": relation.line,
                         "raw": relation.raw,
                         "target_resolution": "unresolved" if warning else "resolved",
+                        **fragment_metadata,
                         **generation,
                     },
                 )
@@ -10414,26 +10494,34 @@ def _relation_line_edges(
     edges: list[GraphEdge] = []
     canonical_lines: set[int] = set()
     for relation in relations:
+        target, fragment = _split_target_fragment(relation.target)
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, resolver=resolver, strict=False, visible=visible
+                target or relation.target,
+                vault_root,
+                resolver=resolver,
+                strict=False,
+                visible=visible,
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if not canonical:
             continue
-        target_path = _with_md(canonical)
+        dst_key, dst_page_key, fragment_metadata = _relation_destination(
+            vault_root, canonical, warning, fragment
+        )
         if relation.canonical:
             canonical_lines.add(relation.line)
         edges.append(
             _edge(
                 file_key,
-                _file_key(target_path),
+                dst_key,
                 relation.kind,
                 "markdown_relation" if relation.canonical else "semantic_relation",
                 source_path=rel_path,
                 source_anchor=f"line-{relation.line}",
                 raw_relation=relation.kind,
+                dst_page_key=dst_page_key,
                 registry=registry,
                 project=project,
                 page_type=page_type,
@@ -10444,6 +10532,7 @@ def _relation_line_edges(
                     "line": relation.raw,
                     "canonical": relation.canonical,
                     "target_resolution": "unresolved" if warning else "resolved",
+                    **fragment_metadata,
                 },
             )
         )
@@ -10530,6 +10619,84 @@ def _links_from_string(value: str) -> list[str]:
     return [stripped] if stripped else []
 
 
+def _split_target_fragment(raw: str) -> tuple[str, str]:
+    """`[[Page#unit|alias]]` as (`Page`, `unit`).
+
+    A same-page `#unit` names no other page, so it carries no fragment here: the
+    relation graph has never given it a destination of its own.
+    """
+    text = str(raw).strip()
+    if text.startswith("[[") and text.endswith("]]"):
+        text = text[2:-2]
+    page, _separator, fragment = text.split("|", 1)[0].partition("#")
+    page = page.strip()
+    return page, fragment.strip() if page else ""
+
+
+def _relation_destination(
+    vault_root: Path, canonical: str, warning: str | None, fragment: str
+) -> tuple[str, str, dict[str, str]]:
+    """Where a relation edge lands, and what the author should be told.
+
+    A fragment that names exactly one unit on the resolved target page lands the
+    edge on that unit. Every other outcome keeps the page-level edge the target
+    always produced, and records why, so a typo degrades instead of deleting.
+    """
+    page_key = _file_key(_with_md(canonical))
+    if not fragment or warning:
+        return page_key, page_key, {}
+    resolved = _current_page_unit(
+        vault_root,
+        _with_md(canonical),
+        lambda document: document.resolve_fragment(fragment),
+    )
+    metadata = {"target_fragment": fragment}
+    if resolved.drift is None:
+        return (
+            _unit_key(resolved.page, resolved.unit),
+            page_key,
+            {**metadata, "fragment_resolution": "unit"},
+        )
+    outcome = _fragment_outcome(resolved, fragment)
+    return page_key, page_key, {**metadata, "fragment_resolution": outcome}
+
+
+def _fragment_outcome(resolved: _PageUnit, fragment: str) -> str:
+    """Why a fragment kept the page edge, in the terms an author can act on.
+
+    `missing` is reserved for a fragment written as a unit address that names
+    nothing (a typo, a case mismatch, a removed unit). A heading reference is
+    not a mistake, so it is not called missing.
+    """
+    if resolved.status == "ambiguous":
+        return "ambiguous"
+    if resolved.state is None:
+        return "missing"
+    if not semantic_units.is_unit_anchor_shaped(fragment) or _names_a_heading(
+        resolved.source or "", fragment
+    ):
+        return "not_unit"
+    return "missing"
+
+
+def _names_a_heading(source: str, fragment: str) -> bool:
+    """Whether `fragment` reads as the text of one of the page's headings."""
+
+    def normal(value: str) -> str:
+        return re.sub(r"[\s_-]+", " ", value).strip().casefold()
+
+    wanted = normal(fragment)
+    in_fence = False
+    for line in source.splitlines():
+        if re.match(r"^\s*(?:```|~~~)", line):
+            in_fence = not in_fence
+        elif not in_fence:
+            heading = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line)
+            if heading and normal(heading.group(1)) == wanted:
+                return True
+    return False
+
+
 def _with_md(path: str) -> str:
     cleaned = str(path).strip()
     if cleaned.startswith("[[") and cleaned.endswith("]]"):
@@ -10581,6 +10748,7 @@ def _edge(
     target_kind: str | None = None,
     source_hash: str = "",
     review_evidence: dict[str, Any] | None = None,
+    dst_page_key: str | None = None,
 ) -> GraphEdge:
     registry = registry or relation_registry.core_registry()
     raw_relation = raw_relation or relation_type
@@ -10623,6 +10791,7 @@ def _edge(
         target_kind,
         resolver_origin,
         dict(review_evidence or {}),
+        dst_page_key if dst_page_key != dst_key else None,
     )
 
 
@@ -10676,15 +10845,16 @@ def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
 def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO graph_edges "
-        "(edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, "
-        "registry_status, registry_version, registry_hash, origin, source_path, "
-        "source_anchor, metadata, resolver_project, resolver_page_type, "
+        "(edge_key, src_key, dst_key, dst_page_key, relation_type, raw_relation, "
+        "parent_relation, registry_status, registry_version, registry_hash, origin, "
+        "source_path, source_anchor, metadata, resolver_project, resolver_page_type, "
         "resolver_source_kind, resolver_target_kind, resolver_origin, review_evidence) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             edge.edge_key,
             edge.src_key,
             edge.dst_key,
+            edge.dst_page_key or edge.dst_key,
             edge.relation_type,
             edge.raw_relation,
             edge.parent_relation,
@@ -10711,12 +10881,12 @@ def _node_row_to_dict(row) -> dict[str, Any]:
         "kind": row[1],
         "path": row[2],
         "anchor": row[3],
-        "title": row[4],
-        "text": row[5],
+        "title": _served(row[2], row[4]),
+        "text": _served(row[2], row[5]),
         "source_hash": row[6],
         "line_start": row[7],
         "line_end": row[8],
-        "metadata": _json(row[9]),
+        "metadata": _served(row[2], _json(row[9])),
     }
 
 
@@ -10734,7 +10904,7 @@ def _edge_row_to_dict(row) -> dict[str, Any]:
         "origin": row[9],
         "source_path": row[10],
         "source_anchor": row[11],
-        "metadata": _json(row[12]),
+        "metadata": _served(row[10], _json(row[12])),
     }
 
 
@@ -10971,6 +11141,63 @@ def _current_unit_status(
     return "found", paths, seeds, drift_counts, False
 
 
+class _PageUnit(NamedTuple):
+    """One page's current answer to "which unit does this reference name"."""
+
+    status: str  # the unit resolution's own: found | missing | ambiguous | stale
+    unit: semantic_units.SemanticUnit | None
+    page: Any
+    state: semantic_index.SemanticParentIndexState | None
+    drift: str | None  # why the page could not answer, else None
+    source: str | None = None  # the page's bytes, kept when the page parsed but named no unit
+
+
+def _current_page_unit(
+    vault_root: Path,
+    rel: str,
+    resolve: Callable[[semantic_units.SemanticUnitDocument], semantic_units.SemanticUnitResolution],
+    *,
+    parent_ref: str | None = None,
+) -> _PageUnit:
+    """Resolve a unit on `rel` from the page's current bytes, never from the sidecar.
+
+    The one owner of that read. A caller holding a `parent_ref` (the sidecar's
+    claim about who owns the page) has it proved against the bytes; a caller
+    holding only a path and a fragment lets the page name its own parent.
+    """
+
+    def unanswered(status: str, drift: str) -> _PageUnit:
+        return _PageUnit(status, None, None, None, drift)
+
+    path = vault_root / rel
+    # The parent-ref sidecar may predate Records admission.  Suppress raw
+    # Records by path before opening them, while missing ordinary paths
+    # remain evidence for the stale-seed collision recovery below.
+    if _records_suppressed_path(vault_root, rel):
+        return unanswered("missing", "suppressed_record_parent")
+    try:
+        source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+    except FileNotFoundError:
+        return unanswered("missing", "missing_parent")
+    except (OSError, UnicodeError):
+        return unanswered("missing", "parent_unavailable")
+    if parent_ref is not None and memory_refs.ref_from_markdown(source) != parent_ref:
+        return unanswered("missing", "parent_ref_mismatch")
+    try:
+        state = semantic_index.current_parent_index_state(vault_root, path, source=source)
+    except (TypeError, ValueError):
+        return unanswered("missing", "invalid_current_parent")
+    resolution = resolve(state.document)
+    if resolution.status != "found" or resolution.unit is None:
+        return _PageUnit(resolution.status, None, None, state, "missing_current_unit", source)
+    page = find_module._parse_page(
+        path, 0.0, vault_root, content=source.encode("utf-8"), resolved_relative=rel
+    )
+    if page is None:
+        return unanswered("missing", "invalid_current_parent")
+    return _PageUnit("found", resolution.unit, page, state, None)
+
+
 def _current_unit_parent_paths(
     conn: sqlite3.Connection,
     vault_root: Path,
@@ -10987,50 +11214,17 @@ def _current_unit_parent_paths(
     drift_counts: dict[str, int] = {}
     for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
         rel = str(row[0])
-        path = vault_root / rel
-        # The parent-ref sidecar may predate Records admission.  Suppress raw
-        # Records by path before opening them, while missing ordinary paths
-        # remain evidence for the stale-seed collision recovery below.
-        if _records_suppressed_path(vault_root, rel):
-            drift_counts["suppressed_record_parent"] = (
-                drift_counts.get("suppressed_record_parent", 0) + 1
-            )
-            continue
-        try:
-            source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
-        except FileNotFoundError:
-            drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
-            continue
-        except (OSError, UnicodeError):
-            drift_counts["parent_unavailable"] = drift_counts.get("parent_unavailable", 0) + 1
-            continue
-        if memory_refs.ref_from_markdown(source) != parent_ref:
-            drift_counts["parent_ref_mismatch"] = drift_counts.get("parent_ref_mismatch", 0) + 1
-            continue
-        try:
-            state = semantic_index.current_parent_index_state(vault_root, path, source=source)
-        except (TypeError, ValueError):
-            drift_counts["invalid_current_parent"] = (
-                drift_counts.get("invalid_current_parent", 0) + 1
-            )
-            continue
-        resolution = state.document.resolve_unit(unit_ref)
-        if resolution.status != "found" or resolution.unit is None:
-            drift_counts["missing_current_unit"] = drift_counts.get("missing_current_unit", 0) + 1
-            continue
-        page = find_module._parse_page(
-            path,
-            0.0,
+        resolved = _current_page_unit(
             vault_root,
-            content=source.encode("utf-8"),
+            rel,
+            lambda document: document.resolve_unit(unit_ref),
+            parent_ref=parent_ref,
         )
-        if page is None:
-            drift_counts["invalid_current_parent"] = (
-                drift_counts.get("invalid_current_parent", 0) + 1
-            )
+        if resolved.drift is not None:
+            drift_counts[resolved.drift] = drift_counts.get(resolved.drift, 0) + 1
             continue
         current_paths.append(rel)
-        current_seeds.append(_unit_node(page, resolution.unit, state).as_dict())
+        current_seeds.append(_unit_node(resolved.page, resolved.unit, resolved.state).as_dict())
         if len(current_paths) == 2:
             return current_paths, current_seeds, drift_counts, False
     return (
@@ -11582,22 +11776,21 @@ def _is_writable_relation_label(label: str) -> bool:
 
 
 _UNIT_RELATION_LIFT_SQL = f"""
-    SELECT e.dst_key, e.raw_relation, e.relation_type, e.source_anchor, n.unit_ref
+    SELECT e.dst_page_key, e.raw_relation, e.relation_type, e.source_anchor, n.unit_ref
     FROM graph_edges AS e
     LEFT JOIN graph_nodes AS n ON n.node_key = e.src_key
     WHERE e.source_path = ?
       AND e.origin = 'semantic_relation'
       AND e.src_key <> ?
-      AND e.dst_key <> ?
-      AND e.dst_key LIKE 'file:%'
+      AND e.dst_page_key <> ?
       AND e.relation_type IS NOT NULL
       AND e.registry_status IN ({_placeholders(_LIFT_REGISTRY_STATUSES)})
       AND NOT EXISTS (
           SELECT 1 FROM graph_edges AS p
-          WHERE p.src_key = ? AND p.dst_key = e.dst_key
+          WHERE p.src_key = ? AND p.dst_page_key = e.dst_page_key
             AND p.relation_type = e.relation_type
       )
-    ORDER BY e.dst_key, e.raw_relation, e.source_anchor
+    ORDER BY e.dst_page_key, e.raw_relation, e.source_anchor
     LIMIT ?
 """
 
@@ -11889,7 +12082,7 @@ def _shared_resolution_target_candidates(
             continue
         grouped.setdefault(target, []).append(
             {
-                "target": _with_md(str(target_key or "").removeprefix("file:")),
+                "target": _with_md(_path_for_node_key(conn, str(target_key or "")) or ""),
                 "relation": relation,
                 "anchor": anchor,
                 "unit_ref": unit_ref,

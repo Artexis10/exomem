@@ -59,18 +59,14 @@ variable "gateway_hostname" {
 }
 
 variable "admin_ssh_cidrs" {
-  description = "Explicit operator IPv4/IPv6 CIDRs allowed to reach SSH."
+  description = "Temporary break-glass CIDRs allowed to reach public SSH; empty (administration over NetBird) closes it."
   type        = set(string)
-
-  validation {
-    condition     = length(var.admin_ssh_cidrs) > 0
-    error_message = "At least one explicit administrator CIDR is required."
-  }
+  default     = []
 
   validation {
     condition = alltrue([
       for cidr in var.admin_ssh_cidrs :
-      can(cidrnetmask(cidr)) && cidr != "0.0.0.0/0" && cidr != "::/0"
+      can(cidrhost(cidr, 0)) && cidr != "0.0.0.0/0" && cidr != "::/0"
     ])
     error_message = "Administrator CIDRs must be valid and cannot expose SSH globally."
   }
@@ -234,4 +230,32 @@ variable "k3s_agent_nodes" {
     error_message = "dedicated_cell_id must be empty or an exact sixteen-character lowercase base32 cell identifier."
   }
 
+}
+
+variable "vswitch" {
+  # Set only once the dedicated server is bought and its vSwitch exists in
+  # Robot. The dedicated server configures its own address in this subnet on
+  # the VLAN (the k3s role does, from the generated inventory).
+  description = "Optional Robot vSwitch coupled to the private network: { id, vlan_id, subnet_cidr }. Null creates nothing."
+  type = object({
+    id          = number
+    vlan_id     = number
+    subnet_cidr = string
+  })
+  default = null
+
+  validation {
+    condition     = var.vswitch == null || try(var.vswitch.vlan_id >= 4000 && var.vswitch.vlan_id <= 4091, false)
+    error_message = "A Hetzner vSwitch VLAN ID is between 4000 and 4091."
+  }
+
+  validation {
+    condition = var.vswitch == null || try(
+      cidrhost(format("%s/%s", cidrhost(var.vswitch.subnet_cidr, 0), split("/", var.private_network_cidr)[1]), 0)
+      == cidrhost(var.private_network_cidr, 0)
+      && tonumber(split("/", var.vswitch.subnet_cidr)[1]) > tonumber(split("/", var.private_network_cidr)[1]),
+      false
+    )
+    error_message = "The vSwitch subnet must sit inside the private network."
+  }
 }

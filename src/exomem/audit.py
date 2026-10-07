@@ -15,7 +15,8 @@ Checks (all read-only; no writes ever):
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
 - `tag_inconsistency`: case/separator variants of the same tag
 - `frontmatter_compliance`: per-page-type required-field gaps,
-  `tenant:` set without `project: q`, patterns using `project:` (singular)
+  `tenant:` set on a page of a project the registry does not declare
+  `tenant_scoped`, patterns using `project:` (singular)
   instead of `projects:` (plural list)
 - `stale_review`: active compiled conclusion that is old AND rarely surfaced in
   `find` AND low inbound-link degree — a measurement-only review candidate.
@@ -111,6 +112,7 @@ from . import (
 from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
+from . import provenance as provenance_module
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -531,7 +533,7 @@ def audit(
     if "tag_inconsistency" in selected:
         findings.extend(_check_tag_inconsistency(pages))
     if "frontmatter_compliance" in selected:
-        findings.extend(_check_frontmatter_compliance(pages))
+        findings.extend(_check_frontmatter_compliance(pages, vault_root))
     if "entity_type_unregistered" in selected:
         findings.extend(_check_unregistered_entity_types(vault_root, pages))
     if "unregistered_project_key" in selected:
@@ -1412,7 +1414,8 @@ def semantic_recall_isolation_census(
     values, truncated, last, failure = _sidecar_rows(
         vault_root,
         graph_sidecar,
-        "SELECT edge_key, source_path, src_key, dst_key FROM graph_edges WHERE edge_key > ? ORDER BY edge_key",
+        "SELECT edge_key, source_path, src_key, dst_key, dst_page_key FROM graph_edges "
+        "WHERE edge_key > ? ORDER BY edge_key",
         after=stored.get("cursor", "") if stored.get("signature") == signature else "",
         limit=limit,
     )
@@ -1421,7 +1424,7 @@ def semantic_recall_isolation_census(
         incomplete["graph_edges"] = failure
     elif truncated and last is not None and signature is not None:
         continuation["graph_edges"] = {"cursor": last, "signature": signature}
-    for _edge_key, source_path, src_key, dst_key in values:
+    for _edge_key, source_path, src_key, dst_key, dst_page_key in values:
         for raw, identity, edge_column in (
             (source_path, source_path, "source_path"),
             (
@@ -1433,8 +1436,10 @@ def semantic_recall_isolation_census(
             ),
             (
                 dst_key,
-                dst_key.removeprefix("file:")
-                if isinstance(dst_key, str) and dst_key.startswith("file:")
+                # A unit destination belongs to a page; that page is the identity
+                # whose admission decides whether the edge may stay.
+                dst_page_key.removeprefix("file:")
+                if isinstance(dst_page_key, str) and dst_page_key.startswith("file:")
                 else None,
                 "dst_key",
             ),
@@ -1905,8 +1910,14 @@ def _complete_semantic_category_summary(
 
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
     """Walk the KB once, parse every .md, return ParsedPage objects."""
+    from .governance import raw_protection
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
+        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+            continue
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -2473,7 +2484,8 @@ def _check_orphan_entities(
             f"{kb_prefix()}Entities/index.md"
         ):
             continue
-        for match in WIKILINK_PATTERN.finditer(page.body):
+        # A carrier is recorded data, not a use of the entity it names.
+        for match in WIKILINK_PATTERN.finditer(provenance_module.without_carriers(page.body)):
             target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
             if target:
                 referenced.add(target)
@@ -2786,16 +2798,21 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
 
 def _check_frontmatter_compliance(
     pages: list[find_module.ParsedPage],
+    vault_root: Path,
 ) -> list[AuditFinding]:
     """Surface per-page-type frontmatter problems.
 
     Three classes of finding:
     - Missing required field for the declared `type:`.
-    - `tenant:` set on a non-Q page (the `tenant` field is Q-only).
+    - `tenant:` set on a page whose project the registry does not declare
+      `tenant_scoped: true` in `_Schema/project-keys.yaml`.
     - Pattern page with singular `project:` instead of plural `projects:`
       (the convention for cross-project patterns).
     """
     findings: list[AuditFinding] = []
+    from . import project_keys as project_keys_module
+
+    tenant_scoped = project_keys_module.load_project_registry(vault_root).tenant_scoped
     for page in pages:
         fm = page.frontmatter
         excluded = vault_module.first_excluded_field(fm)
@@ -2869,24 +2886,29 @@ def _check_frontmatter_compliance(
                     ),
                     )
                 )
-        # tenant: is Q-only.
-        if fm.get("tenant") and fm.get("project") != "q":
-            findings.append(
-                AuditFinding(
-                category="frontmatter_compliance",
-                severity="warn",
-                path=page.rel_path,
-                detail=(
-                    f"`tenant: {fm['tenant']!r}` set but `project` is "
-                    f"{fm.get('project')!r}, not 'q'. The tenant field is "
-                    f"Q-only."
-                ),
-                proposed_fix=(
-                    "Either set `project: q` (if this is a Q-tenant note) "
-                    "or remove the `tenant:` field."
-                ),
+        # `tenant:` belongs only on pages of a project the registry declares tenant-scoped.
+        if fm.get("tenant"):
+            more = fm.get("projects")
+            declared = [fm.get("project"), *(more if isinstance(more, list) else [])]
+            named = [item for item in declared if isinstance(item, str)]
+            if not set(named) & tenant_scoped:
+                findings.append(
+                    AuditFinding(
+                    category="frontmatter_compliance",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=(
+                        f"`tenant: {fm['tenant']!r}` set but none of the page's "
+                        f"projects ({named!r}) is declared `tenant_scoped` "
+                        "in the project registry."
+                    ),
+                    proposed_fix=(
+                        "Either mark the project `tenant_scoped: true` in "
+                        "`_Schema/project-keys.yaml` (if it is tenant-scoped) "
+                        "or remove the `tenant:` field."
+                    ),
+                    )
                 )
-            )
         # Patterns should use plural `projects:`, not singular `project:`.
         if page_type == "pattern" and fm.get("project") and not fm.get("projects"):
             findings.append(
