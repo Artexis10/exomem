@@ -925,9 +925,14 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
         with journey.step("3. import preview, one governed revise, start"):
             preview = await service.import_job(WORKOUTS_ID, mode="preview", **journey.import_request)
             recommended = preview["recommended_declarations"]
+            # The fixture introduces unmapped context after the preview's first 100 rows.
+            findings = preview["mapping"]["findings"]
             expect(
                 preview["rows"]["sampled"] == 100
-                and not preview["mapping"]["findings"]
+                and len(findings) == 1
+                and findings[0]["code"] == "IMPORT_PATH_ABSENT"
+                and findings[0]["at"] == "mapping.fields.extra_context"
+                and "extra_context" not in preview["mapping"]["inferred"]
                 and recommended["fields"]
                 and recommended["rollups"]
                 and recommended["omitted"] == [],
