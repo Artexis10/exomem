@@ -78,7 +78,7 @@ def test_mixed_hidden_scalar_and_json_traps_never_reach_evaluation(store):
     store.connection.execute(f"UPDATE {plan.table_name} SET keys_json=? WHERE item_key=?", (json.dumps(keys), OTHER))
     seen, statements = [], []
     with request_scope(_external()), runtime.read_session(store.root, store.handle.path) as session:
-        session.project_with(lambda row: seen.append(row) or row, fields=())
+        session.project_with(lambda row: seen.append(row) or row, fields={"title"})
         session.connection.set_trace_callback(statements.append)
         result = page(session, query(select=["title"], where={"field": "title", "op": "contains", "value": "Visible"},
                                      order_by=[{"field": "count", "nulls": "first"}]))

@@ -35,6 +35,7 @@ from test_collection_store_importer import (
     valid,
     write_source,
 )
+from test_collection_store_summary import COPY_CID
 from test_collection_store_writer import CID as SUMMARY_CID
 from test_collection_store_writer import KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
@@ -303,6 +304,30 @@ def test_only_a_reduction_that_reads_a_link_leaves_its_ready_rollup(store):
     by_link = query(store, {**request(groups=("related",)), "mode": "explain"}, collection=SUMMARY_CID)
     assert daily["plan"]["strategy"] == "rollup"
     assert (by_link["plan"]["strategy"], by_link["plan"]["reason"]) == ("base", "fields_projected")
+
+
+def test_link_projection_leaves_every_other_value_as_stored(store):
+    """A link-bearing collection whose base scan or rows rewrite a null or empty non-link value, so its
+    groups differ from the same query answered from a ready rollup, and its rows from a link-free twin."""
+    fields = {**FIELDS, "calories": "{type: integer, sortable: true}", "tags": "{type: array, items: {type: string}}"}
+    by_kind = {"by_kind": {**DAILY, "group_by": ["kind"], "values": {"calories": ["count", "sum"]}}}
+    store.create_collection(manifest_path(), manifest(fields=fields, rollups=by_kind, summary=False),
+                            why="create", scaffold=False)
+    store.create_collection(manifest_path().replace("/Work/", "/Twin/"),
+                            manifest(fields={**fields, "related": "{type: link}"}, summary=False, cid=COPY_CID,
+                                     title="Twin"), why="create", scaffold=False)
+    items = [{"id": "null-kind", "kind": None, "tags": [], "start": "2026-03-01T08:00:00+00:00", "calories": 100},
+             {"id": "no-kind", "start": "2026-03-01T09:00:00+00:00", "calories": 200},
+             {"id": "run", "kind": "run", "tags": ["x"], "start": "2026-03-01T10:00:00+00:00", "calories": 300}]
+    for key, item in zip((KEY, OTHER, "33333333-3333-4333-8333-333333333333"), items, strict=True):
+        store.append_record(SUMMARY_CID, item=item, item_key=key, why="observe")
+        store.append_record(COPY_CID, item=item, item_key=key, why="observe")
+    groups = {**request(ops=("count", "sum"), groups=("kind",))}
+    rows = {"version": 1, "select": ["id", "kind", "tags"], "order_by": [{"field": "calories"}]}
+    rollup, linked = (query(store, groups, collection=cid) for cid in (SUMMARY_CID, COPY_CID))
+    assert (rollup["plan"]["strategy"], linked["plan"]["strategy"]) == ("rollup", "base")
+    assert linked["groups"] == rollup["groups"]
+    assert query(store, rows, collection=COPY_CID)["rows"] == query(store, rows, collection=SUMMARY_CID)["rows"]
 
 
 def test_compose_refuses_every_shape_and_profile_that_execute_refuses(store):
