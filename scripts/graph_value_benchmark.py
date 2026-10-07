@@ -2048,6 +2048,15 @@ def _lifecycle_resolution_facts(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _relation_cache_entry(root: Path) -> tuple[str, Any] | None:
+    """`(extension_hash, registry)` the process holds for one vault, or None."""
+    from exomem import relation_registry
+    from exomem.vocabulary import registry as vocabulary_registry
+
+    snapshot = vocabulary_registry.cached(relation_registry.SPEC, root)
+    return None if snapshot is None else (snapshot.content_hash, snapshot.typed)
+
+
 def _lifecycle_error_code(exc: Exception) -> str:
     code = getattr(exc, "code", None)
     if code:
@@ -2521,8 +2530,8 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
     tenant_b_registry = relation_registry.load_registry(tenant_b)
     tenant_a_cache_path = relation_registry.extension_registry_path(tenant_a).resolve()
     tenant_b_cache_path = relation_registry.extension_registry_path(tenant_b).resolve()
-    tenant_a_cache_entry = relation_registry._CACHE.get(tenant_a_cache_path)
-    tenant_b_cache_entry = relation_registry._CACHE.get(tenant_b_cache_path)
+    tenant_a_cache_entry = _relation_cache_entry(tenant_a)
+    tenant_b_cache_entry = _relation_cache_entry(tenant_b)
 
     part_core = next(
         (item for item in part_resolution["core_vocabulary"] if item.get("key") == "part_of"), {}

@@ -888,7 +888,7 @@ def op_bootstrap(
     # Where the compact core points for the vocabulary workflow's full contract: it is
     # served on demand in a section, and a released profile keeps its published text.
     vocabulary_workflow_home = (
-        " (section entities)" if profile == "compact" and not frozen_profile else ""
+        " (section vocabulary)" if profile == "compact" and not frozen_profile else ""
     )
     active_product_names = frozenset(active_descriptor.product_commands)
     # The recall contract opens with a line that names `activate_context`. Where the
@@ -1145,6 +1145,18 @@ def op_bootstrap(
             "key deprecates old"
         ),
     }
+    from .vocabulary import bootstrap as vocabulary_bootstrap_module
+
+    # The live registries by use. A released profile keeps its published payload.
+    vocabulary_projection = (
+        None
+        if frozen_profile
+        else vocabulary_bootstrap_module.block(
+            vault_root,
+            # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
+            inspect_route="schema_memory(operation=inspect, subject=<registry>)",
+        )
+    )
     vocabulary_workflow_projection = {
         "version": "v1",
         "families": [
@@ -1152,17 +1164,35 @@ def op_bootstrap(
             "entity-type/v1",
             "relation-type/v1",
         ],
+        # The live wording is shorter to fund the `vocabulary` block; a released
+        # profile keeps the wording it was published with.
         "consideration": (
-            "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
-            "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
-            "choice and any new definition to the active agent."
+            (
+                "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
+                "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
+                "choice and any new definition to the active agent."
+            )
+            if frozen_profile
+            else (
+                "Choose reuse, enrich or propose-new from source evidence; generic, "
+                "no-edge and defer stay valid. No quota; the active agent decides."
+            )
         ),
         "cadence": (
-            "At a durable capture boundary, use the available review route and inspect "
-            "relevant items with context. If a useful identity or meaning question is "
-            "missing, use a source-page or existing-entity anchor. For a selected edge, "
-            "use relation_question with the current relation-queue candidate so both "
-            "endpoints are reviewed. Record the typed decision before its structural write."
+            (
+                "At a durable capture boundary, use the available review route and inspect "
+                "relevant items with context. If a useful identity or meaning question is "
+                "missing, use a source-page or existing-entity anchor. For a selected edge, "
+                "use relation_question with the current relation-queue candidate so both "
+                "endpoints are reviewed. Record the typed decision before its structural write."
+            )
+            if frozen_profile
+            else (
+                "At a capture boundary, review items with context; anchor a missing identity "
+                "or meaning question on a source page or entity, and an edge question on the "
+                "current relation-queue candidate (relation_question). Record the typed "
+                "decision before its structural write."
+            )
         ),
         "review_route": {"default_limit": 4, **vocabulary_operation("review_memory", {"mode": "vocabulary"})},
         "context": vocabulary_operation(
@@ -1212,11 +1242,19 @@ def op_bootstrap(
         "application": {
             "correlation_fields": ["vocabulary_ref", "vocabulary_fingerprint"],
             "rule": (
-                "On a supported canonical writer, pass the reviewed ref and fingerprint "
-                "to bind the result to its decision. Use one stable transport idempotency "
-                "identity for the operation (REST: Idempotency-Key header), retain it on "
-                "retry, and inspect the canonical receipt. A saved type alone does not "
-                "complete a separately proposed entity or edge."
+                (
+                    "On a supported canonical writer, pass the reviewed ref and fingerprint "
+                    "to bind the result to its decision. Use one stable transport idempotency "
+                    "identity for the operation (REST: Idempotency-Key header), retain it on "
+                    "retry, and inspect the canonical receipt. A saved type alone does not "
+                    "complete a separately proposed entity or edge."
+                )
+                if frozen_profile
+                else (
+                    "Pass the reviewed ref and fingerprint to a supported writer; reuse one "
+                    "idempotency identity (REST: Idempotency-Key) across retries and read the "
+                    "receipt. A saved type does not complete a separately proposed entity or edge."
+                )
             ),
         },
         "entity_instance": {
@@ -1638,8 +1676,23 @@ def op_bootstrap(
             ),
         },
         "source_taxonomy": source_taxonomy_projection,
+        **({"vocabulary": vocabulary_projection} if vocabulary_projection is not None else {}),
         "entity_registry": {
-            "types": [
+            # The live types are in `vocabulary` (by use); a compact payload lists
+            # here only what that block does not carry: declared facets.
+            **({
+                "facets": {
+                    definition.id: {
+                        facet.name: f"{facet.cardinality} {facet.value}"
+                        for facet in entity_type_registry.facets_for(definition.id)
+                    }
+                    for definition in entity_type_registry.active_definitions
+                    if entity_type_registry.facets_for(definition.id)
+                }
+            } if vocabulary_projection is not None and profile == "compact"
+            and any(entity_type_registry.facets_for(item) for item in entity_type_registry.active_ids)
+            else {}),
+            **({} if vocabulary_projection is not None and profile == "compact" else {"types": [
                 {
                     **({
                         "id": definition.id,
@@ -1664,7 +1717,7 @@ def op_bootstrap(
                     } if entity_type_registry.facets_for(definition.id) else {}),
                 }
                 for definition in entity_type_registry.active_definitions
-            ],
+            ]}),
             "capture_rule": (
                 "After durable work: bounded pass. Enrich existing for new durable "
                 "facts or relations; skip incidental. Registration requires why; never invent "
@@ -10300,6 +10353,35 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
+        return _registry_schema_operation(
+            vault_root,
+            subject=subject,
+            operation=operation,
+            proposal=proposal,
+            expected_hash=expected_hash,
+            why=why,
+            version=version,
+            limit=limit,
+            continuation=continuation,
+            unexpected={
+                "name": name,
+                "project": project,
+                "page_type": page_type,
+                "save": save or None,
+                "strict": strict or None,
+                "compare_to": compare_to,
+                "include_model_suggestions": include_model_suggestions or None,
+                "context": context,
+                "date_from": date_from,
+                "date_to": date_to,
+                "query": query,
+                "requested_type": requested_type,
+                "vocabulary_ref": vocabulary_ref,
+                "vocabulary_fingerprint": vocabulary_fingerprint,
+                "detail": detail,
+            },
+        )
     if detail is not None and not (subject == "relations" and operation == "census"):
         raise ValueError(
             "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
@@ -10409,17 +10491,41 @@ def op_schema_memory(
                 "findings": findings,
                 "saved": None,
             }
+        from .vocabulary import contract as vocabulary_contract
+        from .vocabulary import load as load_vocabulary
+
+        restricted = vocabulary_contract.queues_for_owner(vault_root)
+        before = load_vocabulary(entity_types_module.SPEC, vault_root)
+        if restricted is not None:
+            return vocabulary_contract.queue_for_owner(
+                vault_root,
+                entity_types_module.SPEC,
+                before,
+                proposal,
+                why.strip(),
+                restricted,
+                operation="save-entity-types",
+            )
         saved = entity_types_module.save_registry(
             vault_root,
             proposal,
             expected_hash=expected_hash,
             observed_ids=entity_types_module.observed_extension_ids(vault_root),
+            why=why.strip(),
         )
+        after = load_vocabulary(entity_types_module.SPEC, vault_root)
         return {
             "subject": "entity-types",
             "valid": True,
             "findings": [],
             "why": why.strip(),
+            "vocabulary_receipt": vocabulary_contract.receipt_lines(
+                entity_types_module.SPEC,
+                before,
+                after.entries,
+                _changed_entries(before, after),
+                saved["history"]["version"],
+            ),
             "saved": saved,
         }
     if subject == "categories":
@@ -10462,6 +10568,7 @@ def op_schema_memory(
                     vault_root,
                     proposal,
                     expected_hash=expected_hash,
+                    why=why,
                 )
             return result
         if save:
@@ -10679,6 +10786,24 @@ def op_schema_memory(
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: save-relations accepts only delta, hash, and why"
                 )
+            from .vocabulary import contract as vocabulary_contract
+            from .vocabulary import load as load_vocabulary
+
+            restricted = vocabulary_contract.queues_for_owner(vault_root)
+            if restricted is not None:
+                current = relation_registry_module.load_registry(vault_root)
+                relation_registry_module.merge_extension_delta(
+                    memory_schema_module.relation_registry_proposal(current), proposal
+                )
+                return vocabulary_contract.queue_for_owner(
+                    vault_root,
+                    relation_registry_module.SPEC,
+                    load_vocabulary(relation_registry_module.SPEC, vault_root),
+                    proposal,
+                    why.strip(),
+                    restricted,
+                    operation="save-relations",
+                )
             # Pure validation happens before the invocation-specific inner
             # mutation boundary. The guarded section reloads and repeats the
             # hash/merge against the bytes it will actually commit.
@@ -10704,10 +10829,12 @@ def op_schema_memory(
                 merged = relation_registry_module.merge_extension_delta(
                     memory_schema_module.relation_registry_proposal(current), proposal
                 )
+                before = load_vocabulary(relation_registry_module.SPEC, vault_root)
                 saved = relation_registry_module.save_registry(
                     vault_root,
                     merged,
                     expected_hash=expected_hash,
+                    why=why.strip(),
                 )
             changed_keys = sorted(
                 set(proposal.get("upsert") or {})
@@ -10718,6 +10845,13 @@ def op_schema_memory(
                 "valid": True,
                 "why": why.strip(),
                 "changed_keys": changed_keys,
+                "vocabulary_receipt": vocabulary_contract.receipt_lines(
+                    relation_registry_module.SPEC,
+                    before,
+                    load_vocabulary(relation_registry_module.SPEC, vault_root).entries,
+                    tuple(changed_keys),
+                    saved["history"]["version"],
+                ),
                 "saved": saved,
             }
         if operation == "infer":
@@ -10758,6 +10892,8 @@ def op_schema_memory(
                     proposal,
                     expected_hash=expected_hash,
                     observed_keys=observed,
+                    why=why,
+                    operation="infer",
                 )
             return result
         if save:
@@ -10883,6 +11019,91 @@ def op_schema_memory(
         )
         return result
     raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+
+
+def _changed_entries(before: Any, after: Any) -> tuple[str, ...]:
+    """Keys whose effective entry a whole-document save added or changed."""
+    return tuple(
+        sorted(
+            key
+            for key, entry in after.entries.items()
+            if before.entries.get(key) != entry
+        )
+    )
+
+
+#: The generic registry contract (`add-vocabulary-registries`). A registry
+#: subject routes these here; its older operation names keep their handlers.
+_REGISTRY_OPERATIONS = frozenset({"inspect", "propose", "save", "history", "restore"})
+
+
+def _registry_subjects() -> frozenset[str]:
+    from .vocabulary import registry_specs
+
+    return frozenset(registry_specs())
+
+
+def _registry_schema_operation(
+    vault_root: Path,
+    *,
+    subject: str,
+    operation: str,
+    proposal: dict[str, Any] | None,
+    expected_hash: str | None,
+    why: str | None,
+    version: str | None,
+    limit: int,
+    continuation: str | None,
+    unexpected: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One registry contract for every vocabulary subject."""
+    from .vocabulary import contract, registry_spec
+
+    supplied = sorted(name for name, value in unexpected.items() if value is not None)
+    allowed = {
+        "inspect": {"limit", "continuation"},
+        "propose": {"proposal"},
+        "save": {"proposal", "expected_hash", "why"},
+        "history": set(),
+        "restore": {"version", "expected_hash", "why"},
+    }[operation]
+    given = {
+        "proposal": proposal,
+        "expected_hash": expected_hash,
+        "why": why,
+        "version": version,
+        "continuation": continuation,
+        "limit": None if limit == 20 else limit,
+    }
+    extra = supplied + sorted(
+        name for name, value in given.items() if value is not None and name not in allowed
+    )
+    if extra:
+        raise ValueError(
+            f"INVALID_SCHEMA_ARGUMENT: {subject} {operation} takes "
+            + (", ".join(sorted(allowed)) or "no arguments")
+            + "; also got "
+            + ", ".join(extra)
+        )
+    spec = registry_spec(subject)
+    if operation == "inspect":
+        return contract.inspect(vault_root, spec, limit=limit, continuation=continuation)
+    if operation == "history":
+        return contract.history(vault_root, spec)
+    if operation == "restore":
+        return contract.restore(
+            vault_root, spec, version=version, expected_hash=expected_hash, why=why
+        )
+    if proposal is None:
+        raise ValueError(
+            f"INCOMPLETE_REGISTRY_PROPOSAL: {operation} takes a delta in proposal, e.g. "
+            '{"upsert": {"<key>": {...}}}'
+        )
+    if operation == "propose":
+        return contract.propose(vault_root, spec, proposal)
+    return contract.save(
+        vault_root, spec, delta=proposal, expected_hash=expected_hash, why=why
+    )
 
 
 def _workflow_contract_schema_operation(

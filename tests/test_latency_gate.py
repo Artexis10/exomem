@@ -478,7 +478,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
 
     def cold_find_ms() -> float:
         find_module.clear_cache()
-        entity_types._CACHE.clear()
+        entity_types.clear_cache()
         _seed_freshness_live(vault)
         started = time.perf_counter()
         commands.op_find(
@@ -553,7 +553,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             registry_path.write_text(registry_text, encoding="utf-8")
         else:
             registry_path.unlink(missing_ok=True)
-        entity_types._CACHE.clear()
+        entity_types.clear_cache()
         referent_resolution._CUE_NOUN_CACHE.clear()
         entity_registry.clear_entity_registry_cache()
         started = time.perf_counter()
@@ -601,7 +601,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             parse_ms.append((time.perf_counter() - started) * 1000)
 
     monkeypatch.setattr(entity_types, "_parse_extension_data", timed_parse)
-    entity_types._CACHE.clear()
+    entity_types.clear_cache()
 
     commands.op_find(
         vault,

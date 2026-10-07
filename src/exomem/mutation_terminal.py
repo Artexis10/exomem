@@ -1509,6 +1509,22 @@ def _without_relation_advisory_context(result: Any) -> Any:
     return stripped if changed else result
 
 
+#: A write's vocabulary receipt: at most this many lines of at most this many characters.
+_VOCABULARY_RECEIPT_LINES = 16
+_VOCABULARY_RECEIPT_CHARS = 600
+
+
+def _valid_vocabulary_receipt(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and 0 < len(value) <= _VOCABULARY_RECEIPT_LINES
+        and all(
+            isinstance(line, str) and 0 < len(line) <= _VOCABULARY_RECEIPT_CHARS
+            for line in value
+        )
+    )
+
+
 def _bounded_tokens(value: Any, limit: int) -> bool:
     return (
         isinstance(value, (list, tuple))
@@ -1971,6 +1987,11 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 
             if valid_public_resolution(resolution):
                 compact["vocabulary_resolution"] = resolution
+    if isinstance(leaf, Mapping) and _valid_vocabulary_receipt(leaf.get("vocabulary_receipt")):
+        # One line per key a write registered or changed, with its revert route
+        # (`vocabulary.contract`): a promotion is unmissable in the default
+        # detail, and it belongs to this write's response only.
+        compact["vocabulary_receipt"] = list(leaf["vocabulary_receipt"])
     if "vocabulary_resolution" in result:
         from .vocabulary_resolution import valid_public_resolution
 

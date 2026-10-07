@@ -29,6 +29,38 @@ from .vocabulary_workflow import (
     validation_feedback,
 )
 
+#: A restricted principal's registry save, queued for the owner by
+#: `vocabulary.contract`. Its one target is the registry overlay itself, read
+#: here as a virtual page that only the owner can see.
+REGISTRY_PROPOSAL_SIGNAL = "restricted-registry-save"
+
+
+def _registry_overlay(vault_root: Path, item: Mapping[str, Any], ref: str) -> Any | None:
+    """The registry spec whose overlay `ref` names, for a registry proposal only."""
+    if item.get("signal") != REGISTRY_PROPOSAL_SIGNAL:
+        return None
+    from .vocabulary import registry_specs
+
+    root = Path(vault_root)
+    for spec in registry_specs().values():
+        if spec.overlay(root).relative_to(root).as_posix() == ref:
+            return spec
+    raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+
+
+def _read_registry_overlay(vault_root: Path, spec: Any, ref: str) -> dict[str, Any]:
+    if egress.owner_only_aggregate(vault_root) is not None:
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+    from .vocabulary import load
+
+    snapshot = load(spec, Path(vault_root))
+    return {
+        "path": ref,
+        "content_hash": snapshot.content_hash,
+        "frontmatter": {},
+        "body": snapshot.overlay_text or "",
+    }
+
 
 def registry_hashes(vault_root: Path) -> dict[str, str]:
     relations = relation_registry.load_registry(vault_root)
@@ -152,6 +184,12 @@ def _path(vault_root: Path, item: Mapping[str, Any], ref: str) -> str:
 
 
 def _visible(vault_root: Path, item: Mapping[str, Any]) -> bool:
+    if item.get("signal") == REGISTRY_PROPOSAL_SIGNAL:
+        # A registry proposal is the owner's to decide, whatever its target.
+        try:
+            return egress.owner_only_aggregate(vault_root) is None
+        except (ValueError, OSError):
+            return False
     refs = list(
         dict.fromkeys([*item["target_versions"], *(entry["ref"] for entry in item["evidence"])])
     )
@@ -170,6 +208,9 @@ def _visible(vault_root: Path, item: Mapping[str, Any]) -> bool:
 
 
 def _read(vault_root: Path, item: Mapping[str, Any], ref: str) -> dict[str, Any]:
+    spec = _registry_overlay(vault_root, item, ref)
+    if spec is not None:
+        return _read_registry_overlay(vault_root, spec, ref)
     path = _path(vault_root, item, ref)
     if egress.release_level_for(vault_root, path) != DISCLOSURE_MAX:
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")

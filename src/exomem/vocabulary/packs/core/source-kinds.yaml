@@ -1,0 +1,80 @@
+# The source kinds Exomem ships: what a captured artifact IS. The set is a
+# useful default, never the permitted set; a vault adds kinds in
+# `_Schema/source-taxonomy.yaml` and new keys auto-register on first use.
+schema_version: 1
+registry: source-kinds
+entries:
+  article:
+    label: Article
+    description: captured web or PDF content
+    aliases: [articles]
+    attributes: {path_label: Articles, requires_url: true}
+  session:
+    label: Session
+    description: pasted conversation transcripts
+    aliases: [sessions, transcript, transcripts]
+    attributes: {path_label: Sessions}
+  book:
+    label: Book
+    description: book notes or excerpts
+    aliases: [books]
+    attributes: {path_label: Books}
+  paper:
+    label: Paper
+    description: academic papers
+    aliases: [papers]
+    attributes: {path_label: Papers, requires_url: true}
+  video:
+    label: Video
+    description: captured video transcripts or notes
+    aliases: [videos]
+    attributes: {path_label: Videos, requires_url: true}
+  research-report:
+    label: Research report
+    description: a compiled investigation or research report
+    aliases: [research-reports, deep-research]
+    attributes: {path_label: Reports}
+  official-guidance:
+    label: Official guidance
+    description: guidance published by an authority
+    aliases: [guidance]
+    attributes: {path_label: Official Guidance}
+  correspondence:
+    label: Correspondence
+    description: letters, email, or message threads
+    aliases: [letter, letters, email, emails]
+    attributes: {path_label: Correspondence}
+  invoice-receipt:
+    label: Invoice or receipt
+    description: invoices, receipts, and order confirmations
+    aliases: [invoice, invoices, receipt, receipts]
+    attributes: {path_label: Invoices}
+  contract-legal-document:
+    label: Contract or legal document
+    description: contracts and other legal instruments
+    aliases: [contract, contracts, legal-document, legal-documents]
+    attributes: {path_label: Contracts}
+  dataset-export:
+    label: Dataset export
+    description: structured data exports
+    aliases: [dataset, datasets, export, exports]
+    attributes: {path_label: Datasets}
+  manual-documentation:
+    label: Manual or documentation
+    description: product manuals and reference documentation
+    aliases: [manual, manuals, documentation]
+    attributes: {path_label: Manuals}
+  episode:
+    label: Episode
+    description: agent-authored conversation recaps with bounded verbatim excerpts
+    aliases: [episodes]
+    attributes: {path_label: Episodes}
+  webpage-snapshot:
+    label: Webpage snapshot
+    description: point-in-time captures of a web page
+    aliases: [snapshot, snapshots, webpage]
+    attributes: {path_label: Snapshots}
+  other:
+    label: Other
+    description: unclassified captures — a low-confidence fallback
+    attributes: {path_label: Other}

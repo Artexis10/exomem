@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import commands, entity_types, epistemic_graph, registry_history
+from exomem import commands, entity_types, graph_sync, registry_history
 
 _VENUE = {
     "label": "Venue",
@@ -47,15 +47,16 @@ def _served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mcp = server_module.build_server(require_auth=False)
 
     def call(tool: str, arguments: dict) -> dict:
-        result = asyncio.run(mcp.call_tool(tool, arguments, run_middleware=True))
-        return result.structured_content
+        content = asyncio.run(mcp.call_tool(tool, arguments, run_middleware=True)).structured_content
+        # A tool whose output schema is not an object wraps its result.
+        return content["result"] if set(content) == {"result"} else content
 
     return vault, call
 
 
 def _entity_types_in_bootstrap(call) -> dict:
     served = call("bootstrap", {"section": "vocabulary"})
-    return served["vocabulary"]["registries"]["entity-types"]
+    return served["vocabulary"]["entity-types"]
 
 
 def test_a_reverted_promotion_leaves_its_page_as_debt(
@@ -76,10 +77,14 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
             "why": "recurring event places need their own identity",
         },
     )
-    assert promoted["saved"]["content_hash"] != before["content_hash"]
+    # The write says what it promoted, under which parent, and how to revert it.
+    [receipt] = promoted["vocabulary_receipt"]
+    assert "entity-types: registered venue (parent concept)" in receipt
+    assert 'operation="restore"' in receipt
 
-    # Bootstrap lists it with a counted zero once the projection is current.
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    # Bootstrap lists it with a counted zero once the server's own graph
+    # maintenance has converged on the new registry.
+    assert graph_sync.drain_active_rebuilds(timeout=60)
     listed = _entity_types_in_bootstrap(call)
     assert listed["top"]["venue"] == 0
 
@@ -95,7 +100,7 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
     )
     page = vault / created["path"]
     page_bytes = page.read_bytes()
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    assert graph_sync.drain_active_rebuilds(timeout=60)
     assert _entity_types_in_bootstrap(call)["top"]["venue"] == 1
 
     # The owner restores the version the promotion replaced.
@@ -113,7 +118,7 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
             "why": "the owner keeps places as concepts",
         },
     )
-    assert restored["removed_keys"] == ["venue"]
+    assert "removed venue" in restored["vocabulary_receipt"][0]
     assert entity_types.load_entity_types(vault).resolve("venue") is None
 
     # The page keeps its bytes and is reported as unregistered debt.

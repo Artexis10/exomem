@@ -47,7 +47,7 @@ def test_save_registry_supplies_only_complete_registry_yaml_to_canonical_batch(
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
 
-    def batch(writes, *, vault_root: Path):  # noqa: ANN001
+    def batch(writes, *, vault_root: Path, **_sealed):  # noqa: ANN001, ANN003
         calls.append(list(writes))
         return [write.path for write in calls[-1]]
 
@@ -59,10 +59,13 @@ def test_save_registry_supplies_only_complete_registry_yaml_to_canonical_batch(
         tmp_path
     ).relative_to(tmp_path).as_posix()
     assert len(calls) == 1
-    assert len(calls[0]) == 1
-    write = calls[0][0]
+    # The registry YAML and the snapshot of what it replaced; the batch writer,
+    # not the caller, adds the graph epoch.
+    write, snapshot = calls[0]
     assert write.path == relation_registry.extension_registry_path(tmp_path)
     assert yaml.safe_load(write.content) == _proposal()
+    assert snapshot.create_only is True
+    assert snapshot.path.parent.name == "relation-registry"
     assert not any("epoch" in write.path.name for write in calls[0])
 
 

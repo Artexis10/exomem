@@ -151,7 +151,7 @@ def test_save_roles_writes_the_override_and_its_snapshot_through_the_canonical_b
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
 
-    def batch(writes, *, vault_root: Path):  # noqa: ANN001
+    def batch(writes, *, vault_root: Path, **_sealed):  # noqa: ANN001, ANN003
         calls.append(list(writes))
         return [write.path for write in writes]
 
@@ -185,7 +185,7 @@ def test_save_conventions_writes_the_override_and_its_snapshot_through_the_canon
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
 
-    def batch(writes, *, vault_root: Path):  # noqa: ANN001
+    def batch(writes, *, vault_root: Path, **_sealed):  # noqa: ANN001, ANN003
         calls.append(list(writes))
         return [write.path for write in writes]
 

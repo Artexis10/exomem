@@ -1,0 +1,16 @@
+# The subject domains Exomem ships: what a captured source is ABOUT. Open like
+# the source kinds; a vault adds domains in `_Schema/source-taxonomy.yaml`.
+schema_version: 1
+registry: domains
+entries:
+  travel: {label: Travel, attributes: {path_label: Travel}}
+  health: {label: Health, attributes: {path_label: Health}}
+  finance: {label: Finance, attributes: {path_label: Finance}}
+  legal: {label: Legal, attributes: {path_label: Legal}}
+  equipment: {label: Equipment, attributes: {path_label: Equipment}}
+  software: {label: Software, attributes: {path_label: Software}}
+  photography: {label: Photography, attributes: {path_label: Photography}}
+  media: {label: Media, attributes: {path_label: Media}}
+  food: {label: Food, attributes: {path_label: Food}}
+  research: {label: Research, attributes: {path_label: Research}}
+  business: {label: Business, attributes: {path_label: Business}}

@@ -52,7 +52,11 @@ def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> Non
 
     result = commands.op_bootstrap(tmp_path, section="all")
 
-    assert [item["id"] for item in result["entity_registry"]["types"]] == [
+    # With no projection to order by use, the compact block names the vault's own
+    # types; the full profile carries every definition.
+    assert result["vocabulary"]["entity-types"]["top"] == ["place"]
+    full = commands.op_bootstrap(tmp_path, profile="full")
+    assert [item["id"] for item in full["entity_registry"]["types"]] == [
         *entity_types.ENTITY_TYPE_IDS,
         "place",
     ]
@@ -110,11 +114,13 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["workflow_skills"][0]["path"].startswith(".exomem/schema/workflow-skills/")
     assert out["knowledge_packs"]["selected"]["selected_pack_ids"] == ["personal-records"]
     assert out["knowledge_packs"]["available"][0]["beginner_description"]
-    assert [item["id"] for item in out["entity_registry"]["types"]] == list(
+    # The compact payload names entity types in `vocabulary`, by use.
+    assert "types" not in out["entity_registry"]
+    assert "entity-types" in out["vocabulary"]
+    full = commands.op_bootstrap(vault, profile="full")
+    assert [item["id"] for item in full["entity_registry"]["types"]] == list(
         entity_types.ENTITY_TYPE_IDS
     )
-    assert set(out["entity_registry"]["types"][0]) == {"id", "folder", "family"}
-    full = commands.op_bootstrap(vault, profile="full")
     assert full["entity_registry"]["types"][0]["aliases"] == list(
         entity_types.ENTITY_TYPE_REGISTRY[0].aliases
     )
@@ -577,7 +583,7 @@ def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> 
     assert {k: v for k, v in session["engagement"].items() if k != "envelope"} == {
         k: v for k, v in compact["engagement"].items() if k != "envelope"
     }
-    assert set(session["sections"]) >= {"authoring", "entities", "envelope"}
+    assert set(session["sections"]) >= {"authoring", "vocabulary", "envelope"}
     assert session["knowledge_packs"] == {
         "selected": compact["knowledge_packs"]["selected"],
         "selection_rule": compact["knowledge_packs"]["selection_rule"],

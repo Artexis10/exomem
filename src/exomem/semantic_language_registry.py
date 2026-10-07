@@ -19,8 +19,9 @@ from typing import Any, Protocol
 
 import yaml
 
-from . import semantic_blocks, vault
+from . import semantic_blocks
 from .kbdir import kb_dirname
+from .vocabulary import registry as vocabulary_registry
 
 SCHEMA_VERSION = 1
 _STATUSES = frozenset({"active", "deprecated"})
@@ -417,9 +418,6 @@ def core_registry() -> SemanticLanguageRegistry:
     )
 
 
-_CACHE: dict[Path, tuple[str, SemanticLanguageRegistry]] = {}
-
-
 def load_registry(
     vault_root: Path | None = None,
     *,
@@ -431,19 +429,22 @@ def load_registry(
         return _parse_registry_data(proposal, _content_hash(raw), core)
     if vault_root is None:
         return core
-    path = registry_path(vault_root)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    return vocabulary_registry.load(CATEGORY_SPEC, Path(vault_root)).typed
+
+
+def clear_cache() -> None:
+    """Drop every vault's cached semantic-language snapshot."""
+    vocabulary_registry.invalidate_registry(CATEGORY_SPEC.name)
+
+
+def _parse_overlay_text(raw: str | None, digest: str) -> SemanticLanguageRegistry:
+    core = core_registry()
+    if raw is None:
         return core
-    digest = _content_hash(raw)
-    cached = _CACHE.get(path)
-    if cached is not None and cached[0] == digest:
-        return cached[1]
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        registry = SemanticLanguageRegistry(
+        return SemanticLanguageRegistry(
             SCHEMA_VERSION,
             digest,
             core.core_kinds,
@@ -451,10 +452,7 @@ def load_registry(
             core_categories=core.core_categories,
             core_category_aliases=core.core_category_aliases,
         )
-    else:
-        registry = _parse_registry_data(data, digest, core)
-    _CACHE[path] = (digest, registry)
-    return registry
+    return _parse_registry_data(data, digest, core)
 
 
 def validate_proposal(proposal: Any) -> list[dict[str, str]]:
@@ -487,8 +485,10 @@ def save_registry(
     proposal: dict[str, Any],
     *,
     expected_hash: str | None = None,
+    why: str | None = None,
+    operation: str = "infer",
 ) -> dict[str, Any]:
-    """Atomically save one reviewed, complete semantic-language document."""
+    """Atomically save one reviewed, complete semantic-language document, keeping history."""
     if not isinstance(proposal, dict) or not {"categories", "kinds"} <= set(proposal):
         raise ValueError(
             "INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL: "
@@ -527,15 +527,24 @@ def save_registry(
         allow_unicode=True,
         sort_keys=True,
     )
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(path=path, content=rendered)], vault_root=Path(vault_root)
+    history = vocabulary_registry.commit(
+        CATEGORY_SPEC,
+        Path(vault_root),
+        rendered,
+        operation=operation,
+        why=why,
+        before_hash=current_hash or vocabulary_registry.NO_OVERLAY_HASH,
+        added=vocabulary_registry.added_keys(
+            vocabulary_registry.load(CATEGORY_SPEC, Path(vault_root)).entries,
+            CATEGORY_SPEC.adapter.entries(registry),
+        ),
     )
-    _CACHE.pop(path, None)
     return {
         "path": path.relative_to(vault_root).as_posix(),
         "content_hash": _content_hash(rendered),
         "previous_hash": current_hash,
         "created": current_hash is None,
+        "history": history,
     }
 
 
@@ -1110,3 +1119,117 @@ def _finding(
 
 def _content_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# The registry adapter (`add-vocabulary-registries`)
+#
+# The semantic categories are one registry over the `categories` section of
+# `_Schema/semantic-language-registry.yaml`; its custom kinds share the file
+# and its history but are not a vocabulary registry in this slice.
+# --------------------------------------------------------------------------- #
+
+
+class _CategoryAdapter:
+    def parse(self, text: str | None, digest: str) -> SemanticLanguageRegistry:
+        return _parse_overlay_text(text, digest)
+
+    def parse_document(self, document: Mapping[str, Any]) -> SemanticLanguageRegistry:
+        return load_registry(proposal=dict(document))
+
+    def entries(self, typed: SemanticLanguageRegistry) -> dict[str, vocabulary_registry.Entry]:
+        out: dict[str, vocabulary_registry.Entry] = {}
+        for origin, definitions in (("pack", typed.core_categories), ("vault", typed.categories)):
+            for key, definition in definitions.items():
+                scope = {
+                    name: sorted(getattr(definition, name))
+                    for name in ("projects", "page_types")
+                    if getattr(definition, name)
+                }
+                out[key] = vocabulary_registry.Entry(
+                    key=key,
+                    description=definition.description,
+                    aliases=definition.aliases,
+                    status=definition.status,
+                    replaced_by=definition.replaced_by,
+                    attributes=MappingProxyType({"scope": scope} if scope else {}),
+                    origin=origin,
+                )
+        return out
+
+    def findings(self, typed: SemanticLanguageRegistry) -> tuple[dict[str, str], ...]:
+        return tuple(item.as_dict() for item in typed.findings)
+
+    def document(self, text: str | None) -> dict[str, Any]:
+        if text is None:
+            return empty_proposal()
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise vocabulary_registry.RegistryError(
+                "INVALID_REGISTRY_OVERLAY: semantic-language-registry.yaml does not parse; fix "
+                f"it or restore a kept version ({exc})"
+            ) from exc
+        if not isinstance(data, dict):
+            raise vocabulary_registry.RegistryError(
+                "INVALID_REGISTRY_OVERLAY: semantic-language-registry.yaml is not a mapping; "
+                "fix it or restore a kept version"
+            )
+        data.setdefault("schema_version", SCHEMA_VERSION)
+        for section in ("categories", "kinds"):
+            value = data.get(section)
+            data[section] = dict(value) if isinstance(value, dict) else {}
+        return data
+
+    def put(
+        self,
+        document: dict[str, Any],
+        key: str,
+        entry: vocabulary_registry.Entry,
+        *,
+        existing: bool,
+    ) -> None:
+        if key in _core_categories():
+            raise vocabulary_registry.RegistryError(
+                f"PACK_ENTRY_FIXED: {key!r} is a core semantic category"
+            )
+        row: dict[str, Any] = {"description": entry.description}
+        if entry.aliases:
+            row["aliases"] = sorted(normalize_label(alias) for alias in entry.aliases)
+        if entry.status != "active":
+            row["status"] = entry.status
+        if entry.replaced_by:
+            row["replaced_by"] = entry.replaced_by
+        scope = entry.attributes.get("scope")
+        if scope:
+            row["scope"] = {name: sorted(values) for name, values in dict(scope).items()}
+        document["categories"][key] = row
+
+    def render(self, document: Mapping[str, Any]) -> str:
+        return yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=True)
+
+    def normalize_key(self, raw: str) -> str:
+        key = normalize_label(raw)
+        if not _valid_label(key):
+            raise vocabulary_registry.RegistryError(
+                f"INVALID_REGISTRY_KEY: {raw!r} is not a semantic category label"
+            )
+        return key
+
+
+def _category_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.categories(vault_root, snapshot)
+
+
+CATEGORY_SPEC = vocabulary_registry.RegistrySpec(
+    name="categories",
+    stem="semantic-language-registry",
+    overlay=registry_path,
+    adapter=_CategoryAdapter(),
+    fields=frozenset({"description", "aliases", "status", "replaced_by", "attributes"}),
+    attributes=frozenset({"scope"}),
+    cap=512,
+    usage=_category_usage,
+)

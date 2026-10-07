@@ -7488,6 +7488,37 @@ class LexicalStore:
                 out.append((str(path), [item for item in decoded if isinstance(item, str)]))
         return out
 
+    def page_axis_counts(self, column: str) -> dict[str, int] | None:
+        """Knowledge Base pages per stored value of one scalar page axis.
+
+        `column` is `source_kind` or `domain`, the canonicalized scalar columns
+        a vocabulary registry counts its keys over. None when the catalogue is
+        absent or stale, so a caller reports the counts unavailable rather than
+        reading an unbuilt sidecar as zero use.
+        """
+        if column not in {"source_kind", "domain"}:
+            raise ValueError(f"page_axis_counts: unsupported column {column!r}")
+        if self._failed or not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical axis-count probe declined (%s)")
+            return None
+        try:
+            if not self._schema_is_current(conn):
+                return None
+            rows = conn.execute(
+                f"SELECT {column}, COUNT(*) FROM pages "  # noqa: S608 — closed column set above
+                f"WHERE in_kb = 1 AND {column} IS NOT NULL GROUP BY {column}"
+            ).fetchall()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical axis-count probe declined (%s)")
+            return None
+        finally:
+            conn.close()
+        return {str(value): int(count) for value, count in rows}
+
     def tag_usage_aggregate(
         self, excluded_dirs: Iterable[str], whitespace: str
     ) -> tuple[dict[str, int], dict[str, int]] | None:
