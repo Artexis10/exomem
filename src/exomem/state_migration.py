@@ -41,7 +41,8 @@ _ROLLBACK_OPERATIONS = frozenset({
 _LOCK_NAME = ".state-migration.lock"
 _COPY_CHUNK = 4 * 1024 * 1024
 _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
-_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1", "raw-protection-v1"})
+CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
+_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1", "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID})
 
 
 class _MigrationLockBusy(TimeoutError):
@@ -227,7 +228,7 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
 def supported_state_compatibility_ids() -> tuple[str, ...]:
     """Optional state formats this runtime can use, not merely parse."""
 
-    return ("raw-protection-v1",)
+    return ("raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID)
 
 
 def partition_state_descriptor_ids(
@@ -500,6 +501,9 @@ def require_vault_state_ready(
         raise StateMigrationOfflineRequired("migration manifest descriptor set is stale")
     if scan_vault_state(vault_root):
         raise StateMigrationOfflineRequired("legacy in-vault state is still present")
+    from .governance import connector_boundary
+
+    connector_boundary.require_startup(vault_root, optional)
 
     if cached is not None:
         return cached
@@ -598,11 +602,75 @@ def _discard_bootstrap_residue(state_dir: Path, created_root: bool) -> None:
         pass
 
 
+def arm_connector_boundary_offline(vault_root: Path, *, authority: object) -> StateResolution:
+    """Enroll before publishing the portable requirement, under the existing stop-window authority."""
+    _require_offline_authority(authority)
+    from . import activation_manifest
+    from .governance import connector_boundary
+    from .governance.principal import owner_principal, request_scope
+
+    root = Path(vault_root)
+    current = connector_boundary.snapshot(root, maintenance=True)
+    if current is None:
+        raise StateMigrationOfflineRequired("connector boundary configuration is absent")
+    connector_boundary.verify_capture_namespaces(root, current)
+    # Ordinary edits must not initialize a whole-corpus activation census while
+    # carrying a limited caller. Maintenance owns that existing canonical writer.
+    with request_scope(owner_principal(surface="cli")):
+        activation_manifest.ensure_manifest(root)
+    state_dir = state_paths.ensure_vault_state_dir(root)
+    with _migration_lock(state_dir):
+        resolution = _resolve_locked(root, state_dir)
+        if resolution.dual_state:
+            raise StateMigrationOfflineRequired("connector arming requires ready state families")
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("connector arming requires complete state")
+        if CONNECTOR_BOUNDARY_COMPATIBILITY_ID not in manifest["descriptors"]:
+            manifest["descriptors"] = sorted([*manifest["descriptors"], CONNECTOR_BOUNDARY_COMPATIBILITY_ID])
+            _write_manifest(state_dir, manifest)
+        with _RESOLUTION_LOCK:
+            _RESOLUTION_CACHE.pop(_cache_key(root, state_dir), None)
+        # If this publication fails, enrollment survives and startup refuses.
+        connector_boundary.publish_requirement(root, current)
+    return require_vault_state_ready(root)
+
+
+def restore_connector_boundary_offline(vault_root: Path, *, authority: object, recovery=None) -> None:
+    """Enroll restored protection before installing destination-owned Scope definitions."""
+    _require_offline_authority(authority)
+    from .governance import connector_boundary, tool
+
+    root = Path(vault_root)
+    requirement = connector_boundary.read_requirement(root)
+    if requirement is None:
+        return
+    state_dir = state_paths.ensure_vault_state_dir(root)
+    with _migration_lock(state_dir):
+        resolution = _resolve_locked(root, state_dir)
+        if resolution.dual_state:
+            raise StateMigrationOfflineRequired("restored connector state has conflicting families")
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("restored connector state is incomplete")
+        if CONNECTOR_BOUNDARY_COMPATIBILITY_ID not in manifest["descriptors"]:
+            manifest["descriptors"] = sorted([*manifest["descriptors"], CONNECTOR_BOUNDARY_COMPATIBILITY_ID])
+            _write_manifest(state_dir, manifest)
+        with _RESOLUTION_LOCK:
+            _RESOLUTION_CACHE.pop(_cache_key(root, state_dir), None)
+    tool.restore_protective_scopes(root, requirement["protected_scopes"], authority=authority, recovery=recovery)
+    connector_boundary.verify_capture_namespaces(root, connector_boundary.Snapshot(
+        requirement["selectors_sha256"], frozenset(requirement["protected_scopes"]), (),
+        tuple(requirement["capture_paths"]),
+    ))
+
+
 def migrate_vault_state_offline(
     vault_root: Path,
     *,
     authority: object,
     adopt: str | None = None,
+    protection_recovery=None,
 ) -> StateResolution:
     """Mutate state only under an explicitly asserted offline stop window."""
 
@@ -633,6 +701,17 @@ def migrate_vault_state_offline(
             state_dir,
             "a complete manifest has legacy in-vault duplicates",
         )
+    if protection_recovery is not None:
+        from .governance import connector_boundary, tool
+        from .restore_journal import ProtectionRecovery
+
+        requirement = connector_boundary.read_requirement(vault_root)
+        if (not isinstance(protection_recovery, ProtectionRecovery)
+                or protection_recovery.root != vault_root or requirement is None
+                or protection_recovery.record["documents"] != tool.restore_scope_documents(requirement["protected_scopes"])):
+            raise StateMigrationOfflineRequired("restore protection continuation is invalid")
+        protection_recovery.__post_init__()
+        restore_connector_boundary_offline(vault_root, authority=authority, recovery=protection_recovery)
     require_vault_state_ready(vault_root)
     return resolution
 
@@ -1554,7 +1633,10 @@ def _is_manifest_bookkeeping(name: str) -> bool:
     refuse the very fresh deployment whose crash created it.
     """
 
-    if name in {MANIFEST_NAME, _LOCK_NAME}:
+    from .restore_journal import DIRECTORY
+
+    # The restore owner records continuation before canonical state exists.
+    if name in {MANIFEST_NAME, _LOCK_NAME, DIRECTORY}:
         return True
     return name.startswith(f".{MANIFEST_NAME}.") and name.endswith(".tmp")
 

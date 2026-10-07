@@ -3922,8 +3922,18 @@ def _effective_idempotency_key(
     principal_scope: str | None,
     implicit_idempotency_scope: str | None = None,
 ) -> tuple[str | None, float | None, Any]:
+    from .governance.principal import effective_principal
+
     identity = canonical_mutation_identity(mutation_subject)
     namespace = f"cell:{manager.config.vault_id}" if manager.config.vault_id else identity
+    binding = effective_principal().client_binding
+    if binding is not None:
+        # Verified clients cannot share owner terminals. This versioned namespace
+        # leaves old terminals unadopted; reauthentication keeps successful retries.
+        client = hashlib.sha256(json.dumps(
+            [binding.issuer, binding.client_id], separators=(",", ":"),
+        ).encode()).hexdigest()
+        namespace = f"{namespace}\0client:v1:{client}"
     if idempotency_key:
         explicit_namespace = (
             f"{namespace}\0principal:{principal_scope}" if principal_scope else namespace
@@ -4534,6 +4544,11 @@ class LeaseManager:
             command.name == "govern_memory"
             and kwargs.get("operation") == "session"
             and kwargs.get("session_action") in {"open", "rotate"}
+        ) or (
+            # Both closed transfer operations issue bearer capabilities, not
+            # durable mutations whose result may be replayed to another session.
+            command.name == "transfer_artifact"
+            and kwargs.get("operation", "upload") in {"upload", "download"}
         )
         session_open_admission = (
             command.name == "govern_memory"
@@ -4542,8 +4557,7 @@ class LeaseManager:
         )
         if authorization_issuance:
             # The generic mutation store pickles its terminal for replay. An
-            # authorization-session issuance terminal contains the one raw
-            # bearer occurrence the product may return, so it must never enter
+            # credential issuance terminal contains a raw bearer, so it must never enter
             # that durable cache (or be emitted a second time by replay).
             idempotency_key = None
             implicit_idempotency_scope = None

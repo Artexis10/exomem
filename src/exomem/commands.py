@@ -160,6 +160,7 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
+from .governance import connector_boundary
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -1013,7 +1014,12 @@ def op_bootstrap(
             "resolution_required": workflow_resolution_required,
             "status": workflow_public_status,
         }
-    entity_type_registry = entity_types_module.load_entity_types(vault_root)
+    entity_extensions_visible = egress_module.content_permits(
+        vault_root, entity_types_module.extension_registry_path(vault_root).relative_to(vault_root).as_posix(),
+        principal_module.effective_principal(),
+    )
+    entity_type_registry = (entity_types_module.load_entity_types(vault_root) if entity_extensions_visible
+                            else entity_types_module.core_registry())
     entity_recurrence_available = "review_memory" in active_product_names
     if entity_recurrence_available:
         ordinary_mode = (
@@ -1097,7 +1103,12 @@ def op_bootstrap(
                 "due-state",
             ],
         }
-    relation_registry = relation_registry_module.load_registry(vault_root)
+    relation_extensions_visible = egress_module.content_permits(
+        vault_root, relation_registry_module.extension_registry_path(vault_root).relative_to(vault_root).as_posix(),
+        principal_module.effective_principal(),
+    )
+    relation_registry = (relation_registry_module.load_registry(vault_root) if relation_extensions_visible
+                         else relation_registry_module.core_registry())
     legacy_commands = None
     if active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS:
         legacy_commands = {
@@ -1135,8 +1146,10 @@ def op_bootstrap(
         "contract_version": "2026-09-01.1",
         "core_version": relation_registry.core_version,
         **({"core_vocabulary": sorted(relation_registry.core)} if profile != "compact" else {}),
-        "extension_hash": relation_registry.extension_hash,
-        "extension_count": len(relation_registry.extensions),
+        **({"extension_hash": relation_registry.extension_hash,
+            "extension_count": len(relation_registry.extensions)} if relation_extensions_visible else {
+                "extension_registry": {"available": False, "reason": egress_module.AUDIENCE_RESTRICTED},
+            }),
         "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
             "resolve: specific truthful, relates_to generic/no edge. "
@@ -1639,6 +1652,8 @@ def op_bootstrap(
         },
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
+            **({"extension_registry": {"available": False, "reason": egress_module.AUDIENCE_RESTRICTED}}
+               if not entity_extensions_visible else {}),
             "types": [
                 {
                     **({
@@ -2786,14 +2801,12 @@ def op_find(
         )
         hits = release.hits
     else:
-        from .governance import raw_protection
-
         who = principal_module.effective_principal()
         admit_path = (
-            (lambda path: raw_protection.permits(vault_root, path, who))
-            if not raw_protection.has_unrestricted_access(vault_root, who) else None
+            (lambda path: egress_module.content_permits(vault_root, path, who))
+            if not egress_module.unrestricted_content_access(vault_root, who) else None
         )
-        # RAW admission precedes candidate selection; ordinary policy still
+        # Content admission precedes candidate selection; ordinary policy still
         # uses its existing annotation pool and final authorization below.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
         retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
@@ -9450,6 +9463,11 @@ def op_connect_memory(
         supported=operation in {"create-entity", "accept-relation"},
     )
     if operation == "resolve-relation":
+        if not egress_module.content_permits(
+            vault_root, relation_registry_module.extension_registry_path(vault_root).relative_to(vault_root).as_posix(),
+            principal_module.effective_principal(),
+        ):
+            return {"available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
         supplied = locals()
         unrelated_defaults = {
             "unit_ref": None,
@@ -10353,6 +10371,24 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    # These are schema protocol subjects. Each owner supplies its registry path;
+    # hidden global hashes and collisions cost the caller this operation, not a review queue.
+    registry_paths = {
+        "entity-types": entity_types_module.extension_registry_path,
+        "relations": relation_registry_module.extension_registry_path,
+        "categories": semantic_language_registry_module.registry_path,
+        "traversal-profiles": traversal_profiles_module.profile_path,
+    }
+    registry_path = (entity_types_module.extension_registry_path if operation == "save-entity-types"
+                     else registry_paths.get(subject))
+    who = principal_module.effective_principal()
+    if registry_path is not None and not egress_module.content_permits(
+        vault_root, registry_path(vault_root).relative_to(vault_root).as_posix(), who,
+    ):
+        return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
+    if operation == "save-entity-types" and not connector_boundary.unrestricted(vault_root, who):
+        # Entity saves validate global usage, including hidden rows.
+        return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
     if detail is not None and not (subject == "relations" and operation == "census"):
         raise ValueError(
             "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"

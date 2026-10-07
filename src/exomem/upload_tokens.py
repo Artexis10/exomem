@@ -169,7 +169,7 @@ def mint_principal(signing_root: str, principal, *, ttl: int = DEFAULT_TTL) -> s
 
 def bound_principal(presented: str, signing_root: str | None, *, now: int | None = None):
     from .governance.authorization_session_lifecycle import AuthorizationSessionContext
-    from .governance.principal import RequestPrincipal
+    from .governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal
 
     if signing_root is None or len(presented) > 16384:
         return None
@@ -189,6 +189,14 @@ def bound_principal(presented: str, signing_root: str | None, *, now: int | None
         session = values.get("verified_authorization_session")
         if session is not None:
             values["verified_authorization_session"] = AuthorizationSessionContext(**session)
+        client = values.get("client_binding")
+        if client is not None:
+            values["client_binding"] = ClientBinding(**client)
+        origin = values.get("origin_session")
+        if origin is not None:
+            values["origin_session"] = OriginSessionBinding(**origin)
+        # Delegation preserves identity, never local administrative ingress.
+        values["administrative_ingress"] = False
         return RequestPrincipal(**values)
     except (ValueError, TypeError, AttributeError):
         return None

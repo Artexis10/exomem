@@ -1530,6 +1530,39 @@ def compile_documents(documents: Mapping[str, bytes]) -> Policy:
     return _compile_pinned_documents(tuple(sorted(pinned.items())))
 
 
+def protective_scope_documents(compiled: Policy, scope_ids: frozenset[str]) -> dict[str, dict]:
+    """Preserve membership selectors without exporting source policy authority."""
+    if compiled.blocked or not scope_ids or not scope_ids <= compiled.scopes.keys():
+        raise ValueError("protective scopes are unavailable")
+    documents = {}
+    for scope_id in sorted(scope_ids):
+        scope = compiled.scopes[scope_id]
+        # Selector names belong to the canonical Scope schema, not host configuration.
+        documents[scope_id] = {
+            "governance_version": GOVERNANCE_VERSION,
+            "id": scope_id,
+            **{field: sorted(set(getattr(scope, field))) for field in _SCOPE_SELECTOR_FIELDS},
+            "exclude": {field: sorted(set(getattr(scope, f"exclude_{field}")))
+                        for field in _SCOPE_SELECTOR_FIELDS},
+        }
+    return documents
+
+
+def compile_protective_scopes(documents: object) -> Policy:
+    """Validate portable selectors with the ordinary canonical policy compiler."""
+    if not isinstance(documents, dict) or not documents:
+        raise ValueError("protective scopes are unavailable")
+    if any(not is_valid_document_id(scope_id) for scope_id in documents):
+        raise ValueError("protective scope identity is invalid")
+    compiled = compile_documents({
+        f"scopes/{scope_id}.yaml": json.dumps(document, allow_nan=False).encode("utf-8")
+        for scope_id, document in documents.items()
+    })
+    if protective_scope_documents(compiled, frozenset(documents)) != documents:
+        raise ValueError("protective scope selectors are not canonical")
+    return compiled
+
+
 def compile_prospective(
     vault_root: Path,
     documents: dict[str, str | None],

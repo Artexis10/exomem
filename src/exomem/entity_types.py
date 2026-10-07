@@ -446,6 +446,9 @@ def save_registry(
     expected_hash: str | None,
     observed_ids: Iterable[str],
 ) -> dict[str, Any]:
+    from .governance import connector_boundary
+
+    connector_boundary.require_global_observation(vault_root)
     registry = load_entity_types(proposal=proposal)
     if registry.findings:
         raise ValueError(f"INVALID_ENTITY_TYPE_REGISTRY: {list(registry.findings)!r}")
@@ -485,6 +488,9 @@ def empty_proposal() -> dict[str, Any]:
 
 def observed_extension_ids(vault_root: Path) -> frozenset[str]:
     """Return currently registered extension IDs authored under ``Entities``."""
+    from .governance import connector_boundary
+
+    connector_boundary.require_global_observation(vault_root)
     entities = Path(vault_root) / kb_dirname() / "Entities"
     registry = load_entity_types(vault_root)
     observed: set[str] = set()

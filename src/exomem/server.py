@@ -795,6 +795,15 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     resource provides discovery instead; each read reflects current runs.
     """
     from . import adoption_run as adoption_run_module
+    from .governance import connector_boundary, egress, principal
+
+    def content_unavailable():
+        who = principal.resolve_mcp_principal()
+        # Stored run selection and inventories expose global contributors;
+        # limited clients lose this handoff until runs support admitted views.
+        if not connector_boundary.unrestricted(vault_root, who):
+            return egress.owner_only_aggregate(vault_root, principal=who)
+        return None
 
     @mcp.prompt(
         name="continue_adoption",
@@ -805,6 +814,10 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         ),
     )
     def continue_adoption() -> str:
+        if unavailable := content_unavailable():
+            import json
+
+            return json.dumps(unavailable)
         row = _newest_open_adoption_run(vault_root)
         if row is None:
             return (
@@ -833,6 +846,8 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     def adoption_runs() -> dict:
         from .adoption_run import AdoptionRunStore
 
+        if unavailable := content_unavailable():
+            return unavailable
         try:
             rows = AdoptionRunStore(vault_root).list_runs()
         except Exception:  # noqa: BLE001
@@ -847,6 +862,8 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         mime_type="application/json",
     )
     def adoption_run_resource(run_id: str) -> dict:
+        if unavailable := content_unavailable():
+            return unavailable
         try:
             doc = adoption_run_module.status(vault_root, run_id=run_id)
         except adoption_run_module.AdoptionRunError as exc:

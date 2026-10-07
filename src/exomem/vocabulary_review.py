@@ -30,7 +30,18 @@ from .vocabulary_workflow import (
 )
 
 
+def _require_registry_observation(vault_root: Path) -> None:
+    # Currency and collision outcomes depend on whole registries; private domains
+    # must exist before a limited caller can observe their private definitions.
+    who = effective_principal()
+    for path in (relation_registry.extension_registry_path(vault_root),
+                 entity_types.extension_registry_path(vault_root)):
+        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+            raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
+
+
 def registry_hashes(vault_root: Path) -> dict[str, str]:
+    _require_registry_observation(vault_root)
     relations = relation_registry.load_registry(vault_root)
     entities = entity_types.load_entity_types(vault_root)
     return {
@@ -232,6 +243,7 @@ def review(
 ) -> dict[str, Any]:
     from . import vocabulary_delivery
 
+    _require_registry_observation(vault_root)
     recovery = vocabulary_delivery.recover(vault_root) if continuation is None else None
     owner = VocabularyState(vault_root)
     result = owner.page(
@@ -256,6 +268,7 @@ def context(
     max_related_pages: int = 8,
     continuation: str | None = None,
 ) -> dict[str, Any]:
+    _require_registry_observation(vault_root)
     if type(max_body_chars) is not int or not 0 <= max_body_chars <= 12000:
         raise ValueError("VOCABULARY_LIMIT_INVALID: body budget must be 0 to 12000")
     if type(max_related_pages) is not int or not 1 <= max_related_pages <= 64:
@@ -383,6 +396,7 @@ def context(
 
 
 def decide(vault_root: Path, *, ref: str, decision: dict[str, Any]) -> dict[str, Any]:
+    _require_registry_observation(vault_root)
     store = VocabularyState(vault_root)
     current, _ = _fresh(vault_root, store.get(ref))
     validate_decision(current, decision)  # Stale requests must not even update currency.

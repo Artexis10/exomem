@@ -630,7 +630,7 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
     return stem or str(path)
 
 
-def unique_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
+def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
     Collision is tested case-INSENSITIVELY on every platform, not with
@@ -645,6 +645,10 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
     Listing the directory costs one syscall on a write path, against a data-loss
     class that only appears after a sync to another machine.
     """
+    if vault_root is not None:
+        from .governance import connector_boundary
+
+        connector_boundary.require_create(vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix())
     try:
         taken = {entry.name.casefold() for entry in directory.iterdir()}
     except OSError:
@@ -5330,7 +5334,7 @@ def _batch_atomic_write_locked(
                 guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
-                _validate_batch_write_access(root, writes[index:])
+                _validate_batch_write_access(root, writes[index:], proposed=writes)
                 recheck_path_guards(
                     root,
                     (
@@ -5629,11 +5633,21 @@ def _batch_state_target(vault_root: Path, target: Path) -> bool:
 def _validate_batch_write_access(
     vault_root: Path,
     writes: Iterable[PlannedWrite],
+    *,
+    proposed: Iterable[PlannedWrite] | None = None,
 ) -> None:
     """Fail closed when any planned target is outside or newly write-protected."""
     from . import access
+    from .governance import connector_boundary
 
     vault_resolved = vault_root.resolve()
+    writes = tuple(writes)
+    proposed_by_path = {}
+    for write in (writes if proposed is None else proposed):
+        try:
+            proposed_by_path[write.path.resolve().relative_to(vault_resolved).as_posix()] = write
+        except (ValueError, OSError):
+            continue  # The ordinary target check below owns external-state and invalid paths.
     for write in writes:
         for target in (write.path, *write.ensure_directories):
             if _batch_state_target(vault_root, target):
@@ -5646,6 +5660,12 @@ def _validate_batch_write_access(
                 raise ValueError(
                     f"WRITE_REFUSED: {target} resolves outside the vault root"
                 ) from error
+            if target == write.path:
+                connector_boundary.require_write(
+                    vault_root, rel,
+                    content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
+                    proposed=proposed_by_path,
+                )
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")

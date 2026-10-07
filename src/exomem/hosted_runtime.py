@@ -23,8 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import __version__
-from . import env_compat
+from . import __version__, env_compat
 from . import init as init_module
 from .governance.authorization_serving_membership import (
     ServingMembershipReadiness,
@@ -2457,6 +2456,7 @@ def _migrate_hosted_machine_state_under_lifetime_lock(
     *,
     authority_source: str,
     after_migration: Callable[[HostedBindingV2], None] | None = None,
+    protection_recovery=None,
 ):
     """Run the state migrator while the caller holds the hosted lifetime lock."""
 
@@ -2486,6 +2486,7 @@ def _migrate_hosted_machine_state_under_lifetime_lock(
         resolution = state_migration.migrate_vault_state_offline(
             binding.vault_root,
             authority=authority,
+            protection_recovery=protection_recovery,
         )
         if after_migration is not None:
             # Runs inside the bound environment and before ownership converges,

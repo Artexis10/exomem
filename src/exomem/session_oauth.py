@@ -36,6 +36,7 @@ from .auth_sessions import (
     SessionIdentity,
     SessionStoreUnavailable,
 )
+from .governance.principal import OriginSessionBinding
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class ExomemSessionAccessToken(AccessToken):
     """
 
     EXOMEM_SESSION_PROVENANCE: ClassVar[bool] = True
+    origin_session: OriginSessionBinding | None = None
 
 
 class SessionStoreUnavailableMiddleware:
@@ -184,6 +186,9 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         return ExomemSessionAccessToken(
             token=token,
             client_id=record.client_id,
+            origin_session=OriginSessionBinding(
+                session_id=record.session_id, generation=record.generation, audience=record.audience,
+            ),
             scopes=list(record.scopes),
             expires_at=(
                 None if record.expires_at is None else int(record.expires_at)

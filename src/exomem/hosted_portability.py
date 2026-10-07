@@ -26,11 +26,15 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import __version__, reserved_paths, state_paths
+from . import __version__, reserved_paths, restore_journal, state_migration, state_paths
+from .governance import connector_boundary
+from .governance.principal import effective_principal
 from .kbdir import kb_dirname
 
 MANIFEST_NAME = "exomem-manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
+# V2 is mandatory when protection must survive an older V1 reader.
+ARMED_MANIFEST_SCHEMA_VERSION = 2
 CLASSIFICATION_VERSION = 1
 ARCHIVE_FORMAT = "zip"
 
@@ -178,7 +182,7 @@ def _is_hosted_runtime_state(_path: str, parts: tuple[str, ...]) -> bool:
         return True
     if parts and parts[0].casefold() in {
         "hosted-init-operations",
-        "restore-journal",
+        restore_journal.DIRECTORY,
         "tmp",
     }:
         return True
@@ -215,6 +219,12 @@ def _always_canonical(_path: str, _parts: tuple[str, ...]) -> bool:
 
 
 _CLASSIFICATION_RULES = (
+    _ClassificationRule(
+        "portable-connector-protection",
+        ArtifactClass.CANONICAL,
+        "Canonical protective Scope selectors preserve the content ceiling across restore.",
+        lambda path, _parts: path == connector_boundary.requirement_relative_path(),
+    ),
     _ClassificationRule(
         "portable-graph-commit-receipts",
         ArtifactClass.PORTABLE_DERIVED,
@@ -811,6 +821,7 @@ def _build_manifest(
     snapshots: Iterable[_SourceSnapshot],
     context: PortabilityContext,
     exomem_release: str,
+    armed_requirement: dict | None = None,
 ) -> dict[str, Any]:
     records = [
         {
@@ -822,7 +833,7 @@ def _build_manifest(
         for snapshot in snapshots
     ]
     base: dict[str, Any] = {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "schema_version": ARMED_MANIFEST_SCHEMA_VERSION if armed_requirement is not None else MANIFEST_SCHEMA_VERSION,
         "classification_version": CLASSIFICATION_VERSION,
         "archive_format": ARCHIVE_FORMAT,
         "cell_id": context.cell_id,
@@ -833,6 +844,8 @@ def _build_manifest(
         "files": records,
         "signature": {"algorithm": None, "value": None},
     }
+    if armed_requirement is not None:
+        base["connector_boundary"] = armed_requirement
     return {
         **base,
         "overall_digest": {"algorithm": "sha256", "value": _manifest_digest(base)},
@@ -907,6 +920,10 @@ def export_quiesced_vault(
     effective_limits = limits or PortabilityLimits()
     _validate_limits(effective_limits)
     source_root = Path(vault_root).absolute()
+    # Whole-vault export includes private contributors. A limited connector
+    # loses this operation; explicit maintenance ingress retains export authority.
+    if not connector_boundary.unrestricted(source_root, effective_principal()):
+        _fail("EXPORT_UNAVAILABLE", "whole-vault export is unavailable")
     output_root = Path(artifact_root).absolute()
     source_resolved = source_root.resolve(strict=False)
     output_resolved = output_root.resolve(strict=False)
@@ -919,8 +936,11 @@ def export_quiesced_vault(
 
     guard = mutation_guard if mutation_guard is not None else nullcontext()
     with guard:
+        armed_requirement = connector_boundary.read_requirement(source_root)
+        if connector_boundary.snapshot(source_root) is not None:
+            state_migration.require_vault_state_ready(source_root)
         snapshots = _enumerate_source(source_root, effective_limits)
-        manifest = _build_manifest(snapshots, context, release)
+        manifest = _build_manifest(snapshots, context, release, armed_requirement)
         output_root.mkdir(parents=True, exist_ok=True)
         descriptor, pending_name = tempfile.mkstemp(
             prefix=f".{context.operation_id}.",
@@ -1128,7 +1148,7 @@ def _require_manifest_shape(manifest: Any) -> dict[str, Any]:
     if (
         isinstance(schema_version, bool)
         or not isinstance(schema_version, int)
-        or schema_version != MANIFEST_SCHEMA_VERSION
+        or schema_version not in {MANIFEST_SCHEMA_VERSION, ARMED_MANIFEST_SCHEMA_VERSION}
     ):
         _fail("UNSUPPORTED_MANIFEST_VERSION", "manifest schema version is not supported")
     classification_version = manifest.get("classification_version")
@@ -1153,6 +1173,13 @@ def _require_manifest_shape(manifest: Any) -> dict[str, Any]:
     }
     if not required.issubset(manifest):
         _fail("INVALID_MANIFEST", "manifest is missing required fields")
+    if schema_version == ARMED_MANIFEST_SCHEMA_VERSION:
+        try:
+            connector_boundary.parse_requirement(_canonical_json(manifest["connector_boundary"]))
+        except (KeyError, connector_boundary.BoundaryUnavailable):
+            _fail("INVALID_MANIFEST", "armed manifest lacks valid protection")
+    elif "connector_boundary" in manifest:
+        _fail("INVALID_MANIFEST", "armed protection requires manifest version 2")
     if manifest["archive_format"] != ARCHIVE_FORMAT:
         _fail("UNSUPPORTED_ARCHIVE_FORMAT", "archive format is not supported")
     for field in ("cell_id", "vault_id", "operation_id"):
@@ -1280,6 +1307,18 @@ def verify_export_archive(
                 _fail("INVALID_ARCHIVE", "manifest cannot be read safely")
             manifest = _require_manifest_shape(_json_no_duplicates(manifest_raw))
             records = _validate_manifest_records(manifest, entries)
+            boundary_entry = entries.get(connector_boundary.requirement_relative_path())
+            if manifest["schema_version"] == ARMED_MANIFEST_SCHEMA_VERSION:
+                if boundary_entry is None or boundary_entry.file_size > effective_limits.max_manifest_bytes:
+                    _fail("INVALID_MANIFEST", "armed artifact is missing or exceeds the parser bound")
+                try:
+                    requirement = connector_boundary.parse_requirement(archive.read(boundary_entry))
+                except connector_boundary.BoundaryUnavailable:
+                    _fail("INVALID_MANIFEST", "armed artifact is invalid")
+                if requirement != manifest["connector_boundary"]:
+                    _fail("INVALID_MANIFEST", "armed artifact disagrees with the manifest")
+            elif boundary_entry is not None:
+                _fail("INVALID_MANIFEST", "armed artifact requires manifest version 2")
             if expected_cell_id is not None and manifest["cell_id"] != expected_cell_id:
                 _fail("CELL_BINDING_MISMATCH", "archive does not belong to the expected cell")
             if expected_vault_id is not None and manifest["vault_id"] != expected_vault_id:
@@ -1365,7 +1404,8 @@ def _walk_regular_files(root: Path) -> set[str]:
 
 
 def _verify_staged_files(
-    root: Path, manifest: Mapping[str, Any], *, allow_derived_extras: bool = False
+    root: Path, manifest: Mapping[str, Any], *, allow_derived_extras: bool = False,
+    recovery: restore_journal.ProtectionRecovery | None = None,
 ) -> None:
     try:
         root_stat = root.lstat()
@@ -1379,6 +1419,16 @@ def _verify_staged_files(
     if missing:
         _fail("STAGING_DIGEST_MISMATCH", "staging root is missing canonical files")
     extras = found - set(expected)
+    if recovery is not None and extras:
+        from .governance import tool
+
+        try:
+            permitted = tool.restore_residue_paths(root, recovery=recovery)
+        except restore_journal.RestoreJournalError:
+            _fail("UNMANIFESTED_STAGING_ENTRY", "restore protection evidence differs")
+        extras -= permitted
+        if any(reserved_paths.classify_logical(path).descriptor_id == "governance-tree" for path in extras):
+            _fail("UNMANIFESTED_STAGING_ENTRY", "restore contains unlinked governance evidence")
     if extras and not allow_derived_extras:
         _fail("UNMANIFESTED_STAGING_ENTRY", "staging root contains an unmanifested file")
     if allow_derived_extras:
@@ -1396,6 +1446,72 @@ def _verify_staged_files(
             or _hash_file(target) != record["sha256"]
         ):
             _fail("STAGING_DIGEST_MISMATCH", "canonical staged bytes do not match the manifest")
+
+
+def _verify_migrated_archive(vault_root: Path, manifest: Mapping[str, Any], state_dir: Path, *,
+                             recovery: restore_journal.ProtectionRecovery | None = None) -> None:
+    """Verify archive bytes at the canonical migration owner's current placements."""
+    canonical_records = [
+        record
+        for record in manifest["files"]
+        if record["classification"] == ArtifactClass.CANONICAL.value
+    ]
+    canonical_manifest = {**manifest, "files": canonical_records}
+    _verify_staged_files(
+        vault_root,
+        canonical_manifest,
+        allow_derived_extras=True,
+        recovery=recovery,
+    )
+    for record in manifest["files"]:
+        relative = PurePosixPath(str(record["path"]))
+        if record["classification"] != ArtifactClass.PORTABLE_DERIVED.value:
+            wrong_side = Path(state_dir).joinpath(*relative.parts)
+            if os.path.lexists(wrong_side):
+                raise PortabilityError(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "canonical archive member also exists in external state",
+                )
+            continue
+        parts = relative.parts
+        if len(parts) < 2:
+            raise PortabilityError(
+                "CANONICAL_INTEGRITY_VIOLATION",
+                "portable state path has no state member",
+            )
+        wrong_side = vault_root.joinpath(*parts)
+        if os.path.lexists(wrong_side):
+            raise PortabilityError(
+                "CANONICAL_INTEGRITY_VIOLATION",
+                "portable state also exists under the vault",
+            )
+        target = Path(state_dir)
+        for part in parts[1:-1]:
+            target = target / part
+            value = target.lstat()
+            if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+                raise PortabilityError(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "portable state parent is unsafe",
+                )
+        target = target / parts[-1]
+        value = target.lstat()
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+        ):
+            raise PortabilityError(
+                "CANONICAL_INTEGRITY_VIOLATION",
+                "portable state member is unsafe",
+            )
+        if value.st_size != record["size"] or _hash_file(target) != record[
+            "sha256"
+        ]:
+            raise PortabilityError(
+                "STAGING_DIGEST_MISMATCH",
+                "portable state bytes do not match the archive manifest",
+            )
 
 
 def prepare_restore(
@@ -1452,7 +1568,8 @@ def _rollback_failed_publication(staging: Path, live: Path) -> None:
                 os.replace(live, staging)
                 return
             except OSError:
-                pass
+                # Failed rollback retains operation-owned bytes for the exact journal retry.
+                return
         _remove_tree(live)
 
 
@@ -1580,11 +1697,66 @@ def _repair_canonical_from_archive(
 
 
 def publish_prepared_restore(
+    prepared: PreparedRestore, live_root: Path | str, *,
+    publish: Callable[[Path, Path], None] | None = None,
+    rebuild_derived: Callable[[Path], None] | None = None,
+) -> PublishedRestore:
+    """Publish under the destination writer boundary and its durable restore link."""
+    if prepared.manifest.get("schema_version") != ARMED_MANIFEST_SCHEMA_VERSION:
+        return _publish_prepared_restore(prepared, live_root, publish=publish,
+                                         rebuild_derived=rebuild_derived)
+    from . import writer_lease
+    from .governance import tool
+
+    _validate_context(prepared.context, allowed_states={"restore-staging"})
+    live = Path(live_root).resolve()
+    verified = verify_export_archive(prepared.source_archive)
+    if (verified.archive_sha256 != prepared.archive_sha256
+            or verified.manifest != prepared.manifest):
+        _fail("RESTORE_JOURNAL_CONFLICT", "restore archive binding differs")
+    documents = tool.restore_scope_documents(prepared.manifest["connector_boundary"]["protected_scopes"])
+    identity = restore_journal.protection_record(
+        live, archive_sha256=prepared.archive_sha256,
+        manifest_sha256=prepared.manifest["overall_digest"]["value"],
+        operation_id=prepared.context.operation_id, documents=documents,
+    )
+    identity.pop("proposal_id")
+    identity.pop("missing_documents")
+    coordinator = writer_lease.get_manager()._mutation_coordinator_for(live)
+    with coordinator.hold(operation="restore", holder_kind="maintenance"):
+        state_dir = state_paths.ensure_vault_state_dir(live)
+        key = hashlib.sha256(prepared.context.operation_id.encode()).hexdigest()
+        path = state_dir / restore_journal.DIRECTORY / f"{key}.json"
+        try:
+            record = restore_journal.read(path, identity, max_bytes=restore_journal.protection_limit(documents))
+            if record is None:
+                if os.path.lexists(live):
+                    _fail("LIVE_VAULT_EXISTS", "restore publication never overlays a live vault")
+                record = restore_journal.protection_record(live, **{key: identity[key] for key in
+                    ("archive_sha256", "manifest_sha256", "operation_id", "documents")})
+                _verify_staged_files(prepared.staging_root, prepared.manifest)
+                restore_journal.write(path, record)
+            def verify_continuity(binding):
+                if _hash_file(prepared.source_archive) != prepared.archive_sha256:
+                    raise restore_journal.RestoreJournalError("restore archive changed")
+                _verify_migrated_archive(live, prepared.manifest, state_dir, recovery=binding)
+                return prepared.manifest
+
+            recovery = restore_journal.ProtectionRecovery(live, record,
+                lambda: restore_journal.write(path, record), verify_continuity)
+            return _publish_prepared_restore(prepared, live, publish=publish,
+                                             rebuild_derived=rebuild_derived, recovery=recovery)
+        except restore_journal.RestoreJournalError:
+            _fail("RESTORE_JOURNAL_CONFLICT", "restore continuation cannot be verified")
+
+
+def _publish_prepared_restore(
     prepared: PreparedRestore,
     live_root: Path | str,
     *,
     publish: Callable[[Path, Path], None] | None = None,
     rebuild_derived: Callable[[Path], None] | None = None,
+    recovery: restore_journal.ProtectionRecovery | None = None,
 ) -> PublishedRestore:
     """Atomically publish a prepared vault, then soft-fail optional index rebuilds."""
 
@@ -1597,22 +1769,46 @@ def publish_prepared_restore(
         require_restore_admission(live)
     except VocabularyAdmissionError as exc:
         _fail(exc.code, "offline restore cannot replace the destination authority custody")
-    if os.path.lexists(live):
+    resumed_live = recovery is not None and os.path.lexists(live)
+    if os.path.lexists(live) and not resumed_live:
         _fail("LIVE_VAULT_EXISTS", "restore publication never overlays a live vault")
-    if not staging.is_dir() or staging.is_symlink():
+    if resumed_live and os.path.lexists(staging):
+        _fail("PUBLICATION_FAILED", "restore has competing destination trees")
+    physical = live if resumed_live else staging
+    if not physical.is_dir() or physical.is_symlink():
         _fail("STAGING_ROOT_UNAVAILABLE", "prepared restore root is unavailable")
-    _verify_staged_files(staging, prepared.manifest)
+    migrated = state_migration._load_manifest(state_paths.vault_state_dir(live), vault_root=live) if resumed_live else None
+    if migrated is not None and migrated.get("state") == "complete":
+        _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
+    elif migrated is not None and migrated["state"] == "in-progress":
+        # The migration journal owns relocated members; verify canonical and remaining archive bytes before its exact replay.
+        present_manifest = {**prepared.manifest, "files": [record for record in prepared.manifest["files"]
+            if record["classification"] == ArtifactClass.CANONICAL.value
+            or os.path.lexists(live.joinpath(*PurePosixPath(record["path"]).parts))]}
+        _verify_staged_files(live, present_manifest, recovery=recovery)
+    else:
+        _verify_staged_files(physical, prepared.manifest, recovery=recovery)
     live.parent.mkdir(parents=True, exist_ok=True)
     publisher = publish or os.replace
     try:
-        publisher(staging, live)
+        if not resumed_live:
+            publisher(staging, live)
         if not live.is_dir() or live.is_symlink():
             _fail("PUBLICATION_FAILED", "publication did not produce a live vault")
-        _verify_staged_files(live, prepared.manifest)
+        if not resumed_live:
+            _verify_staged_files(live, prepared.manifest, recovery=recovery)
+        if prepared.manifest["schema_version"] == ARMED_MANIFEST_SCHEMA_VERSION:
+            authority = state_migration.assert_offline_migration_authority(
+                source="validated stopped portability restore",
+            )
+            state_migration.migrate_vault_state_offline(live, authority=authority, protection_recovery=recovery)
+            _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
         if os.path.lexists(staging):
             _remove_tree(staging)
     except BaseException as exc:
-        _rollback_failed_publication(staging, live)
+        # Protected continuation retains the custody-bound inode; rehoming it invalidates authority.
+        if recovery is None:
+            _rollback_failed_publication(staging, live)
         if isinstance(exc, PortabilityError) and exc.code == "PUBLICATION_FAILED":
             raise
         _fail("PUBLICATION_FAILED", "prepared restore could not be published atomically")
@@ -1625,8 +1821,14 @@ def publish_prepared_restore(
     except Exception:  # noqa: BLE001 - optional rebuild failures degrade after integrity checks
         rebuild_failed = True
     try:
-        _verify_staged_files(live, prepared.manifest, allow_derived_extras=True)
+        if recovery is not None:
+            _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
+        else:
+            _verify_staged_files(live, prepared.manifest, allow_derived_extras=True)
     except PortabilityError:
+        if recovery is not None:
+            # Destination protection and custody own these bytes; archive repair cannot replace them.
+            _fail("CANONICAL_INTEGRITY_VIOLATION", "derived rebuild changed protected restore bytes; evidence was retained")
         try:
             _repair_canonical_from_archive(prepared, live)
         except Exception as repair_error:

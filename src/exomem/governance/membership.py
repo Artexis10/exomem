@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .. import find_corpus
+from .. import find_corpus, memory_refs
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
 from . import companions
@@ -158,9 +158,18 @@ def _needs_frontmatter(scope: Scope) -> bool:
 def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
     if page.frontmatter_valid:
         classes = page.frontmatter.get("classes") or []
+        identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+        if memory_refs.ID_FIELD in page.frontmatter and identity is None and any(
+            memory_refs.parse_memory_ref(ref) is not None
+            for scope in policy.scopes.values() for ref in (*scope.refs, *scope.exclude_refs)
+        ):
+            # Only identity selectors require valid identity; legacy IDs must
+            # not block unrelated path or metadata membership.
+            raise MembershipUnresolved("malformed governed identity leaves membership unresolved")
         return evaluate_metadata(
             MetadataSubject(
                 path=page.rel_path,
+                refs=(memory_refs.memory_ref(identity),) if identity is not None else (),
                 projects=tuple(p.lower() for p in find_corpus.all_projects(page.frontmatter)),
                 tags=tuple(page.tags),
                 types=(page.page_type.lower(),) if page.page_type is not None else (),
@@ -173,6 +182,11 @@ def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str
     for scope_id, scope in policy.scopes.items():
         if _path_ref_excludes(scope, page.rel_path):
             continue
+        # Invalid metadata cannot disprove a protected identity; only this
+        # malformed page becomes unavailable until its author repairs it.
+        if any(memory_refs.parse_memory_ref(ref) is not None
+               for ref in (*scope.refs, *scope.exclude_refs)):
+            raise MembershipUnresolved("malformed frontmatter leaves canonical identity unresolved")
         if _path_ref_matches(scope, page.rel_path):
             matched.add(scope_id)
             continue
@@ -205,7 +219,7 @@ def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) 
 
 
 def evaluate_path_only(
-    vault_root: Path, rel_path: str, policy: Policy
+    vault_root: Path, rel_path: str, policy: Policy, *, proposed_companion: companions.BoundCompanion | None = None
 ) -> MembershipOutcome:
     """Classify a non-Markdown item's path/ref membership without reading it.
 
@@ -238,11 +252,11 @@ def evaluate_path_only(
             undecided.append((scope_id, scope))
     if undecided:
         try:
-            companion = companions.classify(vault_root, rel_path)
+            companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path)
         except companions.CompanionClassificationError as error:
             return MembershipOutcome("unresolved", frozenset(matched), error.reason)
         memo_key = (policy.fingerprint, rel_path, companion.identities)
-        cached = _PATH_MEMO.get(memo_key)
+        cached = _PATH_MEMO.get(memo_key) if proposed_companion is None else None
         if cached is not None:
             _PATH_MEMO.move_to_end(memo_key)
             return cached
@@ -250,10 +264,11 @@ def evaluate_path_only(
             if _semantic_scope_matches(scope, companion):
                 matched.add(scope_id)
         result = MembershipOutcome("classified", frozenset(matched))
-        _PATH_MEMO[memo_key] = result
-        _PATH_MEMO.move_to_end(memo_key)
-        while len(_PATH_MEMO) > _MEMO_MAX:
-            _PATH_MEMO.popitem(last=False)
+        if proposed_companion is None:
+            _PATH_MEMO[memo_key] = result
+            _PATH_MEMO.move_to_end(memo_key)
+            while len(_PATH_MEMO) > _MEMO_MAX:
+                _PATH_MEMO.popitem(last=False)
         return result
     return MembershipOutcome("classified", frozenset(matched))
 

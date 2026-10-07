@@ -103,9 +103,9 @@ def _semantics(value: object) -> dict[str, tuple[str, ...]]:
     return result
 
 
-def _descriptor(companion: reserved_paths.GenericFileSnapshot) -> dict[str, object]:
+def _descriptor(raw: bytes) -> dict[str, object]:
     try:
-        text = companion.data.decode("utf-8")
+        text = raw.decode("utf-8")
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except (UnicodeDecodeError, vault.FrontmatterError) as error:
         raise CompanionClassificationError("descriptor_invalid") from error
@@ -123,7 +123,8 @@ def _validate_common(
     expected_keys: set[str],
     expected_class: str,
     artifact_path: str,
-    artifact: reserved_paths.GenericFileSnapshot,
+    artifact_sha256: str,
+    artifact_size: int,
 ) -> BoundCompanion:
     if set(descriptor) != {
         "version",
@@ -146,15 +147,14 @@ def _validate_common(
         raise CompanionClassificationError("descriptor_invalid")
     if descriptor.get("artifact_path") != artifact_path:
         raise CompanionClassificationError("artifact_mismatch")
-    actual_hash = hashlib.sha256(artifact.data).hexdigest()
     expected_hash = descriptor.get("artifact_sha256")
     expected_size = descriptor.get("artifact_size")
     if (
         not isinstance(expected_hash, str)
-        or expected_hash != actual_hash
+        or expected_hash != artifact_sha256
         or not isinstance(expected_size, int)
         or isinstance(expected_size, bool)
-        or expected_size != len(artifact.data)
+        or expected_size != artifact_size
     ):
         raise CompanionClassificationError("artifact_mismatch")
     semantics = _semantics(descriptor.get("semantics"))
@@ -187,6 +187,24 @@ def _classify_sibling(
     artifact: reserved_paths.GenericFileSnapshot,
 ) -> BoundCompanion:
     companion = _read_companion(vault_root, f"{artifact_path}.md")
+    result = classify_proposed_sibling(
+        artifact_path, artifact_sha256=hashlib.sha256(artifact.data).hexdigest(),
+        artifact_size=len(artifact.data), companion=companion.data,
+    )
+    return _bind_snapshots(
+        result,
+        ("artifact", artifact_path, artifact),
+        ("companion", f"{artifact_path}.md", companion),
+    )
+
+
+def classify_proposed_sibling(artifact_path: str, *, artifact_sha256: str,
+                              artifact_size: int, companion: bytes) -> BoundCompanion:
+    """Validate a proposed sibling against the batch writer's exact byte identity."""
+    artifact_path = _canonical_relative_path(artifact_path)
+    # Dataset cards and scene frames have separate canonical binding contracts.
+    if PurePosixPath(artifact_path).suffix.casefold() in _DATASET_FORMATS or _FRAME_PATH_RE.fullmatch(artifact_path):
+        raise CompanionClassificationError("descriptor_invalid")
     descriptor = _descriptor(companion)
     media_type = media_types.media_type_for(artifact_path)
     if media_type is None:
@@ -195,29 +213,23 @@ def _classify_sibling(
             expected_keys=set(),
             expected_class="binary",
             artifact_path=artifact_path,
-            artifact=artifact,
+            artifact_sha256=artifact_sha256,
+            artifact_size=artifact_size,
         )
-        return _bind_snapshots(
-            result,
-            ("artifact", artifact_path, artifact),
-            ("companion", f"{artifact_path}.md", companion),
-        )
+        return result
     result = _validate_common(
         descriptor,
         expected_keys={"media_type", "original_filename"},
         expected_class="media",
         artifact_path=artifact_path,
-        artifact=artifact,
+        artifact_sha256=artifact_sha256,
+        artifact_size=artifact_size,
     )
     if descriptor.get("media_type") != media_type or descriptor.get(
         "original_filename"
     ) != PurePosixPath(artifact_path).name:
         raise CompanionClassificationError("artifact_mismatch")
-    return _bind_snapshots(
-        result,
-        ("artifact", artifact_path, artifact),
-        ("companion", f"{artifact_path}.md", companion),
-    )
+    return result
 
 
 def _dataset_cards(vault_root, artifact_path: str):
@@ -274,13 +286,14 @@ def _classify_dataset(
     if len(cards) != 1:
         raise CompanionClassificationError("companion_ambiguous")
     companion_path, frontmatter, companion = cards[0]
-    descriptor = _descriptor(companion)
+    descriptor = _descriptor(companion.data)
     result = _validate_common(
         descriptor,
         expected_keys={"format"},
         expected_class="dataset",
         artifact_path=artifact_path,
-        artifact=artifact,
+        artifact_sha256=hashlib.sha256(artifact.data).hexdigest(),
+        artifact_size=len(artifact.data),
     )
     expected_format = _DATASET_FORMATS[PurePosixPath(artifact_path).suffix.casefold()]
     if descriptor.get("format") != expected_format or frontmatter.get(
@@ -301,13 +314,14 @@ def _classify_scene_frame(
     match: re.Match[str],
 ) -> BoundCompanion:
     companion = _read_companion(vault_root, f"{artifact_path}.md")
-    descriptor = _descriptor(companion)
+    descriptor = _descriptor(companion.data)
     result = _validate_common(
         descriptor,
         expected_keys={"parent_path", "parent_sha256", "frame_timestamp_ms"},
         expected_class="scene_frame",
         artifact_path=artifact_path,
-        artifact=artifact,
+        artifact_sha256=hashlib.sha256(artifact.data).hexdigest(),
+        artifact_size=len(artifact.data),
     )
     parent_path = match.group("parent")
     parent = _read_artifact(vault_root, parent_path)

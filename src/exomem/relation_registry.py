@@ -582,6 +582,13 @@ def save_registry(
     expected_hash: str | None = None,
     observed_keys: Iterable[str] = (),
 ) -> dict[str, Any]:
+    from .governance import connector_boundary, principal
+
+    path = extension_registry_path(vault_root)
+    # Saved continuity is safe only when the whole extension registry is admitted.
+    # Otherwise a collision or stale guard would expose a private definition.
+    if not connector_boundary.permits(vault_root, path.relative_to(vault_root).as_posix(), principal.effective_principal()):
+        raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry is unavailable")
     registry = load_registry(vault_root, proposal=proposal)
     if _blocking(registry):
         raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
@@ -589,7 +596,6 @@ def save_registry(
     removed = sorted(set(observed_keys) - proposed_keys - set(registry.core))
     if removed:
         raise ValueError(f"OBSERVED_RELATION_DELETION: deprecate observed keys instead: {removed}")
-    path = extension_registry_path(vault_root)
     current_hash: str | None = None
     if path.exists():
         current = path.read_text(encoding="utf-8")

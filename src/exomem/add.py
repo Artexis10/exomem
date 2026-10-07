@@ -153,7 +153,7 @@ class SourceArtifact:
     content_type: str | None = None
 
 
-def _artifact_pair(folder: Path, stem: str, suffix: str) -> tuple[Path, Path]:
+def _artifact_pair(folder: Path, stem: str, suffix: str, *, vault_root: Path) -> tuple[Path, Path]:
     """A free `<stem><suffix>` / `<stem><suffix>.md` pair under `folder`.
 
     `unique_path` guarantees one free name; a captured artifact needs two, and
@@ -164,7 +164,7 @@ def _artifact_pair(folder: Path, stem: str, suffix: str) -> tuple[Path, Path]:
     """
     for attempt in range(1, 51):
         seed = stem if attempt == 1 else f"{stem}-{attempt}"
-        page = unique_path(folder, seed, suffix=f"{suffix}.md")
+        page = unique_path(folder, seed, suffix=f"{suffix}.md", vault_root=vault_root)
         artifact = page.with_name(page.name[:-3])
         if not artifact.exists():
             return artifact, page
@@ -374,6 +374,12 @@ def add(
     )
     folder_name = segments[1]
     folder_path = kb_root(vault_root).joinpath(*segments)
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, (folder_path / f"{date_iso}-{filename_slug}.md").relative_to(vault_root).as_posix())
+    except ValueError as error:
+        raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
     if adoption_seed is not None:
         actual_destination = folder_path.relative_to(vault_root).as_posix()
         if adoption_seed.get("destination") != actual_destination:
@@ -417,12 +423,12 @@ def add(
     # and removes it again if the commit is refused.
     if artifact is None:
         artifact_path: Path | None = None
-        source_path = unique_path(folder_path, stem)
+        source_path = unique_path(folder_path, stem, vault_root=vault_root)
     else:
         # The page is `<stem><ext>.md` beside `<stem><ext>`, the same convention
         # Evidence uses, so the media pipeline addresses both lanes with no
         # change and the citation resolver is fixed once rather than per layout.
-        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix)
+        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix, vault_root=vault_root)
 
     adoption_receipt: dict[str, object] | None = None
     if adoption_seed is not None:

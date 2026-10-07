@@ -1127,9 +1127,15 @@ def _resolve_path(
         stem = f"{date_iso[:7]}-{slug}"  # YYYY-MM-<slug>
     else:  # pragma: no cover — validation guards this
         raise ValueError(f"unhandled note_type: {note_type}")
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, (folder / f"{stem}.md").relative_to(vault_root).as_posix())
+    except ValueError as error:
+        raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
     if create_parents:
         folder.mkdir(parents=True, exist_ok=True)
-    return unique_path(folder, stem)
+    return unique_path(folder, stem, vault_root=vault_root)
 
 
 def _domain_folder(domain: str) -> str:

@@ -5016,6 +5016,12 @@ def _assert_portable_absent(root: Path, target: Path) -> None:
         raise collections.CollectionError("INVALID_COLLECTION_PATH", "target escapes vault")
     if not relative.parts or any(component in {"", ".", ".."} for component in relative.parts):
         raise collections.CollectionError("INVALID_COLLECTION_PATH", "target path is not portable")
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(root, relative.as_posix())
+    except ValueError as error:
+        raise collections.CollectionError("WRITE_REFUSED", "target is unavailable") from error
     current = root
     for component in relative.parts:
         try:

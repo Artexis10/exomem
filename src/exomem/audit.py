@@ -95,8 +95,6 @@ from typing import Any, Literal
 
 import yaml
 
-from .collection_store.preview import canonical_read, selected_writer
-
 from . import (
     access,
     contradiction_stance,
@@ -114,6 +112,7 @@ from . import entity_types as entity_types_module
 from . import find as find_module
 from . import provenance as provenance_module
 from . import vault as vault_module
+from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     _mask_code_spans,
@@ -1910,13 +1909,13 @@ def _complete_semantic_category_summary(
 
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
     """Walk the KB once, parse every .md, return ParsedPage objects."""
-    from .governance import raw_protection
+    from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
-        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
             continue
         try:
             mtime = path.stat().st_mtime

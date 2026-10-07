@@ -577,7 +577,7 @@ def _legacy_dated_child_resolution(
     else:
         parent_slug = vault.slugify_title(parent.name or "legacy")
         parent_rel = f"{prefix}Notes/Research/{parent_slug}"
-    candidate = vault.unique_path(vault_root / parent_rel, f"{date}-{slug}")
+    candidate = vault.unique_path(vault_root / parent_rel, f"{date}-{slug}", vault_root=vault_root)
     suggested_path = PurePosixPath(parent_rel, candidate.name).as_posix()
     return {
         "action": "create-dated-child",

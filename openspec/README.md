@@ -10,7 +10,7 @@ A checked task needs implementation, verification and merge evidence.
 | --- | --- | --- |
 | RAW originals | [Collection query engine](changes/add-collection-query-engine/tasks.md), S1.5b | Admit protected originals before ranking or reporting. Ship before the first SQLite owner slice. |
 | Compiler follow-up | [Memory loop](changes/close-memory-loop/tasks.md) and [thread-aware compilation](changes/archive/2026-10-06-add-thread-aware-compilation/tasks.md) | Integrate RAW admission. Preserve truthful withheld results and useful context without repeated classification. |
-| Release | [Runtime upgrades](changes/standardize-hosted-runtime-upgrades/tasks.md) | Release 0.110 follows merged RAW and compiler corrections, with the Cloud storage and runtime changes. |
+| Release | [Plain Cloud cells](changes/adopt-exomem-cloud-plain-cells/tasks.md) | Release 0.110 follows merged RAW and compiler corrections, with the Cloud storage and runtime changes. |
 | Source-kind retirement | `retire-other-source-kind` on its delivery branch | Follow RAW and compiler. Require meaningful agent classification and teach the migration through every bootstrap profile. |
 | Vocabulary registries | `add-vocabulary-registries` on its delivery branch | Follow source-kind retirement. Replace customer vocabulary constants with vault-owned registries. |
 | First SQLite collection | [Collection query engine](changes/add-collection-query-engine/tasks.md), S1, and [SQLite collections](changes/move-structured-collections-to-sqlite/tasks.md) | Follow RAW. Prove startup compatibility, location admission, import, publication and the owner workflow. |
@@ -36,17 +36,22 @@ See [vocabulary evolution](changes/activate-agent-led-vocabulary-evolution/tasks
 
 ## Governed vault consolidation
 
-[Vault consolidation](changes/add-governed-vault-consolidation/tasks.md) contains
-the earlier design. Its old trust-chain prerequisites and task list need
-reconciliation before implementation resumes. They do not describe shipped work.
-The closed PR stack retains reusable reconciliation, preimage, journal,
-fingerprint and recovery components.
+[Vault consolidation](changes/add-governed-vault-consolidation/tasks.md) now has
+three deliveries. Connector admission preserves owner identity while enforcing
+host-configured content ceilings and protection across supported portability.
+Private vocabulary domains follow the vocabulary registry foundation. Offline
+managed-vault import follows both deliveries and uses existing mutation and
+restore owners.
 
-The retained outcome is one governed vault with distinct connector boundaries.
-An owner identity must not bypass a connector's content restriction. Establish
-that boundary before combining vaults. Prove preview, import, admitted reads and
-rollback on disposable copies before changing live vaults. Preserve original
-evidence and use the existing policy and mutation owners.
+Connector admission alone does not complete T16. Real import and connector
+cutover need fresh operational authority after disposable rehearsal proves
+preservation, allowed utility, negative disclosure, and rollback. Source
+retirement remains a separate destructive operation with verified surviving copies.
+
+The retired stack supplies salvage candidates only. Its signing, custody,
+fencing, and per-step approval protocol is not the implementation contract.
+Hosted end-client provenance remains a gateway dependency; a shared cell bearer
+receives the restricted connector default when protection is armed.
 
 ## Remaining programme contracts
 

@@ -20,6 +20,8 @@ For the guided ≤15-minute bring-up, start with
 [remote-quickstart.md](remote-quickstart.md); this document is the reference.
 For structured logs, metrics, and diagnosing a failure after the fact, see
 [observability.md](observability.md).
+For host-configured content ceilings between owner clients, see
+[connector boundaries](connector-boundaries.md).
 
 ## Architecture
 
