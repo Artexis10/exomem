@@ -52,7 +52,8 @@ from exomem.collection_store import (
     runtime,
 )
 from exomem.collection_store.connection import CollectionStoreError
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance import egress
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 OWNER = owner_principal(surface="mcp")
 DAILY = "66666666-6666-4666-8666-666666666666"
@@ -173,6 +174,13 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
     assert ab_bytes(root) == before
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         assert reader.execute("SELECT collection_id,COUNT(*) FROM items GROUP BY 1").fetchall() == [(CID, 2)]
+    inspected = call(root, "record_memory", action="inspect", collection=CID)
+    # The MCP layer's second egress pass runs on its own thread, as this test does,
+    # and serves the inspection only to the principal the store admitted it for.
+    with request_scope(OWNER):
+        assert egress.postfilter("record_memory", inspected, root) == inspected
+    with request_scope(RequestPrincipal(audience_id="external-agent", surface="mcp")):
+        refused(lambda: egress.postfilter("record_memory", inspected, root), "COLLECTION_NOT_FOUND")
     inventory = call(root, "record_memory", action="inspect")
     assert {row["collection_id"]: row["committed"] for row in inventory["collections"]} == {KEY: 1, CID: 2}
     assert inventory["unreadable_manifests"] == []

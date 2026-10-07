@@ -6516,7 +6516,15 @@ def filter_withheld_entries(
     inspection_evidence = canonical_governance._inspection_evidence(payload)
     if inspection_evidence is not None:
         if operation is None:
-            canonical_governance.OperationAuthorization.refuse()
+            from ..collection_store import runtime as store_runtime
+
+            if (not store_runtime.served(vault_root) or inspection_evidence.root != vault_root.resolve()
+                    or inspection_evidence.principal != (principal if principal is not None else effective_principal())):
+                canonical_governance.OperationAuthorization.refuse()
+            # Only a store writer in this process seals an inspection, and the serving store
+            # thread admitted it in the dispatcher's pass. A caller's later pass, such as the
+            # MCP layer's, has no bound operation to repeat that admission with.
+            return payload
         inspection_evidence = operation.validate_inspection_projection(payload, writer.handle)
     metadata_references = dict(inspection_evidence.references) if inspection_evidence is not None else {}
     policy = operation.policy if operation is not None else policy_module.load(vault_root)
