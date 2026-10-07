@@ -269,7 +269,7 @@ def test_add_surfaces_overlap_warning(
     monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
     monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
     res = add_module.add(
-        vault, source_schema, content="Body.", source_type="other", title="New Capture"
+        vault, source_schema, content="Body.", source_type="correspondence", title="New Capture"
     )
     assert any("overlaps active note" in w for w in res.warnings), res.warnings
 
@@ -292,7 +292,7 @@ def test_add_path_composes_declared_rival_filter(
         vault,
         source_schema,
         content="Intentional rival source.",
-        source_type="other",
+        source_type="correspondence",
         title="New Rival Capture",
     )
 
@@ -314,7 +314,7 @@ def test_add_commits_when_post_commit_advisory_emission_fails(
         vault,
         source_schema,
         content="Committed even without advisory state.",
-        source_type="other",
+        source_type="correspondence",
         title="Fail-open Capture",
     )
 
@@ -710,7 +710,8 @@ def test_add_commit_reuses_the_vectors_its_own_advisory_encoded(
     body = "\n\n".join(_REUSE_PARAGRAPHS)
 
     result = add_module.add(
-        vault, source_schema, content=body, source_type="other", title="Capture reuse probe"
+        vault, source_schema, content=body, source_type="correspondence",
+        title="Capture reuse probe",
     )
 
     draft_chunks = embeddings.chunk_text("Capture reuse probe", body)

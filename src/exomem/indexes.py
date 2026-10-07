@@ -146,13 +146,22 @@ def compute_updates(
     )
 
 
-def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> int:
+def _count_markdown_pages(
+    root: Path,
+    *,
+    skip_underscore_dirs: bool = False,
+    keep: Callable[[str], bool] | None = None,
+    vault_root: Path | None = None,
+) -> int:
     """Non-index `*.md` entries under `root`, recursively, in one scandir pass.
 
     The same set `root.rglob("*.md")` minus `index.md` yields (symlinked
     directories are not descended; a directory named `*.md` is counted and
     descended), without a `stat` per entry: this runs inside the commit of
     every write, so its cost is the write's hold time.
+
+    `keep`, a release predicate over vault-relative paths, counts only the
+    pages a restricted caller may see; `vault_root` anchors those paths.
     """
     count = 0
     pending = [os.fspath(root)]
@@ -160,7 +169,14 @@ def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> 
         try:
             with os.scandir(pending.pop()) as entries:
                 for entry in entries:
-                    if entry.name.endswith(".md") and entry.name != "index.md":
+                    if (
+                        entry.name.endswith(".md")
+                        and entry.name != "index.md"
+                        and (
+                            keep is None
+                            or keep(Path(entry.path).relative_to(vault_root).as_posix())
+                        )
+                    ):
                         count += 1
                     # A directory named `x.md` is counted above and still descended.
                     if entry.is_dir(follow_symlinks=False) and not (
@@ -172,7 +188,12 @@ def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> 
     return count
 
 
-def _count_sources(sources_dir: Path) -> dict[str, int]:
+def _count_sources(
+    sources_dir: Path,
+    *,
+    keep: Callable[[str], bool] | None = None,
+    vault_root: Path | None = None,
+) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
     out: dict[str, int] = {}
     if not sources_dir.is_dir():
@@ -180,7 +201,9 @@ def _count_sources(sources_dir: Path) -> dict[str, int]:
     for sub in sources_dir.iterdir():
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
-        out[sub.name] = _count_markdown_pages(sub, skip_underscore_dirs=True)
+        out[sub.name] = _count_markdown_pages(
+            sub, skip_underscore_dirs=True, keep=keep, vault_root=vault_root
+        )
     return out
 
 

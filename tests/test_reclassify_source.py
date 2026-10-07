@@ -35,6 +35,8 @@ def _capture(
     vault: Path, source_schema: schema_module.SourceSchema, **kwargs: object
 ) -> add_module.AddResult:
     kwargs.setdefault("content", "Body text for a captured source.\n\nSecond paragraph.")
+    # What a capture with no agent in the loop records: no kind was chosen.
+    kwargs.setdefault("source_type", st.UNCLASSIFIED_KIND)
     kwargs.setdefault("today", TODAY)
     return add_module.add(vault, source_schema, **kwargs)  # type: ignore[arg-type]
 
@@ -59,7 +61,7 @@ def test_a_fallback_capture_is_corrected_to_a_real_kind(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     captured = _capture(vault, source_schema, title="Airfare notes", domain="travel")
-    assert captured.path.startswith(f"{KB}/Sources/Other/Travel/")
+    assert captured.path.startswith(f"{KB}/Sources/Unclassified/Travel/")
 
     result = rc.reclassify(
         vault,
@@ -162,7 +164,28 @@ def test_a_correction_without_a_reason_is_refused(
                 reason=reason, today=TODAY,
             )
         assert exc.value.code == "REASON_REQUIRED"
-    assert _front(vault, captured.path)["source_type"] == "other"
+    assert _front(vault, captured.path)["source_type"] == "unclassified"
+
+
+@pytest.mark.parametrize("unchosen", ["other", "unclassified"])
+def test_a_correction_cannot_file_a_source_under_no_chosen_kind(
+    vault: Path, source_schema: schema_module.SourceSchema, unchosen: str
+) -> None:
+    captured = _capture(
+        vault, source_schema, title="Field log", source_type="field-notebook"
+    )
+    before = (vault / captured.path).read_bytes()
+
+    with pytest.raises(rc.ReclassifyError) as preview:
+        rc.propose(vault, captured.path, source_kind=unchosen)
+    with pytest.raises(rc.ReclassifyError) as correction:
+        rc.reclassify(
+            vault, path=captured.path, source_kind=unchosen,
+            reason="unsure what it is", today=TODAY,
+        )
+
+    assert preview.value.code == correction.value.code == "SOURCE_KIND_REQUIRED"
+    assert (vault / captured.path).read_bytes() == before
 
 
 @pytest.mark.parametrize(
@@ -190,7 +213,7 @@ def test_an_unsafe_corrected_value_never_reaches_a_path(
     except rc.ReclassifyError as error:
         assert error.code == "INVALID_CLASSIFICATION"
         assert (vault / captured.path).exists()
-        assert _front(vault, captured.path)["source_type"] == "other"
+        assert _front(vault, captured.path)["source_type"] == "unclassified"
         return
 
     assert result.new_path.startswith(f"{KB}/Sources/")
@@ -390,7 +413,7 @@ def test_an_undecidable_kind_is_reported_not_guessed(
     captured = _capture(vault, source_schema, title="Loose item", domain="media")
     proposal = rc.propose(vault, captured.path)
     assert proposal.proposed_kind is None
-    assert st.FALLBACK_KIND not in (proposal.proposed_kind or "")
+    assert (proposal.proposed_kind or "") not in st.UNCHOSEN_KINDS
     assert any("no kind is proposed" in item for item in proposal.kind_evidence)
 
 
@@ -490,7 +513,7 @@ def test_capturing_more_material_relocates_nothing(
     for index in range(3):
         _capture(vault, source_schema, title=f"Loose {index}", domain="media")
     assert (vault / first.path).exists()
-    assert _front(vault, first.path)["source_type"] == "other"
+    assert _front(vault, first.path)["source_type"] == "unclassified"
 
 
 def test_a_registry_path_label_rename_migrates_nothing(

@@ -21,6 +21,11 @@ from pathlib import Path
 from membench.native import CorpusView, FactParityReport, ParityStatus, corpus_facts
 from membench.schema import ScheduleOp, load_jsonl
 
+#: The kind every corpus document is captured under. The loader reads no
+#: document closely enough to classify it, and Exomem refuses a capture with no
+#: kind, so the benchmark names what each one is to it: a corpus document.
+CORPUS_SOURCE_KIND = "corpus-document"
+
 
 def render_conclusions(view: CorpusView, ops: list[dict], report: FactParityReport) -> None:
     """Append the compile plan as `remember` ops, after the captures it cites.
@@ -106,7 +111,7 @@ def render(
                     "op": "capture_source",
                     "source_id": source.source_id,
                     "title": source.title,
-                    "source_type": "other",
+                    "source_type": CORPUS_SOURCE_KIND,
                     "content": content,
                 }
             )

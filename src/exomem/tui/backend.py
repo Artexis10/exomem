@@ -260,12 +260,17 @@ class ExomemBackend:
         return result if isinstance(result, dict) else {"body": str(result)}
 
     def capture_thought(
-        self, content: str, title: str, *, source_type: str = "other"
+        self, content: str, title: str, *, source_type: str | None = None
     ) -> dict:
-        return self._call(
-            "capture_source",
-            {"content": content, "title": title, "source_type": source_type},
-        )
+        """Save a person's own words as a Source.
+
+        With no kind the capture is recorded as `unclassified`: the person at
+        the keyboard is not asked to classify, and an agent classifies it later.
+        """
+        raw = {"content": content, "title": title}
+        if source_type:
+            raw["source_type"] = source_type
+        return self._call("capture_source", raw)
 
     def remember_note(
         self, content: str, title: str, *, note_type: str = "insight"

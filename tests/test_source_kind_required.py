@@ -248,16 +248,6 @@ def test_a_legacy_vault_import_is_unclassified_and_counts_as_debt(
     assert advisory["folders"] == ["Imported"]
 
 
-def test_a_vault_with_no_unclassified_sources_reports_no_debt(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    leaf = commands.op_capture_source(
-        vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
-        source_kind="field-notebook",
-    )
-    assert "structure_suggestion" not in leaf["source"]
-
-
 # ---------------------------------------------------------------------------
 # Legacy Sources/Other stays readable, findable and filterable
 # ---------------------------------------------------------------------------

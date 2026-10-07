@@ -45,9 +45,19 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
-#: The low-confidence fallback. It means "could not be determined", never
-#: "this code has no label for it".
-FALLBACK_KIND = "other"
+#: The kind of a capture made with no agent in the loop to classify it: the
+#: terminal UI, the hosted capture box, an out-of-band upload, a legacy-vault
+#: import. It records classification debt; an agent never chooses it.
+UNCLASSIFIED_KIND = "unclassified"
+#: The retired catch-all. Pages already filed under it stay readable and
+#: filterable; no new capture writes it.
+LEGACY_OTHER_KIND = "other"
+#: Kinds that record that nobody chose a kind. An agent-facing capture refuses
+#: them, and every source filed under one counts as classification debt.
+UNCHOSEN_KINDS = frozenset({UNCLASSIFIED_KIND, LEGACY_OTHER_KIND})
+#: Where a legacy-vault import files its copies. Every page there is still
+#: unclassified: reclassifying one moves it to its new kind's folder.
+IMPORTED_PATH_LABEL = "Imported"
 
 #: Canonical keys are hyphenated slugs, matching the project-key and tag
 #: conventions rather than the underscore form `semantic_language_registry`
@@ -335,10 +345,18 @@ _BUILTIN_KINDS: tuple[Definition, ...] = (
         builtin=True,
     ),
     Definition(
-        key=FALLBACK_KIND,
+        key=UNCLASSIFIED_KIND,
+        label="Unclassified",
+        path_label="Unclassified",
+        description="captured with no agent to classify it; needs a kind",
+        builtin=True,
+    ),
+    Definition(
+        key=LEGACY_OTHER_KIND,
         label="Other",
         path_label="Other",
-        description="unclassified captures — a low-confidence fallback",
+        description="the retired catch-all; needs a kind",
+        status="deprecated",
         builtin=True,
     ),
 )
@@ -433,6 +451,11 @@ def normalize(raw: object, *, axis: str = "value") -> str:
             f"cannot be used as a directory. Choose a more specific key",
         )
     return key
+
+
+def is_canonical_key(value: object) -> bool:
+    """Whether `value` already is a canonical key, without normalizing it."""
+    return isinstance(value, str) and _KEY_RE.fullmatch(value) is not None
 
 
 def _validate_path_label(axis: str, key: str, label: str) -> str:

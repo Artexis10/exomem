@@ -23,8 +23,7 @@
 │   ├── Sessions/                 Conversation transcripts OR session captures
 │   ├── Books/                    Book notes/excerpts
 │   ├── Papers/                   Academic papers
-│   ├── Videos/                   Video transcripts/notes
-│   └── Other/                    Miscellaneous captures
+│   └── Videos/                   Video transcripts/notes
 ├── Notes/
 │   ├── Research/<scope>/         Project- or domain-scoped research (incl. hubs + snapshots)
 │   ├── Insights/                 Distilled cross-cutting lessons

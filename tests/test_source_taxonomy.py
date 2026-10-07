@@ -10,7 +10,8 @@ then grew subject folders underneath that fallback. This suite binds the fix:
   value works with no code change and no migration;
 - the location is a deterministic projection of the canonical keys, so the
   directory tree is derived from the model rather than being the model;
-- `other` means low confidence, never missing vocabulary;
+- there is no fallback kind (`tests/test_source_kind_required.py` binds the
+  capture refusal and the `unclassified` debt);
 - every legacy kind and every already-captured path keeps working untouched;
 - open vocabulary does not weaken filesystem safety.
 
@@ -280,12 +281,14 @@ def test_an_unregistered_key_derives_its_own_labels() -> None:
 # ---------------------------------------------------------------------------
 # The fallback contract
 # ---------------------------------------------------------------------------
-def test_an_unclassified_capture_still_succeeds(
+def test_the_capture_core_never_invents_a_kind(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
-    result = _capture(vault, source_schema, title="A loose thought")
-    assert result.path.startswith(f"{KB}/Sources/Other/")
-    assert _frontmatter(vault, result.path)["source_type"] == "other"
+    """A caller that forgets the kind is refused, not filed under a default."""
+    with pytest.raises(add_module.AddError) as refused:
+        _capture(vault, source_schema, title="A loose thought")
+    assert refused.value.code == "SOURCE_KIND_REQUIRED"
+    assert not (vault / KB / "Sources" / "Other").exists()
 
 
 def test_a_confidently_supplied_unknown_kind_is_never_demoted(
@@ -300,18 +303,8 @@ def test_a_confidently_supplied_unknown_kind_is_never_demoted(
         vault, source_schema, source_type="research-report", domain="travel",
         title="Autumn airfare investigation",
     )
-    assert _frontmatter(vault, result.path)["source_type"] != st.FALLBACK_KIND
+    assert _frontmatter(vault, result.path)["source_type"] not in st.UNCHOSEN_KINDS
     assert f"{KB}/Sources/Other" not in result.path
-
-
-def test_the_fallback_with_a_domain_still_nests_under_the_fallback(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    """Legacy-compatible by construction: this is the shape vaults already grew."""
-    result = _capture(
-        vault, source_schema, source_type="other", domain="travel", title="Loose travel note"
-    )
-    assert result.path.startswith(f"{KB}/Sources/Other/Travel/")
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +318,6 @@ def test_the_fallback_with_a_domain_still_nests_under_the_fallback(
         ("book", "Books", None),
         ("paper", "Papers", "https://example.com/p"),
         ("video", "Videos", "https://example.com/v"),
-        ("other", "Other", None),
     ],
 )
 def test_every_legacy_kind_routes_exactly_where_it_used_to(
@@ -412,15 +404,6 @@ def test_a_conflicting_pair_of_names_is_refused(
             vault, source_schema, content="Body.", title="Conflicting pair",
             source_type="book", source_kind="research-report",
         )
-
-
-def test_neither_name_resolves_to_the_fallback(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    out = commands.op_capture_source(
-        vault, source_schema, content="Body.", title="Unclassified capture"
-    )
-    assert out["source"]["path"].startswith(f"{KB}/Sources/Other/")
 
 
 # ---------------------------------------------------------------------------
@@ -668,36 +651,6 @@ def test_the_session_note_type_heuristic_still_fires(
 # ---------------------------------------------------------------------------
 # Advisory classification suggestion
 # ---------------------------------------------------------------------------
-def test_recurring_fallback_captures_in_one_domain_suggest_a_real_kind(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    suggestions = [
-        _capture(
-            vault, source_schema, source_type="other", domain="media",
-            title=f"Loose media item {index}",
-        ).structure_suggestion
-        for index in range(3)
-    ]
-    assert suggestions[0]["strength"] == "moderate"
-    final = suggestions[-1]
-    assert final["kind"] == "source_classification_debt"
-    assert final["strength"] == "strong"
-    assert final["reasons"] == sorted(final["reasons"])
-    assert "fallback_captures_recur_in_domain" in final["reasons"]
-    assert final["domain"] == "media"
-    # Advisory, never a score.
-    assert "confidence" not in final
-    assert "score" not in final
-    assert "probability" not in final
-
-
-def test_a_single_unclassified_capture_stays_quiet(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    result = _capture(vault, source_schema, title="One loose thought")
-    assert result.structure_suggestion is None
-
-
 def test_a_coherently_classified_capture_stays_quiet(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
@@ -713,27 +666,18 @@ def test_advisory_failure_leaves_the_capture_committed(
     source_schema: schema_module.SourceSchema,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def explode(*_args: object, **_kwargs: object) -> int:
+    def explode(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         raise RuntimeError("sensor exploded")
 
-    monkeypatch.setattr(add_module, "_count_capped", explode)
+    _capture(vault, source_schema, source_type="unclassified", title="Owed a kind")
+    monkeypatch.setattr(add_module, "unclassified_folders", explode)
     result = _capture(
-        vault, source_schema, source_type="other", domain="media", title="Still saved"
+        vault, source_schema, source_type="invoice-receipt", domain="media",
+        title="Still saved",
     )
     assert result.structure_suggestion is None
     assert (vault / result.path).exists()
-    assert result.path.startswith(f"{KB}/Sources/Other/Media/")
-
-
-def test_the_suggestion_surfaces_on_the_public_capture_result(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    for index in range(3):
-        out = commands.op_capture_source(
-            vault, source_schema, content="Body.", title=f"Loose item {index}",
-            source_kind="other", domain="media",
-        )
-    assert out["source"]["structure_suggestion"]["strength"] == "strong"
+    assert result.path.startswith(f"{KB}/Sources/Invoices/Media/")
 
 
 def test_a_classified_capture_omits_the_key_entirely(
@@ -746,43 +690,18 @@ def test_a_classified_capture_omits_the_key_entirely(
     assert "structure_suggestion" not in out["source"]
 
 
-def test_the_advisory_survives_the_committed_mutation_envelope(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    """Producing the advisory is not the same as an agent receiving it.
-
-    The envelope re-validates every advisory against the bounds declared for its
-    kind, so an advisory whose payload the terminal does not recognise is dropped
-    silently — which is correct for a malformed one and useless for a real one.
-    """
-    for index in range(3):
-        leaf = commands.op_capture_source(
-            vault, source_schema, content="Body.", title=f"Loose item {index}",
-            source_kind="other", domain="media",
-        )
-    envelope = _committed_envelope(leaf)
-    advisory = envelope["structure_suggestion"]
-    assert advisory["kind"] == "source_classification_debt"
-    assert advisory["strength"] == "strong"
-    assert advisory["domain"] == "media"
-    assert advisory["fallback_captures"] == 3
-    # The compiled-write shape is not smuggled in beside it.
-    assert "off_scope_units" not in advisory
-    assert "cluster_terms" not in advisory
-
-
 def test_a_malformed_classification_advisory_is_dropped_not_forwarded(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     leaf = {
         "source": {
-            "path": "Knowledge Base/Sources/Other/Media/x.md",
+            "path": "Knowledge Base/Sources/Invoices/x.md",
             "structure_suggestion": {
                 "kind": "source_classification_debt",
-                "strength": "strong",
-                "reasons": ["fallback_kind_with_declared_domain"],
-                "domain": "media",
-                "fallback_captures": "three",  # not an int
+                "strength": "moderate",
+                "reasons": ["unclassified_sources_present"],
+                "unclassified_sources": "three",  # not an int
+                "folders": ["Unclassified"],
             },
         }
     }
@@ -921,6 +840,7 @@ def test_built_in_vocabulary_is_pinned_so_additions_stay_reviewable() -> None:
         "paper",
         "research-report",
         "session",
+        "unclassified",
         "video",
         "webpage-snapshot",
     }
@@ -957,8 +877,9 @@ def test_bootstrap_teaches_the_open_vocabulary_contract(vault: Path) -> None:
         assert axis in block["contract"]
     assert "open" in block["contract"].lower()
     assert "even if unfamiliar" in block["contract"]
-    assert "could not be determined" in block["fallback_rule"]
-    assert "never that no familiar label matched" in block["fallback_rule"]
+    assert "fallback_rule" not in block
+    for unchosen in st.UNCHOSEN_KINDS:
+        assert repr(unchosen) in block["kind_rule"]
 
 
 def test_richer_profiles_add_the_live_vocabulary_and_the_mechanics(
@@ -979,7 +900,7 @@ def test_bootstrap_no_longer_publishes_the_fallback_as_the_capture_default(
     capture = payload["simple_actions"]["capture"]
     assert capture["route"]["tool"] == "capture_source"
     assert capture["route"]["args"] == {}
-    assert st.FALLBACK_KIND not in str(capture["route"])
+    assert not any(kind in str(capture["route"]) for kind in st.UNCHOSEN_KINDS)
     # The capture action names all three axes in the prose it already publishes
     # and points at the block carrying the openness rule, so the compact payload
     # never says it twice and never pays for a key of its own.
@@ -1098,7 +1019,7 @@ def test_the_capture_alias_never_supplies_the_fallback_on_the_callers_behalf() -
     low-confidence classification rather than an absent one.
     """
     argv = _capture_alias_argv(["Body text.", "--title", "Untyped capture"])
-    assert st.FALLBACK_KIND not in argv
+    assert not st.UNCHOSEN_KINDS & set(argv)
     assert "--source-type" not in argv
     assert "--source-kind" not in argv
 

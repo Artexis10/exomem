@@ -56,6 +56,7 @@ from membench.adapters.base import (
     register_adapter,
 )
 from membench.clock import end_of_window
+from membench.native.exomem_kb import CORPUS_SOURCE_KIND
 from membench.ids import sentinels_in
 from membench.schema import ClaimRecord, PolicyRule, PolicySet, load_jsonl
 
@@ -388,7 +389,7 @@ class ExomemLocalAdapter:
                         {
                             "content": op["content"],
                             "title": op["title"],
-                            "source_type": op.get("source_type", "other"),
+                            "source_type": op.get("source_type", CORPUS_SOURCE_KIND),
                         },
                     )
                     ok = bool(payload) and not payload.get("error")
@@ -399,7 +400,7 @@ class ExomemLocalAdapter:
                         self._schema,
                         content=op["content"],
                         title=op["title"],
-                        source_type=op.get("source_type", "other"),
+                        source_type=op.get("source_type", CORPUS_SOURCE_KIND),
                     )
                     # Recorded unconditionally: governance wiring needs these
                     # for scope selectors, and the compiled altitude needs them

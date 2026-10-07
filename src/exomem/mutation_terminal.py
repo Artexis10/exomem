@@ -785,9 +785,11 @@ _ROUTING_CALL_ACTIONS = frozenset({"append", "update"})
 _MAX_ROUTING_PROSE_CHARS = 480
 _MAX_ROUTING_CALL_BYTES = 4096
 _MAX_ROUTING_PREDICATES = 4
-#: Advisory kind emitted by the capture path. Its payload names the domain the
-#: fallback captures share, not the off-scope units a compiled write reports.
+#: Advisory kind emitted by the capture path. Its payload counts the vault's
+#: sources with no chosen kind and names their folders, not the off-scope units
+#: a compiled write reports.
 _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
+_MAX_UNCLASSIFIED_FOLDERS = 4
 
 
 def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
@@ -823,13 +825,13 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
             continue
         common = {"kind": kind, "strength": strength, "reasons": list(reasons)}
         if kind == _SOURCE_CLASSIFICATION_KIND:
-            domain = value.get("domain")
-            captures = value.get("fallback_captures")
-            if not isinstance(domain, str) or not 0 < len(domain) <= (_MAX_STRUCTURE_TOKEN_CHARS):
+            sources = value.get("unclassified_sources")
+            folders = value.get("folders")
+            if type(sources) is not int or sources < 1:
                 continue
-            if type(captures) is not int or captures < 0:
+            if not _bounded_tokens(folders, _MAX_UNCLASSIFIED_FOLDERS):
                 continue
-            return {**common, "domain": domain, "fallback_captures": captures}
+            return {**common, "unclassified_sources": sources, "folders": list(folders)}
         terms = value.get("cluster_terms")
         units = value.get("off_scope_units")
         if type(units) is not int or units < 0:

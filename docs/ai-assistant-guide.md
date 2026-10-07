@@ -176,8 +176,8 @@ Agent behavior:
    the label you actually mean instead of falling back. Add `projects` for the
    work it serves; a source can serve several, and projects never affect where
    it is stored.
-4. Reserve `other` for material whose kind you genuinely could not determine.
-   It means low confidence, not "no label exists for this".
+4. Always name a kind. If no known kind fits, name a new one; there is no
+   catch-all, and `other` is retired.
 5. Offer to compile a note only if there is a durable conclusion to extract.
 
 For one observation or rich unit, use `observe_memory` rather than page-wide
