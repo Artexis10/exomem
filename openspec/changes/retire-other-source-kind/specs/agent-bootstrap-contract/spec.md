@@ -8,6 +8,8 @@ Bootstrap SHALL tell an agent to inspect an advisory classification suggestion r
 
 This guidance SHALL fit within the existing compact-profile size budget.
 
+Bootstrap SHALL advance its existing operating-contract version and carry a bounded migration notice. The notice SHALL state that current capture rules supersede historical descriptions permitting an omitted kind or `other`. Current compact, session, full and historical bootstrap profiles SHALL convey the rule from the same source.
+
 #### Scenario: The contract states the kind rule
 
 - **WHEN** an agent reads the source-capture guidance in any bootstrap profile
@@ -24,6 +26,12 @@ This guidance SHALL fit within the existing compact-profile size budget.
 
 - **WHEN** the compact bootstrap payload is produced with this guidance present
 - **THEN** its serialized size remains within the established compact ceiling
+
+#### Scenario: Historical instructions receive a versioned correction
+
+- **WHEN** a current or historical client reads bootstrap after this behavioral migration
+- **THEN** it sees the operating-contract version and the corrected capture rule
+- **AND** it learns that older optional-kind and `other` guidance no longer governs new captures
 
 ## REMOVED Requirements
 

@@ -689,11 +689,8 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
             "projects is what work it serves. Kind and domain are open: any "
             "lowercase slug is accepted, so name what you mean even if unfamiliar."
         ),
-        "kind_rule": (
-            "Always name a kind: the closest known one or a new slug. Never "
-            f"{source_taxonomy_module.LEGACY_OTHER_KIND!r} or "
-            f"{source_taxonomy_module.UNCLASSIFIED_KIND!r}."
-        ),
+        "kind_rule": source_taxonomy_module.CAPTURE_KIND_RULE,
+        "migration": source_taxonomy_module.CAPTURE_KIND_MIGRATION,
     }
     if profile != "compact":
         projection["recall"] = "ask_memory(source_kinds=, domains=, projects=), alone or combined."
@@ -1553,7 +1550,7 @@ def op_bootstrap(
         ),
     }
     payload: dict = {
-        "contract_version": "2026-08-17.1",
+        "contract_version": "2026-10-07.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -3588,18 +3585,10 @@ def _resolve_source_kind_argument(
 
 
 def _unattended_capture() -> bool:
-    """Whether this capture arrives with no agent in the loop to classify it.
+    """Whether an explicit human adapter bound this capture, without a wire flag."""
+    from . import source_taxonomy
 
-    Two surfaces put a person, not an agent, behind `capture_source`: the
-    terminal UI, which invokes products in-process under the owner's `library`
-    principal, and the hosted web capture box, which reaches the cell through
-    the private command router rather than an agent profile. Both are bound by
-    the surface adapter, never by an argument, so an agent cannot claim either.
-    """
-    from .governance import principal as principal_module
-
-    bound = principal_module.current_principal()
-    if bound is not None and bound.surface == "library":
+    if source_taxonomy.is_human_capture():
         return True
     surface = capabilities_module.current_active_surface()
     return (

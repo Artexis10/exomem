@@ -87,6 +87,8 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
     "unresolved_sources_truncated",
     "known_source_kinds",
     "known_source_kinds_total",
+    "known_source_kinds_state",
+    "known_source_kinds_counted",
 )
 _HOSTED_MUTATION_ERROR_SHAPES = {
     "MAINTENANCE_REQUIRES_CLI": ("terminal", False),
@@ -196,7 +198,7 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
     A code absent from this table degrades to the generic message and a null
     remediation — the safe direction for anything unrecognised.
     """
-    from . import semantic_authoring, source_closure
+    from . import add, semantic_authoring, source_closure, source_taxonomy
 
     findings = semantic_authoring.AUTHORING_CONTRACT.findings
     unit = findings["missing_semantic_unit"]
@@ -248,9 +250,8 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         ),
         "SOURCE_KIND_REQUIRED": (
             "the source needs source_kind: what the material IS",
-            "Pick the closest kind in known_source_kinds, or name a new lowercase slug, "
-            "which registers on capture. Each count is the source pages filed under "
-            "that kind's Sources/ folder.",
+            f"{source_taxonomy.CAPTURE_KIND_RULE} {source_taxonomy.CAPTURE_KIND_MIGRATION} "
+            f"{add.KNOWN_KINDS_COUNTED}.",
         ),
     }
 
@@ -457,16 +458,22 @@ def _known_source_kinds_details(error: Mapping[str, Any]) -> dict[str, Any]:
             and set(row) == {"kind", "sources"}
             and isinstance(row["kind"], str)
             and source_taxonomy.is_canonical_key(row["kind"])
-            and type(row["sources"]) is int
-            and row["sources"] >= 0
+            and (
+                row["sources"] is None
+                or (type(row["sources"]) is int and row["sources"] >= 0)
+            )
             for row in rows
         )
         and type(total) is int
         and total >= len(rows)
+        # These are the fixed read states of the kind-refusal envelope.
+        and error.get("known_source_kinds_state") in {"complete", "incomplete", "failed"}
     ):
         return {
             "known_source_kinds": [dict(row) for row in rows],
             "known_source_kinds_total": total,
+            "known_source_kinds_state": error["known_source_kinds_state"],
+            "known_source_kinds_counted": add.KNOWN_KINDS_COUNTED,
         }
     return {}
 

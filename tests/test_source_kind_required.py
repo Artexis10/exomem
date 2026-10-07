@@ -27,6 +27,7 @@ from exomem import adopt as adopt_module
 from exomem import commands, mutation_terminal, product_invoke
 from exomem import schema as schema_module
 from exomem.cli_ops import OpError
+from exomem.governance.principal import library_scope
 from exomem.tui.backend import ExomemBackend
 
 KB = "Knowledge Base"
@@ -237,16 +238,15 @@ def test_a_kindless_out_of_band_upload_is_recorded_as_unclassified(
 def test_unclassified_sources_are_reported_as_debt_on_the_next_agent_capture(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
-    product_invoke.invoke_product(
-        "capture_source",
-        {"content": "Buy filters for the furnace.", "title": "Furnace filters"},
-        vault_root=vault,
+    ExomemBackend(str(vault)).capture_thought(
+        "Buy filters for the furnace.", "Furnace filters"
     )
 
-    leaf = commands.op_capture_source(
-        vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
-        source_kind="field-notebook",
-    )
+    with library_scope():
+        leaf = commands.op_capture_source(
+            vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
+            source_kind="field-notebook",
+        )
 
     advisory = _committed_envelope(leaf)["structure_suggestion"]
     assert advisory["kind"] == "source_classification_debt"
@@ -268,10 +268,11 @@ def test_a_legacy_vault_import_is_unclassified_and_counts_as_debt(
     imported = report["copy"]["copied_sources"][0]["source_path"]
     assert _frontmatter(vault, imported)["source_type"] == "unclassified"
 
-    leaf = commands.op_capture_source(
-        vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
-        source_kind="field-notebook",
-    )
+    with library_scope():
+        leaf = commands.op_capture_source(
+            vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
+            source_kind="field-notebook",
+        )
     advisory = leaf["source"]["structure_suggestion"]
     assert advisory["unclassified_sources"] == 1
     assert advisory["folders"] == ["Imported"]
@@ -315,10 +316,11 @@ def test_a_legacy_other_page_counts_as_debt(
 ) -> None:
     _legacy_other_page(vault)
 
-    leaf = commands.op_capture_source(
-        vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
-        source_kind="field-notebook",
-    )
+    with library_scope():
+        leaf = commands.op_capture_source(
+            vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
+            source_kind="field-notebook",
+        )
 
     advisory = leaf["source"]["structure_suggestion"]
     assert advisory["unclassified_sources"] == 1
@@ -353,4 +355,110 @@ def test_a_restricted_caller_gets_no_debt_count(
             source_kind="field-notebook",
         )
 
+    assert "structure_suggestion" not in leaf["source"]
+
+
+def test_programmatic_capture_cannot_reuse_the_tui_exception(vault: Path) -> None:
+    ExomemBackend(str(vault)).capture_thought("Fix the tap.", "Tap")
+    before = _vault_files(vault)
+
+    with pytest.raises(OpError, match="SOURCE_KIND_REQUIRED"):
+        product_invoke.invoke_product(
+            "capture_source", {"title": "Agent call", "content": "A programmatic capture."},
+            vault_root=vault,
+        )
+
+    assert _vault_files(vault) == before
+
+
+def test_hosted_nonowner_gets_no_debt_advisory(vault: Path, source_schema) -> None:
+    from exomem.governance.principal import request_scope, resolve_hosted_principal
+
+    _legacy_other_page(vault)
+    with request_scope(resolve_hosted_principal("tenant-capture")):
+        leaf = commands.op_capture_source(
+            vault, source_schema, title="Field report", content="Three nests.",
+            source_kind="field-notebook",
+        )
+
+    assert "structure_suggestion" not in leaf["source"]
+
+
+@pytest.mark.parametrize("failure", ["folder", "root-list", "entry-stat"])
+def test_unreadable_kind_counts_are_unknown_without_blocking_a_corrected_capture(
+    vault: Path, source_schema, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    import os
+
+    sources = vault / KB / "Sources"
+    before = _vault_files(vault)
+    scandir = os.scandir
+    iterdir = Path.iterdir
+    stat = Path.stat
+
+    def unreadable_scan(path):
+        if Path(path) == sources / "Articles":
+            raise PermissionError("synthetic unreadable folder")
+        return scandir(path)
+
+    def unreadable_list(path):
+        if path == sources:
+            raise PermissionError("synthetic unreadable root")
+        return iterdir(path)
+
+    def unreadable_stat(path, *args, **kwargs):
+        if path == sources / "Articles":
+            raise PermissionError("synthetic unreadable entry")
+        return stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        if failure == "folder":
+            patch.setattr(os, "scandir", unreadable_scan)
+        elif failure == "root-list":
+            patch.setattr(Path, "iterdir", unreadable_list)
+        else:
+            patch.setattr(Path, "stat", unreadable_stat)
+        with pytest.raises(OpError) as refused:
+            commands.op_capture_source(
+                vault, source_schema, title="Field report", content="Three nests."
+            )
+
+    details = refused.value.details
+    rows = details["known_source_kinds"]
+    assert {"kind": "article", "sources": None} in rows
+    assert details["known_source_kinds_state"] == (
+        "failed" if failure == "root-list" else "incomplete"
+    )
+    assert rows == sorted(
+        rows, key=lambda row: (row["sources"] is None, -(row["sources"] or 0), row["kind"])
+    )
+    assert _vault_files(vault) == before
+    saved = commands.op_capture_source(
+        vault, source_schema, title="Field report", content="Three nests.",
+        source_kind="field-notebook",
+    )
+    assert saved["source"]["path"]
+
+
+def test_incomplete_debt_scan_does_not_change_a_committed_capture(
+    vault: Path, source_schema, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    _legacy_other_page(vault)
+    scandir = os.scandir
+
+    def unreadable(path):
+        if Path(path) == vault / KB / "Sources" / "Other":
+            raise PermissionError("synthetic unreadable debt folder")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unreadable)
+    with library_scope():
+        leaf = commands.op_capture_source(
+            vault, source_schema, title="Field report", content="Three nests.",
+            source_kind="field-notebook",
+        )
+
+    assert (vault / leaf["source"]["path"]).is_file()
     assert "structure_suggestion" not in leaf["source"]

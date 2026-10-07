@@ -12,9 +12,10 @@ values that legitimately move between releases are normalised away: the
 server's own version and the tool-surface fingerprints, which the tool-schema
 lane edits independently.
 
-Re-recorded by `retire-other-source-kind`, on purpose: released profiles share
-the capture leaf, which now refuses a capture with no kind, so their
-`source_taxonomy` block teaches that kind rule instead of the retired fallback.
+The capture behavior migrates through bootstrap contract 2026-10-07.1. Historical
+command descriptors stay frozen; bootstrap and runtime refusals explicitly
+supersede their optional-kind and `other` guidance. Re-record the payload pins
+only after that migration and its shared rule have been verified.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import tempfile
 
 import pytest
 
-from exomem import capabilities, commands, hosted_legacy_schemas
+from exomem import capabilities, commands, hosted_legacy_schemas, source_taxonomy
 
 LEGACY_PROFILES = tuple(f"hosted-alpha-agent-v{n}" for n in range(1, 5))
 LEVELS = ("off", "light", "balanced", "maximal")
@@ -93,11 +94,14 @@ def legacy_compact(monkeypatch: pytest.MonkeyPatch, profile: str, level: str) ->
 
 @pytest.mark.parametrize("level", LEVELS)
 @pytest.mark.parametrize("profile", LEGACY_PROFILES)
-def test_a_released_profile_serves_the_pre_split_payload(monkeypatch, profile, level):
+def test_a_released_profile_serves_its_versioned_payload(monkeypatch, profile, level):
     payload = legacy_compact(monkeypatch, profile, level)
 
     assert payload["profile"] == "compact"
     assert "sections" not in payload
+    assert payload["contract_version"] == "2026-10-07.1"
+    assert payload["source_taxonomy"]["kind_rule"] == source_taxonomy.CAPTURE_KIND_RULE
+    assert payload["source_taxonomy"]["migration"] == source_taxonomy.CAPTURE_KIND_MIGRATION
     assert normalised_digest(payload) == GOLDEN[profile][level]
 
 

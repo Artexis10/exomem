@@ -270,7 +270,10 @@ class ExomemBackend:
         raw = {"content": content, "title": title}
         if source_type:
             raw["source_type"] = source_type
-        return self._call("capture_source", raw)
+        from ..source_taxonomy import human_capture
+
+        with human_capture():
+            return self._call("capture_source", raw)
 
     def remember_note(
         self, content: str, title: str, *, note_type: str = "insight"

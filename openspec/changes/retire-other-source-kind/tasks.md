@@ -1,21 +1,21 @@
 ## 1. Capture contract
 
-- [x] 1.1 Refuse a missing kind, `other` and `unclassified` on agent-facing capture with `SOURCE_KIND_REQUIRED`, the known kinds with counts, and the rule line, before any fetch or write
-- [x] 1.2 Record a missing kind as `unclassified` on the terminal UI, the hosted private command router, the upload form and legacy-vault import
+- [ ] 1.1 Correct kind refusals and count failures; verify no effects and explicit unknown counts.
+- [ ] 1.2 Bind the terminal UI exception separately; verify library callers still require a kind.
 - [x] 1.3 Deprecate `other`, add the `unclassified` built-in, and refuse both as a reclassification target
-- [x] 1.4 Report classification debt through `structure_suggestion: source_classification_debt` and bound its new payload in the committed terminal
+- [ ] 1.4 Restrict the bounded classification-debt advisory to the verified owner; verify exempt hosted callers receive none.
 - [x] 1.5 Name the alternative in the URL refusal
-- [x] 1.6 Carry the refusal guidance and the known kinds across the hosted boundary
+- [ ] 1.6 Carry corrective guidance and honest counts across hosted routes; verify an old-style request can recover.
 
 ## 2. Agent-facing text
 
-- [x] 2.1 Replace bootstrap's fallback rule with the kind rule
+- [ ] 2.1 Version the bootstrap migration; verify every profile teaches the shared kind rule and historical descriptors remain unchanged.
 - [x] 2.2 Remove `Other` as a destination from the scaffold references, the capture and ingest skills, `source-taxonomy.yaml`, the knowledge packs and the docs
-- [x] 2.3 Regenerate the skill contract, packaged skills, tool schemas, hosted plugins, cloud plugin and capabilities document
+- [ ] 2.3 Regenerate current artifacts through their source generators; verify frozen hosted descriptors remain unchanged.
 
 ## 3. Proof
 
-- [x] 3.1 Red-then-green tests for each behaviour in `tests/test_source_kind_required.py` and the two hosted route tests
+- [ ] 3.1 Run capture, advisory, count-failure and historical recovery proofs; verify all four independent review findings close.
 - [x] 3.2 Update tests that encoded the fallback contract
 - [ ] 3.3 Full pytest corpus green in pull-request CI
 

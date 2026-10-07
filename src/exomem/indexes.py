@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -151,6 +152,7 @@ def _count_markdown_pages(
     *,
     skip_underscore_dirs: bool = False,
     keep: Callable[[str], bool] | None = None,
+    on_error: Callable[[OSError], None] | None = None,
 ) -> int:
     """Non-index `*.md` entries under `root`, recursively, in one scandir pass.
 
@@ -161,6 +163,7 @@ def _count_markdown_pages(
 
     `keep`, when given, receives each page's path as scanned and decides
     whether it counts, so a caller can count only what its audience may see.
+    `on_error` reports incomplete reads without changing legacy best-effort counts.
     """
     count = 0
     pending = [os.fspath(root)]
@@ -179,20 +182,41 @@ def _count_markdown_pages(
                         skip_underscore_dirs and entry.name.startswith("_")
                     ):
                         pending.append(entry.path)
-        except OSError:
+        except OSError as error:
+            if on_error is not None:
+                on_error(error)
             continue
     return count
 
 
-def _count_sources(sources_dir: Path) -> dict[str, int]:
+def _count_sources(
+    sources_dir: Path, *, on_error: Callable[[OSError], None] | None = None
+) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
     out: dict[str, int] = {}
-    if not sources_dir.is_dir():
+    try:
+        entries = list(sources_dir.iterdir())
+    except FileNotFoundError:
         return out
-    for sub in sources_dir.iterdir():
-        if not sub.is_dir() or sub.name.startswith("_"):
+    except OSError as error:
+        if on_error is None:
+            raise
+        on_error(error)
+        return out
+    for sub in entries:
+        if sub.name.startswith("_"):
             continue
-        out[sub.name] = _count_markdown_pages(sub, skip_underscore_dirs=True)
+        try:
+            if not stat.S_ISDIR(sub.stat().st_mode):
+                continue
+        except OSError as error:
+            if on_error is None:
+                raise
+            on_error(error)
+            continue
+        out[sub.name] = _count_markdown_pages(
+            sub, skip_underscore_dirs=True, on_error=on_error
+        )
     return out
 
 

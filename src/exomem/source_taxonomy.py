@@ -24,7 +24,9 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -58,6 +60,31 @@ UNCHOSEN_KINDS = frozenset({UNCLASSIFIED_KIND, LEGACY_OTHER_KIND})
 #: Where a legacy-vault import files its copies. Every page there is still
 #: unclassified: reclassifying one moves it to its new kind's folder.
 IMPORTED_PATH_LABEL = "Imported"
+
+# One runtime migration rule serves bootstrap and refusals, including old profiles.
+CAPTURE_KIND_RULE = (
+    "Supply source_kind or source_type: the closest known kind or a new lowercase slug. "
+    f"Never {LEGACY_OTHER_KIND!r} or {UNCLASSIFIED_KIND!r}."
+)
+CAPTURE_KIND_MIGRATION = (
+    "Older optional-kind and 'other' instructions no longer govern capture; "
+    "retry with either existing kind argument."
+)
+_HUMAN_CAPTURE = ContextVar("human_capture", default=False)
+
+
+@contextmanager
+def human_capture() -> Iterator[None]:
+    """Bind the human adapter's classification exception for this call only."""
+    token = _HUMAN_CAPTURE.set(True)
+    try:
+        yield
+    finally:
+        _HUMAN_CAPTURE.reset(token)
+
+
+def is_human_capture() -> bool:
+    return _HUMAN_CAPTURE.get()
 
 #: Canonical keys are hyphenated slugs, matching the project-key and tag
 #: conventions rather than the underscore form `semantic_language_registry`

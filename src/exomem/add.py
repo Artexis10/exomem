@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
+import stat
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -473,7 +474,10 @@ def add(
     )
 
     # Pre-compute counts and bump the relevant folder by 1 for the new file.
-    pre_counts = indexes._count_sources(kb_root(vault_root) / "Sources")
+    count_errors: list[OSError] = []
+    pre_counts = indexes._count_sources(
+        kb_root(vault_root) / "Sources", on_error=count_errors.append
+    )
     post_counts = dict(pre_counts)
     post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
 
@@ -707,7 +711,7 @@ def add(
         slug=filename_slug,
         structure_suggestion=_classification_suggestion(
             vault_root, taxonomy, post_counts
-        ),
+        ) if not count_errors else None,
         adoption=adoption_receipt,
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
     )
@@ -765,9 +769,13 @@ def _classification_suggestion(
     not see. Wrapped so a fault here can never fail a committed capture.
     """
     try:
-        from .governance import egress
+        from .governance import principal, raw_protection
 
-        if egress.restricted_release_filter(vault_root) is not None:
+        who = principal.effective_principal()
+        if not (
+            raw_protection.is_owner(who)
+            and raw_protection.has_unrestricted_access(vault_root, who)
+        ):
             return None
         by_folder = {name.casefold(): count for name, count in counts.items()}
         folders = {
@@ -840,12 +848,16 @@ def kind_required(vault_root: Path, *, supplied: str | None) -> cli_ops.OpError:
     return cli_ops.OpError(
         "SOURCE_KIND_REQUIRED",
         message,
-        "Pick the closest kind in known_source_kinds, or name a new lowercase "
-        "slug, which registers on capture.",
+        f"{source_taxonomy.CAPTURE_KIND_RULE} {source_taxonomy.CAPTURE_KIND_MIGRATION}",
         details={
             "known_source_kinds": known[:KNOWN_KINDS_SHOWN],
             "known_source_kinds_total": len(known),
             "known_source_kinds_counted": KNOWN_KINDS_COUNTED,
+            "known_source_kinds_state": (
+                "complete" if all(row["sources"] is not None for row in known)
+                else "incomplete" if any(row["sources"] is not None for row in known)
+                else "failed"
+            ),
         },
     )
 
@@ -868,16 +880,36 @@ def known_kind_counts(
     # Walks the folders itself rather than calling `indexes._count_sources`,
     # which `_compute_updates_with_counts` swaps out process-wide while a
     # capture in another thread computes its index.
-    by_folder: dict[str, int] = {}
+    by_folder: dict[str, int | None] = {}
     sources = kb_root(vault_root) / source_taxonomy.SOURCES_ROOT
-    if sources.is_dir():
-        for folder in sources.iterdir():
-            if folder.is_dir() and not folder.name.startswith("_"):
-                by_folder[folder.name.casefold()] = indexes._count_markdown_pages(
+    listing_complete = False
+    try:
+        # iterdir distinguishes proven absence from a failed directory read.
+        folders = list(sources.iterdir())
+    except FileNotFoundError:
+        listing_complete = True
+    except OSError:
+        pass
+    else:
+        listing_complete = True
+        for folder in folders:
+            if folder.name.startswith("_"):
+                continue
+            errors: list[OSError] = []
+            try:
+                # stat raises on inaccessible entries; is_dir can suppress errors.
+                if not stat.S_ISDIR(folder.stat().st_mode):
+                    continue
+                count = indexes._count_markdown_pages(
                     folder,
                     skip_underscore_dirs=True,
                     keep=None if keep is None else visible,
+                    on_error=errors.append,
                 )
+            except OSError:
+                by_folder[folder.name.casefold()] = None
+            else:
+                by_folder[folder.name.casefold()] = None if errors else count
     choosable = [
         definition
         for key, definition in taxonomy.kinds.items()
@@ -886,10 +918,10 @@ def known_kind_counts(
         and definition.status != "deprecated"
     ]
     rows = [
-        (by_folder.get(definition.path_label.casefold(), 0), definition.key)
+        (by_folder.get(definition.path_label.casefold(), 0 if listing_complete else None), definition.key)
         for definition in choosable
     ]
-    rows.sort(key=lambda row: (-row[0], row[1]))
+    rows.sort(key=lambda row: (row[0] is None, -(row[0] or 0), row[1]))
     return [{"kind": key, "sources": count} for count, key in rows]
 
 

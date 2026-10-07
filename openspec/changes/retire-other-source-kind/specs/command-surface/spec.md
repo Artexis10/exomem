@@ -6,6 +6,8 @@ Every capture surface an agent can call SHALL refuse a capture that supplies no 
 
 The refusal SHALL list the kinds an agent may choose in this vault, each with the number of source pages filed under that kind's folder, most used first and capped at 30. It SHALL report how many choosable kinds exist in total and state what each count measures and where it was read. For a caller other than the owner, a count SHALL include only the pages that caller may see. The refusal SHALL carry one rule: pick the closest existing kind, or name a new slug, which registers on capture.
 
+The refusal SHALL label failed and incomplete count reads. An unknown count SHALL remain unknown, never zero or a complete partial count. Complete counts SHALL sort before unknown counts, with kind names providing deterministic ties. An unavailable count SHALL NOT prevent the caller from choosing a kind.
+
 The system SHALL NOT infer a kind from the content, the title, or any other part of the material. Choosing the kind is the agent's judgement.
 
 #### Scenario: A kindless capture is refused with the known kinds
@@ -33,11 +35,19 @@ The system SHALL NOT infer a kind from the content, the title, or any other part
 - **THEN** the capture succeeds at that kind's projected folder
 - **AND** the vault's registry now carries the kind
 
+#### Scenario: A failed count remains unknown
+
+- **WHEN** a source folder cannot be read completely while constructing the refusal
+- **THEN** the refusal labels the affected count as unknown and the read as failed or incomplete
+- **AND** it retains the choosable kind without reporting zero or a complete partial count
+
 ### Requirement: A capture with no agent in the loop is recorded as unclassified
 
 A capture made where no agent can be asked for a kind SHALL record a missing kind as `unclassified` and file the source under that kind's folder. These surfaces are the terminal UI, the hosted web capture box reached through the private command router, the upload form, and a legacy-vault import. The surface adapter SHALL decide this; no caller argument can claim it.
 
 A kind such a surface supplies SHALL resolve as it would for any capture. A supplied `unclassified` or `other` SHALL still be refused, because only an omitted kind means that nobody was asked.
+
+An owner-library principal alone SHALL NOT establish a human capture. The terminal UI adapter SHALL bind its exception separately from the shared programmatic invocation API.
 
 #### Scenario: The terminal UI saves a kindless thought
 
@@ -53,6 +63,11 @@ A kind such a surface supplies SHALL resolve as it would for any capture. A supp
 
 - **WHEN** a hosted agent profile posts a capture without a kind
 - **THEN** the capture is refused with `SOURCE_KIND_REQUIRED`, its remediation, and the known kinds
+
+#### Scenario: A programmatic library caller still names a kind
+
+- **WHEN** a programmatic caller invokes capture through the shared product API without a kind
+- **THEN** the capture is refused before effects despite its owner-library principal
 
 #### Scenario: A legacy-vault import is unclassified
 
@@ -107,6 +122,12 @@ The suggestion SHALL reach the caller through the committed-mutation response, a
 - **THEN** the capture is still committed at its projected location
 - **AND** the result reports its normal success outcome with no suggestion key
 
+#### Scenario: An exempt hosted caller receives no owner advisory
+
+- **WHEN** a resolved hosted caller captures a source in a vault that holds classification debt
+- **THEN** the capture follows its ordinary authorization rules
+- **AND** the result omits the classification-debt advisory unless that caller is the verified owner
+
 ## MODIFIED Requirements
 
 ### Requirement: Legacy source clients and already-captured sources remain valid
@@ -116,6 +137,8 @@ Every source kind the closed vocabulary previously accepted, except `other`, SHA
 Callers SHALL be able to supply the source kind under either the existing parameter name or a preferred equivalent name. When both are supplied with different values the system SHALL refuse rather than silently prefer one. When neither is supplied, the capture follows the agent-facing refusal or the no-agent `unclassified` rule.
 
 Already-captured sources SHALL remain valid without modification, whether or not they carry the newer metadata axes. No migration SHALL be required to adopt this change.
+
+Released hosted descriptor bytes SHALL remain unchanged. Their source-capture runtime semantics SHALL migrate through a versioned operating contract and explicit corrective guidance. A historical optional argument or description SHALL NOT authorize a new unclassified or `other` agent capture.
 
 #### Scenario: Every legacy kind routes exactly as before
 
@@ -143,6 +166,13 @@ Already-captured sources SHALL remain valid without modification, whether or not
 - **WHEN** a vault containing sources captured under the previous vocabulary is read, indexed, and searched after this change
 - **THEN** every existing source remains valid and retrievable at its original location
 - **AND** no migration step was required
+
+#### Scenario: A historical hosted caller corrects its arguments
+
+- **WHEN** a historical hosted profile submits a capture permitted by its old optional-kind guidance
+- **THEN** runtime refuses before effects and explains the current meaningful-kind requirement
+- **AND** a retry with either existing kind argument and a meaningful value succeeds
+- **AND** the archived descriptor remains unchanged
 
 ### Requirement: A captured source's classification is correctable
 
