@@ -242,7 +242,7 @@ def test_implemented_public_error_catalog_exactly_matches_normative_artifact() -
         }
         for code, values in hosted_transfer_routes._ERROR_CATALOG.items()
     }
-    assert implemented == {
+    expected = {
         code: {
             "status": values["status"],
             "message": values["message"],
@@ -251,6 +251,18 @@ def test_implemented_public_error_catalog_exactly_matches_normative_artifact() -
         }
         for code, values in catalog.items()
     }
+
+    from exomem.governance import raw_protection
+
+    # The current RAW contract adds this refusal; the archived protocol entries stay exact.
+    expected["RAW_PROTECTION_UNAVAILABLE"] = {
+        "status": 400,
+        "message": raw_protection.UNAVAILABLE_MESSAGE,
+        "retryable": False,
+        "requires_new_grant": True,
+    }
+    assert implemented == expected
+
 
 
 def test_grant_v2_has_exact_canonical_claims_and_uses_versioned_authority() -> None:
@@ -917,6 +929,67 @@ def test_missing_download_is_existence_neutral_and_burns_grant(tmp_path: Path) -
     }
     assert "private-sentinel" not in response.text
     assert security.consumed == {JTI}
+
+
+@pytest.mark.parametrize("protocol", ["public-v2", "private-v1"])
+@pytest.mark.parametrize("marked_field", [None, "filename", "category", "scope"], ids=["ordinary", "raw-filename", "raw-category", "raw-scope"])
+def test_hosted_upload_preserves_only_when_raw_protection_is_available(tmp_path, protocol, marked_field):
+    """Both signed upload surfaces bind the tenant before the canonical write."""
+    from exomem.governance import raw_protection
+
+    app, config, lifecycle = _app(tmp_path, FakeSecurityAuthority())
+    metadata = {"filename": "alpha.txt", "scope": "research", "category": "documents"}
+    if marked_field:
+        metadata[marked_field] = raw_protection.PREFIX + metadata[marked_field]
+    filename = metadata["filename"]
+    before = {str(p.relative_to(config.vault_root)): p.read_bytes()
+              for p in config.vault_root.rglob("*") if p.is_file()}
+    if protocol == "public-v2":
+        target = _upload_target()
+        target["metadata"].update(metadata)
+        target["metadata_sha256"] = hashlib.sha256(
+            hosted_transfer.canonical_json(target["metadata"])
+        ).hexdigest()
+        response = asyncio.run(_request(
+            app, "PUT", hosted_transfer.TRANSFER_UPLOAD_PATH,
+            headers={"Origin": ORIGIN, "Content-Type": "text/plain",
+                     hosted_transfer.TRANSFER_GRANT_HEADER: _grant(target=target)},
+            content=b"alpha",
+        ))
+    else:
+        response = asyncio.run(_request(
+            app, "POST", "/private/exomem/v1/upload",
+            headers={
+                "Authorization": f"Bearer {config.service_credential}",
+                gateway.CELL_HEADER: config.cell_id,
+                gateway.PROTOCOL_HEADER: config.protocol_version,
+                gateway.REQUEST_HEADER: "33333333-3333-4333-8333-333333333333",
+                gateway.PRINCIPAL_HEADER: PRINCIPAL,
+                "Idempotency-Key": "raw-upload",
+                gateway.TRANSFER_GRANT_HEADER: gateway.mint_transfer_grant(
+                    config, tenant_scope="tenant-alpha", principal_scope=PRINCIPAL,
+                    operation="upload", jti="raw-upload", max_bytes=65536,
+                ),
+            },
+            files={"file": (filename, b"alpha", "text/plain")},
+            data={key: metadata[key] for key in ("scope", "category")},
+        ))
+    if marked_field:
+        error = response.json()["error"]
+        assert error["code"] == "RAW_PROTECTION_UNAVAILABLE", response.text
+        assert error["message"] == raw_protection.UNAVAILABLE_MESSAGE
+        if protocol == "public-v2":
+            assert error["retryable"] is False
+            assert error["requires_new_grant"] is True
+        after = {str(p.relative_to(config.vault_root)): p.read_bytes()
+                 for p in config.vault_root.rglob("*") if p.is_file()}
+        assert after == before
+    else:
+        assert response.status_code == 201, response.text
+        artifact = config.vault_root / "Knowledge Base/Evidence/research/documents/alpha.txt"
+        assert artifact.read_bytes() == b"alpha"
+        assert artifact.with_name("alpha.txt.md").is_file()
+    assert lifecycle.snapshot().active_transfers == 0
 
 
 def test_hosted_transfer_defaults_and_private_v1_deadline_are_fail_closed(

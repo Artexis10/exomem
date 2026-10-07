@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from exomem.governance.principal import library_scope
+
 from exomem import commands, embeddings
 from exomem import find as find_module
 
@@ -33,6 +35,7 @@ def test_repeat_request_served_from_cache(vault: Path, monkeypatch) -> None:
     assert [h.as_dict() for h in first] == [h.as_dict() for h in second]
 
 
+@library_scope()
 def test_cache_hit_visible_in_timings(vault: Path) -> None:
     commands.op_find(vault, query="metabolism")
     out = commands.op_find(vault, query="metabolism", include_timings=True)
@@ -47,6 +50,7 @@ def test_different_params_do_not_collide(vault: Path, monkeypatch) -> None:
     assert calls["n"] == 3
 
 
+@library_scope()
 def test_detail_is_serialization_not_a_cache_key(vault: Path, monkeypatch) -> None:
     calls = _count_semantic(monkeypatch)
     commands.op_find(vault, query="metabolism", detail="full")

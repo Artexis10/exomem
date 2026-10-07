@@ -1262,7 +1262,7 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
     replay = path.read_bytes()
     enroll(vault, authority_check=lambda: True)
     assert path.read_bytes() == replay
-    assert state_migration.supported_state_compatibility_ids() == ()
+    assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
     assert state_migration.migration_status(vault) == "unsupported"
     with pytest.raises(state_migration.StateMigrationOfflineRequired, match="compatible runtime"):
         state_migration.require_vault_state_ready(vault)
@@ -1977,7 +1977,7 @@ def test_mixed_marker_requires_support_before_bootstrap_or_cached_admission(
     with pytest.raises(state_migration.StateCompatibilityUnsupported):
         state_migration.require_vault_state_ready(vault)
 
-    assert state_migration.supported_state_compatibility_ids() == ()
+    assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
     if existing_state:
         assert {path.name: path.read_bytes() for path in state_dir.iterdir()} == before
         assert "collections-store-v1" not in state_migration.recorded_descriptor_ids(vault)

@@ -601,10 +601,12 @@ def activation(
         proposed_fix=_ACTIVATION_FIX,
     )
     # Coverage is a reduction over every eligible page, so no filter applied
-    # to it can remove what a withheld page contributed: it is the owner's.
+    # to it can remove what a withheld page contributed: it is the owner's
+    # under a policy. The scan admits each page through RAW, so with no
+    # policy it is served.
     from .governance import egress
 
-    refusal = egress.owner_only_aggregate(Path(vault_root))
+    refusal = egress.owner_only_aggregate(Path(vault_root), raw_admitted=True)
     ranked.coverage = scan.coverage if refusal is None else refusal
     return _apply_review_state(
         vault_root,

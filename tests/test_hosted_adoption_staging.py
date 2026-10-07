@@ -245,29 +245,33 @@ def _run_dir(config: HostedCellConfig, run_id: str = RUN_ID) -> Path:
 # --------------------------------------------------------------------------
 
 
-def test_staged_single_file_lands_at_exact_path_and_is_scannable(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["note.txt", "__exomem_raw_v1__note.txt"])
+def test_staged_single_file_lands_at_exact_path_and_is_scannable(tmp_path: Path, filename: str) -> None:
     security = FakeSecurityAuthority()
     app, config, _lifecycle = _app(tmp_path, security)
     data = b"legacy note body that predates governance"
     kb_before = _kb_files(config)
 
-    response = asyncio.run(_put(app, _grant(data), data, "text/plain"))
+    response = asyncio.run(_put(app, _grant(data, filename=filename), data, "text/plain"))
 
     assert response.status_code == 201, response.text
-    landed = _run_dir(config) / "note.txt"
+    landed = _run_dir(config) / filename
     assert landed.is_file()
     assert landed.read_bytes() == data
     # Raw staging lands OUTSIDE Knowledge Base/ — the engine treats it as legacy input.
     assert _kb_files(config) == kb_before
     assert "Knowledge Base" not in landed.relative_to(config.vault_root).parts
-    # Proof the staged tree is scannable via the existing read-only leaf functions.
-    scan = overview_module.overview(config.vault_root, path=f"{STAGING_ROOT}/{RUN_ID}")
-    assert scan["totals"]["files"] == 1
-    report = adopt_module.adopt(
-        config.vault_root, path=f"{STAGING_ROOT}/{RUN_ID}", mode="scan-only"
-    )
-    assert report["mode"] == "scan-only"
-    assert report["summary"]["totals"]["files"] == 1
+    from exomem.governance import principal
+
+    with principal.request_scope(principal.resolve_hosted_principal(PRINCIPAL)):
+        # Proof the staged tree is scannable via the existing read-only leaf functions.
+        scan = overview_module.overview(config.vault_root, path=f"{STAGING_ROOT}/{RUN_ID}")
+        assert scan["totals"]["files"] == 1
+        report = adopt_module.adopt(
+            config.vault_root, path=f"{STAGING_ROOT}/{RUN_ID}", mode="scan-only"
+        )
+        assert report["mode"] == "scan-only"
+        assert report["summary"]["totals"]["files"] == 1
     assert _temp_entries(config) == []
     assert security.consumed == {JTI}
 

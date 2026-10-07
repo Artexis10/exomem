@@ -30,7 +30,7 @@ from test_upkeep_vocabulary_egress_twin import (
 )
 
 from exomem import dreamer, dreamer_families, dreamer_store, freshness, upkeep
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.writer_lease import invoke_command
 
 REFS = {
@@ -253,3 +253,49 @@ def test_an_owner_session_start_recomputes_no_fold_or_profile_row(
     assert owner_recomputed == []
     assert sorted(recomputed) == sorted([dreamer_families.FOLD_KIND, dreamer_families.PROFILE_KIND])
     assert owner_items == caller_items == [dreamer_families.FOLD_KIND]
+
+
+def test_a_remote_owner_session_start_is_served_as_the_local_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner ruling: the owner is the owner on any surface. The owner's OAuth
+    connector is served the stored fold that counts a raw-protected third recap,
+    as the local owner is; a guest is served a fold recomputed without it."""
+    raw_recap = fx.recap(
+        "Private session",
+        episode="ep-" + "d4" * 16,
+        captured="2026-05-04",
+        decided="Retire the [[Orbit Pump]] next year",
+    )
+    vault = _build(tmp_path, {f"{fx.EPISODES}/__exomem_raw_v1__private-session.md": raw_recap})
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+    monkeypatch.setattr(upkeep, "_wall", lambda: LATER + 7200)
+
+    def session_start(principal, session: str) -> list[tuple[str, str]]:
+        packet = {
+            "recent_context": [{"path": fx.ENTITY, "title": "Orbit Pump", "why": "edited"}],
+            "anchors": [],
+            "budget": {"limit_chars": 4000, "used_chars": 0},
+            "abstention": {"reason": "unresolved"},
+        }
+        with request_scope(principal):
+            upkeep.for_packet(vault, packet, session=session)
+        items = (packet.get("upkeep") or {}).get("items") or ()
+        return [(item["kind"], item["why"]) for item in items]
+
+    connector = RequestPrincipal(
+        audience_id="owner",
+        surface="mcp",
+        resolved=True,
+        issuer_family="mcp-oauth:" + "c" * 64,
+        remote_owner=True,
+    )
+    owner_items = session_start(owner_principal(), "owner")
+    _reset_caches()
+    connector_items = session_start(connector, "connector")
+    _reset_caches()
+    guest_items = session_start(_external(), "external")
+
+    assert owner_items, owner_items
+    assert connector_items == owner_items
+    assert guest_items != owner_items, guest_items

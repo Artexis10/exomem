@@ -250,13 +250,20 @@ def _graph_section(
             "truncated_edges": 0,
             "truncation": [],
         }
+    from .governance import egress
+
     try:
+        # The caller's own release decision, before the caps: a page it may not
+        # see is never a node, an edge endpoint or a hop (`graph_context`'s
+        # `keep`), so the section and its counts read as if that page were
+        # absent.
         raw = epistemic_graph.graph_context(
             vault_root,
             path=path,
             depth=1,
             max_nodes=max_nodes,
             max_edges=max_edges,
+            keep=egress.visible_page_filter(vault_root),
         )
     except Exception as exc:  # noqa: BLE001 - optional section soft-fails by contract
         return _unavailable_graph(str(exc))

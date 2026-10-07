@@ -717,14 +717,15 @@ _UNDECIDED = object()
 
 
 def _heat_release_filter(
-    vault_root: Path, *, purpose: str | None = None
+    vault_root: Path, profile: working_set_heat.HeatProfile, *, purpose: str | None = None
 ) -> Callable[[str], bool] | None:
     """The request's one release decision for heat, or `None` when every page
-    is released (a vault that withholds nothing)."""
+    `profile` ranks or marks is released (a vault that withholds nothing)."""
     from .governance import egress
 
+    pages = [*profile.all_rows, *(path for mark in profile.sessions.values() for path in mark.paths)]
     try:
-        return egress.page_release_filter(vault_root, purpose=purpose)
+        return egress.page_release_filter(vault_root, purpose=purpose, pages=pages)
     except Exception:  # noqa: BLE001 - undecidable is not released
         log.warning("heat release decision unavailable; releasing nothing", exc_info=True)
         return lambda _path: False
@@ -775,7 +776,9 @@ def visible_marks(
     if released is _UNDECIDED:
         from .governance import egress
 
-        released = egress.page_release_filter(vault_root, purpose=purpose) if wanted else None
+        released = egress.page_release_filter(
+            vault_root, purpose=purpose, pages=[path for mark in wanted for path in mark.paths]
+        ) if wanted else None
 
     out: dict[str, working_set_heat.SessionMark] = {}
     workspace_marks = 0
@@ -1893,7 +1896,8 @@ def serve(
         owner = working_set_heat._owner_request()
         keyed = attribution is not None and bool(attribution.session or attribution.workspace)
         released = (
-            _heat_release_filter(root, purpose=purpose) if keyed or not owner else None
+            _heat_release_filter(root, heat_profile, purpose=purpose)
+            if keyed or not owner else None
         )
         restricted_view = released is not None and not owner
         if restricted_view:

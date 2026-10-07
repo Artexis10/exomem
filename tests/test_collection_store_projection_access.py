@@ -327,7 +327,7 @@ def test_owned_unproven_projection_is_absent_with_empty_policy(store, kind):
             _through_dispatcher(store.root, "get", path=path)
         if kind != "log":
             assert egress.release_level_for_path_only(store.root, path) == 0
-        keep = egress.governed_release_filter(store.root)
+        keep = egress.restricted_release_filter(store.root)
         assert keep is not None and not keep(path)
 
 

@@ -80,8 +80,16 @@ class ActivationScan:
 
 
 def scan(vault_root: Path) -> ActivationScan:
-    """Measure activation coverage and review deficits in one tolerant vault walk."""
+    """Measure activation coverage and review deficits in one tolerant vault walk.
+
+    Each page is admitted through RAW before it is counted, as the audit's
+    page walk is, so a protected capture counts for the owner only.
+    """
+    from .governance import raw_protection
+    from .governance.principal import effective_principal
+
     vault_root = Path(vault_root)
+    who = effective_principal()
     registry = relation_registry.load_registry(vault_root)
     language_registry = semantic_language_registry.load_registry(vault_root)
     findings: list[AuditFinding] = []
@@ -101,6 +109,8 @@ def scan(vault_root: Path) -> ActivationScan:
         return ActivationScan(findings=findings, coverage=coverage)
 
     for path in find_module._walk_md(kb):
+        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+            continue
         try:
             page = find_module._parse_page(path, path.stat().st_mtime, vault_root)
         except OSError:

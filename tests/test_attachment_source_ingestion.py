@@ -756,6 +756,58 @@ def test_the_moved_page_points_at_the_moved_bytes(
     assert "original_filename: receipt.png" in page
 
 
+def test_raw_text_source_promotion_retains_bytes_identity_and_protection(vault: Path, source_schema) -> None:
+    """A supported promotion must carry the original pair and protection token."""
+    from exomem import add as add_module
+    from exomem import move_file as move_file_module
+    from exomem.governance import raw_protection
+
+    original = "exact UTF-8 source — with trailing whitespace  \n"
+    added = add_module.add(
+        vault, source_schema, content=original, title="Protected source", raw_protection=True,
+    )
+    before = raw_protection.binding(vault, added.artifact_path)[0]
+    from exomem.vault import parse_frontmatter
+
+    example = "\n```yaml\nevidence_file: example.txt\ndata_file: example.txt\nraw_protection:\n  artifact_path: example.txt\n```\n"
+    page_path = vault / added.path
+    page_path.write_text(page_path.read_text() + example)
+    body_before = parse_frontmatter(page_path.read_text(), strict=True)[1]
+    moved = move_file_module.move_file(
+        vault, old_path=added.artifact_path,
+        new_path="Knowledge Base/Evidence/Test/raw/promoted.txt",
+        promotion_reason="preserve proof",
+    )
+    after, companion, _ = raw_protection.binding(vault, moved.new_path)
+    assert (vault / after["artifact_path"]).read_bytes() == original.encode()
+    assert after["original_ref"] == before["original_ref"]
+    assert after["revision"] == before["revision"]
+    assert raw_protection.marked(companion)
+    frontmatter, body_after, _ = parse_frontmatter((vault / companion).read_text(), strict=True)
+    assert frontmatter["evidence_file"] == after["artifact_path"]
+    assert after["artifact_path"] == "Knowledge Base/Evidence/Test/raw/__exomem_raw_v1__promoted.txt"
+    assert body_after == body_before
+    assert not (vault / added.path).exists()
+    assert not (vault / added.artifact_path).exists()
+
+
+def test_raw_source_keeps_new_vocabulary_private(vault: Path, source_schema) -> None:
+    """Protected source metadata must not become global schema vocabulary."""
+    from exomem import add, project_keys, source_taxonomy
+
+    saved = add.add(
+        vault, source_schema, content="Exact private original", title="Private source",
+        source_type="private-sensor-kind", projects=["private-expedition"], raw_protection=True,
+    )
+    companion = (vault / saved.path).read_text()
+    assert "private-sensor-kind" in companion
+    assert "private-expedition" in companion
+    registry = source_taxonomy.load_taxonomy(vault)
+    assert "private-sensor-kind" not in registry.kinds
+    assert "private-expedition" not in project_keys.load_project_registry(vault).keys
+    assert not any("registered" in warning.lower() for warning in saved.warnings)
+
+
 def test_moving_the_page_moves_the_artifact_too(
     vault: Path, source_schema, tmp_path: Path
 ) -> None:

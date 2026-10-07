@@ -115,6 +115,7 @@ class TransferConfig:
     cf_team: str | None
     cf_aud: str | None
     cf_jwks: Any | None
+    principal_signing_root: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -140,6 +141,9 @@ def load_transfer_config() -> TransferConfig:
         cf_team=cf_team,
         cf_aud=cf_aud,
         cf_jwks=cf_jwks,
+        principal_signing_root=upload_tokens.private_signing_root(
+            upload_token, os.environ.get("EXOMEM_JWT_SIGNING_KEY"),
+        ),
     )
 
 
@@ -148,14 +152,10 @@ def download_principal(
 ) -> principal_module.RequestPrincipal:
     """Canonical audience for a `/download` caller (design D5).
 
-    Three credentials reach this route and they are NOT the same human.
-    `EXOMEM_UPLOAD_TOKEN` itself is the vault owner's own key. A token minted
-    from it is signed with that key but was handed to whoever called
-    `transfer_artifact`, so it resolves to the audience it carries — the
-    minting caller's — and only the owner's own mint carries `owner`. A
-    Cloudflare Access assertion carries a real third-party identity, folded
-    into the same id space `server_rest._rest_principal` uses, so a grant
-    authored for that human on MCP or REST applies here too.
+    The public bearer and legacy v2 tokens carry an audience, nothing more. V3
+    preserves the minting principal, its session and purpose included, using
+    the server-private signing root. Cloudflare Access identities use the same normalized audience
+    as REST. Every form still meets the live release decision for the bytes sent.
 
     Module-level (not a closure over the route) so the resolution contract is
     directly testable without reaching through a registered endpoint.
@@ -168,6 +168,11 @@ def download_principal(
             # header is whatever bytes the caller sent.
             if secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                 return principal_module.owner_principal(surface="transfer")
+            bound = upload_tokens.bound_principal(presented, upload_tokens.private_signing_root(
+                config.upload_token, config.principal_signing_root,
+            ))
+            if bound is not None:
+                return bound
             audience = upload_tokens.bound_audience(presented, config.upload_token)
             if audience == principal_module.OWNER_AUDIENCE:
                 return principal_module.owner_principal(surface="transfer")
@@ -248,7 +253,8 @@ def register_transfer_routes(
                     # Only a capability naming its minting principal opens
                     # `/download`. One minted before that binding names nobody,
                     # so it is refused rather than guessed to be the owner.
-                    if upload_tokens.bound_audience(presented, config.upload_token):
+                    if (upload_tokens.bound_audience(presented, config.upload_token)
+                            or upload_tokens.bound_principal(presented, config.principal_signing_root) is not None):
                         return True
                 elif upload_tokens.verify(presented, config.upload_token, scope=scope):
                     return True
@@ -486,6 +492,10 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            if not egress.release_allows_download(
+                vault_root, rel, principal=download_principal(request, config), snapshot=snapshot.data
+            ):
+                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
         except VaultPathError as exc:
             if exc.code in ("NOT_FOUND", "NOT_A_FILE"):
                 # Missing, withheld, reserved and folder all answer with ONE
