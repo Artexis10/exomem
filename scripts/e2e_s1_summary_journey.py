@@ -95,7 +95,15 @@ def export_rows() -> list[dict[str, Any]]:
                 "calories": rng.randint(80, 950),
                 "distance_m": float(distance) if index % 2 else distance,
             },
+            "route": {"fixes": [
+                {"latitude": 12.345 + index / 100000, "longitude": 64.987 - index / 100000},
+                {"latitude": 12.346 + index / 100000, "longitude": 64.988 - index / 100000},
+            ]},
+            "place": {"label": f"Invented place {index % 7}", "region": "Invented region"},
         }
+        # The preview never sees this source subtree; its undeclared values must stay private.
+        if index >= 4200:
+            row["context"] = {"unreviewed": {"place": f"Late invented place {index}"}}
         shape = index % 10
         if shape < 4:
             row["start_utc"] = instant.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -222,6 +230,25 @@ FIELDS = """    exercise_id: {type: string, required: true}
     started_at: {type: datetime}
     utc_offset: {type: string}
     local_date: {type: date}
+    route:
+      type: object
+      classification: location
+      properties:
+        fixes:
+          type: array
+          items:
+            type: object
+            properties:
+              latitude: {type: number}
+              longitude: {type: number}
+    place:
+      type: object
+      classification: location
+      properties:
+        label: {type: string}
+        region: {type: string}
+    place_label: {type: string, depends_on: [place]}
+    extra_context: {type: object}
 """
 
 
@@ -254,6 +281,23 @@ MAPPING = {
         "duration_s": "duration_s",
         "calories": "metrics.calories",
         "distance_m": "metrics.distance_m",
+        "route": "route",
+        "place": "place",
+        "place_label": "place.label",
+        "extra_context": "context",
+    },
+    "coverage": {
+        "id": {"classification": None},
+        "kind": {"classification": None},
+        "duration_s": {"classification": None},
+        "metrics.calories": {"classification": None},
+        "metrics.distance_m": {"classification": None},
+        "start_utc": {"classification": None},
+        "utc_offset": {"classification": None},
+        "start": {"classification": None},
+        "date": {"classification": None},
+        "route": {"classification": "location", "subtree": True},
+        "place": {"classification": "location", "subtree": True},
     },
     "time": {
         "from": [
@@ -317,6 +361,7 @@ class Session:
         )
         if getattr(result, "is_error", False):
             text = "".join(getattr(block, "text", "") for block in result.content)
+            # This checks the product's fixed refusal-code format, never the meaning of user text.
             code = re.search(r"\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b", text)
             raise Refused(tool, code.group(1) if code else "UNKNOWN", text)
         data = loop._result_data(result)
@@ -347,6 +392,26 @@ class Session:
 
     async def import_job(self, collection: str, **request: Any) -> Any:
         return await self.records(action="import", collection=collection, import_request=request)
+
+
+class RestOwner(Session):
+    """The authenticated owner REST facade on the recipient's running writer."""
+
+    def __init__(self, base_url: str, journey: Journey) -> None:
+        super().__init__(None, journey.timeout)
+        self.base_url, self.token = base_url, journey.rest_key
+
+    async def call(self, tool: str, **arguments: Any) -> Any:
+        status, payload = await asyncio.to_thread(
+            loop._http_json, f"{self.base_url}/api/{tool}", method="POST",
+            body=arguments, token=self.token, timeout=self.timeout,
+        )
+        error = payload.get("error")
+        if payload.get("success") is False and isinstance(error, dict):
+            raise Refused(tool, str(error.get("code")), str(error.get("message")))
+        expect(status == 200 and payload.get("success") is True,
+               f"owner REST {tool} failed", {"status": status, "payload": payload})
+        return payload["data"]
 
 
 class Journey:
