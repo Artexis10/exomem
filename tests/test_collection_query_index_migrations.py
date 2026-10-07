@@ -168,33 +168,68 @@ def test_rebuild_requires_current_full_collection_authority(store):
     assert store.connection.execute("SELECT * FROM query_projection_mappings").fetchall() == before
 
 
-def test_a_populated_collection_without_a_projection_gets_one_by_backfill_never_by_a_query(tmp_path, store):
-    """Defect: a collection imported from files, or enrolled before every collection carried a
-    projection, refuses typed queries forever, or a query builds its projection."""
+def _import_files(tmp_path, store, values, text=None):
+    """Import one file collection into the store as P1b does: its rows, and no query projection."""
     from test_collection_store_legacy_import import CONTEXT, _capture, _items
 
     from exomem.collection_store import legacy_import
-    from exomem.query_engine import runtime
-    from exomem.query_engine.typed_rows import execute_rows
-    from exomem.query_engine.validation import normalize_query
 
-    root, path = _items(tmp_path, values={"title": "Imported", "count": 3})
+    root, path = _items(tmp_path, text=text, values=values)
     with _capture(tmp_path, root, path) as (audit, captured):
         store.connection.execute("BEGIN")
         legacy_import.import_legacy_collection(store.connection, captured, audit=audit, context=CONTEXT)
         store.connection.commit()
-    logical = normalize_query({"version": 1, "select": ["title", "count"]}, collection=CID, declarations={CID: {
+
+
+def _rows(store, fields):
+    from exomem.query_engine import runtime
+    from exomem.query_engine.typed_rows import execute_rows
+    from exomem.query_engine.validation import normalize_query
+
+    logical = normalize_query({"version": 1, "select": list(fields)}, collection=CID, declarations={CID: {
         "domain": "collections", "type": "records", "vault": "fixture",
-        "fields": {"item_key": {"type": "string"}, "title": {"type": "string"}, "count": {"type": "integer"}}}}).query
+        "fields": {"item_key": {"type": "string"}, **{name: {"type": kind} for name, kind in fields.items()}}}}).query
+    with runtime.read_session(store.root, store.handle.path) as session:
+        return execute_rows(session.admit_query(logical, as_of="2026-10-07T00:00:00+00:00")).rows
 
-    def rows():
-        with runtime.read_session(store.root, store.handle.path) as session:
-            return execute_rows(session.admit_query(logical, as_of="2026-10-07T00:00:00+00:00")).rows
 
-    with pytest.raises(runtime.QueryError, match="QUERY_UNAVAILABLE"):
-        rows()
+def test_a_populated_collection_without_a_projection_gets_one_by_backfill_never_by_a_query(tmp_path, store):
+    """Defect: a collection imported from files, or enrolled before every collection carried a
+    projection, refuses typed queries forever without naming why, or a query builds its projection."""
+    from exomem.query_engine import runtime
+
+    _import_files(tmp_path, store, {"title": "Imported", "count": 3})
+    with pytest.raises(runtime.QueryError, match="QUERY_PROJECTION_BUILDING"):
+        _rows(store, {"title": "string", "count": "integer"})
     assert store.connection.execute("SELECT COUNT(*) FROM query_projection_mappings").fetchone() == (0,)
     assert store.backfill_query_indexes(CID)
     manager, plan = ready(store)
     assert plan is not None and plan.indexes == () and plan.scalars == ()
-    assert rows() == [{"title": "Imported", "count": 3}]
+    assert _rows(store, {"title": "string", "count": "integer"}) == [{"title": "Imported", "count": 3}]
+
+
+def test_a_projection_without_indexes_accepts_a_row_too_large_to_index(tmp_path, store):
+    """Defect: one stored row over the 256 KiB index cell fails the first build of a projection
+    that indexes nothing, so the collection's typed queries never become available."""
+    fields = "".join(f"    part{n}: {{type: string}}\n" for n in range(9))
+    text = manifest_text().replace("    count: {type: integer}\n", fields)
+    _import_files(tmp_path, store, {"title": "Large", **{f"part{n}": "x" * 30_000 for n in range(9)}}, text=text)
+    assert store.connection.execute("SELECT length(values_json) FROM items").fetchone()[0] > 256 * 1024
+    assert store.backfill_query_indexes(CID)
+    assert _rows(store, {"title": "string"}) == [{"title": "Large"}]
+
+
+def test_a_first_build_whose_declaration_never_normalized_fails_once_and_says_so(tmp_path, store):
+    """Defect: an imported declaration that never normalized retries its first build every tick
+    forever, or its queries refuse without naming the failed projection and its repair."""
+    from exomem.collection_store import index_migrations
+    from exomem.query_engine import runtime
+
+    text = manifest_text().replace("count: {type: integer}", "count: {type: integer, sortable: yes-please}")
+    _import_files(tmp_path, store, {"title": "Imported", "count": 3}, text=text)
+    assert not store.backfill_query_indexes(CID)
+    assert store.connection.execute("SELECT generation,state FROM query_projection_mappings").fetchall() == [
+        (1, "failed")]
+    assert index_migrations.backfill_due(store.connection) == ()
+    with pytest.raises(runtime.QueryError, match="QUERY_PROJECTION_FAILED"):
+        _rows(store, {"title": "string"})

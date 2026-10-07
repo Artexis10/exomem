@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, suppress
 from functools import wraps
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import connection, replica, schema
 
@@ -617,8 +618,10 @@ _STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
 IMPORT_IDLE_SECONDS = 1.0
 #: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
 IMPORT_RETRY_SECONDS = 30.0
-#: Rows per derived backfill batch: one batch per building collection each tick.
+#: Rows per derived backfill batch; each tick runs one batch for one building collection.
 BACKFILL_BATCH_ROWS = 128
+#: Paths per pending-view publication window: one collection's summary pages at their bounds.
+VIEW_BATCH_PATHS = 16
 #: How often it retries a vault whose store it could not open.
 OPEN_RETRY_SECONDS = 30.0
 _SERVERS: dict[Path, StoreServer] = {}
@@ -666,8 +669,8 @@ def route(command, vault_root, arguments):
     elif command == "record_memory" and arguments.get("action") == "inspect" and selector is None:
         server = None if raw is None else _server(root)
         return server if server is not None and server.runtime is not None else None
-    elif selector is None or raw is None or authority.selected_entry(
-            root, authority.parse_marker(root, raw), selector) is None:
+    elif selector is None or raw is None or (authority.selected_entry(
+            root, authority.parse_marker(root, raw), selector) is None and not _creating(root, selector)):
         return None
     server = _server(root)
     if server is None:
@@ -677,6 +680,19 @@ def route(command, vault_root, arguments):
             "Send the request to the service that serves this vault.",
         )
     return server
+
+
+def _creating(root, selector):
+    """Whether ``selector`` names the collection a served create left pending.
+
+    The marker routes it only once the create finishes, so until then its requests go to
+    the store thread, which refuses them as busy, not as a collection that does not exist.
+    """
+    from . import authority
+
+    server = _SERVERS.get(root)
+    pending = None if server is None else server.pending_create
+    return pending is not None and authority.selected_entry(root, {"collections": [pending]}, selector) is not None
 
 
 def summary_create(root, arguments):
@@ -703,6 +719,7 @@ def served_create(vault_root, arguments):
     create (``admission.create_new``), which a vault already enrolled in this store
     completes with writer authority. Enrolling a vault is the owner's offline step.
     """
+    from .. import structured_collections as collections
     from .. import writer_lease
     from . import admission, capability
 
@@ -718,11 +735,23 @@ def served_create(vault_root, arguments):
     if not session.fence_client.collection_store_fence().enrolled:
         # Served, so this vault's store was enrolled: a coordinator that no longer knows it was replaced.
         raise admission.adoption_required()
-    with server.lent():
-        return admission.create_new(
+    with server.lent() as lend:
+        result = admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
             fence_client=session.fence_client, scaffold=arguments.get("scaffold", True))
+        if result.get("status") == "pending":
+            # Committed, but its replica publication did not finish: the store stays the
+            # create's until this thread's create tick resumes it, so this request ends
+            # without a fresh checkout and says so.
+            lend.resume = False
+            server.pending_create = {"collection_id": result["collection_id"], "manifest_path":
+                                     collections._reference_key(root, arguments["manifest_path"])}
+            result = {**result, "warnings": [*result.get("warnings", ()), (
+                f"collection_publication_pending ({result.get('reason')}): the collection is created and "
+                "the service is finishing its publication; until then store requests refuse as "
+                "COLLECTION_STORE_BUSY, so retry them shortly")]}
+        return result
 
 
 def _closed(manager):
@@ -775,10 +804,11 @@ class StoreServer:
     which registers the runtime in ``_SERVING``, and so owns the store writer. Every
     store-routed request runs on it in turn, with the caller's context and principal and
     the writer bound. Between requests, while this release enables records-summary-v1,
-    it advances running import jobs one batch at a time; each batch runs under its job's
-    own bound principal, never the service's. It also advances each building projection
-    or rollup by one bounded batch, as the in-process owner. Between two requests it runs
-    one tick, the one that has waited longer. A request it cannot take within the
+    it finishes a create whose publication is pending and advances running import jobs
+    one batch at a time; each batch runs under its job's own bound principal, never the
+    service's. As the in-process owner, it also advances building projections and rollups
+    and publishes pending views, one bounded batch at a time. Between two requests it
+    runs one tick, the one that has waited longest. A request it cannot take within the
     mutation timeout refuses as retryable, so a running batch never holds an
     acknowledgement past that timeout. A vault it cannot open refuses store-routed
     requests with the reason and retries; file collections never wait on it.
@@ -790,8 +820,13 @@ class StoreServer:
         self.refusal = ("COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
         self._stack = self._scope = None
         self._retry_at = 0.0
-        self._next_tick = self._next_backfill = 0.0
+        # When each maintenance tick is next due; between two requests the most overdue one runs.
+        self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0}
+        self._views_after = None  # where the current pass over pending views continues
+        self._views_passes = 0  # completed passes since the last request
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
+        self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
+        self.pending_create = None  # the marker entry a served create left pending, until it finishes
         self._requests = deque()
         self._closed = False
         self._condition = threading.Condition()
@@ -828,18 +863,17 @@ class StoreServer:
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
-                due = min(self._next_tick, self._next_backfill)
+                due = min(self._ticks.values())
                 request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
                 if request is not None:
                     self._serve(request)
-                    # The request may have started or continued a job, or revised a declaration.
-                    self._next_tick = self._next_backfill = 0.0
+                    # The request may have started a job, revised a declaration or left views pending.
+                    self._ticks = dict.fromkeys(self._ticks, 0.0)
+                    self._views_after, self._views_passes = None, 0
                 elif time.monotonic() >= due:
                     # One tick per turn, so a waiting request is taken between any two.
-                    if self._next_tick <= self._next_backfill:
-                        self._next_tick = time.monotonic() + self._import_tick()
-                    else:
-                        self._next_backfill = time.monotonic() + self._backfill_tick()
+                    name = min(self._ticks, key=self._ticks.get)
+                    self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
 
@@ -920,24 +954,56 @@ class StoreServer:
         the rest of the request is bound to a fresh checkout. Its mutation boundary and
         active mutation stay held throughout, so no release or publication runs meanwhile.
         """
-        from .preview import preview_store
+        from .preview import preview_store, unbound
 
         manager, thread = self.manager, threading.get_ident()
         with manager._lock:
             held = manager._store_borrowers.pop(thread, 0)
+        # The producer clears ``resume`` when it leaves the store to a pending create, which
+        # no fresh checkout can enter; the rest of the request then runs unbound.
+        lend = SimpleNamespace(resume=True)
 
         def resume():
             with manager._lock:
                 manager._store_borrowers[thread] = manager._store_borrowers.get(thread, 0) + held
-            self._scope.enter_context(preview_store(self.root, self.runtime))
+            self._scope.enter_context(preview_store(self.root, self.runtime) if lend.resume else unbound())
 
         try:
-            yield
+            yield lend
         except BaseException:
             with suppress(Exception):
                 resume()
             raise
         resume()
+
+    def _create_tick(self):
+        """Finish a create whose replica publication did not complete; returns the seconds until the next tick.
+
+        Until it finishes, the create owns the store and every store request refuses as
+        busy. It resumes through the create's own recovery and publication, as the
+        in-process owner, never waiting for an owner step. A publication still pending
+        retries after the idle interval; any other refusal after the retry interval.
+        """
+        from ..governance import principal
+        from . import admission, authority, capability
+
+        if self.runtime is None or self.session is None or not capability.records_summary_enabled():
+            return IMPORT_IDLE_SECONDS
+        try:
+            with closing(connection.open_reader(self.runtime.path)) as reader:
+                if authority.pending_create(reader) is None:
+                    self.pending_create = None
+                    return IMPORT_IDLE_SECONDS
+            with principal.library_scope():
+                result = admission.resume_local(self.session, self.manager, fence_client=self.session.fence_client)
+        except Exception:  # noqa: BLE001 - the create stays pending and is retried
+            logger.warning("a pending collection create could not finish; retrying later", exc_info=True)
+            return IMPORT_RETRY_SECONDS
+        if result["status"] == "marker_admitted":
+            self.pending_create = None
+            return 0.0
+        logger.warning("a pending collection create is still %s: %s", result["status"], result.get("reason"))
+        return IMPORT_IDLE_SECONDS if result["status"] == "pending" else IMPORT_RETRY_SECONDS
 
     def _import_tick(self):
         """Advance running import jobs by one batch; returns the seconds until the next tick."""
@@ -960,19 +1026,20 @@ class StoreServer:
         return 0.0 if done["batches"] else IMPORT_RETRY_SECONDS
 
     def _backfill_tick(self):
-        """Advance each building projection or rollup by one batch; returns the seconds until the next tick.
+        """Advance one building projection or rollup by one batch; returns the seconds until the next tick.
 
-        A plain read finds the work, so an idle store takes no lease and no checkout. Each
-        batch is its own writer transaction under the mutation boundary, as the in-process
-        owner, and re-resolves that authority. The tick starts no batch past half the
-        mutation timeout, so a request waiting for the thread is taken in time. A collection
-        whose batch is refused waits the retry interval; the others keep advancing.
+        Like imports, it runs only while this release enables records-summary-v1, so slice
+        rollback stops it. A plain read finds the work, so an idle store takes no lease and
+        no checkout. Each tick runs one collection's projection and rollup batch in one
+        writer transaction under the mutation boundary, as the in-process owner, taking the
+        building collections in turn; a waiting request is taken before the next batch. A
+        collection whose batch is refused waits the retry interval; the others keep advancing.
         """
         from ..governance import principal
-        from . import index_migrations
+        from . import capability, index_migrations
         from .preview import _mutate, preview_store
 
-        if self.runtime is None:
+        if self.runtime is None or not capability.records_summary_enabled():
             return IMPORT_IDLE_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
@@ -986,26 +1053,54 @@ class StoreServer:
         due = [row for row in due if row[0] not in self._backfill_refused]
         if not due:
             return min((at - now for at in self._backfill_refused.values()), default=IMPORT_IDLE_SECONDS)
-        deadline = now + self.manager._mutation_timeout_seconds / 2
+        collection_id, projection, rollup = next((row for row in due if row[0] > self._backfill_last), due[0])
+        self._backfill_last = collection_id
         try:
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                for collection_id, projection, rollup in due:
-                    if time.monotonic() >= deadline:
-                        break
-                    try:
-                        if projection:
-                            _mutate(self.root, writer.backfill_query_indexes, collection_id,
-                                    limit=BACKFILL_BATCH_ROWS)
-                        if rollup:
-                            _mutate(self.root, writer.backfill_rollups, collection_id, limit=BACKFILL_BATCH_ROWS)
-                    except Exception:  # noqa: BLE001 - one refused collection leaves the others to advance
-                        logger.warning("derived backfill of %s could not advance; retrying later",
-                                       collection_id, exc_info=True)
-                        self._backfill_refused[collection_id] = time.monotonic() + IMPORT_RETRY_SECONDS
+                try:
+                    _mutate(self.root, writer.backfill_derived, collection_id, limit=BACKFILL_BATCH_ROWS,
+                            projection=projection, rollup=rollup)
+                except Exception:  # noqa: BLE001 - one refused collection leaves the others to advance
+                    logger.warning("derived backfill of %s could not advance; retrying later",
+                                   collection_id, exc_info=True)
+                    self._backfill_refused[collection_id] = time.monotonic() + IMPORT_RETRY_SECONDS
         except Exception:  # noqa: BLE001 - a store that cannot be checked out is retried later
             logger.warning("derived backfill could not check out the store; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
         return 0.0
+
+    def _views_tick(self):
+        """Publish pending views, such as summary pages, a window at a time; returns the seconds until the next tick.
+
+        A committed change leaves summary pages pending; they publish here, after its
+        acknowledgement, through the store's reconcile path, as the in-process owner. A
+        window holds at most ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages
+        at their bounds. A view installed by one pass is confirmed current by the next, so
+        two passes follow each request; views still pending then, which cannot publish yet,
+        wait for the next request or the retry interval.
+        """
+        from ..governance import principal
+        from . import capability
+        from .preview import _mutate, preview_store
+
+        if self.runtime is None or not capability.records_summary_enabled():
+            return IMPORT_IDLE_SECONDS
+        try:
+            with closing(connection.open_reader(self.runtime.path)) as reader:
+                if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
+                    self._views_after, self._views_passes = None, 0
+                    return IMPORT_IDLE_SECONDS
+            with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
+                                 after=self._views_after, pending_only=True)
+        except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
+            logger.warning("pending collection views could not publish; retrying later", exc_info=True)
+            self._views_after = None
+            return IMPORT_RETRY_SECONDS
+        self._views_after = result["next_path"]
+        if self._views_after is None:
+            self._views_passes += 1
+        return 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS
 
     def _close(self):
         with self._condition:

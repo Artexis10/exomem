@@ -992,8 +992,8 @@ class UnreadableManifest:
     path: str
     code: str
     message: str
-    #: The profile a store-routed row's manifest declares, so a profile-scoped consumer
-    #: skips another profile's row; None when no profile is legible, which counts for all.
+    #: A store-routed row's profile as its marker entry records it, so a profile-scoped
+    #: consumer skips another profile's row; None when unrecorded, which counts for all.
     semantic_profile: str | None = None
 
 
@@ -1151,17 +1151,6 @@ def discover_collections(
     return manifests
 
 
-def _declared_profile(root: Path, rel: str) -> str | None:
-    """The semantic profile a manifest view declares, read without loading it as a collection."""
-    try:
-        data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)
-        frontmatter, _, _ = vault.parse_frontmatter(data.decode("utf-8"), strict=True)
-    except (vault.PathGuardError, ValueError):
-        return None
-    profile = frontmatter.get("semantic_profile")
-    return profile if isinstance(profile, str) and profile in _SUPPORTED_PROFILES else None
-
-
 def discover_collections_with_errors(
     vault_root: Path,
     *,
@@ -1234,12 +1223,13 @@ def discover_collections_with_errors(
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
-        if marker_error is not None or (
-                marker is not None and authority.selected_entry(root, marker, safe[1]) is not None):
+        entry = None if marker is None else authority.selected_entry(root, marker, safe[1])
+        if marker_error is not None or entry is not None:
             if writer is None and authorize(safe[1]):
                 # A routed manifest is the store's generated view, never a file collection,
-                # and only the service that serves the store can read it. Under an unreadable
-                # marker, any manifest may be one.
+                # and only the service that serves the store can read it. Its profile comes
+                # from the marker, never from that editable view. Under an unreadable marker,
+                # any manifest may be one, with no known profile.
                 if marker_error is None:
                     code, message = "COLLECTION_STORE_UNAVAILABLE", (
                         "this collection lives in the collection store, which only the running Exomem service serves")
@@ -1247,7 +1237,8 @@ def discover_collections_with_errors(
                     code, message = marker_error.code, (
                         "the collection store's authority marker is unreadable, so no collection here can be "
                         "told apart from one the store owns")
-                unreadable.append(UnreadableManifest(safe[1], code, message, _declared_profile(root, safe[1])))
+                unreadable.append(UnreadableManifest(
+                    safe[1], code, message, None if entry is None else entry.get("semantic_profile")))
                 if len(stored) + len(unreadable) > max_raw_candidates:
                     raise CollectionError(
                         "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"

@@ -1109,10 +1109,11 @@ def _deliver_and_adopt(found, copy, why):
     assert _adopt(found, why)[1]["status"] == "adopted"
 
 
-def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(abc, tmp_path, monkeypatch, capsys):
+def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(abc, tmp_path, monkeypatch):
     """Defect: reconcile marks evidence done while dropping part of its delta, holds one item twice,
-    re-records a repeat, or leaves the owner no exit from evidence it cannot hold."""
-    from exomem import __main__ as cli
+    re-records a repeat, or leaves the owner no exit from evidence it cannot hold while the service
+    holds the lease."""
+    from exomem import commands
     from exomem.collection_store import runtime
 
     monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)  # each round's write publishes promptly
@@ -1146,9 +1147,10 @@ def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(
         assert (plan["preview"]["items"], repeat["held_ids"], repeat["transitions"]) == ([], [], [])
         assert (abc.meta()[schema.META_COMMIT_SEQ], _held_later(abc)) == (sequence, [2])
     _lease_environment(abc, monkeypatch)
-    assert cli._collections_main(["adopt-local", "--vault", str(abc.root), "--why", "the copy-only collection is gone",
-                                  "--preview-id", plan["preview_id"], "--acknowledge-skipped"]) == 0
-    acknowledged = json.loads(capsys.readouterr().out)
+    # The owner's exit while the service holds the lease: maintain_memory, applied in the serving session.
+    acknowledged = commands.op_maintain_memory(
+        abc.root, mode="collections-store-adopt-local", apply=True, plan_id=plan["preview_id"],
+        why="the copy-only collection is gone", acknowledge_skipped=True)
     assert {tuple(receipt["ids"]["skipped_collection_absent"]) for receipt in acknowledged["transitions"]} == {
         tuple(f"{entry['collection_id']}:{entry['item_key']}" for entry in plan["preview"]["skipped"])}
     assert sorted(acknowledged["reconciled"]) == sorted(source["sha256"] for source in plan["preview"]["sources"])

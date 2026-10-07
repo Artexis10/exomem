@@ -587,8 +587,7 @@ def mixed(store):
     marker = {
         "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
         "authority_epoch": 1,
-        "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
-                         "authority": "store", "store_id": sid}],
+        "collections": [authority.marker_entry(CID, manifest_path(), sid, "records")],
         "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
     }
     return store, json.dumps(marker).encode(), before
@@ -819,8 +818,7 @@ def test_commit_acknowledgement_survives_actual_runtime_fence(runtime):
         target = json.dumps({
             "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
             "authority_epoch": 1,
-            "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
-                             "authority": "store", "store_id": sid}],
+            "collections": [authority.marker_entry(CID, manifest_path(), sid, "records")],
             "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
         }).encode()
 

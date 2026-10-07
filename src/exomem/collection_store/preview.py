@@ -50,6 +50,20 @@ def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[Collec
             _BOUND.reset(token)
 
 
+@contextmanager
+def unbound() -> Iterator[None]:
+    """Bind no writer for the rest of this call context, as after a create left the store pending.
+
+    The vault's marker does not route that collection yet, so the call's remaining reads
+    take ordinary file authority.
+    """
+    token = _BOUND.set(None)
+    try:
+        yield
+    finally:
+        _BOUND.reset(token)
+
+
 def bound_writer(vault_root: Path) -> CollectionWriter | None:
     binding = _BOUND.get()
     return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
@@ -224,6 +238,15 @@ def dispatch(
         args["refresh_presentation"] = args.get("refresh_presentation") is True
         return True, _mutate(vault_root, writer.update_record, collection, **args)
     if action == "revise":
+        if binding[2] and isinstance(args.get("manifest_text"), str):
+            from .admission import require_summary_manifest
+            from .summary import SUMMARY
+
+            # Under the caller's own authority first, so a hidden collection still refuses as not found.
+            # A summary collection stays one; an items-mode store collection from before S1 revises as before.
+            with writer.read_collection(collection, facade_profile=profile) as current:
+                if current.view_mode == SUMMARY:
+                    require_summary_manifest(vault_root, current.path, args["manifest_text"])
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)

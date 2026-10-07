@@ -1860,11 +1860,11 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
                 }
                 for manifest in manifests
             ],
-            # Both profiles, always. A manifest this sweep could not read has no
-            # legible profile, so it cannot be filed under one -- and whichever
-            # inventory was asked for, this file is a hole in the answer. An
-            # empty list here is the honest "swept, everything read"; omitting
-            # the key would make an unread file indistinguishable from no file.
+            # A manifest this sweep could not read is listed under every profile
+            # unless the store's marker records its profile: whichever inventory
+            # was asked for, an unread file of unknown profile is a hole in the
+            # answer. An empty list here is the honest "swept, everything read";
+            # omitting the key would make an unread file indistinguishable from no file.
             "unreadable_manifests": [
                 {"path": row.path, "error_code": row.code, "message": row.message}
                 for row in unreadable

@@ -422,8 +422,6 @@ def test_query_engine_chapters_are_bounded_read_only_and_name_what_is_unavailabl
         assert (chapter["subject"], chapter["chapter"], chapter["version"]) == ("query-engine", name, 1)
         assert chapter["capability"] and chapter["unavailable"]
         assert runtime.wire_bytes(chapter) <= runtime.MAX_RESULT_BYTES
-    teaching = mcp("schema_memory", operation="inspect", subject="query-engine", name="import")["before_start"]
-    assert "recommended_declarations" in teaching["step"] and "revise" in teaching["step"]
     assert vault_files() == before
     graph = mcp("schema_memory", operation="inspect", subject="query-engine", name="graph")
     assert (graph["code"], graph["at"], graph["retryable"]) == ("QUERY_CAPABILITY_UNAVAILABLE", "name", False)

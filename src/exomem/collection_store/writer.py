@@ -963,10 +963,11 @@ class CollectionWriter:
             raise result.error
         return preserved
 
-    def reconcile_views(self, *, limit=64, after=None):
+    def reconcile_views(self, *, limit=64, after=None, pending_only=False):
         """Recover one path window; inspect never writes or invokes this path.
 
         The window does not bound file bytes, preserved inputs or directory enumeration.
+        ``pending_only`` takes only views awaiting publication, as the serving store thread does.
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
             raise ValueError("reconcile limit must be between 1 and 1024")
@@ -979,8 +980,8 @@ class CollectionWriter:
             result["recovered_stages"] = batch.recovered_stages
             cursor = self.connection.execute(
                 "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') AND path>? "
-                "ORDER BY path LIMIT ?",
-                (after or "", limit + 1),
+                "AND (? OR state='pending') ORDER BY path LIMIT ?",
+                (after or "", not pending_only, limit + 1),
             )
             rows = [dict(zip((c[0] for c in cursor.description), row, strict=True)) for row in cursor.fetchall()]
             if len(rows) > limit:
@@ -1189,37 +1190,35 @@ class CollectionWriter:
                     for cid, facts in affected.items()}, why=why)
         return result
 
-    def backfill_query_indexes(self, collection, *, limit=128) -> bool:
-        """Resume one derived batch under the writer lease and current authority.
+    def backfill_derived(self, collection, *, limit=128, projection=True, rollup=True) -> tuple[bool, bool]:
+        """Advance this collection's query projection and building rollups by one batch each, in one transaction.
 
-        This is internal maintenance, not a public query; the serving store
-        thread drives it. A collection with no projection at all starts its
-        first build here. Canonical items, generations and mutation audit
-        remain unchanged.
+        Internal maintenance under the writer lease and current authority, not a
+        public route; the serving store thread drives it. A collection with no
+        projection at all starts its first build here. Canonical items,
+        generations and audit are unchanged. Returns whether the projection
+        published (True only on the batch that publishes it) and whether every
+        declared rollup is ready; until then the planner reads base rows.
         """
         with self._mutation():
             _, manifest, declared = self._collection(collection)
             accounted = index_migrations.AccountedWriter(self.connection, self._execute)
-            index_migrations.begin_missing(accounted, manifest.collection_id, declared)
-            complete = index_migrations.backfill_batch(accounted, manifest.collection_id, limit=limit)
+            published = ready = False
+            if projection:
+                index_migrations.begin_missing(accounted, manifest.collection_id, declared)
+                published = index_migrations.backfill_batch(accounted, manifest.collection_id, limit=limit)
+            if rollup:
+                ready = rollups.backfill_batch(accounted, manifest.collection_id, limit=limit)
             self._precommit(manifest)
-        return complete
+        return published, ready
+
+    def backfill_query_indexes(self, collection, *, limit=128) -> bool:
+        """One projection batch alone; True when it publishes the projection."""
+        return self.backfill_derived(collection, limit=limit, rollup=False)[0]
 
     def backfill_rollups(self, collection, *, limit=128) -> bool:
-        """Advance this collection's building rollups by one batch under the writer lease and current authority.
-
-        Internal maintenance like the query-index backfill, not a public route:
-        canonical items, generations and audit are unchanged. True once every
-        declared rollup is ready; until then the planner reads base rows.
-        """
-        with self._mutation():
-            _, manifest, _ = self._collection(collection)
-            complete = rollups.backfill_batch(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                manifest.collection_id, limit=limit,
-            )
-            self._precommit(manifest)
-        return complete
+        """One rollup batch alone; True once every declared rollup is ready."""
+        return self.backfill_derived(collection, limit=limit, projection=False)[1]
 
     def migrate_typed_encoding(self, collection, *, limit=128) -> str:
         """Advance this collection's forward typed-v1 encoding migration by one batch.
@@ -1585,12 +1584,38 @@ class CollectionWriter:
         """
         for path in summary.page_paths(manifest):
             self._publication.pending = True
+            self._confirm_installed(path)
             self._execute(
                 "INSERT INTO projection_state(path,collection_id,row_id,kind,pending_row_version,pending_sha256,state) "
                 "VALUES (?,?,NULL,'summary',?,NULL,'pending') ON CONFLICT(path) DO UPDATE SET "
                 "pending_row_version=excluded.pending_row_version,pending_sha256=NULL,state='pending'",
                 (path, manifest.collection_id, generation),
             )
+
+    def _confirm_installed(self, path):
+        """Record a page that a publication installed and no reconcile confirmed yet, before a new basis replaces it.
+
+        Reconcile confirms an installed page on its next pass. A commit in between would
+        otherwise clear the page's digest, so its bytes would match neither recorded digest
+        and read as a foreign edit that never publishes again.
+        """
+        row = self.connection.execute(
+            "SELECT pending_sha256 FROM projection_state WHERE path=? AND pending_sha256 IS NOT NULL", (path,)
+        ).fetchone()
+        if row is None:
+            return
+        batch = self._publication
+        try:
+            opened = batch._fs().file(batch._parent(path), Path(path).name)
+            if not opened.ok:
+                return
+            with opened.require() as file:
+                raw = batch._fs().read(file).require()
+        except (held_fs.HeldFsError, OSError):
+            return
+        if views._digest(raw) == row[0]:
+            self._execute("UPDATE projection_state SET published_row_version=pending_row_version,"
+                          "published_sha256=pending_sha256 WHERE path=?", (path,))
 
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
                     *, ordinal=0, queue_log=True):

@@ -420,7 +420,6 @@ def test_source_release_revoked_between_batches_pauses_with_exact_counts(
 ):
     """A job that proves source release only at start keeps importing after revocation."""
     from exomem.collection_store.writer import CollectionWriter
-    from exomem.structured_collections import CollectionError
 
     setup(store)
     small(monkeypatch)
@@ -434,7 +433,7 @@ def test_source_release_revoked_between_batches_pauses_with_exact_counts(
     def refuse_first_record(self, operation, *args, **kwargs):
         if not refused_once:
             refused_once.append(operation)
-            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            raise connection.busy("collection store handoff is in progress")  # as during shutdown
         return record(self, operation, *args, **kwargs)
 
     monkeypatch.setattr(CollectionWriter, "record_control_transition", refuse_first_record)

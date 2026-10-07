@@ -1623,8 +1623,10 @@ def _pause(root: Path, writer, job: _Job, reason: str) -> str:
     try:
         return _settle(root, writer, job, "partial", reason)
     except Exception as error:  # noqa: BLE001 - never escalated to a job failure
-        code = getattr(error, "code", type(error).__name__)
-        coded = isinstance(error, (collections.CollectionError, connection.CollectionStoreError))
+        code = getattr(error, "code", None)
+        # Any refusal that carries a code is an expected state, the store's BUSY OpError included.
+        coded = isinstance(code, str)
+        code = code if coded else type(error).__name__
         first = not coded and job.id not in _traced
         if first:
             _traced[job.id] = None

@@ -13,6 +13,7 @@ from exomem import (
     due_state,
     plan_progress,
     record_formats,
+    record_governance,
     records,
     records_disposition,
     working_set_state,
@@ -127,12 +128,24 @@ def test_mixed_foreign_store_identity_refuses_c_without_displacing_file_a(mixed)
             record_memory(mixed.root, "query", collection=manifest_path())
 
 
-def test_an_unbound_sweep_names_the_profile_of_a_routed_row_so_a_planning_scan_skips_it(mixed):
-    """Defect: a planning scan counts a store-routed Records collection as an unavailable Planning collection."""
+def test_an_unbound_sweep_takes_a_routed_row_profile_from_the_marker_never_its_view(mixed):
+    """Defect: a planning scan counts a store-routed Records collection as an unavailable Planning
+    collection, or an edit of its generated view drops it from the Records inventory, which then
+    reports a complete scan."""
+    # The fixture's marker predates entries recording their profile: the row counts for every profile.
+    assert plan_progress.review(mixed.root)["collections_unavailable"] == 1
+    marker = authority.parse_marker(mixed.root, authority.read_marker(mixed.root))
+    marker["collections"] = [authority.marker_entry(CID, manifest_path(), marker["store_id"], "records")]
+    authority.marker_path(mixed.root).write_text(json.dumps(marker))
+    view = mixed.root / manifest_path()
+    view.write_text(view.read_text().replace("semantic_profile: records", "semantic_profile: planning", 1))
+    assert "semantic_profile: planning" in view.read_text()
     _, errors = collections.discover_collections_with_errors(mixed.root)
     assert [(error.path, error.code, error.semantic_profile) for error in errors] == [
         (manifest_path(), "COLLECTION_STORE_UNAVAILABLE", "records")]
     assert plan_progress.review(mixed.root)["collections_unavailable"] == 0
+    inventory = record_governance.inventory_collections(mixed.root)
+    assert [row["path"] for row in inventory["unreadable_manifests"]] == [manifest_path()]
 
 
 def test_a_malformed_marker_leaves_every_manifest_unreadable_and_no_sweep_crashing(mixed):
@@ -144,8 +157,8 @@ def test_a_malformed_marker_leaves_every_manifest_unreadable_and_no_sweep_crashi
     assert sorted(error.path for error in errors) == sorted(
         [manifest_path().replace("Work", "Legacy"), manifest_path(), manifest_path("planning").replace("Work", "Legacy")])
     assert {error.code for error in errors} == {"COLLECTION_STORE_MARKER_CONFLICT"}
-    # Only the Planning manifest counts against a planning scan.
-    assert plan_progress.review(mixed.root)["collections_unavailable"] == 1
+    # With no readable marker no row's profile is known, so each one counts against a planning scan.
+    assert plan_progress.review(mixed.root)["collections_unavailable"] == 3
 
 
 def test_mixed_hidden_store_projection_does_not_consume_discovery_budget(mixed):

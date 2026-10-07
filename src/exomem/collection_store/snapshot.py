@@ -53,7 +53,18 @@ def _head(commit_seq: int, head: str | None) -> None:
         tokens._hex64(head, "store head")
 
 
-def _validate(conn: sqlite3.Connection, check: Callable[[], None]) -> dict[str, str]:
+def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[str, str]:
+    # An error from the caller's own check (custody, fencing, a transient read) is re-raised
+    # as itself: only the copy's own validation may call the copy invalid.
+    stopped: list[BaseException] = []
+
+    def check() -> None:
+        try:
+            raw_check()
+        except BaseException as error:
+            stopped.append(error)
+            raise
+
     try:
         check()
         if conn.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
@@ -103,6 +114,8 @@ def _validate(conn: sqlite3.Connection, check: Callable[[], None]) -> dict[str, 
             raise ValueError("current instance is absent from lineage")
         return metadata
     except (KeyError, TypeError, ValueError, AttributeError, sqlite3.DatabaseError) as error:
+        if stopped and error is stopped[-1]:
+            raise
         raise connection.CollectionStoreError(
             "COLLECTION_SNAPSHOT_INVALID", "copied store failed snapshot validation"
         ) from error

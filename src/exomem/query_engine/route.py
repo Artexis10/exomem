@@ -33,6 +33,10 @@ _REPAIRS = {
     "QUERY_CURSOR_STALE": ("page.after", "The collection changed; restart from the first page.", False),
     "QUERY_UNSUPPORTED": ("query", "Use only the operations the query-engine chapter lists.", False),
     "QUERY_CAPABILITY_UNAVAILABLE": ("name", "Use name collections or import.", False),
+    "QUERY_PROJECTION_BUILDING": ("collection", "Retry shortly; the service is building this collection's "
+                                  "query projection.", True),
+    "QUERY_PROJECTION_FAILED": ("collection", "Revise the collection's declaration; its query projection failed "
+                                "on the declaration or on a stored value.", False),
 }
 
 
