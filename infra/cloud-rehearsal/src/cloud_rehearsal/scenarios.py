@@ -446,6 +446,8 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
     pod = ctx.runtime_pod(ctx.a.cell_id)
     namespace = namespace_name(ctx.a.cell_id)
     pvc = ctx.kube_json("get", "pvc", "cell-data", "--namespace", namespace)
+    if pvc["spec"].get("storageClassName") != ctx.report.stages["platform"]["hetzner_class"]:
+        raise StepFailure("the Hetzner-domain cell's claim uses another storage class")
     record.evidence.update(
         {
             "provision_seconds": round(provision, 2),
