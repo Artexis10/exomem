@@ -312,7 +312,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Governed lifecycle, restart persistence, and transport shutdown
+      # The one run also drives the S1 summary-collection journey
+      # (scripts/e2e_s1_summary_journey.py): dark and released phases on the same
+      # installed wheel, preserved-source import with a mid-job restart, daily queries
+      # against an independent reference, and file collections left unchanged.
+      - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
       # The harness prints the tail inline; this keeps the whole log for the
       # failures whose cause is older than the tail.

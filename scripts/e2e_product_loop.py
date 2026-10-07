@@ -2737,6 +2737,31 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cwd=work,
             timeout=max(60.0, args.request_timeout * 8),
         )
+        # Its own module: the wheel is built once above, and this journey restarts the
+        # service, rewrites one installed file and imports a large export.
+        print("product-e2e: S1 Records summary journey (dark, released, import, restart, query)")
+        s1_journey = _run(
+            [
+                str(python),
+                str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
+                "--python",
+                str(python),
+                "--executable",
+                str(executable),
+                "--vault",
+                str(tmp / "s1-vault"),
+                "--work",
+                str(work / "s1-journey"),
+                "--home",
+                str(home),
+                "--request-timeout",
+                str(args.request_timeout),
+            ],
+            env=env,
+            cwd=work,
+            timeout=max(180.0, args.request_timeout * 14),
+        )
+        print(s1_journey.stdout.strip().splitlines()[-1])
     elapsed = time.monotonic() - started
     if elapsed > args.budget_seconds:
         raise TimeoutError(
