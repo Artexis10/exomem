@@ -48,7 +48,7 @@ Under v2 additive authority the batch writer classifies every staged write. The 
 
 ### 7. One governance decision point
 
-`egress.owner_only_aggregate` decides. When it returns no refusal (the owner, an ungoverned vault, or an unbound call), a save takes effect at once. Otherwise:
+`egress.owner_only_aggregate` decides. When it returns no refusal, a save takes effect at once. The shared decision checks verified owner authority, unbound internal calls and the current hosted exemption. Empty file policy alone does not make a bound nonowner unrestricted: RAW protects whole-vault metadata too. Registry code must reuse that decision without a second authority rule. Otherwise:
 
 - `save` records a pending work item in the owner's `review_memory(mode="vocabulary")` queue, in the registry's review family, carrying the reason and the delta. The registry is unchanged. A registry without a review family refuses with `audience_restricted`.
 - `restore` refuses with `audience_restricted`.

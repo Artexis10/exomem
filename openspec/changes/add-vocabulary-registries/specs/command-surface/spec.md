@@ -20,9 +20,9 @@ The existing operation names (`save-entity-types`, `resolve-entity-type`, `propo
 - **THEN** the save is refused and the overlay is unchanged
 
 ### Requirement: Registry saves follow the owner governance rule
-The governance decision for a registry save SHALL be `owner_only_aggregate`. When it returns no refusal, a save SHALL take effect at once. Under a governed policy, a `save` by any other principal SHALL leave the registry unchanged and SHALL record a pending work item in `review_memory(mode="vocabulary")` that carries the reason and the delta and is visible to the owner only; a registry without a review family SHALL refuse with `audience_restricted`. A `restore` by such a principal SHALL refuse with `audience_restricted`. Usage counts and save reasons SHALL be served to the owner only.
+The governance decision for a registry save SHALL be `owner_only_aggregate`. When it returns no refusal, a save SHALL take effect at once. When it refuses the caller, a `save` SHALL leave the registry unchanged and SHALL record a pending work item in `review_memory(mode="vocabulary")`. That item SHALL carry the reason and delta and remain visible to the owner only. A registry without a review family SHALL refuse with `audience_restricted`. A `restore` by such a caller SHALL refuse with `audience_restricted`. Usage counts and save reasons SHALL follow the same shared admission decision, including RAW protection without configured file policy.
 
 #### Scenario: A delegate's save becomes a pending proposal
-- **WHEN** a restricted principal saves a new entity type on a governed vault
+- **WHEN** a bound principal refused by `owner_only_aggregate` saves a new entity type, with or without configured file policy
 - **THEN** the response reports a pending vocabulary item and the registry hash is unchanged
 - **AND** the owner's `review_memory(mode="vocabulary")` lists the item with the delegate's reason and delta
