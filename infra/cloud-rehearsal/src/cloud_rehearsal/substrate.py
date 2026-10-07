@@ -39,10 +39,9 @@ from .infra import PG_DATABASE, PG_ROLES, Stack
 from .shell import run, wait_for
 
 SUBSTRATE_REPOSITORY = "https://github.com/substrate-systems/substrate.git"
-# Substrate main with #181 (Cloud deletion finish, paid Cloud activation, the
-# gateway's tenant-status grant) and #183 (RFC 7636 verifiers, 127.0.0.1
-# loopback redirects). Bump deliberately.
-SUBSTRATE_COMMIT = "2b387300e7a69786b8d507e15ce5141b9371eab2"
+# Substrate #214 supplies the observed growth column that cellctl reads.
+# Pin its main merge commit so the rehearsal uses the shipped schema.
+SUBSTRATE_COMMIT = "370597b136518540de374bc376b06b59a3fb3c9e"
 NODE_IMAGE = "node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 MCP_PATH = "/mcp"
 MCP_URL = f"https://{tls.MCP_HOST}{MCP_PATH}"

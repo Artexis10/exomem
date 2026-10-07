@@ -199,7 +199,7 @@ kubectl -n exomem-cloud scale deployment cellctl --replicas=0 \
 
 Go on only after `stopped; continue`; otherwise follow [recovery](#if-a-step-fails-after-step-5).
 
-While cellctl is paused, no cell reconciles, backs up or upgrades. Keep the pause to this procedure. Only a deploy of the platform chart would bring cellctl back early, so run no platform deploy until step 7.
+While cellctl is paused, no cell reconciles, backs up or upgrades. Keep the pause to this procedure. Only a deploy of the platform chart would bring cellctl back early, so run no platform deploy until step 7. A running cellctl restores the cell's replica at once, because the row still reads `running`, and the runtime would start over a half-swapped vault.
 
 ## 6. Unpack and swap
 
@@ -310,7 +310,7 @@ kubectl -n exomem-cloud scale deployment cellctl --replicas=1
 kubectl -n exomem-cloud rollout status deployment/cellctl --timeout=300s
 ```
 
-Scale the StatefulSet back by hand, as above. cellctl will not do it. Its row still reads `running`, so it only checks readiness and never re-applies the replica count. `cell-init` migrates state for the new vault, and the runtime serves while its indexes build in the background. A large vault takes minutes to become fully searchable.
+Scale the StatefulSet back by hand, as above, before you resume cellctl, so the cell starts while you watch it. cellctl would also restore the replica when it resumes: its row still reads `running`, and it applies a served cell that runs no replica again. `cell-init` migrates state for the new vault, and the runtime serves while its indexes build in the background. A large vault takes minutes to become fully searchable.
 
 ## 8. Verify
 

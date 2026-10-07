@@ -173,6 +173,23 @@ def test_the_current_holds_job_and_only_its_own_pod_answer() -> None:
     assert observation.backup_job_snapshot_id == "fresh-snapshot"
 
 
+@pytest.mark.parametrize(
+    ("message", "reported"),
+    # The vault check's own code reaches the operator; any other message a
+    # failed Job leaves (restic's, a shell's) may name vault content, so none does.
+    [("BACKUP_SOURCE_NOT_A_VAULT", "BACKUP_SOURCE_NOT_A_VAULT"), ("open /data/vault/notes/private.md: denied", None)],
+)
+def test_a_failed_backup_reports_only_its_value_free_code(message: str, reported: str | None) -> None:
+    current_backup = hold_job_name("cell-backup", CURRENT_HOLD)
+    pod = _job_pod(current_backup, snapshot_id=message)
+    pod.status.container_statuses[0].state.terminated.exit_code = 1
+
+    observation = _client(hold_started_at=CURRENT_HOLD, jobs={current_backup: _job(failed=True)},
+                          pods=[pod]).observe(CELL_ID, NAMESPACE)
+
+    assert (observation.backup_job_failed, observation.backup_job_failure_code) == (True, reported)
+
+
 def test_the_current_holds_failed_backup_is_observed() -> None:
     jobs = {
         hold_job_name("cell-backup", EARLIER_HOLD): _job(succeeded=True),
