@@ -310,6 +310,7 @@ def selected_current_values(conn, layout: Layout, row_id: int, selection, *, max
     from io import BytesIO
 
     from ..query_engine.selected_values import read_selected_tree
+    from .field_admission import WHOLE_SUBTREE
 
     selected = [(ordinal, name) for ordinal, name in enumerate(layout.fields) if name in selection]
     columns = [f"t.{part}{ordinal}" for ordinal, _ in selected for part in "tvk"]
@@ -326,9 +327,11 @@ def selected_current_values(conn, layout: Layout, row_id: int, selection, *, max
     result = {}
     for index, (_, name) in enumerate(selected):
         tag, value, key = values[2 + index * 3:5 + index * 3]
-        if tag == JSON and selection[name] is not True:
+        if tag == JSON and selection[name] is not WHOLE_SUBTREE:
             decoded = read_selected_tree(BytesIO(value.encode()), selection[name], max_bytes=max_bytes, check=check)
         else:
+            if selection[name] is not True and selection[name] is not WHOLE_SUBTREE and tag not in (MISSING, NULL):
+                raise TypedStorageError("stored scalar does not match admitted field shape")
             decoded = decode_value(tag, value, key)
         if decoded is not _ABSENT:
             result[name] = decoded

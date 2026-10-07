@@ -77,7 +77,7 @@ def _codec(session):
 
 def _visible(admitted, dependencies):
     plan = admitted.session._field_plans[admitted.query.source.ref]
-    if admitted.uniform and all(plan.fields.get(name) is True for name in dependencies - {"item_key"}):
+    if admitted.uniform and dependencies - {"item_key"} <= plan.whole_fields:
         basis = query_freshness.uniform_basis(admitted.session.connection, admitted.query.source.ref, dependencies)
         if basis is None:
             raise QueryError("QUERY_UNAVAILABLE")

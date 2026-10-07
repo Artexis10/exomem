@@ -148,12 +148,12 @@ def _plan(session, collection_id: str, shape: _Shape, uniform: bool) -> _Plan:
         return _Plan("base", "mixed_release", "admitted")
     if session._projected_fields & set(shape.reads()):
         return _Plan("base", "fields_projected", "uniform")
-    admitted = session._field_plans[collection_id].fields
+    admitted = session._field_plans[collection_id].whole_fields
 
     def eligible(definition):
         rollup = definition[1]
         dependencies = (*rollup.groups, *(name for name, _ in rollup.values), rollup.basis.field, rollup.basis.offset)
-        return all(name is None or admitted.get(name) is True for name in dependencies)
+        return all(name is None or name in admitted for name in dependencies)
 
     matching = [definition for definition in rollups.definitions(session.connection, collection_id)
                 if eligible(definition) and _answers(definition[1], shape)]
@@ -217,14 +217,20 @@ def _from_rollup(session, shape: _Shape, plan: _Plan, after: str | None):
 
 def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple[str, ...]):
     """Choose released dependencies before decoding any canonical value."""
+    from ..collection_store.field_admission import WHOLE_SUBTREE
+
     selection = session._field_plans[collection_id].fields
-    if layout is not None and all(name in layout.fields and selection.get(name) is True for name in fields):
+    if layout is not None and all(name in layout.fields and (selection.get(name) is True
+                                 or selection.get(name) is WHOLE_SUBTREE) for name in fields):
         # Dense admitted scalars share one scan; residuals still need the bounded field-tree reader.
         columns = [(name, layout.fields.index(name)) for name in fields]
         selected = "".join(f",t.t{ordinal},t.v{ordinal},t.k{ordinal}" for _, ordinal in columns)
 
         def decode_typed(row):
             if row[1] != row[2]:
+                raise QueryError("QUERY_UNAVAILABLE")
+            if any(selection[name] is True and row[3 * index] == typed_storage.JSON
+                   for index, (name, _) in enumerate(columns, start=1)):
                 raise QueryError("QUERY_UNAVAILABLE")
             return {name: typed_storage.decode_value(row[3 * index], row[3 * index + 1], row[3 * index + 2])
                     for index, (name, _) in enumerate(columns, start=1)
@@ -318,7 +324,7 @@ def _binding(session, query, collection_id: str, manifest, shape: _Shape, unifor
     if shape.basis is not None:
         read |= {name for name in (shape.basis.field, shape.basis.offset) if name is not None}
     field_plan = session._field_plans[collection_id]
-    if uniform and all(field_plan.fields.get(name) is True for name in read):
+    if uniform and read <= field_plan.whole_fields:
         basis = query_freshness.uniform_basis(session.connection, collection_id, read)
         if basis is None:
             raise QueryError("QUERY_UNAVAILABLE", "continuation needs the collection's freshness basis")

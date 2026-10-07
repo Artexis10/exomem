@@ -436,8 +436,7 @@ class CollectionWriter:
         row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
         field_plan = self._operation.field_plan(manifest)
-        if not field_plan.owner and (set(field_plan.fields) != set(manifest.schema.fields)
-                                     or any(value is not True for value in field_plan.fields.values())):
+        if not field_plan.owner and (field_plan.whole_fields != set(manifest.schema.fields)):
             rows, snapshot, _ = self._operation.authorized_rows(manifest.collection_id)
             diagnostics = []
             record_governance._inspection_templates(

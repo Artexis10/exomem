@@ -1240,6 +1240,14 @@ def discover_collections_with_errors(
     if not kb.is_dir():
         return stored, store_errors
     authorize = authorize_path or (lambda _path: True)
+    notice_owner = False
+    if writer is None and (marker is not None or marker_error is not None):
+        from .governance import raw_protection
+        from .governance.principal import effective_principal
+
+        who = effective_principal()
+        # An unavailable C must remain visible in its owner's inventory; this grants a notice, never view bytes.
+        notice_owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(root, who)
     manifests: list[CollectionManifest] = list(stored)
     unreadable: list[UnreadableManifest] = list(store_errors)
     candidates = []
@@ -1249,7 +1257,7 @@ def discover_collections_with_errors(
             continue
         entry = None if marker is None else authority.selected_entry(root, marker, safe[1])
         if marker_error is not None or entry is not None:
-            if writer is None and authorize(safe[1]):
+            if writer is None and (notice_owner or authorize(safe[1])):
                 # A routed manifest is the store's generated view, never a file collection,
                 # and only the service that serves the store can read it. Its profile comes
                 # from a marker checked against canon, never from that editable view.
@@ -2974,8 +2982,15 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         assert spec.items is not None
         for item in value:
             _validate_field_value(name, item, spec.items)
-    if spec.type == "object" and (not isinstance(value, Mapping) or not _is_json_value(value)):
-        raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
+    if spec.type == "object":
+        if not isinstance(value, Mapping) or not _is_json_value(value):
+            raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
+        for child, child_spec in spec.properties.items():
+            path = f"{name}.{child}"
+            if child_spec.required and child not in value:
+                raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {path}")
+            if child in value:
+                _validate_field_value(path, value[child], child_spec)
     if spec.type == "link" and type(value) is not str:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.enum and not any(

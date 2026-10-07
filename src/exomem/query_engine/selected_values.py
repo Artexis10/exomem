@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from decimal import Decimal
 
 import ijson
 from ijson.common import ObjectBuilder
 
+from ..collection_store.field_admission import WHOLE_SUBTREE
 from .runtime import QueryError
 
 
@@ -112,6 +114,8 @@ def read_selected_tree(source, selection, *, max_bytes, check):
         check()
         event, value = next(events) if first is None else first
         if event == "start_map":
+            if chosen is not None and chosen is not WHOLE_SUBTREE and not isinstance(chosen, Mapping):
+                raise ValueError("stored container does not match admitted field shape")
             result = {} if chosen is not None else None
             if chosen is not None:
                 charge({})
@@ -119,17 +123,19 @@ def read_selected_tree(source, selection, *, max_bytes, check):
                 if event_value[0] != "map_key":
                     raise ValueError("invalid stored object")
                 name = event_value[1]
-                child = True if chosen is True else chosen.get(name) if chosen is not None else None
+                child = WHOLE_SUBTREE if chosen is WHOLE_SUBTREE else chosen.get(name) if chosen is not None else None
                 value = read(child)
                 if child is not None:
                     charge(name)
                     result[name] = value
             return result
         if event == "start_array":
+            if chosen is not None and chosen is not WHOLE_SUBTREE and not isinstance(chosen, tuple):
+                raise ValueError("stored container does not match admitted field shape")
             result = [] if chosen is not None else None
             if chosen is not None:
                 charge([])
-            child = True if chosen is True else chosen[0] if chosen is not None else None
+            child = WHOLE_SUBTREE if chosen is WHOLE_SUBTREE else chosen[0] if chosen is not None else None
             while (event_value := next(events))[0] != "end_array":
                 value = read(child, event_value)
                 if child is not None:
@@ -137,6 +143,8 @@ def read_selected_tree(source, selection, *, max_bytes, check):
             return result
         if chosen is None:
             return None
+        if value is not None and chosen is not True and chosen is not WHOLE_SUBTREE:
+            raise ValueError("stored scalar does not match admitted field shape")
         value = float(value) if isinstance(value, Decimal) else value
         charge(value)
         return value

@@ -305,3 +305,180 @@ def test_recipient_summary_counts_only_rows_released_by_ordinary_policy(store):
     empty = tool(store, "read_memory", who=GUEST, path=path)
     assert empty["frontmatter"]["value"] == 0
     assert empty["frontmatter"]["completeness"] == "complete at basis"
+
+
+@pytest.mark.parametrize("value", [
+    {"metric": {"unreviewed_location": "12.345,64.987"}},
+    {"metric": [{"unreviewed_location": "12.345,64.987"}]},
+])
+def test_nested_scalar_shape_changes_are_refused_before_commit(store, value):
+    """A scalar property changed into a container that inherits ordinary metric admission."""
+    from exomem.structured_collections import CollectionError
+
+    receipts = create(store)
+    before = query(store, {"select": ["count", "mixed"]})["rows"]
+    with pytest.raises(CollectionError, match="SCHEMA_FIELD_TYPE"):
+        store.update_record(CID, item_key=OTHER, changes={"mixed": value}, why="invalid nested shape",
+            expected_item_version=receipts[-1]["after_item_hash"], expected_container_hash=receipts[-1]["after_container_hash"])
+    assert query(store, {"select": ["count", "mixed"]})["rows"] == before
+
+
+@pytest.mark.parametrize("summary", [False, True])
+@pytest.mark.parametrize("declaration,valid,malformed", [
+    ("{type: integer}", 3, {"unreviewed_location": "12.345,64.987"}),
+    ("{type: array, items: {type: integer}}", [3], [{"unreviewed_location": "12.345,64.987"}]),
+])
+def test_old_stored_scalar_containers_are_unavailable_without_affecting_metrics(store, summary, declaration, valid, malformed):
+    """An older stored malformed nested value that bypasses corrected write validation on JSON or typed reads."""
+    import json
+
+    from exomem.cli_ops import OpError
+    from exomem.collection_store import typed_storage
+    from exomem.structured_collections import CollectionError
+
+    text = manifest_text().replace("    count: {type: integer}",
+        "    count: {type: integer}\n    mixed: {type: object, properties: {metric: " + declaration + "}}")
+    store.create_collection(manifest_path(), summary_text(text) if summary else text,
+                            why="declare scalar coverage", scaffold=False)
+    receipt = store.append_record(CID, item={"title": "One", "count": 7, "mixed": {"metric": valid}}, item_key=KEY, why="record")
+    assert tool(store, "record_memory", who=GUEST, action="query", collection=CID,
+                query={"version": 1, "select": ["mixed"]})["rows"] == [{"mixed": {"metric": valid}}]
+    old = {"metric": malformed}
+    with pytest.raises(CollectionError, match="SCHEMA_FIELD_TYPE"):
+        store.update_record(CID, item_key=KEY, changes={"mixed": old}, why="invalid nested shape",
+            expected_item_version=receipt["after_item_hash"], expected_container_hash=receipt["after_container_hash"])
+    # Model data admitted by the older validator, retaining the live row identity and encoding.
+    if summary:
+        layout = typed_storage.require_layout(store.connection, CID)
+        ordinal = layout.fields.index("mixed")
+        store.connection.execute(f"UPDATE {layout.current_table} SET v{ordinal}=?", (json.dumps(old),))
+    else:
+        store.connection.execute("UPDATE items SET values_json=json_set(values_json,'$.mixed',json(?))", (json.dumps(old),))
+    assert tool(store, "record_memory", who=GUEST, action="query", collection=CID,
+                query={"version": 1, "select": ["count"]})["rows"] == [{"count": 7}]
+    with pytest.raises(OpError) as error:
+        tool(store, "record_memory", who=GUEST, action="query", collection=CID,
+             query={"version": 1, "select": ["count", "mixed"]})
+    assert "QUERY_UNAVAILABLE" in str(error.value) and "12.345" not in str(error.value)
+
+
+def test_late_imported_scalar_container_is_rejected_after_the_preview_sample(store):
+    """A row after the preview sample that turns a reviewed scalar source path into an unreviewed subtree."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        SOURCE,
+        WORKOUT_FIELDS,
+        call,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    fields = WORKOUT_FIELDS + "    mixed: {type: object, properties: {metric: {type: integer}}}\n"
+    mapping = deepcopy(MAPPING)
+    mapping["fields"]["mixed"] = "mixed"
+    mapping["coverage"]["mixed.metric"] = {"classification": None}
+    rows = [{"id": str(n), "kind": "invented", "duration_s": 10, "metrics": {"calories": n, "distance_m": 1},
+             "start": "2026-03-01T00:00:00+00:00", "mixed": {"metric": n}} for n in range(101)]
+    rows[-1]["mixed"]["metric"] = {"new_private_location": "12.345,64.987"}
+    setup(store, ndjson(rows), fields=fields)
+    preview = call(store, OWNER, mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping)
+    assert preview["rows"]["sampled"] == 100 and preview["rows"]["invalid"] == 0
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    result = status(store, job, OWNER)
+    assert result["rows"]["imported"] == 100 and result["rows"]["rejected"] == 1
+    response = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                    query={"version": 1, "select": ["mixed"], "page": {"limit": 200}})
+    assert sorted(row["mixed"]["metric"] for row in response["rows"]) == list(range(100))
+
+
+def test_schema_location_cannot_be_downgraded_by_leaf_coverage_or_extracted_alias(store):
+    """Ordinary source-leaf coverage that overrides a classified parent and its differently named alias."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    fields = WORKOUT_FIELDS + (
+        "    place: {type: object, classification: location, properties: {label: {type: string}}}\n"
+        "    alias: {type: string}\n")
+    mapping = deepcopy(MAPPING)
+    mapping["fields"].update(place="place", alias="place.label")
+    mapping["coverage"]["place.label"] = {"classification": None}
+    setup(store, ndjson([{"id": "one", "kind": "invented", "duration_s": 10,
+        "metrics": {"calories": 7, "distance_m": 1}, "start": "2026-03-01T00:00:00+00:00",
+        "place": {"label": "private-schema-location"}}]), fields=fields)
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    result = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                  query={"version": 1})
+    assert result["rows"][0]["calories"] == 7
+    assert "place" not in result["rows"][0] and "alias" not in result["rows"][0]
+    owner = tool(store, "record_memory", action="query", collection=IMPORT_CID,
+                 query={"version": 1, "select": ["place", "alias"]})
+    assert owner["rows"] == [{"place": {"label": "private-schema-location"}, "alias": "private-schema-location"}]
+
+
+def test_nested_field_grant_does_not_release_a_literal_dotted_property_or_source_alias(store):
+    """Flattened path identities that let one nested grant release a different property or mapped alias."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    from exomem.cli_ops import OpError
+
+    initialize_vault_state_offline(store.root, source="structural field release fixture")
+    fields = WORKOUT_FIELDS + (
+        "    place: {type: object, classification: location, properties: {region: {type: object, "
+        "properties: {label: {type: string}}}, 'region.label': {type: string}}}\n"
+        "    alias: {type: string}\n")
+    mapping = deepcopy(MAPPING)
+    mapping["fields"].update(place="place", alias="place.region.label")
+    mapping["coverage"]["place.region.label"] = {"classification": None}
+    place = {"region": {"label": "released-region"}, "region.label": "withheld-exact-address"}
+    setup(store, ndjson([{"id": "one", "kind": "invented", "duration_s": 10,
+        "metrics": {"calories": 7, "distance_m": 1}, "start": "2026-03-01T00:00:00+00:00",
+        "place": place}]), fields=fields)
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    basis = tool(store, "record_memory", action="inspect", collection=IMPORT_CID)["field_release_basis"]
+    document = yaml.safe_load(release_document(basis))
+    document["field_release"]["paths"] = [{"path": "place.region.label", "subtree": False}]
+    proposal = govern(store, operation="propose", intent="Release only the nested region label",
+        documents={"grants/nested-field.yaml": yaml.safe_dump(document)},
+        selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    govern(store, operation="commit", proposal_id=proposal["proposal_id"])
+    released = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                    query={"version": 1, "select": ["place"]})
+    assert released["rows"] == [{"place": {"region": {"label": "released-region"}}}]
+    with pytest.raises(OpError, match="QUERY_FIELD_UNAVAILABLE"):
+        tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+             query={"version": 1, "select": ["alias"]})
+    owner = tool(store, "record_memory", action="query", collection=IMPORT_CID,
+                 query={"version": 1, "select": ["place", "alias"]})
+    assert owner["rows"] == [{"place": place, "alias": "released-region"}]

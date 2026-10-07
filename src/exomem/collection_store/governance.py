@@ -905,8 +905,7 @@ class OperationAuthorization:
             manifest = self.field_manifest(cid)
             plan = self.field_plan(manifest)
             # Partial field readers cannot guard full-state writes; a false refusal costs them a retry by the owner.
-            if not plan.owner and (set(plan.fields) != set(manifest.schema.fields)
-                                   or any(value is not True for value in plan.fields.values())):
+            if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
                 self.refuse()
         try:
             head = self.summary_manifest(cid)
@@ -1138,6 +1137,14 @@ class OperationAuthorization:
         raw = collection_authority.read_marker(self.root)
         if raw is not None:
             marker = collection_authority.parse_marker(self.root, raw)
+            if marker["version"] == 2:
+                entry = collection_authority.owned_entry(self.root, marker, path)
+                if entry is None:
+                    return None
+                collection_authority.require_selected(self.conn, marker, entry, root=self.root)
+                if owners - {entry["collection_id"]}:
+                    return ()
+                owners = {entry["collection_id"]}
             entries = {cid: collection_authority.selected_entry(self.root, marker, cid) for cid in owners}
             intent = collection_authority.pending_create(self.conn)
             if intent is not None and intent["collection_id"] in owners and entries[intent["collection_id"]] is None:
@@ -1200,8 +1207,7 @@ class OperationAuthorization:
             if not plan.owner and projection_kind == ("summary",):
                 # The stored page carries private stamps; direct reads use the canonical released overview instead.
                 return Decision(0)
-            if not plan.owner and (set(plan.fields) != set(manifest.schema.fields)
-                                   or any(value is not True for value in plan.fields.values())):
+            if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
                 # Raw file views carry complete fields and guards. Recipients use canonical record/summary projections.
                 if projection_kind != ("summary",):
                     return Decision(0)

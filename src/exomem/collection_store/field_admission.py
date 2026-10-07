@@ -13,6 +13,14 @@ from .connection import CollectionStoreError
 
 # S1 fixes location and unresolved coverage as protection states, not a field-name vocabulary.
 UNRESOLVED = "unresolved"
+# Scalar admission never authorizes a container; only an owner or explicit subtree release does.
+WHOLE_SUBTREE = object()
+
+
+def whole_value(selection):
+    """Whether every value of the declared shape is admitted, including scalar-array members."""
+    return selection is True or selection is WHOLE_SUBTREE or (
+        isinstance(selection, tuple) and whole_value(selection[0]))
 
 
 def _json(value):
@@ -28,45 +36,54 @@ def _spec(spec):
 
 def mapping_classes(mapping, manifest, fmt):
     """Resolve source coverage structurally, including aliases introduced by the mapping."""
-    coverage = mapping.get("coverage", {})
+    def source_path(raw):
+        return (raw,) if fmt == "csv" else tuple(raw.split("."))
+
+    coverage = {source_path(path): declaration for path, declaration in mapping.get("coverage", {}).items()}
+    protected = {path for path, declaration in coverage.items() if declaration["classification"] == "location"}
+    fields = {target: source_path(source.get("from") if isinstance(source, dict) else source)
+              for target, source in mapping.get("fields", {}).items()}
     result = {}
 
-    def classify(source):
-        path = (source,) if fmt == "csv" else tuple(source.split("."))
-        matched = []
-        for raw, declaration in coverage.items():
-            parent = (raw,) if fmt == "csv" else tuple(raw.split("."))
-            if path == parent or (declaration.get("subtree") and path[:len(parent)] == parent):
-                matched.append((len(parent), declaration["classification"]))
-        return ("location" if any(value == "location" for _, value in matched)
-                else max(matched)[1] if matched else UNRESOLVED)
+    def protect(source, spec):
+        if spec.classification == "location":
+            protected.add(source)
+        for name, child in spec.properties.items():
+            protect((*source, name), child)
+        if spec.items is not None:
+            protect(source, spec.items)
+
+    # A schema classification also protects its mapped source subtree from differently named extracted aliases.
+    for target, source in fields.items():
+        if target in manifest.schema.fields:
+            protect(source, manifest.schema.fields[target])
+
+    def classify(path):
+        if any(path[:len(parent)] == parent for parent in protected):
+            return "location"
+        return coverage[path]["classification"] if path in coverage else UNRESOLVED
 
     def descendants(target, source, spec):
         result[target] = classify(source)
-        if spec.type == "object":
-            for name, child in spec.properties.items():
-                descendants(target + "." + name, source + "." + name, child)
-        elif spec.type == "array" and spec.items is not None:
-            for name, child in spec.items.properties.items():
-                descendants(target + "." + name, source + "." + name, child)
+        for name, child in spec.properties.items():
+            descendants((*target, name), (*source, name), child)
+        if spec.items is not None:
+            descendants(target, source, spec.items)
 
-    for target, source in mapping.get("fields", {}).items():
-        source = source.get("from") if isinstance(source, dict) else source
+    for target, source in fields.items():
         if target in manifest.schema.fields:
-            descendants(target, source, manifest.schema.fields[target])
+            descendants((target,), source, manifest.schema.fields[target])
         else:
-            result[target] = classify(source)
+            result[(target,)] = classify(source)
     time_mapping = mapping.get("time") or {}
-    sources = [value for source in time_mapping.get("from", []) for key, value in source.items()
-               if key in {"instant", "offset", "date"}]
-    if sources:
-        classes = mapping_classes({"fields": {str(i): path for i, path in enumerate(sources)},
-                                   "coverage": coverage}, manifest, fmt)
-        classification = ("location" if "location" in classes.values()
-                          else UNRESOLVED if UNRESOLVED in classes.values() else None)
+    classes = [classify(source_path(value)) for source in time_mapping.get("from", [])
+               for key, value in source.items() if key in {"instant", "offset", "date"}]
+    if classes:
+        classification = ("location" if "location" in classes
+                          else UNRESOLVED if UNRESOLVED in classes else None)
         for key in ("instant", "offset", "local_date"):
             if time_mapping.get(key):
-                result[time_mapping[key]] = classification
+                result[(time_mapping[key],)] = classification
     return result
 
 
@@ -83,7 +100,7 @@ def canonical_basis(conn, manifest):
     store_id = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     declaration = {name: _spec(spec) for name, spec in manifest.schema.fields.items()}
     digest = hashlib.sha256(b"exomem.collection-fields.v1\0" + _json([store_id, manifest.collection_id,
-                                                                  declaration, mappings, sorted(declarations)]).encode()).hexdigest()
+                                                                  declaration, sorted(mappings.items()), sorted(declarations)]).encode()).hexdigest()
     return {"version": 1, "store_id": store_id, "collection_id": manifest.collection_id,
             "classification_basis": digest}, mappings
 
@@ -96,11 +113,17 @@ class FieldPlan:
     owner: bool
     grants: tuple
 
+    @property
+    def whole_fields(self):
+        return frozenset(name for name, selection in self.fields.items() if whole_value(selection))
+
     def admits_path(self, path):
         chosen = self.fields
         for name in path.split("."):
-            if chosen is True:
+            if chosen is WHOLE_SUBTREE:
                 return True
+            if chosen is True:
+                return False
             if isinstance(chosen, tuple):
                 if not name.isdecimal():
                     return False
@@ -112,10 +135,10 @@ class FieldPlan:
         return True
 
     def binding(self, paths):
+        requested = [(path,) if path in self.fields else tuple(path.split(".")) for path in paths]
         relevant = [grant for grant in self.grants if any(
-            requested == entry["path"] or requested.startswith(entry["path"] + ".")
-            or entry["path"].startswith(requested + ".")
-            for requested in paths for entry in grant.field_release["paths"])]
+            path[:len(entry)] == entry or entry[:len(path)] == path
+            for path in requested for entry in (tuple(item["path"].split(".")) for item in grant.field_release["paths"]))]
         return [(grant.id, grant.content_hash, grant.field_release) for grant in relevant]
 
 
@@ -124,10 +147,10 @@ def resolve(operation, manifest):
     who = operation.who
     owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(operation.root, who)
     if owner:
-        fields = {name: True for name in manifest.schema.fields}
+        fields = {name: WHOLE_SUBTREE for name in manifest.schema.fields}
         grammar = record_formats.log_grammar_tokens(manifest)
         if grammar is not None and grammar.note_field is not None:
-            fields[grammar.note_field] = True
+            fields[grammar.note_field] = WHOLE_SUBTREE
         return FieldPlan(basis, MappingProxyType(fields), manifest, True, ())
     valid, purpose = raw_protection._authority(operation.root, who)
     grants = tuple(grant for grant in operation.policy.release_grants if valid and grant.field_release is not None
@@ -138,9 +161,11 @@ def resolve(operation, manifest):
                    and grant.field_release["purpose"] == purpose)
 
     def released(path, subtree=False):
-        return any((entry["path"] == path and (not subtree or entry["subtree"])) or (
-                    entry["subtree"] and path.startswith(entry["path"] + "."))
-                   for grant in grants for entry in grant.field_release["paths"])
+        # Segment identity keeps a literal dotted property distinct from the public nested-path grammar.
+        return any((target == path and (not subtree or entry["subtree"])) or (
+                    entry["subtree"] and path[:len(target)] == target)
+                   for grant in grants for entry in grant.field_release["paths"]
+                   for target in (tuple(entry["path"].split(".")),))
 
     def nested(spec):
         return [spec.classification, *(value for sub in spec.properties.values() for value in nested(sub)),
@@ -150,14 +175,16 @@ def resolve(operation, manifest):
         if name in seen or name not in manifest.schema.fields:
             return UNRESOLVED
         spec = manifest.schema.fields[name]
-        own = mapped.get(name) or spec.classification
+        own = "location" if spec.classification == "location" else mapped.get((name,))
+        if own == "location":
+            return own
         children = [dependency(other, (*seen, name), True) for other in (*spec.depends_on, *((spec.offset,) if spec.offset else ()))]
         if derived:
             # An open object can carry undeclared descendants; its alias stays private until the parent is classified.
             if spec.type in {"object", "array"} and own != "location":
                 children.append(UNRESOLVED)
             children.extend(nested(spec))
-            children.extend(value for path, value in mapped.items() if path.startswith(name + "."))
+            children.extend(value for path, value in mapped.items() if len(path) > 1 and path[0] == name)
         if own == UNRESOLVED or UNRESOLVED in children:
             return UNRESOLVED
         if own == "location" or "location" in children:
@@ -166,25 +193,27 @@ def resolve(operation, manifest):
 
     def select(spec, path, inherited=None):
         dependencies = [dependency(name, derived=True) for name in spec.depends_on]
-        if UNRESOLVED in dependencies:
-            return None
-        classification = inherited or mapped.get(path) or spec.classification
-        if "location" in dependencies:
-            classification = "location"
+        classification = ("location" if "location" in (inherited, spec.classification, mapped.get(path))
+                          else mapped.get(path) or inherited)
+        if classification != "location":
+            if UNRESOLVED in dependencies:
+                return None
+            if "location" in dependencies:
+                classification = "location"
         if classification == "location" and released(path, subtree=spec.type in {"object", "array"}):
-            return True
+            return WHOLE_SUBTREE if spec.type in {"object", "array"} else True
         if spec.type == "object":
             chosen = {name: value for name, child in spec.properties.items()
-                      if (value := select(child, path + "." + name,
+                      if (value := select(child, (*path, name),
                                           "location" if classification == "location" else None)) is not None}
             return MappingProxyType(chosen) if chosen else None
         if spec.type == "array":
             child = select(spec.items, path, classification)
-            return True if child is True else (child,) if child is not None else None
+            return (child,) if child is not None else None
         return None if classification in (UNRESOLVED, "location") else True
 
     selected = {name: value for name, spec in manifest.schema.fields.items()
-                if (value := select(spec, name, dependency(name))) is not None}
+                if (value := select(spec, (name,), dependency(name))) is not None}
     visible = replace(manifest, schema=replace(manifest.schema,
                       fields=MappingProxyType({name: spec for name, spec in manifest.schema.fields.items() if name in selected}),
                       natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)))

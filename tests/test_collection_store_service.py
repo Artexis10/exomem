@@ -560,3 +560,147 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
     restarted = functools.partial(_finish_after_restart, continuation=job["continuation"])
     assert run_host(tmp_path, tmp_path / "state", "restart", restarted, root=root,
                     database=tmp_path / "coordinator.sqlite") == ("complete", 60)
+
+
+def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):
+    """Public reads or governance that fall through to physical C bytes outside an explicit preview binding."""
+    import yaml
+    from test_collection_field_admission import GRANT, GUEST, release_document
+
+    from exomem import vault
+
+    root = service.root
+    front, body, _ = vault.parse_frontmatter(summary_text(), strict=True)
+    front["item_schema"]["fields"].update({
+        "place": {"type": "object", "classification": "location", "properties": {"label": {"type": "string"}}},
+        "label": {"type": "string", "depends_on": ["place"]},
+    })
+    text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
+    guards = call(root, "record_memory", action="inspect", collection=CID)["lifecycle_guards"]
+    call(root, "record_memory", action="revise", collection=CID, manifest_text=text,
+         why="declare reviewed location", **guards)
+    call(root, "record_memory", action="append", collection=CID, item_key=LATER,
+         item={"title": "Located", "place": {"label": "invented-place"}, "label": "invented-place"},
+         why="record location")
+    path = manifest_path().replace("_collection.md", "Items/_summary.md")
+    _until(lambda: (root / path).exists())
+
+    def recipient(tool, **arguments):
+        command = next(command for command in commands.product_commands_for("mcp") if command.name == tool)
+        with request_scope(GUEST):
+            return writer_lease.invoke_command(command, root, **arguments)
+
+    page = recipient("read_memory", path=path.removeprefix("Knowledge Base/").removesuffix(".md"))
+    assert page["frontmatter"]["metric"] == "released rows"
+    assert page["frontmatter"]["value"] == 2
+    assert "exomem_view" not in page["frontmatter"]
+    with pytest.raises(ValueError, match="NOT_FOUND"):
+        recipient("read_memory", path=manifest_path())
+    assert "exomem_view" in call(root, "read_memory", path=path)["frontmatter"]
+    assert recipient("read_memory", path=A_PATH)["path"] == A_PATH
+    basis = call(root, "record_memory", action="inspect", collection=CID)["field_release_basis"]
+    proposed = call(root, "govern_memory", operation="propose", intent="Release invented location",
+                    documents={"grants/collection-location.yaml": release_document(basis)},
+                    selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    assert proposed["ok"], proposed
+    committed = call(root, "govern_memory", operation="commit", proposal_id=proposed["diagnostics"]["proposal_id"])
+    assert committed["ok"], committed
+    rows = recipient("record_memory", action="query", collection=CID,
+                     query={"version": 1, "select": ["place", "label"]})["rows"]
+    assert any(row.get("place") == {"label": "invented-place"} for row in rows)
+    assert call(root, "govern_memory", operation="revoke", scope="standing", grant_id=GRANT)["ok"]
+    refused(lambda: recipient("record_memory", action="query", collection=CID,
+                              query={"version": 1, "select": ["place"]}), "QUERY_FIELD_UNAVAILABLE")
+    service.stop()
+    assert recipient("read_memory", path=A_PATH)["path"] == A_PATH
+    refused(lambda: recipient("read_memory", path=path), "COLLECTION_STORE_UNAVAILABLE")
+
+
+def test_marker_ownership_keeps_file_reads_available_when_the_store_is_corrupt(service, tmp_path):
+    """A missing store or edited projection header that either discloses C bytes or disables unrelated A/B pages."""
+    from test_collection_field_admission import GUEST
+
+    root = service.root
+    external = "Knowledge Base/Records/DetachedRows"
+    text = DAILY_TEXT.replace("source: Items", "source: " + external)
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=text, why="external source")
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    assert marker["version"] == 2
+    assert authority.owned_entry(root, marker, external + "/unknown.md")["collection_id"] == DAILY
+    service.stop()
+    protected = [manifest_path(), "Knowledge Base/Records/Work/Items/_summary.md",
+                 external + "/unknown.md", "Knowledge Base/Records/Daily/Held/unknown.md",
+                 "Knowledge Base/Records/Daily/_history/unknown.md", "Knowledge Base/Records/Daily/_history.md"]
+    for path in protected:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("# Edited view\n\nprivate-projection-content\n")
+    ordinary = "Knowledge Base/Records/Daily/Notes.md"
+    (root / ordinary).write_text("# Independent knowledge\n\nordinary-content\n")
+    connection.store_path(root).write_bytes(b"unreadable sqlite fixture")
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS.get(root) is not None and runtime._SERVERS[root].runtime is None)
+        for path in (A_PATH, B_PATH, ordinary):
+            assert call(root, "read_memory", path=path)["path"] == path
+        command = next(command for command in commands.product_commands_for("mcp") if command.name == "read_memory")
+        for who in (OWNER, GUEST):
+            with request_scope(who):
+                for path in protected:
+                    try:
+                        result = writer_lease.invoke_command(command, root, path=path)
+                    except (OpError, CollectionStoreError, ValueError) as error:
+                        assert "private-projection-content" not in str(error)
+                    else:
+                        pytest.fail(f"unavailable owned path returned content: {path}: {result}")
+    finally:
+        restarted.stop()
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+def test_legacy_marker_upgrade_recovers_after_atomic_publication_interruption(service, monkeypatch, phase):
+    """A restart that derives ownership from edited views or leaves an interrupted v1 upgrade ambiguous."""
+    root = service.root
+    service.stop()
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    marker["version"] = 1
+    for entry in marker["collections"]:
+        entry.pop("source_path")
+        entry.pop("layout")
+    authority.marker_path(root).write_text(json.dumps(marker))
+    (root / manifest_path()).write_text("# Edited view without declaration\n")
+    publish = admission._replace_marker
+    interrupted = []
+
+    def interrupt(session, token, expected, raw):
+        if not interrupted and phase == "before":
+            interrupted.append(True)
+            raise OSError("injected marker publication interruption")
+        publish(session, token, expected, raw)
+        if not interrupted:
+            interrupted.append(True)
+            raise OSError("injected marker publication interruption")
+
+    monkeypatch.setattr(admission, "_replace_marker", interrupt)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS.get(root) is not None and runtime._SERVERS[root].runtime is not None)
+        assert titles(root, CID) == ["Canonical"]
+        _until(lambda: restarted.manager.status().get("collection_store", {}).get("status") == "admitted")
+        upgraded = authority.parse_marker(root, authority.read_marker(root))
+        assert interrupted and upgraded["version"] == 2
+        assert upgraded["authority_epoch"] == marker["authority_epoch"] + 1
+        assert upgraded["collections"][0]["source_path"] == "Knowledge Base/Records/Work/Items"
+        assert titles(root, CID) == ["Canonical"]
+        assert state_migration.COLLECTION_MARKER_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(root)
+    finally:
+        restarted.stop()
+
+
+def test_new_marker_entry_cannot_overlap_existing_owned_source(service):
+    """A new collection that changes which canonical collection authorizes an already owned source subtree."""
+    root = service.root
+    marker = authority.read_marker(root)
+    text = DAILY_TEXT.replace("source: Items", "source: Knowledge Base/Records/Work/Items/Nested")
+    refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                         manifest_text=text, why="overlapping source"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker and titles(root, CID) == ["Canonical"]

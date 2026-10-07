@@ -51,7 +51,7 @@ def _object(pairs):
 
 
 def parse_marker(root, raw):
-    """Validate only the version-one, file-default marker used by this leaf."""
+    """Validate the file-default marker and its complete version-two ownership namespace."""
     try:
         marker = json.loads(raw, object_pairs_hook=_object)
     except (ValueError, UnicodeError, TypeError) as error:
@@ -61,7 +61,7 @@ def parse_marker(root, raw):
     sid = marker.get("store_id")
     epoch = marker.get("authority_epoch")
     fence = marker.get("collection_store_fence")
-    if (type(marker.get("version")) is not int or marker["version"] != 1
+    if (type(marker.get("version")) is not int or marker["version"] not in (1, 2)
             or marker.get("mode") != "store" or marker.get("default_authority") != "file"
             or not isinstance(sid, str) or memory_refs.normalize_id(sid) != sid
             or type(epoch) is not int or epoch < 1
@@ -85,17 +85,82 @@ def parse_marker(root, raw):
             _invalid()
         ids.add(cid)
         paths.add(portable)
+        if marker["version"] == 2:
+            # The store schema fixes these layouts; dataset collections retain file authority.
+            source = entry.get("source_path")
+            if (not isinstance(source, str) or collections._reference_key(Path(root), source) != source
+                    or entry.get("layout") not in ("markdown-items", "markdown-log")):
+                _invalid()
+    if marker["version"] == 2:
+        for index, entry in enumerate(marker["collections"]):
+            for other in marker["collections"][:index]:
+                if any(_owns(entry, path) for path, _ in _owned_regions(other)) or any(
+                        _owns(other, path) for path, _ in _owned_regions(entry)):
+                    raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection ownership namespaces overlap")
     return marker
 
 
-def marker_entry(collection_id, manifest_path, store_id, semantic_profile):
+def marker_entry(collection_id, manifest_path, store_id, semantic_profile, source_path=None, layout=None):
     """One marker entry routing a collection to the store, with the profile it was created with.
 
     The marker is the routing authority, so a sweep that cannot read the store takes the
     collection's profile from here, never from its editable generated view.
     """
     return {"collection_id": collection_id, "manifest_path": manifest_path, "authority": "store",
-            "store_id": store_id, "semantic_profile": semantic_profile}
+            "store_id": store_id, "semantic_profile": semantic_profile,
+            **({"source_path": source_path, "layout": layout} if source_path is not None else {})}
+
+
+def _owned_regions(entry):
+    from .. import records
+
+    directory = Path(entry["manifest_path"]).parent
+    return ((entry["manifest_path"], False),
+            (entry["source_path"], entry["layout"] == "markdown-items"),
+            ((directory / records._HELD_DIRECTORY).as_posix(), True),
+            ((directory / "_history").as_posix(), True),
+            ((directory / "_history.md").as_posix(), False))
+
+
+def _owns(entry, path):
+    from .. import records
+
+    key = collections._portable_path_key(path)
+    for root, subtree in _owned_regions(entry):
+        root = collections._portable_path_key(root)
+        if key == root or subtree and key.startswith(root + "/"):
+            return True
+    source = collections._portable_path_key(entry["source_path"])
+    if entry["layout"] == "markdown-log" and key.startswith(source + "#"):
+        try:
+            records._validate_item_key(key[len(source) + 1:])
+            return True
+        except collections.CollectionError:
+            pass
+    return False
+
+
+def owned_entry(root, marker, path):
+    """None means an ordinary file only when the marker completely names C ownership."""
+    if marker["version"] != 2:
+        # Legacy markers cannot distinguish arbitrary source paths; repair needs canonical custody, not editable views.
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "canonical marker ownership needs an upgrade")
+    path = collections._reference_key(Path(root), path)
+    if path is None:
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "invalid canonical projection path")
+    return next((entry for entry in marker["collections"] if _owns(entry, path)), None)
+
+
+def upgraded_marker(root, conn, marker):
+    """Derive ownership only from the validated current canonical declarations."""
+    entries = []
+    for entry in marker["collections"]:
+        require_selected(conn, marker, entry, root=root)
+        row = conn.execute("SELECT source_path,layout FROM collections WHERE collection_id=?",
+                           (entry["collection_id"],)).fetchone()
+        entries.append({**entry, "source_path": row[0], "layout": row[1]})
+    result = {**marker, "version": 2, "authority_epoch": marker["authority_epoch"] + 1, "collections": entries}
+    return parse_marker(root, json.dumps(result))
 
 
 def routes(entry, collection_id, manifest_path, store_id):
@@ -127,18 +192,38 @@ def selected_entry(root, marker, selector):
 def require_selected(conn, marker, entry, *, root):
     sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
     row = conn.execute(
-        "SELECT c.manifest_path,m.manifest_text FROM collections c JOIN collection_manifests m "
+        "SELECT c.manifest_path,m.manifest_text,c.source_path,c.layout FROM collections c JOIN collection_manifests m "
         "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version "
         "WHERE c.collection_id=?", (entry["collection_id"],),
     ).fetchone()
     # Missing canon cannot verify routing or profile; a false refusal delays C, while A/B remain available.
     if sid is None or sid[0] != marker["store_id"] or row is None or row[0] != entry["manifest_path"]:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "store differs from authority marker")
+    manifest = collections.parse_manifest_bytes(root, row[0], row[1].encode())
+    if (row[2:] != (manifest.storage.source, manifest.storage.strategy) or
+            marker["version"] == 2 and row[2:] != (entry["source_path"], entry["layout"])):
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "marker ownership differs from canonical storage")
     if entry.get("semantic_profile") is not None:
-        manifest = collections.parse_manifest_bytes(root, row[0], row[1].encode())
         if manifest.semantic_profile != entry["semantic_profile"]:
             # A false refusal costs a marker repair; accepting hides rows from profile sweeps.
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "marker profile differs from canonical manifest")
+
+
+def require_marker(conn, marker, *, root):
+    """Verify canonical bindings and reject projections outside the marker's declared ownership."""
+    for entry in marker["collections"]:
+        require_selected(conn, marker, entry, root=root)
+    if marker["version"] == 1:
+        marker = upgraded_marker(root, conn, marker)
+    routed = {entry["collection_id"] for entry in marker["collections"]}
+    for cid, path in conn.execute(
+            "SELECT collection_id,path FROM projection_state UNION "
+            "SELECT collection_id,view_path FROM items UNION SELECT collection_id,view_path FROM held_candidates"):
+        if cid not in routed or path is None:
+            continue
+        owner = owned_entry(root, marker, path)
+        if owner is None or owner["collection_id"] != cid:
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "projection lies outside canonical ownership")
 
 
 def required_state_compatibility_ids(root):
@@ -147,7 +232,10 @@ def required_state_compatibility_ids(root):
     if raw is None:
         return frozenset()
     marker = parse_marker(root, raw)
-    return frozenset({marker["collection_store_fence"]["capability"]})
+    from ..state_migration import COLLECTION_MARKER_COMPATIBILITY_ID
+
+    return frozenset({marker["collection_store_fence"]["capability"],
+                      *([COLLECTION_MARKER_COMPATIBILITY_ID] if marker["version"] == 2 else [])})
 
 
 def pending_create(conn):

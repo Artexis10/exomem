@@ -234,12 +234,15 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     expected = authority.read_marker(writer.root)
     old = None if expected is None else authority.parse_marker(writer.root, expected)
     manifest = collections.parse_manifest_bytes(writer.root, manifest_path, manifest_text.encode())
-    target = {"version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
+    if old is not None and old["version"] != 2:
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "open the existing store before creating another collection")
+    target = {"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
               "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
               "collections": ([] if old is None else old["collections"]) + [authority.marker_entry(
-                  manifest.collection_id, manifest.path, sid, manifest.semantic_profile)],
+                  manifest.collection_id, manifest.path, sid, manifest.semantic_profile, manifest.storage.source, manifest.storage.strategy)],
               "collection_store_fence": {"capability": "collections-store-v1", "generation": 1}
               if old is None else old["collection_store_fence"]}
+    authority.parse_marker(writer.root, json.dumps(target))
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
                            target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode())
@@ -854,6 +857,11 @@ def _settle(session, runtime, token, facts, staged, action, reason, check):
     state_migration.record_collection_store_compatibility(
         session.root, authority_check=lambda: session.require(token))
     with session.writer(token) as writer:
+        try:
+            _upgrade_marker(session, writer, token)
+        except OSError:
+            # Atomic publication can finish before durability reports an error; the same canonical marker retries next use.
+            return takeover.BUSY, "marker ownership publication is pending"
         published = _publish_current_epoch(session, writer, token)
     if published.status == "published":
         # Record this instance's head now, so the next holder adopts this replica.
@@ -919,6 +927,10 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
                 if authority.marker_status(writer, intent) != "marker_admitted":
                     raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "marker changed before cleanup")
                 conn.execute("DELETE FROM store_meta WHERE key=?", (authority.PENDING_CREATE,))
+            if _upgrade_marker(session, writer, token):
+                published = _publish_current_epoch(session, writer, token)
+                if published.status != "published":
+                    return {**result, "status": "pending", "reason": published.reason or published.status}
             return result
         except BaseException:
             with manager._report_lock:
@@ -1008,7 +1020,29 @@ def _install_marker(session, token, fence_client, target, intent, current, write
             or chain.verify_store_chain(writer.connection) != current):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "cutover authority changed")
     expected = None if intent["expected_marker"] is None else intent["expected_marker"].encode()
-    raw = intent["target_marker"].encode()
+    _replace_marker(session, token, expected, intent["target_marker"].encode())
+
+
+def _upgrade_marker(session, writer, token):
+    raw = authority.read_marker(session.root)
+    if raw is None:
+        return
+    marker = authority.parse_marker(session.root, raw)
+    authority.require_marker(writer.connection, marker, root=session.root)
+    if marker["version"] == 2:
+        return
+    # The same validated canonical head and fence determine every retry; no editable projection supplies ownership.
+    chain.verify_store_chain(writer.connection)
+    upgraded = authority.upgraded_marker(session.root, writer.connection, marker)
+    state_migration.record_collection_store_compatibility(session.root, authority_check=lambda: session.require(token))
+    with session.manager._report_lock:
+        session.manager._collection_store._admitted_token = None
+    _replace_marker(session, token, raw, json.dumps(upgraded, sort_keys=True, separators=(",", ":")).encode())
+    return True
+
+
+def _replace_marker(session, token, expected, raw):
+    """Publish one marker atomically under the existing custody, lease and mutation boundary."""
     if authority.read_marker(session.root) == raw:
         with session.fs.file(session.namespace, "mode.json", access="write").require() as installed:
             if session.fs.read(installed).require() != raw:
@@ -1055,7 +1089,8 @@ class _CreateAdmission:
         self.txn_id = txn["txn_id"]
         target = authority.parse_marker(writer.root, self.target)
         sid = writer._publication.identity["store_id"]
-        entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile)
+        entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile,
+                                       manifest.storage.source if target["version"] == 2 else None, manifest.storage.strategy)
         old = None if self.expected is None else authority.parse_marker(writer.root, self.expected)
         if (target["store_id"] != sid or target["collections"] !=
                 ([] if old is None else old["collections"]) + [entry]

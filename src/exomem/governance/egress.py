@@ -1798,10 +1798,13 @@ def _is_markdown_path(rel_path: str) -> bool:
 
 
 def _file_policy_empty(vault_root: Path, policy: Policy) -> bool:
-    return policy.empty and bound_writer(vault_root) is None
+    from ..collection_store.authority import read_marker
+
+    # A mixed vault has canonical field policy even when its file policy is empty.
+    return policy.empty and bound_writer(vault_root) is None and read_marker(vault_root) is None
 
 
-@canonical_read
+@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -4391,7 +4394,7 @@ def _project_page_origin(
     return out, True
 
 
-@canonical_read
+@canonical_read(projection=True)
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -5901,7 +5904,7 @@ def unit_parent_withheld(
     return False
 
 
-@canonical_read
+@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
 def release_level_for_path_only(
     vault_root: Path,
     rel_path: str,
