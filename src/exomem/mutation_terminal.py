@@ -829,7 +829,9 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
             folders = value.get("folders")
             if type(sources) is not int or sources < 1:
                 continue
-            if not _bounded_tokens(folders, _MAX_UNCLASSIFIED_FOLDERS):
+            if not isinstance(folders, list) or not _bounded_tokens(
+                folders, _MAX_UNCLASSIFIED_FOLDERS
+            ):
                 continue
             return {**common, "unclassified_sources": sources, "folders": list(folders)}
         terms = value.get("cluster_terms")

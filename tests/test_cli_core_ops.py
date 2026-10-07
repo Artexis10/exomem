@@ -1005,7 +1005,7 @@ def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys)
             "--title",
             "Simple raw source",
             "--source-type",
-            "other",
+            "correspondence",
             "--json",
         ],
         capsys,
@@ -1013,7 +1013,7 @@ def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys)
     assert code == 0, err
     source_payload = json.loads(out.strip().splitlines()[-1])
     assert source_payload["success"] is True
-    assert "/Sources/Other/" in source_payload["data"]["path"]
+    assert "/Sources/Correspondence/" in source_payload["data"]["path"]
 
     code2, out2, err2 = _run(
         [

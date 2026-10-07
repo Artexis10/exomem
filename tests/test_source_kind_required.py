@@ -86,6 +86,35 @@ def test_a_kindless_agent_capture_is_refused_with_the_known_kinds_and_writes_not
     assert _vault_files(vault) == before
 
 
+def test_a_restricted_caller_counts_only_the_sources_it_may_see(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """A count is an aggregate: a withheld source must not show up in it."""
+    from test_governance_egress import SCOPE_ID, _external, write_rule
+
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import request_scope
+
+    scope = vault / KB / "_Governance" / "scopes" / "withheld.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\n"
+        'paths: ["Sources/Articles/2026-05-04-best-egcg-supplements.md"]\n',
+        encoding="utf-8",
+    )
+    write_rule(vault, ceiling=0)
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    with request_scope(_external()), pytest.raises(OpError) as refused:
+        commands.op_capture_source(
+            vault, source_schema, content="Raw notes from a call.", title="Loose capture"
+        )
+
+    assert {"kind": "article", "sources": 1} in refused.value.details["known_source_kinds"]
+
+
 @pytest.mark.parametrize("unchosen", ["other", "unclassified"])
 def test_an_agent_cannot_choose_a_kind_that_records_no_choice(
     vault: Path, source_schema: schema_module.SourceSchema, unchosen: str
@@ -294,3 +323,34 @@ def test_a_legacy_other_page_counts_as_debt(
     advisory = leaf["source"]["structure_suggestion"]
     assert advisory["unclassified_sources"] == 1
     assert advisory["folders"] == ["Other"]
+
+
+def test_a_restricted_caller_gets_no_debt_count(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """The debt count covers pages a restricted caller may not see, so it gets none."""
+    from test_governance_egress import SCOPE_ID, _external, write_rule
+
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import request_scope
+
+    _legacy_other_page(vault)
+    scope = vault / KB / "_Governance" / "scopes" / "withheld.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\n"
+        'paths: ["Sources/Other/**"]\n',
+        encoding="utf-8",
+    )
+    write_rule(vault, ceiling=0)
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    with request_scope(_external()):
+        leaf = commands.op_capture_source(
+            vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
+            source_kind="field-notebook",
+        )
+
+    assert "structure_suggestion" not in leaf["source"]

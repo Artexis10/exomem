@@ -11,6 +11,10 @@ the pin says this change alters no released profile, not that no one ever does. 
 values that legitimately move between releases are normalised away: the
 server's own version and the tool-surface fingerprints, which the tool-schema
 lane edits independently.
+
+Re-recorded by `retire-other-source-kind`, on purpose: released profiles share
+the capture leaf, which now refuses a capture with no kind, so their
+`source_taxonomy` block teaches that kind rule instead of the retired fallback.
 """
 
 from __future__ import annotations
@@ -31,28 +35,28 @@ LEVELS = ("off", "light", "balanced", "maximal")
 #: profile -> level -> sha256 of the normalised compact payload.
 GOLDEN: dict[str, dict[str, str]] = {
     "hosted-alpha-agent-v1": {
-        "off": "2be2e4fc7b0f2df1ae7ce5e4b00ef00e539e867c0a60ac6789d58ba5ffeb72bb",
-        "light": "a8b86e762cfc4c91dc6fc1264594056b3af0c6cdb004a5fcc8163178fc53f072",
-        "balanced": "628982b4aa3922cd9d7490d1554cb813475c2c80b8c5c7e9f88e49ef45510707",
-        "maximal": "cce587e5241fb1bda5a3399d61fc36b133593ba4ea70969b5b3b839a9d1f666d",
+        "off": "59a2b5b988633d0013c28d0d0842632f5209577448e86d550fb2c0bc5a303c39",
+        "light": "c9a852ad009e5e6bbfe7a94fc8e9b795a28a91f2b88a888cb4880808e045a0b7",
+        "balanced": "435e642217fea601f56485b55480fdd2b1209016d55bc1d117b333ad97d1b9f6",
+        "maximal": "bd86dfe433a3fe8cea7fd38791b9a0ed8474de468172502db407e61d99385481",
     },
     "hosted-alpha-agent-v2": {
-        "off": "d62f2fa37e85120bf3a5ff624ff38006e62a22481a14b95a5b09b05a5bc1692b",
-        "light": "181f1b5ce82f7de8caf6198c826d795ac58904d89039d7a589847818467d4d7c",
-        "balanced": "37c1c3bddabfe2be453ef430ac5c5798006a839826aed5737915fb799065cf22",
-        "maximal": "9cb8a290eb1dad908ae525df7b447a4432871a4e62a3ec63b4f5b6ac63337843",
+        "off": "d9602bbbcdfc3581e3f861734f9121c045480a2cbbf1553163f1b6a8fc04eb18",
+        "light": "7093ae98574f5d67b9a1636e7001098d84730b11dab57779101b27f39d074b7a",
+        "balanced": "24996de3edafbfcfa9c1b792d68bc4f5cd4c28eb25d434be02618965348c37cf",
+        "maximal": "1be4f750b419b858f72895ae7e77896c30b85cfdb8ffe742b9408550e16e80d1",
     },
     "hosted-alpha-agent-v3": {
-        "off": "b80f29ff8d18815f582fa99c83152ee1cccca8ed49f8ad5afc23d542f0084c0b",
-        "light": "e2c1dae68fc930f7a27d0b4569ea9319662f3b21426aba64c664e7a781f3d948",
-        "balanced": "78e03c039a417120eb5da46bac3bdd15d0ec483fee3543ce50cf6337f95374e3",
-        "maximal": "f902ce970997395e43cbea7ae0514762904a5ba12ce2e355733f669872c1e5e8",
+        "off": "4558caa9b0267f72f79d00e3f3cdde81b9d7a6234aa11cde803956a9e5d4cd38",
+        "light": "59afe3ae5424a8c4dc1851e0393a21ca4c0057b9a497506d1454b7355cb172ca",
+        "balanced": "9c850dd7117f1e2b3cbdfd39155149263e76b1f0700bc8358475184019d3c63a",
+        "maximal": "4f6199288b58c7ee6d35ea33fccce129b1e4ee91b6e0e22ff1412a754d2fda3f",
     },
     "hosted-alpha-agent-v4": {
-        "off": "d5a967117267a44c35bd30344bde89e638c85f4745278a60fa497ebd3661c6dd",
-        "light": "6953349500e403a5a3687eab84d11ca59646f9855b467fcc4bcaf9537f25f979",
-        "balanced": "b1ffd3f46470a692bf61de2b7d79246258d72bd419290efc6652b9cbac102de4",
-        "maximal": "cc9584123d6d3426a13c0f19b7fb36602170e023dff2d9745700dbd38154937e",
+        "off": "b48ddc8c0cc452131d7520f0fd91b8f67043eb0956b1ce4e7dc260cd23a61a55",
+        "light": "ff69e381fb81c64ba07354cb6cda87e663457ab51daed1562a0992e61381c75c",
+        "balanced": "274c2c1c35b915426e9bd6126a268df294dafcc64f9e4d3b0589537d97a632bd",
+        "maximal": "c28c64f21a65be60bd9a2395ab5c764a62d10a022050b64c116bb1cef6abcc2f",
     },
 }
 

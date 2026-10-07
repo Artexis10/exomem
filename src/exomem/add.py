@@ -861,14 +861,23 @@ def known_kind_counts(
     from .governance import egress
 
     keep = egress.restricted_release_filter(vault_root)
-    by_folder = {
-        name.casefold(): count
-        for name, count in indexes._count_sources(
-            kb_root(vault_root) / source_taxonomy.SOURCES_ROOT,
-            keep=keep,
-            vault_root=vault_root,
-        ).items()
-    }
+
+    def visible(path: str) -> bool:
+        return bool(keep(Path(path).relative_to(vault_root).as_posix()))
+
+    # Walks the folders itself rather than calling `indexes._count_sources`,
+    # which `_compute_updates_with_counts` swaps out process-wide while a
+    # capture in another thread computes its index.
+    by_folder: dict[str, int] = {}
+    sources = kb_root(vault_root) / source_taxonomy.SOURCES_ROOT
+    if sources.is_dir():
+        for folder in sources.iterdir():
+            if folder.is_dir() and not folder.name.startswith("_"):
+                by_folder[folder.name.casefold()] = indexes._count_markdown_pages(
+                    folder,
+                    skip_underscore_dirs=True,
+                    keep=None if keep is None else visible,
+                )
     choosable = [
         definition
         for key, definition in taxonomy.kinds.items()
