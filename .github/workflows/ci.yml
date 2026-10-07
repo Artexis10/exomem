@@ -312,6 +312,12 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Install the pinned older reader for the installed launcher proof
+        timeout-minutes: 5
+        run: |
+          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
       # The one run also drives the S1 summary-collection journey
       # (scripts/e2e_s1_summary_journey.py): dark and released phases on the same
       # installed wheel, preserved-source import with a mid-job restart, daily queries

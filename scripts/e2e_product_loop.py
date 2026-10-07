@@ -2749,6 +2749,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 str(python),
                 "--executable",
                 str(executable),
+                "--older-python",
+                args.older_python,
                 "--vault",
                 str(tmp / "s1-vault"),
                 "--work",
@@ -2787,6 +2789,7 @@ def main() -> int:
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--executable", default="")
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", ""))
     parser.add_argument("--http-server", default="")
     parser.add_argument("--vault", default="")
     parser.add_argument("--work", default="")

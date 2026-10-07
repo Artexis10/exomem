@@ -38,6 +38,8 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
+import zipfile
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta, timezone
 from fractions import Fraction
@@ -352,6 +354,7 @@ class Journey:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.executable, self.python = Path(args.executable), Path(args.python)
+        self.older_python = getattr(args, "older_python", "")
         self.vault, self.work, self.home = Path(args.vault), Path(args.work), Path(args.home)
         self.work.mkdir(parents=True, exist_ok=True)
         self.timeout = args.request_timeout
@@ -359,6 +362,9 @@ class Journey:
         self.export = export_bytes(self.rows)
         self.timings: dict[str, float] = {}
         self.coordinator_url = ""
+        self.lease_vault_id = LEASE_VAULT_ID
+        self.replica_id = "service"
+        self.state_root = self.home / "state"
         self.lease_state = self.work / "lease-service"
         self.lease_state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.file_collections: dict[str, Any] = {}
@@ -382,11 +388,12 @@ class Journey:
         env.update(
             {
                 "EXOMEM_WRITER_LEASE_URL": self.coordinator_url,
-                "EXOMEM_WRITER_LEASE_VAULT_ID": LEASE_VAULT_ID,
-                "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+                "EXOMEM_WRITER_LEASE_VAULT_ID": self.lease_vault_id,
+                "EXOMEM_WRITER_LEASE_REPLICA_ID": self.replica_id,
                 "EXOMEM_WRITER_LEASE_TOKEN": LEASE_TOKEN,
                 "EXOMEM_WRITER_LEASE_TTL": str(LEASE_TTL),
                 "EXOMEM_WRITER_LEASE_STATE_DIR": str(self.lease_state),
+                "EXOMEM_STATE_ROOT": str(self.state_root),
                 # The service takes the lease at start and takes it back after a handoff.
                 "EXOMEM_WRITER_LEASE_PREFERRED": "1",
             }
@@ -450,7 +457,7 @@ class Journey:
             "EXOMEM_JWT_SIGNING_KEY": secrets.token_hex(32),
             "EXOMEM_REST_API_KEY": self.rest_key,
             "EXOMEM_OAUTH_STORAGE_URL": self.coordinator_url,
-            "EXOMEM_OAUTH_STORAGE_NAMESPACE": LEASE_VAULT_ID,
+            "EXOMEM_OAUTH_STORAGE_NAMESPACE": self.lease_vault_id,
             "EXOMEM_OAUTH_STORAGE_TOKEN": LEASE_TOKEN,
         })
         token_file = self.work / "recipient-token"
@@ -504,6 +511,28 @@ class Journey:
             timeout=max(60.0, self.timeout * 3),
             check=False,
         )
+
+    def fork(self, label: str, vault: Path) -> Journey:
+        child = Journey(argparse.Namespace(
+            executable=str(self.executable), python=str(self.python), older_python=self.older_python,
+            vault=str(vault), work=str(self.work / label / "work"), home=str(self.work / label / "home"),
+            request_timeout=self.timeout,
+        ))
+        child.coordinator_url = self.coordinator_url
+        child.lease_vault_id = f"{LEASE_VAULT_ID}-{label}"
+        child.replica_id = label
+        child.file_collections = self.file_collections
+        child.source_receipt = self.source_receipt
+        return child
+
+    def installed_helper(self, option: str, target: Path, **extra: str) -> dict[str, Any]:
+        command = [str(self.python), str(Path(__file__).resolve()), option, str(target),
+                   "--python", str(self.python), "--executable", str(self.executable),
+                   "--vault", str(self.vault), "--work", str(self.work), "--home", str(self.home)]
+        for name, value in extra.items():
+            command.extend([f"--{name.replace('_', '-')}", value])
+        result = loop._run(command, env=self.lease_env(), cwd=self.work, timeout=max(90, self.timeout * 4))
+        return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 def tree_digest(root: Path, relative: str) -> str:
@@ -1005,7 +1034,226 @@ async def compare_queries(journey: Journey, service: Session) -> None:
     )
 
 
+def adopt_fresh(journey: Journey) -> None:
+    """Use the owner's public preview/apply route on a copy with no live store."""
+    expect(not list(journey.state_root.rglob("collections.sqlite")), "the fresh copy already has a live store")
+    preview = journey.owner_cli("adopt-local", "--dry-run", "--why", "adopt the copied fixture")
+    expect(preview.returncode == 0, "copy adoption preview refused", preview.stderr)
+    sealed = json.loads(preview.stdout.strip().splitlines()[-1])
+    expect(not list(journey.state_root.rglob("collections.sqlite")), "preview installed a live store")
+    applied = journey.owner_cli("adopt-local", "--preview-id", sealed["preview_id"],
+                                "--why", "adopt the copied fixture")
+    expect(applied.returncode == 0, "copy adoption refused", applied.stderr)
+    result = json.loads(applied.stdout.strip().splitlines()[-1])
+    expect(result["status"] == "admitted", "copy adoption did not admit the store", result)
+
+
+async def copy_and_restore(journey: Journey) -> None:
+    """Step 6: fresh-state adoption and actual staged restore of the mixed vault."""
+    with journey.step("6. copy the stopped vault and adopt its published replica"):
+        copied_root = journey.work / "copied-vault"
+        shutil.copytree(journey.vault, copied_root)
+        copied = journey.fork("copy", copied_root)
+        adopt_fresh(copied)
+        async with copied.service("copied") as service:
+            await compare_queries(copied, service)
+            await file_collections_unchanged(copied, service, "after fresh-root copy")
+    with journey.step("6. export, stage and activate the snapshot restore"):
+        parent = journey.work / "restore"
+        result = journey.installed_helper("--snapshot-restore", parent)
+        expect(result["code"] == "HOSTED_RESTORE_CANDIDATE_READY"
+               and result["journal_phase"] == "complete" and result["credential_revision"] > 0,
+               "installed staged restore did not finish", result)
+        restored = journey.fork("restore-client", parent / "vault")
+        restored.state_root = parent / "state" / "vault-state"
+        expect((restored.vault / journey.export_path).read_bytes() == journey.export,
+               "the restored preservation changed the raw bytes")
+        expect((restored.vault / STORE_FILES[1]).read_bytes() == (journey.vault / STORE_FILES[1]).read_bytes(),
+               "the staged restore changed the routing marker")
+        adopt_fresh(restored)
+        async with restored.service("restored") as service:
+            await compare_queries(restored, service)
+            await file_collections_unchanged(restored, service, "after snapshot restore")
+
+
+async def unsupported_launcher(journey: Journey) -> None:
+    """The store fence must refuse an actual older reader without a RAW fence masking it."""
+    with journey.step("6. refuse an actual unsupported interpreter through the launcher"):
+        expect(journey.older_python, "the launcher proof needs --older-python")
+        fixture = journey.fork("older-reader", journey.work / "older-reader-vault")
+        loop._run([str(fixture.executable), "init", "--vault", str(fixture.vault)],
+                  env=fixture.lease_env(), cwd=fixture.work, timeout=60)
+        async with fixture.service("files") as service:
+            await create_file_collections(fixture, service)
+        manifest = fixture.work / "summary.md"
+        manifest.write_text(summary_manifest(WORKOUTS_ID, "Reader compatibility fixture"), encoding="utf-8")
+        created = fixture.owner_cli("create", "--manifest-path", WORKOUTS_PATH,
+                                    "--manifest-file", str(manifest), "--why", "create compatibility fixture")
+        expect(created.returncode == 0, "compatibility fixture create refused", created.stderr)
+        async with fixture.service("summary") as service:
+            await service.mutate("record_memory", action="append", collection=WORKOUTS_ID,
+                                 item={"exercise_id": "reader-proof", "calories": 7, "local_date": "2026-03-11"},
+                                 why="compatibility proof row")
+        copied_root = fixture.work / "copied-vault"
+        shutil.copytree(fixture.vault, copied_root)
+        result = fixture.installed_helper("--unsupported-launcher", copied_root,
+                                          older_python=journey.older_python)
+        expect(result["store_fence_refused"] is True, "the unsupported launcher accepted the copy", result)
+
+
+def snapshot_state(journey: Journey, label: str) -> dict[str, Any]:
+    target = journey.work / f"{label}.sqlite"
+    backup = journey.owner_cli("backup", "--to", str(target))
+    expect(backup.returncode == 0, "the integrity-checked backup refused", backup.stderr)
+    return journey.installed_helper("--snapshot-state", target)
+
+
+async def narrowing_rollback(journey: Journey) -> None:
+    """Disable this vault through its public route, then prove retained data and paused work."""
+    with journey.step("6. narrow the vault capability and keep A/B usable"):
+        async with journey.service("before-rollback") as service:
+            pending = await service.import_job(WORKOUTS_ID, mode="start", **journey.import_request)
+            expect(pending["state"] == "running", "rollback has no active import to stop", pending)
+        before = snapshot_state(journey, "before-rollback")
+        marker = (journey.vault / STORE_FILES[1]).read_bytes()
+        rollback = journey.owner_cli("rollback")
+        expect(rollback.returncode == 0, "the public vault rollback refused", rollback.stderr)
+        expect(json.loads(rollback.stdout.strip().splitlines()[-1])["status"] == "disabled",
+               "rollback did not disable the vault", rollback.stdout)
+        async with journey.service("after-rollback") as service:
+            await service.refused("COLLECTION_STORE_DISABLED", "record_memory", action="query", collection=WORKOUTS_ID)
+            await file_collections_unchanged(journey, service, "after vault rollback")
+            await service.mutate("record_memory", action="append", collection=journey.file_collections["records"],
+                                 item={"occurred_on": "2026-08-05", "title": "After rollback", "status": "completed"},
+                                 why="prove file Records stays writable")
+            await service.mutate("plan_memory", action="add", collection=journey.file_collections["planning"],
+                                 plan_id=str(uuid.uuid4()), item={"title": "After rollback", "tags": ["bug"]},
+                                 why="prove file Planning stays writable")
+            await asyncio.sleep(1.2)  # Cross a normal background tick while the import remains disabled.
+            after = snapshot_state(journey, "after-rollback")
+        expect(after == before, "rollback or disabled ticks changed canonical rows, history or import checkpoints",
+               {"before": before, "after": after})
+        expect((journey.vault / STORE_FILES[1]).read_bytes() == marker, "rollback changed the routing marker")
+        expect((journey.vault / journey.export_path).read_bytes() == journey.export, "rollback changed preserved raw bytes")
+        expect((journey.vault / STORE_FILES[0]).is_file(), "rollback removed the published replica")
+
+
 # --- entry point --------------------------------------------------------------
+
+
+def snapshot_restore(args: argparse.Namespace) -> int:
+    """Run the installed export and candidate restore with real private credential state."""
+    from exomem import __version__, hosted_portability, hosted_restore, state_migration
+    from exomem.hosted_runtime import HOSTED_PROTOCOL_VERSION
+    from exomem.hosted_security import CredentialBundle, HostedSecurityAuthority
+
+    parent = args.snapshot_restore.resolve()
+    parent.mkdir(mode=0o700, parents=True)
+    exported = hosted_portability.export_quiesced_vault(
+        Path(args.vault), parent / "artifacts", context=hosted_portability.PortabilityContext(
+            cell_id="s1-source", vault_id="s1-vault", operation_id="s1-export",
+            created_at=datetime.now(UTC).isoformat(), operator_authorized=True,
+            lifecycle_state="quiesced", routing_stopped=True, active_mutations=0,
+            background_writers_stopped=True, reads_allowed=True,
+        ),
+    )
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        members = archive.namelist()
+        expect(all(any(member.endswith(path) for member in members) for path in STORE_FILES),
+               "the archive omitted the routing marker or published replica", members)
+        expect(not any(member.endswith(("collections.sqlite-wal", "collections.sqlite-shm")) for member in members),
+               "the archive carried live SQLite companions", members)
+    secret = secrets.token_urlsafe(32)
+    bundle = CredentialBundle({"s1-fixture": secret})
+
+    def security(binding):
+        return HostedSecurityAuthority(
+            binding.state_root, cell_id=binding.cell_id, vault_id=binding.vault_id,
+            expected_uid=binding.runtime_uid, expected_gid=binding.runtime_gid, bundle_loader=lambda: bundle,
+        )
+
+    def bootstrap_security(*, binding, active_credential_version, operation_id, request_digest):
+        return security(binding).bootstrap(active_version=active_credential_version,
+                                          operation_id=operation_id, request_digest=request_digest)
+
+    request = {
+        "request_id": "351a1841-716e-45c7-a4f8-6f54654c2b1e", "operation_id": "s1-restore",
+        "artifact_reference": exported.artifact_reference, "archive_path": str(exported.archive_path),
+        "expected_archive_sha256": exported.archive_sha256,
+        "source_cell_id": "s1-source", "source_vault_id": "s1-vault",
+        "target_cell_id": "s1-target", "target_vault_id": "s1-vault",
+        "target_vault_root": str(parent / "vault"), "target_state_root": str(parent / "state"),
+        "target_log_root": str(parent / "logs"), "expected_release": __version__,
+        "expected_protocol": HOSTED_PROTOCOL_VERSION, "runtime_uid": os.getuid(), "runtime_gid": os.getgid(),
+        "active_credential_version": "s1-fixture", "routing_stopped": True, "workload_stopped": True,
+    }
+    code, result = hosted_restore.execute_restore_candidate(request, bootstrap_security=bootstrap_security)
+    from exomem.hosted_runtime import HostedBindingV2
+
+    binding = HostedBindingV2(
+        cell_id="s1-target", vault_id="s1-vault", vault_root=parent / "vault",
+        state_root=parent / "state", log_root=parent / "logs", runtime_uid=os.getuid(), runtime_gid=os.getgid(),
+    )
+    credential = security(binding).authenticate(secret)
+    expect(credential is not None and credential.security_revision == result["credential_revision"],
+           "the restored credential did not authenticate at the reported revision")
+    os.environ["EXOMEM_STATE_ROOT"] = str(parent / "state" / "vault-state")
+    os.environ["EXOMEM_HOSTED_STATE_ROOT"] = str(parent / "state")
+    state_migration.require_vault_state_ready(parent / "vault")
+    print(json.dumps({"code": code, "journal_phase": result["journal_phase"],
+                      "credential_revision": credential.security_revision}))
+    return 0
+
+
+def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
+    """Probe the real older installation through production candidate admission."""
+    from exomem.collection_store import authority
+    from exomem.governance import raw_protection
+    from exomem.service_manager import WorkerRuntime
+
+    root = args.unsupported_launcher.resolve()
+    expect(not raw_protection.required_compatibility(root), "RAW would mask the store fence in this fixture")
+    expect(authority.required_state_compatibility_ids(root) == frozenset({"collections-store-v1"}),
+           "the compatibility fixture does not require the store format")
+    os.environ["EXOMEM_VAULT_PATH"] = str(root)
+    fresh_state = Path(args.work) / "unsupported-state"
+    os.environ["EXOMEM_STATE_ROOT"] = str(fresh_state)
+    old = loop._run([args.older_python, "-I", "-c",
+                     "from importlib.metadata import version; print(version('exomem'))"],
+                    env=os.environ.copy(), cwd=Path(args.work), timeout=20).stdout.strip()
+    runtime = WorkerRuntime(Path(args.work) / "unsupported.sock", host="127.0.0.1", port=0)
+    target = asyncio.run(runtime.inspect({"python": args.older_python, "version": old}))
+    try:
+        runtime.migration_required(target)
+    except ValueError as error:
+        expect(str(error) == "candidate does not support required state compatibility",
+               "the launcher refused for another reason", str(error))
+    else:
+        raise RuntimeError("the launcher admitted the unsupported store reader")
+    expect(runtime.child is None and runtime.standby is None, "rejected candidate started a worker")
+    expect(not fresh_state.exists(), "rejected candidate created external state")
+    print(json.dumps({"store_fence_refused": True, "older_version": old}))
+    return 0
+
+
+def inspect_snapshot_state(path: Path) -> int:
+    """Compare business state and job checkpoints in private, integrity-checked backup files."""
+    from contextlib import closing
+
+    from exomem.collection_store.connection import open_reader
+
+    with closing(open_reader(path)) as reader:
+        expect(reader.execute("PRAGMA integrity_check").fetchone() == ("ok",), "the backup fails integrity")
+        # These are fixed schema tables, not customer-defined fields or vocabularies.
+        tables = {"items": "row_id", "txns": "commit_seq", "collection_manifests": "collection_id,manifest_version",
+                  "import_jobs": "job_id"}
+        proof = {}
+        for table, order in tables.items():
+            rows = reader.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()
+            encoded = json.dumps(rows, separators=(",", ":"), default=repr).encode()
+            proof[table] = {"rows": len(rows), "sha256": hashlib.sha256(encoded).hexdigest()}
+    print(json.dumps(proof))
+    return 0
 
 
 def issue_recipient_session(path: Path) -> int:
@@ -1090,6 +1338,9 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(released_phase_enrol(journey))
         continuation, imported = asyncio.run(create_and_start_import(journey))
         asyncio.run(resume_import(journey, continuation, imported))
+        asyncio.run(copy_and_restore(journey))
+        asyncio.run(unsupported_launcher(journey))
+        asyncio.run(narrowing_rollback(journey))
     except BaseException:
         print_log_tails(journey.work)
         raise
@@ -1105,13 +1356,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", required=True, help="the installed wheel's python")
     parser.add_argument("--executable", required=True, help="the installed wheel's exomem")
+    parser.add_argument("--older-python", default="", help="the actual unsupported installed reader for the launcher proof")
     parser.add_argument("--vault", required=True, help="a vault path for this journey; created by init")
     parser.add_argument("--work", required=True)
     parser.add_argument("--home", required=True)
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--issue-recipient-session", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--snapshot-restore", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--unsupported-launcher", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--snapshot-state", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    return issue_recipient_session(args.issue_recipient_session) if args.issue_recipient_session else run(args)
+    if args.issue_recipient_session:
+        return issue_recipient_session(args.issue_recipient_session)
+    if args.snapshot_restore:
+        return snapshot_restore(args)
+    if args.unsupported_launcher:
+        return inspect_unsupported_launcher(args)
+    if args.snapshot_state:
+        return inspect_snapshot_state(args.snapshot_state)
+    return run(args)
 
 
 if __name__ == "__main__":
