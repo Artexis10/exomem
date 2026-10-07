@@ -688,12 +688,10 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
         "contract": (
             "source_kind is what the artifact IS; domain is what it is ABOUT; "
             "projects is what work it serves. Kind and domain are open: any "
-            "lowercase slug is accepted, so name what you mean even if unfamiliar."
+            "lowercase slug is accepted."
         ),
-        "fallback_rule": (
-            f"{source_taxonomy_module.FALLBACK_KIND!r} means the kind could not be "
-            "determined, never that no familiar label matched."
-        ),
+        "kind_rule": source_taxonomy_module.CAPTURE_KIND_RULE,
+        "migration": source_taxonomy_module.CAPTURE_KIND_MIGRATION,
     }
     if profile != "compact":
         projection["recall"] = "ask_memory(source_kinds=, domains=, projects=), alone or combined."
@@ -1553,7 +1551,7 @@ def op_bootstrap(
         ),
     }
     payload: dict = {
-        "contract_version": "2026-08-17.1",
+        "contract_version": "2026-10-07.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -1765,7 +1763,7 @@ def op_bootstrap(
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
                 "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
-                "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': captures keep landing in the 'other' fallback within one domain, so a real kind probably exists",
+                "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders",
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
@@ -3568,14 +3566,17 @@ def op_suggest_relations(
     )
 
 
-def _resolve_source_kind_argument(source_type: str | None, source_kind: str | None) -> str:
-    """Collapse the two names for the source-kind axis into one value.
+def _resolve_source_kind_argument(
+    vault_root: Path, source_type: str | None, source_kind: str | None
+) -> str:
+    """Collapse the two names for the source-kind axis into the kind to file under.
 
     `source_kind` is the preferred name and `source_type` the original; they are
     the same axis, so a conflict between them cannot be resolved by preferring
     one. Refusing is the only honest answer — silently ignoring an explicit
-    argument is worse than a visible error. Neither supplied means unclassified,
-    which resolves to the low-confidence fallback.
+    argument is worse than a visible error. Neither supplied is refused for an
+    agent and recorded as `unclassified` when no agent is in the loop
+    (`add.capture_kind`).
     """
     supplied_type = (source_type or "").strip()
     supplied_kind = (source_kind or "").strip()
@@ -3593,13 +3594,61 @@ def _resolve_source_kind_argument(source_type: str | None, source_kind: str | No
                 )
         except source_taxonomy.TaxonomyError as exc:
             raise ValueError(f"INVALID_SOURCE: {exc}") from exc
-    return supplied_kind or supplied_type or source_taxonomy_fallback()
+    return add_module.capture_kind(
+        vault_root, supplied_kind or supplied_type or None, unattended=_unattended_capture()
+    )
 
 
-def source_taxonomy_fallback() -> str:
-    from .source_taxonomy import FALLBACK_KIND
+def _unattended_capture() -> bool:
+    """Whether an explicit human adapter bound this capture, without a wire flag."""
+    from . import source_taxonomy
 
-    return FALLBACK_KIND
+    if source_taxonomy.is_human_capture():
+        return True
+    surface = capabilities_module.current_active_surface()
+    return (
+        surface is not None
+        and surface.surface == "hosted"
+        and surface.profile == capabilities_module.HOSTED_PRIVATE_ROUTER_PROFILE
+    )
+
+
+def _add_source(
+    vault_root: Path,
+    source_schema: object,
+    *,
+    kind: str,
+    content: str,
+    title: str,
+    slug: str | None,
+    url: str | None,
+    tags: list[str] | None,
+    why_captured: str | None,
+    domain: str | None,
+    projects: list[str] | None,
+    raw_protection: bool = False,
+) -> dict:
+    """Capture text as a source under an already-resolved kind."""
+    try:
+        result = add_module.add(
+            vault_root,
+            source_schema,
+            content=content,
+            source_type=kind,
+            title=title,
+            slug=slug,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+            raw_protection=raw_protection,
+        )
+    except add_module.AddError as e:
+        # FastMCP serializes raised exceptions; we want a structured shape.
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+    query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
+    return result.as_dict()
 
 
 def op_add(
@@ -3647,27 +3696,20 @@ def op_add(
         {path, warnings}. On schema violation, raises a structured error
         with code=INVALID_SOURCE, the missing fields, and the reason.
     """
-    try:
-        resolved_kind = _resolve_source_kind_argument(source_type, source_kind)
-        result = add_module.add(
-            vault_root,
-            source_schema,
-            content=content,
-            source_type=resolved_kind,
-            title=title,
-            slug=slug,
-            url=url,
-            tags=tags,
-            why_captured=why_captured,
-            domain=domain,
-            projects=projects,
-            raw_protection=raw_protection,
-        )
-    except add_module.AddError as e:
-        # FastMCP serializes raised exceptions; we want a structured shape.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
-    query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
-    return result.as_dict()
+    return _add_source(
+        vault_root,
+        source_schema,
+        kind=_resolve_source_kind_argument(vault_root, source_type, source_kind),
+        content=content,
+        title=title,
+        slug=slug,
+        url=url,
+        tags=tags,
+        why_captured=why_captured,
+        domain=domain,
+        projects=projects,
+        raw_protection=raw_protection,
+    )
 
 
 def op_audit(
@@ -7707,8 +7749,8 @@ def op_capture_source(
     preserve_artifacts; choose by role, not transport. compile_guidance=true
     returns a compilation proposal.
 
-    Classification never blocks preserving: `source_kind` (what it IS) and
-    `domain` (what it is ABOUT) are independent open vocabularies.
+    `source_kind` (what it IS) is required; `domain` (what it is ABOUT) is
+    optional. Both are open vocabularies: a new slug registers.
 
     Args:
         content: Raw text. Supply this or `files`, not both.
@@ -7718,9 +7760,8 @@ def op_capture_source(
         tags: Secondary labels; not for kind, domain or project.
         compile_guidance: Return a compilation proposal.
         suggested_title: Title hint for the proposal.
-        source_kind: What it IS, lowercase slug. Differing values with
-            source_type are refused. Name the kind you mean; 'other' only when
-            undeterminable.
+        source_kind: What it IS, lowercase slug: the closest known kind or a
+            new one. Differing values with source_type are refused.
         domain: What it is ABOUT, lowercase slug.
         projects: Project keys served; never affects storage.
         files: Client file handles, captured instead of `content`.
@@ -7728,6 +7769,8 @@ def op_capture_source(
             not write consent; agent-initiated use obeys proactive_capture.
         raw_protection: Keep the original owner-only until a whole-artifact release.
     """
+    # Resolved before any byte is fetched or written, for files and text alike.
+    kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
     if files or adoption is not None:
         from . import client_artifacts
 
@@ -7737,7 +7780,7 @@ def op_capture_source(
             title=title,
             files=files,
             slug=slug,
-            source_type=source_type or source_kind,
+            source_type=kind,
             url=url,
             tags=tags,
             why_captured=why_captured,
@@ -7748,17 +7791,16 @@ def op_capture_source(
         )
         _note_committed_artifact_targets(captured)
         return captured
-    source = op_add(
+    source = _add_source(
         vault_root,
         source_schema,
+        kind=kind,
         content=content,
-        source_type=source_type,
         title=title,
         slug=slug,
         url=url,
         tags=tags,
         why_captured=why_captured,
-        source_kind=source_kind,
         domain=domain,
         projects=projects,
         raw_protection=raw_protection,
@@ -12017,9 +12059,9 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "Capture raw material or proof-bearing text without turning it into a "
             "conclusion. Pass source_kind, domain and projects; see source_taxonomy."
         ),
-        # No source_kind is published here on purpose. Naming the fallback as
-        # the route's default argument taught every agent to file clearly
-        # classifiable material as unclassified.
+        # No source_kind is published here on purpose: the agent names the kind
+        # of each capture. A default argument taught every agent to file
+        # clearly classifiable material under a catch-all.
         "route": {"tool": "capture_source", "args": {}},
         "evidence_route": {"tool": "preserve_evidence", "args": {}},
         "safety": "additive write; Sources and Evidence preserve originals/provenance",

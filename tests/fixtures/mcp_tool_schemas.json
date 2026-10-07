@@ -538,7 +538,7 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a compilation proposal.\n\nClassification never blocks preserving: `source_kind` (what it IS) and\n`domain` (what it is ABOUT) are independent open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a compilation proposal.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is\noptional. Both are open vocabularies: a new slug registers.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -582,7 +582,7 @@
         },
         "source_kind": {
           "type": "string",
-          "description": "What it IS, lowercase slug. Differing values with source_type are refused. Name the kind you mean; 'other' only when undeterminable."
+          "description": "What it IS, lowercase slug: the closest known kind or a new one. Differing values with source_type are refused."
         },
         "domain": {
           "type": "string",

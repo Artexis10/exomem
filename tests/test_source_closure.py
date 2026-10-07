@@ -567,7 +567,7 @@ def test_end_to_end_provenance_fixture_never_promotes_a_partial_derivative(
         vault,
         source_schema,
         content="Original script supplied by its author.\n",
-        source_type="other",
+        source_type="correspondence",
         title="Captured client script original",
         url="https://example.invalid/original-script",
     )

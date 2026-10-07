@@ -174,6 +174,7 @@ def test_renamed_product_commands_forward_explicit_slugs(
         content="会話。",
         title="睡眠の会話",
         slug="sleep-source",
+        source_kind="session",
     )
     assert captured["source"]["path"].endswith("-sleep-source.md")
 

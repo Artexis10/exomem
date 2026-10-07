@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -146,13 +147,23 @@ def compute_updates(
     )
 
 
-def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> int:
+def _count_markdown_pages(
+    root: Path,
+    *,
+    skip_underscore_dirs: bool = False,
+    keep: Callable[[str], bool] | None = None,
+    on_error: Callable[[OSError], None] | None = None,
+) -> int:
     """Non-index `*.md` entries under `root`, recursively, in one scandir pass.
 
     The same set `root.rglob("*.md")` minus `index.md` yields (symlinked
     directories are not descended; a directory named `*.md` is counted and
     descended), without a `stat` per entry: this runs inside the commit of
     every write, so its cost is the write's hold time.
+
+    `keep`, when given, receives each page's path as scanned and decides
+    whether it counts, so a caller can count only what its audience may see.
+    `on_error` reports incomplete reads without changing legacy best-effort counts.
     """
     count = 0
     pending = [os.fspath(root)]
@@ -160,27 +171,52 @@ def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> 
         try:
             with os.scandir(pending.pop()) as entries:
                 for entry in entries:
-                    if entry.name.endswith(".md") and entry.name != "index.md":
+                    if (
+                        entry.name.endswith(".md")
+                        and entry.name != "index.md"
+                        and (keep is None or keep(entry.path))
+                    ):
                         count += 1
                     # A directory named `x.md` is counted above and still descended.
                     if entry.is_dir(follow_symlinks=False) and not (
                         skip_underscore_dirs and entry.name.startswith("_")
                     ):
                         pending.append(entry.path)
-        except OSError:
+        except OSError as error:
+            if on_error is not None:
+                on_error(error)
             continue
     return count
 
 
-def _count_sources(sources_dir: Path) -> dict[str, int]:
+def _count_sources(
+    sources_dir: Path, *, on_error: Callable[[OSError], None] | None = None
+) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
     out: dict[str, int] = {}
-    if not sources_dir.is_dir():
+    try:
+        entries = list(sources_dir.iterdir())
+    except FileNotFoundError:
         return out
-    for sub in sources_dir.iterdir():
-        if not sub.is_dir() or sub.name.startswith("_"):
+    except OSError as error:
+        if on_error is None:
+            raise
+        on_error(error)
+        return out
+    for sub in entries:
+        if sub.name.startswith("_"):
             continue
-        out[sub.name] = _count_markdown_pages(sub, skip_underscore_dirs=True)
+        try:
+            if not stat.S_ISDIR(sub.stat().st_mode):
+                continue
+        except OSError as error:
+            if on_error is None:
+                raise
+            on_error(error)
+            continue
+        out[sub.name] = _count_markdown_pages(
+            sub, skip_underscore_dirs=True, on_error=on_error
+        )
     return out
 
 

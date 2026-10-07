@@ -131,6 +131,7 @@ def _stage_source_receipt(
         vault,
         source_schema=source_schema,
         title="Synthetic reasoning input",
+        source_type="research-report",
         files=[
             {
                 "download_url": "https://files.example/selected-source",
@@ -208,6 +209,7 @@ def test_public_source_and_evidence_commands_forward_the_closed_adoption_envelop
         title="Research input",
         files=[handle],
         adoption=envelope,
+        source_kind="research-report",
     )
     commands.op_preserve_artifacts(
         tmp_path,
