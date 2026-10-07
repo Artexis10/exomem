@@ -58,7 +58,6 @@ WINDOW_DAYS = 80
 OFFSETS = (-480, -300, 0, 60, 330, 720)
 #: Evidence path the owner preserves the export at.
 EXPORT_SCOPE, EXPORT_CATEGORY, EXPORT_FILENAME = "wearable", "export", "workouts.ndjson"
-EXPORT_PATH = f"Knowledge Base/Evidence/{EXPORT_SCOPE}/{EXPORT_CATEGORY}/{EXPORT_FILENAME}"
 
 
 def _offset_text(minutes: int) -> str:
@@ -265,7 +264,6 @@ MAPPING = {
     },
     "on_invalid": "skip",
 }
-IMPORT_REQUEST = {"source_ref": EXPORT_PATH, "format": "ndjson", "mapping": MAPPING}
 DAILY = {
     "version": 1,
     "group_by": [{"field": "local_date", "bucket": "day"}],
@@ -361,6 +359,18 @@ class Journey:
         self.coordinator_url = ""
         self.lease_state = self.work / "lease-service"
         self.file_collections: dict[str, Any] = {}
+        self.source_receipt: dict[str, Any] = {}
+
+    @property
+    def export_path(self) -> str:
+        path = self.source_receipt.get("stored_path")
+        if not isinstance(path, str) or not path:
+            raise RuntimeError("the export has no preserved-source receipt")
+        return path
+
+    @property
+    def import_request(self) -> dict[str, Any]:
+        return {"source_ref": self.export_path, "format": "ndjson", "mapping": MAPPING}
 
     def lease_env(self) -> dict[str, str]:
         """The service's environment: a writer lease and no operator credential."""
@@ -591,11 +601,14 @@ async def preserve_export(journey: Journey, service: Session) -> None:
         filename=EXPORT_FILENAME,
         content=journey.export.decode("utf-8"),
         description="invented workout-summary export",
+        raw_protection=True,
     )
+    journey.source_receipt = receipt
     digest = hashlib.sha256(journey.export).hexdigest()
     expect(
         receipt.get("state") == "stored"
-        and receipt.get("stored_path") == EXPORT_PATH
+        and Path(journey.export_path).parent
+        == Path("Knowledge Base/Evidence") / EXPORT_SCOPE / EXPORT_CATEGORY
         and receipt.get("hash_algorithm") == "sha256"
         and receipt.get("hash") == digest
         and receipt.get("size") == len(journey.export),
@@ -603,7 +616,7 @@ async def preserve_export(journey: Journey, service: Session) -> None:
         {"receipt": receipt, "expected_hash": digest, "expected_size": len(journey.export)},
     )
     expect(
-        hashlib.sha256((journey.vault / EXPORT_PATH).read_bytes()).hexdigest() == digest,
+        hashlib.sha256((journey.vault / journey.export_path).read_bytes()).hexdigest() == digest,
         "the preserved Evidence file is not the export's exact bytes",
     )
 
@@ -636,7 +649,7 @@ async def dark_phase(journey: Journey) -> None:
                     "record_memory",
                     action="import",
                     collection=target,
-                    import_request={"mode": "preview", **IMPORT_REQUEST},
+                    import_request={"mode": "preview", **journey.import_request},
                 )
     enrolment = journey.work / "enrolment.md"
     enrolment.write_text(summary_manifest(ENROLMENT_ID, "Enrolment"), encoding="utf-8")
@@ -747,7 +760,7 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 inspected.get("contract"),
             )
         with journey.step("3. import preview, one governed revise, start"):
-            preview = await service.import_job(WORKOUTS_ID, mode="preview", **IMPORT_REQUEST)
+            preview = await service.import_job(WORKOUTS_ID, mode="preview", **journey.import_request)
             recommended = preview["recommended_declarations"]
             expect(
                 preview["rows"]["sampled"] == 100
@@ -767,7 +780,7 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 why="declare the recommended index and daily rollups",
                 **guards,
             )
-            job = await service.import_job(WORKOUTS_ID, mode="start", **IMPORT_REQUEST)
+            job = await service.import_job(WORKOUTS_ID, mode="start", **journey.import_request)
             expect(job["state"] == "running", "the import did not start running", job)
         with journey.step("3. stop the service mid-job"):
             async def advanced():
@@ -837,7 +850,7 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
         with journey.step("7. file collections A and B unchanged"):
             await file_collections_unchanged(journey, service, "after the journey")
     expect(
-        hashlib.sha256((journey.vault / EXPORT_PATH).read_bytes()).hexdigest()
+        hashlib.sha256((journey.vault / journey.export_path).read_bytes()).hexdigest()
         == hashlib.sha256(journey.export).hexdigest(),
         "the preserved export changed during the import",
     )
