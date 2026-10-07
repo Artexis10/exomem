@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
-from . import context_refs, knowledge_packs
+from . import context_refs, knowledge_packs, source_taxonomy
 from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .kbdir import kb_dirname
@@ -609,7 +609,7 @@ def plan(root: Path, *, run_id: str, today: dt.date | None = None) -> dict:
                     "title": it.title,
                     "frontmatter": {
                         "type": "source",
-                        "source_type": "other",
+                        "source_type": source_taxonomy.UNCLASSIFIED_KIND,
                         "imported_from": it.original_path,
                         "original_sha256": it.sha256,
                         "original_bytes": it.bytes,

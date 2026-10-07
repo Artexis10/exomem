@@ -100,20 +100,6 @@ def test_add_video_auto_creates_folder(
     assert (vault / "Knowledge Base" / "Sources" / "Videos").is_dir()
 
 
-def test_add_other_auto_creates_folder(
-    vault: Path, source_schema: schema_module.SourceSchema
-) -> None:
-    add_module.add(
-        vault,
-        source_schema,
-        content="Random capture.",
-        source_type="other",
-        title="Random note",
-        today=TODAY,
-    )
-    assert (vault / "Knowledge Base" / "Sources" / "Other").is_dir()
-
-
 def test_add_filename_collision_appends_suffix(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:

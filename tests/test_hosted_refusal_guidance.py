@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 from temporary_vault import temporary_vault
 
-from exomem import commands, find, schema, semantic_authoring, server_hosted
+from exomem import capabilities, commands, find, schema, semantic_authoring, server_hosted
 from exomem.cli_ops import OpError, error_dict
 from exomem.init import init_vault
 
@@ -128,14 +128,24 @@ def test_capture_lane_accepts_consecutive_ordinary_sentences() -> None:
         ("Renew the passport before March.", "Passport renewal"),
     ]
 
+    # The box reaches the cell through the private command router and names no
+    # kind; the router records such a capture as unclassified.
+    router = capabilities.ActiveSurfaceDescriptor(
+        surface="hosted",
+        profile=capabilities.HOSTED_PRIVATE_ROUTER_PROFILE,
+        tier2_enabled=False,
+        product_commands=("capture_source",),
+    )
+
     with temporary_vault() as vault:
         init_vault(vault)
         source_schema = schema.load_source_schema(vault)
 
         for content, title in sentences:
-            result = commands.op_capture_source(
-                vault, source_schema, content=content, title=title, source_type="other"
-            )
+            with capabilities.active_surface(router):
+                result = commands.op_capture_source(
+                    vault, source_schema, content=content, title=title
+                )
             # `capture_source` nests its result under `source`, unlike
             # `remember` — the companion UI change depends on this shape.
             assert result["source"]["path"], f"capture refused {title!r}"

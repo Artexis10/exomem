@@ -260,6 +260,7 @@ def _cell(
     records_reader_version: int = 2,
     lifecycle_actions_enabled: bool = False,
     production_invoker: bool = False,
+    agent_profile: str | None = None,
     authorization_session_replica_id: str | None = None,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
@@ -276,6 +277,7 @@ def _cell(
         worker_policy_digest="a" * 64 if private_authenticator is not None else None,
         enforce_transfer_v1_compatibility=False,
         records_reader_version=records_reader_version,
+        agent_profile=agent_profile,
         lifecycle_actions_enabled=lifecycle_actions_enabled,
         authorization_session_replica_id=authorization_session_replica_id,
         resource_limits=HostedResourceLimits(
@@ -3654,3 +3656,124 @@ def test_v5_curation_commits_and_replays_under_fast_durable_acknowledgement(
     assert after["committed_steps"] == ["one"]
     assert len(after["receipts"]) == 1
     assert len(list(config.vault_root.rglob("*v5-fast-ack*.md"))) == 1
+
+
+def test_hosted_capture_box_saves_a_kindless_memory_as_unclassified(tmp_path: Path) -> None:
+    """The web capture box sends a title and text; nobody there can name a kind."""
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-capture-box",
+        credential="capture-box-private-service-credential-0001",
+    )
+
+    saved = client.post(
+        "/private/exomem/v1/command/capture_source",
+        headers=_headers(config, idempotency_key="capture-box-0001"),
+        json={"title": "Dentist Thursday", "content": "Dentist on Thursday at 3pm."},
+    )
+
+    assert saved.status_code == 200, saved.text
+    pages = list((config.vault_root / "Knowledge Base" / "Sources").rglob("*dentist*.md"))
+    assert [page.parent.name for page in pages] == ["Unclassified"]
+
+
+def test_hosted_agent_kindless_capture_is_refused_with_the_known_kinds(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-agent-kindless",
+        credential="agent-kindless-private-service-credential-0001",
+    )
+
+    refused = client.post(
+        f"/private/exomem/v1/agent/{config.active_agent_profile}/command/capture_source",
+        headers=_headers(config, idempotency_key="agent-kindless-0001"),
+        json={"title": "Loose capture", "content": "Raw notes from a call."},
+    )
+
+    error = refused.json()["error"]
+    assert error["code"] == "SOURCE_KIND_REQUIRED"
+    assert error["remediation"], "the agent must be told how to choose a kind"
+    assert {"kind": "article", "sources": 0} in error["known_source_kinds"]
+    assert not list((config.vault_root / "Knowledge Base" / "Sources").rglob("*loose*.md"))
+
+
+@pytest.mark.parametrize(
+    ("profile", "old_kind", "kind_argument"),
+    [("hosted-alpha-agent-v1", None, "source_kind"),
+     ("hosted-alpha-agent-v4", "other", "source_type")],
+)
+def test_historical_capture_contract_refuses_then_recovers_with_existing_kind_argument(
+    tmp_path: Path, profile: str, old_kind: str | None, kind_argument: str,
+) -> None:
+    from exomem import source_taxonomy
+
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path, cell_id="cell-capture-migration",
+        credential="capture-migration-private-credential-0001", agent_profile=profile,
+    )
+    route = f"/private/exomem/v1/agent/{profile}/command/"
+    bootstrap = client.post(
+        route + "bootstrap", headers=_headers(config), json={"profile": "compact"},
+    )
+    assert bootstrap.status_code == 200, bootstrap.text
+    operating = bootstrap.json()["data"]
+    assert operating["contract_version"] == "2026-10-07.1"
+    assert operating["source_taxonomy"]["migration"] == source_taxonomy.CAPTURE_KIND_MIGRATION
+    body = {"title": "Migration capture", "content": "Observed three nests."}
+    if old_kind is not None:
+        body["source_type"] = old_kind
+    kb = config.vault_root / "Knowledge Base"
+    before = {p.relative_to(kb): p.read_bytes() for p in kb.rglob("*") if p.is_file()}
+
+    refused = client.post(
+        route + "capture_source", headers=_headers(config, idempotency_key="migration-old"),
+        json=body,
+    )
+
+    error = refused.json()["error"]
+    assert error["code"] == "SOURCE_KIND_REQUIRED"
+    assert source_taxonomy.CAPTURE_KIND_RULE in error["remediation"]
+    assert source_taxonomy.CAPTURE_KIND_MIGRATION in error["remediation"]
+    assert error["known_source_kinds_state"] == "complete"
+    assert {p.relative_to(kb): p.read_bytes() for p in kb.rglob("*") if p.is_file()} == before
+    body.pop("source_type", None)
+    body[kind_argument] = "field-notebook"
+    saved = client.post(
+        route + "capture_source", headers=_headers(config, idempotency_key="migration-retry"),
+        json=body,
+    )
+
+    assert saved.status_code == 200, saved.text
+    pages = list((kb / "Sources" / "Field Notebook").glob("*migration-capture*.md"))
+    assert len(pages) == 1
+    assert "Observed three nests." in pages[0].read_text(encoding="utf-8")
+
+
+def test_hosted_refusal_keeps_unknown_counts_visible(tmp_path: Path, monkeypatch) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path, cell_id="cell-unreadable-counts",
+        credential="unreadable-counts-private-credential-0001",
+    )
+    sources = config.vault_root / "Knowledge Base" / "Sources"
+    iterdir = Path.iterdir
+
+    def unavailable(path):
+        if path == sources:
+            raise PermissionError("synthetic directory read failure")
+        return iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", unavailable)
+    refused = client.post(
+        f"/private/exomem/v1/agent/{config.active_agent_profile}/command/capture_source",
+        headers=_headers(config, idempotency_key="counts-unknown"),
+        json={"title": "Loose capture", "content": "Observed three nests."},
+    )
+
+    error = refused.json()["error"]
+    assert error["code"] == "SOURCE_KIND_REQUIRED"
+    assert error["known_source_kinds_state"] == "failed"
+    assert error["known_source_kinds"]
+    assert all(row["sources"] is None for row in error["known_source_kinds"])
+    assert "Sources/" in error["known_source_kinds_counted"]

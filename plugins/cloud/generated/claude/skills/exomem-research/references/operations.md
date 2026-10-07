@@ -327,8 +327,8 @@ None.
 ### Procedure
 1. Classify the kind and, when it is clear, the domain. The destination follows
    deterministically as `Sources/<Kind>/[<Domain>/]` — do not choose a folder
-   directly. Fall back to `other` only when the kind genuinely cannot be
-   determined; `other` means low confidence, never a missing label.
+   directly. There is no fallback kind: when no known kind fits, name a new
+   slug (see `frontmatter.md` § source).
 2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated
    lowercase ASCII, ≤ 100 chars. An explicit `slug` controls only the filename;
    the Unicode display title is stored unchanged.
@@ -337,10 +337,9 @@ None.
 5. Update `Sources/index.md` with a new line.
 6. Report path written and offer: "Compile a note from this?"
 7. If the result carries a `structure_suggestion` of kind
-   `source_classification_debt`, a run of material has been landing in the
-   catch-all. Surface a `strong` one in the user's own language and offer to
-   start filing that pattern under a real kind; use judgement on a `moderate`
-   one, and do not repeat the same advice within one conversation.
+   `source_classification_debt`, the vault holds sources nobody has given a
+   kind, counted with their folders. Offer once per conversation to classify
+   them: read each, choose its kind, and reclassify it.
 
 ### Edge cases
 - **Duplicate URL.** If a source with the same URL already exists, surface it and ask whether to capture again or link to the existing one.
