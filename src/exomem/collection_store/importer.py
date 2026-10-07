@@ -12,11 +12,18 @@ size), the target's store and declaration lineage, and the declared mapping.
 Before each batch, and again inside the batch transaction, it re-resolves that
 principal's authority from a fresh snapshot; a loss rolls the batch back and
 pauses the job as ``partial``/``authority_lost``. Ambient service or owner
-authority never substitutes, another principal never inherits a job, and expiry
-is renewed only by the bound principal's explicit continuation. A batch is one
-ordinary writer transaction (``bulk_upsert_records``) whose checkpoint, counters
-and rejections commit with its rows, so a crash or retry can neither skip nor
-repeat effects. Source text is data: it never reaches SQL text or executes.
+authority never imports for a job, another principal never inherits a job, and
+expiry is renewed only by the bound principal's explicit continuation. A batch is
+one ordinary writer transaction (``bulk_upsert_records``) whose checkpoint,
+counters and rejections commit with its rows, so a crash or retry can neither skip
+nor repeat effects. A state change that commits no rows (start, pause, resume,
+cancel, failure, completion) is one content-free control transition carrying the
+job id and counts, so it advances the store head and reaches the replica. A
+batch that commits no rows (every row rejected, superseded or unchanged) and
+leaves the job running advances only its checkpoint: the replica lags that
+progress until the next head change, and a host taking over the store redoes
+those batches, which write nothing. Source text is data: it never reaches SQL
+text or executes.
 """
 
 from __future__ import annotations
@@ -108,10 +115,14 @@ def contract() -> dict[str, Any]:
             "fields, flagged rows, mapping findings and row identity"
         ),
         "states": {
-            "running": "batches continue in the store writer",
+            "running": (
+                "batches continue in the store writer; authority is current, or unverified "
+                "until this host re-proves the source bytes"
+            ),
             "partial": (
                 "paused: authority_lost or time_cap until continued, cancelled for good, or "
-                "store_unavailable until the store accepts writes again"
+                "store_unavailable until the store accepts writes again. Status checks a "
+                "running job afresh and reports the pause its next batch would record"
             ),
             "failed": "invalid_row under on_invalid stop, or batch_error; earlier batches stay",
             "complete": "the whole source was consumed",
@@ -238,7 +249,7 @@ def _parse_request(raw: Any) -> _Request:
             allowed=["continuation", "format", "mapping", "mode", "source_ref"],
         )
     mode = raw.get("mode")
-    if mode not in _MODE_FIELDS:
+    if not isinstance(mode, str) or mode not in _MODE_FIELDS:
         _invalid("import_request.mode", "mode is required", allowed=list(_MODE_FIELDS))
     supplied = {key for key, value in raw.items() if value is not None} - {"mode"}
     required, optional = _MODE_FIELDS[mode]
@@ -1208,6 +1219,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         )
     ]
     state, reason, error = job.state, job.reason, progress["error"]
+    checked = {}
     blocked = writer.handle.import_blocked.get(job.id) if state == "running" else None
     if blocked is not None:
         # The store refuses writes, so this pause is host-local; a later tick resumes.
@@ -1218,9 +1230,16 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
             "row": checkpoint["row"],
             "byte": checkpoint["byte"],
         }
+    elif state == "running" and _now() >= job.window_expires:
+        state, reason = "partial", "time_cap"
+    elif state == "running":
+        checked["authority"] = _verdict(writer, job)
+        if checked["authority"] == "lost":
+            state, reason = "partial", "authority_lost"
     return {
         "mode": mode,
         **extra,
+        **checked,
         "continuation": _JOB_PREFIX + job.id,
         "state": state,
         "reason": reason,
@@ -1256,43 +1275,79 @@ def _snapshot(writer):
         writer.connection.execute("ROLLBACK")
 
 
-def _authorize(writer, job: _Job, *, prove: bool) -> Source:
-    """Re-resolve the bound principal's authority now; raise _Lost when any part fails.
+def _grant(writer, job: _Job, operation) -> None:
+    """The bound principal's authority now, short of proving the source bytes; else _Lost.
 
-    The checks are the collection's complete-state mutation rule, a live (never
-    extended) session, the bound store and declaration (``_holds``) and release of
-    the exact bound source bytes. A host without its own proof of those bytes
-    re-hashes them.
+    The checks are a live (never extended) session, the collection's complete-state
+    mutation rule, the bound store and declaration (``_holds``) and release of the
+    exact bound source digest.
     """
     bound = job.binding
     session = bound["principal"]["session"]
     if session is not None and _now() > session["expires_at"]:
         raise _Lost
+    if not _owns(operation.who, job):
+        raise _Lost
+    try:
+        operation.require_collection(job.collection_id, complete=True)
+    except collections.CollectionError as error:
+        raise _Lost from error
+    if operation.failed or not _holds(
+        bound["target"], _lineage(writer.connection, job.collection_id)
+    ):
+        raise _Lost
+    source = bound["source"]
+    if not operation.allows_file(source["ref"], content_sha256=source["sha256"]):
+        raise _Lost
+
+
+def _authorize(writer, job: _Job, *, prove: bool) -> Source:
+    """Re-resolve the bound principal's authority now; raise _Lost when any part fails.
+
+    Beyond ``_grant``, the bytes must match the bound digest: a host without its
+    own proof of them re-hashes them when ``prove`` allows.
+    """
     operation = writer._fresh_authorization()
     try:
-        if not _owns(operation.who, job):
-            raise _Lost
-        try:
-            operation.require_collection(job.collection_id, complete=True)
-        except collections.CollectionError as error:
-            raise _Lost from error
-        if operation.failed or not _holds(
-            bound["target"], _lineage(writer.connection, job.collection_id)
-        ):
-            raise _Lost
+        _grant(writer, job, operation)
         proof = _proofs(writer).get(job.id)
         if proof is None:
             if not prove:
                 raise _Lost
             proof = _prove(writer, job, operation)
-        if not operation.allows_file(proof.ref, content_sha256=bound["source"]["sha256"]):
-            raise _Lost
         proof.guard.recheck(writer.root)
         return proof
     except vault.PathGuardError as error:
         raise _Lost from error
     finally:
         operation.close()
+
+
+def _verdict(writer, job: _Job) -> str:
+    """What a fresh check finds for a durably running job: current, unverified or lost.
+
+    A restarted host knows only the durable row; status reports this instead, so
+    it never shows a bare running that the first tick turns into a pause.
+    Unverified means the authority holds but this host has not yet proved the
+    source bytes (its next batch re-hashes them), or the check could not run.
+    """
+    try:
+        with principal_module.request_scope(job.principal()):
+            operation = writer._fresh_authorization()
+            try:
+                _grant(writer, job, operation)
+            finally:
+                operation.close()
+        proof = _proofs(writer).get(job.id)
+        if proof is None:
+            return "unverified"
+        proof.guard.recheck(writer.root)
+    except (_Lost, vault.PathGuardError):
+        return "lost"
+    except Exception:  # noqa: BLE001 - an unreadable check is reported, not guessed
+        log.warning("import job authority check failed", exc_info=True)
+        return "unverified"
+    return "current"
 
 
 def _proofs(writer) -> dict[str, Source]:
@@ -1427,6 +1482,37 @@ def _record(
     )
     if cursor.rowcount != 1:
         raise RuntimeError("import job changed under its batch")
+    if state != "running" and not (result is not None and result.get("committed")):
+        # Rows committed carry the change in their own transaction; otherwise record it.
+        operation = "import_job_fail" if state == "failed" else "import_job_complete"
+        _control(writer, job, operation, progress, checkpoint)
+
+
+def _control(
+    writer,
+    job: _Job,
+    operation: str,
+    progress: Mapping[str, Any] | None = None,
+    checkpoint: Mapping[str, Any] | None = None,
+) -> None:
+    """Record one row-free job-state change as a content-free control transition.
+
+    It joins the open writer mutation, advancing the store's commit_seq and head
+    so the replica carries the change. The receipt holds the job id and counts,
+    never the source, its path or a row value.
+    """
+    progress, checkpoint = progress or job.progress, checkpoint or job.checkpoint
+    counts = {name: progress[name] for name in ("imported", "rejected", "duplicates", "batches")}
+    writer.record_control_transition(
+        operation,
+        {
+            job.collection_id: {
+                "counts": {**counts, "rows_read": checkpoint["row"]},
+                "ids": {"import_job_ids": [job.id]},
+            }
+        },
+        why=f"import {job.id[:12]} {operation.removeprefix('import_job_').replace('_', ' ')}",
+    )
 
 
 class _Settlement:
@@ -1474,10 +1560,11 @@ class _Settlement:
 
 
 def _transaction(root: Path, writer, work) -> None:
+    """One writer mutation, so a control transition can join it."""
     from .preview import _mutate
 
     def import_job_settlement():
-        with writer.handle.transaction():
+        with writer._mutation():
             work()
 
     _mutate(root, import_job_settlement)
@@ -1489,24 +1576,47 @@ def _forget(writer, job_id: str) -> None:
     writer.handle.import_blocked.pop(job_id, None)
 
 
+_SETTLED = {
+    "time_cap": "import_job_pause",
+    "authority_lost": "import_job_authority_lost",
+    "batch_error": "import_job_fail",
+}
+
+
 def _settle(root: Path, writer, job: _Job, state: str, reason: str, error=None) -> str:
-    """Pause or fail a running job outside a batch; a failure records its typed error."""
+    """Pause or fail a running job outside a batch; a failure records its typed error.
+
+    The driver records it under its own principal: the bound one may have lost
+    the collection, and the transition carries no row or source content.
+    """
     _forget(writer, job.id)
 
     def write():
         progress = {**job.progress, "error": error} if error is not None else job.progress
-        writer._execute(
+        cursor = writer._execute(
             "UPDATE import_jobs SET state=?,reason=?,progress_json=?,updated_at=? "
             "WHERE job_id=? AND state='running'",
             (state, reason, _json(progress), _stamp(), job.id),
         )
+        if cursor.rowcount == 1:
+            _control(writer, job, _SETTLED[reason], progress)
 
     _transaction(root, writer, write)
     return "paused"
 
 
 def _pause(root: Path, writer, job: _Job, reason: str) -> str:
-    return _settle(root, writer, job, "partial", reason)
+    """Record ``_step``'s pause, or defer it to the next tick when the record fails.
+
+    A pause that could not be written is not a failed job: the job stays running,
+    status reports the pause from its fresh check, and the next tick retries.
+    """
+    try:
+        return _settle(root, writer, job, "partial", reason)
+    except Exception as error:  # noqa: BLE001 - never escalated to a job failure
+        code = getattr(error, "code", type(error).__name__)
+        log.warning("import job %s %s pause deferred: %s", job.id[:12], reason, code)
+        return "deferred"
 
 
 def _authorized_now(writer, job: _Job) -> bool:
@@ -1519,75 +1629,82 @@ def _authorized_now(writer, job: _Job) -> bool:
 
 
 def _step(root: Path, writer, job_id: str) -> str:
-    """Run one batch of one job under its bound principal, or pause it honestly."""
-    from .preview import _mutate
+    """Run one batch of one job under its bound principal, or pause it honestly.
 
+    A pause is recorded outside the bound principal's scope, by the driver.
+    """
     job = _load(writer.connection, job_id)
     if job is None or job.state != "running":
         return "idle"
+    if _now() >= job.window_expires:
+        return _pause(root, writer, job, "time_cap")
     with principal_module.request_scope(job.principal()):
-        if _now() >= job.window_expires:
-            return _pause(root, writer, job, "time_cap")
-        try:
-            with _snapshot(writer) as conn:
-                proof = _authorize(writer, job, prove=True)
-                generation, head = conn.execute(
-                    "SELECT generation,audit_head FROM collections WHERE collection_id=?",
-                    (job.collection_id,),
-                ).fetchone()
-                manifest = writer._collection_manifest(writer._collection_row(job.collection_id))[0]
-            plan = compile_mapping(
-                job.binding["mapping"]["declared"], manifest, job.binding["mapping"]["format"]
-            )
-            with _open_source(proof) as handle:
-                batch = next(
-                    iter_batches(handle, job.binding["mapping"]["format"], plan, job.checkpoint)
-                )
-        except (_Lost, OSError, vault.PathGuardError):
-            return _pause(root, writer, job, "authority_lost")
-        sequence = job.checkpoint["batch"]
-        kept, superseded = _collapse(batch.rows, manifest, proof.ref)
-        try:
-            if batch.stop is not None or not kept:
-
-                def settle_alone():
-                    _authorize(writer, job, prove=False)
-                    if batch.stop is not None:
-                        _record(writer, job, batch, fail=batch.stop)
-                    else:
-                        _record(writer, job, batch, superseded=superseded)
-
-                _transaction(root, writer, settle_alone)
-                outcome = "paused" if batch.stop is not None else "batch"
-            else:
-                _mutate(
-                    root,
-                    writer.bulk_upsert_records,
-                    job.collection_id,
-                    rows=[{"item": values} for _, values in kept],
-                    why=f"import {job.id[:12]} batch {sequence}",
-                    expected_container_hash=tokens.container_hash(
-                        job.collection_id, generation, head
-                    ),
-                    source=proof.ref,
-                    on_reject="skip" if plan.on_invalid == "skip" else "abort",
-                    request_id=f"import:{job.id}:{sequence}",
-                    _import=_Settlement(job, batch, kept, superseded, plan, proof),
-                )
-                outcome = "batch"
-        except _Lost:
-            return _pause(root, writer, job, "authority_lost")
-        except (collections.CollectionError, vault.PathGuardError):
-            if not _authorized_now(writer, job):
-                return _pause(root, writer, job, "authority_lost")
-            raise
+        outcome = _batch(root, writer, job)
+    if outcome == "authority_lost":
+        return _pause(root, writer, job, "authority_lost")
     writer.handle.import_blocked.pop(job.id, None)
     settled = _load(writer.connection, job.id)
-    if settled.state == "running" and settled.checkpoint["batch"] == sequence:
+    if settled.state == "running" and settled.checkpoint["batch"] == job.checkpoint["batch"]:
         raise RuntimeError("import batch replay did not settle its checkpoint")
     if settled.state != "running":
         _forget(writer, job.id)
     return outcome
+
+
+def _batch(root: Path, writer, job: _Job) -> str:
+    """One batch as the bound principal: ``batch``, ``paused`` (a stop) or ``authority_lost``."""
+    from .preview import _mutate
+
+    try:
+        with _snapshot(writer) as conn:
+            proof = _authorize(writer, job, prove=True)
+            generation, head = conn.execute(
+                "SELECT generation,audit_head FROM collections WHERE collection_id=?",
+                (job.collection_id,),
+            ).fetchone()
+            manifest = writer._collection_manifest(writer._collection_row(job.collection_id))[0]
+        plan = compile_mapping(
+            job.binding["mapping"]["declared"], manifest, job.binding["mapping"]["format"]
+        )
+        with _open_source(proof) as handle:
+            batch = next(
+                iter_batches(handle, job.binding["mapping"]["format"], plan, job.checkpoint)
+            )
+    except (_Lost, OSError, vault.PathGuardError):
+        return "authority_lost"
+    sequence = job.checkpoint["batch"]
+    kept, superseded = _collapse(batch.rows, manifest, proof.ref)
+    try:
+        if batch.stop is not None or not kept:
+
+            def settle_alone():
+                _authorize(writer, job, prove=False)
+                if batch.stop is not None:
+                    _record(writer, job, batch, fail=batch.stop)
+                else:
+                    _record(writer, job, batch, superseded=superseded)
+
+            _transaction(root, writer, settle_alone)
+            return "paused" if batch.stop is not None else "batch"
+        _mutate(
+            root,
+            writer.bulk_upsert_records,
+            job.collection_id,
+            rows=[{"item": values} for _, values in kept],
+            why=f"import {job.id[:12]} batch {sequence}",
+            expected_container_hash=tokens.container_hash(job.collection_id, generation, head),
+            source=proof.ref,
+            on_reject="skip" if plan.on_invalid == "skip" else "abort",
+            request_id=f"import:{job.id}:{sequence}",
+            _import=_Settlement(job, batch, kept, superseded, plan, proof),
+        )
+        return "batch"
+    except _Lost:
+        return "authority_lost"
+    except (collections.CollectionError, vault.PathGuardError):
+        if not _authorized_now(writer, job):
+            return "authority_lost"
+        raise
 
 
 def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exception) -> None:
@@ -1627,7 +1744,8 @@ def run_jobs(
 
     The single-writer service calls this between requests with a batch or
     monotonic-deadline budget. Each batch is an ordinary writer-lease
-    transaction; ``_after_error`` settles a batch that raised.
+    transaction; ``_after_error`` settles a batch that raised, and a pause whose
+    record failed is retried on the next tick (``deferred``).
     """
     from .preview import bound_writer
 
@@ -1638,8 +1756,14 @@ def run_jobs(
         )
     if not vault.STAT_GENERATION_TRUSTED:
         _proofs(writer).clear()
-    root = Path(vault_root)
-    summary = {"batches": 0, "paused": 0, "errors": 0}
+    # The driver records pauses and failures as the in-process service; each
+    # batch still runs as its job's bound principal.
+    with principal_module.library_scope():
+        return _drive(Path(vault_root), writer, max_batches, deadline)
+
+
+def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) -> dict[str, int]:
+    summary = {"batches": 0, "paused": 0, "deferred": 0, "errors": 0}
     running = [
         row[0]
         for row in writer.connection.execute(
@@ -1664,6 +1788,7 @@ def run_jobs(
                 break
             if outcome != "batch":
                 summary["paused"] += outcome == "paused"
+                summary["deferred"] += outcome == "deferred"
                 break
             summary["batches"] += 1
     return summary
@@ -1751,7 +1876,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
         },
     }
     identity = _identity(binding)
-    with writer.handle.transaction():
+    with writer._mutation():
         latest = writer.connection.execute(
             "SELECT job_id FROM import_jobs WHERE identity=? AND state<>'failed' "
             "AND reason IS NOT 'cancelled' ORDER BY created_at DESC, job_id DESC LIMIT 1",
@@ -1794,6 +1919,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
                     _stamp(),
                 ),
             )
+            _control(writer, _load(writer.connection, job_id), "import_job_start")
     if latest is None:
         _proofs(writer)[job_id] = source
         return _status(writer, _load(writer.connection, job_id), "start")
@@ -1801,25 +1927,34 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
 
 
 def _cancel(writer, collection: str, request: _Request) -> dict[str, Any]:
-    with writer.handle.transaction(), writer._authorization(mutation=False):
+    # Cancelling needs only sight of the job, not write authority over its collection.
+    with writer._authorization(mutation=False), writer._mutation():
         job = _visible(writer, collection, request.job_id)
         if job.state == "running" or (job.state == "partial" and job.reason in _RESUMABLE):
             writer._execute(
                 "UPDATE import_jobs SET state='partial',reason='cancelled',updated_at=? WHERE job_id=?",
                 (_stamp(), job.id),
             )
+            _control(writer, job, "import_job_cancel")
             job.state, job.reason = "partial", "cancelled"
             _forget(writer, job.id)
         return _status(writer, job, "cancel")
 
 
 def _continue(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
-    """Explicit renewal by the bound principal: re-prove source, lineage and live authority."""
+    """Explicit renewal by the bound principal: re-prove source, lineage and live authority.
+
+    A job still durably running renews too once status would report it paused
+    (its window ended or its authority lapsed), before the driver records that.
+    """
     with writer.read_snapshot():
         job = _visible(writer, collection, request.job_id)
-    if job.state == "running":
+        lapsed = job.state == "running" and (
+            _now() >= job.window_expires or _verdict(writer, job) == "lost"
+        )
+    if job.state == "running" and not lapsed:
         return _status(writer, job, "start")
-    if not (job.state == "partial" and job.reason in _RESUMABLE):
+    if not (lapsed or (job.state == "partial" and job.reason in _RESUMABLE)):
         _refuse(
             "IMPORT_JOB_NOT_RESUMABLE",
             f"a {job.state} import ({job.reason}) cannot continue",
@@ -1843,13 +1978,15 @@ def _continue(root: Path, writer, collection: str, request: _Request) -> dict[st
             repair="restore access, or start a new import",
             retryable=True,
         )
-    with writer.handle.transaction():
+    with writer._mutation():
         now = _now()
-        writer._execute(
+        cursor = writer._execute(
             "UPDATE import_jobs SET binding_json=?,state='running',reason=NULL,window_started=?,window_expires=?,"
-            "updated_at=? WHERE job_id=? AND state='partial'",
+            "updated_at=? WHERE job_id=? AND state IN ('partial','running')",
             (_json(job.binding), now, now + JOB_WINDOW_SECONDS, _stamp(), job.id),
         )
+        if cursor.rowcount == 1:
+            _control(writer, job, "import_job_resume")
     return _status(writer, _load(writer.connection, job.id), "start")
 
 

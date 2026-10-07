@@ -28,9 +28,9 @@ from test_collection_store_writer import CID as GATE_CID
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
-from exomem import commands, records
+from exomem import commands, mutation_terminal, records
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection, schema, typed_storage
+from exomem.collection_store import chain, connection, schema, typed_storage
 from exomem.collection_store.preview import preview_store
 from exomem.governance import authorization_custody, authorization_session_lifecycle
 from exomem.governance import store as authority_store
@@ -415,6 +415,9 @@ def test_job_binds_exact_source_receipt_and_target_lineage(store):
 
 def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, monkeypatch):
     """A job that proves source release only at start keeps importing after revocation."""
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.structured_collections import CollectionError
+
     setup(store)
     small(monkeypatch)
     job = start(store)
@@ -422,8 +425,29 @@ def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, 
     committed, txns = count(store.connection), import_txns(store.connection)
     write_scope(store.root, paths="Evidence/**")
     write_rule(store.root, ceiling=0)
+    record, refused_once = CollectionWriter.record_control_transition, []
+
+    def refuse_first_record(self, operation, *args, **kwargs):
+        if not refused_once:
+            refused_once.append(operation)
+            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        return record(self, operation, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "record_control_transition", refuse_first_record)
     with request_scope(owner_principal(surface="mcp")):
+        # A pause that cannot be recorded leaves the job running, never failed;
+        # the next tick records it.
+        summary = run(store)
+        assert store.connection.execute("SELECT state FROM import_jobs").fetchone() == ("running",)
+        assert summary["deferred"] == 1
         run(store)
+    assert refused_once == ["import_job_authority_lost"]
+    assert [
+        row[0]
+        for row in store.connection.execute(
+            "SELECT operation FROM txns WHERE operation LIKE 'import_job_%' ORDER BY commit_seq"
+        )
+    ] == ["import_job_start", "import_job_authority_lost"]
     assert (count(store.connection), import_txns(store.connection)) == (committed, txns)
     assert refused(status, store, job).code == "IMPORT_JOB_NOT_FOUND"
     release(store)
@@ -598,6 +622,35 @@ def test_host_takeover_reproves_the_bound_source_hash(store, monkeypatch, change
         else:
             assert result["state"] == "complete"
             assert count(handle.connection) == len(valid(iter_exercises()))
+
+
+def test_status_after_a_restart_reports_what_a_fresh_check_finds(store, monkeypatch):
+    """A restarted host reading only the durable row reports running for a job its next batch pauses."""
+    setup(store)
+    small(monkeypatch)
+    session(store, monkeypatch, paths="Unrelated/**")
+    who = _session_at(store, NOW, 60)
+    job = start(store, who)
+    run(store, max_batches=1)
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        intact = status(store, job, who, handle=handle)
+        expired = who.verified_authorization_session.expires_at + 1
+        monkeypatch.setattr("time.time", lambda: expired)
+        renewed = _session_at(store, expired, 120)
+        lapsed = status(store, job, renewed, handle=handle)
+        resumed = call(
+            store, renewed, handle=handle, mode="start", continuation=job["continuation"]
+        )
+    assert (intact["state"], intact["authority"]) == ("running", "unverified")
+    assert (lapsed["state"], lapsed["reason"], lapsed["authority"]) == (
+        "partial",
+        "authority_lost",
+        "lost",
+    )
+    # Status reported a pause the driver had not yet recorded; continuation honours it.
+    assert (resumed["state"], resumed["authority"]) == ("running", "current")
 
 
 def _on(found, work):
@@ -1068,6 +1121,60 @@ def test_each_committed_batch_has_one_value_free_receipt(store, monkeypatch):
     assert "ex-000001" not in " ".join(receipt for _, receipt in receipts)
 
 
+def test_each_row_free_job_change_is_one_chained_content_free_receipt(store, monkeypatch):
+    """Job states written beside the chain never advance the head, so replica and audit miss them."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    job_id = job["continuation"].removeprefix("import-job:")
+    run(store, max_batches=1)
+    committed = count(store.connection)
+    write_scope(store.root, paths="Evidence/**")
+    write_rule(store.root, ceiling=0)
+    run(store)
+    release(store)
+    call(store, mode="start", continuation=job["continuation"])
+    call(store, mode="cancel", continuation=job["continuation"])
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        head = chain.verify_store_chain(handle.connection)[0]
+        rows = handle.connection.execute(
+            "SELECT commit_seq, why, receipt_json FROM txns WHERE operation LIKE 'import_job_%' "
+            "ORDER BY commit_seq"
+        ).fetchall()
+    receipts = [json.loads(receipt) for _, _, receipt in rows]
+    assert [receipt["operation"] for receipt in receipts] == [
+        "import_job_start",
+        "import_job_authority_lost",
+        "import_job_resume",
+        "import_job_cancel",
+    ]
+    assert all(mutation_terminal.valid_control_receipt(receipt) for receipt in receipts)
+    assert all(receipt["ids"] == {"import_job_ids": [job_id]} for receipt in receipts)
+    assert [receipt["counts"]["imported"] for receipt in receipts] == [0, *[committed] * 3]
+    sequence = [commit_seq for commit_seq, _, _ in rows]
+    assert sequence == sorted(set(sequence)) and sequence[-1] == head
+    recorded = json.dumps(rows)
+    assert "Evidence" not in recorded and "ex-0000" not in recorded
+
+
+def test_a_job_receipt_refuses_an_unknown_or_content_shaped_id(store):
+    """A loose id registration lets a source path, title or token into the audit chain."""
+    setup(store)
+    head = chain.verify_store_chain(store.connection)[0]
+    for ids in (
+        {"import_job_ids": [SOURCE]},
+        {"import_job_ids": ["sk-live-0123456789abcdef0123456789"]},
+        {"source_refs": ["0" * 32]},
+    ):
+        with pytest.raises(RuntimeError, match="invalid collection receipt"):
+            store.record_control_transition(
+                "import_job_cancel", {CID: {"counts": {}, "ids": ids}}, why="import probe"
+            )
+    assert chain.verify_store_chain(store.connection)[0] == head
+
+
 # Agent surface
 
 
@@ -1116,6 +1223,11 @@ def test_owner_journey_through_preserve_and_record_memory(store, monkeypatch):
         "mapping",
         "continuation",
     }
+    malformed = refused(agent, mode=["preview"])
+    assert (malformed.code, malformed.details["at"]) == (
+        "IMPORT_REQUEST_INVALID",
+        "import_request.mode",
+    )
     preview = agent(mode="preview", source_ref=first["path"], format="ndjson", mapping=MAPPING)
     assert preview["mapping"]["findings"] == [] and preview["rows"]["sampled"] == 96
     job = agent(mode="start", source_ref=first["path"], format="ndjson", mapping=MAPPING)

@@ -2387,9 +2387,14 @@ def valid_collection_receipt(value: Any) -> bool:
     return valid_record_receipt(value) or valid_planning_receipt(value)
 
 
+#: Import-job state changes that commit no rows (``collection_store.importer``).
+IMPORT_JOB_OPERATIONS = frozenset({
+    "import_job_start", "import_job_pause", "import_job_authority_lost", "import_job_resume",
+    "import_job_cancel", "import_job_fail", "import_job_complete",
+})
 #: Content-free control transitions a collection-store txn may record. Each changes no
 #: item, manifest or container hash, and its receipt carries counts and ids only.
-CONTROL_OPERATIONS = frozenset({"store_reconcile"})
+CONTROL_OPERATIONS = frozenset({"store_reconcile", *IMPORT_JOB_OPERATIONS})
 CONTROL_RECEIPT_MARKER = "exomem.collection-control"
 #: Identifiers one control receipt may carry; a larger transition is recorded in parts.
 CONTROL_RECEIPT_MAX_IDS = 4096
@@ -2407,6 +2412,7 @@ CONTROL_ID_PATTERNS = {
     "skipped_another_store": _HEX64,
     "skipped_collection_absent": _ITEM_REF,
     "skipped_no_committed_row": _ITEM_REF,
+    "import_job_ids": re.compile(r"[0-9a-f]{32}"),
 }
 
 
