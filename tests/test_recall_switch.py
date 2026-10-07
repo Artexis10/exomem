@@ -157,6 +157,31 @@ def test_a_disabled_lane_names_the_recall_encoder(
 # ------------------------------------------------------------------- doctor
 
 
+def test_cloud_doctor_reports_reembedding_instead_of_warming_a_refused_encoder(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import doctor
+
+    monkeypatch.setattr(embeddings, "MODEL_NAME", BASE)
+    EmbeddingIndex(vault).upsert_file(
+        f"{kb_dirname()}/Notes/retry.md", ["Retry. Retries wait."], _Encoder(768)(["x"]), 1.0
+    )
+    monkeypatch.setattr(embeddings, "MODEL_NAME", M3)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setattr(doctor, "_resolved_embedding_backend", lambda: "onnx")
+    monkeypatch.setattr(doctor, "_vector_stack_available", lambda _backend: True)
+    monkeypatch.setattr(doctor, "_model_cached", lambda _hub, _dirname: False)
+
+    checks = {check.id: check for check in doctor.doctor(vault=str(vault)).checks}
+
+    assert "embeddings.sidecar" not in checks
+    reembed = checks["embeddings.reembed"]
+    assert reembed.status == "warn"
+    assert reembed.details["serving"]["model"] == BASE
+    assert "refuses" in reembed.message
+    assert "warm" not in (reembed.remediation or "")
+
+
 def test_doctor_probes_the_sidecar_with_the_encoder_that_serves_it(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
