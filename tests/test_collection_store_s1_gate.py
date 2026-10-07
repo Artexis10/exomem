@@ -1161,7 +1161,6 @@ def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(
 # --- later slices: strict xfails naming the slice that turns them green -----------------
 
 
-@pytest.mark.xfail(strict=True, reason="s1-A3: compatibility flip for supported launchers on fresh roots")
 def test_supported_runtime_admits_a_fresh_root_copy_of_the_c_vault(abc, tmp_path, monkeypatch):
     """Defect: the supported release itself can never start on a C vault copy or restore."""
     copy = tmp_path / "copy"
@@ -1171,27 +1170,93 @@ def test_supported_runtime_admits_a_fresh_root_copy_of_the_c_vault(abc, tmp_path
     state_migration.require_vault_state_ready(copy)
 
 
-@pytest.mark.xfail(strict=True, reason="s1-A3: hosted snapshot export and staged restore admission")
-def test_staged_restore_carries_the_replica_and_admits_the_c_vault(abc, tmp_path, monkeypatch):
+def test_staged_restore_carries_the_replica_and_admits_the_c_vault(abc, tmp_path):
     """Defect: a restore drops C's replica, carries live WAL bytes, or refuses the supported runtime."""
+    from test_hosted_restore_candidate import _bootstrap, _request
+
     from exomem import hosted_portability, hosted_restore
+    from exomem.init import init_vault
 
     abc.release()
-    kb = "Knowledge Base/_Collections/"
-    assert hosted_portability.classify_artifact(kb + "collections.sqlite").included
-    assert not hosted_portability.classify_artifact(kb + "collections.sqlite-wal").included
-    restored = tmp_path / "restored"
-    shutil.copytree(abc.root, restored)
-    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "restored-state"))
-    hosted_restore._require_restore_admission(restored)
+    init_vault(abc.root, force=True)
+    context = hosted_portability.PortabilityContext(
+        cell_id="source-cell", vault_id="logical-vault", operation_id="export-gate",
+        created_at="2026-10-06T00:00:00+00:00", operator_authorized=True, lifecycle_state="quiesced",
+        routing_stopped=True, active_mutations=0, background_writers_stopped=True, reads_allowed=True)
+    exported = hosted_portability.export_quiesced_vault(abc.root, tmp_path / "exports", context=context)
+    restored = hosted_restore.restore_candidate(_request(tmp_path, exported), bootstrap_security=_bootstrap)
+    assert restored.status == "ready"
+    target = tmp_path / "target-vault"
+    assert authority.read_marker(target) == authority.read_marker(abc.root)
+    assert ab_bytes(target) == ab_bytes(abc.root)
+    assert not [path for path in target.rglob("*") if path.name.endswith(("-wal", "-shm"))]
+    assert run_host(tmp_path, tmp_path / "restored-state", "restore", _adopt_fresh_copy,
+                    root=target, database=tmp_path / "restore-coordinator.sqlite") == "committed"
 
 
-@pytest.mark.xfail(strict=True, reason="s1-A3: slice rollback switch")
 def test_slice_rollback_disables_c_but_keeps_its_data_and_a_b(abc):
     """Defect: rolling back the slice deletes C's routing/rows/replica or disables A/B."""
     marker = authority.read_marker(abc.root)
     admission.rollback_slice(abc.session, abc.manager)
     refused(abc.read_c, "COLLECTION_STORE_DISABLED")
+    refused(lambda: admission.resume_local(abc.session, abc.manager, fence_client=abc.operator),
+            "COLLECTION_STORE_DISABLED")
     assert authority.read_marker(abc.root) == marker
     assert abc.meta()[schema.META_COMMIT_SEQ] == "2"
     assert abc.write_a("A after rollback") == "committed"
+
+
+def test_rollback_reports_disable_when_publication_fails(abc, monkeypatch):
+    """An unavailable replica cannot hide that the local producer has already stopped."""
+    def unavailable(*args):
+        raise OSError("replica unavailable")
+
+    monkeypatch.setattr(admission, "_publish_current_epoch", unavailable)
+    result = admission.rollback_slice(abc.session, abc.manager)
+    assert result["status"] == "disabled" and result["publication"] == "pending"
+    assert capability.records_summary_disabled(abc.root)
+    assert abc.write_a("A after failed publication") == "committed"
+
+
+def test_marker_profile_must_match_the_canonical_collection(abc):
+    """A marker edit cannot make a Records store disappear from a profile-filtered inventory."""
+    marker = json.loads(authority.read_marker(abc.root))
+    marker["collections"][0]["semantic_profile"] = "planning"
+    authority.marker_path(abc.root).write_text(json.dumps(marker))
+    refused(abc.read_c, "COLLECTION_STORE_MARKER_CONFLICT")
+
+
+def test_failed_close_stops_renewing_an_unadmitted_lease(ab):
+    """A process surviving failed shutdown must not keep the next writer fenced forever."""
+    ab.session.bind(ab.manager)
+    ab.session.runtime()
+    ab.manager.ensure_writer()
+    ab.manager.start_renewer()
+    refused(ab.manager.close, "COLLECTION_STORE_FLUSH_PENDING")
+    ab.manager._renewer.join(2)
+    assert not ab.manager._renewer.is_alive()
+
+
+def _adopt_fresh_copy(found):
+    with pytest.MonkeyPatch.context() as patch:
+        _lease_environment(found, patch)
+        preview = admission.adopt_local_route(found.root)
+        assert not found.session.path.exists()
+        refused(lambda: admission.adopt_local_route(found.root, why="copy", preview_id="0" * 64),
+                "COLLECTION_STORE_ADOPT_PREVIEW_STALE")
+        assert not found.session.path.exists()
+        result = admission.adopt_local_route(found.root, why="copy", preview_id=preview["preview_id"])
+    assert result["status"] == "admitted"
+    assert found.open()["status"] == "admitted"
+    assert found.read_c() == ["Canonical"]
+    assert found.write_a("A after copy") == "committed"
+    return found.write_c(LATER, "C after copy")["outcome"]
+
+
+def test_fresh_copy_adoption_previews_before_installing_the_replica(abc, tmp_path):
+    """A copied vault must preview and adopt without an already existing local store."""
+    abc.release()
+    copy = tmp_path / "copy"
+    shutil.copytree(abc.root, copy)
+    assert run_host(tmp_path, tmp_path / "copy-state", "copy", _adopt_fresh_copy,
+                    root=copy, database=tmp_path / "copy-coordinator.sqlite") == "committed"

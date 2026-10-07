@@ -1,4 +1,4 @@
-"""Private create/restart/takeover producer; public routes and launch support remain closed.
+"""Vault-custodied create, restart, takeover and rollback for mixed-authority stores.
 
 One intent references the immutable create receipt. It survives cutover in shared
 snapshots without requiring a new business transaction or replica publication.
@@ -179,12 +179,14 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
     if session.production:
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
-        capability.require_records_summary()
+        capability.require_records_summary(session.root)
         require_summary_manifest(session.root, manifest_path, manifest_text)
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
     with manager.consistency_guard(session.root, operation="collection_store_create"):
+        if session.production:
+            capability.require_records_summary(session.root)
         if session.path.exists():
             session.runtime()
         with manager.writer_authority_guard(vault_root=session.root):
@@ -366,6 +368,78 @@ def _stale_preview():
                                 "the store, replica or recorded head changed since the preview; preview again")
 
 
+def rollback_slice(session, manager):
+    """Narrow S1 for this vault, preserving its canonical history and routing (S1.8).
+
+    The mutation boundary drains any running batch before the disable commits. A
+    mistaken rollback interrupts C until authorized resume; it never interrupts A/B.
+    Publication remains available so backup and close can preserve the disabled store.
+    """
+    _require_owner(session.root, "rollback")
+    session.verify_custody()
+    _ProducerSession.bind(session, manager)
+    runtime = session.runtime(retire=False)
+    with manager.writer_authority_guard(vault_root=session.root):
+        token = manager._fencing_token
+        with manager.consistency_guard(session.root, operation="collection_store_rollback"):
+            state_migration._require_collection_store_recovery(session, token)
+            if not runtime.retire_idle_handle():
+                raise connection.busy("the live store is still borrowed")
+            with session.writer(token) as writer:
+                intent = authority.pending_create(writer.connection)
+                if intent is not None:
+                    # Reject unestablished custody; a false refusal delays the owner's
+                    # narrowing operation, but cannot authorize a first cutover.
+                    if intent["expected_marker"] is None:
+                        raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
+                                                   "first enrollment must finish before rollback")
+                    expected = authority.parse_marker(session.root, intent["expected_marker"])
+                    target = authority.parse_marker(session.root, intent["target_marker"])
+                    fence = session.fence_client.collection_store_fence()
+                    _require_fence(fence, expected)
+                    if not fence.enrolled or runtime.sample_head().store_id != target["store_id"]:
+                        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "rollback store binding differs")
+                    if _acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head is None:
+                        raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "rollback requires the recorded store head")
+                    _verify_acquisition(writer, runtime, fence, target)
+                    if _recover_create(writer)["status"] == "conflict":
+                        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "create marker basis differs")
+                elif not runtime.reporting_ready(token):
+                    raise runtime._refusal()
+                with writer.handle.transaction() as conn:
+                    conn.execute("INSERT OR IGNORE INTO store_meta(key,value) VALUES (?,?)",
+                                 (capability.DISABLED_KEY, "1"))
+                try:
+                    published = _publish_current_epoch(session, writer, token)
+                    if published.status == "published":
+                        manager._renew_collection_store(token)
+                except (CollectionStoreError, OpError, OSError, sqlite3.Error) as error:
+                    return {"status": "disabled", "capability": capability.RECORDS_SUMMARY_V1,
+                            "publication": "pending", "reason": getattr(error, "code", str(error))}
+    return {"status": "disabled", "capability": capability.RECORDS_SUMMARY_V1,
+            "publication": published.status,
+            **({"reason": published.reason} if published.reason else {})}
+
+
+def rollback_route(vault_root):
+    """The offline owner's narrowing-only rollback; no route can enable the slice."""
+    _require_owner(vault_root, "rollback")
+
+    def apply(session, manager, fence_client):
+        _ProducerSession.bind(session, manager)
+        _bind_fence_client(session, fence_client)
+        session.runtime(retire=False)
+        with closing(connection.open_reader(session.path)) as reader:
+            pending = authority.pending_create(reader)
+        if pending is None:
+            opened = open_store(session, manager, fence_client=fence_client)
+            if opened["status"] != "admitted":
+                raise session.runtime(retire=False)._refusal()
+        return rollback_slice(session, manager)
+
+    return _offline_owner(Path(vault_root).resolve(), "rollback", apply)
+
+
 def adopt_local(session, manager, *, why, fence_client, preview_id=None):
     """Owner adopt-local (A3), preview-first: continue from this host's store past a foreign head.
 
@@ -460,6 +534,8 @@ def _coordinator_head():
 
 def _route_step(root):
     """Adopt-local while this store does not continue the vault's replica, then its reconcile step."""
+    if not connection.store_path(root).exists():
+        return "adopt-replica", owner.adopt_replica_preview(root, recorded=_coordinator_head())
     adopt = owner.adopt_local_preview(root, recorded=_coordinator_head())
     if adopt["preview"]["state"] == "in_sync":
         with closing(connection.open_reader(connection.store_path(root))) as local:
@@ -501,6 +577,16 @@ def _require_no_service(config):
 
 
 def _apply_step(session, manager, fence_client, step, *, why, preview_id, acknowledge_skipped=False):
+    if step == "adopt-replica":
+        if _route_step(session.root)[1]["preview_id"] != preview_id:
+            raise _stale_preview()
+        _owner_operation(session, manager, fence_client, why)
+        with manager.writer_authority_guard(vault_root=session.root), \
+                manager.consistency_guard(session.root, operation="collection_store_adopt_replica"):
+            if _route_step(session.root)[1]["preview_id"] != preview_id:
+                raise _stale_preview()
+            # The ordinary takeover still proves custody, marker, chain and coordinator lineage.
+            return open_store(session, manager, fence_client=fence_client)
     if step == "adopt-local":
         result = adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
         if result["status"] == "in_sync":
@@ -529,7 +615,7 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
     with the flushed head. ``acknowledge_skipped`` applies the reconcile step's owner
     acknowledgement of changes it cannot hold.
     """
-    _require_owner("adopt-local")
+    _require_owner(vault_root, "adopt-local")
     root = Path(vault_root).resolve()
     step, sealed = _route_step(root)
     if acknowledge_skipped and step != "reconcile":
@@ -577,8 +663,8 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
     cut that enrols the vault; on an enrolled vault it adds the collection as the
     service's route does. It hands the lease back with the flushed head.
     """
-    _require_owner("create")
-    capability.require_records_summary()  # before any lease, fence or operator credential
+    _require_owner(vault_root, "create")
+    capability.require_records_summary(vault_root)  # before any lease, fence or operator credential
     require_summary_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
     return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
         session, manager, manifest_path, manifest_text, why=why, request_id=request_id,
@@ -628,11 +714,12 @@ def enrollment_required():
         f"enrolling this vault's collection store is the owner's offline step: run {ENROLLMENT_COMMAND}")
 
 
-def _require_owner(operation):
-    from ..governance.principal import OWNER_AUDIENCE, effective_principal
+def _require_owner(root, operation):
+    from ..governance import raw_protection
+    from ..governance.principal import effective_principal
 
     who = effective_principal()
-    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+    if not raw_protection.has_unrestricted_access(root, who):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
@@ -659,7 +746,13 @@ def _offline_owner(root, operation, work):
             with suppress(Exception):
                 manager.close()
             raise
-        manager.close()
+        try:
+            manager.close()
+        except OpError as error:
+            if operation != "rollback" or result["status"] != "disabled":
+                raise
+            # The local disable already committed; a failed handoff must not hide it.
+            result = {**result, "publication": "pending", "reason": error.code}
     return result
 
 
@@ -771,6 +864,8 @@ def _settle(session, runtime, token, facts, staged, action, reason, check):
 
 
 def _resume_locked(session, fence_client, *, preparation_token=None):
+    if session.production:
+        capability.require_records_summary(session.root)
     manager = session.manager
     runtime = session.runtime()
     with closing(connection.open_reader(session.path)) as reader:

@@ -175,6 +175,31 @@ def adopt_local_preview(vault_root, *, recorded=UNKNOWN) -> dict:
                     "abandoned_publication": abandoned, "fork_point": {"local": head, "foreign": foreign}})
 
 
+def adopt_replica_preview(vault_root, *, recorded=UNKNOWN) -> dict:
+    """Preview a fresh host's copy without creating live state or opening the shared replica."""
+    from . import authority
+
+    root = Path(vault_root).resolve()
+    raw = authority.read_marker(root)
+    marker = authority.parse_marker(root, raw)
+    with tempfile.TemporaryDirectory(prefix="exomem-adopt-preview-") as scratch, \
+            _evidence(replica.replica_path(root), Path(scratch)) as (digest, conn, meta):
+        if meta is None:
+            raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the vault replica is incomplete or invalid")
+        for entry in marker["collections"]:
+            authority.require_selected(conn, marker, entry, root=root)
+            if conn.execute("SELECT 1 FROM collections WHERE collection_id=?",
+                            (entry["collection_id"],)).fetchone() is None:
+                raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the replica lacks a marker collection")
+        head = _head(meta)
+    recorded_view = recorded if recorded in (UNKNOWN, None) else {
+        "store_id": recorded.store_id, "instance_id": recorded.instance_id,
+        "commit_seq": recorded.commit_seq, "head_hash": recorded.head_hash}
+    return _sealed({"state": "replica", "store_id": marker["store_id"],
+                    "marker_sha256": hashlib.sha256(raw).hexdigest(), "replica": {"sha256": digest, **head},
+                    "recorded_head": recorded_view})
+
+
 def record_fork(conn, preview: dict, *, why: str, token: int):
     """Continue this store as a new lineage tenure past the previewed fork; returns its identity.
 

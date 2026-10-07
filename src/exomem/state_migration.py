@@ -227,7 +227,7 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
 def supported_state_compatibility_ids() -> tuple[str, ...]:
     """Optional state formats this runtime can use, not merely parse."""
 
-    return ("raw-protection-v1",)
+    return ("raw-protection-v1", "collections-store-v1")
 
 
 def partition_state_descriptor_ids(

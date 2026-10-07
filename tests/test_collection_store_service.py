@@ -97,10 +97,12 @@ class Service:
 
     def stop(self):
         server = runtime._SERVERS.get(self.root)
-        self.manager.close()
-        if server is not None:
-            server.thread.join(10)
-        writer_lease._MANAGERS.pop(self.manager.config, None)
+        try:
+            self.manager.close()
+        finally:
+            if server is not None:
+                server.thread.join(10)
+            writer_lease._MANAGERS.pop(self.manager.config, None)
 
 
 def offline_create(root, manifest_file, path, *, why):
@@ -148,11 +150,10 @@ def service(tmp_path, monkeypatch):
                         item_key=ROW, why="first row")["outcome"] == "committed"
             yield started
         finally:
-            started.stop()
+            if not started.manager._stop.is_set():
+                started.stop()
 
 
-@pytest.mark.xfail(strict=True, raises=state_migration.StateCompatibilityUnsupported,
-                   reason="s1-A3: compatibility flip (collections-store-v1) for the service's startup gate")
 def test_the_service_startup_gate_admits_the_mixed_vault(service):
     """Defect: the installed service refuses to start on a vault whose marker routes C to the store."""
     state_migration.require_vault_state_ready(service.root)
@@ -317,6 +318,78 @@ def test_the_release_lever_stops_the_service_building_derived_state(service, mon
     stopped = progress()
     time.sleep(1.0)
     assert stopped[0] == "building" and progress() == stopped
+
+
+def test_vault_rollback_survives_restart_and_keeps_file_collections_usable(service, monkeypatch, capsys):
+    """Rollback must stop a pending import after restart without deleting rows or disabling A/B."""
+    root = service.root
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 1)
+    write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(60)), SOURCE)
+    imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+    monkeypatch.setattr(capability, "RELEASED", frozenset())
+    service.stop()
+    marker = authority.read_marker(root)
+    monkeypatch.setenv(OPERATOR, "operator")
+    assert cli._collections_main(["rollback", "--vault", str(root)]) == 0, capsys.readouterr().err
+    monkeypatch.delenv(OPERATOR)
+    monkeypatch.setattr(capability, "RELEASED", ON)
+
+    def stored():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return {table: reader.execute(f"SELECT * FROM {table}").fetchall()
+                    # Closed schema tables: canonical rows, audit and each kind of background work.
+                    for table in ("items", "txns", "import_jobs", "projection_state", "rollup_definitions")}
+
+    before = stored()
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: restarted.manager.status().get("collection_store", {}).get("status") == "admitted")
+        refused(lambda: titles(root, CID), capability.DISABLED)
+        time.sleep(1.2)
+        assert stored() == before and authority.read_marker(root) == marker
+        assert call(root, "record_memory", action="append", collection=KEY, item={"title": "After rollback"},
+                    item_key=LATER, why="file write")["outcome"] == "committed"
+        assert titles(root, KEY) == ["After rollback"]
+    finally:
+        restarted.stop()
+
+
+def test_rollback_preserves_a_pending_later_create_without_recovering_it(service, monkeypatch):
+    """A stopped producer must not require create recovery before the owner can disable it."""
+    root = service.root
+    with monkeypatch.context() as deadline:
+        deadline.setattr(admission, "time", SimpleNamespace(
+            monotonic=lambda: time.monotonic() - 31, time=time.time, sleep=time.sleep))
+        created = call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                       manifest_text=DAILY_TEXT, why="summary", idempotency_key="pending-create")
+        assert created["status"] == "committed"
+        refused(service.stop, "COLLECTION_STORE_FLUSH_PENDING")
+    # The close test proves renewal stops; surrender the stopped holder instead of waiting its TTL here.
+    service.manager.client.release_holder(service.manager.config.replica_id, service.manager._fencing_token)
+    marker = authority.read_marker(root)
+    before = store_meta(root)[authority.PENDING_CREATE]
+    monkeypatch.setenv(OPERATOR, "operator")
+    with request_scope(OWNER):
+        result = admission.rollback_route(root)
+    assert result["status"] == "disabled" and result["publication"] == "published"
+    assert authority.read_marker(root) == marker
+    assert store_meta(root)[authority.PENDING_CREATE] == before
+    assert capability.records_summary_disabled(root)
+    monkeypatch.delenv(OPERATOR)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: restarted.manager._collection_store is not None)
+        assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Still writable"},
+                    item_key=LATER, why="file write")["outcome"] == "committed"
+        assert titles(root, KEY) == ["Still writable"]
+        time.sleep(1.2)
+        assert authority.read_marker(root) == marker
+        assert store_meta(root)[authority.PENDING_CREATE] == before
+    finally:
+        try:
+            restarted.stop()
+        except OpError as error:
+            assert error.code == "COLLECTION_STORE_FLUSH_PENDING"
 
 
 def test_a_served_create_that_misses_its_publication_deadline_recovers_without_an_owner_step(

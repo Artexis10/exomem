@@ -2063,7 +2063,10 @@ def _collections_main(argv: list[str]) -> int:
         "--request-id", help="identity of this create; a retry with the same one completes it once "
         "(default: derived from the manifest path and text)",
     )
-    for command in (backup, adopt, create):
+    rollback = subcommands.add_parser(
+        "rollback", help="disable summary access and jobs for this vault; stop the service first"
+    )
+    for command in (backup, adopt, create, rollback):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2086,6 +2089,10 @@ def _collections_main(argv: list[str]) -> int:
                 Path(args.vault), destination=args.to, stream=sys.stdout.buffer if args.stdout else None
             )
             print(json.dumps(result, sort_keys=True), file=sys.stderr if args.stdout else sys.stdout)
+        elif args.command == "rollback":
+            with library_scope():
+                result = admission.rollback_route(Path(args.vault))
+            print(json.dumps(result, sort_keys=True))
         elif args.command == "create":
             import hashlib
 

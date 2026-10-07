@@ -1,8 +1,8 @@
 """Vault-bound lifetime for admitted collection stores.
 
 Admission comes only from a trusted producer session (``admission``) that holds
-custody, fence and takeover authority; the preview flag supplies none. Public
-routes and launcher support remain closed.
+custody, fence and takeover authority; the preview flag supplies none. Release
+capabilities control serving; compatibility gates supported launchers.
 """
 
 from __future__ import annotations
@@ -489,6 +489,9 @@ class CollectionStoreRuntime:
 
     @contextmanager
     def checkout(self):
+        from . import capability
+
+        capability.require_not_disabled(self.root)
         if self._bootstrap and not self.reporting_ready(self.manager._fencing_token):
             if self._resolver is None:
                 raise connection.CollectionStoreError(
@@ -498,6 +501,8 @@ class CollectionStoreRuntime:
             # takeover leaves reads of the local copy, and never closes a borrowed handle.
             self._resolver()
         with self.manager._collection_store_checkout():
+            # A rollback between the first check and borrowing must also refuse this checkout.
+            capability.require_not_disabled(self.root)
             lease = self.manager.ensure_writer()
             self._admit(lease.fencing_token, reads=True)
             if self._handle is None or self._writer_token != lease.fencing_token:
@@ -664,7 +669,7 @@ def route(command, vault_root, arguments):
     raw = authority.read_marker(root)
     if command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments):
         if raw is None:
-            capability.require_records_summary()
+            capability.require_records_summary(root)
             raise admission.enrollment_required()
     elif command == "record_memory" and arguments.get("action") == "inspect" and selector is None:
         server = None if raw is None else _server(root)
@@ -748,7 +753,7 @@ def served_create(vault_root, arguments):
     root = Path(vault_root).resolve()
     if not summary_create(root, arguments):
         return None
-    capability.require_records_summary()
+    capability.require_records_summary(root)
     server = _SERVERS.get(root)
     if server is None or server.session is None or server.thread is not threading.current_thread():
         raise connection.CollectionStoreError(
@@ -1011,7 +1016,7 @@ class StoreServer:
         from ..governance import principal
         from . import admission, authority, capability
 
-        if self.runtime is None or self.session is None or not capability.records_summary_enabled():
+        if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
@@ -1034,7 +1039,7 @@ class StoreServer:
         from . import capability, importer
         from .preview import preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled():
+        if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             # A plain read first: an idle store takes no lease and no checkout.
@@ -1063,7 +1068,7 @@ class StoreServer:
         from . import capability, index_migrations
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled():
+        if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
@@ -1107,7 +1112,7 @@ class StoreServer:
         from . import capability
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled():
+        if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:

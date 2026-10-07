@@ -337,7 +337,8 @@ class CollectionWriter:
                 if authorize_path is not None and not authorize_path(path):
                     continue
                 if marker is not None:
-                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid))
+                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid),
+                                               root=self.root)
                 head = self._operation.summary_manifest(cid)
                 if head is None:
                     head = (None, self._operation.decision(self._operation.catalog(cid)[0]))

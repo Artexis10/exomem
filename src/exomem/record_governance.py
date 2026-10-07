@@ -1828,7 +1828,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
         ]
         unreadable = tuple(row for row in unreadable if row.semantic_profile in (None, semantic_profile))
-        if production_bound(root) and not capability.records_summary_enabled():
+        if production_bound(root) and not capability.records_summary_enabled(root):
             # A summary collection is records-summary-v1: while the release keeps it off,
             # the inventory names it as unavailable rather than reading its counts.
             dark = [m for m in manifests if m.view_mode == "summary" and selected_writer(root, m) is not None]

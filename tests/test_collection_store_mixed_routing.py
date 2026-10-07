@@ -128,12 +128,14 @@ def test_mixed_foreign_store_identity_refuses_c_without_displacing_file_a(mixed)
             record_memory(mixed.root, "query", collection=manifest_path())
 
 
-def test_an_unbound_sweep_takes_a_routed_row_profile_from_the_marker_never_its_view(mixed):
+def test_an_unbound_sweep_takes_a_routed_row_profile_from_the_marker_never_its_view(mixed, monkeypatch):
     """Defect: a planning scan counts a store-routed Records collection as an unavailable Planning
     collection, or an edit of its generated view drops it from the Records inventory, which then
     reports a complete scan."""
     # The fixture's marker predates entries recording their profile: the row counts for every profile.
     assert plan_progress.review(mixed.root)["collections_unavailable"] == 1
+    # This isolated writer uses an arbitrary path; make its actual canonical file discoverable.
+    monkeypatch.setattr("exomem.collection_store.connection.store_path", lambda root: mixed.handle.path)
     marker = authority.parse_marker(mixed.root, authority.read_marker(mixed.root))
     marker["collections"] = [authority.marker_entry(CID, manifest_path(), marker["store_id"], "records")]
     authority.marker_path(mixed.root).write_text(json.dumps(marker))
@@ -146,6 +148,11 @@ def test_an_unbound_sweep_takes_a_routed_row_profile_from_the_marker_never_its_v
     assert plan_progress.review(mixed.root)["collections_unavailable"] == 0
     inventory = record_governance.inventory_collections(mixed.root)
     assert [row["path"] for row in inventory["unreadable_manifests"]] == [manifest_path()]
+    marker["collections"][0]["semantic_profile"] = "planning"
+    authority.marker_path(mixed.root).write_text(json.dumps(marker))
+    inventory = record_governance.inventory_collections(mixed.root)
+    assert any(row["path"] == manifest_path() and row["error_code"] == "COLLECTION_STORE_MARKER_CONFLICT"
+               for row in inventory["unreadable_manifests"])
 
 
 def test_a_malformed_marker_leaves_every_manifest_unreadable_and_no_sweep_crashing(mixed):

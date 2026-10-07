@@ -518,7 +518,7 @@ def test_restore_candidate_rejects_unpinned_or_online_inputs_before_publication(
     assert not (tmp_path / "target-vault").exists()
 
 
-def test_restore_mixed_marker_refuses_before_publication_or_security_activation(tmp_path: Path) -> None:
+def test_restore_mixed_marker_refuses_before_publication_or_security_activation(tmp_path: Path, monkeypatch) -> None:
     from exomem.collection_store import authority, replica
 
     sid = "123e4567-e89b-42d3-a456-426614174000"
@@ -537,6 +537,7 @@ def test_restore_mixed_marker_refuses_before_publication_or_security_activation(
         assert archive.read(authority.marker_path(Path()).as_posix()) == marker
         assert archive.read(replica.replica_path(Path()).as_posix()) == b"published replica"
 
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ())
     with pytest.raises(OperatorFailure) as error:
         restore_candidate(request, bootstrap_security=lambda **kwargs: activations.append(kwargs))
 
