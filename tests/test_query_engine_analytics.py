@@ -116,9 +116,9 @@ def test_analytics_explain_preview_and_dry_run_report_profile_and_bounds_without
     explained = reduce(store, analytics({**request(), "mode": "explain"}), limits=wide)
     assert explained["execution_profile"] == "analytics" and explained["bounds"] == ANALYTICS
     assert explained["plan"]["strategy"] == "base" and explained["plan"]["reason"] == "no_matching_rollup"
-    assert "groups" not in explained and "estimated_row_visits" not in explained
+    assert "groups" not in explained and "admitted_rows" not in explained
     previewed = reduce(store, analytics({**request(), "mode": "preview"}), limits=wide)
-    assert previewed["estimated_row_visits"] == 500 and "groups" not in previewed
+    assert previewed["admitted_rows"] == 500 and "groups" not in previewed
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         reduce(store, {**request(), "mode": "dry_run"}, limits=tight)
     admitted = reduce(store, analytics({**request(), "mode": "dry_run"}), limits=wide)

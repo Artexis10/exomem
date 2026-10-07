@@ -10296,6 +10296,22 @@ def op_schema_memory(
         raise ValueError(
             "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
         )
+    if subject == "query-engine":
+        # The typed query grammar's bounded discovery chapters; no vault read or write.
+        from .query_engine import route as query_route
+
+        others = (project, page_type, expected_hash, compare_to, proposal, why, context, date_from,
+                  date_to, continuation, query, requested_type, vocabulary_ref, vocabulary_fingerprint, version)
+        if operation != "inspect" or any(value is not None for value in others) or save or strict \
+                or include_model_suggestions or limit != 20:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: query-engine accepts operation inspect and name only")
+        from .cli_ops import OpError
+
+        try:
+            return query_route.chapter(name)
+        except query_route.QueryError as error:
+            refusal = query_route.details(error)
+            raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation == "save-entity-types"
@@ -11565,30 +11581,31 @@ def op_record_memory(
     source: str | None = None,
     on_reject: Literal["abort", "skip"] | None = None,
     import_request: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Store observed state; Planning uses plan_memory, originals use Sources/Evidence.
 
     Describe/propose before create.
 
     Args:
-        collection: Target collection; omit for describe, inventory, or new manifest validate/create.
+        collection: Target; omit for describe, inventory or new-manifest validate/create.
         manifest_text: Full manifest for validate/create/revise.
         expand_child: Exact declared child container.
         refresh_presentation: Guarded managed Markdown rebuild.
         item_key: Update UUID; append derives identity from natural key.
-        expected_container_hash: Current snapshot for append/bulk_upsert/update/revise/rebaseline.
+        expected_container_hash: Current container hash for guarded writes.
         expected_manifest_hash: Current manifest hash for revise/rebaseline.
         expected_item_version: Update item version.
         acknowledged_gap_codes: Inspect-reported rebaseline gaps.
         why: Write audit reason.
         delivery: Append receipt envelope; never sets values or creates collections.
-        held: Resume append/update with item/changes overrides; null removes a field.
-            Discard removes the held candidate.
+        held: Resume append/update (item/changes override; null removes a field); discard deletes it.
         hold: False refuses; otherwise invalid candidates are held.
         rows: bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.
             Outcomes: inserted/updated/unchanged/rejected.
         source: bulk_upsert default preserved Source/Evidence path.
-        on_reject: bulk_upsert: abort writes nothing on rejection; skip commits the rest.
+        on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
+        query: v1 query object; grammar via describe.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -11629,6 +11646,7 @@ def op_record_memory(
         source=source,
         on_reject=on_reject,
         import_request=import_request,
+        query=query,
     )
 
 
@@ -11882,6 +11900,13 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "import-conditional":
+            from .collection_store.importer import READ_ONLY_MODES
+
+            request = kwargs.get("import_request")
+            mode = request.get("mode") if isinstance(request, dict) else None
+            # A malformed mode stays on the writer path, where the importer refuses it.
+            return isinstance(mode, str) and mode in READ_ONLY_MODES
         if adapter == "question-conditional":
             return not _review_question_submission(
                 kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")

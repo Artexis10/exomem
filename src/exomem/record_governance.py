@@ -1141,7 +1141,16 @@ class _LinkProjector:
             return value
         return self._project_value(value, collections.FieldSpec("link", link_kind=column.link_kind))
 
+    @staticmethod
+    def carries_links(spec: collections.FieldSpec) -> bool:
+        """Whether projection can withhold this field's values: a link, or an array of them."""
+        return spec.type == "link" or (
+            spec.type == "array" and spec.items is not None and _LinkProjector.carries_links(spec.items)
+        )
+
     def _project_value(self, value: Any, spec: collections.FieldSpec) -> Any:
+        if not self.carries_links(spec):
+            return value
         if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
             return [
                 result

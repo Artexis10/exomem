@@ -12,6 +12,7 @@ import datetime as dt
 import json
 
 import pytest
+from fastmcp.tools.base import default_serializer
 from s1_export_fixture import daily_summaries, expected_daily, iter_exercises
 from test_collection_store_summary import COPY_CID, canonical, files, guards, summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
@@ -347,18 +348,21 @@ def pages(store, raw):
 
 @pytest.mark.parametrize("strategy", ["rollup", "base"])
 def test_daily_answer_longer_than_a_page_is_read_whole_through_cursors(store, strategy):
-    """A daily answer past one page that is unreachable or refused, a page past the 64 KiB result
-    cap, or a continuation that repeats, skips or reorders a group on either execution path."""
+    """A daily answer past one page that is unreachable or refused, a page of non-ASCII labels past
+    the 64 KiB result cap as MCP or REST serializes it, or a continuation that repeats, skips or
+    reorders a group on either execution path."""
     rollup = {**STEPS, "group_by": ["source"]}
     store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date",
                             rollups={"steps": rollup} if strategy == "rollup" else None), why="create", scaffold=False)
     rows = daily_summaries(400)
-    load(store, [{"date": row["date"], "steps": row["steps"], "source": f"{row['date']} " + "w" * 600}
+    load(store, [{"date": row["date"], "steps": row["steps"], "source": f"{row['date']} " + "歩" * 200}
                  for row in rows])
     daily, _ = expected_daily(rows, "steps")
     read = pages(store, request(field="steps", timestamp="date", groups=("source",)))
     assert {page["plan"]["strategy"] for page in read} == {strategy}
-    assert all(len(json.dumps(page, separators=(",", ":")).encode()) <= 64 * 1024 for page in read)
+    for page in read:
+        assert len(default_serializer(page).encode()) <= 64 * 1024  # MCP tool result text
+        assert len(json.dumps(page, ensure_ascii=False).encode()) <= 64 * 1024  # REST and CLI
     assert [page["truncation_reason"] for page in read] == ["bytes"] * (len(read) - 1) + [None]
     groups = [{name: value for name, value in group.items() if name != "source"}
               for page in read for group in page["groups"]]

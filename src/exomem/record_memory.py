@@ -52,6 +52,7 @@ _ACTION_FIELDS = {
             "continuation",
             "include_agent_history",
             "output_format",
+            "query",
         }
     ),
     "append": frozenset(
@@ -189,6 +190,7 @@ def record_memory(
     source: str | None = None,
     on_reject: Literal["abort", "skip"] | None = None,
     import_request: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, bulk_upsert, update, revise, rebaseline, discard or import Records.
 
@@ -245,6 +247,9 @@ def record_memory(
         import_request: import only, for a store-routed collection: a durable job
             streams one preserved Sources/Evidence file in bounded batches; store-mode
             `describe` carries its contract.
+        query: query only, for a store-routed collection: a typed v1 query object
+            instead of the legacy shaping arguments; store-mode `describe` names its
+            grammar route.
     """
     values = {
         "collection": collection,
@@ -283,17 +288,29 @@ def record_memory(
         "source": source,
         "on_reject": on_reject,
         "import_request": import_request,
+        "query": query,
     }
     _validate_arguments(action, values)
+    from .query_engine.runtime import QueryError
+
     try:
         from .collection_store import preview
 
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
-        if action == "import":
+        if action == "import" or query is not None:
+            # Resolve under the caller's authority first: an absent or withheld selector
+            # answers exactly as a sealed store-routed collection does, so the refusal
+            # below never confirms that a collection exists.
+            assert collection is not None
+            record_governance.resolve_collection(vault_root, collection)
+            if action == "import":
+                raise CollectionError(
+                    "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
+                )
             raise CollectionError(
-                "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
+                "QUERY_UNAVAILABLE", "a v1 query runs only on a store-routed Records collection"
             )
         if action == "describe":
             return parse_manifest_contract()
@@ -466,6 +483,11 @@ def record_memory(
             error.reason,
             details=_json_safe_details(getattr(error, "details", None)),
         ) from error
+    except QueryError as error:
+        from .query_engine import route
+
+        refusal = route.details(error)
+        raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
 
 
 def parse_manifest_contract(*, store_mode: bool = False) -> dict[str, Any]:
@@ -666,6 +688,17 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "validate" and values["collection"] is not None and values["scaffold"] is not None:
         _invalid_arguments("scaffold is not accepted when collection is supplied")
+    if action == "query" and values["query"] is not None and supplied - {"collection", "query"}:
+        from .query_engine.validation import Finding
+
+        legacy = sorted(supplied - {"collection", "query"})
+        repair = "Remove " + ", ".join(legacy) + ", or omit query."
+        raise OpError(
+            "QUERY_ARGUMENT_CONFLICT",
+            "the query object replaces the legacy query arguments",
+            repair,
+            details=Finding("QUERY_ARGUMENT_CONFLICT", "query", "one query grammar", tuple(legacy), repair).as_dict(),
+        )
     if action == "query" and values["view"] is not None and supplied & _QUERY_SHAPING_FIELDS:
         offending = sorted(supplied & _QUERY_SHAPING_FIELDS)
         _invalid_arguments("view excludes shaping fields: " + ", ".join(offending))

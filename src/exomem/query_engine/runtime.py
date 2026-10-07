@@ -20,9 +20,27 @@ from ..governance.principal import effective_principal
 
 _READERS_GUARD = threading.Lock()
 _READERS: dict[Path, int] = {}
+#: Analytics sessions per store. Each holds one of the store's two readers for up to two
+#: seconds, so at most one runs at a time and an interactive reader always remains.
+_ANALYTICS: dict[Path, int] = {}
+MAX_ANALYTICS_SESSIONS = 1
 _ADMISSION_SEAL = object()
 _CURRENT_SESSION: ContextVar[ReadSession | None] = ContextVar("collection_query_session", default=None)
 _MAX_DECODE_BYTES = 256 * 1024
+#: The whole serialized v1 result, rows or groups (design §8).
+MAX_RESULT_BYTES = 64 * 1024
+
+
+def wire_bytes(value) -> int:
+    """Bytes of ``value`` as REST and the CLI's JSON output serialize a result.
+
+    Both use ``json.dumps(..., ensure_ascii=False)`` with spaced separators. MCP's
+    compact UTF-8 JSON (FastMCP's pydantic serializer) is never larger, and no
+    result transport escapes non-ASCII text. The CLI's human output re-indents a
+    result with ``indent=2`` for reading; that display, like the envelope around a
+    result, is outside the cap.
+    """
+    return len(json.dumps(value, ensure_ascii=False).encode())
 
 
 class QueryError(RuntimeError):
@@ -30,6 +48,7 @@ class QueryError(RuntimeError):
 
     def __init__(self, code: str, message: str = "collection query could not complete") -> None:
         self.code = code
+        self.message = message
         super().__init__(f"{code}: {message}")
 
 
@@ -114,12 +133,12 @@ class AdmittedCollection:
 
 
 class ReadSession:
-    def __init__(self, root, conn, limits, cancelled, project_values, deadline):
+    def __init__(self, root, conn, limits, cancelled, deadline):
         self.connection = conn
         self.limits = limits
         self._root = root
         self._cancelled = cancelled
-        self._project_values = project_values
+        self._project_values = None
         self._principal = effective_principal()
         self._thread = threading.get_ident()
         self._deadline = deadline
@@ -130,9 +149,33 @@ class ReadSession:
         self._queries = {}
         self._cursors = set()
         self._estimated_visits = 0
+        # Fields the projection can change; `project_with` is the only way to install one.
+        self._projected_fields = frozenset()
 
     def __reduce__(self):
         raise TypeError("query sessions are request-local")
+
+    def project_with(self, project_values, *, fields) -> None:
+        """Install the projection of ``fields`` that this session's own manifest calls for, before any query runs.
+
+        ``project_values`` sees only the values of ``fields``, and only those come back from it; every
+        other value passes as stored. A rollup, which never projects, and a base scan therefore agree
+        on every field outside ``fields``, which is what the reduction planner relies on.
+        """
+        if self._project_values is not None or self._admitted or self._queries or self._estimated_visits:
+            raise QueryError("QUERY_UNAVAILABLE", "a session's value projection is fixed before its first query")
+        fields = frozenset(fields)
+
+        def project(values):
+            chosen = {name: value for name, value in values.items() if name in fields}
+            if not chosen:
+                return values
+            projected = project_values(chosen)
+            return {name: projected[name] if name in fields else value for name, value in values.items()
+                    if name not in fields or name in projected}
+
+        self._project_values = project
+        self._projected_fields = fields
 
     def check(self) -> None:
         if self._failure is not None:
@@ -356,20 +399,23 @@ def _summary_released(operation, collection_id: str) -> bool:
 
 @contextmanager
 def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = None,
-                 cancelled: Callable[[], bool] | None = None, project_values=None) -> Iterator[ReadSession]:
+                 cancelled: Callable[[], bool] | None = None) -> Iterator[ReadSession]:
     """Own a fresh connection, snapshot, evaluator and admission until return."""
     limits = limits or QueryLimits()
     deadline = time.monotonic() + limits.timeout_ms / 1000
     target = Path(store_path).resolve()
+    analytics = limits.profile == "analytics"
     with _READERS_GUARD:
-        if _READERS.get(target, 0) >= 2:
-            raise QueryError("QUERY_BUSY")
+        if _READERS.get(target, 0) >= 2 or analytics and _ANALYTICS.get(target, 0) >= MAX_ANALYTICS_SESSIONS:
+            raise QueryError("QUERY_BUSY", "the store's query readers are in use; retry shortly")
         _READERS[target] = _READERS.get(target, 0) + 1
+        if analytics:
+            _ANALYTICS[target] = _ANALYTICS.get(target, 0) + 1
     conn = session = token = None
     try:
         conn = connection.open_query_reader(target, busy_timeout_ms=limits.timeout_ms)
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
-        session = ReadSession(Path(root), conn, limits, cancelled, project_values, deadline)
+        session = ReadSession(Path(root), conn, limits, cancelled, deadline)
         token = _CURRENT_SESSION.set(session)
         conn.set_progress_handler(session._progress, 1000)
         conn.create_function("exomem_query_values", 2, session._values)
@@ -419,3 +465,7 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
                 _READERS[target] -= 1
                 if not _READERS[target]:
                     del _READERS[target]
+                if analytics:
+                    _ANALYTICS[target] -= 1
+                    if not _ANALYTICS[target]:
+                        del _ANALYTICS[target]

@@ -72,6 +72,26 @@ _OPS = frozenset(
     }
 )
 _NULL_OPS = frozenset({"exists", "missing", "is_null", "is_missing", "is_not_null"})
+#: The v1 grammar's closed choices and input bounds (design §8, §11). The
+#: query-engine discovery chapter reports these same objects.
+MODES = ("compose", "explain", "preview", "dry_run", "execute")
+PROFILES = ("interactive", "analytics")
+BUCKETS = ("day", "week", "month")
+AGGREGATE_OPS = ("count", "sum", "avg", "min", "max", "latest", "percentile", "distinct_count")
+LIMITS = {
+    "query_bytes": 16 * 1024,
+    "predicate_leaves": 64,
+    "boolean_depth": 8,
+    "membership_values": 100,
+    "select": 32,
+    "order_by": 4,
+    "group_by": 4,
+    "aggregates": 8,
+    "joins": 2,
+    "page_default": 50,
+    "row_page": 1000,
+    "group_page": 200,
+}
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _SCALARS = frozenset({"string", "integer", "number", "boolean", "date", "datetime", "enum", "link"})
 _LEGACY = frozenset(
@@ -189,8 +209,8 @@ def _bounded_json(value: Any, at: str) -> None:
         )
     except (TypeError, ValueError, OverflowError, RecursionError):
         _fail("QUERY_VALUE_INVALID", at, "bounded JSON object")
-    if size > 16 * 1024:
-        _fail("QUERY_INPUT_LIMIT", at, "at most 16 KiB")
+    if size > LIMITS["query_bytes"]:
+        _fail("QUERY_INPUT_LIMIT", at, f"at most {LIMITS['query_bytes'] // 1024} KiB")
 
 
 def _instant(value: Any, at: str) -> str:
@@ -234,7 +254,8 @@ class _Binder:
         self.reduction_fields: dict[str, Field] | None = None
         self.leaves = 0
 
-    def field(self, name: Any, at: str, *, reduction=False) -> Field:
+    def field(self, name: Any, at: str, *, reduction=False, evaluated=False) -> Field:
+        """Bind a declared field; ``evaluated`` marks a use that SQL evaluates on stored values."""
         if reduction:
             fields = self.reduction_fields or {}
             if isinstance(name, str) and name in fields:
@@ -266,6 +287,11 @@ class _Binder:
                 allowed,
                 "Describe the source and choose a declared field.",
             )
+        if evaluated and fields[path].get("projected"):
+            # Each caller sees this field's values only after projection, so a filter, sort or join
+            # on the stored values would reveal what a row omits, to the owner as to anyone else.
+            _fail("QUERY_FIELD_UNAVAILABLE", at, "a field stored as each caller sees it", (),
+                  "Select, aggregate or group the field; filter and sort on another field.")
         kind = fields[path].get("type")
         enum = tuple(fields[path].get("enum", ()))
         if kind == "enum":
@@ -279,15 +305,15 @@ class _Binder:
         return Field(source, path, kind, alias, enum)
 
     def predicate(self, value: Any, at: str, depth=0, *, reduction=False) -> Filter:
-        if depth > 8:
-            _fail("QUERY_INPUT_LIMIT", at, "boolean depth at most 8")
+        if depth > LIMITS["boolean_depth"]:
+            _fail("QUERY_INPUT_LIMIT", at, f"boolean depth at most {LIMITS['boolean_depth']}")
         raw = _object(value, at, {"all", "any", "not", "field", "op", "value"})
         boolean = raw.keys() & {"all", "any", "not"}
         if boolean:
             if len(raw) != 1:
                 _fail("QUERY_VALUE_INVALID", at, "one boolean operator")
             op = next(iter(boolean))
-            children = [raw[op]] if op == "not" else _list(raw[op], f"{at}.{op}", 64)
+            children = [raw[op]] if op == "not" else _list(raw[op], f"{at}.{op}", LIMITS["predicate_leaves"])
             if not children:
                 _fail("QUERY_VALUE_INVALID", at, "nonempty boolean operands")
             return Filter(
@@ -304,9 +330,9 @@ class _Binder:
             )
         raw = _object(raw, at, {"field", "op", "value"}, {"field", "op"})
         self.leaves += 1
-        if self.leaves > 64:
-            _fail("QUERY_INPUT_LIMIT", "where", "at most 64 predicate leaves")
-        field = self.field(raw["field"], f"{at}.field", reduction=reduction)
+        if self.leaves > LIMITS["predicate_leaves"]:
+            _fail("QUERY_INPUT_LIMIT", "where", f"at most {LIMITS['predicate_leaves']} predicate leaves")
+        field = self.field(raw["field"], f"{at}.field", reduction=reduction, evaluated=True)
         op = raw["op"]
         if not isinstance(op, str) or op not in _OPS:
             _fail("QUERY_OPERATOR_UNKNOWN", f"{at}.op", "closed predicate operator", _OPS)
@@ -323,7 +349,7 @@ class _Binder:
             _fail("QUERY_VALUE_INVALID", f"{at}.value", "required typed literal")
         value_at = f"{at}.value"
         if op in {"in", "nin"}:
-            values = _list(raw["value"], value_at, 100)
+            values = _list(raw["value"], value_at, LIMITS["membership_values"])
             literal = tuple(_value(v, field, f"{value_at}[{i}]") for i, v in enumerate(values))
         elif op == "between":
             bounds = _object(
@@ -362,7 +388,7 @@ class _Binder:
     def joins(self, values: Any) -> tuple[Join, ...]:
         joins = []
         ancestors = {self.source.ref: (self.source.ref,)}
-        for i, value in enumerate(_list(values, "joins", 2)):
+        for i, value in enumerate(_list(values, "joins", LIMITS["joins"])):
             at = f"joins[{i}]"
             raw = _object(value, at, {"relation", "alias", "kind"}, {"relation", "alias", "kind"})
             alias = _name(raw["alias"], f"{at}.alias")
@@ -406,7 +432,7 @@ class _Binder:
             field_name = (
                 f"{parent_alias}.{relation['field']}" if parent_alias else relation["field"]
             )
-            source_field = self.field(field_name, f"{at}.relation")
+            source_field = self.field(field_name, f"{at}.relation", evaluated=True)
             if source_field.value_type not in {"string", "link"}:
                 _fail("QUERY_RELATION_INVALID", f"{at}.relation", "opaque reference field")
             bound = Source("collections", target_ref, target["type"])
@@ -422,9 +448,10 @@ class _Binder:
     def aggregate(self, groups: Any, values: Any) -> Aggregate:
         keys = []
         self.reduction_fields = {}
-        for i, value in enumerate(_list(groups, "group_by", 4)):
+        for i, value in enumerate(_list(groups, "group_by", LIMITS["group_by"])):
             at = f"group_by[{i}]"
             raw = _object(value, at, {"field", "bucket", "from", "to"}, {"field"})
+            # Reductions group projected values, so a projected field may group.
             field = self.field(raw["field"], f"{at}.field")
             if raw["field"] in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "unique group field path")
@@ -432,7 +459,7 @@ class _Binder:
                 _fail("QUERY_UNSUPPORTED", at, "scalar group key")
             bucket = None
             if "bucket" in raw:
-                bucket = _choice(raw["bucket"], f"{at}.bucket", {"day", "week", "month"})
+                bucket = _choice(raw["bucket"], f"{at}.bucket", BUCKETS)
                 if field.value_type not in {"date", "datetime"}:
                     _fail("QUERY_VALUE_INVALID", f"{at}.bucket", "declared date or datetime field")
             window = []
@@ -459,8 +486,8 @@ class _Binder:
         raw_values = _object(
             values, "aggregates", values.keys() if isinstance(values, dict) else ()
         )
-        if len(raw_values) > 8:
-            _fail("QUERY_INPUT_LIMIT", "aggregates", "at most 8 named aggregates")
+        if len(raw_values) > LIMITS["aggregates"]:
+            _fail("QUERY_INPUT_LIMIT", "aggregates", f"at most {LIMITS['aggregates']} named aggregates")
         aggregates = []
         for name, value in raw_values.items():
             at = f"aggregates.{name}"
@@ -468,11 +495,7 @@ class _Binder:
             if name in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", at, "alias distinct from group keys")
             raw = _object(value, at, {"op", "field", "p"}, {"op"})
-            op = _choice(
-                raw["op"],
-                f"{at}.op",
-                {"count", "sum", "avg", "min", "max", "latest", "percentile", "distinct_count"},
-            )
+            op = _choice(raw["op"], f"{at}.op", AGGREGATE_OPS)
             field = self.field(raw["field"], f"{at}.field") if "field" in raw else None
             if field is None and op != "count":
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "required declared field")
@@ -563,16 +586,8 @@ def normalize_query(
         if domain == "graph":
             _fail("QUERY_UNSUPPORTED", "graph", "settled external graph request grammar")
         source = Source(domain, ref, declaration["type"])
-        mode = _choice(
-            raw.get("mode", "execute"),
-            "mode",
-            {"compose", "explain", "preview", "dry_run", "execute"},
-        )
-        profile = _choice(
-            raw.get("execution_profile", "interactive"),
-            "execution_profile",
-            {"interactive", "analytics"},
-        )
+        mode = _choice(raw.get("mode", "execute"), "mode", MODES)
+        profile = _choice(raw.get("execution_profile", "interactive"), "execution_profile", PROFILES)
         binder = _Binder(source, declarations)
         joins = binder.joins(raw.get("joins", []))
         where = binder.predicate(raw["where"], "where") if "where" in raw else None
@@ -588,13 +603,13 @@ def normalize_query(
         )
         fields = tuple(
             binder.field(name, f"select[{i}]", reduction=aggregate is not None)
-            for i, name in enumerate(_list(raw.get("select", []), "select", 32))
+            for i, name in enumerate(_list(raw.get("select", []), "select", LIMITS["select"]))
         )
         sort = []
-        for i, value in enumerate(_list(raw.get("order_by", []), "order_by", 4)):
+        for i, value in enumerate(_list(raw.get("order_by", []), "order_by", LIMITS["order_by"])):
             at = f"order_by[{i}]"
             key = _object(value, at, {"field", "direction", "nulls"}, {"field"})
-            field = binder.field(key["field"], f"{at}.field", reduction=aggregate is not None)
+            field = binder.field(key["field"], f"{at}.field", reduction=aggregate is not None, evaluated=True)
             if field.value_type not in _SCALARS:
                 _fail("QUERY_UNSUPPORTED", f"{at}.field", "scalar sort field")
             sort.append(
@@ -620,7 +635,10 @@ def normalize_query(
                     sort.append(SortKey(field))
         page = _object(raw.get("page", {}), "page", {"limit", "after"})
         limit = _integer(
-            page.get("limit", 50), "page.limit", 1, 200 if aggregate is not None else 1000
+            page.get("limit", LIMITS["page_default"]),
+            "page.limit",
+            1,
+            LIMITS["group_page"] if aggregate is not None else LIMITS["row_page"],
         )
         after = page.get("after")
         if "after" in page and (not isinstance(after, str) or not after):

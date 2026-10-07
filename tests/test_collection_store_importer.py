@@ -28,7 +28,7 @@ from test_collection_store_writer import CID as GATE_CID
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
-from exomem import commands
+from exomem import commands, records
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, schema, typed_storage
 from exomem.collection_store.preview import preview_store
@@ -1074,6 +1074,9 @@ def test_each_committed_batch_has_one_value_free_receipt(store, monkeypatch):
 def test_import_is_unavailable_for_file_authoritative_collections(tmp_path):
     """An import route reachable outside the store bypasses its job, lineage and batch contract."""
     (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base/log.md").write_text("# Log\n")
+    records.create_collection(tmp_path, "Knowledge Base/Records/Workouts/_collection.md", manifest_text(),
+                              why="file collection", scaffold=True)
     error = refused(
         record_memory,
         tmp_path,

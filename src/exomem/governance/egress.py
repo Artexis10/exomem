@@ -4956,6 +4956,9 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+        # `import_request.mode` decides: preview and status read, while start,
+        # continue and cancel write (importer.READ_ONLY_MODES).
+        "import": "import-conditional",
     },
     ("episode_memory", "action"): {
         "record": "mutation",

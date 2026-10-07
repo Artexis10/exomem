@@ -1778,7 +1778,7 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nstructured-files and tag-variants apply needs the preview's `plan_id` and `why`.\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
+    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nstructured-files, tag-variants and collections-store-adopt-local apply need the preview's\n`plan_id` and `why`.\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1792,7 +1792,8 @@
             "backfill-ids",
             "structured-files",
             "curation",
-            "tag-variants"
+            "tag-variants",
+            "collections-store-adopt-local"
           ],
           "type": "string"
         },
@@ -1843,7 +1844,7 @@
         },
         "plan_id": {
           "type": "string",
-          "description": "Preview identity required to apply (structured-files, tag-variants)."
+          "description": "Preview identity required to apply."
         },
         "source_snapshot": {
           "type": "string",
@@ -1851,7 +1852,7 @@
         },
         "why": {
           "type": "string",
-          "description": "Audit reason required to apply structured-files or tag-variants."
+          "description": "Audit reason required to apply."
         },
         "curation_action": {
           "enum": [
@@ -2713,7 +2714,7 @@
     }
   },
   "record_memory": {
-    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nResolve one compatible collection; otherwise describe/propose before create.",
+    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDescribe/propose before create.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2729,13 +2730,14 @@
             "update",
             "revise",
             "rebaseline",
-            "discard"
+            "discard",
+            "import"
           ],
           "type": "string"
         },
         "collection": {
           "type": "string",
-          "description": "Target collection; omit for describe, inventory, or new manifest validate/create."
+          "description": "Target; omit for describe, inventory or new-manifest validate/create."
         },
         "manifest_path": {
           "type": "string"
@@ -2817,7 +2819,7 @@
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "Current snapshot for append/bulk_upsert/update/revise/rebaseline."
+          "description": "Current container hash for guarded writes."
         },
         "expected_manifest_hash": {
           "type": "string",
@@ -2914,7 +2916,7 @@
         },
         "held": {
           "type": "string",
-          "description": "Resume append/update with item/changes overrides; null removes a field. Discard removes the held candidate."
+          "description": "Resume append/update (item/changes override; null removes a field); discard deletes it."
         },
         "hold": {
           "type": "boolean",
@@ -2937,7 +2939,14 @@
             "skip"
           ],
           "type": "string",
-          "description": "bulk_upsert: abort writes nothing on rejection; skip commits the rest."
+          "description": "bulk_upsert: abort writes nothing; skip commits the rest."
+        },
+        "import_request": {
+          "type": "object"
+        },
+        "query": {
+          "type": "object",
+          "description": "v1 query object; grammar via describe."
         },
         "response_detail": {
           "default": "compact",

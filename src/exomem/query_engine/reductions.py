@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass
 from ..collection_store import query_freshness, rollups, typed_storage
 from . import cursors, ir
 from .buckets import EXTREMES, Accumulator, Basis, bucket_key, declared_kind, group_key
-from .runtime import QueryError
+from .runtime import MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
 
 _UNSUPPORTED = frozenset({"percentile", "distinct_count"})
@@ -60,6 +60,11 @@ class _Shape:
     latest: bool
     values: tuple[ir.NamedAggregate, ...]
 
+    def reads(self) -> tuple[str, ...]:
+        """Every declared field the reduction reads: aggregated values, group keys and the timing basis."""
+        timing = () if self.basis is None else (self.basis.field, self.basis.offset)
+        return tuple(dict.fromkeys(name for name in (*self.fields, *self.others, *timing) if name is not None))
+
 
 @dataclass(frozen=True, slots=True)
 class _Plan:
@@ -84,11 +89,17 @@ def _refuse_request(query, limits) -> None:
         raise QueryError("QUERY_PROFILE_UNAVAILABLE", "the request names a profile this session does not run")
     if query.where is not None:
         raise QueryError("QUERY_UNSUPPORTED", "bound a reduction by its local-day window: group_by[n].from and .to")
-    if (query.mode == "compose" or query.joins or query.having is not None or query.text is not None
+    if (query.joins or query.having is not None or query.text is not None
             or query.graph is not None or sum(key.bucket is not None for key in query.aggregate.groups) > 1):
         raise QueryError("QUERY_UNSUPPORTED", "this reduction shape is not available")
     if any(value.op in _UNSUPPORTED for value in query.aggregate.values):
         raise QueryError("QUERY_UNSUPPORTED", "percentile and distinct count are not assembled from rollups")
+
+
+def check_shape(query, manifest, limits) -> None:
+    """Every refusal a reduction gets from its request and declaration; compose runs it too."""
+    _refuse_request(query, limits)
+    _shape(query, manifest)
 
 
 def _shape(query, manifest) -> _Shape:
@@ -136,7 +147,7 @@ def _aligned(shape: _Shape) -> bool:
 def _plan(session, collection_id: str, shape: _Shape, uniform: bool) -> _Plan:
     if not uniform:
         return _Plan("base", "mixed_release", "admitted")
-    if session._project_values is not None:
+    if session._projected_fields & set(shape.reads()):
         return _Plan("base", "fields_projected", "uniform")
     matching = [definition for definition in rollups.definitions(session.connection, collection_id)
                 if _answers(definition[1], shape)]
@@ -237,8 +248,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     Flagged rows count whatever the window, since their local day is unknown.
     Rows of buckets before the cursor's bucket are skipped, not retained.
     """
-    timing = () if shape.basis is None else (shape.basis.field, shape.basis.offset)
-    read = tuple(dict.fromkeys(name for name in (*shape.fields, *shape.others, *timing) if name is not None))
+    read = shape.reads()
     sql, decode = _scan_sql(collection_id, layout, predicate, read)
     project = session._project_values
     basis, bucket, timed = shape.basis, "", shape.timed
@@ -308,31 +318,29 @@ def _binding(session, query, collection_id: str, manifest, shape: _Shape, unifor
     if shape.basis is not None:
         read |= {name for name in (shape.basis.field, shape.basis.offset) if name is not None}
     basis = query_freshness.uniform_basis(session.connection, collection_id, read) if uniform else None
-    if basis is None:
+    if not uniform:
         # S1.5b (write-time released-field bases) replaces this refusal with a bound continuation.
         raise QueryError("QUERY_UNSUPPORTED", "continuation under mixed release is not supported: narrow the "
-                         "local-day window to one page" if not uniform else
-                         "continuation needs the collection's freshness basis: narrow the window to one page")
+                         "local-day window to one page")
+    if basis is None:
+        # The row path's refusal for the same missing coverage (cursors._visible).
+        raise QueryError("QUERY_UNAVAILABLE", "continuation needs the collection's freshness basis")
     return {**cursors.caller_binding(session, query), "schema": cursors._hash([collection_id,
             manifest.manifest_version.hash]), "visible": cursors._hash(["exomem.group-pages.v1", asdict(basis)])}
 
 
-def _size(value) -> int:
-    return len(cursors._json(value).encode())
-
-
 def _assemble(session, query, shape: _Shape, ordered, envelope: dict, mint) -> dict:
     """Whole groups up to the page limit and the result byte cap; a stop with groups left mints a cursor."""
-    empty = {**envelope, "groups": [], "returned": 0, "truncated": False, "truncation_reason": "limit",
-             "next_cursor": ""}
-    rows, used, last, reason = [], _size(empty) + _PAGE_RESERVE, None, None
+    empty = {**envelope, "groups": [], "returned": 0, "has_more": False, "truncated": False,
+             "truncation_reason": "limit", "next_cursor": ""}
+    rows, used, last, reason = [], wire_bytes(empty) + _PAGE_RESERVE, None, None
     for bucket, identity, tagged, count, accumulators in ordered:
         if len(rows) == query.page.limit:
             reason = "limit"
             break
         row = _row(shape, bucket, tagged, count, accumulators)
-        size = _size(row) + 1
-        if used + size > cursors._MAX_RESULT_BYTES:
+        size = wire_bytes(row) + 2
+        if used + size > MAX_RESULT_BYTES:
             if not rows:
                 raise QueryError("QUERY_RESULT_TOO_LARGE", "one group exceeds the result size cap")
             reason = "bytes"
@@ -341,10 +349,10 @@ def _assemble(session, query, shape: _Shape, ordered, envelope: dict, mint) -> d
         used += size
         last = (bucket, identity)
     token = None if reason is None else mint(_boundary(*last))
-    result = {**envelope, "groups": rows, "returned": len(rows), "truncated": reason is not None,
-              "truncation_reason": reason, "next_cursor": token}
+    result = {**envelope, "groups": rows, "returned": len(rows), "has_more": reason is not None,
+              "truncated": reason is not None, "truncation_reason": reason, "next_cursor": token}
     session.check()
-    if _size(result) > cursors._MAX_RESULT_BYTES:
+    if wire_bytes(result) > MAX_RESULT_BYTES:
         raise QueryError("QUERY_RESULT_TOO_LARGE")
     return result
 
@@ -356,6 +364,8 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
     """
     session.check()
     limits = session.limits
+    if getattr(query, "mode", None) == "compose":
+        raise QueryError("QUERY_UNSUPPORTED", "compose reads no values")
     _refuse_request(query, limits)
     collection_id = query.source.ref
     codec = payload = None
@@ -373,8 +383,9 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
     with session._manifest(collection_id) as (manifest, _, _, uniform):
         shape = _shape(query, manifest)
     plan = _plan(session, collection_id, shape, uniform)
-    result = {"collection": collection_id, "as_of": frozen, "execution_profile": limits.profile,
-              "bounds": limits.bounds(), "plan": plan.describe(shape)}
+    result = {"source": asdict(query.source), "query_version": query.version,
+              "schema_version": manifest.schema.version, "mode": query.mode, "as_of": frozen,
+              "execution_profile": limits.profile, "bounds": limits.bounds(), "plan": plan.describe(shape)}
     binding = after = None
     if payload is not None:
         binding = _binding(session, query, collection_id, manifest, shape, uniform)
@@ -392,10 +403,12 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
         # Uniform admission counts rows; mixed admission streams released row ids to bounded temp.
         admitted = session.admit(collection_id)
         visits, layout, predicate = admitted.visible_count, admitted.layout, admitted.membership_sql
+    # What the plan reads, exactly: released rows on the base path, stored buckets on the rollup path.
+    read = {"rollup_buckets" if plan.strategy == "rollup" else "admitted_rows": visits}
     if query.mode == "preview":
-        return {**result, "estimated_row_visits": visits}
+        return {**result, **read}
     if query.mode == "dry_run":
-        return {**result, "admitted": True, "estimated_row_visits": visits}
+        return {**result, "admitted": True, **read}
     if plan.strategy == "rollup":
         ordered, flagged = _from_rollup(session, shape, plan, after), plan.rollup[3]
     else:
@@ -408,7 +421,7 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
         return codec.mint(binding, as_of=frozen, boundary=boundary)
 
     # Flagged rows have no local day, so they are counted over the released collection, not the window.
-    envelope = {**result, "flagged_rows": flagged, "flagged_scope": "collection", "row_visits": visits}
+    envelope = {**result, "flagged_rows": flagged, "flagged_scope": "collection", **read}
     try:
         return _assemble(session, query, shape, ordered, envelope, mint)
     finally:
