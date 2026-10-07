@@ -860,6 +860,7 @@ def test_renderer_preserves_active_artifact_and_flags_before_dirty_path_overflow
     assert "[continuation fields omitted:" in rendered
     assert "dirty paths=" in rendered
     assert "Reconcile these structural pointers" in rendered
+    assert "do not embed the canonical ref as a Markdown link target" in rendered
 
 
 def test_renderer_reserves_artifact_omission_marker_at_max_payload() -> None:

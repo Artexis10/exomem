@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import compile_proposal as compile_proposal_module
-from . import context_refs, indexes, knowledge_packs, semantic_census
+from . import context_refs, indexes, knowledge_packs, semantic_census, source_taxonomy
 from . import overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -35,7 +35,7 @@ DEFAULT_MODE = "scan-only"
 SUPPORTED_MODES = ("scan-only", "save-manifest", "copy-as-sources", "compile-selected")
 PLANNED_MODES: tuple[str, ...] = ()
 ADOPTION_DIR = "_Adoption"
-IMPORTED_SOURCE_FOLDER = "Imported"
+IMPORTED_SOURCE_FOLDER = source_taxonomy.IMPORTED_PATH_LABEL
 _APPLIED_OUTCOME_STATUSES = frozenset({"applied", "already-applied"})
 _TEXT_IMPORT_SUFFIXES = frozenset(
     {".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".json", ".yaml", ".yml", ".rst", ".log"}
@@ -315,7 +315,7 @@ def _render_imported_source(
             "---",
             "type: source",
             f"title: {yaml_scalar(title)}",
-            "source_type: other",
+            f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}",
             f"captured: {date_iso}",
             f"imported_from: {yaml_scalar(rel_original)}",
             f"original_sha256: {sha256}",

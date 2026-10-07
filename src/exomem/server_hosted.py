@@ -86,6 +86,10 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
     "unresolved_sources",
     "unresolved_source_count",
     "unresolved_sources_truncated",
+    "known_source_kinds",
+    "known_source_kinds_total",
+    "known_source_kinds_state",
+    "known_source_kinds_counted",
 )
 _HOSTED_MUTATION_ERROR_SHAPES = {
     "MAINTENANCE_REQUIRES_CLI": ("terminal", False),
@@ -195,7 +199,7 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
     A code absent from this table degrades to the generic message and a null
     remediation — the safe direction for anything unrecognised.
     """
-    from . import semantic_authoring, source_closure
+    from . import add, semantic_authoring, source_closure, source_taxonomy
     from .governance import raw_protection
 
     findings = semantic_authoring.AUTHORING_CONTRACT.findings
@@ -249,6 +253,11 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         source_closure.UNRESOLVED_CODE: (
             source_closure.UNRESOLVED_MESSAGE,
             source_closure.UNRESOLVED_REMEDIATION,
+        ),
+        "SOURCE_KIND_REQUIRED": (
+            "the source needs source_kind: what the material IS",
+            f"{source_taxonomy.CAPTURE_KIND_RULE} {source_taxonomy.CAPTURE_KIND_MIGRATION} "
+            f"{add.KNOWN_KINDS_COUNTED}.",
         ),
     }
 
@@ -441,6 +450,40 @@ def _error_response(
     )
 
 
+def _known_source_kinds_details(error: Mapping[str, Any]) -> dict[str, Any]:
+    """Forward a kind-required refusal's vocabulary only in its declared shape."""
+    from . import add, source_taxonomy
+
+    rows = error.get("known_source_kinds")
+    total = error.get("known_source_kinds_total")
+    if (
+        isinstance(rows, list)
+        and len(rows) <= add.KNOWN_KINDS_SHOWN
+        and all(
+            isinstance(row, Mapping)
+            and set(row) == {"kind", "sources"}
+            and isinstance(row["kind"], str)
+            and source_taxonomy.is_canonical_key(row["kind"])
+            and (
+                row["sources"] is None
+                or (type(row["sources"]) is int and row["sources"] >= 0)
+            )
+            for row in rows
+        )
+        and type(total) is int
+        and total >= len(rows)
+        # These are the fixed read states of the kind-refusal envelope.
+        and error.get("known_source_kinds_state") in {"complete", "incomplete", "failed"}
+    ):
+        return {
+            "known_source_kinds": [dict(row) for row in rows],
+            "known_source_kinds_total": total,
+            "known_source_kinds_state": error["known_source_kinds_state"],
+            "known_source_kinds_counted": add.KNOWN_KINDS_COUNTED,
+        }
+    return {}
+
+
 def _hosted_mutation_error_details(
     error: Mapping[str, Any],
     *,
@@ -468,6 +511,8 @@ def _hosted_mutation_error_details(
                 "unresolved_sources_truncated": truncated,
             }
         return {}
+    if code == "SOURCE_KIND_REQUIRED":
+        return _known_source_kinds_details(error)
     expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(code) if isinstance(code, str) else None
     if expected_shape is None:
         return {}
@@ -952,7 +997,7 @@ def register_hosted_routes(
     by_name = {command.name: command for command in commands}
     surface_descriptor = capabilities.ActiveSurfaceDescriptor(
         surface="hosted",
-        profile="private-command-router",
+        profile=capabilities.HOSTED_PRIVATE_ROUTER_PROFILE,
         tier2_enabled=expose_tier2,
         product_commands=tuple(command.name for command in commands),
     )

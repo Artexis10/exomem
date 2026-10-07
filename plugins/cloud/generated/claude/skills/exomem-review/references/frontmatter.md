@@ -39,7 +39,7 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 
 | Field | Required | Notes |
 |---|---|---|
-| `source_type` | yes | what the artifact **is**, as a slug-shaped key registered in `_Schema/source-taxonomy.yaml`; unknown keys **auto-register on first use** (typo-guarded). An open set, not a closed enum — e.g. `article`, `session`, `book`, `paper`, `video`, `research-report`, `official-guidance`, `correspondence`, `invoice-receipt`, `dataset-export`, `other`. Also accepted as the argument name `source_kind` |
+| `source_type` | yes | what the artifact **is**, as a slug-shaped key registered in `_Schema/source-taxonomy.yaml`; unknown keys **auto-register on first use** (typo-guarded). An open set, not a closed enum — e.g. `article`, `session`, `book`, `paper`, `video`, `research-report`, `official-guidance`, `correspondence`, `invoice-receipt`, `dataset-export`. Also accepted as the argument name `source_kind` |
 | `domain` | optional | what the artifact is **about**, on an axis independent of `source_type`; same open, auto-registering vocabulary — e.g. `travel`, `health`, `finance`, `equipment`, `software` |
 | `projects` | optional | list of project keys this source serves; a source may serve several, and this never affects where it is filed |
 | `captured` | yes | ISO date — same as `created` for sources |
@@ -47,9 +47,15 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 | `author` | optional | |
 | `ingested_into` | yes | list of wikilinks to compiled notes that cite this; starts as `[]` |
 
-`other` is a **low-confidence fallback**: use it when the kind genuinely cannot
-be determined, never because no listed label matches. Naming a kind Exomem has
-not seen before is normal and requires no setup.
+There is **no catch-all kind**. Name the closest existing kind, or a new slug,
+which registers on capture; an agent-facing capture without a kind is refused
+with the vault's known kinds. Two values record that nobody chose a kind:
+`unclassified`, for a capture made with no agent in the loop (the terminal UI,
+the hosted capture box, the upload form, a legacy-vault import), and the
+retired `other` on legacy `Sources/Other/` pages. Neither is ever chosen for a
+new capture. Both stay readable and filterable (`source_kinds=["other"]`), and
+are classified with `manage_memory_file(operation="reclassify")`, which moves
+the page to its kind's folder and rewrites every link to it.
 
 ### research-note
 

@@ -157,7 +157,7 @@ def _current_classification(text: str) -> tuple[str, str | None]:
     kind = front.get("source_type")
     domain = front.get("domain")
     return (
-        str(kind) if isinstance(kind, str) and kind else source_taxonomy.FALLBACK_KIND,
+        str(kind) if isinstance(kind, str) and kind else source_taxonomy.UNCLASSIFIED_KIND,
         str(domain) if isinstance(domain, str) and domain else None,
     )
 
@@ -320,6 +320,16 @@ def _refuse_episode_kind(current_kind: str, target_kind: str | None) -> None:
         )
 
 
+def _refuse_unchosen_kind(target_kind: str | None) -> None:
+    """A correction names what the source IS; it never files one as unclassified."""
+    if target_kind in source_taxonomy.UNCHOSEN_KINDS:
+        raise ReclassifyError(
+            "SOURCE_KIND_REQUIRED",
+            f"{target_kind!r} records that no kind was chosen; reclassify to the kind "
+            "the source actually is, an existing one or a new slug",
+        )
+
+
 def _introduction_warnings(plan: source_taxonomy.TaxonomyPlan) -> tuple[str, ...]:
     """Say so when a correction introduces vocabulary the vault had not seen.
 
@@ -393,7 +403,7 @@ def propose(
     if source_kind is not None:
         proposed_kind = taxonomy.resolve_kind(source_kind).key
         kind_evidence.append("supplied by the caller")
-    elif current_kind == source_taxonomy.FALLBACK_KIND:
+    elif current_kind in source_taxonomy.UNCHOSEN_KINDS:
         # Deliberately no title or content heuristics. A kind guessed from a
         # filename reads as authoritative once approved, and a wrong kind is
         # exactly the debt this operation exists to clear.
@@ -412,6 +422,8 @@ def propose(
 
     if source_kind is not None or domain is not None:
         _refuse_episode_kind(current_kind, proposed_kind)
+    if source_kind:
+        _refuse_unchosen_kind(proposed_kind)
     effective_domain = proposed_domain or current_domain
     destination: str | None = None
     relocation_required = False
@@ -500,6 +512,8 @@ def reclassify(
             error.code, vocabulary_resolution.registry_refusal_reason(vault_root, error)
         ) from error
     _refuse_episode_kind(current_kind, kind_resolution.key)
+    if source_kind:
+        _refuse_unchosen_kind(kind_resolution.key)
 
     plan = source_taxonomy.plan_registrations(
         vault_root, kind=kind_resolution, domain=domain_resolution

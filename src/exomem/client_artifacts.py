@@ -773,7 +773,8 @@ def _source_destination(
     from . import source_taxonomy, vocabulary_resolution
 
     try:
-        raw_kind = source_fields.get("source_type") or source_taxonomy.FALLBACK_KIND
+        # `capture_source` resolved the kind before staging; there is no fallback.
+        raw_kind = source_fields.get("source_type")
         raw_domain = source_fields.get("domain")
         if not isinstance(raw_kind, str) or (
             raw_domain is not None and not isinstance(raw_domain, str)

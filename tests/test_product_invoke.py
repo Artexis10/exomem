@@ -64,7 +64,7 @@ def test_needs_schema_command_gets_schema_injected(vault: Path):
         {
             "content": "a seam test thought about progressive disclosure",
             "title": "Seam Test Source",
-            "source_type": "other",
+            "source_kind": "personal-note",
         },
     )
     assert isinstance(result, dict)
