@@ -360,14 +360,15 @@ def test_validation_cancellation_is_reported_as_cancellation(genesis, monkeypatc
     # SQL progress-handler interruption must retain its cancellation cause.
     root, stage, writer = genesis
     _commit(writer, initial=True)
-    validating = False
+    validating = begun = False
     interrupted = []
     original_connect = sqlite3.connect
     monotonic = time.monotonic
 
     class ValidationConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):
-            nonlocal validating
+            nonlocal validating, begun
+            begun |= sql == "PRAGMA journal_mode=DELETE"  # the copy's validation has begun
             if sql == "PRAGMA integrity_check":
                 validating = True
             try:
@@ -394,6 +395,19 @@ def test_validation_cancellation_is_reported_as_cancellation(genesis, monkeypatc
     assert interrupted == ["PRAGMA integrity_check"]
     assert list(stage.iterdir()) == []
     assert writer.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+    # A transient error from the caller's own check at a validation phase boundary, such as a
+    # locked store read, stays that error: it says nothing about the copy.
+    begun, locked = False, sqlite3.OperationalError("database is locked")
+
+    def transient():
+        if begun:
+            raise locked
+        return False
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        with snapshot.staged_snapshot(root, directory=stage, deadline=time.monotonic() + 10, cancelled=transient):
+            pytest.fail("validation that could not check its caller was yielded")
+    assert raised.value is locked
 
 
 def test_reader_timeout_override_preserves_default(genesis) -> None:

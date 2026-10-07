@@ -131,7 +131,10 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
         fields, schema = _validate(query, manifest, basis)
         projection = index_migrations.ready_plan(conn, manifest.collection_id)
         if projection is None:
-            raise QueryError("QUERY_UNAVAILABLE")
+            # Disclosed only after the session admitted the collection: an operator diagnostic.
+            if index_migrations.unready_state(conn, manifest.collection_id) == "failed":
+                raise QueryError("QUERY_PROJECTION_FAILED", "this collection's query projection could not be built")
+            raise QueryError("QUERY_PROJECTION_BUILDING", "this collection's query projection is still building")
         for scalar in projection.scalars:
             spec = manifest.schema.fields.get(scalar.field)
             if spec is None or spec.type != scalar.kind or scalar.path != (scalar.field,):

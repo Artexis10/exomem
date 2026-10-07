@@ -234,9 +234,8 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     manifest = collections.parse_manifest_bytes(writer.root, manifest_path, manifest_text.encode())
     target = {"version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
               "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
-              "collections": ([] if old is None else old["collections"]) + [{
-                  "collection_id": manifest.collection_id, "manifest_path": manifest.path,
-                  "authority": "store", "store_id": sid}],
+              "collections": ([] if old is None else old["collections"]) + [authority.marker_entry(
+                  manifest.collection_id, manifest.path, sid, manifest.semantic_profile)],
               "collection_store_fence": {"capability": "collections-store-v1", "generation": 1}
               if old is None else old["collection_store_fence"]}
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
@@ -507,7 +506,10 @@ def _apply_step(session, manager, fence_client, step, *, why, preview_id, acknow
         if result["status"] == "in_sync":
             # A store in sync with its replica may still be unknown to this coordinator (a copied
             # vault or a replaced coordinator): adopt-local cut its fence, so admit the store here.
-            result = {**result, "store": open_store(session, manager, fence_client=fence_client)}
+            opened = open_store(session, manager, fence_client=fence_client)
+            # In sync only once admitted; otherwise the store's own unresolved state is the answer.
+            result = {**result, "status": "in_sync" if opened["status"] == "admitted" else opened["status"],
+                      "store": opened}
         return result
     open_store(session, manager, fence_client=fence_client)
     return reconcile_store(session, manager, why=why, fence_client=fence_client, preview_id=preview_id,
@@ -524,15 +526,21 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
     maintain_memory) it runs on that service's own session and lease, which it keeps.
     Elsewhere (the CLI) it refuses while any service holds the lease; otherwise it runs
     in its own producer session under the configured lease and hands the lease back
-    with the flushed head. ``acknowledge_skipped`` (the CLI only) applies the reconcile
-    step's owner acknowledgement of changes it cannot hold.
+    with the flushed head. ``acknowledge_skipped`` applies the reconcile step's owner
+    acknowledgement of changes it cannot hold.
     """
     _require_owner("adopt-local")
     root = Path(vault_root).resolve()
     step, sealed = _route_step(root)
     if acknowledge_skipped and step != "reconcile":
+        if sealed["preview"]["state"] == "in_sync":
+            # Nothing awaits reconciliation, as after an acknowledgement that already applied.
+            raise CollectionStoreError(
+                "COLLECTION_STORE_ACKNOWLEDGE_UNAVAILABLE",
+                "no preserved evidence awaits reconciliation, so there is nothing to acknowledge; "
+                "an earlier acknowledgement may already have applied")
         raise CollectionStoreError("COLLECTION_STORE_ACKNOWLEDGE_UNAVAILABLE",
-                                   f"--acknowledge-skipped applies to the reconcile step; the next step is {step}")
+                                   f"the acknowledgement applies to the reconcile step; the next step is {step}")
     if preview_id is None:
         if sealed["preview"].get("recorded_head") == owner.UNKNOWN:
             return {"step": step, **sealed, "warnings": [
@@ -685,6 +693,11 @@ def _routed_store(session):
     if session.path.exists():
         with closing(connection.open_reader(session.path)) as reader:
             if authority.pending_create(reader) is not None:
+                from .runtime import served
+
+                if served(session.root):
+                    # The serving store thread resumes it, so the same request succeeds later.
+                    raise connection.busy("a collection create is still publishing; retry shortly")
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
     raw = authority.read_marker(session.root)
@@ -944,8 +957,7 @@ class _CreateAdmission:
         self.txn_id = txn["txn_id"]
         target = authority.parse_marker(writer.root, self.target)
         sid = writer._publication.identity["store_id"]
-        entry = {"collection_id": manifest.collection_id, "manifest_path": manifest.path,
-                 "authority": "store", "store_id": sid}
+        entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile)
         old = None if self.expected is None else authority.parse_marker(writer.root, self.expected)
         if (target["store_id"] != sid or target["collections"] !=
                 ([] if old is None else old["collections"]) + [entry]

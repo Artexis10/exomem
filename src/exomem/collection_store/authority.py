@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .. import held_fs, memory_refs, vault
+from .. import collection_profiles, held_fs, memory_refs, vault
 from .. import structured_collections as collections
 from .connection import CollectionStoreError
 
 PENDING_CREATE = "pending_collection_create"
+#: The semantic profiles a marker entry may record; an entry from before entries carried one has none.
+PROFILES = tuple(collection_profiles.PROFILES)
 MARKER_REQUIRED = "collection_store_marker_required"
 
 
@@ -75,7 +77,8 @@ def parse_marker(root, raw):
         if (not isinstance(cid, str) or memory_refs.normalize_id(cid) != cid
                 or not isinstance(path, str) or collections._reference_key(Path(root), path) != path
                 or Path(path).name != "_collection.md"
-                or entry.get("authority") != "store" or entry.get("store_id") != sid):
+                or entry.get("authority") != "store" or entry.get("store_id") != sid
+                or entry.get("semantic_profile") not in (None, *PROFILES)):
             _invalid()
         portable = collections._portable_path_key(path)
         if cid in ids or portable in paths:
@@ -83,6 +86,25 @@ def parse_marker(root, raw):
         ids.add(cid)
         paths.add(portable)
     return marker
+
+
+def marker_entry(collection_id, manifest_path, store_id, semantic_profile):
+    """One marker entry routing a collection to the store, with the profile it was created with.
+
+    The marker is the routing authority, so a sweep that cannot read the store takes the
+    collection's profile from here, never from its editable generated view.
+    """
+    return {"collection_id": collection_id, "manifest_path": manifest_path, "authority": "store",
+            "store_id": store_id, "semantic_profile": semantic_profile}
+
+
+def routes(entry, collection_id, manifest_path, store_id):
+    """Whether ``entry`` routes this collection, at this path, to this store.
+
+    An entry written before entries carried their profile routes the same way.
+    """
+    return (entry["collection_id"], entry["manifest_path"], entry["authority"], entry["store_id"]) == (
+        collection_id, manifest_path, "store", store_id)
 
 
 def routing_marker(writer):
@@ -143,9 +165,9 @@ def marker_status(writer, intent):
         root = writer.root
         target_marker = parse_marker(root, intent["target_marker"])
         sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-        entry = {"collection_id": intent["collection_id"], "manifest_path": intent["manifest_path"],
-                 "authority": "store", "store_id": sid}
-        if target_marker["store_id"] != sid or entry not in target_marker["collections"]:
+        if target_marker["store_id"] != sid or not any(
+                routes(entry, intent["collection_id"], intent["manifest_path"], sid)
+                for entry in target_marker["collections"]):
             return "conflict"
         raw = read_marker(root)
         target = intent["target_marker"].encode()
@@ -179,10 +201,8 @@ def collection_admitted(writer, collection_id):
         marker = parse_marker(writer.root, raw)
         sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
         row = writer._collection_row(collection_id)
-        return marker["store_id"] == sid and {
-            "collection_id": collection_id, "manifest_path": row["manifest_path"],
-            "authority": "store", "store_id": sid,
-        } in marker["collections"]
+        return marker["store_id"] == sid and any(
+            routes(entry, collection_id, row["manifest_path"], sid) for entry in marker["collections"])
     except (held_fs.HeldFsError, OSError, CollectionStoreError):
         return False
 

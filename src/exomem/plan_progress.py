@@ -417,8 +417,8 @@ def _planning_manifests(
     # about. Counting it unavailable is the honest answer; not counting it would
     # report a complete scan of a tree this pass could not fully read. A count
     # discloses nothing, which is why the review surface carries the number and
-    # never the path. A store-routed row declares its profile, so another
-    # profile's row is ruled out.
+    # never the path. A store-routed row whose marker entry records another
+    # profile is ruled out.
     return [
         manifest for manifest in discovered if manifest.semantic_profile == "planning"
     ], sum(row.semantic_profile in (None, "planning") for row in unreadable)

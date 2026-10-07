@@ -146,18 +146,25 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
         conn.execute(f"DROP TABLE {plan.table_name}")
         return False
     last = row[2]
+    # A plan without scalars keys every row identically from no value, so it reads none
+    # and no row is too large for it.
+    reads = bool(plan.scalars)
     cursor = conn.execute("SELECT row_id,item_key,row_version,"
-                          "CASE WHEN length(CAST(values_json AS BLOB))<=? THEN values_json END,"
-                          "length(CAST(values_json AS BLOB)),encoding FROM items "
+                          "CASE WHEN ? AND length(CAST(values_json AS BLOB))<=? THEN values_json END,"
+                          "CASE WHEN ? THEN length(CAST(values_json AS BLOB)) ELSE 0 END,encoding FROM items "
                           "WHERE collection_id=? AND row_id>? ORDER BY row_id LIMIT ?",
-                          (_MAX_CELL_BYTES, collection_id, last, limit))
+                          (reads, _MAX_CELL_BYTES, reads, collection_id, last, limit))
     rows = cursor.fetchall()
     typed = {row["row_id"]: row["values_json"] for row in typed_storage.hydrate(conn, [
         {"row_id": row[0], "collection_id": collection_id, "encoding": row[5], "values_json": None}
-        for row in rows if row[5] != typed_storage.JSON_V1])}
+        for row in rows if reads and row[5] != typed_storage.JSON_V1])}
     total = 0
     try:
         for row_id, key, version, values, size, _ in rows:
+            if not reads:
+                conn.execute(plan.upsert_sql, (row_id, key, version, plan.encode({})))
+                last = row_id
+                continue
             if row_id in typed:
                 size = len(typed[row_id].encode())
                 values = typed[row_id] if size <= _MAX_CELL_BYTES else None
@@ -229,13 +236,32 @@ def begin_missing(conn, collection_id: str, declared) -> bool:
     text = conn.execute("SELECT m.manifest_text FROM collection_manifests m JOIN collections c "
                         "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version "
                         "WHERE c.collection_id=?", (collection_id,)).fetchone()[0]
-    data, _, _ = vault.parse_frontmatter(text, strict=True)
-    fields, specifications = _declared(data, declared)
-    plan = build_projection_plan(collection_id, fields, specifications)
+    try:
+        data, _, _ = vault.parse_frontmatter(text, strict=True)
+        fields, specifications = _declared(data, declared)
+        plan = build_projection_plan(collection_id, fields, specifications)
+    except (ValueError, KeyError, TypeError) as error:
+        # A declaration that never normalized (as one imported from files can) fails once and
+        # stays failed: a governed revise repairs it, which a retry cannot.
+        encoded = json.dumps({"version": 1, "error": getattr(error, "code", "INVALID_INDEX_DECLARATION")},
+                             sort_keys=True, separators=(",", ":"))
+        conn.execute("INSERT INTO query_projection_mappings(collection_id,generation,state,plan_json,plan_hash) "
+                     "VALUES(?,1,'failed',?,?)", (collection_id, encoded, hashlib.sha256(encoded.encode()).hexdigest()))
+        return False
     _declare_paths(conn, collection_id, fields, plan)
     conn.execute("UPDATE collections SET query_plan_hash=? WHERE collection_id=?", (_hash(plan), collection_id))
     begin_build(conn, plan)
     return True
+
+
+def unready_state(conn: sqlite3.Connection, collection_id: str) -> str | None:
+    """The newest projection attempt's state while none is ready: ``building`` or ``failed``.
+
+    None means no attempt yet; the serving store thread starts one.
+    """
+    row = conn.execute("SELECT state FROM query_projection_mappings WHERE collection_id=? AND state<>'ready' "
+                       "ORDER BY generation DESC LIMIT 1", (collection_id,)).fetchone()
+    return None if row is None else row[0]
 
 
 def backfill_due(conn) -> tuple[tuple[str, bool, bool], ...]:

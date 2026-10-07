@@ -42,6 +42,7 @@ from exomem import commands, record_governance, records, state_migration, writer
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
+    admission,
     authority,
     capability,
     connection,
@@ -247,17 +248,18 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     assert titles(root, KEY) == ["File row"]
 
 
-def test_the_service_builds_a_rollup_a_revise_adds_to_a_populated_collection(service, monkeypatch):
+def test_the_service_builds_a_revised_rollup_and_publishes_the_summary_page(service, monkeypatch):
     """Defect: nothing in the service drives derived backfill, so a rollup that a governed revise
     adds to a populated collection stays building and every daily sum reads base rows, or the
-    built rollup answers differently from them."""
+    built rollup answers differently from them; or the summary page and the manifest view never
+    publish after create, write and revise."""
     root = service.root
     monkeypatch.setattr(capability, "RELEASED", ON)
     activity = "77777777-7777-4777-8777-777777777777"
+    path = manifest_path().replace("Work", "Activity")
     text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Activity")
                         .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
-    call(root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Activity"),
-         manifest_text=text, why="activity")
+    call(root, "record_memory", action="create", manifest_path=path, manifest_text=text, why="activity")
     for title, day, count in (("a", "2026-10-01", 3), ("b", "2026-10-01", 4), ("c", "2026-10-02", 5)):
         call(root, "record_memory", action="append", collection=activity, item={"title": title, "day": day,
                                                                                 "count": count}, why="row")
@@ -273,6 +275,96 @@ def test_the_service_builds_a_rollup_a_revise_adds_to_a_populated_collection(ser
                         query={**daily, "mode": "explain"})["plan"]["strategy"] == "rollup")
     rolled = call(root, "record_memory", action="query", collection=activity, query=daily)
     assert rolled["plan"]["strategy"] == "rollup" and rolled["groups"] == base["groups"]
+    page = root / path.replace("_collection.md", "Items/_summary.md")
+    _until(lambda: page.exists() and "3 committed rows" in page.read_text())
+    _until(lambda: "rollups:" in (root / path).read_text())
+
+
+def test_the_release_lever_stops_the_service_building_derived_state(service, monkeypatch):
+    """Defect: with records-summary-v1 switched off, the service keeps writing a summary collection's
+    derived state, so the slice's rollback lever cannot stop the store's background writes."""
+    root = service.root
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    monkeypatch.setattr(runtime, "BACKFILL_BATCH_ROWS", 1)
+    activity = "99999999-9999-4999-8999-999999999999"
+    text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Lever")
+                        .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
+    call(root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Lever"),
+         manifest_text=text, why="lever")
+    for n in range(30):
+        call(root, "record_memory", action="append", collection=activity,
+             item={"title": f"r{n}", "day": "2026-10-01", "count": n}, why="row")
+    guards = call(root, "record_memory", action="inspect", collection=activity)["lifecycle_guards"]
+    rollup = "rollups:\n  daily:\n    bucket: day\n    timestamp: day\n    values:\n      count: [sum]\n"
+    call(root, "record_memory", action="revise", collection=activity, manifest_text=text.removesuffix("---\n")
+         + rollup + "---\n", why="daily rollup", **guards)
+    monkeypatch.setattr(capability, "RELEASED", frozenset())
+
+    def progress():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT state,last_row_id FROM rollup_definitions WHERE collection_id=?",
+                                  (activity,)).fetchone()
+
+    stopped = progress()
+    time.sleep(1.0)
+    assert stopped[0] == "building" and progress() == stopped
+
+
+def test_a_served_create_that_misses_its_publication_deadline_recovers_without_an_owner_step(
+        service, monkeypatch):
+    """Defect: a served create whose replica publication misses its deadline answers with an
+    uncertain acknowledgement, and the store refuses that create's retry, every later write and
+    the service stop until an owner resumes the create, which nothing lets the owner do."""
+    root = service.root
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    late = [True]  # every publication deadline has already passed when it starts, until reset
+    monkeypatch.setattr(admission, "time", SimpleNamespace(
+        monotonic=lambda: time.monotonic() - (31 if late[0] else 0), time=time.time, sleep=time.sleep))
+
+    def create():
+        return call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+                    why="summary", idempotency_key="daily-create")
+
+    def append():
+        return call(root, "record_memory", action="append", collection=DAILY, item={"title": "Daily row"},
+                    why="summary write")
+
+    created = create()
+    assert created["status"] == "committed" and created["warnings"][0].startswith("collection_publication_pending")
+    refused(append, "COLLECTION_STORE_BUSY")  # retryable while the service keeps resuming the create
+    late[0] = False
+
+    def written():
+        try:
+            return append()["outcome"] == "committed"
+        except OpError as error:
+            assert error.code == "COLLECTION_STORE_BUSY"
+            return False
+
+    _until(written)
+    assert create()["status"] == "committed" and titles(root, DAILY) == ["Daily row"]
+    service.stop()  # the handoff publishes; a pending create would refuse it as FLUSH_PENDING
+
+
+def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(service):
+    """Defect: once its summary page publishes, an empty summary collection revised without
+    view_mode becomes an items-mode store collection outside the release gate."""
+    root = service.root
+    empty = "88888888-8888-4888-8888-888888888888"
+    path = manifest_path().replace("Work", "Empty")
+    text = summary_text(manifest_text().replace(CID, empty).replace("title: Work", "title: Empty"))
+    call(root, "record_memory", action="create", manifest_path=path, manifest_text=text, why="empty")
+
+    def published():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT state FROM projection_state WHERE collection_id=? AND kind='summary'",
+                                  (empty,)).fetchone() == ("current",)
+
+    _until(published)  # no pending publication masks a mode change any more
+    guards = call(root, "record_memory", action="inspect", collection=empty)["lifecycle_guards"]
+    refused(lambda: call(root, "record_memory", action="revise", collection=empty, why="items mode",
+                         manifest_text=text.replace("view_mode: summary\n", ""), **guards),
+            "COLLECTION_STORE_SUMMARY_REQUIRED")
 
 
 def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_serves_it(
