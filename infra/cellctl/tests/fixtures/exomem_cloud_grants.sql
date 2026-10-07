@@ -142,6 +142,16 @@ BEGIN
       backup_key_wrapped, backup_key_version, b2_key_id, b2_key_wrapped, b2_key_version,
       hold_kind, hold_started_at
     ) ON exomem_cloud_cells TO exomem_cellctl;
+    -- Migration 0059 (move-cloud-cells-to-local-storage D10): the size cellctl
+    -- grew a local cell's volume to. Guarded on the column's own existence, as
+    -- 0057's grant is, since grants also run after a partial upgrade.
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = target_schema AND table_name = 'exomem_cloud_cells'
+        AND column_name = 'grown_storage_gib'
+    ) THEN
+      GRANT UPDATE (grown_storage_gib) ON exomem_cloud_cells TO exomem_cellctl;
+    END IF;
     GRANT INSERT, UPDATE ON exomem_cloud_capacity TO exomem_cellctl;
     GRANT UPDATE (paused, error_code, held_cell_id, last_good_image, updated_at)
       ON exomem_cloud_rollout TO exomem_cellctl;

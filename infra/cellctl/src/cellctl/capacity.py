@@ -76,6 +76,14 @@ class LocalCapacityObservation:
     cell_nodes: dict[str, str] = field(default_factory=dict)
 
 
+def snapshot_reserve_bytes(local: LocalStorage, largest_cell_gib: int) -> int:
+    """D6: the pool kept free for hourly backups on one node: a snapshot and
+    its clone, each the largest cell's full size, for every backup the node
+    may run at once."""
+
+    return 2 * max(local.default_cell_gib, largest_cell_gib) * GIB * local.backup_concurrency_per_node
+
+
 def compute_local_capacity(
     observation: LocalCapacityObservation, *, local: LocalStorage, cell_sizes: dict[str, int]
 ) -> dict[str, NodeCapacity]:
@@ -91,8 +99,7 @@ def compute_local_capacity(
     """
 
     default = local.default_cell_gib * GIB
-    largest = max([local.default_cell_gib, *cell_sizes.values()]) * GIB
-    reserve = 2 * largest * local.backup_concurrency_per_node
+    reserve = snapshot_reserve_bytes(local, max(cell_sizes.values(), default=0))
     used: Counter[str] = Counter()
     for volume in observation.volumes:
         # A volume whose object exists before lvmd creates it has taken no

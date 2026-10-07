@@ -1438,6 +1438,22 @@ def test_no_flap_while_paused_existing_cell_keeps_its_image() -> None:
     assert decision.image == IMAGE_A
 
 
+def test_a_served_cell_whose_statefulset_is_gone_restarts_on_its_own_image() -> None:
+    # A StatefulSet deleted out of band during a rollout must not bring the
+    # cell back on the rollout's target: that would upgrade it with no
+    # pre-upgrade backup. The rollout upgrades it later, through its hold.
+    decision = decide(
+        row(observed_state="running", observed_image=IMAGE_A, ready=True),
+        rollout(last_good_image=IMAGE_A),
+        obs(namespace_exists=True, namespace_cell_label="aaaaaaaaaaaaaaaa", pvc_exists=True),
+        now=NOW,
+        cell_image=IMAGE_B,
+        start_upgrade=False,
+        config=CONFIG,
+    )
+    assert (decision.apply_manifests, decision.image) == (True, IMAGE_A)
+
+
 # --- H9 regression: deletion mid-upgrade never wedges the fleet -------------
 
 
