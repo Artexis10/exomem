@@ -18,8 +18,12 @@ one ordinary writer transaction (``bulk_upsert_records``) whose checkpoint,
 counters and rejections commit with its rows, so a crash or retry can neither skip
 nor repeat effects. A state change that commits no rows (start, pause, resume,
 cancel, failure, completion) is one content-free control transition carrying the
-job id and counts, so it advances the store head and reaches the replica. Source
-text is data: it never reaches SQL text or executes.
+job id and counts, so it advances the store head and reaches the replica. A
+batch that commits no rows (every row rejected, superseded or unchanged) and
+leaves the job running advances only its checkpoint: the replica lags that
+progress until the next head change, and a host taking over the store redoes
+those batches, which write nothing. Source text is data: it never reaches SQL
+text or executes.
 """
 
 from __future__ import annotations
@@ -243,7 +247,7 @@ def _parse_request(raw: Any) -> _Request:
             allowed=["continuation", "format", "mapping", "mode", "source_ref"],
         )
     mode = raw.get("mode")
-    if mode not in _MODE_FIELDS:
+    if not isinstance(mode, str) or mode not in _MODE_FIELDS:
         _invalid("import_request.mode", "mode is required", allowed=list(_MODE_FIELDS))
     supplied = {key for key, value in raw.items() if value is not None} - {"mode"}
     required, optional = _MODE_FIELDS[mode]
@@ -1600,7 +1604,17 @@ def _settle(root: Path, writer, job: _Job, state: str, reason: str, error=None) 
 
 
 def _pause(root: Path, writer, job: _Job, reason: str) -> str:
-    return _settle(root, writer, job, "partial", reason)
+    """Record ``_step``'s pause, or defer it to the next tick when the record fails.
+
+    A pause that could not be written is not a failed job: the job stays running,
+    status reports the pause from its fresh check, and the next tick retries.
+    """
+    try:
+        return _settle(root, writer, job, "partial", reason)
+    except Exception as error:  # noqa: BLE001 - never escalated to a job failure
+        code = getattr(error, "code", type(error).__name__)
+        log.warning("import job %s %s pause deferred: %s", job.id[:12], reason, code)
+        return "deferred"
 
 
 def _authorized_now(writer, job: _Job) -> bool:
@@ -1728,7 +1742,8 @@ def run_jobs(
 
     The single-writer service calls this between requests with a batch or
     monotonic-deadline budget. Each batch is an ordinary writer-lease
-    transaction; ``_after_error`` settles a batch that raised.
+    transaction; ``_after_error`` settles a batch that raised, and a pause whose
+    record failed is retried on the next tick (``deferred``).
     """
     from .preview import bound_writer
 
@@ -1746,7 +1761,7 @@ def run_jobs(
 
 
 def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) -> dict[str, int]:
-    summary = {"batches": 0, "paused": 0, "errors": 0}
+    summary = {"batches": 0, "paused": 0, "deferred": 0, "errors": 0}
     running = [
         row[0]
         for row in writer.connection.execute(
@@ -1771,6 +1786,7 @@ def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) 
                 break
             if outcome != "batch":
                 summary["paused"] += outcome == "paused"
+                summary["deferred"] += outcome == "deferred"
                 break
             summary["batches"] += 1
     return summary

@@ -415,6 +415,9 @@ def test_job_binds_exact_source_receipt_and_target_lineage(store):
 
 def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, monkeypatch):
     """A job that proves source release only at start keeps importing after revocation."""
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.structured_collections import CollectionError
+
     setup(store)
     small(monkeypatch)
     job = start(store)
@@ -422,8 +425,29 @@ def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, 
     committed, txns = count(store.connection), import_txns(store.connection)
     write_scope(store.root, paths="Evidence/**")
     write_rule(store.root, ceiling=0)
+    record, refused_once = CollectionWriter.record_control_transition, []
+
+    def refuse_first_record(self, operation, *args, **kwargs):
+        if not refused_once:
+            refused_once.append(operation)
+            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        return record(self, operation, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "record_control_transition", refuse_first_record)
     with request_scope(owner_principal(surface="mcp")):
+        # A pause that cannot be recorded leaves the job running, never failed;
+        # the next tick records it.
+        summary = run(store)
+        assert store.connection.execute("SELECT state FROM import_jobs").fetchone() == ("running",)
+        assert summary["deferred"] == 1
         run(store)
+    assert refused_once == ["import_job_authority_lost"]
+    assert [
+        row[0]
+        for row in store.connection.execute(
+            "SELECT operation FROM txns WHERE operation LIKE 'import_job_%' ORDER BY commit_seq"
+        )
+    ] == ["import_job_start", "import_job_authority_lost"]
     assert (count(store.connection), import_txns(store.connection)) == (committed, txns)
     assert refused(status, store, job).code == "IMPORT_JOB_NOT_FOUND"
     release(store)
@@ -1196,6 +1220,11 @@ def test_owner_journey_through_preserve_and_record_memory(store, monkeypatch):
         "mapping",
         "continuation",
     }
+    malformed = refused(agent, mode=["preview"])
+    assert (malformed.code, malformed.details["at"]) == (
+        "IMPORT_REQUEST_INVALID",
+        "import_request.mode",
+    )
     preview = agent(mode="preview", source_ref=first["path"], format="ndjson", mapping=MAPPING)
     assert preview["mapping"]["findings"] == [] and preview["rows"]["sampled"] == 96
     job = agent(mode="start", source_ref=first["path"], format="ndjson", mapping=MAPPING)
