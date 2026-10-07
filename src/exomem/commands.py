@@ -687,7 +687,7 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
         "contract": (
             "source_kind is what the artifact IS; domain is what it is ABOUT; "
             "projects is what work it serves. Kind and domain are open: any "
-            "lowercase slug is accepted, so name what you mean even if unfamiliar."
+            "lowercase slug is accepted."
         ),
         "kind_rule": source_taxonomy_module.CAPTURE_KIND_RULE,
         "migration": source_taxonomy_module.CAPTURE_KIND_MIGRATION,
