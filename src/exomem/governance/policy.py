@@ -310,6 +310,7 @@ class ReleaseGrant:
     bridge_scope: str
     bridge_of: tuple[ReleaseDependency, ...]
     strip_provenance: tuple[str, ...]
+    raw_protection: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -762,7 +763,9 @@ def canonical_compiled_bytes(policy: Policy) -> bytes:
         "rules": [dataclasses.asdict(rule) for rule in policy.rules],
         "grants": [dataclasses.asdict(grant) for grant in policy.grants],
         "release_grants": [
-            dataclasses.asdict(grant) for grant in policy.release_grants
+            {key: value for key, value in dataclasses.asdict(grant).items()
+             if key != "raw_protection" or value is not None}
+            for grant in policy.release_grants
         ],
         "findings": list(policy.findings),
     }
@@ -1893,6 +1896,9 @@ def _parse_grant(
     data: dict[str, Any], rel: str
 ) -> tuple[StandingGrant | None, ReleaseGrant | None, list[dict[str, str]]]:
     kind = data.get("kind", "standing")
+    if kind == "raw-artifact":
+        release, findings = _parse_raw_release_grant(data, rel)
+        return None, release, findings
     if kind == "release":
         release, findings = _parse_release_grant(data, rel)
         return None, release, findings
@@ -1940,6 +1946,42 @@ def _parse_grant(
         id=doc_id, source=rel, scope_ids=scope_ids, audience=audience, ceiling=ceiling
     )
     return grant, None, findings
+
+
+def _parse_raw_release_grant(data: dict[str, Any], rel: str):
+    allowed = frozenset({"governance_version", "id", "kind", "path", "ref", "content_hash",
+                         "to_audience", "released_at", "why", "raw_protection"})
+    findings, doc_id = _check_common(data, rel, allowed)
+    spec = data.get("raw_protection")
+    valid = (
+        isinstance(spec, dict)
+        and set(spec) == {"version", "artifact_sha256", "revision", "surface", "issuer_family",
+                          "purpose", "includes_location"}
+        and type(spec.get("version")) is int and spec["version"] == 1
+        and spec.get("includes_location") is True
+        and isinstance(spec.get("artifact_sha256"), str)
+        and _SHA256_RE.fullmatch(spec["artifact_sha256"]) is not None
+        and isinstance(spec.get("revision"), str)
+        and re.fullmatch(r"[0-9a-f]{32}", spec["revision"]) is not None
+        and all(isinstance(spec.get(key), str) and 0 < len(spec[key]) <= 512
+                for key in ("surface", "issuer_family"))
+        and (spec.get("purpose") is None or isinstance(spec.get("purpose"), str) and bool(spec["purpose"]))
+        and _valid_relative_path(data.get("path"))
+        and isinstance(data.get("ref"), str) and memory_refs.parse_memory_ref(data["ref"]) is not None
+        and isinstance(data.get("content_hash"), str) and _SHA256_RE.fullmatch(data["content_hash"]) is not None
+        and all(isinstance(data.get(key), str) and bool(data[key].strip())
+                for key in ("to_audience", "released_at", "why"))
+        and _valid_release_time(data["released_at"])
+    )
+    audience = _reject_reserved_audience(data.get("to_audience"), rel, "to_audience", findings)
+    if not valid or doc_id is None or audience is None:
+        findings.append(_finding("invalid_field", rel, "raw-artifact release requires an exact version-1 binding"))
+        return None, findings
+    return ReleaseGrant(
+        id=doc_id, source=rel, path=data["path"], ref=data["ref"], content_hash=data["content_hash"],
+        to_audience=audience, released_at=data["released_at"], why=data["why"],
+        bridge_scope="", bridge_of=(), strip_provenance=(), raw_protection=dict(spec),
+    ), findings
 
 
 def _parse_release_grant(

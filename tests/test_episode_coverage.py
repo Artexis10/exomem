@@ -782,7 +782,8 @@ def _relation_leaf(vault: Path, page: str) -> dict:
     with pytest.MonkeyPatch.context() as patch:
         patch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
         semantic_contract.build_corpus_context(vault)
-        review = commands.op_review_memory(vault, mode="relation-queue")
+        with request_scope(owner_principal(surface="library")):
+            review = commands.op_review_memory(vault, mode="relation-queue")
     item = next(
         item
         for group in review["groups"]
@@ -804,7 +805,7 @@ def _relation_leaf(vault: Path, page: str) -> dict:
 
 @pytest.mark.parametrize("registry_changed", [False, True], ids=["as-sealed", "registry-changed"])
 def test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_one(
-    vault: Path, enabled, registry_changed: bool
+    vault: Path, enabled, registry_changed: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A page leaf with no bound home: only its own permission check answers.
 
@@ -828,13 +829,23 @@ def test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_on
                 vault, key, action="record", subject="Vat note", summary="A link.",
                 decided=["Link the supplier"],
             )
-            _client_episode(
-                vault,
-                key,
-                action="prepare",
-                candidate="link",
-                proposal=_proposal("relation_only", [_relation_leaf(vault, pages[case])], target=ENTITY),
-            )
+            # Model a client journal prepared before RAW made relation preparation
+            # owner-only. Its later preview and resume still run as the client.
+            prepare_proposal = curation.prepare_proposal
+
+            def prepare_historical_leaf(*args, **kwargs):
+                with request_scope(owner_principal(surface="library")):
+                    return prepare_proposal(*args, **kwargs)
+
+            with monkeypatch.context() as setup:
+                setup.setattr(curation, "prepare_proposal", prepare_historical_leaf)
+                _client_episode(
+                    vault,
+                    key,
+                    action="prepare",
+                    candidate="link",
+                    proposal=_proposal("relation_only", [_relation_leaf(vault, pages[case])], target=ENTITY),
+                )
             reviewed[case] = _client_episode(
                 vault, key, action="disposition", candidate="link", disposition="routed", reason="r"
             )

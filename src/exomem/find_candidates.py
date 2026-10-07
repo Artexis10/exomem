@@ -204,6 +204,7 @@ def collect_candidates(
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
     shadow: Callable[[list[str]], list[str]] | None = None,
@@ -480,6 +481,7 @@ def collect_candidates(
                         scope=scope,
                         freshness=snapshot.for_scope(scope),
                         allowed_paths=eligible_paths,
+                        admitted_paths=admitted_paths,
                     )
                     if not catalog_result.readiness.complete:
                         _mark_source(timings, "bm25", find_types.SOURCE_DECLINED)
@@ -497,6 +499,7 @@ def collect_candidates(
                         scope=scope,
                         freshness=snapshot.for_scope(scope),
                         allowed_paths=eligible_paths,
+                        admitted_paths=admitted_paths,
                         repair=lexical_repair,
                     )
                 bm25_ranking = [p for p, _ in bm25_hits]

@@ -674,8 +674,8 @@ def build_queue(
 ) -> dict[str, Any]:
     """Assemble one bounded graph-native relation-acceptance queue.
 
-    Under a governed policy the queue is the owner's: another audience
-    receives the `audience_restricted` refusal before anything is read.
+    The queue is the owner's: another audience receives the
+    `audience_restricted` refusal before anything is read.
     """
     from .governance import egress
 
@@ -744,7 +744,7 @@ def build_queue(
 
 
 def _refuse_other_audiences(vault_root: Path) -> None:
-    """Relation review is owner work under a governed policy.
+    """Relation review is owner work.
 
     A candidate names pages as resolved over the whole vault, so another
     audience is refused before any candidate is resolved or read, with one
@@ -754,8 +754,7 @@ def _refuse_other_audiences(vault_root: Path) -> None:
 
     if egress.owner_only_aggregate(vault_root) is not None:
         raise ValueError(
-            "AUDIENCE_RESTRICTED: relation review is served to the owner only "
-            "under a governed policy"
+            "AUDIENCE_RESTRICTED: relation review is served to the owner only"
         )
 
 

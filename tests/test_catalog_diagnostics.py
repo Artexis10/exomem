@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 
+from exomem.governance.principal import library_scope
+
 from exomem import commands, find_types, freshness, lexstore
 from exomem import find as find_module
 
@@ -95,6 +97,7 @@ def test_catalog_profile_has_fixed_private_shape(
         ("unsupported", "temporarily_unavailable"),
     ],
 )
+@library_scope()
 def test_incomplete_catalog_outcomes_are_typed_and_not_cached(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -154,6 +157,7 @@ def test_incomplete_catalog_outcomes_are_typed_and_not_cached(
 
 @pytest.mark.parametrize("result_level", ["page", "unit"])
 @pytest.mark.parametrize("tick_seconds", [0.125, 0.25])
+@library_scope()
 def test_exact_catalog_cold_and_hot_timings_are_measurable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

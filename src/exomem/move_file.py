@@ -18,15 +18,13 @@ import dataclasses
 import datetime as dt
 import hashlib
 import logging
-import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy
-from . import working_set_heat
+from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy, working_set_heat
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -145,12 +143,6 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
         raise MoveFileError("MOVE_FAILED", "held file move was refused") from None
 
 
-#: Frontmatter key holding a page's pointer at the bytes it describes. The
-#: name is a misnomer once a Source uses it, and is kept because roughly fifteen
-#: readers depend on it.
-_ARTIFACT_POINTER_RE = re.compile(r"(?m)^(evidence_file:[ \t]*)(.+?)[ \t]*$")
-
-
 def _compose_transforms(first, second):
     """Run a caller's own content transform, then this module's repointing.
 
@@ -174,6 +166,15 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
     Returns None for an ordinary page, which is the common case: a source page
     whose stem happens to have no sibling file is not a pair.
     """
+    from .governance.raw_protection import marked
+
+    if marked(rel):
+        from .governance.raw_protection import binding
+
+        pair = binding(vault_root, rel)
+        if pair is not None:
+            block, companion, _ = pair
+            return companion, block["artifact_path"]
     if rel.lower().endswith(".md"):
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
@@ -187,10 +188,26 @@ def _repoint_artifact(old_binary: str, new_binary: str):
     """A content transform that repoints a moved page at its moved bytes."""
 
     def transform(text: str) -> str:
-        def replace(match: re.Match[str]) -> str:
-            return f"{match.group(1)}{new_binary}" if match.group(2) == old_binary else match.group(0)
+        from .vault import document_newline, parse_frontmatter, render_frontmatter_document, serialize_frontmatter
 
-        return _ARTIFACT_POINTER_RE.sub(replace, text)
+        frontmatter, body, block = parse_frontmatter(text, strict=True)
+        if block is None:
+            return text
+        changed = False
+        # These two pointer fields belong to the Source/Evidence companion schema.
+        for field in ("evidence_file", "data_file"):
+            if frontmatter.get(field) == old_binary:
+                frontmatter[field] = new_binary
+                changed = True
+        protection = frontmatter.get("raw_protection")
+        if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
+            protection["artifact_path"] = new_binary
+            changed = True
+        if not changed:
+            return text
+        return render_frontmatter_document(
+            serialize_frontmatter(frontmatter), body, newline=document_newline(text), blank_line=True,
+        )
 
     return transform
 
@@ -303,6 +320,11 @@ def move_file(
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
+    from .governance import raw_protection
+
+    if raw_protection.marked(old_rel) and not raw_protection.marked(new_abs.name):
+        new_abs = new_abs.with_name(raw_protection.PREFIX + new_abs.name)
+        new_rel = new_abs.relative_to(vault_root).as_posix()
     if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
@@ -322,7 +344,7 @@ def move_file(
     if pair is not None:
         page_rel, binary_rel = pair
         if old_rel == binary_rel:
-            if not new_rel.lower().endswith(".md"):
+            if not new_rel.lower().endswith(".md") or raw_protection.marked(old_rel):
                 paired_binary = (binary_rel, new_rel)
                 new_rel = f"{new_rel}.md"
                 new_abs = new_abs.with_name(new_abs.name + ".md")
@@ -498,11 +520,11 @@ def move_file(
     wikilinks_updated = 0
     # Every linking page is rewritten, including pages the mover may not see,
     # so the vault stays consistent; the counts and paths reported to a mover
-    # other than the owner cover the pages it may see. The activity log keeps
-    # the full figures.
+    # other than the owner cover the pages it may see, by a policy or by RAW.
+    # The activity log keeps the full figures.
     from .governance import egress
 
-    visible = egress.governed_release_filter(vault_root)
+    visible = egress.restricted_release_filter(vault_root)
     reported_touched: list[str] = []
     reported_updated = 0
     # For such a mover, a withheld linker the move cannot rewrite cleanly is
@@ -1095,7 +1117,7 @@ def restricted_mover_terminal(
     """
     from .governance import egress
 
-    if not isinstance(result, Mapping) or egress.governed_release_filter(vault_root) is None:
+    if not isinstance(result, Mapping) or not egress.caller_restricted(vault_root):
         return result
     if "leaf_result" not in result and "new_path" in result and "old_path" in result:
         result = committed(result)

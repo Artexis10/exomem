@@ -57,6 +57,7 @@ from . import (
     authorization_session_lifecycle,
     bridges,
     lifecycle,
+    raw_protection,
     receipts,
     scrubber,
     store,
@@ -329,6 +330,9 @@ def _outcome_for_decision(
     the claim comes before the page is hashed, so a path decided again (by the
     compiler, then by the guard) is neither hashed nor recorded twice.
     """
+    if (decision is not None and _file_policy_empty(vault_root, policy)
+            and not raw_protection.marked(rel_path)):
+        return
     collector = _collector()
     if collector is None or not _claim_path_outcome(
         collector, rel_path, outcome, decision.level if decision is not None else None,
@@ -901,6 +905,10 @@ def direct_text_references_visible(
     root = Path(vault_root)
     policy = policy_module.load(root)
     who = principal if principal is not None else effective_principal()
+    for reference in _WIKILINK_ANYWHERE.findall(text):
+        target, _ = _unwrap_reference(reference, is_wikilink_target=True)
+        if not raw_protection.permits(root, target, who):
+            return False
     if _file_policy_empty(root, policy):
         return True
     if policy.blocked or not who.resolved:
@@ -956,7 +964,7 @@ def direct_text_references_visible(
             root,
             path,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -1807,6 +1815,7 @@ def _decide_path(
     | None = None,
     expected_content_hash: str | None = None,
     tombstones: frozenset[str] | None = None,
+    principal: RequestPrincipal | None = None,
 ) -> Decision | None:
     """Decide one path, memoized per request identity AND page identity.
 
@@ -1833,6 +1842,13 @@ def _decide_path(
     if (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
             else lifecycle.is_tombstoned_in(tombstones, rel_path)):
         return None
+    who = principal if principal is not None else effective_principal()
+    if who.audience_id != audience:
+        who = RequestPrincipal(audience_id=audience)
+    if not raw_protection.permits(vault_root, rel_path, who):
+        return Decision(DISCLOSURE_MIN)
+    if _file_policy_empty(vault_root, policy):
+        return Decision(DISCLOSURE_MAX)
     full_path = vault_root / rel_path
     try:
         st = full_path.stat()
@@ -2031,7 +2047,7 @@ def _visible_candidates(
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
     if _file_policy_empty(vault_root, policy):
-        return candidates
+        return tuple(path for path in candidates if raw_protection.permits(vault_root, path, who))
     if policy.blocked or not who.resolved:
         return ()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
@@ -2044,7 +2060,7 @@ def _visible_candidates(
                 vault_root,
                 rel_path,
                 policy=policy,
-                audience=who.audience_id,
+                principal=who, audience=who.audience_id,
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
@@ -2275,15 +2291,19 @@ def annotate_hits(
     tombstoned = frozenset(
         path
         for hit in hits
-        if (path := _hit_path(hit)) and lifecycle.is_tombstoned(vault_root, path)
+        if (path := _hit_path(hit)) and (
+            lifecycle.is_tombstoned(vault_root, path)
+            or not raw_protection.permits(vault_root, path, who)
+        )
     )
     if tombstoned:
         hits = [hit for hit in hits if _hit_path(hit) not in tombstoned]
 
-    # (1) Open fast path — no governance configured.
+    # (1) Open fast path — no governance configured. The pool can still hold
+    #     more than `limit` (a restricted caller, a tombstone): cut it here.
     if _file_policy_empty(vault_root, policy):
         return AnnotatedHits(
-            hits=hits,
+            hits=hits[:effective_limit],
             withheld_paths=tombstoned,
             active=bool(tombstoned),
             fingerprint=policy.fingerprint,
@@ -2323,7 +2343,7 @@ def annotate_hits(
             vault_root,
             rel_path,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -2526,7 +2546,8 @@ def guard_graph_context(
         for node in (payload.get(section) or [])
         if isinstance(node, Mapping)
         and node.get("path")
-        and lifecycle.is_tombstoned(vault_root, str(node.get("path")))
+        and (lifecycle.is_tombstoned(vault_root, str(node.get("path")))
+             or not raw_protection.permits(vault_root, str(node.get("path")), who))
     )
     if tombstoned:
         payload = guard_seed(payload, tombstoned)
@@ -2568,7 +2589,7 @@ def guard_graph_context(
                 vault_root,
                 rel_path,
                 policy=policy,
-                audience=who.audience_id,
+                principal=who, audience=who.audience_id,
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
@@ -2586,7 +2607,7 @@ def guard_graph_context(
                 vault_root,
                 rel_path,
                 policy=policy,
-                audience=who.audience_id,
+                principal=who, audience=who.audience_id,
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
@@ -2603,7 +2624,7 @@ def guard_graph_context(
             vault_root,
             rel_path,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -2632,7 +2653,8 @@ def guard_referents(
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
         return None
-    if release_gate_active:
+    # Both are counted over the whole entity registry before admission.
+    if release_gate_active or caller_restricted(vault_root, principal=principal, purpose=purpose):
         guarded.pop("reasons", None)
         guarded.pop("omitted_candidate_count", None)
 
@@ -2642,15 +2664,17 @@ def guard_referents(
             if not isinstance(item, Mapping):
                 continue
             path = str(item.get("path") or "")
-            if path and lifecycle.is_tombstoned(vault_root, path):
+            if path and (lifecycle.is_tombstoned(vault_root, path)
+                         or not raw_protection.permits(vault_root, path, who)):
                 tombstoned.add(path)
             for evidence in item.get("evidence") or []:
                 if not isinstance(evidence, Mapping):
                     continue
                 for field_name in ("seed", "anchor", "path"):
                     evidence_path = evidence.get(field_name)
-                    if isinstance(evidence_path, str) and lifecycle.is_tombstoned(
-                        vault_root, evidence_path
+                    if isinstance(evidence_path, str) and (
+                        lifecycle.is_tombstoned(vault_root, evidence_path)
+                        or not raw_protection.permits(vault_root, evidence_path, who)
                     ):
                         tombstoned.add(evidence_path)
 
@@ -2670,7 +2694,7 @@ def guard_referents(
                 vault_root,
                 rel_path,
                 policy=policy,
-                audience=who.audience_id,
+                principal=who, audience=who.audience_id,
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
@@ -2770,6 +2794,9 @@ def quick_page_visible(
     """
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return False
+    who = principal if principal is not None else effective_principal()
+    if not raw_protection.permits(vault_root, rel_path, who):
+        return False
     policy, _release_gate_active = gate_state(vault_root)
     if _file_policy_empty(vault_root, policy):
         return True
@@ -2784,7 +2811,7 @@ def quick_page_visible(
         vault_root,
         rel_path,
         policy=policy,
-        audience=who.audience_id,
+        principal=who, audience=who.audience_id,
         purpose=declared_purpose,
         grants_hash=grants_hash,
         authorization_session=who.authorization_session_id,
@@ -2804,9 +2831,13 @@ def page_release_filter(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    pages: Iterable[str] | None = None,
 ) -> Callable[[str], bool] | None:
     """`quick_page_visible` for many pages in one request, or `None` when
-    every page is released (an ungoverned vault with no tombstone).
+    every page is released: an ungoverned vault with no tombstone, where none
+    of `pages` (every page the caller will ask about) carries the RAW mark.
+    Without `pages` a callable is always returned, since a marked original
+    can be withheld even under an empty policy.
 
     The policy, the tombstones, the principal, the grants hash and the
     declared purpose are resolved once, and each page costs only its own
@@ -2819,11 +2850,14 @@ def page_release_filter(
     memo: dict[str, bool] = {}
     if _file_policy_empty(root, policy):
         tombstones = lifecycle.tombstoned_paths(root)
-        if not tombstones:
+        if not tombstones and pages is not None and not any(map(raw_protection.marked, pages)):
             return None
         if lifecycle.FAIL_CLOSED_TOMBSTONE in tombstones:
             return lambda _rel_path: False
-        return lambda rel_path: lifecycle._normalize_rel(rel_path) not in tombstones
+        return lambda rel_path: (
+            lifecycle._normalize_rel(rel_path) not in tombstones
+            and raw_protection.permits(root, rel_path, who)
+        )
     if policy.blocked or not who.resolved:
         return lambda _rel_path: False
     grants_hash = _grants_hash(policy)
@@ -2838,7 +2872,7 @@ def page_release_filter(
                 root,
                 rel_path,
                 policy=policy,
-                audience=who.audience_id,
+                principal=who, audience=who.audience_id,
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
@@ -2890,6 +2924,7 @@ class _PacketRelease:
             vault_root,
             rel_path,
             policy=self.policy,
+            principal=self.who,
             audience=self.who.audience_id,
             purpose=self.declared_purpose,
             grants_hash=self.grants_hash,
@@ -2941,6 +2976,13 @@ class _PacketRelease:
         return rel_path in self.withheld and decision is not None and decision.level > LEVEL_NONE
 
 
+def _floor_withholds(vault_root: Path, rel_path: str, who: RequestPrincipal) -> bool:
+    """Apply tombstone and RAW admission before any file-policy decision."""
+    return lifecycle.is_tombstoned(vault_root, rel_path) or not raw_protection.permits(
+        vault_root, rel_path, who
+    )
+
+
 def _packet_release(
     vault_root: Path,
     packet: Mapping[str, Any],
@@ -2956,7 +2998,7 @@ def _packet_release(
     nothing to decide: no governance, no gate and nothing withheld."""
     named_paths, prose_names, interpretations, unresolvable = _working_set_paths(packet)
     tombstoned = {
-        path for path in named_paths if path and lifecycle.is_tombstoned(vault_root, path)
+        path for path in named_paths if path and _floor_withholds(vault_root, path, who)
     }
     withheld = set(release.withheld_paths) | tombstoned
     if not release_gate_active and policy.empty and not withheld:
@@ -2980,7 +3022,7 @@ def _packet_release(
     withheld |= {
         path
         for path in resolved_paths
-        if path and lifecycle.is_tombstoned(vault_root, path)
+        if path and _floor_withholds(vault_root, path, who)
     }
 
     ctx = _PacketRelease(
@@ -3256,7 +3298,7 @@ def guard_working_set(
             rel_path = str(entry.get("path") or "")
             if not rel_path or rel_path in decisions or rel_path in withheld:
                 continue
-            if lifecycle.is_tombstoned(vault_root, rel_path):
+            if _floor_withholds(vault_root, rel_path, who):
                 withheld.add(rel_path)
             elif ctx.policy_decides:
                 ctx.decide(rel_path)
@@ -4373,6 +4415,9 @@ def annotate_page(
         return None
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
+    held = snapshot_content.encode("utf-8") if isinstance(snapshot_content, str) else snapshot_content
+    if not raw_protection.permits(vault_root, rel_path, who, snapshot=held):
+        return None
 
     if _file_policy_empty(vault_root, policy):
         # No configured audience: the owner reads origin metadata as written.
@@ -4513,7 +4558,7 @@ def annotate_page(
             vault_root,
             rel_path,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -4600,7 +4645,7 @@ def annotate_page(
             vault_root,
             rel,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -5652,6 +5697,9 @@ def annotate_dataset(
     rel_path = str(payload.get("path") or "")
     if rel_path and lifecycle.is_tombstoned(vault_root, rel_path):
         return None
+    who = principal if principal is not None else effective_principal()
+    if not raw_protection.permits(vault_root, rel_path, who):
+        return None
     policy = policy_module.load(vault_root)
     if _file_policy_empty(vault_root, policy):
         return dict(payload)
@@ -5665,7 +5713,7 @@ def annotate_dataset(
         vault_root,
         rel_path,
         policy=policy,
-        audience=who.audience_id,
+        principal=who, audience=who.audience_id,
         purpose=declared_purpose,
         grants_hash=_grants_hash(policy),
         authorization_session=who.authorization_session_id,
@@ -5718,6 +5766,9 @@ def release_level_for(
     vault_root = Path(vault_root)
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return None
+    who = principal if principal is not None else effective_principal()
+    if not raw_protection.permits(vault_root, rel_path, who):
+        return DISCLOSURE_MIN
     policy = policy_module.load(vault_root)
     if _file_policy_empty(vault_root, policy):
         return DISCLOSURE_MAX
@@ -5730,7 +5781,7 @@ def release_level_for(
         vault_root,
         rel_path,
         policy=policy,
-        audience=who.audience_id,
+        principal=who, audience=who.audience_id,
         purpose=declared_purpose,
         grants_hash=_grants_hash(policy),
         authorization_session=who.authorization_session_id,
@@ -5878,6 +5929,8 @@ def release_level_for_path_only(
     if policy is None:
         policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
+    if not raw_protection.permits(vault_root, rel_path, who):
+        return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=who.audience_id,
@@ -6151,7 +6204,7 @@ class _ArtifactReferenceGate:
                 self.vault_root,
                 rel_path,
                 policy=self.policy,
-                audience=self.who.audience_id,
+                principal=self.who, audience=self.who.audience_id,
                 purpose=self.purpose,
                 grants_hash=self.grants_hash,
                 authorization_session=self.who.authorization_session_id,
@@ -6171,6 +6224,15 @@ class _ArtifactReferenceGate:
         return allowed
 
     def gate_text(self, text: str) -> str:
+        if (raw_protection.PREFIX in text.casefold()
+                and not raw_protection.has_unrestricted_access(self.vault_root, self.who)):
+            # The token is recognizable even in an orphan/bare-name citation.
+            # Full path strings can prove an exact release without a corpus census.
+            if not raw_protection.marked(text) or not raw_protection.permits(self.vault_root, text, self.who):
+                text = "\n".join(
+                    WITHHELD_REFERENCE if raw_protection.PREFIX in line.casefold() else line
+                    for line in text.split("\n")
+                )
         if not text or (_file_policy_empty(self.vault_root, self.policy) and not self.tombstones):
             return text
         self._ensure_index()
@@ -6293,7 +6355,10 @@ def release_walk_filter(
     policy = policy_module.load(Path(vault_root))
     tombstones = lifecycle.tombstoned_paths(vault_root)
     if _file_policy_empty(vault_root, policy) and not tombstones:
-        return None
+        who = principal if principal is not None else effective_principal()
+        if raw_protection.has_unrestricted_access(vault_root, who):
+            return None
+        return lambda path: raw_protection.permits(vault_root, path, who)
 
     vault_root = Path(vault_root)
     who = principal if principal is not None else effective_principal()
@@ -6315,7 +6380,7 @@ def release_walk_filter(
             vault_root,
             rel_path,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -6360,9 +6425,24 @@ def restricted_release_filter(
         # did. Every surface binds a principal before the dispatcher, whose
         # entry filter still decides for the unbound floor.
         return None
-    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+    if raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who):
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+def caller_restricted(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """Could anything, RAW included, be withheld from this caller?
+
+    The question every count, cut or diagnostic computed before admission
+    asks. Policy state (`gate_state`) is a different question: RAW withholds
+    a protected page from a guest on an ungoverned vault too.
+    """
+    return restricted_release_filter(vault_root, principal=principal, purpose=purpose) is not None
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;
@@ -6375,16 +6455,20 @@ def owner_only_aggregate(
     vault_root: Path,
     *,
     principal: RequestPrincipal | None = None,
+    raw_admitted: bool = False,
 ) -> dict[str, Any] | None:
     """The refusal a whole-vault aggregate gives a caller other than the owner.
 
     An audit, a schema inferred from the corpus, or a coverage block reduces
     every page, so no filter applied to its result can remove what a page the
-    caller may not see contributed. Under a governed policy it is therefore
-    served to the owner only, as the relation census is; every other bound
-    audience receives `available: false` with `reason: "audience_restricted"`,
-    decided from the principal and the policy before anything is read. Under
-    an empty file-mode policy, for the owner, and for a call no surface bound,
+    caller may not see contributed. It is therefore served to the owner only,
+    as the relation census is; every other bound audience receives
+    `available: false` with `reason: "audience_restricted"`, decided from the
+    principal and the policy before anything is read. With no file policy RAW
+    is the only floor, and it still withholds a protected capture from every
+    caller but the owner: an aggregate whose producer admits each page through
+    RAW before reducing (`raw_admitted`) is served there, and any other is
+    refused as under a policy. For the owner and for a call no surface bound,
     this is `None` and the aggregate is served as before. A bound preview must
     prove every owned artifact current and fully released before aggregating.
 
@@ -6394,7 +6478,7 @@ def owner_only_aggregate(
     """
     who = principal if principal is not None else current_principal()
     writer = bound_writer(vault_root)
-    if writer is not None and (who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE)):
+    if writer is not None and (who is None or (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who))):
         operation = writer._operation
         try:
             for entry in reserved_paths.list_generic_tree(vault_root, "."):
@@ -6405,7 +6489,7 @@ def owner_only_aggregate(
                     continue
                 decision = _decide_path(
                     vault_root, entry.relative_path, policy=operation.policy,
-                    audience=operation.who.audience_id, purpose=operation.purpose,
+                    principal=operation.who, audience=operation.who.audience_id, purpose=operation.purpose,
                     grants_hash=_grants_hash(operation.policy),
                     authorization_context=operation.context,
                 )
@@ -6413,29 +6497,13 @@ def owner_only_aggregate(
                     return {"available": False, "reason": AUDIENCE_RESTRICTED}
         except (OSError, reserved_paths.ReservedPathLeafError):
             return {"available": False, "reason": AUDIENCE_RESTRICTED}
-    if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
+    if who is None or (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who)):
         return None
-    if _file_policy_empty(vault_root, policy_module.load(Path(vault_root))):
+    if (raw_admitted or not raw_protection.applies_to(who)) and _file_policy_empty(
+        vault_root, policy_module.load(Path(vault_root))
+    ):
         return None
     return {"available": False, "reason": AUDIENCE_RESTRICTED}
-
-
-def governed_release_filter(
-    vault_root: Path,
-    *,
-    principal: RequestPrincipal | None = None,
-    purpose: str | None = None,
-) -> Any:
-    """`restricted_release_filter` under a governed policy only, else `None`.
-
-    For the write doors whose answers change for a caller other than the
-    owner (folder deletes, a move's report, an occupied entity's refusal):
-    on a vault with no policy they answer every caller as before, even when
-    an erased page's tombstone makes the release filter decide a path.
-    """
-    if owner_only_aggregate(vault_root, principal=principal) is None:
-        return None
-    return restricted_release_filter(vault_root, principal=principal, purpose=purpose)
 
 
 def write_target_withheld(
@@ -6591,6 +6659,7 @@ def release_allows_download(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    snapshot: bytes | None = None,
 ) -> bool:
     """True only at FULL disclosure — a download hands over the complete bytes.
 
@@ -6599,6 +6668,9 @@ def release_allows_download(
     original would let any ceiling be escaped by asking for the artifact
     instead of the text.
     """
+    who = principal if principal is not None else effective_principal()
+    if not raw_protection.permits(vault_root, rel_path, who, snapshot=snapshot):
+        return False
     return _binary_boundary(
         vault_root,
         rel_path,
@@ -6623,6 +6695,9 @@ def release_allows_frames(
     projector exists, every level below L6 must refuse rather than decode or
     return partial pixels.
     """
+    who = principal if principal is not None else effective_principal()
+    if not raw_protection.permits(vault_root, rel_path, who, derived=True):
+        return False
     return _binary_boundary(
         vault_root,
         rel_path,
@@ -6975,10 +7050,8 @@ def filter_withheld_entries(
     metadata_references = dict(inspection_evidence.references) if inspection_evidence is not None else {}
     policy = operation.policy if operation is not None else policy_module.load(vault_root)
     tombstones = operation.tombstones if operation is not None else lifecycle.tombstoned_paths(vault_root)
-    if _file_policy_empty(vault_root, policy) and not tombstones:
-        return payload
     who = principal if principal is not None else effective_principal()
-    fail_closed = policy.blocked or not who.resolved
+    fail_closed = policy.blocked or (not policy.empty and not who.resolved)
 
     grants_hash = "" if fail_closed else _grants_hash(policy)
     declared_purpose = _declared_purpose(vault_root, who, purpose)
@@ -7007,7 +7080,7 @@ def filter_withheld_entries(
             vault_root,
             rel_path,
             policy=policy,
-            audience=who.audience_id,
+            principal=who, audience=who.audience_id,
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
@@ -7166,6 +7239,8 @@ def filter_withheld_entries(
             return candidates
         review_audience = _bridge_review_audience(entry)
         for rel_path in candidates:
+            if not raw_protection.permits(vault_root, rel_path, who):
+                return None
             if fail_closed:
                 _record_blocked_outcome(who.audience_id)
                 return None
@@ -7197,6 +7272,11 @@ def filter_withheld_entries(
         )
 
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
+        if isinstance(node, Mapping) and any(
+            not raw_protection.permits(vault_root, path, who)
+            for path in _entry_candidate_paths(node, directory)
+        ):
+            return None
         if (location == ("source_versions",) and inspection_evidence is not None
                 and _is_admitted_source_versions(node)):
             # Exact admitted metadata has no ordinary references or nested text.

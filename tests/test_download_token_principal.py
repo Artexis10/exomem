@@ -23,6 +23,7 @@ from exomem.governance import egress, membership, policy, scrubber
 from exomem.governance import principal as principal_module
 
 SECRET = "synthetic-upload-secret-0123456789abcdef"
+PRIVATE_SIGNING_ROOT = "synthetic-private-signing-root-0123456789abcdef"
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 WITHHELD = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
@@ -48,6 +49,7 @@ def _clear_governance_caches():
 def _transfer_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", SECRET)
+    monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", PRIVATE_SIGNING_ROOT)
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://memory.example")
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
 
@@ -101,6 +103,7 @@ def _transfer_config() -> server_transfer.TransferConfig:
         cf_team=None,
         cf_aud=None,
         cf_jwks=None,
+        principal_signing_root=PRIVATE_SIGNING_ROOT,
     )
 
 
@@ -190,6 +193,192 @@ def test_owner_mint_still_downloads(vault: Path) -> None:
     assert resolved.audience_id == principal_module.OWNER_AUDIENCE
 
 
+def test_marked_raw_orphan_is_downloadable_only_by_the_owner_without_policy(vault: Path) -> None:
+    """A copied raw artifact must not become public when its companion is lost.
+    The owner's transfer bearer and owner-audience capabilities still serve it;
+    a guest's capability, or one forged with the public bearer, reads as absent."""
+    path = "Knowledge Base/Evidence/Test/export/__exomem_raw_v1__sample.csv"
+    artifact = vault / path
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"timestamp,latitude\n2026-10-01,12.345\n")
+    client = _client()
+    token = _mint_as(vault, _oauth_principal())
+    response = _download(client, path, token)
+    shared_key = _download(client, path, SECRET)
+    legacy_owner = _download(client, path, upload_tokens.mint_bound(SECRET, audience="owner"))
+    forged_token = upload_tokens.mint_principal(
+        SECRET, principal_module.owner_principal(surface="library"),
+    )
+    forged_local = _download(client, path, forged_token)
+    artifact.unlink()
+    absent = _download(client, path, token)
+    forged_absent = _download(client, path, forged_token)
+
+    assert response.status_code == absent.status_code == 404
+    assert response.content == absent.content
+    assert shared_key.status_code == legacy_owner.status_code == 200
+    assert shared_key.content == legacy_owner.content == b"timestamp,latitude\n2026-10-01,12.345\n"
+    assert forged_local.status_code == forged_absent.status_code
+    assert forged_local.content == forged_absent.content
+
+
+def test_raw_preservation_release_revocation_and_held_download(vault: Path, monkeypatch) -> None:
+    """Release covers one live recipient and the exact bytes sent, never a swapped snapshot."""
+    from exomem.writer_lease import invoke_command
+
+    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
+
+    raw = "timestamp,latitude\n2026-10-01,12.345\n"
+    local = principal_module.owner_principal(surface="library")
+    recipient = _oauth_principal()
+    other = _cf_access_principal()
+    client = _client()
+    with principal_module.request_scope(local):
+        saved = commands.op_preserve_evidence(
+            vault, scope="Test", category="raw", filename="sample.csv", content=raw,
+            raw_protection=True,
+        )
+    path = saved["path"]
+    assert (vault / path).read_bytes() == raw.encode()
+    local_token = _mint_as(vault, local)
+    token = _mint_as(vault, recipient)
+    assert _download(client, path, local_token).content == raw.encode()
+    assert _download(client, path, token).status_code == 404
+    with principal_module.request_scope(local):
+        grant = invoke_command(
+            govern, vault, operation="grant", scope="standing", grant_id=RULE_ID,
+            path=path, audience=recipient.audience_id,
+            raw_release={"version": 1, "surface": recipient.surface,
+                         "issuer_family": recipient.issuer_family,
+                         "purpose": None, "includes_location": True},
+        )
+    assert grant["ok"], grant
+    assert _download(client, path, token).content == raw.encode()
+    assert _download(client, saved["sidecar_path"], token).content == (vault / saved["sidecar_path"]).read_bytes()
+    with principal_module.request_scope(recipient):
+        page = egress.postfilter("read_memory", commands.op_read_memory(
+            vault, path=saved["sidecar_path"], include_raw=True,
+        ), vault)
+    assert page["content"] == (vault / saved["sidecar_path"]).read_text()
+    assert _download(client, path, _mint_as(vault, other)).status_code == 404
+    assert not egress.release_allows_frames(vault, path, principal=recipient)
+    assert egress.release_allows_frames(vault, path, principal=local)
+
+    from dataclasses import replace
+
+    from exomem import reserved_paths
+
+    read = reserved_paths.read_generic_bytes
+
+    def swapped(root, relative, **kwargs):
+        snapshot = read(root, relative, **kwargs)
+        return replace(snapshot, data=b"different bytes") if relative == path else snapshot
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reserved_paths, "read_generic_bytes", swapped)
+        assert _download(client, path, token).status_code == 404
+    with principal_module.request_scope(local):
+        invoke_command(govern, vault, operation="revoke", scope="standing", grant_id=RULE_ID)
+    assert _download(client, path, token).status_code == 404
+
+
+@pytest.mark.parametrize("signing_root", [None, SECRET], ids=["missing-private-root", "root-is-public-bearer"])
+def test_non_private_signer_keeps_legacy_transfer_for_the_owner(vault, monkeypatch, signing_root):
+    """Static-bearer deployments serve the owner's protected original through the
+    owner-audience capability, and cannot forge a full principal."""
+    if signing_root is None:
+        monkeypatch.delenv("EXOMEM_JWT_SIGNING_KEY")
+    else:
+        monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", signing_root)
+    local = principal_module.owner_principal(surface="library")
+    with principal_module.request_scope(local):
+        saved = commands.op_preserve_evidence(
+            vault, scope="Test", category="raw", filename="local.txt",
+            content="exact local original\n", raw_protection=True,
+        )
+        handoff = commands.op_transfer_artifact(vault, operation="download")
+        page = commands.op_read_memory(vault, path=saved["path"], include_raw=True)
+    assert page["content"] == "exact local original\n"
+    assert handoff["preserves_ingress_principal"] is False
+    assert "raw_transfer_unavailable_reason" not in handoff
+    assert upload_tokens.bound_audience(handoff["token"], SECRET) == "owner"
+    client = _client()
+    assert _download(client, RELEASED, handoff["token"]).content == (vault / RELEASED).read_bytes()
+    assert _download(client, saved["path"], handoff["token"]).content == b"exact local original\n"
+    forged = upload_tokens.mint_principal(SECRET, local)
+    assert _download(client, saved["path"], forged).status_code == 401
+
+
+def test_raw_transfer_rechecks_verified_session_purpose_and_closure(vault: Path, tmp_path, monkeypatch) -> None:
+    """A signed transfer cannot retain a superseded purpose or closed session."""
+    import sqlite3
+
+    from test_authorization_session_lifecycle import NOW, _custody, _file_connection
+
+    from exomem.governance import authorization_session_authority as authority
+    from exomem.governance import authorization_session_lifecycle as lifecycle
+    from exomem.governance import raw_protection
+    from exomem.writer_lease import invoke_command
+
+    database = tmp_path / "sessions.sqlite"
+    connection, migration = _file_connection(database)
+    custody = _custody(migration.activation_state_digest)
+    recipient = _oauth_principal()
+    issued = lifecycle.open_session(
+        connection, custody=custody, principal_id=recipient.audience_id,
+        issuer_family=recipient.issuer_family, now=NOW, ttl_seconds=600,
+    )
+    context = lifecycle.resume_session(
+        connection, custody=custody, bearer=issued.bearer,
+        principal_id=recipient.audience_id, issuer_family=recipient.issuer_family, now=NOW,
+    )
+    session_recipient = recipient.with_verified_authorization_session(
+        context, issuer_family=recipient.issuer_family,
+    )
+    client = _client()
+    local = principal_module.owner_principal(surface="library")
+    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
+    with principal_module.request_scope(local):
+        saved = commands.op_preserve_evidence(
+            vault, scope="Test", category="raw", filename="purpose.csv",
+            content="timestamp,latitude\n2026-10-01,12.345\n", raw_protection=True,
+        )
+        grant = invoke_command(
+            govern, vault, operation="grant", scope="standing", grant_id=RULE_ID,
+            path=saved["path"], audience=recipient.audience_id,
+            raw_release={"version": 1, "surface": recipient.surface,
+                         "issuer_family": recipient.issuer_family,
+                         "purpose": "route-audit", "includes_location": True},
+        )
+    assert grant["ok"], grant
+    monkeypatch.setattr(raw_protection.time, "time", lambda: NOW)
+    monkeypatch.setattr(raw_protection.store, "open_authorization_session_connection", lambda _root: sqlite3.connect(database))
+    monkeypatch.setattr(raw_protection.authorization_custody, "load_authorization_custody", lambda _root, **_kw: custody)
+    token = _mint_as(vault, session_recipient)
+    # A request argument is not the verified session's purpose.
+    assert _download(client, saved["path"], _mint_as(vault, recipient.with_purpose("route-audit"))).status_code == 404
+    assert _download(client, saved["path"], token).status_code == 404
+    authority.declare_purpose(
+        connection, context=context, audience=recipient.audience_id,
+        purpose="route-audit", now=NOW, expires_at=NOW + 300,
+    )
+    released = _download(client, saved["path"], token)
+    assert released.status_code == 200, released.text
+    assert released.content == (vault / saved["path"]).read_bytes()
+    authority.declare_purpose(
+        connection, context=context, audience=recipient.audience_id,
+        purpose="unrelated", now=NOW, expires_at=NOW + 300,
+    )
+    assert _download(client, saved["path"], token).status_code == 404
+    authority.declare_purpose(
+        connection, context=context, audience=recipient.audience_id,
+        purpose="route-audit", now=NOW, expires_at=NOW + 300,
+    )
+    lifecycle.close_verified_session(connection, custody=custody, context=context, now=NOW)
+    assert _download(client, saved["path"], token).status_code == 404
+    connection.close()
+
+
 def test_raw_upload_secret_is_still_the_owner(vault: Path) -> None:
     _withhold(vault, audience=ALICE)
     client = _client()
@@ -259,7 +448,7 @@ def test_cf_access_rest_round_trip_through_the_dispatcher(
     )
     assert minted.status_code == 200, minted.text
     token = minted.json()["data"]["token"]
-    assert upload_tokens.bound_audience(token, SECRET) == CF_AUDIENCE
+    assert upload_tokens.bound_principal(token, PRIVATE_SIGNING_ROOT).audience_id == CF_AUDIENCE
 
     withheld = _download(client, WITHHELD, token)
     released = _download(client, RELEASED, token)
