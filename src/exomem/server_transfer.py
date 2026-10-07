@@ -67,9 +67,13 @@ def _capture_source_under_guard(
     The bytes are spooled to a private temporary file first because `add` copies
     from a path: it writes the artifact and its page in one operation, and a
     half-consumed request stream cannot be replayed if that operation refuses.
+
+    A person may post from the upload form with no agent to ask, so a missing
+    kind is recorded as `unclassified` rather than refused.
     """
     import tempfile
 
+    source_type = add_module.capture_kind(vault_root, source_type, unattended=True)
     with tempfile.TemporaryDirectory(prefix="exomem-upload-") as staging:
         staged = Path(staging) / (Path(filename).name or "upload.bin")
         written = 0

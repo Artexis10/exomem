@@ -20,7 +20,7 @@ import pytest
 from bootstrap_populated import CUSTOM_ENTITY_TYPES, populated_blocks, populated_root
 from budget_gate import check_budget
 
-from exomem import bootstrap_core, capabilities, commands, prominence, workflow_skills
+from exomem import bootstrap_core, capabilities, commands, prominence, source_taxonomy, workflow_skills
 
 #: Core ceiling at maximal on the worst-case surface. Ruled 15,000; measured
 #: 14,407 (claude-code, maximal) when set, i.e. about 590 bytes of margin.
@@ -102,6 +102,11 @@ def _text(value: object) -> str:
 
 #: id -> (levels that must carry it, predicate over the served core).
 CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
+    "source-kind-migration": (
+        prominence.CANON,
+        lambda core: core["capture_semantics"]["kind_rule"] == source_taxonomy.CAPTURE_KIND_RULE
+        and core["capture_semantics"]["migration"] == source_taxonomy.CAPTURE_KIND_MIGRATION,
+    ),
     "recall-before-answering": (
         CARRYING,
         lambda core: "Search memory" in core["engagement"]["contract"]["recall"],

@@ -29,7 +29,8 @@
 #
 # Shipped kinds include article, session, book, paper, video, research-report,
 # official-guidance, correspondence, invoice-receipt, contract-legal-document,
-# dataset-export, manual-documentation, webpage-snapshot, episode, and other.
+# dataset-export, manual-documentation, webpage-snapshot, episode, and
+# unclassified.
 # `episode` is reserved for conversation recaps recorded with episode_memory:
 # its Sources/Episodes/ folder cannot be relabelled or claimed by another kind.
 # Shipped
@@ -37,8 +38,9 @@
 # photography, media, food, research, and business. Neither list is the
 # permitted set — they are defaults.
 #
-# `other` is a low-confidence fallback. It means "the kind could not be
-# determined", never "there is no label for this".
+# There is no catch-all kind. `unclassified` marks a capture made with no agent
+# to classify it, and `other` is the retired catch-all on legacy pages; no new
+# capture chooses either.
 schema_version: 1
 source_kinds: {}
 domains: {}

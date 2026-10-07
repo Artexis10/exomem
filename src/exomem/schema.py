@@ -177,7 +177,11 @@ def validate_source(
         reasons.append("title is empty")
     if requires_url and not url:
         missing.append("url")
-        reasons.append(f"url is required for source_type={source_type}")
+        reasons.append(
+            f"url is required for source_type={source_type}: supply the url, or, "
+            f"if you hold something made from it rather than the {source_type} "
+            f"itself (a transcript is not the video), name what you hold as source_kind"
+        )
 
     if missing:
         return ValidationError(

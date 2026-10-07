@@ -1103,7 +1103,10 @@ def test_target_constrained_mutations_are_actually_constrained(
     # manifest validation first.
     baseline: dict[str, dict[str, Any]] = {
         "remember": {"content": "## Observations\n\nprobe\n", "title": "Probe"},
-        "capture_source": {"content": "probe", "title": "Probe"},
+        # A kind, so the slug and title probes reach placement instead of the
+        # kind refusal. Probing `source_type` against it bounces as a conflict;
+        # `source_kind` is the same axis through the same resolver and is probed.
+        "capture_source": {"content": "probe", "title": "Probe", "source_kind": "probe-notes"},
         "preserve_evidence": {
             "scope": "probe",
             "category": "probe",
