@@ -372,7 +372,9 @@ jobs:
     name: retrieval latency (2k synthetic vault)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Green CI took 9m38s; one case allows 15m. Let the remaining suite report
+    # its result after that case while keeping every latency assertion unchanged.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
