@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import json
+import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass
@@ -332,6 +333,28 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
     created = create()
     assert created["status"] == "committed" and created["warnings"][0].startswith("collection_publication_pending")
     refused(append, "COLLECTION_STORE_BUSY")  # retryable while the service keeps resuming the create
+    # A restart while the create is still pending: the stop cannot hand off, so a new
+    # process's service starts beside it, and its requests for the create stay busy.
+    refused(service.stop, "COLLECTION_STORE_FLUSH_PENDING")
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    service = Service(root, writer_lease.start_server_lifecycle())
+    codes = []
+
+    def busy():
+        try:
+            call(root, "record_memory", action="inspect", collection=DAILY)
+        except OpError as error:
+            codes.append(error.code)
+        return codes[-1:] == ["COLLECTION_STORE_BUSY"]
+
+    _until(busy)
+    assert "COLLECTION_NOT_FOUND" not in codes, codes
+    marker = authority.marker_path(root)
+    agreed = marker.read_bytes()
+    marker.write_bytes(agreed + b"\n")  # a marker changed under the create never resolves by retrying
+    refused(append, "COLLECTION_STORE_LEASE_REQUIRED")
+    marker.write_bytes(agreed)
     late[0] = False
 
     def written():
@@ -344,6 +367,35 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
     _until(written)
     assert create()["status"] == "committed" and titles(root, DAILY) == ["Daily row"]
     service.stop()  # the handoff publishes; a pending create would refuse it as FLUSH_PENDING
+
+
+def test_file_collections_stay_writable_while_an_unreadable_store_is_unopened(service, tmp_path):
+    """Defect: while the store is unopened, an unreadable pending create in it refuses the
+    file collections too, though they never depend on the store."""
+    root = service.root
+    service.stop()
+    with closing(sqlite3.connect(connection.store_path(root))) as conn:
+        conn.execute("INSERT INTO store_meta(key,value) VALUES (?, '{\"version\": 1}')", (authority.PENDING_CREATE,))
+        conn.commit()
+    with coordinator(tmp_path / "replaced.sqlite"):  # a replaced coordinator keeps the store unopened
+        runtime._SERVERS.pop(root, None)
+        runtime._SERVED.pop(root, None)
+        replaced = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            _until(lambda: getattr(runtime._SERVERS.get(root), "refusal", None) is not None)
+
+            def written():
+                try:
+                    return call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
+                                item_key=ROW, why="file write")["outcome"] == "committed"
+                except OpError as error:
+                    assert error.code == "WRITER_LEASE_REQUIRED", error  # the new writer is still starting
+                    return False
+
+            _until(written)
+            assert titles(root, KEY) == ["File row"]
+        finally:
+            replaced.stop()
 
 
 def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(service):

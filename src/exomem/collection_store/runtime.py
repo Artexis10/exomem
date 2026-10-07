@@ -682,6 +682,25 @@ def route(command, vault_root, arguments):
     return server
 
 
+def _durable_create(root):
+    """The marker entry of a create left pending on disk, or None when there is none or it cannot be read.
+
+    File collections route through here too, so a store that cannot be read must leave
+    them on their file route rather than refuse them.
+    """
+    from . import authority
+
+    try:
+        if not connection.store_path(root).exists():
+            return None
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            intent = authority.pending_create(reader)
+    except (connection.CollectionStoreError, sqlite3.Error, OSError):
+        return None
+    return None if intent is None else {"collection_id": intent["collection_id"],
+                                        "manifest_path": intent["manifest_path"]}
+
+
 def _creating(root, selector):
     """Whether ``selector`` names the collection a served create left pending.
 
@@ -692,6 +711,9 @@ def _creating(root, selector):
 
     server = _SERVERS.get(root)
     pending = None if server is None else server.pending_create
+    if pending is None and server is not None and server.session is None:
+        # Not open yet, as after a restart: a create left pending is only on disk so far.
+        pending = _durable_create(root)
     return pending is not None and authority.selected_entry(root, {"collections": [pending]}, selector) is not None
 
 
@@ -904,6 +926,8 @@ class StoreServer:
                 # A copied vault, or a replaced coordinator, that never enrolled this store: the
                 # fence cut is the owner's offline step, which the writer credential cannot make.
                 raise admission.adoption_required()
+            # A create left pending before a restart: its requests are busy, not missing.
+            self.pending_create = _durable_create(self.root)
             try:
                 admission.open_store(session, self.manager, fence_client=fence_client)
             except (OpError, connection.CollectionStoreError):

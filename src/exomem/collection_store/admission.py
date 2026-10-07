@@ -692,12 +692,14 @@ def _routed_store(session):
     """
     if session.path.exists():
         with closing(connection.open_reader(session.path)) as reader:
-            if authority.pending_create(reader) is not None:
+            intent = authority.pending_create(reader)
+            if intent is not None:
                 from .runtime import served
 
-                if served(session.root):
+                if served(session.root) and authority.intent_status(session.root, reader, intent) == "pending":
                     # The serving store thread resumes it, so the same request succeeds later.
                     raise connection.busy("a collection create is still publishing; retry shortly")
+                # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
     raw = authority.read_marker(session.root)
