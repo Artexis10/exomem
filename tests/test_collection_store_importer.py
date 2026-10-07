@@ -105,10 +105,12 @@ def write_source(root, data, path=SOURCE):
     target.write_bytes(data)
 
 
-def setup(store, data=None, *, cid=CID, title="Workouts", fields=WORKOUT_FIELDS, path=SOURCE):
+def setup(
+    store, data=None, *, cid=CID, title="Workouts", fields=WORKOUT_FIELDS, path=SOURCE, text=None
+):
     store.create_collection(
         f"Knowledge Base/Records/{title}/_collection.md",
-        manifest_text(cid, title, fields),
+        text or manifest_text(cid, title, fields),
         why="fixture",
         scaffold=False,
     )
@@ -413,7 +415,9 @@ def test_job_binds_exact_source_receipt_and_target_lineage(store):
     assert count(store.connection) == 0 and import_txns(store.connection) == 0
 
 
-def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, monkeypatch):
+def test_source_release_revoked_between_batches_pauses_with_exact_counts(
+    store, monkeypatch, caplog
+):
     """A job that proves source release only at start keeps importing after revocation."""
     from exomem.collection_store.writer import CollectionWriter
     from exomem.structured_collections import CollectionError
@@ -442,6 +446,8 @@ def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, 
         assert summary["deferred"] == 1
         run(store)
     assert refused_once == ["import_job_authority_lost"]
+    deferrals = [record for record in caplog.records if "pause deferred" in record.getMessage()]
+    assert [bool(record.exc_info) for record in deferrals] == [False]
     assert [
         row[0]
         for row in store.connection.execute(
@@ -454,6 +460,36 @@ def test_source_release_revoked_between_batches_pauses_with_exact_counts(store, 
     result = status(store, job)
     assert (result["state"], result["reason"]) == ("partial", "authority_lost")
     assert result["rows"]["imported"] == committed and result["batches"] == 1
+
+
+def test_a_pause_deferred_by_an_unclassified_error_logs_its_traceback_once(
+    store, monkeypatch, caplog
+):
+    """A defect that keeps a pause from being recorded must be diagnosable from the log, and must
+    not repeat its traceback on every tick of the writer."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    setup(store)
+    small(monkeypatch)
+    start(store)
+    run(store, max_batches=1)
+    write_scope(store.root, paths="Evidence/**")
+    write_rule(store.root, ceiling=0)
+    record, failures = CollectionWriter.record_control_transition, []
+
+    def fail_three_times(self, operation, *args, **kwargs):
+        if len(failures) < 3:
+            failures.append(operation)
+            raise RuntimeError("control record defect")
+        return record(self, operation, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "record_control_transition", fail_three_times)
+    with request_scope(owner_principal(surface="mcp")):
+        assert [run(store)["deferred"] for _ in range(3)] == [1, 1, 1]
+    deferrals = [record for record in caplog.records if "pause deferred" in record.getMessage()]
+    assert len(deferrals) == 3
+    traced = [record for record in deferrals if record.exc_info]
+    assert len(traced) == 1 and traced[0].exc_info[0] is RuntimeError
 
 
 def test_source_release_revoked_during_commit_rolls_back_the_batch(store, monkeypatch):
@@ -776,6 +812,124 @@ def test_preview_bounds_every_shape_section_and_says_so(store):
     assert len(json.dumps(result).encode()) < 64 << 10
     assert result["truncated"] == {"fields": True, "nested": True, "time_fields": True}
     assert len(result["fields"]) == len(result["nested"]) == len(result["time"]["fields"]) == 64
+
+
+TWO_NUMERIC = {
+    **MAPPING,
+    "fields": {
+        "exercise_id": "id",
+        "calories": "metrics.calories",
+        "distance_m": "metrics.distance_m",
+    },
+}
+
+
+def daily_rollup(*values):
+    return {
+        "bucket": "day",
+        "timestamp": "local_date",
+        "values": {name: ["count", "sum", "avg"] for name in values},
+    }
+
+
+def summarized(text):
+    """The manifest as a summary collection, whose rows live only in the store."""
+    return text.replace("lifecycle: active\n", "lifecycle: active\nview_mode: summary\n")
+
+
+def recommended_for(store, text):
+    """Preview ``TWO_NUMERIC`` on a summary collection made from ``text``; preview writes nothing."""
+    with request_scope(owner_principal()):
+        setup(store, text=summarized(text))
+    before = tuple(store.connection.iterdump())
+    result = call(
+        store,
+        owner_principal(surface="mcp"),
+        mode="preview",
+        source_ref=SOURCE,
+        format="ndjson",
+        mapping=TWO_NUMERIC,
+    )
+    assert tuple(store.connection.iterdump()) == before
+    return result["recommended_declarations"]
+
+
+def test_preview_recommends_the_index_and_daily_rollups_that_make_the_import_fast(store):
+    """A preview that recommends nothing leaves agents to guess which index and rollups keep a
+    million imported rows fast; one that writes them silently declares for the owner."""
+    assert recommended_for(store, manifest_text()) == {
+        "fields": {"local_date": {"filterable": True, "sortable": True}},
+        "rollups": {"daily": daily_rollup("calories", "distance_m")},
+        "omitted": [],
+    }
+
+
+def test_preview_recommends_only_what_the_manifest_does_not_already_declare(store):
+    """Re-recommending a declared flag or rollup makes the agent's revise rebuild structures that
+    are already ready; a new rollup must not collide with the declared one's name."""
+    fields = WORKOUT_FIELDS.replace("local_date: {type: date}", "local_date: {type: date, filterable: true}")
+    declared = manifest_text(fields=fields).removesuffix("---\n") + (
+        "rollups:\n  daily: {bucket: day, timestamp: local_date, values: {calories: [count, sum, avg]}}\n---\n"
+    )
+    assert recommended_for(store, declared) == {
+        "fields": {},
+        "rollups": {"daily_2": daily_rollup("distance_m")},
+        "omitted": [],
+    }
+
+
+def test_preview_splits_numeric_fields_across_rollups_of_at_most_eight_values(tmp_path):
+    """One rollup holding nine values is refused by the agent's revise with ROLLUP_LIMIT."""
+    from exomem import structured_collections as collections
+    from exomem import vault
+    from exomem.collection_store import import_recommendations, rollups
+
+    numeric = [f"m{n}" for n in range(9)]
+    # m9 is numeric and part of the natural key: an identifier, not a measure, so it is never totalled.
+    fields = WORKOUT_FIELDS.replace("[exercise_id]", "[exercise_id, m9]")
+    text = manifest_text(fields=fields + "".join(f"    {n}: {{type: number}}\n" for n in [*numeric, "m9"]))
+    (tmp_path / "Knowledge Base").mkdir()
+    manifest = collections.parse_manifest_bytes(
+        tmp_path, tmp_path / "Knowledge Base/Records/Workouts/_collection.md", text.encode()
+    )
+    mapping = {"fields": {"exercise_id": "id", **{n: n for n in [*numeric, "m9"]}}, "time": MAPPING["time"]}
+    plan = importer().compile_mapping(mapping, manifest, "ndjson")
+    data = vault.parse_frontmatter(text, strict=True)[0]
+    result = import_recommendations.recommend(plan, manifest, data)
+    assert {name: list(rollup["values"]) for name, rollup in result["rollups"].items()} == {
+        "daily": numeric[:8],
+        "daily_2": numeric[8:],
+    }
+    assert result["omitted"] == []
+    assert len(rollups.normalize(manifest.schema.fields, result["rollups"])) == 2
+
+
+def test_preview_lists_the_index_a_full_index_budget_leaves_out(store):
+    """A recommendation past 8 indexes makes the agent's revise refuse with INDEX_BUDGET_EXCEEDED
+    instead of telling it which index to drop."""
+    tags = "".join(f"    tag{n}: {{type: string, filterable: true}}\n" for n in range(8))
+    result = recommended_for(store, manifest_text(fields=WORKOUT_FIELDS + tags))
+    assert result["fields"] == {}
+    assert result["omitted"] == [
+        {"kind": "index", "field": "local_date", "code": "INDEX_BUDGET_EXCEEDED"}
+    ]
+    assert result["rollups"] == {"daily": daily_rollup("calories", "distance_m")}
+
+
+def test_preview_lists_the_rollup_values_a_full_rollup_budget_leaves_out(store):
+    """A recommendation past 8 rollups makes the agent's revise refuse with ROLLUP_LIMIT."""
+    weekly = "".join(
+        f"  w{n}: {{bucket: week, timestamp: local_date, values: {{calories: [count]}}}}\n"
+        for n in range(8)
+    )
+    result = recommended_for(
+        store, manifest_text().removesuffix("---\n") + f"rollups:\n{weekly}---\n"
+    )
+    assert result["rollups"] == {}
+    assert result["omitted"] == [
+        {"kind": "rollup", "fields": ["calories", "distance_m"], "code": "ROLLUP_LIMIT"}
+    ]
+    assert result["fields"] == {"local_date": {"filterable": True, "sortable": True}}
 
 
 @pytest.mark.parametrize(

@@ -154,6 +154,14 @@ def chapter(name: str | None) -> dict:
                 "route": {"tool": "record_memory", "args": {"action": "import", "collection": "<collection>",
                                                              "import_request": {"mode": "preview"}}},
                 "contract": importer.contract(),
+                "before_start": {
+                    "step": "Apply recommended_declarations from the preview with one record_memory revise, "
+                            "then start.",
+                    "revise": "Merge fields into item_schema.fields and rollups into rollups in the manifest. "
+                              "Take both hashes from inspect lifecycle_guards.",
+                    "result": "The imported rows answer filters and sorts on the time field by index, and daily "
+                              "totals by rollup. omitted lists each recommendation a budget stopped.",
+                },
                 "unavailable": ["import into a file-mode collection: IMPORT_UNAVAILABLE"]}
     limits = validation.LIMITS
     return {

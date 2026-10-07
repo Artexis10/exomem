@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import initialize_vault_state_offline
 from s1_export_fixture import daily_summaries, expected_daily, iter_exercises
 from test_collection_rollups import DAILY, FIELDS, SUMMARY_FIELDS, exercise, load, manifest, request
@@ -27,14 +28,17 @@ from test_collection_store_importer import (
     CID,
     MAPPING,
     SOURCE,
+    TWO_NUMERIC,
     WORKOUT_FIELDS,
     ndjson,
     run,
     setup,
     small,
+    summarized,
     valid,
     write_source,
 )
+from test_collection_store_importer import manifest_text as workout_manifest
 from test_collection_store_summary import COPY_CID
 from test_collection_store_writer import CID as SUMMARY_CID
 from test_collection_store_writer import KEY, OTHER, manifest_path, manifest_text
@@ -42,7 +46,7 @@ from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
 import exomem
-from exomem import commands, records, server
+from exomem import commands, records, server, vault
 from exomem.cli_ops import OpError
 from exomem.collection_store import authority
 from exomem.collection_store.preview import preview_store
@@ -163,6 +167,52 @@ def test_agent_imports_and_reads_source_local_daily_totals_in_every_mode(store, 
     assert rows["returned"] == 5 and rows["has_more"] is True and rows["next_cursor"]
     assert [row["calories"] for row in rows["rows"]] == sorted(
         (record["metrics"]["calories"] for record in valid(records)), reverse=True)[:5]
+
+
+def test_applying_the_previewed_declarations_lets_imported_rows_answer_from_a_rollup(store, monkeypatch):
+    """An import that works but leaves the daily totals on the base scan, so the agent still has to
+    choose declarations by hand; or a recommendation that its own revise refuses. The rollup's
+    daily count, sum and mean equal the base path's and the independent reference."""
+    small(monkeypatch)
+    records = list(iter_exercises())
+    text = summarized(workout_manifest())
+    setup(store, text=text)
+    # The same collection without the recommendation is the base path.
+    setup(store, cid=COPY_CID, title="Workouts base", text=summarized(workout_manifest(COPY_CID, "Workouts base")))
+
+    def imported(collection, **request):
+        return tool(store, "record_memory", action="import", collection=collection, import_request=request)
+
+    source = {"source_ref": SOURCE, "format": "ndjson", "mapping": TWO_NUMERIC}
+    recommended = imported(CID, mode="preview", **source)["recommended_declarations"]
+    assert recommended["fields"] and recommended["rollups"] and recommended["omitted"] == []
+    data, _, _ = vault.parse_frontmatter(text, strict=True)
+    for name, flags in recommended["fields"].items():
+        data["item_schema"]["fields"][name].update(flags)
+    data["rollups"] = recommended["rollups"]
+    guards = tool(store, "record_memory", action="inspect", collection=CID)["lifecycle_guards"]
+    tool(store, "record_memory", action="revise", collection=CID, why="declare the recommended index and rollups",
+         manifest_text="---\n" + yaml.safe_dump(data, sort_keys=False) + "---\n", **guards)
+
+    for collection in (CID, COPY_CID):
+        job = imported(collection, mode="start", **source)
+        run(store)
+        assert imported(collection, mode="status", continuation=job["continuation"])["state"] == "complete"
+    window = {"version": 1, "select": ["exercise_id"], "order_by": [{"field": "local_date"}],
+              "where": {"field": "local_date", "op": "gte", "value": "2026-03-01"}, "mode": "explain"}
+    assert query(store, window)["plan"]["index"] == "field:local_date"
+    answers = {}
+    for collection in (CID, COPY_CID):
+        explained = query(store, {**DAILY_CALORIES, "mode": "explain"}, collection=collection)
+        pages = [query(store, {**DAILY_CALORIES, "page": {"limit": 10}}, collection=collection)]
+        while pages[-1]["has_more"]:
+            pages.append(query(store, {**DAILY_CALORIES, "page": {"limit": 10, "after": pages[-1]["next_cursor"]}},
+                               collection=collection))
+        answers[explained["plan"]["strategy"]] = {group.pop("local_date"): group for page in pages
+                                                  for group in page["groups"]}
+    daily, flagged = expected_daily(records, "metrics.calories")
+    assert flagged and set(answers) == {"rollup", "base"}
+    assert answers["rollup"] == answers["base"] == daily
 
 
 def test_execution_profile_defaults_to_interactive_and_refuses_an_unknown_profile(store):
@@ -372,6 +422,8 @@ def test_query_engine_chapters_are_bounded_read_only_and_name_what_is_unavailabl
         assert (chapter["subject"], chapter["chapter"], chapter["version"]) == ("query-engine", name, 1)
         assert chapter["capability"] and chapter["unavailable"]
         assert runtime.wire_bytes(chapter) <= runtime.MAX_RESULT_BYTES
+    teaching = mcp("schema_memory", operation="inspect", subject="query-engine", name="import")["before_start"]
+    assert "recommended_declarations" in teaching["step"] and "revise" in teaching["step"]
     assert vault_files() == before
     graph = mcp("schema_memory", operation="inspect", subject="query-engine", name="graph")
     assert (graph["code"], graph["at"], graph["retryable"]) == ("QUERY_CAPABILITY_UNAVAILABLE", "name", False)
