@@ -240,11 +240,13 @@ class stage:  # noqa: N801 - used as a context manager
         raise StageFailed from error
 
 
-def guarded(report: Any, what: str, action) -> None:  # noqa: ANN001 - a zero-argument callable
-    """Runs one cleanup step; a failure is noted and the next step still runs."""
+def guarded(report: Any, what: str, action) -> bool:  # noqa: ANN001 - a zero-argument callable
+    """Run one cleanup step and report whether it succeeded; cleanup continues."""
 
     try:
         action()
+        return True
     except Exception as error:  # noqa: BLE001 - cleanup must continue
         report.notes.append(f"cleanup step {what} failed: {type(error).__name__}: {str(error)[:300]}")
         print(f"[rehearsal] cleanup {what} failed: {error}", flush=True)
+        return False

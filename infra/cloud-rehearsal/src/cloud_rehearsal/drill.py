@@ -246,8 +246,8 @@ class Drill:
         return json.loads(self.kubectl(*args, "--output=json").stdout)
 
     def maybe_json(self, *args: str) -> dict[str, Any] | None:
-        result = self.kubectl(*args, "--output=json", check=False)
-        return json.loads(result.stdout) if result.returncode == 0 else None
+        result = self.kubectl(*args, "--output=json", "--ignore-not-found")
+        return json.loads(result.stdout) if result.stdout.strip() else None
 
     def apply(self, *documents: dict[str, Any]) -> None:
         payload = "\n---\n".join(json.dumps(document) for document in documents)
@@ -1270,7 +1270,8 @@ async def run_drill(args: argparse.Namespace) -> int:
     finally:
         if stack is not None and stack.k3s is not None and not args.keep:
             guarded(report, "diagnostics", lambda: collect_diagnostics(stack, cluster, workdir))
-        guarded(report, "report", lambda: report.write(args.report))
+        if not guarded(report, "report", lambda: report.write(args.report)):
+            code = 2
         if not args.keep:
             guarded(report, "teardown", lambda: infra.teardown(stack, keep=False))
             guarded(report, "disks", lambda: drill_cluster.release_disks(cluster))

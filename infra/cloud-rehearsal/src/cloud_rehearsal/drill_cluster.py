@@ -223,14 +223,9 @@ def list_volumes_argv() -> list[str]:
 
 
 def list_volumes(agent: Agent) -> dict[str, Any]:
-    """What the listing play writes for this agent: its `lvs` report, or an
-    empty one where the agent has no volume group."""
+    """Read the active volume group's `lvs` report through the listing play."""
 
-    result = run(["docker", "exec", agent.container, *list_volumes_argv()], check=False, timeout=120)
-    if result.returncode != 0:
-        if "not found" not in result.stderr:
-            raise RuntimeError(f"lvs on {agent.name} failed: {result.stderr.strip()[-500:]}")
-        return {"report": [{"lv": []}]}
+    result = run(["docker", "exec", agent.container, *list_volumes_argv()], timeout=120)
     return json.loads(result.stdout)
 
 

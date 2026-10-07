@@ -98,6 +98,7 @@ jobs:
             python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
       - name: Upload the report and diagnostics
         if: always()
@@ -107,7 +108,7 @@ jobs:
           path: |
             ${{ runner.temp }}/cloud-rehearsal-report.json
             ${{ runner.temp }}/rehearsal-diagnostics
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
   local-storage-drill:
@@ -150,6 +151,7 @@ jobs:
             python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
       - name: Upload the report and diagnostics
         if: always()
@@ -159,5 +161,5 @@ jobs:
           path: |
             ${{ runner.temp }}/local-storage-drill-report.json
             ${{ runner.temp }}/drill-diagnostics
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30

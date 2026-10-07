@@ -227,7 +227,8 @@ async def _run(args: argparse.Namespace) -> int:
         # or loses the report.
         if stack is not None and not args.keep:
             guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
-        guarded(report, "report", lambda: report.write(args.report))
+        if not guarded(report, "report", lambda: report.write(args.report)):
+            code = 2
         guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep))
         if not args.keep:
             # This run's own image tags; base images stay cached.
