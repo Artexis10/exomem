@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 from .. import record_formats
@@ -34,81 +34,168 @@ def _spec(spec):
             "items": None if spec.items is None else _spec(spec.items)}
 
 
-def mapping_classes(mapping, manifest, fmt):
-    """Resolve source coverage structurally, including aliases introduced by the mapping."""
+def _nested_classifications(spec):
+    return [spec.classification, *(value for sub in spec.properties.values() for value in _nested_classifications(sub)),
+            *(_nested_classifications(spec.items) if spec.items is not None else [])]
+
+
+def _dependencies(manifest, mapped, inferred, spec, seen=()):
+    return [_dependency(manifest, mapped, inferred, name, seen, True)
+            for name in (*spec.depends_on, *((spec.offset,) if spec.offset else ()))]
+
+
+def _dependency(manifest, mapped, inferred, name, seen=(), derived=False):
+    if name in seen or name not in manifest.schema.fields:
+        return UNRESOLVED
+    spec = manifest.schema.fields[name]
+    own = "location" if spec.classification == "location" else mapped.get((name,))
+    if own == "location":
+        return own
+    children = _dependencies(manifest, mapped, inferred, spec, (*seen, name))
+    # Inference is a dependency, never an explicit classification that can erase a cycle or unknown authority.
+    children.extend(inferred.get((name,), ()))
+    if derived:
+        # An open object can carry undeclared descendants; its alias stays private until the parent is classified.
+        if spec.type in {"object", "array"}:
+            children.append(UNRESOLVED)
+        children.extend(_nested_classifications(spec))
+        children.extend(value for path, value in mapped.items() if len(path) > 1 and path[0] == name)
+        children.extend(value for path, values in inferred.items() if len(path) > 1 and path[0] == name for value in values)
+    if own == UNRESOLVED or UNRESOLVED in children:
+        return UNRESOLVED
+    return "location" if "location" in children else None
+
+
+@dataclass
+class _MappingSources:
+    coverage: dict
+    fields: list
+    time_sources: tuple
+    time_targets: tuple
+    links: list
+    protected: set
+    inferred: dict = field(default_factory=dict)
+
+    def declared(self):
+        def classify(path):
+            if any(path[:len(parent)] == parent for parent in self.protected):
+                return "location"
+            return self.coverage[path]["classification"] if path in self.coverage else UNRESOLVED
+
+        result = {target: classify(source) for target, source, _ in self.fields}
+        classes = [classify(source) for source in self.time_sources]
+        if classes:
+            classification = ("location" if "location" in classes else UNRESOLVED if UNRESOLVED in classes else None)
+            result.update({target: classification for target in self.time_targets})
+        return result
+
+    def restrictions(self):
+        result = {}
+        for target, source, _ in self.links:
+            values = {value for parent, facts in self.inferred.items() if source[:len(parent)] == parent for value in facts}
+            if values:
+                result.setdefault(target, set()).update(values)
+        return result
+
+
+def _mapping_sources(mapping, manifest, fmt):
     def source_path(raw):
         return (raw,) if fmt == "csv" else tuple(raw.split("."))
 
     coverage = {source_path(path): declaration for path, declaration in mapping.get("coverage", {}).items()}
-    protected = {path for path, declaration in coverage.items() if declaration["classification"] == "location"}
-    fields = {target: source_path(source.get("from") if isinstance(source, dict) else source)
-              for target, source in mapping.get("fields", {}).items()}
-    result = {}
-    time_mapping = mapping.get("time") or {}
-    # The mapping grammar fixes these keys; all time outputs share the declared source dependencies.
-    time_sources = [source_path(value) for source in time_mapping.get("from", [])
-                    for key, value in source.items() if key in {"instant", "offset", "date"}]
-    time_targets = [time_mapping[key] for key in ("instant", "offset", "local_date") if time_mapping.get(key)]
-
-    def protect(source, spec):
-        if spec.classification == "location":
-            protected.add(source)
-        for name, child in spec.properties.items():
-            protect((*source, name), child)
-        if spec.items is not None:
-            protect(source, spec.items)
-
-    # A schema classification also protects its mapped source subtree from differently named extracted aliases.
-    for target, source in fields.items():
-        if target in manifest.schema.fields:
-            protect(source, manifest.schema.fields[target])
-    for target in time_targets:
-        if target in manifest.schema.fields:
-            for source in time_sources:
-                protect(source, manifest.schema.fields[target])
-
-    def classify(path):
-        if any(path[:len(parent)] == parent for parent in protected):
-            return "location"
-        return coverage[path]["classification"] if path in coverage else UNRESOLVED
+    fields = []
 
     def descendants(target, source, spec):
-        result[target] = classify(source)
-        for name, child in spec.properties.items():
-            descendants((*target, name), (*source, name), child)
-        if spec.items is not None:
-            descendants(target, source, spec.items)
+        fields.append((target, source, spec))
+        if spec is not None:
+            for name, child in spec.properties.items():
+                descendants((*target, name), (*source, name), child)
+            if spec.items is not None:
+                descendants(target, source, spec.items)
 
-    for target, source in fields.items():
-        if target in manifest.schema.fields:
-            descendants((target,), source, manifest.schema.fields[target])
-        else:
-            result[(target,)] = classify(source)
-    classes = [classify(source) for source in time_sources]
-    if classes:
-        classification = ("location" if "location" in classes
-                          else UNRESOLVED if UNRESOLVED in classes else None)
-        for target in time_targets:
-            result[(target,)] = classification
-    return result
+    for target, source in mapping.get("fields", {}).items():
+        descendants((target,), source_path(source.get("from") if isinstance(source, dict) else source),
+                    manifest.schema.fields.get(target))
+    time_mapping = mapping.get("time") or {}
+    # The mapping grammar fixes these keys; all time outputs share the declared source dependencies.
+    time_sources = tuple(source_path(value) for source in time_mapping.get("from", [])
+                         for key, value in source.items() if key in {"instant", "offset", "date"})
+    time_targets = tuple((time_mapping[key],) for key in ("instant", "offset", "local_date") if time_mapping.get(key))
+    links = fields + [(target, source, manifest.schema.fields.get(target[0]))
+                      for target in time_targets for source in time_sources]
+    protected = {path for path, declaration in coverage.items() if declaration["classification"] == "location"}
+    protected.update(source for _, source, spec in links if spec is not None and spec.classification == "location")
+    return _MappingSources(coverage, fields, time_sources, time_targets, links, protected)
+
+
+def _mapping_authority(mappings, manifest):
+    # Source names belong to each import declaration; only canonical target paths join across jobs.
+    jobs = [_mapping_sources(mapping, manifest, fmt) for mapping, fmt in mappings]
+    while True:
+        mapped = {}
+        location_paths = set()
+        for job in jobs:
+            for path, classification in job.declared().items():
+                if classification == "location":
+                    location_paths.add(path)
+                before = mapped.get(path)
+                mapped[path] = (UNRESOLVED if UNRESOLVED in (before, classification)
+                                else "location" if "location" in (before, classification) else None)
+        changed = False
+        for job in jobs:
+            for path, source, _ in job.links:
+                if mapped.get(path) == "location" and source not in job.protected:
+                    job.protected.add(source)
+                    changed = True
+        if not changed:
+            break
+    # Conflicting coverage keeps unknown authority, but cannot erase another import's location restriction from aliases.
+    for job in jobs:
+        for path, source, _ in job.links:
+            if path in location_paths and mapped.get(path) == UNRESOLVED:
+                job.inferred.setdefault(source, set()).add("location")
+    # Freeze explicit authority before inference. Each pass only adds a finite source-path/protection fact.
+    while True:
+        inferred = {}
+        for job in jobs:
+            for path, facts in job.restrictions().items():
+                inferred.setdefault(path, set()).update(facts)
+        changed = False
+        for job in jobs:
+            for path, source, spec in job.links:
+                if spec is None or spec.classification == "location" or mapped.get(path) == "location":
+                    continue
+                facts = set(inferred.get(path, ()))
+                facts.update(value for value in _dependencies(manifest, mapped, inferred, spec, (path[0],)) if value is not None)
+                if facts - job.inferred.get(source, set()):
+                    job.inferred.setdefault(source, set()).update(facts)
+                    changed = True
+        if not changed:
+            return mapped, inferred
+
+
+def mapping_classes(mapping, manifest, fmt):
+    """The importer uses the same dependency closure as canonical field admission."""
+    mapped, inferred = _mapping_authority(((mapping, fmt),), manifest)
+    return {path: ("location" if value == "location" else UNRESOLVED if UNRESOLVED in inferred.get(path, ())
+                   else "location" if "location" in inferred.get(path, ()) else value)
+            for path, value in mapped.items()}
 
 
 def canonical_basis(conn, manifest):
-    mappings, declarations = {}, set()
+    jobs, declarations = [], set()
     for (encoded,) in conn.execute("SELECT binding_json FROM import_jobs WHERE collection_id=?", (manifest.collection_id,)):
         mapping = json.loads(encoded)["mapping"]
         declarations.add(_json([mapping["format"], mapping["declared"]]))
-        current = mapping_classes(mapping["declared"], manifest, mapping["format"])
-        for name, classification in current.items():
-            before = mappings.get(name)
-            mappings[name] = (UNRESOLVED if UNRESOLVED in (before, classification)
-                              else "location" if "location" in (before, classification) else None)
+        jobs.append((mapping["declared"], mapping["format"]))
+    mappings, inferred = _mapping_authority(jobs, manifest)
     store_id = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     declaration = {name: _spec(spec) for name, spec in manifest.schema.fields.items()}
     digest = hashlib.sha256(b"exomem.collection-fields.v1\0" + _json([store_id, manifest.collection_id,
-                                                                  declaration, sorted(mappings.items()), sorted(declarations)]).encode()).hexdigest()
+                                                                  declaration, sorted(mappings.items()), sorted(declarations),
+                                                                  sorted((path, sorted(facts)) for path, facts in inferred.items())]).encode()).hexdigest()
     return {"version": 1, "store_id": store_id, "collection_id": manifest.collection_id,
-            "classification_basis": digest}, mappings
+            "classification_basis": digest}, mappings, inferred
 
 
 @dataclass(frozen=True)
@@ -149,7 +236,7 @@ class FieldPlan:
 
 
 def resolve(operation, manifest):
-    basis, mapped = canonical_basis(operation.conn, manifest)
+    basis, mapped, inferred = canonical_basis(operation.conn, manifest)
     who = operation.who
     owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(operation.root, who)
     if owner:
@@ -173,32 +260,8 @@ def resolve(operation, manifest):
                    for grant in grants for entry in grant.field_release["paths"]
                    for target in (tuple(entry["path"].split(".")),))
 
-    def nested(spec):
-        return [spec.classification, *(value for sub in spec.properties.values() for value in nested(sub)),
-                *(nested(spec.items) if spec.items is not None else [])]
-
-    def dependency(name, seen=(), derived=False):
-        if name in seen or name not in manifest.schema.fields:
-            return UNRESOLVED
-        spec = manifest.schema.fields[name]
-        own = "location" if spec.classification == "location" else mapped.get((name,))
-        if own == "location":
-            return own
-        children = [dependency(other, (*seen, name), True) for other in (*spec.depends_on, *((spec.offset,) if spec.offset else ()))]
-        if derived:
-            # An open object can carry undeclared descendants; its alias stays private until the parent is classified.
-            if spec.type in {"object", "array"} and own != "location":
-                children.append(UNRESOLVED)
-            children.extend(nested(spec))
-            children.extend(value for path, value in mapped.items() if len(path) > 1 and path[0] == name)
-        if own == UNRESOLVED or UNRESOLVED in children:
-            return UNRESOLVED
-        if own == "location" or "location" in children:
-            return "location"
-        return None
-
     def select(spec, path, inherited=None):
-        dependencies = [dependency(name, derived=True) for name in spec.depends_on]
+        dependencies = _dependencies(manifest, mapped, inferred, spec) + list(inferred.get(path, ()))
         classification = ("location" if "location" in (inherited, spec.classification, mapped.get(path))
                           else mapped.get(path) or inherited)
         if classification != "location":
@@ -219,7 +282,7 @@ def resolve(operation, manifest):
         return None if classification in (UNRESOLVED, "location") else True
 
     selected = {name: value for name, spec in manifest.schema.fields.items()
-                if (value := select(spec, (name,), dependency(name))) is not None}
+                if (value := select(spec, (name,), _dependency(manifest, mapped, inferred, name))) is not None}
     visible = replace(manifest, schema=replace(manifest.schema,
                       fields=MappingProxyType({name: spec for name, spec in manifest.schema.fields.items() if name in selected}),
                       natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)))

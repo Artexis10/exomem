@@ -525,3 +525,184 @@ def test_time_output_classification_protects_source_aliases_and_shared_derivativ
     owner = tool(store, "record_memory", action="query", collection=IMPORT_CID,
                  query={"version": 1, "select": ["alias", "local_date"]})
     assert owner["rows"] == [{"alias": instant, "local_date": "2026-03-01"}]
+
+
+@pytest.mark.parametrize(("target_kind", "protection"), [
+    ("time", "schema"), ("field", "schema"), ("field", "source"), ("field", "open"), ("field", "cycle"),
+])
+def test_mapping_aliases_keep_transitive_dependency_protection(store, target_kind, protection):
+    """A mapped-source alias that bypasses schema, source, open-object or cyclic dependency authority."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    target = "started_at" if target_kind == "time" else "derived"
+    place = {"type": "object" if protection == "open" else "string"}
+    if protection == "schema":
+        place["classification"] = "location"
+    elif protection == "cycle":
+        place["depends_on"] = [target]
+    fields = WORKOUT_FIELDS + (
+        "    place: " + yaml.safe_dump(place, default_flow_style=True).strip() + "\n"
+        "    bridge: {type: string, depends_on: [place]}\n"
+        "    alias: {type: string}\n")
+    if target_kind == "time":
+        fields = fields.replace("started_at: {type: datetime}", "started_at: {type: datetime, depends_on: [bridge]}")
+    else:
+        fields += "    derived: {type: string, depends_on: [bridge]}\n"
+    mapping = deepcopy(MAPPING)
+    mapping["fields"].update(place="place", bridge="bridge", alias="start_utc" if target_kind == "time" else "derived")
+    if target_kind == "field":
+        mapping["fields"]["derived"] = "derived"
+    mapping["coverage"].update({path: {"classification": None} for path in ("place", "bridge", "derived")})
+    if protection == "source":
+        mapping["coverage"]["place"]["classification"] = "location"
+    instant = "2026-03-01T00:00:00Z"
+    setup(store, ndjson([{"id": "one", "kind": "invented", "duration_s": 10,
+        "metrics": {"calories": 7, "distance_m": 1}, "start_utc": instant, "utc_offset": "+02:00",
+        "place": {"late": "private"} if protection == "open" else "private", "bridge": "derived", "derived": "derived"}]),
+        fields=fields)
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    result = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                  query={"version": 1})["rows"][0]
+    assert result["calories"] == 7 and result["duration_s"] == 10
+    assert not {target, "alias"} & result.keys()
+    if target_kind == "time":
+        assert not {"utc_offset", "local_date"} & result.keys()
+    else:
+        assert result["utc_offset"] == "+02:00" and result["local_date"] == "2026-03-01"
+    assert tool(store, "record_memory", action="query", collection=IMPORT_CID,
+                query={"version": 1, "select": ["alias"]})["rows"] == [
+                    {"alias": instant if target_kind == "time" else "derived"}]
+
+
+def test_nested_dependency_protects_its_source_alias_without_hiding_reviewed_sibling(store):
+    """A nested dependency alias that escapes its parent, or closure that hides an unrelated reviewed child."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    fields = WORKOUT_FIELDS + (
+        "    place: {type: string, classification: location}\n"
+        "    mixed: {type: object, properties: {derived: {type: string, depends_on: [place]}, count: {type: integer}}}\n"
+        "    alias: {type: string}\n")
+    mapping = deepcopy(MAPPING)
+    mapping["fields"].update(place="place", mixed="mixed", alias="mixed.derived")
+    mapping["coverage"].update({path: {"classification": None} for path in ("place", "mixed.derived", "mixed.count")})
+    setup(store, ndjson([{"id": "one", "kind": "invented", "duration_s": 10,
+        "metrics": {"calories": 7, "distance_m": 1}, "start": "2026-03-01T00:00:00Z",
+        "place": "private", "mixed": {"derived": "private", "count": 7}}]), fields=fields)
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    result = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                  query={"version": 1})["rows"][0]
+    assert result["mixed"] == {"count": 7} and result["calories"] == 7 and "alias" not in result
+
+
+def test_dependency_source_closure_spans_import_jobs_without_joining_their_source_paths(store):
+    """A later dependency declaration that leaves an earlier alias public, or taints an unrelated job's same source key."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        SOURCE,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+        write_source,
+    )
+
+    fields = WORKOUT_FIELDS + (
+        "    place: {type: string}\n"
+        "    derived: {type: string, depends_on: [place]}\n"
+        "    alias: {type: string}\n")
+    row = {"id": "one", "kind": "invented", "duration_s": 10,
+           "metrics": {"calories": 7, "distance_m": 1}, "start": "2026-03-01T00:00:00Z"}
+    first = deepcopy(MAPPING)
+    first["fields"].update(calories="shared", derived="other", alias="other")
+    first["coverage"].update({path: {"classification": None} for path in ("shared", "other")})
+    setup(store, ndjson([{**row, "shared": 7, "other": "derived"}]), fields=fields)
+    job = start(store, OWNER, mapping=first)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    assert tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                query={"version": 1, "select": ["alias"]})["rows"] == [{"alias": "derived"}]
+    second = deepcopy(MAPPING)
+    second["fields"]["place"] = "shared"
+    second["coverage"]["shared"] = {"classification": "location"}
+    source = SOURCE.replace("exercises.ndjson", "later.ndjson")
+    write_source(store.root, ndjson([{**row, "id": "two", "shared": "private"}]), path=source)
+    job = start(store, OWNER, source_ref=source, mapping=second)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    result = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                  query={"version": 1})["rows"]
+    assert len(result) == 2 and all(item["calories"] == 7 for item in result)
+    assert all(not {"alias", "derived", "place"} & item.keys() for item in result)
+
+
+def test_unresolved_import_cannot_erase_another_imports_location_ancestor(store):
+    """An uncovered open object that erases an earlier location restriction from its reviewed source alias."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        SOURCE,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+        write_source,
+    )
+
+    fields = WORKOUT_FIELDS + "    payload: {type: object}\n    alias: {type: string}\n"
+    row = {"id": "one", "kind": "invented", "duration_s": 10,
+           "metrics": {"calories": 7, "distance_m": 1}, "start": "2026-03-01T00:00:00Z",
+           "payload": {"unlisted": "private"}}
+    first = deepcopy(MAPPING)
+    first["fields"]["payload"] = "payload"
+    first["coverage"]["payload"] = {"classification": "location", "subtree": True}
+    setup(store, ndjson([row]), fields=fields)
+    job = start(store, OWNER, mapping=first)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    second = deepcopy(MAPPING)
+    second["fields"].update(payload="payload", alias="payload.unlisted")
+    second["coverage"]["payload.unlisted"] = {"classification": None}
+    source = SOURCE.replace("exercises.ndjson", "later.ndjson")
+    write_source(store.root, ndjson([{**row, "id": "two"}]), path=source)
+    job = start(store, OWNER, source_ref=source, mapping=second)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    result = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                  query={"version": 1})["rows"]
+    assert len(result) == 2 and all(item["calories"] == 7 for item in result)
+    assert all("payload" not in item and "alias" not in item for item in result)

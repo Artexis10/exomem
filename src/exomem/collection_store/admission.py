@@ -912,13 +912,24 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
         state_migration.record_collection_store_compatibility(
             session.root, authority_check=lambda: session.require(token),
         )
+        try:
+            _require_create_file_ownership(writer, intent)
+        except CollectionStoreError as error:
+            return {**recovered, "status": "pending", "reason": error.code}
         published = _publish_current_epoch(session, writer, token)
         if published.status != "published":
             return {**recovered, "status": "pending", "reason": published.reason or published.status}
         current = (published.commit_seq, published.head_hash)
         try:
             manager._renew_collection_store(token)
-            _install_marker(session, token, fence_client, target, intent, current, writer)
+            try:
+                _install_marker(session, token, fence_client, target, intent, current, writer)
+            except CollectionStoreError as error:
+                if error.code != "COLLECTION_STORE_MARKER_CONFLICT":
+                    raise
+                with manager._report_lock:
+                    runtime._admitted_token = None
+                return {**recovered, "status": "pending", "reason": error.code}
             writer.reconcile_views()
             result = _recover_create(writer)
             if result["status"] != "marker_admitted":
@@ -1012,6 +1023,21 @@ def _verify_acquisition(writer, runtime, fence, target):
             raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "acquired head is not in the local chain")
 
 
+def _require_create_file_ownership(writer, intent):
+    root = writer.root
+    raw = authority.read_marker(root)
+    expected = None if intent["expected_marker"] is None else intent["expected_marker"].encode()
+    target_raw = intent["target_marker"].encode()
+    if raw not in (expected, target_raw):
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "create marker preimage changed")
+    current = None if raw is None else authority.parse_marker(root, raw)
+    target = authority.parse_marker(root, target_raw)
+    if target["version"] == 1:
+        target = authority.upgraded_marker(root, writer.connection, target)
+    # An interrupted create may wait behind a new file declaration; retaining its intent costs only C publication.
+    authority.require_new_file_ownership(root, current, target["collections"][-1])
+
+
 def _install_marker(session, token, fence_client, target, intent, current, writer):
     session.verify_custody()
     session.require(token)
@@ -1020,6 +1046,7 @@ def _install_marker(session, token, fence_client, target, intent, current, write
             or fence.generation != target["collection_store_fence"]["generation"]
             or chain.verify_store_chain(writer.connection) != current):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "cutover authority changed")
+    _require_create_file_ownership(writer, intent)
     expected = None if intent["expected_marker"] is None else intent["expected_marker"].encode()
     _replace_marker(session, token, expected, intent["target_marker"].encode())
 
@@ -1084,6 +1111,13 @@ class _CreateAdmission:
         elif replay is not None:
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "create receipt lacks its admission intent")
 
+    def recheck(self, root):
+        if authority.read_marker(root) != self.expected:
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "create marker basis changed")
+        old = None if self.expected is None else authority.parse_marker(root, self.expected)
+        # Rechecking at commit prevents C from seizing a late file source; a false conflict only delays this create.
+        authority.require_new_file_ownership(root, old, self.entry)
+
     def record(self, manifest, txn):
         writer = self.writer
         writer._publication.deferred_create = manifest.collection_id
@@ -1100,6 +1134,9 @@ class _CreateAdmission:
                     old["collection_store_fence"] != target["collection_store_fence"]))
                 or authority.read_marker(writer.root) != self.expected):
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "create marker basis differs")
+        self.entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile,
+                                            manifest.storage.source, manifest.storage.strategy)
+        writer._recheck_guard(self)
         intent = {"version": 1, "request_id": txn["request_id"], "request_hash": txn["request_hash"],
                   "collection_id": manifest.collection_id, "manifest_path": manifest.path,
                   "source_path": manifest.storage.source, "txn_id": txn["txn_id"],

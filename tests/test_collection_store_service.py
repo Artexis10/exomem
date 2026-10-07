@@ -772,3 +772,111 @@ def test_mixed_vault_owner_reads_original_bytes_and_recipient_still_cannot_read_
             denials.append(str(error.value).replace(path, "<requested>"))
         assert writer_lease.invoke_command(command, root, path=ordinary, include_raw=True)["content"] == body
     assert denials[0] == denials[1]
+
+
+@pytest.mark.parametrize("arrival", ["after_discovery", "before_commit"])
+def test_new_file_declaration_arrival_cannot_lose_its_authority_to_c(service, monkeypatch, arrival):
+    """A file declaration arriving after discovery must survive the C transaction's ownership recheck."""
+    root = service.root
+    late_id = "77777777-7777-4777-8777-777777777777"
+    late_path = root / "Knowledge Base/Records/LateA/_collection.md"
+    source = "Knowledge Base/Records/Shared"
+    marker = authority.read_marker(root)
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Before"},
+                item_key=ROW, why="existing file baseline")["outcome"] == "committed"
+    baseline = call(root, "record_memory", action="inspect", collection=KEY)
+
+    def arrive():
+        late_path.parent.mkdir(parents=True)
+        late_path.write_text(manifest_text().replace(CID, late_id).replace("source: Items", "source: " + source))
+        (root / source).mkdir()
+
+    with monkeypatch.context() as fault:
+        if arrival == "after_discovery":
+            original = admission._prepare_create
+
+            def prepare(*args, **kwargs):
+                arrive()
+                return original(*args, **kwargs)
+
+            fault.setattr(admission, "_prepare_create", prepare)
+        else:
+            original = admission._CreateAdmission.record
+
+            def record(self, *args, **kwargs):
+                result = original(self, *args, **kwargs)
+                arrive()
+                return result
+
+            fault.setattr(admission._CreateAdmission, "record", record)
+        refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                             manifest_text=DAILY_TEXT.replace("source: Items", "source: " + source + "/Nested"),
+                             why="concurrent file arrival"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker
+    assert not (root / DAILY_PATH).exists() and not (root / source / "Nested").exists()
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader) is None
+        assert reader.execute("SELECT collection_id FROM collections ORDER BY collection_id").fetchall() == [(CID,)]
+        assert reader.execute("SELECT COUNT(*) FROM txns WHERE collection_id=?", (DAILY,)).fetchone() == (0,)
+    after = call(root, "record_memory", action="inspect", collection=KEY)
+    assert after["audit"] == baseline["audit"] and after["source_versions"] == baseline["source_versions"]
+    assert call(root, "record_memory", action="append", collection=late_id, item={"title": "Arrived file row"},
+                item_key=ROW, why="retained file authority")["outcome"] == "committed"
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Existing file row"},
+                item_key=LATER, why="existing authority")["outcome"] == "committed"
+    assert call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+                why="retry with separate source")["status"] == "committed"
+    assert titles(root, late_id) == ["Arrived file row"] and titles(root, KEY) == ["Before", "Existing file row"]
+
+
+@pytest.mark.parametrize("arrival", ["interrupted", "after_publication"])
+def test_pending_create_cannot_publish_over_an_arriving_file_declaration(service, monkeypatch, arrival):
+    """Recovery must retain a committed intent instead of seizing a file source that arrived during interruption."""
+    root = service.root
+    late_id = "77777777-7777-4777-8777-777777777777"
+    late_path = root / "Knowledge Base/Records/LateA/_collection.md"
+    source = "Knowledge Base/Records/Shared"
+    marker = authority.read_marker(root)
+
+    def arrive():
+        late_path.parent.mkdir(parents=True)
+        late_path.write_text(manifest_text().replace(CID, late_id).replace("source: Items", "source: " + source))
+        (root / source).mkdir()
+
+    with monkeypatch.context() as deadline:
+        if arrival == "interrupted":
+            deadline.setattr(admission, "time", SimpleNamespace(
+                monotonic=lambda: time.monotonic() - 31, time=time.time, sleep=time.sleep))
+        else:
+            original = admission._publish_current_epoch
+
+            def publish(*args, **kwargs):
+                result = original(*args, **kwargs)
+                if result.status == "published" and not late_path.exists():
+                    arrive()
+                return result
+
+            deadline.setattr(admission, "_publish_current_epoch", publish)
+        created = call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                       manifest_text=DAILY_TEXT.replace("source: Items", "source: " + source + "/Nested"),
+                       why="interrupted create", idempotency_key="arrival-pending")
+        assert created["status"] == "committed" and created["warnings"]
+        if arrival == "interrupted":
+            arrive()
+        else:
+            assert "COLLECTION_STORE_MARKER_CONFLICT" in created["warnings"][0]
+            assert not service.manager._collection_store.reporting_ready(service.manager._fencing_token)
+        intent = store_meta(root)[authority.PENDING_CREATE]
+    assert call(root, "record_memory", action="append", collection=late_id, item={"title": "File during interruption"},
+                item_key=ROW, why="file still authoritative")["outcome"] == "committed"
+    assert authority.read_marker(root) == marker and store_meta(root)[authority.PENDING_CREATE] == intent
+    assert not (root / DAILY_PATH).exists() and not (root / source / "Nested").exists()
+    assert titles(root, late_id) == ["File during interruption"]
+    # Repair the overlapping declaration. The pending C intent then uses its original canonical target.
+    (root / source).rename(late_path.parent / "Items")
+    late_path.write_text(late_path.read_text().replace("source: " + source, "source: Items"))
+    _until(lambda: authority.read_marker(root) != marker)
+    _until(lambda: authority.PENDING_CREATE not in store_meta(root))
+    assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Recovered C row"},
+                item_key=LATER, why="recovered publication")["outcome"] == "committed"
+    assert titles(root, late_id) == ["File during interruption"]
