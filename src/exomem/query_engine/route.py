@@ -81,11 +81,10 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
                               if _LinkProjector.carries_links(spec))
             declaration = typed_rows.declaration(manifest, basis, projected=links)
         if links:
-            # No cold vault walk inside the query deadline: a bare-title or memory link that needs the
-            # candidate index is omitted, as on the legacy bounded-latency path.
+            # A bare-title or memory link may build the candidate index inside the query deadline;
+            # a cold build that runs past it fails the query with QUERY_TIMEOUT, never drops the link.
             session.project_with(_LinkProjector.create(writer.root, manifest, policy=operation.policy,
-                                                       allow_cold_index=False, authorize_path=operation.allows_file),
-                                 fields=links)
+                                                       authorize_path=operation.allows_file), fields=links)
         result = validation.normalize_query(raw, declarations={collection_id: declaration}, collection=collection_id)
         if result.findings:
             raise Refusal(result.findings[0])

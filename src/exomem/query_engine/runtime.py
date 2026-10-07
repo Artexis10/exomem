@@ -133,12 +133,12 @@ class AdmittedCollection:
 
 
 class ReadSession:
-    def __init__(self, root, conn, limits, cancelled, project_values, deadline):
+    def __init__(self, root, conn, limits, cancelled, deadline):
         self.connection = conn
         self.limits = limits
         self._root = root
         self._cancelled = cancelled
-        self._project_values = project_values
+        self._project_values = None
         self._principal = effective_principal()
         self._thread = threading.get_ident()
         self._deadline = deadline
@@ -149,8 +149,8 @@ class ReadSession:
         self._queries = {}
         self._cursors = set()
         self._estimated_visits = 0
-        # Fields the projection can change; None means any field may change.
-        self._projected_fields = None
+        # Fields the projection can change; `project_with` is the only way to install one.
+        self._projected_fields = frozenset()
 
     def __reduce__(self):
         raise TypeError("query sessions are request-local")
@@ -384,7 +384,7 @@ def _summary_released(operation, collection_id: str) -> bool:
 
 @contextmanager
 def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = None,
-                 cancelled: Callable[[], bool] | None = None, project_values=None) -> Iterator[ReadSession]:
+                 cancelled: Callable[[], bool] | None = None) -> Iterator[ReadSession]:
     """Own a fresh connection, snapshot, evaluator and admission until return."""
     limits = limits or QueryLimits()
     deadline = time.monotonic() + limits.timeout_ms / 1000
@@ -400,7 +400,7 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
     try:
         conn = connection.open_query_reader(target, busy_timeout_ms=limits.timeout_ms)
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
-        session = ReadSession(Path(root), conn, limits, cancelled, project_values, deadline)
+        session = ReadSession(Path(root), conn, limits, cancelled, deadline)
         token = _CURRENT_SESSION.set(session)
         conn.set_progress_handler(session._progress, 1000)
         conn.create_function("exomem_query_values", 2, session._values)

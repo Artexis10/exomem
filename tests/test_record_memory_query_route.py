@@ -251,30 +251,35 @@ def test_sealed_collection_under_a_routing_marker_refuses_like_an_absent_one(sto
 
 def test_a_link_to_a_page_the_caller_cannot_read_never_shows_and_cannot_filter_or_sort(store):
     """A typed row or group label naming a page the caller cannot read, for another audience or for the
-    owner under an access exclusion, or a filter or sort on stored link values that recovers what a
-    row omits."""
-    link = "[[Private/Secret Plan]]"
+    owner under an access exclusion; a visible bare-title link dropped where the legacy query shows it;
+    or a filter or sort on stored link values that recovers what a row omits."""
+    link, bare = "[[Private/Secret Plan]]", "[[Open Page]]"
     fields = {"id": "{type: string, required: true}", "count": "{type: integer, sortable: true}",
               "related": "{type: link, sortable: true}"}
     store.create_collection(manifest_path(), manifest(fields=fields, summary=False), why="create", scaffold=False)
-    secret = store.root / "Knowledge Base/Private/Secret Plan.md"
-    secret.parent.mkdir(parents=True)
-    secret.write_text("# Secret Plan\n")
-    store.append_record(SUMMARY_CID, item={"id": "linked", "count": 1, "related": link}, item_key=KEY, why="observe")
-    store.append_record(SUMMARY_CID, item={"id": "unlinked", "count": 2}, item_key=OTHER, why="observe")
+    for page in ("Private/Secret Plan", "Notes/Open Page"):
+        target = store.root / f"Knowledge Base/{page}.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(f"# {page.rsplit('/', 1)[-1]}\n")
+    for key, item in ((KEY, {"id": "linked", "count": 1, "related": link}), (OTHER, {"id": "unlinked", "count": 2}),
+                      ("33333333-3333-4333-8333-333333333333", {"id": "bare", "count": 3, "related": bare})):
+        store.append_record(SUMMARY_CID, item=item, item_key=key, why="observe")
     rows = {"version": 1, "select": ["id", "related"], "order_by": [{"field": "count"}]}
     by_link = {"version": 1, "group_by": [{"field": "related"}], "aggregates": {"rows": {"op": "count"}}}
 
     def answers(who):
-        def read(raw):
-            return tool(store, "record_memory", who, action="query", collection=SUMMARY_CID, query=raw)
-        return read(rows)["rows"], read(by_link)["groups"]
+        def read(**arguments):
+            return tool(store, "record_memory", who, action="query", collection=SUMMARY_CID, **arguments)
+        typed, legacy = read(query=rows)["rows"], read()["rows"]
+        assert {row["id"]: row.get("related") for row in typed} == {row["id"]: row.get("related") for row in legacy}
+        return typed, read(query=by_link)["groups"]
 
     released_rows, released_groups = answers(OWNER)
-    assert released_rows == [{"id": "linked", "related": link}, {"id": "unlinked"}]
-    assert released_groups == [{"rows": 1}, {"related": link, "rows": 1}]
+    assert released_rows == [{"id": "linked", "related": link}, {"id": "unlinked"}, {"id": "bare", "related": bare}]
+    assert released_groups == [{"rows": 1}, {"related": bare, "rows": 1}, {"related": link, "rows": 1}]
     # Withheld, the linked row reads exactly like its unlinked twin and joins the absent-link group.
-    withheld = ([{"id": "linked"}, {"id": "unlinked"}], [{"rows": 2}])
+    withheld = ([{"id": "linked"}, {"id": "unlinked"}, {"id": "bare", "related": bare}],
+                [{"rows": 2}, {"related": bare, "rows": 1}])
     write_scope(store.root, paths="Private/**")
     write_rule(store.root, ceiling=0)
     assert answers(_external()) == withheld

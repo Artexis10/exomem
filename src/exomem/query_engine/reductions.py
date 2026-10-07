@@ -147,8 +147,7 @@ def _aligned(shape: _Shape) -> bool:
 def _plan(session, collection_id: str, shape: _Shape, uniform: bool) -> _Plan:
     if not uniform:
         return _Plan("base", "mixed_release", "admitted")
-    projected = session._projected_fields
-    if session._project_values is not None and (projected is None or projected & set(shape.reads())):
+    if session._projected_fields & set(shape.reads()):
         return _Plan("base", "fields_projected", "uniform")
     matching = [definition for definition in rollups.definitions(session.connection, collection_id)
                 if _answers(definition[1], shape)]

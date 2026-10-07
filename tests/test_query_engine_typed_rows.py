@@ -77,9 +77,8 @@ def test_mixed_hidden_scalar_and_json_traps_never_reach_evaluation(store):
     keys[scalar][1] = "ff"
     store.connection.execute(f"UPDATE {plan.table_name} SET keys_json=? WHERE item_key=?", (json.dumps(keys), OTHER))
     seen, statements = [], []
-    with request_scope(_external()), runtime.read_session(
-        store.root, store.handle.path, project_values=lambda row: seen.append(row) or row,
-    ) as session:
+    with request_scope(_external()), runtime.read_session(store.root, store.handle.path) as session:
+        session.project_with(lambda row: seen.append(row) or row, fields=())
         session.connection.set_trace_callback(statements.append)
         result = page(session, query(select=["title"], where={"field": "title", "op": "contains", "value": "Visible"},
                                      order_by=[{"field": "count", "nulls": "first"}]))
@@ -124,8 +123,8 @@ def test_residual_cost_refuses_before_any_value_function(store, monkeypatch):
         pytest.fail("evaluated a value before admitting the residual pass")
 
     monkeypatch.setattr(typed_sql, "text_predicate", trap)
-    with runtime.read_session(store.root, store.handle.path,
-                              limits=runtime.QueryLimits(max_row_visits=3), project_values=trap) as session:
+    with runtime.read_session(store.root, store.handle.path, limits=runtime.QueryLimits(max_row_visits=3)) as session:
+        session.project_with(trap, fields={"title"})
         with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
             page(session, query(where={"field": "title", "op": "contains", "value": "One"}, page={"limit": 1}))
 
@@ -307,7 +306,8 @@ def test_private_projection_obeys_temp_quota_before_decoding(store):
 
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         with runtime.read_session(store.root, store.handle.path,
-                                  limits=runtime.QueryLimits(max_temp_bytes=8192), project_values=trap) as session:
+                                  limits=runtime.QueryLimits(max_temp_bytes=8192)) as session:
+            session.project_with(trap, fields={"title", "count"})
             page(session, query(order_by=[{"field": "count", "nulls": "first"}]))
     with runtime.read_session(store.root, store.handle.path) as session:
         assert page(session, query(select=["title"])).rows == [{"title": "One"}]

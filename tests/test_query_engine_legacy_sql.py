@@ -147,8 +147,8 @@ def test_matching_withheld_sibling_is_absent_before_sql_value_evaluation(store):
         return value
 
     def query():
-        with request_scope(_external()), runtime.read_session(
-                store.root, store.handle.path, project_values=project) as session:
+        with request_scope(_external()), runtime.read_session(store.root, store.handle.path) as session:
+            session.project_with(project, fields={"title", "count"})
             admitted = session.admit(CID)
             plan = legacy.normalize(columns_available=admitted.fields,
                                     filters=[{"column": "count", "op": "gt", "value": 1}],
@@ -176,8 +176,8 @@ def test_ordered_temporary_relation_uses_its_index_without_uncapped_sorter(store
 
 def test_projection_precedes_filter_and_temporary_quota_refuses_without_result(store, legacy_rows):
     """Values removed by trusted projection cannot match; temp exhaustion is not partial success."""
-    with runtime.read_session(store.root, store.handle.path,
-                              project_values=lambda row: {"count": row.get("count")}) as session:
+    with runtime.read_session(store.root, store.handle.path) as session:
+        session.project_with(lambda row: {"count": row.get("count")}, fields={"title"})
         admitted = session.admit(CID)
         plan = legacy.normalize(columns_available=admitted.fields,
                                 filters=[{"column": "title", "op": "exists"}])
