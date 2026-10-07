@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from test_governance_egress import (
     EXTERNAL,
     SCOPE_ID,
@@ -528,13 +530,18 @@ def _person_with_status_page(name: str) -> str:
     )
 
 
-def test_a_withheld_leading_unit_does_not_choose_the_current_state(vault: Path) -> None:
-    """A person's declared current-state page leads with a unit that links a
-    withheld page. Its next unit is the current state, as on a page without it."""
+@pytest.mark.parametrize("hidden_count", [1, 64])
+def test_a_withheld_leading_unit_does_not_choose_the_current_state(
+    vault: Path, hidden_count: int
+) -> None:
+    """Hidden facts must not hide the public state, even at the raw read cap."""
     _write(vault, ILSE, _person_with_status_page("Ilse Vandermeer"))
     _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
     _withhold(vault, SECRET, ceiling=0)
-    lead = "- [fact] Ilse moved to the [[Secret cluster]] rota. ^st-1"
+    lead = "\n".join(
+        f"- [fact] Ilse moved to the [[Secret cluster]] rota {number}. ^hidden-{number}"
+        for number in range(hidden_count)
+    )
     rest = "- [fact] Ilse runs the harbour gauges from the north office. ^st-2"
     related = "Related: [[Ilse Vandermeer]]"
     _write(vault, ILSE_STATUS, _note("Ilse status", f"{lead}\n{rest}", related))

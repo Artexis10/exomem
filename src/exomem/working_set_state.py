@@ -119,7 +119,19 @@ def _from_canonical_page(
         return None
     from . import find as find_module
     from . import ranking_config, structured_filters
-    from . import working_set_currency
+    from . import working_set, working_set_currency
+    from .governance import egress
+
+    def in_view(hits: Sequence[Any]) -> list[Any]:
+        return working_set.hits_in_view(
+            [
+                hit
+                for hit in hits
+                if str(getattr(hit, "parent_path", "") or "") == named
+                and not getattr(hit, "parent_superseded_by", None)
+            ],
+            visible,
+        )
 
     try:
         snapshot = find_module.FreshnessSnapshot(vault_root)
@@ -127,30 +139,31 @@ def _from_canonical_page(
             None,
             shortcuts=structured_filters.FilterShortcuts(categories=CANONICAL_CATEGORIES),
         )
-        hits = find_module._find_semantic_units(
-            vault_root, query="", limit=CANONICAL_UNIT_LIMIT, scope="kb", plan=plan,
-            snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
-            mode="keyword", degraded_out=None, failed_out=None,
-            allowed_parent_paths={named},
-            recall_checkpoint=snapshot.recall_checkpoint("kb"), repair=False,
-            max_catalog_candidates=CANONICAL_UNIT_LIMIT,
-        )
+        checkpoint = snapshot.recall_checkpoint("kb")
+
+        def read(size: int) -> tuple[list[Any], bool]:
+            hits = find_module._find_semantic_units(
+                vault_root, query="", limit=size, scope="kb", plan=plan,
+                snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
+                mode="keyword", degraded_out=None, failed_out=None,
+                allowed_parent_paths={named},
+                recall_checkpoint=checkpoint, repair=False,
+                max_catalog_candidates=size,
+            )
+            # A full raw window cannot prove exhaustion before reader filtering.
+            return hits, len(hits) >= size
+
+        if working_set._restricted(visible):
+            hits, _ = working_set._read_in_view(
+                read, in_view, CANONICAL_UNIT_LIMIT, restricted=True
+            )
+        else:
+            hits = in_view(read(CANONICAL_UNIT_LIMIT)[0])
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - an unreadable unit index costs this entry only
         log.debug("current state: canonical page lookup failed", exc_info=True)
         return None
-    from . import working_set
-
-    # A unit the reader's egress guard would remove never leads: the next one
-    # is the current state, as on a page without it (`working_set.hits_in_view`).
-    hits = working_set.hits_in_view(
-        [
-            hit
-            for hit in hits
-            if str(getattr(hit, "parent_path", "") or "") == named
-            and not getattr(hit, "parent_superseded_by", None)
-        ],
-        visible,
-    )
     if not hits:
         return None
 
