@@ -122,6 +122,9 @@ See [hosted-operations.md](hosted-operations.md) for the cell runbook and
 [substrate-control-plane-contract.md](substrate-control-plane-contract.md) for
 the companion ownership contract.
 
+See [hosted-hardware-options.md](hosted-hardware-options.md) for dated EU hardware
+prices, candidate capabilities, and the distinction between cell embeddings and shared sensing.
+
 ## Non-goals
 
 Do not add a service/repository/database stack just to look layered. Exomem core
