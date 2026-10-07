@@ -349,6 +349,11 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
 
     _until(busy)
     assert "COLLECTION_NOT_FOUND" not in codes, codes
+    marker = authority.marker_path(root)
+    agreed = marker.read_bytes()
+    marker.write_bytes(agreed + b"\n")  # a marker changed under the create never resolves by retrying
+    refused(append, "COLLECTION_STORE_LEASE_REQUIRED")
+    marker.write_bytes(agreed)
     late[0] = False
 
     def written():
