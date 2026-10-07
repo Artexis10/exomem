@@ -886,6 +886,55 @@ def load_measurement_store(
 ) -> tuple[MeasurementStoreManifest, tuple[ProjectionMeasurement, ...]]:
     """Load one family only after its namespace and immutable root verify."""
 
+    return _load_measurement_store(
+        vault_root,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=_digest(
+            expected_rows_digest, "expected measurement rows digest"
+        ),
+    )
+
+
+def load_prepared_measurement_store(
+    vault_root: Path,
+    *,
+    namespace: projection_store.PreparedProjectionNamespace,
+    family: MeasurementFamilyKey,
+    expected_rows_digest: str | None = None,
+) -> tuple[MeasurementStoreManifest, tuple[ProjectionMeasurement, ...]]:
+    """Verify staged rows against freshly derived target inputs before reuse."""
+
+    if not isinstance(namespace, projection_store.PreparedProjectionNamespace):
+        raise MeasurementStoreMismatch("prepared projection namespace is unavailable")
+    manifest, rows = _load_measurement_store(
+        vault_root,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=(
+            _digest(expected_rows_digest, "expected measurement rows digest")
+            if expected_rows_digest is not None
+            else None
+        ),
+    )
+    expected_ids = {
+        variant.projection_variant_id
+        for item in namespace.items
+        for variant in item.variants
+        if family.lane != "clip" or projected_retrieval.clip_variant_applicable(variant)
+    }
+    if {_measurement_key(row).projection_variant_id for row in rows} != expected_ids:
+        raise MeasurementStoreMismatch("prepared measurement family is incomplete")
+    return manifest, rows
+
+
+def _load_measurement_store(
+    vault_root: Path,
+    *,
+    namespace: ProjectionNamespace,
+    family: MeasurementFamilyKey,
+    expected_rows_digest: str | None,
+) -> tuple[MeasurementStoreManifest, tuple[ProjectionMeasurement, ...]]:
     if family.namespace_key != namespace.namespace_key:
         raise MeasurementStoreMismatch(
             "measurement family does not match the verified namespace"
@@ -911,6 +960,10 @@ def load_measurement_store(
                     database=database,
                 )
                 try:
+                    if expected_rows_digest is None:
+                        expected_rows_digest = _metadata_manifest(
+                            connection, family
+                        ).rows_digest
                     return _verify_connection(
                         connection,
                         namespace=namespace,

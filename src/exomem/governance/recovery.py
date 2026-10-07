@@ -1215,6 +1215,7 @@ def _reconcile_orphan_reservations(vault_root: Path) -> tuple[int, bool]:
         if isinstance(binding, dict) and binding.get("schema") in {
             "exomem.governance-policy-proposal/v3",
             "exomem.governance-policy-proposal/v4",
+            "exomem.governance-policy-proposal/v5",
         }:
             # Immutable-generation proposals own receipt reservation and recovery in
             # the v4 policy publisher.  They intentionally have no legacy YAML

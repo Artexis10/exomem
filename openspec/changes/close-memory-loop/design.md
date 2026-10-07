@@ -28,6 +28,8 @@ The programme serves a domain-neutral epistemic substrate, not only conversation
 
 Only semantic changes covered by the correction contract require such interpretation history; formatting and derived maintenance do not create new knowledge objects. Bounded history reads must not scan every prior revision or the whole vault. Retention, deletion and current disclosure govern historical payloads as well as current content; keep an explicit unavailable state if retained content is no longer accessible. Measure storage/write amplification and bounded history-read cost at realistic correction depth, including retention/restore, before claiming the representation scales. This does not make full history a prerequisite for ordinary current-state reads.
 
+**File-row history (3.15, first slice).** A guarded Records or Planning file-row update that changes the row's payload keeps the payload it replaced in the same atomic batch as the correction: prior values and body with their payload hash, operation, `why`, audit transition, before/after item hashes, actor, and the caller's input binding (an episode correction names its curation run; a direct update has none). An update that leaves the payload unchanged keeps only an empty marker named for its transition, so the read accounts for it instead of reporting lost history; a refused retry keeps nothing. Each entry is one create-only JSON file named like `registry_history` versions under `Knowledge Base/_Collections/history/<collection_id>/<item_key>/`, inside the collection store's reserved tree, not `_Governance`: that tree is the governance authoring workspace, whose non-operational files are policy inputs, export treats it as disposable, and Records writers must not reach administration state. No read surface serves a reserved file, so `record_memory`/`plan_memory` `history` is the only way to a kept payload; it first releases the row exactly as a query would, so history is withheld exactly when its row is and a withheld row answers like a missing one. A read returns one page, newest first (default 20, at most 50) with a continuation, and opens only that page's entries. A kept body passes through the same origin projection and gate (`egress.projects_origin`) as the live row, under the reader's principal, and the corrector's audience is shown only to the owner or to that audience. `status` is `complete` when every correction in the row's verified audit chain has an entry, `unavailable_legacy` (with a count) when some predate retention, and `unverified` when the chain itself fails verification. Export classifies the history subtree as canonical content beside the store's mode marker and replica, so supported export and restore carry it. The module is the logical interface: store-mode collections keep row content in `item_versions`, which later backs the same read. Measured cost is about 730 B per correction for a three-field row with an empty body; it grows with the row's own payload, never with the collection. Note and semantic-unit revisions are the next slice.
+
 **Explanations reuse authored relationships.** Refinement, specialization, derivation, decomposition and changed support can use existing governed relations and open vocabulary; these examples are not a closed transition ontology. `resolve-relation-fragment-targets` owns precise target resolution. The shared graph-query owner consumes that identity and retained revision evidence, labels page-level fallback, and assembles evidence chains or reverse-impact candidates. Projection freshness, changed supporting evidence and authored supersession are distinct. A changed premise invites reconsideration; deterministic dependency machinery does not decide that a conclusion is false. Preserve the agreed S1/G4 placement dependencies rather than adding a second traversal backend.
 
 **Compute is not epistemic authority.** Cheap workers can propose extractions, relationships or interpretations under the active agent; proposals remain attributable, source/version-bound candidates until an authorized writer accepts the agent's disposition. The principal reasoner is scoped to an operation, not a global single brain. Repeated workers over one source remain one evidential origin, and a delayed candidate cannot overwrite a later correction. Start by measuring agent-layer delegation against direct reasoning. A server placement, including generation, remains possible when its measured benefit justifies a separately specified output/effect contract, bounded data access and resources, cancellation/recovery and stale-input handling. Existing closed-label instruments and current runtime defaults remain unchanged; this is not permission to turn on an unreviewed worker.
@@ -162,6 +164,354 @@ Semantic neighbour evidence for a non-exact term moves to the sensed epistemic m
 Version any changed draft encoding. Legacy experiment drafts without a canonical binding require fresh validation; other note types retain their existing token semantics. Replaying an already committed receipt remains a readback of that original effect and never repeats or relocates it. The binding is validation evidence, not a permission grant.
 
 Every fan-out destination retains its originating episode/source/span identity. Compilation cannot increase the number of independently established input origins: conversation-only fan-out inherits one episode origin, while independently established original sources discussed together retain their distinct identities. Copying either source into more pages adds no independent evidence. The write-time carrier and background detector must agree; where independence cannot be established, report it as unassessed rather than count pages as independent mentions.
+
+Independence may be supported by an explicit, attributed active-agent assessment
+bound to the exact retained inputs, their versions and relevant spans. Report
+this as an agent assessment, never as server-certified semantic independence.
+The server validates the retained-input and target bindings and existing
+authority; it does not infer independence from distinct URLs, IDs, hashes,
+sessions or page counts. Missing, stale or unsupported bindings cannot establish
+independent recurrence. This assessment is advice evidence only: capture,
+promotion and disclosure permissions remain unchanged.
+
+Preserve the original input identities through synthesis and copying. A synthesis
+supported by two independently assessed originals retains both origins rather
+than collapsing them because they share a destination or discussion. Attribute
+support to the relevant claim/span, not every statement on the containing page.
+Separate assessments cannot be composed into an additional independence claim
+that the agent did not assess. Legacy provenance without an adequate assessment
+remains explicitly unassessed; migration must not manufacture independence.
+
+##### Origin accounting implementation boundary
+
+Use one versioned `exomem-origin:v1` JSON comment in canonical managed content,
+outside authored semantic units. Existing `content`, entity `summary` and
+file-Records item `body` inputs carry it; Source capture remains raw and never
+interprets a provenance-looking comment as an assessment. Keep three distinct
+collections: retained `inputs`, explicit `assessments` over those inputs, and
+`bindings` from selected inputs to output scopes. A claim supported only by A
+may retain an assessment of A and B without falsely attributing B to that claim.
+Limit an assessment to eight inputs, a page to 32 bindings, and total origin
+metadata to 16 KiB. New authoring beyond the limits is a typed refusal, not
+silent truncation; unsupported legacy metadata remains unassessed.
+
+Inputs use existing canonical Source/Evidence references, optional exact unit
+references/fingerprints and exact version-bound spans. Assessments name their
+input set, `basis: agent_assessment`, authored attribution and a bounded reason.
+Authored attribution is not authenticated identity or a permission credential.
+Bindings use existing local unit anchors/fingerprints; mixed claims require an
+exact subspan. Relation scopes bind the resolved directed tuple and its authored
+occurrence. Entity/Records field scopes bind selected top-level values; Records
+add their existing collection/item identity. No whole-page fallback assigns
+sources to unrelated claims. Derive original roots from retained original
+identity, using the verified episode identity for episode recap inputs; changing
+a version, unit selector or destination cannot mint an additional root.
+
+The v1 envelope has exactly `inputs`, `assessments` and `bindings`. `inputs`
+is a map of page-local labels to `{reference, version}`, with optional
+`unit_fingerprint` and `span`. Labels only connect this envelope's collections;
+they are never source identities or authenticated principals. `reference` uses
+the existing canonical memory reference, optionally with its exact unit fragment.
+`version` is the material version. A unit input also retains its current unit
+fingerprint. Spans use the existing start/end character-offset convention,
+relative to the selected body or exact unit text and bound by that version.
+Assessments contain exactly `inputs` (labels), `basis`, `by` and `reason`;
+bindings contain exactly `inputs` (the contributing labels) and `scope`.
+Neither collection needs another identifier or attribution store.
+
+Scopes are closed variants: `unit` uses the existing local `unit_ref` fragment,
+fingerprint and optional exact subspan; `relation` uses its registered relation,
+direction (`outbound` or `inbound`), canonical peer reference and authored
+`occurrence_fingerprint`; `field` uses the top-level field and value fingerprint;
+`record_field` additionally uses the existing collection ID and item key.
+A relation's owning page supplies its own endpoint: resolution and its occurrence
+fingerprint bind the resulting directed tuple, not a page-wide link list.
+The existing preparation owners may fill an omitted target fingerprint for a
+new authored effect; persisted metadata requires it and is never rebound.
+
+Serialized scopes use the discriminator `kind` and these exact keys:
+
+- `unit`: `unit_ref` (the existing local fragment, including its leading `#`),
+  `fingerprint`, and optional `span`.
+- `relation`: `relation`, `direction`, `peer`, `occurrence_fingerprint`.
+- `field`: `field`, `fingerprint`.
+- `record_field`: `collection_id` (the existing canonical UUID), `item_key`
+  (the existing string identity), `field`, `fingerprint`.
+
+Versions/fingerprints are 64-character lowercase hexadecimal strings. Input
+and unit-scope spans use `start_offset` and `end_offset`: zero-based,
+end-exclusive character offsets relative to the selected input body/unit text
+or target unit text, respectively. Input unit revisions use `unit_fingerprint`;
+the exact selector remains in `reference`. Only the target fingerprint may be
+omitted for initial preparation, never a required input/version binding.
+
+One shared parser/encoder owns this grammar. Duplicate JSON keys, unknown
+fields/variants/versions, dangling labels, duplicate membership, invalid spans
+or multiple designated blocks cannot become assessed support. New authoring
+gets a typed refusal; existing unsupported or malformed metadata is unassessed.
+Keep the reserved block's location even when it is invalid so later disclosure
+can withhold the whole payload rather than treating it as safe ordinary prose.
+Fenced/inline examples are not designated metadata. Canonical JSON escaping
+must prevent authored attribution or reasons from terminating the HTML comment.
+The existing eight-input, 32-binding and 16 KiB bounds apply without additional
+per-service state or an extra matrix of content-specific limits.
+
+Markdown code context has one owner for origin carriers, `markdown_regions.py`,
+backed by the core-pinned `markdown-it-py==4.2.0` CommonMark parser. It owns
+fenced, indented and inline code at exact original offsets (Unicode and CR/LF
+preserved); the pin stays exact because the offset adapter subclasses the
+inline parser. Comment carriers are deliberately conservative and need no HTML
+parser: every reserved opener (`<!--` then `exomem-origin`) outside markdown-it
+code and not backslash-escaped is a carrier that runs to its first `-->` or the
+end of the text. Openers are located directly, never through another
+comment's span, so a stray `<!--` above a carrier cannot swallow it. That code
+exemption governs classification and writing only. A read that projects origin
+fails closed: unless the page's one valid carrier outside code is released to
+the reader, every reserved opener is withheld wherever it sits, code and
+escapes included, so an unclosed fence or an indent above a carrier cannot
+display its payload as code. An opener inside code with no `-->` before that
+code ends is a mention, not a carrier: its span ends with the code, so prose
+and links after a documented opener stay readable for everyone. The span still
+runs to the `-->` when that follows with no blank line between, which keeps a
+carrier that code swallowed whole. Nothing is withheld from the owner, and with no
+configured audience nothing is projected, so both read every page as written.
+Fields that every audience shares withhold the same spans for everyone: search
+fields and titles (BM25, lexstore, embedding chunks, find excerpts), context
+pack ledes, excerpts, projected search fields and bridge abstractions. A fenced
+example of a carrier is over-hidden there, which costs nothing worth keeping.
+Prose served to one caller passes one choke point, `egress.prose_for_caller`:
+withheld for a reader whose origin is projected, the code-exempt classification
+for the owner. Review context, graph-context documents, link suggestions,
+upkeep and adoption excerpts, entity ledes and outbound links use it. Fields
+built once for every caller withhold for everyone: graph node and edge text,
+titles and metadata (at emission, so a stored graph needs no rebuild),
+category excerpts, claims, anchor signatures and activation's ranking text.
+Find and pack units drop a unit that overlaps a carrier this caller is never
+shown (`egress.carrier_spans_for_caller`), and cached find results key on that
+view, so the owner keeps a carrier example in a unit's code literal. The provenance report, the inbound-link index and
+the activation index's link edges drop each carrier's characters and keep its
+line breaks: a carrier is never a provenance tag or a link, so a carried page
+never lists a person only its carrier links. A writer never rewrites a link
+inside a carrier, in link normalization or on a move, so a carrier keeps the
+bytes it recorded. Semantic units keep the code exemption, so the write side
+keeps code examples literal. Reading over-hides a literal that HTML would not treat as a comment, which costs nothing; writing
+accepts exactly one designated block and refuses anything else (malformed,
+unterminated or more than one) with a typed `ORIGIN_METADATA_INVALID`. Origin
+JSON is decoded from original slices, and an unmappable offset fails the
+operation rather than returning absent metadata.
+
+markdown-it is not yet the only Markdown owner. It locates code only for origin
+carriers. Wikilink masking keeps the line-regex masker on every page, so a page
+reads the same links with or without a carrier and the hot path costs what it
+did. Seven regex fence parsers remain:
+`semantic_units.py` (`_FENCE_RE`), `semantic_blocks.py` (`_FENCE_RE`),
+`observe_memory.py` (`_FENCE_RE`), `context_pack.py` (`_FENCE_RE`),
+`markdown_relations.py` (`_FENCE_RE`), `record_formats.py` (`_FENCE_OPEN`) and
+`working_set_anaphora.py` (`_FENCE`). Blanking origin spans before unit parsing
+keeps them from diverging for this feature. A follow-up consolidates them onto
+the one owner; no change adds a third parser. `markdown_regions` is imported
+lazily, only once a reserved opener or code marker is present.
+
+Compute `evidence_version` once in the shared provenance code from the retained
+body and canonical parsed frontmatter, excluding only `ingested_into`. All other
+metadata, including episode status, update time, successor, original identity,
+capture metadata and governance fields, stays bound. Episode supersession is a
+meaningful revision, not an ignored bookkeeping change. Keep this material
+version separate from the freshly checked whole-page `content_hash` and existing
+write guards. Expose it only after a complete Source/Evidence read passes the
+existing full-release and truncation checks, including exact-unit parent release;
+withheld, partial or frontmatter-only output provides no binding value.
+For an exact unit, full parent authorization and unchanged returned
+unit/context/parent metadata are required. The version guards that selected
+scope's parent revision; it does not attest that unreturned parent text was
+delivered or credential-scanned. Terminal filtering that changes the actual
+requested page or unit withdraws the version without changing canonical hashes.
+
+Treat the reserved origin block as structured provenance at the existing
+disclosure boundary, not as ordinary authored prose. Before returning body/raw
+content, nearby unit context or projected metadata, gate the whole block under
+the current reader's policy for every retained input. An unavailable or
+insufficiently released input removes the entire payload, including attribution
+and free-text reasons; no hidden reference, version or input count escapes.
+Canonical bytes are not rewritten. A redacted projection is not exact raw
+content: omit the raw representation and retain existing exact-read refusal
+rules and canonical drift guards. Source capture text is still raw evidence,
+not a designated managed origin block.
+
+##### Origin-aware projector refresh
+
+A projector change requires fresh canonical search fields for every active
+catalog item, including items with only low-disclosure or no serving variants.
+Do not derive the new fields from a predecessor excerpt. Reuse the existing
+catalog preparation and vector, CLIP and graph measurement owners; retain all
+required measurement families under the new variant identities. Managed origin
+comments are not ordinary graph links. Immutable historical namespace schemas
+remain readable for preparation and receipt recovery, but obsolete projector
+versions are not eligible for current serving or fresh content publication.
+
+An owner explicitly proposing `documents={}` through `govern_memory` prepares a
+representation-only refresh from the exact active immutable policy; omitted
+documents remain invalid. This does not overlay or mirror pending workspace
+policy. Commit uses the existing policy-generation publisher and complete tuple
+CAS: a new policy-generation identity, the same policy fingerprint, the running
+projector version, and the same catalog generation when its descriptor is
+unchanged. An already-current representation reports that no refresh is needed,
+without a new proposal or generation. Ordinary policy proposals also prepare
+fresh fields under the running projector. No new mutation executor is added.
+
+Nothing about this refresh needs a person: the owner runtime runs it at startup
+or takeover (local activation and hosted active startup), under the writer lease
+as a background holder, through the same owner proposal and commit. An
+already-current tuple answers `current`. A refresh whose commit reserved its
+publication before a crash is committed from its own receipt first, as an owner
+retry would be; an unreserved proposal simply expires. Each outcome is logged,
+and a failure leaves serving up for the next owner start to retry.
+
+Representation-only refresh preserves grants through an explicit bound proposal
+mode, not by reinterpreting legacy missing grant-transition data. This is allowed
+only for unchanged policy bytes/fingerprint and catalog authority bindings;
+concurrent grant lifecycle changes remain authoritative. Changed policy or
+membership retains ordinary dependent-grant review. Commit verifies the complete
+staged namespace and measurement roots without rerunning models. A committed
+predecessor receipt recovers its exact original publication; an uncommitted old
+projector proposal requires fresh preparation rather than silent conversion.
+
+Runtime installation happens outside queries after publication and registry
+acknowledgement. Until a compatible representation is installed, content serving
+reports content-free pending readiness while the owner refresh operation remains
+reachable; startup must not crash or silently use old fields. This prevents stale
+origin metadata from being served. A wrong firing costs temporary content
+unavailability to the reader and bounded refresh work to the owner, never a
+human reapproval of unchanged grants. Release compatible writers first, refresh
+through this owner, then activate the runtime; rollback does not relabel old
+derived data as current.
+
+Retain the complete bounded set of input proofs through a carrier read. After
+initial resolution, run one final sweep through the shared snapshot release and
+exact-text checks, requiring unchanged full frontmatter; then refresh a verified
+authorization session through its existing custody/status owner when present.
+Check every input and episode-journal byte guard after that sweep, immediately
+before returning the carrier. This observes persistent changes during initial
+resolution; it does not promise a linearizable snapshot across files, policy,
+sessions and external custody, or prevent changes after their final checks.
+Do not add transitive dependency-proof storage or repeat resolution indefinitely.
+The control prevents stale attribution release; a wrong firing costs the caller
+attribution for that response, not ordinary parent prose or a human approval.
+Existing exact-read refusal rules still apply when the projection differs.
+
+New retained Source/Evidence episode inputs use the material version through the
+existing input-model/journal compatibility path. Historical digests, attempted
+leaf identities and receipts remain unchanged. A legacy binding that cannot be
+verified stays stale until an ordinary new input revision is supplied; it is
+never silently rebound. Normalize/validate new attribution during existing
+writer preparation before its prepared effect is sealed. Existing normalized
+leaf arguments and receipts cover the canonical bytes; no new mutation argument,
+leaf kind, episode transition or attribution event store is needed.
+
+Extract the existing episode input snapshot/release/selection work into one
+internal retained-input reader, rather than duplicating authorization in the
+origin validator. Reuse the prepared immutable page, nested disclosure owner,
+exact semantic-unit selector and physical raw-byte `PathGuard`; the logical page
+path remains the authorization key. The trusted committed-Source path verifies
+the canonical reference at that path without a corpus walk. Its compatibility
+adapter may keep the privately read snapshot solely for the existing opaque
+digest-only receipt when release or guard acquisition fails. An ordinary input
+read must refuse instead; unavailable text never enters a result or exception.
+
+Episode labels on a recap are lookup cues, not original-identity proof. Only an
+exact canonical-parent/digest match in the current audience's existing episode
+ledger establishes its episode root, using that entry's recorded digest scheme.
+Reuse the journal owner's bounded read and reconstruction, retaining a guard on
+the same journal bytes. Missing, digest-only, corrupt, mismatched or foreign-owned
+history supplies no episode root; do not search other audiences, repair history
+or substitute the recap page identity. Unit selectors, spans and revisions do
+not create new roots. Origin binding remains separate from legacy digest logic.
+
+Writer adapters must extract the reserved block from unit content or entity
+summary before ordinary rendering, place it outside semantic units, and retain
+the existing content validation. In particular, compact observations remain
+single-line semantic content; metadata cannot become their text or alter a unit
+fingerprint by embedding its own fingerprint. Initial authoring may omit the
+target fingerprint for preparation to compute from the exact submitted effect.
+Persisted bindings require it. Unchanged existing metadata is never rebound to
+changed content: an unrelated unit/field edit preserves valid scopes, while a
+changed bound claim/relation/field makes that binding stale.
+
+The shared validator resolves exact inputs under current release policy and
+returns fresh source guards to the existing commit owners. Shared semantic
+preflight covers notes, entities, observations, edits and relation-bearing page
+mutations; file-Records needs its own thin adapter before payload hashing and the
+existing preparation callback. Its item body and selected fields, not a manifest
+or neighbouring item, own the attribution. Preserve raw Source/Evidence capture
+and current permission checks throughout.
+
+Carry the prepared input and episode proof through those existing preflights to
+the atomic batch. Byte guards and disclosure receipts are not permission proofs:
+one private, non-serialized validation callback must freshly acquire applicable
+policy/session authority and re-resolve the exact inputs, versions, selections
+and roots immediately before the first destination publication and after all
+destinations are installed, while ordinary failure can still roll back the batch.
+An operation's cached verdict or pinned policy snapshot cannot satisfy either
+check. Preserve the atomic owner's caught-failure rollback and interruption
+semantics; this adds no cross-filesystem or SQLite linearizability guarantee.
+
+Source closure may rewrite an input's `ingested_into` in that same batch. Require
+its planned post-image to preserve the material version, use the existing write
+guard and installed-artifact guard, and do not also retain its old-byte guard as
+a read-only requirement. Keep unchanged inputs and episode journals guarded.
+Do not evaluate full release against intermediate backrefs naming destinations
+that are not installed yet: existing byte/identity guards run before each flip,
+and the final permission check evaluates the complete post-image. Origin
+staleness retains a distinct refusal rather than being reported as stale
+vocabulary. Session expiry, revocation, narrower policy or changed bridge
+dependencies at either permission checkpoint must refuse without a committed
+origin-bearing effect, including rollback of installed auxiliaries.
+
+The file-Records preparation callback must receive the writer's normalized
+body/payload rather than recomputing a hash from the originally supplied body.
+Preparation, commit and receipt reconciliation must therefore bind identical
+canonical bytes, including a target fingerprint filled during preparation.
+This is an internal adapter change, not another argument or persistence layer.
+An unchanged original authored Records proposal may be repeated or retained
+beside new leaves after commitment, including commitment through curation before
+the episode records an attempt. Recognize it by applying only omitted output
+fingerprints from the exact retained binding and the same carrier placement and
+encoding. The result and all other arguments must equal the retained effect;
+do not reread today's Source or target, recertify historical input permission,
+or relax attempted-effect identity. Changed prose, inputs, scopes or supplied
+fingerprints are not an equivalent request.
+
+One scoped resolver selects actual contributing units, field values or relation
+occurrences before aggregation. Do not use a first-link-only or page-wide
+contribution as evidence for every unit/pair. Rebuildable node/edge metadata
+carries this same parsed attribution for graph-only consumers. Recurrence,
+capture advice, hydration and vocabulary relation advice share its summary.
+URL/hash/import aliases remain descriptive copy clues, never independence proof.
+The largest applicable valid explicit assessed set intersecting the contributing
+roots supplies a conservative lower bound: AB and BC never become an assessed
+ABC, even when all three pairs were assessed separately. No clique search or
+independence graph is introduced.
+
+Write-time advice compares the same scoped summary before and after the current
+write, including an already-linked identity gaining a second original and one
+synthesis carrying two originals. Keep page counts descriptive. Existing
+bounded discovery, incomplete/unavailable states and the ordinary-text lane's
+additional eligibility rules remain; only the two-origin wikilink gate changes
+with task 4.5. No canonical database, SQLite migration, receipt rebinding or
+historical independence backfill belongs to this implementation.
+
+Acceptance is five public-writer journeys in a temporary vault: one conversation
+fanning into Source/facet/note/file-Record remains one origin after publication
+and restart; two assessed originals plus synthesis/copies remain two and agree
+across write/background/vocabulary advice despite backlinks; mixed scopes and
+AB/BC do not inflate support; invalid/missing/withheld/stale bindings abstain and
+relevant/unrelated edits invalidate/preserve the right scopes; interrupted
+committed leaves reuse the original receipt without another effect or origin.
+The withheld-input case reads an otherwise permitted parent page through the
+public surface and verifies that its metadata cannot disclose the input. The
+interrupted Records case starts with an omitted target fingerprint and verifies
+that normalization cannot strand a committed append as uncertain.
+These checks prove writer/accounting plumbing, not ordinary-agent initiation.
 
 #### Identity, roles and supplier provenance
 
@@ -337,6 +687,12 @@ Lexical contact reads the words a turn shares with an anchor. A German or Russia
 Acceptance runs on the multilingual fixture set (`context-activation-multilingual-v1`): its hard gates on both arms in the core tier with planted vectors, and the usefulness bars and latency with the served encoder in the embeddings job.
 
 ### 8. Adaptation, hot profile, priors and dreamer are committed milestones
+
+The union-find origin accounting described below records the shipped legacy
+detector, not the task 4.3 contract. Task 4.3 replaces it with the scoped,
+agent-attributed accounting in §4 for every recurrence, hydration and vocabulary
+consumer; unrelated support stays unassessed and synthesis does not merge its
+originals. The worker lifecycle and proposal-delivery guarantees remain unchanged.
 
 User corrections and observed misses create bounded review candidates tied to evidence. The active agent can propose revisions to registered context roles, cues, aliases or vault conventions; application follows each family's applicable authority, with versions and reversible history. The current `context-roles` owner-authored override gate remains in force: agent proposals do not independently grant role-edit authority. A fresh session must consume the accepted result. Do not encode one user's equipment, suppliers or language into product source. Hard identity, provenance, authority and abstention invariants remain stable.
 

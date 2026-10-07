@@ -1036,11 +1036,14 @@ def assemble_context(
     if target_path:
         try:
             page = get_page_module.get_page(root, path=_clean(target_path))
+            from .governance import egress
+
+            prose = egress.prose_for_caller(root, page.body, owner_path=page.path)
             target = {
                 "path": page.path,
                 "content_hash": page.content_hash,
-                "excerpt": page.body[:max_chars],
-                "excerpt_truncated": len(page.body) > max_chars,
+                "excerpt": prose[:max_chars],
+                "excerpt_truncated": len(prose) > max_chars,
             }
         except Exception:  # noqa: BLE001 - a missing target is reported, not fatal
             target = {"path": _clean(target_path), "content_hash": None, "missing": True}

@@ -33,7 +33,7 @@ def test_dockerfile_declares_cuda_target_as_capable_not_resident() -> None:
 
 def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
     text = _read("Dockerfile")
-    hosted = text.split("FROM python:3.12-slim AS hosted", 1)[1].split(
+    hosted = text.split("FROM python:3.12-slim AS cell-runtime", 1)[1].split(
         "FROM python:3.12-slim AS lean", 1
     )[0]
 
@@ -64,9 +64,9 @@ def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
         return text.split(header, 1)[1].split("\nFROM ", 1)[0]
 
     builder = stage("FROM builder-lean AS builder-hosted")
-    hosted = stage("FROM python:3.12-slim AS hosted")
+    hosted = stage("FROM cell-runtime AS hosted")
     cloud_builder = stage("FROM builder-hosted AS builder-cloud-model")
-    cloud = stage("FROM hosted AS cloud")
+    cloud = stage("FROM cell-runtime AS cloud")
 
     for part in (builder, hosted):
         assert f"{recall_space.RECALL_MODEL_ENV}={hosted_model}" in part
@@ -75,7 +75,11 @@ def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
     for part in (builder, cloud_builder):
         assert "HF_HUB_OFFLINE=1" in part
         assert "recall_space.declared_dim(MODEL_NAME)" in part
-    assert "COPY --from=builder-cloud-model /opt/exomem-models /opt/exomem-models" in cloud
+    # The cloud builder fetches into a root of its own, so the English model
+    # it was built over never reaches the cloud image.
+    assert "HF_HOME=/opt/exomem-cloud-models" in cloud_builder
+    assert "COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models" in cloud
+    assert "COPY --from=builder-hosted /opt/exomem-models" not in cloud
 
 
 def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egress() -> None:
@@ -83,7 +87,7 @@ def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egr
     manifest, must keep runtime logs off the tenant volume and avoid FastMCP's
     startup update check stalling every cold start on a no-egress NetworkPolicy."""
     text = _read("Dockerfile")
-    cloud = text.split("FROM hosted AS cloud", 1)[1].split(
+    cloud = text.split("FROM cell-runtime AS cloud", 1)[1].split(
         "FROM python:3.12-slim AS lean", 1
     )[0]
 

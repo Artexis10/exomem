@@ -15,8 +15,8 @@ import asyncpg
 import pytest
 
 from cellctl import reconcile
-from cellctl.decide import decide
-from cellctl.manifests import STORAGE_CLASS, namespace_name
+from cellctl.decide import StorageRoom, decide
+from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import ClusterConfig
 from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, RolloutRow
 from cellctl.storage.fake_b2 import FakeB2
@@ -147,6 +147,8 @@ def test_with_no_local_class_an_existing_cells_render_digest_does_not_move() -> 
     config = ClusterConfig(
         object_storage_bucket="b",
         job_egress_except=("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"),
+        # Production's live chart values still set the resources it was captured with.
+        resources=ResourceSettings(cpu_request="250m", memory_request="1Gi"),
     )
 
     assert _compute_render_digest(row, config, _secrets_config(), STORAGE_CLASS) == (
@@ -403,6 +405,18 @@ def test_an_hourly_backup_reads_a_clone_of_its_snapshot_and_ends_once_both_are_g
     assert (finished.hold_kind, finished.row_updates["hold_kind"], finished.replicas) == (None, None, 1)
 
 
+def test_a_finished_hourly_backup_deletes_its_job_so_its_clone_can_go() -> None:
+    # Kubernetes keeps a claim while any pod mounting it exists, a finished
+    # one included. Left alone, the backup Job's pod held the clone, and so
+    # the hold, until the Job's five-minute TTL (local-storage drill, task 4.1).
+    row = _row(hold_kind="backup", hold_started_at=STARTED, last_backup_at=NOW, last_backup_snapshot=SNAPSHOT_ID)
+
+    cleaning = _step(_in_hold(statefulset_backup_outcome=SNAPSHOT_ID, clone_exists=True), row)
+
+    assert (cleaning.delete_backup_job, cleaning.delete_snapshot_backup, cleaning.hold_kind) == (
+        True, True, "snapshot-backup")
+
+
 def test_a_failed_hourly_backup_backs_off_and_still_removes_its_clone_and_snapshot() -> None:
     late = STARTED.replace(hour=12, minute=20)  # past the 15-minute backup deadline
 
@@ -455,11 +469,11 @@ def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serv
 
     hard = render_resource_quota(spec)["spec"]["hard"]
 
-    # Serving 250m/1Gi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
+    # Serving 125m/512Mi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
     assert {key: hard[key] for key in ("persistentvolumeclaims", "requests.storage", "requests.cpu",
                                        "requests.memory", "limits.cpu")} == {
-        "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "350m",
-        "requests.memory": "1280Mi", "limits.cpu": "3",
+        "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "225m",
+        "requests.memory": "768Mi", "limits.cpu": "3",
     }
 
 
@@ -1088,7 +1102,8 @@ def test_the_alert_is_the_receivers_exact_transition_shape(monkeypatch: pytest.M
 
     monkeypatch.setattr(alerts.urllib.request, "build_opener", lambda *handlers: Opener())
 
-    alerts.deliver("https://receiver.example/api/exomem/alerts/token", active=True, observed_at=NOW)
+    alerts.deliver("https://receiver.example/api/exomem/alerts/token", alert=alerts.BACKUP_ALERT, active=True,
+                   observed_at=NOW)
 
     (request,) = sent
     body = json.loads(request.data)
@@ -1106,7 +1121,12 @@ async def test_a_stale_backup_fires_once_and_resolves_once_through_the_alert_rec
     from cellctl import alerts, db
 
     delivered: list[tuple[str, bool]] = []
-    monkeypatch.setattr(alerts, "deliver", lambda url, *, active, observed_at: delivered.append((url, active)))
+
+    def deliver(url: str, *, alert: str, active: bool, observed_at: datetime) -> None:
+        if alert == alerts.BACKUP_ALERT:
+            delivered.append((url, active))
+
+    monkeypatch.setattr(alerts, "deliver", deliver)
 
     class Gateway(FakeClusterGateway):
         def read_secret_value(self, namespace: str, name: str, key: str) -> str:
@@ -1149,7 +1169,9 @@ async def test_a_receiver_that_is_down_is_asked_again_a_minute_later_not_every_p
 
     attempts: list[datetime] = []
 
-    def deliver(url: str, *, active: bool, observed_at: datetime) -> None:
+    def deliver(url: str, *, alert: str, active: bool, observed_at: datetime) -> None:
+        if alert != alerts.BACKUP_ALERT:
+            return
         attempts.append(observed_at)
         if len(attempts) == 1:
             raise RuntimeError("alert delivery failed")
@@ -1223,3 +1245,410 @@ def test_after_an_etcd_restore_each_volume_on_disk_is_matched_to_its_row_or_repo
     assert report.conflict == [("eeeeeeeeeeeeeeee", "vol-twice", ["agent-2", "agent-3"])]
     # Neither a row nor an object claims it; only an operator on the host releases it.
     assert report.unclaimed == [("agent-1", "vol-stray")]
+
+
+# --- 2.10: a local cell grows online before it fills ---------------------------------------
+
+MEASURED_SNAPSHOT = "e" * 64
+# More free bytes on agent-1 than any step and reserve these tests take.
+ROOMY = StorageRoom(free_bytes={"agent-1": 200 * GIB}, largest_cell_gib=10)
+
+
+def _backed_up(used: int, total: int = 100, **overrides) -> ClusterObservation:
+    """The pass that sees this hold's backup Job finish, with the clone's
+    filesystem use the Job reported, in bytes."""
+
+    return _in_hold(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True,
+                    backup_job_succeeded=True, backup_job_snapshot_id=MEASURED_SNAPSHOT,
+                    backup_job_used_bytes=used, backup_job_total_bytes=total, **overrides)
+
+
+def _measure(observation: ClusterObservation, row: CellRow | None = None, *, storage: StorageConfig = MIGRATING,
+             room: StorageRoom | None = ROOMY):
+    return decide(row or _row(hold_kind="backup", hold_started_at=STARTED), RolloutRow(), observation, now=NOW,
+                  cell_image=IMAGE_A, start_upgrade=False, storage=storage, storage_room=room)
+
+
+def test_a_backup_refuses_a_volume_that_holds_no_vault_before_restic_reads_it(tmp_path) -> None:
+    # A served cell restarted onto an emptied volume: cell-init refuses, but
+    # leaves /data/vault and /data/host empty. Backed up, they would become the
+    # cell's last restore point. The rendered script runs under sh, with
+    # restic stubbed and the cell image's exomem.vault stubbed to find no vault.
+    import os
+    import subprocess
+
+    from cellctl.manifests import CellManifestSpec, render_backup_job
+
+    from .test_k8s_client import CELL_ID, CURRENT_HOLD
+
+    bin_dir, data, stubs = tmp_path / "bin", tmp_path / "data", tmp_path / "stubs" / "exomem"
+    bin_dir.mkdir()
+    (data / "vault").mkdir(parents=True)
+    (data / "host").mkdir()
+    stubs.mkdir(parents=True)
+    (stubs / "__init__.py").write_text("", encoding="utf-8")
+    (stubs / "vault.py").write_text("def _is_vault(path):\n    return False\n", encoding="utf-8")
+    calls = tmp_path / "restic-calls"
+    restic = bin_dir / "restic"
+    restic.write_text(f"#!/bin/sh\necho \"$1\" >> {calls}\n", encoding="utf-8")
+    restic.chmod(0o755)
+    spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
+                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
+    shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
+                                            retention=None)["spec"]["template"]["spec"]["containers"][0]["command"]
+    for path, moved in (("/dev/termination-log", tmp_path / "termination-log"),
+                        ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
+        script = script.replace(path, str(moved))
+
+    result = subprocess.run([shell, flag, script], env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(stubs.parent)})
+
+    assert result.returncode != 0
+    assert (tmp_path / "termination-log").read_text(encoding="utf-8") == "BACKUP_SOURCE_NOT_A_VAULT"
+    assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
+
+
+def test_a_vault_check_that_cannot_run_is_reported_apart_from_a_volume_with_no_vault(tmp_path) -> None:
+    # An image whose exomem.vault cannot answer (renamed, missing, crashing)
+    # must not read as an emptied volume: the operator would look for lost
+    # data instead of a broken check. The rendered script runs under sh, with
+    # restic stubbed and exomem.vault stubbed without its check.
+    import os
+    import subprocess
+
+    from cellctl.manifests import CellManifestSpec, render_backup_job
+
+    from .test_k8s_client import CELL_ID, CURRENT_HOLD
+
+    bin_dir, data, stubs = tmp_path / "bin", tmp_path / "data", tmp_path / "stubs" / "exomem"
+    bin_dir.mkdir()
+    (data / "vault").mkdir(parents=True)
+    (data / "host").mkdir()
+    stubs.mkdir(parents=True)
+    (stubs / "__init__.py").write_text("", encoding="utf-8")
+    (stubs / "vault.py").write_text("", encoding="utf-8")
+    calls = tmp_path / "restic-calls"
+    restic = bin_dir / "restic"
+    restic.write_text(f"#!/bin/sh\necho \"$1\" >> {calls}\n", encoding="utf-8")
+    restic.chmod(0o755)
+    spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
+                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
+    shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
+                                            retention=None)["spec"]["template"]["spec"]["containers"][0]["command"]
+    for path, moved in (("/dev/termination-log", tmp_path / "termination-log"),
+                        ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
+        script = script.replace(path, str(moved))
+
+    result = subprocess.run([shell, flag, script], env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(stubs.parent)})
+
+    assert result.returncode != 0
+    assert (tmp_path / "termination-log").read_text(encoding="utf-8") == "BACKUP_VAULT_CHECK_FAILED"
+    assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
+
+
+def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
+    # The Job and cellctl must agree on the termination message, or no cell
+    # ever grows. This runs the rendered command under sh, with restic stubbed
+    # and the Job's paths moved under tmp_path, and reads the message back as
+    # ClusterClient.observe() does. The cell image's exomem.vault is stubbed
+    # to find the vault.
+    import os
+    import subprocess
+
+    from cellctl.manifests import CellManifestSpec, hold_job_name, render_backup_job
+
+    from .test_k8s_client import CELL_ID, CURRENT_HOLD, NAMESPACE, _client, _job, _job_pod
+
+    bin_dir, data, stubs = tmp_path / "bin", tmp_path / "data", tmp_path / "stubs" / "exomem"
+    bin_dir.mkdir()
+    (data / "vault").mkdir(parents=True)
+    (data / "host").mkdir()
+    stubs.mkdir(parents=True)
+    (stubs / "__init__.py").write_text("", encoding="utf-8")
+    (stubs / "vault.py").write_text("def _is_vault(path):\n    return True\n", encoding="utf-8")
+    restic = bin_dir / "restic"
+    restic.write_text(
+        "#!/bin/sh\n"
+        f"if [ \"$1\" = backup ]; then echo '{{\"message_type\":\"summary\",\"snapshot_id\":\"{SNAPSHOT_ID}\"}}'; fi\n",
+        encoding="utf-8",
+    )
+    restic.chmod(0o755)
+    spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
+                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
+    shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
+                                            retention=None)["spec"]["template"]["spec"]["containers"][0]["command"]
+    for path, moved in (("/dev/termination-log", tmp_path / "termination-log"),
+                        ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
+        script = script.replace(path, str(moved))
+
+    subprocess.run([shell, flag, script], check=True, env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(stubs.parent)})
+
+    backup = hold_job_name("cell-backup", CURRENT_HOLD)
+    message = (tmp_path / "termination-log").read_text(encoding="utf-8")
+    observed = _client(hold_started_at=CURRENT_HOLD, jobs={backup: _job(succeeded=True)},
+                       pods=[_job_pod(backup, snapshot_id=message)]).observe(CELL_ID, NAMESPACE)
+    filesystem = os.statvfs(data)
+    assert observed.backup_job_snapshot_id == SNAPSHOT_ID
+    assert observed.backup_job_total_bytes == filesystem.f_blocks * filesystem.f_frsize
+    assert 0 < observed.backup_job_used_bytes <= observed.backup_job_total_bytes
+
+
+async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a_restart(
+    cell_db: CellDatabase,
+) -> None:
+    # Its hourly backup measures the filesystem. The claim and its quota grow
+    # once the hold's clone is gone, since the clone holds the quota's second
+    # share until then; the row records the size, and the pod template, so
+    # the running pod, stays as it was.
+    from cellctl import db
+    from cellctl.capacity import LocalCapacityObservation
+    from cellctl.manifests import (
+        BACKUP_OUTCOME_ANNOTATION,
+        GROW_STORAGE_ANNOTATION,
+        HOLD_ANNOTATION,
+    )
+
+    from .test_reconcile import _observed_from_applied
+
+    cell_id, namespace = "aaaaaaaaaaaaaaaa", namespace_name("aaaaaaaaaaaaaaaa")
+    await _seed_cell(cell_db, cell_id, "tenant-a")  # storage_gib 10
+    cluster = FakeClusterGateway()
+    cluster.delete_snapshot_backup = lambda namespace, snapshot, claim: None
+    cluster.local_capacity_inputs = lambda local: LocalCapacityObservation(free_bytes={"agent-1": 200 * GIB})
+    config = ClusterConfig(object_storage_bucket="b", storage=CUT_OVER)
+    local = dict(pv_storage_class=LOCAL.class_name, pvc_storage_class=LOCAL.class_name, pv_node="agent-1")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+
+    def applied(kind: str, name: str) -> dict:
+        return cluster.applied[(namespace, kind, name)]
+
+    def observe(**overrides) -> None:
+        annotations = applied("StatefulSet", "cell")["metadata"]["annotations"]
+        grow_to = annotations.get(GROW_STORAGE_ANNOTATION)
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, **local, statefulset_backup_outcome=annotations.get(BACKUP_OUTCOME_ANNOTATION),
+            statefulset_grow_storage_gib=int(grow_to) if grow_to else None, **overrides)
+
+    async def run(minute: int) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=NOW + timedelta(minutes=minute))
+
+    try:
+        await run(0)
+        observe()
+        await run(1)
+        observe()
+        await run(2)  # the hourly hold starts
+        template = applied("StatefulSet", "cell")["spec"]["template"]
+        observe(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True)
+        await run(3)
+        observe(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True,
+                backup_job_succeeded=True, backup_job_snapshot_id=MEASURED_SNAPSHOT,
+                backup_job_used_bytes=9 * GIB, backup_job_total_bytes=10 * GIB)
+        await run(4)  # 90% used
+        assert applied("PersistentVolumeClaim", "cell-data")["spec"]["resources"]["requests"]["storage"] == "10Gi"
+
+        observe()  # the clone and snapshot are gone
+        await run(5)
+
+        assert applied("PersistentVolumeClaim", "cell-data")["spec"]["resources"]["requests"]["storage"] == "14Gi"
+        assert applied("ResourceQuota", "cell-quota")["spec"]["hard"]["requests.storage"] == "28Gi"
+        statefulset = applied("StatefulSet", "cell")
+        assert HOLD_ANNOTATION not in statefulset["metadata"]["annotations"]
+        assert statefulset["spec"]["template"] == template
+        assert (await db.select_all_rows(connection))[0].grown_storage_gib == 14
+    finally:
+        await connection.close()
+
+
+def test_a_local_cell_at_80_percent_use_keeps_its_size() -> None:
+    decision = _measure(_backed_up(used=80, total=100))
+
+    assert decision.grow_storage_gib is None
+
+
+@pytest.mark.parametrize(("size", "grown"), [(18, 20), (20, None)], ids=["clamped-to-the-cap", "at-the-cap"])
+def test_a_local_cell_never_grows_past_the_configured_cap(size: int, grown: int | None) -> None:
+    capped = StorageConfig(local=LocalStorage(max_cell_gib=20))
+
+    decision = _measure(_backed_up(used=95), _row(storage_gib=size, hold_kind="backup", hold_started_at=STARTED),
+                        storage=capped)
+
+    assert decision.grow_storage_gib == grown
+
+
+def test_a_cell_at_its_cap_past_80_percent_use_raises_the_growth_alert() -> None:
+    # It cannot grow, so it will fill and fail its writes. That is when an
+    # operator must act, as when its node has no room.
+    from cellctl.alerts import growth_blocked
+
+    capped = StorageConfig(local=LocalStorage(max_cell_gib=20))
+    row = _row(storage_gib=20, hold_kind="backup", hold_started_at=STARTED)
+
+    decision = _measure(_backed_up(used=95), row, storage=capped)
+
+    assert growth_blocked([row], {row.cell_id: _local()}, {row.cell_id: decision.storage_growth}, storage=capped) is True
+
+
+async def test_a_cell_whose_node_has_no_room_keeps_its_size_and_raises_the_growth_alert(
+    cell_db: CellDatabase, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Growing into the node's snapshot reserve would starve the hourly backups
+    # of every cell on it. 14 GiB needs its 4 GiB step plus a 56 GiB reserve
+    # (2 x 14 GiB x 2 backups at once); the node publishes 59 GiB free.
+    from cellctl import alerts, db
+    from cellctl.capacity import LocalCapacityObservation
+    from cellctl.manifests import BACKUP_OUTCOME_ANNOTATION, GROW_STORAGE_ANNOTATION
+
+    from .test_reconcile import _observed_from_applied
+
+    delivered: list[tuple[str, bool]] = []
+    monkeypatch.setattr(alerts, "deliver",
+                        lambda url, *, alert, active, observed_at: delivered.append((alert, active)))
+
+    class Gateway(FakeClusterGateway):
+        def read_secret_value(self, namespace: str, name: str, key: str) -> str:
+            return "https://receiver.example/alerts/token"
+
+        def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
+            pass
+
+        def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation:
+            return LocalCapacityObservation(free_bytes={"agent-1": 59 * GIB})
+
+    cell_id, namespace = "aaaaaaaaaaaaaaaa", namespace_name("aaaaaaaaaaaaaaaa")
+    await _seed_cell(cell_db, cell_id, "tenant-a")  # storage_gib 10
+    cluster = Gateway()
+    config = ClusterConfig(object_storage_bucket="b", storage=CUT_OVER,
+                           alert_delivery_secret=("exomem-platform", "exomem-hosted-alert-delivery", "url"))
+    local = dict(pv_storage_class=LOCAL.class_name, pvc_storage_class=LOCAL.class_name, pv_node="agent-1")
+    memory = reconcile.LoopMemory()
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+
+    def observe(**overrides) -> None:
+        annotations = cluster.applied[(namespace, "StatefulSet", "cell")]["metadata"]["annotations"]
+        grow_to = annotations.get(GROW_STORAGE_ANNOTATION)
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, **local, statefulset_backup_outcome=annotations.get(BACKUP_OUTCOME_ANNOTATION),
+            statefulset_grow_storage_gib=int(grow_to) if grow_to else None, **overrides)
+
+    async def run(minute: int) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=NOW + timedelta(minutes=minute), memory=memory)
+
+    try:
+        await run(0)
+        observe()
+        await run(1)
+        observe()
+        await run(2)
+        observe(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True)
+        await run(3)
+        observe(snapshot_exists=True, snapshot_ready=True, clone_exists=True, clone_bound=True,
+                backup_job_succeeded=True, backup_job_snapshot_id=MEASURED_SNAPSHOT,
+                backup_job_used_bytes=9 * GIB, backup_job_total_bytes=10 * GIB)
+        await run(4)
+        observe()
+        await run(5)
+
+        claim = cluster.applied[(namespace, "PersistentVolumeClaim", "cell-data")]
+        assert claim["spec"]["resources"]["requests"]["storage"] == "10Gi"
+        assert (await db.select_all_rows(connection))[0].grown_storage_gib is None
+        assert [active for alert, active in delivered if alert == alerts.GROWTH_ALERT][-1:] == [True]
+    finally:
+        await connection.close()
+
+
+def test_after_a_restart_the_growth_alert_waits_until_every_local_cell_is_measured_again() -> None:
+    # The verdicts live in cellctl's memory. Resolving the alert before every
+    # serving local cell has been measured again would send a false
+    # "resolved", then a fresh "firing" an hour later.
+    from cellctl.alerts import growth_blocked
+
+    rows = [_row(cell_id="aaaaaaaaaaaaaaaa"), _row(cell_id="bbbbbbbbbbbbbbbb")]
+    observations = {row.cell_id: _local() for row in rows}
+
+    assert growth_blocked(rows, observations, {}, storage=MIGRATING) is None
+    assert growth_blocked(rows, observations, {"aaaaaaaaaaaaaaaa": "fits"}, storage=MIGRATING) is None
+    assert growth_blocked(rows, observations, {"aaaaaaaaaaaaaaaa": "no-room"}, storage=MIGRATING) is True
+    assert growth_blocked(rows, observations, {row.cell_id: "fits" for row in rows}, storage=MIGRATING) is False
+
+
+def test_a_holds_cleanup_pass_carries_the_size_its_backup_planned() -> None:
+    # Server-side apply drops an annotation a pass stops sending, so a cleanup
+    # pass that left the planned size out would lose the growth before the
+    # hold's exit records it.
+    cleaning = _measure(_backed_up(used=95, statefulset_backup_outcome=MEASURED_SNAPSHOT,
+                                   statefulset_grow_storage_gib=14))
+
+    assert cleaning.grow_storage_gib == 14
+
+
+async def test_a_grown_cell_back_on_its_hetzner_volume_renders_that_volumes_size(cell_db: CellDatabase) -> None:
+    # A migration rollback rebinds the cell's retained Hetzner volume (design
+    # D7), made at storage_gib. A claim at the grown size would stay Pending
+    # against it, or grow a bound Hetzner volume.
+    from cellctl import db
+
+    from .test_reconcile import _observed_from_applied, _set_storage
+
+    cell_id, namespace = "aaaaaaaaaaaaaaaa", namespace_name("aaaaaaaaaaaaaaaa")
+    await _seed_cell(cell_db, cell_id, "tenant-a")  # storage_gib 10
+    cluster = FakeClusterGateway()
+    config = ClusterConfig(object_storage_bucket="b", storage=MIGRATING)
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+
+    async def run(minute: int) -> None:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=NOW + timedelta(minutes=minute))
+
+    try:
+        await run(0)
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, pv_storage_class=STORAGE_CLASS, pvc_storage_class=STORAGE_CLASS)
+        await db.write_observed(connection, cell_id, {"grown_storage_gib": 14})  # grown while it was local
+        await _set_storage(cell_db, cell_id, 10, desired_state="read_only")  # a routine re-apply
+        await run(1)
+
+        claim = cluster.applied[(namespace, "PersistentVolumeClaim", "cell-data")]
+        assert claim["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    finally:
+        await connection.close()
+
+
+async def test_a_grown_cell_takes_the_slots_and_reserve_of_its_grown_size(cell_db: CellDatabase) -> None:
+    # Admission counts each cell as one row, so capacity alone charges a grown
+    # cell's extra slots; charging its storage_gib would over-fill the pool.
+    from cellctl import db
+    from cellctl.capacity import LocalCapacityObservation
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")  # storage_gib 10
+    cluster = FakeClusterGateway()
+    cluster.local_capacity_inputs = lambda local: LocalCapacityObservation(
+        free_bytes={"agent-1": 84 * GIB}, volumes=(_volume("agent-1", 16),), cell_nodes={cell_id: "agent-1"})
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await db.write_observed(connection, cell_id, {"grown_storage_gib": 16})
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+                                       ClusterConfig(object_storage_bucket="b", storage=CUT_OVER), now=NOW)
+        slots = await connection.fetchval("SELECT cell_slots FROM exomem_cloud_capacity WHERE node = 'agent-1'")
+    finally:
+        await connection.close()
+
+    # (100 GiB pool - 2 x 16 GiB x 2 backups at once) / 4 = 9, less the grown
+    # cell's ceil(16 / 4) - 1 = 3 more slots.
+    assert slots == 6
+
+
+def test_a_cell_on_a_hetzner_volume_never_grows() -> None:
+    # A migration rollback rebinds a cell's retained Hetzner volume (design
+    # D7), so a recorded hourly hold can finish on one. Even with room on the
+    # node, its backup plans no growth.
+    hetzner = _backed_up(used=95, pv_storage_class=STORAGE_CLASS, pvc_storage_class=STORAGE_CLASS)
+
+    decision = _measure(hetzner)
+
+    assert decision.grow_storage_gib is None

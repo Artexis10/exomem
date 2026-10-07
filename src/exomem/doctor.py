@@ -2085,19 +2085,19 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     """
     if vault_root is None:
         return None
-    from . import index_paths
+    from . import index_paths, recall_space
 
     sidecar = index_paths.sidecar_path(vault_root)
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and (
         not sidecar.exists() or _vector_stack_available(_resolved_embedding_backend())
     ):
-        initial_build = _check_recall_reembed(vault_root)
-        if (
-            initial_build is not None
-            and initial_build.details is not None
-            and initial_build.details.get("serving") is None
-        ):
-            return None  # embeddings.reembed reports this progress once.
+        reembed = _check_recall_reembed(vault_root)
+        if reembed is not None and reembed.details is not None:
+            serving = reembed.details.get("serving")
+            if serving is None or (
+                recall_space.cell_mode() and serving["model"] != recall_space.recall_model()
+            ):
+                return None  # embeddings.reembed reports initial or refused-sidecar progress once.
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",
@@ -2123,7 +2123,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "so it can't be probed.",
             f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
-    from . import embeddings, model_cache, recall_space
+    from . import embeddings, model_cache
 
     index = embeddings.get_embedding_index(vault_root)
     # The probe encodes with the encoder that serves this sidecar: the recall

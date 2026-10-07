@@ -15,5 +15,10 @@
 
 - [x] 3.1 Scoped suites green: recall switch, embedding migration, embedding index fingerprint, container distribution, and every test touching cell mode or the re-embed job
 - [x] 3.2 The hosted and cloud images build locally; the hosted gate loads bge-base at 768 and the cloud gate loads bge-m3 at 1024
-- [ ] 3.3 Released; the owner cell runs the release, re-embeds to bge-m3 and cuts over; the cell's peak memory during the build and resident memory after it are recorded against its limit
-- [ ] 3.4 The cloud parity smoke is re-run on the owner cell against the personal server, and the result is recorded
+- [x] 3.3 Released; the owner cell runs the release, re-embeds to bge-m3 and cuts over; the cell's peak memory during the build and resident memory after it are recorded against its limit
+  - Evidence (0.100.0, 2026-09-30 21:10Z to 2026-10-01 00:43Z): the owner cell built 80,354 chunks over 4,722 paths into `.embeddings.3d01893360c8c488.sqlite`, and `.embeddings.active` named it at 00:43Z with 0 restarts. The cgroup peak was 1,901 MiB against the 3 GiB limit; the process high-water mark was 1,376 MiB.
+  - After (0.109.0, 2026-10-06, read-only on the node): the owner, reviewer-canary and QA sidecars all record `BAAI/bge-m3` at 1024 with one fingerprint. The 0.109 roll started no re-embed. The owner cell holds 889 MiB with 320 MiB private, and its peak since the roll is 1,136 MiB.
+- [x] 3.4 The cloud parity smoke is re-run on the owner cell against the personal server, and the result is recorded
+  - Evidence (2026-10-01, after the cutover, read-only, 33 query pairs at limit 10):
+    - Hybrid (25 queries): mean overlap 2.64 of 3 and 8.6 of 10, the same top result for 17, and cloud median 3,286 ms against 1,537 ms local.
+    - Keyword (8 queries): mean overlap 1.6 of 3 and 3.6 of 10, the same top result for 5, and cloud median 744 ms against 851 ms local.

@@ -4767,6 +4767,7 @@ def batch_atomic_write(
     defer_graph_completion: bool = False,
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -4775,7 +4776,9 @@ def batch_atomic_write(
     descriptor-owned staging, exact rollback snapshots, and one post-commit
     index fan-out. ``completion_guards`` bind large read-only inputs once before
     publication and once at the rollback-capable completion point, avoiding a
-    full content rehash before every destination flip.
+    full content rehash before every destination flip. A trusted owner's private
+    binding validator runs at those same boundaries; byte guards alone cannot
+    establish fresh input permission.
     """
     from . import working_set_heat
 
@@ -4813,6 +4816,7 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 publication_intents_out=publication_intents_out,
+                _validate_prepared_bindings=_validate_prepared_bindings,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -4836,6 +4840,7 @@ def _batch_atomic_write_locked(
     defer_graph_completion: bool = False,
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5298,6 +5303,8 @@ def _batch_atomic_write_locked(
         validate_active_write_fence()
         log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
         for index, (final, workspace, artifact) in enumerate(staged):
+            if index == 0 and _validate_prepared_bindings is not None:
+                _validate_prepared_bindings()
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
             for _pending_final, _pending_workspace, pending_artifact in staged[index:]:
@@ -5382,6 +5389,11 @@ def _batch_atomic_write_locked(
             )
             _after_batch_destination_published(final)
             workspace.recheck()
+        if _validate_prepared_bindings is not None:
+            # Judge complete post-images, never a Source backref whose new
+            # destination is still in flight. Recheck byte guards afterwards:
+            # an external editor may have changed a file while validation waited.
+            _validate_prepared_bindings()
         if read_only_guards or all_completion_guards:
             recheck_path_guards(Path(vault_root), (*read_only_guards, *all_completion_guards))
         for workspace in workspace_by_parent.values():
@@ -6489,10 +6501,14 @@ def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
 
     Shared by the full-vault build and the per-file patch so the two stay in
     lockstep — a patched file's entries are byte-identical to what a fresh
-    full rebuild would produce for that same file content.
+    full rebuild would produce for that same file content. An origin carrier
+    is attribution, not a link: its line never becomes a context any reader
+    of the target is shown (`provenance.without_carriers`).
     """
+    from . import provenance
+
     out: list[tuple[int, str, str]] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(provenance.without_carriers(text).splitlines(), start=1):
         for m in _WIKILINK_PATTERN.finditer(line):
             out.append((lineno, line.strip()[:240], m.group(1).strip()))
     return out
@@ -6961,7 +6977,7 @@ def render_wikilinks_for_vault(text: str, vault_root: Path) -> str:
     KB-relative display form when Obsidian opens the managed directory itself.
     """
     new_text = text
-    for match in reversed(find_body_wikilinks(text)):
+    for match in reversed(_rewritable_wikilinks(text)):
         full = match.group(0)
         inner = full[2:-2]
         target, separator, alias = inner.partition("|")
@@ -7148,8 +7164,25 @@ def _mask_code_spans(text: str) -> str:
 
 def find_body_wikilinks(text: str) -> list[re.Match[str]]:
     """Return wikilink matches in `text`, skipping fenced code + inline code."""
+    if "[[" not in text:
+        return []
     masked = _mask_code_spans(text)
     return list(_WIKILINK_PATTERN.finditer(masked))
+
+
+def _rewritable_wikilinks(text: str) -> list[re.Match[str]]:
+    """The body wikilinks a writer may rewrite: none in code or an origin carrier.
+
+    A carrier is recorded data, so a writer leaves its bytes exactly as
+    written (`provenance.in_carrier`, the `without_carriers` span rule).
+    """
+    matches = find_body_wikilinks(text)
+    if not matches:
+        return matches
+    from . import provenance
+
+    inside = provenance.in_carrier(text)
+    return [match for match in matches if not inside(match.start(), match.end())]
 
 
 def normalize_body_wikilinks(
@@ -7160,8 +7193,8 @@ def normalize_body_wikilinks(
 ) -> tuple[str, list[str]]:
     """Rewrite every `[[X]]` to the preferred Obsidian-visible form.
 
-    Preserves `[[X|alias]]` aliases. Skips matches inside fenced code blocks
-    and inline code spans. Internal resolution remains canonical vault-rooted;
+    Preserves `[[X|alias]]` aliases. Skips matches inside fenced code blocks,
+    inline code spans and origin carriers. Internal resolution remains canonical vault-rooted;
     emitted Markdown is KB-relative when ``Knowledge Base/.obsidian`` marks the
     managed directory as the Obsidian vault root. Returns `(new_body, warnings)`.
     Unresolvable links are left as-is with a warning — forward references are
@@ -7172,7 +7205,7 @@ def normalize_body_wikilinks(
         resolver = WikilinkResolver(vault_root)
     visible = writer_link_visibility(vault_root)
     warnings: list[str] = []
-    matches = find_body_wikilinks(body)
+    matches = _rewritable_wikilinks(body)
     new_body = body
     # Walk back-to-front so earlier rewrites don't shift later positions.
     # _WIKILINK_PATTERN's group(1) is the target without the alias (the alias

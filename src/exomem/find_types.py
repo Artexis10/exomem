@@ -173,8 +173,19 @@ class ParsedPage:
         return [str(x) for x in sv] if isinstance(sv, list) else [str(sv)]
 
     @cached_property
+    def search_body(self) -> str:
+        """The body every search field reads: origin carriers are not prose.
+
+        Every audience is served from these fields, so a carrier a hand edit
+        pushed into code is withheld too (`provenance.withheld_prose`).
+        """
+        from . import provenance
+
+        return provenance.withheld_prose(self.body, owner_path=self.rel_path)
+
+    @cached_property
     def body_stripped(self) -> str:
-        return self.body.strip()
+        return self.search_body.strip()
 
     @cached_property
     def body_norm(self) -> str:
@@ -190,7 +201,7 @@ class ParsedPage:
 
         if not self.__dict__.get("_byte_bounded_cache") and "stem_set" in self.__dict__:
             return self.__dict__["stem_set"]
-        words = frozenset(bm25.tokenize(self.title + " " + self.body))
+        words = frozenset(bm25.tokenize(self.title + " " + self.search_body))
         if not self.__dict__.get("_byte_bounded_cache"):
             self.__dict__["stem_set"] = words
         return words
@@ -200,7 +211,7 @@ class ParsedPage:
         """The script most of the page's letters are written in (`find_policy.dominant_script`)."""
         from . import find_policy
 
-        return find_policy.dominant_script(self.title + " " + self.body)
+        return find_policy.dominant_script(self.title + " " + self.search_body)
 
 
 def _format_timestamp(seconds: float) -> str:

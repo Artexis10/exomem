@@ -39,4 +39,5 @@ def link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
         if rel_path
         else []
     )
-    return {"inbound": inbound, "outbound": outbound_link_targets(body)}
+    prose = egress.prose_for_caller(vault_root, body, owner_path=rel_path)
+    return {"inbound": inbound, "outbound": outbound_link_targets(prose)}

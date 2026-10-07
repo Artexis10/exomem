@@ -286,15 +286,15 @@ cellctl:
   # databaseEgressCidrs pattern.
   databaseEgressCidrs: []
   # memoryLimit is 3Gi because the first index build over a large restored vault
-  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The owner's cell (about
-  # 9,300 files, 3.6 GB) then settled at 1.7 GiB resident at idle after
-  # indexing, so memoryRequest (1Gi) understates a large vault's steady state
-  # and lets several large cells overcommit a node. The request is left as is
-  # here; sizing it is a separate decision.
+  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The requests are what an
+  # idle 0.108+ cell needs: about 226 MiB private memory with the model weights
+  # shared across cells, and 14-28 m CPU. The 0.108 matched pair qualified
+  # 512Mi/125m: a large owner-sized cell saved and queried the same as at
+  # 1Gi/250m on the same host (add-cloud-service-resource-policy task 3.9).
   cellResources:
-    cpuRequest: 250m
+    cpuRequest: 125m
     cpuLimit: "2"
-    memoryRequest: 1Gi
+    memoryRequest: 512Mi
     memoryLimit: 3Gi
   resources:
     requests: {cpu: 100m, memory: 128Mi}
@@ -394,6 +394,10 @@ cellStorage:
     enabled: false
     # D3: hourly backups that may run at once on one node.
     backupConcurrencyPerNode: 2
+    # D10: a local cell past 80% use grows online by the 4 GiB default size, up
+    # to this many GiB. D6 reserves twice the largest cell per concurrent
+    # backup, so this cap also bounds each node's snapshot reserve.
+    maxCellGib: 20
   snapshotController:
     # external-snapshotter v8.6.0, the release the vendored CRDs in
     # files/external-snapshotter come from (LOCAL_STORAGE_PROVENANCE.md).

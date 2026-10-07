@@ -668,6 +668,9 @@ def test_service_env_path_on_macos_uses_application_support(monkeypatch: pytest.
 
 def test_service_env_path_is_none_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_SERVICE_ENV", raising=False)
+    # Load the cached hook modules first: their loaders build a host Path,
+    # which this POSIX host cannot construct while os.name says "nt".
+    hook_mod._state_core().local_credentials()
     monkeypatch.setattr(hook_mod.os, "name", "nt")
     assert hook_mod._service_env_path() is None
     assert hook_mod._rest_api_key() == ""

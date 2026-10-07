@@ -198,6 +198,37 @@ def test_model_version_is_a_measurement_subkey_not_a_namespace_alias() -> None:
 
 
 @pytest.mark.parametrize("lane", ("vector", "clip", "graph"))
+def test_preparation_reuse_refuses_missing_target_measurements(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    active, _lower, _full = _namespace()
+    target = projection_store.prepare_projection_namespace(
+        key=active.namespace_key, manifest=active.manifest, items=active.items
+    )
+    family = _family(lane)
+    manifest = projection_measurement_store.stage_measurement_store(
+        tmp_path, namespace=target, family=family, measurements=()
+    )
+
+    with pytest.raises(projection_measurement_store.MeasurementStoreMismatch, match="incomplete"):
+        projection_measurement_store.load_prepared_measurement_store(
+            tmp_path, namespace=target, family=family
+        )
+
+    loaded, rows = projection_measurement_store.load_measurement_store(
+        tmp_path, namespace=active, family=family,
+        expected_rows_digest=manifest.rows_digest,
+    )
+    assert loaded == manifest
+    assert rows == ()
+    with pytest.raises(projection_measurement_store.MeasurementStoreMismatch, match="expected root"):
+        projection_measurement_store.load_measurement_store(
+            tmp_path, namespace=active, family=family, expected_rows_digest="0" * 64
+        )
+
+
+@pytest.mark.parametrize("lane", ("vector", "clip", "graph"))
 def test_empty_measurement_family_is_a_stable_ready_store(
     tmp_path: Path,
     lane: str,

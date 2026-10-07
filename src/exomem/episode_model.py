@@ -51,6 +51,7 @@ MAX_INPUT_REVISIONS = 64
 #: Refs of existing pages an input concerns, retained with it. Opaque here;
 #: the recorder resolves and visibility-filters them before they arrive.
 MAX_INPUT_ABOUT = 3
+MATERIAL_EVIDENCE_SCHEME = "evidence-v1"
 MAX_ATTESTATIONS = 64
 MAX_EFFECT_HISTORY = 64
 MAX_ATTEMPTS = 64
@@ -124,7 +125,9 @@ def leaf_id(candidate: str, key: str) -> str:
 
 
 def _evidence(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, Mapping) or set(raw) - {"reference", "excerpt", "digest", "about"}:
+    if not isinstance(raw, Mapping) or set(raw) - {
+        "reference", "excerpt", "digest", "about", "version_scheme"
+    }:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence has unknown fields")
     value = dict(raw)
     if value.get("reference") is not None and (
@@ -143,6 +146,12 @@ def _evidence(raw: Any) -> dict[str, Any]:
         not isinstance(value["digest"], str) or not _HEX.fullmatch(value["digest"])
     ):
         raise _fail("EPISODE_EVIDENCE_INVALID", "digest is invalid")
+    if "version_scheme" in value and (
+        value["version_scheme"] != MATERIAL_EVIDENCE_SCHEME
+        or value.get("reference") is None
+        or value.get("digest") is None
+    ):
+        raise _fail("EPISODE_EVIDENCE_INVALID", "version scheme is invalid")
     about = value.get("about")
     if about is not None and (
         not isinstance(about, (list, tuple))
@@ -152,7 +161,9 @@ def _evidence(raw: Any) -> dict[str, Any]:
     ):
         raise _fail("EPISODE_EVIDENCE_INVALID", "about is invalid")
     keep = {
-        key: value[key] for key in ("reference", "excerpt", "digest") if value.get(key) is not None
+        key: value[key]
+        for key in ("reference", "excerpt", "digest", "version_scheme")
+        if value.get(key) is not None
     }
     if not keep:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence is empty")

@@ -13,6 +13,63 @@ from exomem import media_processing, readiness, server_runtime
 from exomem.governance import projection_runtime
 
 
+@pytest.mark.parametrize("hosted", [False, True], ids=["local", "hosted"])
+def test_unavailable_projection_startup_keeps_owner_governance_reachable_and_content_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hosted: bool
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.governance import authorization_custody, principal
+    from exomem.hosted_runtime import HostedCellConfig, provision_hosted_cell
+    from exomem.init import init_vault
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    if hosted:
+        for name, value in {
+            "EXOMEM_HOSTED_CELL": "1",
+            "EXOMEM_HOSTED_CELL_ID": "cell-fixture",
+            "EXOMEM_HOSTED_STATE_ROOT": str(tmp_path / "state"),
+            "EXOMEM_LOG_DIR": str(tmp_path / "logs"),
+            "EXOMEM_HOSTED_SERVICE_CREDENTIAL": "fixture-owner-service-credential-value",
+        }.items():
+            monkeypatch.setenv(name, value)
+        provision_hosted_cell(HostedCellConfig.from_env(require_provisioned=False))
+    else:
+        vault.mkdir()
+        init_vault(vault)
+    monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(tmp_path / "missing-keyring"))
+    monkeypatch.setattr(server_runtime, "_start_metrics_persistence", lambda: None)
+    monkeypatch.setattr(server_runtime, "_start_retrieval_runtime", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_derived_drain", lambda _root: None)
+    monkeypatch.setattr(
+        server_runtime, "probe_hosted_mutation_authority", lambda _root: (True, "HOSTED_READY")
+    )
+    projection_runtime._clear_preactivated_runtimes_for_tests()
+
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+    try:
+        assert runtime.vault_root == vault
+        assert projection_runtime.requires_fixed_projected_completion(vault)
+        assert not projection_runtime.has_preactivated_projection_runtime(vault)
+        if hosted:
+            assert runtime.hosted_lifecycle is not None
+            assert runtime.hosted_lifecycle.readiness().write_admitted
+        command = next(
+            command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory"
+        )
+        with principal.request_scope(principal.resolve_rest_principal(None)):
+            governed = writer_lease.invoke_command(command, vault, operation="list")
+            assert "rules" in governed and "scopes" in governed
+            with pytest.raises(
+                projection_runtime.ProjectionRuntimeUnavailable,
+                match="^governed projected retrieval is unavailable$",
+            ):
+                commands.op_find(vault, query="private term", mode="keyword")
+    finally:
+        if runtime.hosted_lifetime_lock is not None:
+            runtime.hosted_lifetime_lock.__exit__(None, None, None)
+
+
 def test_initialize_runtime_loads_dotenv_from_service_working_directory(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1050,6 +1107,35 @@ def test_shutdown_reports_a_live_owned_graph_producer(tmp_path, monkeypatch):
     finally:
         release.set()
         graph_drain.stop()
+
+
+def test_shutdown_while_vocabulary_watcher_starts_does_not_crash_or_orphan_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    original_start = threading.Thread.start
+
+    def paused_start(thread):
+        if thread.name == "exomem-vocabulary-recovery":
+            entered.set()
+            assert release.wait(timeout=2.0)
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", paused_start)
+    starter = threading.Thread(target=activation._start_vocabulary_recovery, args=(tmp_path,))
+    starter.start()
+    try:
+        assert entered.wait(timeout=1.0)
+        activation._stop_background_workers()
+    finally:
+        release.set()
+        starter.join(timeout=2.0)
+        activation._join_vocabulary_recovery()
+    assert not starter.is_alive()
+    assert activation.vocabulary_recovery is not None
+    assert not activation.vocabulary_recovery.is_alive()
 
 
 def test_stopping_background_workers_joins_the_vocabulary_watcher(

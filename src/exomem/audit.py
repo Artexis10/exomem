@@ -112,6 +112,7 @@ from . import (
 from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
+from . import provenance as provenance_module
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -2477,7 +2478,8 @@ def _check_orphan_entities(
             f"{kb_prefix()}Entities/index.md"
         ):
             continue
-        for match in WIKILINK_PATTERN.finditer(page.body):
+        # A carrier is recorded data, not a use of the entity it names.
+        for match in WIKILINK_PATTERN.finditer(provenance_module.without_carriers(page.body)):
             target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
             if target:
                 referenced.add(target)

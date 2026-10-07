@@ -35,6 +35,8 @@ class LocalStorage:
     # Hetzner volumes need (their provider minimum): a local cell charges its
     # full size at ratio 1.0 and grows online.
     default_cell_gib: int = 4
+    # D10: a cell grows online one default size at a time, never past this.
+    max_cell_gib: int = 20
 
     def __post_init__(self) -> None:
         for name in (self.class_name, self.clone_class, self.snapshot_class, self.driver, self.device_class):
@@ -46,6 +48,8 @@ class LocalStorage:
             raise ValueError("per-node backup concurrency must be a positive integer")
         if type(self.default_cell_gib) is not int or self.default_cell_gib < 1:
             raise ValueError("the default cell size must be a positive number of GiB")
+        if type(self.max_cell_gib) is not int or self.max_cell_gib < self.default_cell_gib:
+            raise ValueError("the largest a cell grows to must be a whole number of GiB, at least the default size")
 
     @property
     def capacity_annotation(self) -> str:

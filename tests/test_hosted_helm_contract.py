@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import ipaddress
 import json
@@ -3480,13 +3481,26 @@ def test_no_service_requires_an_external_load_balancer() -> None:
     assert not offenders, f"these Services need an external balancer the cluster lacks: {offenders}"
 
 
-def test_cloud_cell_default_memory_envelope_is_3gi_limit_over_a_1gi_request() -> None:
-    """The cloud cell's first index build over a large restored vault was
-    OOM-killed at 1536Mi. The platform default feeds cellctl's
-    CELLCTL_CELL_MEMORY_LIMIT, which must agree with cellctl's own default."""
+def test_cloud_cell_default_resources_agree_with_cellctls_own_defaults() -> None:
+    """The platform's cellResources feed cellctl's CELLCTL_CELL_* settings, and
+    cellctl's ResourceSettings defaults apply when they are unset; the two copies
+    must name the same envelope. The 3Gi limit stays: the first index build over
+    a large restored vault was OOM-killed at 1536Mi."""
     values = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))
-    resources = values["cellctl"]["cellResources"]
-    assert resources["memoryLimit"] == "3Gi"
-    assert resources["memoryRequest"] == "1Gi"
-    main_py = (ROOT / "infra/cellctl/src/cellctl/main.py").read_text(encoding="utf-8")
-    assert 'os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi")' in main_py
+    chart = values["cellctl"]["cellResources"]
+    manifests = ast.parse((ROOT / "infra/cellctl/src/cellctl/manifests.py").read_text(encoding="utf-8"))
+    settings = next(
+        node for node in manifests.body if isinstance(node, ast.ClassDef) and node.name == "ResourceSettings"
+    )
+    defaults = {
+        statement.target.id: ast.literal_eval(statement.value)
+        for statement in settings.body
+        if isinstance(statement, ast.AnnAssign) and statement.value is not None
+    }
+    assert chart == {
+        "cpuRequest": defaults["cpu_request"],
+        "cpuLimit": defaults["cpu_limit"],
+        "memoryRequest": defaults["memory_request"],
+        "memoryLimit": defaults["memory_limit"],
+    }
+    assert chart["memoryLimit"] == "3Gi"

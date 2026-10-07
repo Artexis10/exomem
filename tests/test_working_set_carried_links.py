@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from test_governance_egress import OPEN_PATH, RESTRICTED_PATH, _external, write_rule, write_scope
+from test_origin_bindings import _write as _write_input
 from test_working_set_carry import (
     CARRY_PAGE,
     GENUINE_PAGE,
@@ -28,7 +29,14 @@ from test_working_set_carry import (
 )
 from test_working_set_named_domains import BOTH_TURN
 
-from exomem import commands, lexstore, memory_refs, working_set_index, working_set_runtime
+from exomem import (
+    commands,
+    lexstore,
+    memory_refs,
+    provenance,
+    working_set_index,
+    working_set_runtime,
+)
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
@@ -142,6 +150,40 @@ def test_a_unit_too_long_to_serve_names_no_one(vault: Path) -> None:
 
     assert any(p.get("reason") == "unit_too_long" for p in packet["pointers"]), packet["pointers"]
     assert not [a for a in packet["anchors"] if "carried_link" in a["evidence"]], packet["anchors"]
+
+
+def test_a_link_only_an_origin_carrier_holds_lists_no_one(vault: Path) -> None:
+    """A carrier is attribution, not a link: a person it alone links stays out."""
+    seed_ordinary_notes(vault)
+    _write(vault, TALIA, _person("Talia Verenko", "Platform engineer on the storage team."))
+    binding = _write_input(vault, "Original evidence.\n")
+    carrier = provenance.encode_origin(
+        {
+            "inputs": {"original": binding},
+            "assessments": [
+                {
+                    "inputs": ["original"],
+                    "basis": "agent_assessment",
+                    "by": "agent",
+                    "reason": "Raised by [[Talia Verenko]].",
+                }
+            ],
+            "bindings": [],
+        }
+    )
+    _write(
+        vault,
+        NOTE,
+        "---\ntype: note\nstatus: active\nupdated: 2026-09-28\n---\n\n"
+        f"# Replica migration stall\n\n{carrier}\n\n## Summary\n\n"
+        "- [failure] Talia Verenko's migration stalled on the staging replica last week. ^r-stall\n",
+    )
+    _reindex(vault)
+
+    packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert _anchors(packet).get(NOTE, ("",))[0] == "resolved", packet["anchors"]
+    assert not any("carried_link" in a["evidence"] for a in packet["anchors"]), packet["anchors"]
 
 
 def test_a_person_listed_through_one_carried_page_takes_no_slot_of_the_next(vault: Path) -> None:

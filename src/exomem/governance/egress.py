@@ -67,7 +67,13 @@ from . import policy as policy_module
 from .decisions import Decision, decide
 from .decisions import _meet_decisions as _meet_decisions
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
-from .principal import OWNER_AUDIENCE, RequestPrincipal, current_principal, effective_principal
+from .principal import (
+    OWNER_AUDIENCE,
+    RequestPrincipal,
+    current_principal,
+    effective_principal,
+    request_scope,
+)
 
 log = logging.getLogger(__name__)
 
@@ -747,6 +753,7 @@ _FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
         "record_manifest",
         "record_template",
         "record_mutation",
+        "record_history",
         "planning_query",
         "planning_inspection",
         "planning_mutation",
@@ -4238,6 +4245,110 @@ def _attach_raw_content(
     return out
 
 
+def projects_origin(vault_root: Path, policy: Policy, principal: RequestPrincipal) -> bool:
+    """Whether a read withholds origin carriers from `principal`.
+
+    With no configured audience nothing is projected, and nothing is ever
+    withheld from the owner, so the owner reads every page as written.
+    """
+    return not _file_policy_empty(vault_root, policy) and not (
+        principal.resolved and principal.audience_id == OWNER_AUDIENCE
+    )
+
+
+def prose_for_caller(
+    vault_root: Path,
+    text: str,
+    *,
+    owner_path: str,
+    principal: RequestPrincipal | None = None,
+) -> str:
+    """Page prose for the current caller; an origin carrier is never prose.
+
+    The one helper every door that serves page prose to one caller uses. The
+    owner, and every caller of a vault with no configured audience, keeps the
+    code exemption, so a fenced carrier example stays literal. Every other
+    caller gets `provenance.withheld_prose`: each reserved opener is withheld
+    wherever it sits, code and escapes included. Prose every audience shares is
+    computed once, before any caller is known, and uses `withheld_prose`
+    directly (search fields, units, packs, graph fields).
+    """
+    from .. import provenance
+
+    if projects_origin_for_caller(vault_root, principal):
+        return provenance.withheld_prose(text, owner_path=owner_path)
+    return provenance.origin_prose(text, owner_path=owner_path)
+
+
+def carrier_spans_for_caller(
+    vault_root: Path,
+    text: str,
+    *,
+    owner_path: str,
+    principal: RequestPrincipal | None = None,
+) -> tuple[tuple[int, int], ...]:
+    """The carrier spans this caller is never shown: `prose_for_caller`'s rule as spans.
+
+    For units, which keep their offsets: a projected reader loses every reserved
+    span (`provenance.withheld_spans`), and the owner loses only the page's own
+    carrier, so a carrier example in a unit's code stays literal for them.
+    """
+    from .. import provenance
+
+    if projects_origin_for_caller(vault_root, principal):
+        return provenance.withheld_spans(text, owner_path=owner_path)
+    return provenance.parse_owned_origin(text, owner_path=owner_path).spans
+
+
+def projects_origin_for_caller(
+    vault_root: Path, principal: RequestPrincipal | None = None
+) -> bool:
+    """Whether this caller reads origin projected (`projects_origin`). A cache
+    of anything `prose_for_caller` or `carrier_spans_for_caller` shaped keys on it."""
+    who = principal if principal is not None else effective_principal()
+    return projects_origin(vault_root, policy_module.load(vault_root), who)
+
+
+def _project_page_origin(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    policy: Policy,
+    principal: RequestPrincipal,
+    purpose: str | None,
+    snapshot_content: str | bytes | None,
+) -> tuple[dict[str, Any], bool]:
+    if not projects_origin(vault_root, policy, principal):
+        return page, False
+    text = snapshot_content if snapshot_content is not None else page.get("body")
+    if isinstance(text, bytes):
+        try:
+            text = text.decode("utf-8")
+        except UnicodeDecodeError:
+            return page, False  # Existing raw-content and snapshot owners refuse these bytes.
+    if not isinstance(text, str) or "<!--" not in text or "exomem-origin" not in text.lower():
+        return page, False
+    from .. import origin_bindings, source_closure
+
+    if source_closure._eligible_path(str(page.get("path") or "")):  # noqa: SLF001
+        return page, False  # Captured evidence is not managed attribution.
+    with request_scope(principal.with_purpose(_declared_purpose(vault_root, principal, purpose))):
+        projected = origin_bindings.project_origin_text(vault_root, text)
+    if projected == text:
+        return page, False
+    out = dict(page)
+    if snapshot_content is not None:
+        frontmatter, body, _ = vault.parse_frontmatter(projected)
+        if "frontmatter" in out:
+            out["frontmatter"] = frontmatter
+        if "body" in out:
+            out["body"] = body
+    elif "body" in out:
+        out["body"] = projected
+    out.pop("content", None)  # A redacted projection is never an exact raw read.
+    return out, True
+
+
 @canonical_read
 def annotate_page(
     vault_root: Path,
@@ -4264,6 +4375,7 @@ def annotate_page(
     who = principal if principal is not None else effective_principal()
 
     if _file_policy_empty(vault_root, policy):
+        # No configured audience: the owner reads origin metadata as written.
         return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
@@ -4452,6 +4564,14 @@ def annotate_page(
             bridge_abstraction=decision.bridge_abstraction,
         )
 
+    page, origin_redacted = _project_page_origin(
+        vault_root,
+        page,
+        policy=policy,
+        principal=who,
+        purpose=declared_purpose,
+        snapshot_content=snapshot_content,
+    )
     # L5/L6: the page is released. Its own provenance must still not name a
     # sub-notice item (D3 applies the strip at EVERY level, not just below
     # full), so decide the items this page points at before answering.
@@ -4491,6 +4611,11 @@ def annotate_page(
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
     if level == LEVEL_EXCERPT:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        from .. import provenance
+
+        # An excerpt is prose: no origin carrier, released or not, starts it,
+        # and none pushed into code reaches this restricted reader either.
+        body = provenance.withheld_prose(body, owner_path=rel_path)
         body = redact_withheld_references(
             vault_root,
             body,
@@ -4518,7 +4643,7 @@ def annotate_page(
             decision.release_strip,
             direct_page=True,
         )
-    return _attach_raw_content(out, snapshot_content) if include_raw else out
+    return _attach_raw_content(out, snapshot_content) if include_raw and not origin_redacted else out
 
 
 def _iter_reference_targets(value: Any) -> Iterable[str]:
@@ -4717,6 +4842,9 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    evidence_projection = (
+        result if isinstance(result, dict) and "evidence_version" in result else None
+    )
     issuance_context = scrubber._issuance_projection_context(result)
     if issuance_context is not None:
         # `rotate` has already invalidated the request's prior credential by
@@ -4754,6 +4882,15 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
+    # A material version requires an unchanged requested page or exact unit.
+    # Later filtering can turn that response into a projection; keep its
+    # canonical hash, but withdraw the binding without scanning unreturned text.
+    if (
+        evidence_projection is not None
+        and isinstance(cleaned, dict)
+        and cleaned != evidence_projection
+    ):
+        cleaned.pop("evidence_version", None)
     return (canonical_governance._seal_inspection_projection(cleaned, inspection_evidence)
             if inspection_evidence is not None else cleaned)
 
@@ -5189,6 +5326,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+        "history": "structure",
     },
     ("episode_memory", "action"): {
         "record": "mutation",
@@ -5213,6 +5351,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "triage": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
+        "history": "structure",
     },
 }
 

@@ -4845,7 +4845,7 @@ class LexicalStore:
             title = page.title
             title_lower = page.title_norm if title else ""
             body_lower = page.body_norm
-            stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.body))
+            stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.search_body))
             updated = page.updated or "0000-00-00"
             # Scene-frame children carry the parent video they collapse into;
             # unparseable rows (page is None) stay NULL like ordinary pages.

@@ -252,7 +252,7 @@ A node-loss drill SHALL be run on disposable infrastructure before any tenant ce
 
 ### Requirement: A local cell grows online before it fills
 
-cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
+cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A cell past 80% use at its cap SHALL raise the same alert. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
 
 #### Scenario: Cell passes 80% use
 
@@ -264,9 +264,14 @@ cellctl SHALL grow a running cell's local volume online when its filesystem pass
 - **WHEN** a local cell passes 80% use, but its node's free bytes do not cover the step and the larger reserve
 - **THEN** cellctl raises an alert and leaves the cell's size unchanged
 
+#### Scenario: Cell at its cap passes 80% use
+
+- **WHEN** a local cell at its configured cap reports more than 80% filesystem use
+- **THEN** cellctl leaves its size unchanged and raises the same alert as for a node without room
+
 ### Requirement: A cell never initializes an empty vault over a lost volume
 
-While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for it; a missing claim SHALL leave the cell stopped with a reason on its row, except when the cell is relocated from its backup. A cell whose Secret records that it has a completed backup SHALL refuse to initialise an empty vault on an empty volume. It SHALL remain not ready, and SHALL report a value-free reason that reaches the cell's row. Recording the backup SHALL NOT change the cell's pod template. A cell with no recorded backup SHALL initialise an empty vault as before.
+While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for it; a missing claim SHALL leave the cell stopped with a reason on its row, except when the cell is relocated from its backup. A cell whose Secret records that it has a completed backup SHALL refuse to initialise an empty vault on an empty volume. It SHALL remain not ready, and SHALL report a value-free reason that reaches the cell's row. Recording the backup SHALL NOT change the cell's pod template. A cell with no recorded backup SHALL initialise an empty vault as before. A backup SHALL refuse a source that holds no vault and fail with a value-free reason, so an empty volume never replaces the cell's last restore point.
 
 #### Scenario: Volume recreated after a node loss
 
@@ -282,6 +287,11 @@ While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for 
 
 - **WHEN** a new cell with no recorded backup starts on an empty volume
 - **THEN** it initialises an empty vault and becomes ready
+
+#### Scenario: Backup of a volume that holds no vault
+
+- **WHEN** a cell's backup runs over a volume that holds no vault, such as one emptied under a serving cell
+- **THEN** the backup fails before it reads the volume, the cell's last backup stays as it was, and its row shows the backup failure and then the cell's initialisation refusal
 
 #### Scenario: First backup recorded
 

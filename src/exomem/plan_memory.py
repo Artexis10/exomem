@@ -20,9 +20,11 @@ ACTIONS = frozenset(
         "triage",
         "revise",
         "rebaseline",
+        "history",
     }
 )
 _ACTION_FIELDS = {
+    "history": frozenset({"collection", "plan_id", "limit", "continuation"}),
     "inspect": frozenset({"collection"}),
     "validate": frozenset({"collection", "manifest_path", "manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why", "scaffold"}),
@@ -90,6 +92,7 @@ _ACTION_FIELDS = {
     ),
 }
 _REQUIRED_FIELDS = {
+    "history": frozenset({"collection", "plan_id"}),
     "inspect": frozenset({"collection"}),
     "validate": frozenset({"manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
@@ -155,6 +158,7 @@ def plan_memory(
         "triage",
         "revise",
         "rebaseline",
+        "history",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -242,6 +246,18 @@ def plan_memory(
                 expected_container_hash=expected_container_hash,
                 body="" if body is None else body,
                 why=why,
+            )
+        if action == "history":
+            assert collection is not None and plan_id is not None
+            from . import record_history
+
+            return record_history.read(
+                vault_root,
+                collection,
+                item_key=plan_id,
+                semantic_profile="planning",
+                limit=limit,
+                continuation=continuation,
             )
         if action == "query":
             assert collection is not None
