@@ -295,7 +295,7 @@ def prepare_manifest(conn, manifest, data, declared) -> None:
         dependencies = set()
         for view in manifest.normalized_views.values():
             query = view["query"]
-            dependencies.update(f["field"] for f in query.get("filters", []))
+            dependencies.update(f["column"] for f in query.get("filters", []))
             dependencies.update(query[key] for key in ("sort_by", "date_column") if key in query)
         require_index_dependencies(specifications, dependencies & current_leading)
         # Integer/number use exactly the same numeric keys. Widening can
