@@ -47,7 +47,7 @@ from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
 from ..query_engine import scalars
-from . import connection, governance, schema, takeover, tokens
+from . import connection, governance, import_recommendations, schema, takeover, tokens
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ def contract() -> dict[str, Any]:
         ),
         "preview": (
             f"reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
-            "fields, flagged rows, mapping findings and row identity"
+            "fields, flagged rows, mapping findings, row identity and recommended_declarations"
         ),
         "states": {
             "running": (
@@ -1605,17 +1605,34 @@ def _settle(root: Path, writer, job: _Job, state: str, reason: str, error=None) 
     return "paused"
 
 
+# Jobs whose deferred pause already logged an unclassified error's traceback. Bounded,
+# oldest first out: a job evicted by a flood of others logs one more traceback.
+_TRACED_JOBS = 64
+_traced: dict[str, None] = {}
+
+
 def _pause(root: Path, writer, job: _Job, reason: str) -> str:
     """Record ``_step``'s pause, or defer it to the next tick when the record fails.
 
     A pause that could not be written is not a failed job: the job stays running,
-    status reports the pause from its fresh check, and the next tick retries.
+    status reports the pause from its fresh check, and the next tick retries. A
+    store or collection refusal is a coded, expected state and logs one line per
+    tick. Any other error is a defect: its first deferral per job also logs the
+    traceback, and later ticks stay one line.
     """
     try:
         return _settle(root, writer, job, "partial", reason)
     except Exception as error:  # noqa: BLE001 - never escalated to a job failure
         code = getattr(error, "code", type(error).__name__)
-        log.warning("import job %s %s pause deferred: %s", job.id[:12], reason, code)
+        coded = isinstance(error, (collections.CollectionError, connection.CollectionStoreError))
+        first = not coded and job.id not in _traced
+        if first:
+            _traced[job.id] = None
+            while len(_traced) > _TRACED_JOBS:
+                del _traced[next(iter(_traced))]
+        log.warning(
+            "import job %s %s pause deferred: %s", job.id[:12], reason, code, exc_info=first
+        )
         return "deferred"
 
 
@@ -2131,7 +2148,7 @@ class _Sample:
 
 def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     with writer.read_snapshot():
-        row, manifest, _ = writer._collection(collection, facade_profile="records")
+        row, manifest, declared = writer._collection(collection, facade_profile="records")
         source, _, size = resolve_source(root, writer._operation, request.source_ref)
         plan, findings = None, []
         if request.mapping is not None:
@@ -2154,6 +2171,10 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         encoding = writer.connection.execute(
             "SELECT encoding FROM collections WHERE collection_id=?", (row["collection_id"],)
         ).fetchone()[0]
+        manifest_text = writer.connection.execute(
+            "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+            (row["collection_id"], row["manifest_version"]),
+        ).fetchone()[0]
     produced = (
         None
         if plan is None
@@ -2166,6 +2187,13 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         for path in sorted(sample.paths)
         if path.rsplit(".", 1)[-1] == target
     }
+    recommended = (
+        None
+        if plan is None
+        else import_recommendations.recommend(
+            plan, manifest, vault.parse_frontmatter(manifest_text, strict=True)[0], declared.indexes
+        )
+    )
     return {
         "mode": "preview",
         "collection_id": row["collection_id"],
@@ -2198,6 +2226,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "fields": {name: spec.type for name, spec in manifest.schema.fields.items()},
             "encoding": encoding,
         },
+        "recommended_declarations": recommended,
         "errors": sample.errors,
         "limits": {
             "preview_rows": PREVIEW_ROWS,
