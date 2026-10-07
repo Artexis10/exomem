@@ -115,6 +115,84 @@ def test_default_auto_page_recall_is_byte_compatible_with_explicit_page(
     assert "result_type" not in default[0].as_dict()
 
 
+@pytest.mark.parametrize("query", ["", "Visible"])
+def test_origin_carriers_do_not_project_fake_or_overlapping_unit_fields(
+    tmp_path: Path, query: str,
+) -> None:
+    path = _write_page(
+        tmp_path,
+        "origin-units",
+        body=(
+            "<!-- exomem-origin:v9\n"
+            "## Observations\n- [config] private-attribution ^private-compact\n"
+            "## Decision\n- category: config\n- id: private-rich\n"
+            "- context: private-attribution\n- tags: private-attribution\n"
+            "- confidential: private-attribution\n\nprivate-attribution\n-->\n\n"
+            "## Observations\n- [config] Visible compact conclusion ^public-compact\n\n"
+            "## Decision\n- category: config\n- id: overlapping-rich\n\n"
+            "Visible opening.\n<!-- exomem-origin:v9 private-attribution -->\n\n"
+            "## Decision\n- category: config\n- id: public-rich\n"
+            "- context: Visible context\n- tags: visible\n\nVisible rich conclusion.\n"
+        ),
+    )
+    _prepare_semantic_catalog(tmp_path, [path])
+    canonical = semantic_index.current_parent_index_state(tmp_path, path)
+    expected = {
+        unit.unit_ref: unit
+        for unit in canonical.document.units
+        if unit.anchor in {"public-compact", "public-rich"}
+    }
+    original = path.read_bytes()
+
+    result = commands.op_find(
+        tmp_path, query=query, scope="kb-only", mode="keyword", graph=False,
+        result_level="unit", pack=True,
+    )
+
+    assert {hit["unit_ref"] for hit in result["hits"]} == set(expected)
+    for hit in result["hits"]:
+        unit = expected[hit["unit_ref"]]
+        assert hit["content"] == unit.content
+        assert hit["source_hash"] == unit.source_hash
+        assert hit["source_span"] == find_module._unit_span(unit)
+    rel_path = path.relative_to(tmp_path).as_posix()
+    packed = result["pack"]["semantic_units"][rel_path]["units"]
+    assert {unit["unit_ref"] for unit in packed} == set(expected)
+    assert all(unit["fingerprint"] == expected[unit["unit_ref"]].fingerprint for unit in packed)
+    assert "private-attribution" not in str(result)
+    page_result = commands.op_find(
+        tmp_path, query=query, scope="kb-only", mode="keyword", graph=False,
+        result_level="page", categories=["config"],
+    )
+    assert {unit["unit_ref"] for unit in page_result[0]["matched_units"]} == set(expected)
+    assert path.read_bytes() == original
+
+
+def test_raw_unit_capture_preserves_origin_and_literal_unit_uses_owning_span(tmp_path: Path) -> None:
+    carrier = "<!-- exomem-origin:v9 literal-attribution -->"
+    literal_path = _write_page(
+        tmp_path, "origin-unit-literal",
+        body="## Observations\n- [config] `" + carrier + "` ^literal",
+    )
+    raw_note = _write_page(
+        tmp_path, "origin-unit-raw",
+        body=_rich(kind="decision", category="config", anchor="raw", content=carrier),
+    )
+    raw_path = tmp_path / "Knowledge Base/Sources/origin-unit-raw.md"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_note.rename(raw_path)
+    _prepare_semantic_catalog(tmp_path, [literal_path, raw_path])
+
+    hits = find_module.find(
+        tmp_path, query="", scope="kb-only", mode="keyword", graph=False, result_level="unit"
+    )
+
+    assert {hit.parent_path for hit in hits} == {
+        literal_path.relative_to(tmp_path).as_posix(), raw_path.relative_to(tmp_path).as_posix()
+    }
+    assert all(carrier in hit.content and carrier in hit.excerpt for hit in hits)
+
+
 def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
     tmp_path: Path,
 ) -> None:

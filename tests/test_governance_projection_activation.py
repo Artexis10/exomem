@@ -20,10 +20,10 @@ from exomem.governance.decisions import Decision
 from exomem.governance.policy import Policy, Scope
 
 
-def _active_runtime():
+def _active_runtime(*, projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION):
     scope = Scope(id="visible", source="scopes/visible.yaml")
     policy = Policy(fingerprint="f" * 64, scopes={scope.id: scope})
-    key = projections.ProjectionNamespaceKey(policy.fingerprint, 1, 7)
+    key = projections.ProjectionNamespaceKey(policy.fingerprint, projector_schema_version, 7)
     variant = projections.build_projection_variant(
         item_identity="Knowledge Base/visible.md",
         content_hash="1" * 64,
@@ -62,6 +62,14 @@ def _active_runtime():
     )
     runtime = projection_runtime.ActiveProjectionRuntime(snapshot, namespace)
     return runtime, items
+
+
+def test_runtime_refuses_correctly_bound_obsolete_projector() -> None:
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="^governed projected retrieval is unavailable$",
+    ):
+        _active_runtime(projector_schema_version=1)
 
 
 def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtime(
@@ -179,6 +187,18 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
     )
     assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is True
     assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
+
+    with monkeypatch.context() as upgrade:
+        upgrade.setattr(
+            projections,
+            "PROJECTOR_SCHEMA_VERSION",
+            activated.namespace.namespace_key.projector_schema_version + 1,
+        )
+        with pytest.raises(
+            projection_runtime.ProjectionRuntimeUnavailable,
+            match="^governed projected retrieval is unavailable$",
+        ):
+            projection_runtime.load_active_projection_runtime(tmp_path)
 
     current_control[0] = replace(control, activation_epoch=control.activation_epoch + 1)
     with pytest.raises(

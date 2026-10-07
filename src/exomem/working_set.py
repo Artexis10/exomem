@@ -1274,6 +1274,7 @@ def _material_lane(
         bm25,
         find,
         lexstore,
+        provenance,
         relation_registry,
         semantic_language_registry,
         semantic_units,
@@ -1410,6 +1411,9 @@ def _material_lane(
         for unit in sorted(document.units, key=lambda unit: unit.span.start_offset, reverse=True):
             prose = prose[:unit.span.start_offset] + "\n" + prose[unit.span.end_offset:]
         prose = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith("#"))
+        # The same withheld text every search field ranks on: a carrier's
+        # payload must not decide which page a turn's material lane serves.
+        prose = provenance.withheld_prose(prose, owner_path=path)
         prose_stems = frozenset(bm25.tokenize(prose))
         if not wanted.intersection(prose_stems):
             continue
@@ -1521,6 +1525,7 @@ def _entity_lane(
 ) -> tuple[LaneItem, ...]:
     """The anchor page's own lede — its identity in its own words."""
     from . import find_corpus
+    from .governance import egress
 
     out: list[LaneItem] = []
     for anchor in anchors:
@@ -1531,7 +1536,7 @@ def _entity_lane(
         if page is None:
             continue
         frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
-        lede = working_set_index.lede(page.body)
+        lede = working_set_index.lede(egress.prose_for_caller(vault_root, page.body, owner_path=rel))
         if not lede:
             continue
         out.append(

@@ -530,7 +530,34 @@ def namespace_evidence_from_snapshot(
 
     if not isinstance(snapshot, schema_v4.ActivePolicySnapshot):
         raise ProjectionStoreMismatch("active governance snapshot is unavailable")
-    raw = snapshot.projection_namespace_evidence
+    active = snapshot.active
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=active.policy_fingerprint,
+        projector_schema_version=active.projector_schema_version,
+        catalog_generation=active.catalog_generation,
+    )
+    if (
+        snapshot.policy.fingerprint != key.policy_fingerprint
+        or active.projection_namespace_id != key.namespace_id
+    ):
+        raise ProjectionStoreMismatch("projection namespace evidence does not verify")
+    return decode_projection_namespace_evidence(
+        snapshot.projection_namespace_evidence,
+        expected_key=key,
+    )
+
+
+def decode_projection_namespace_evidence(
+    raw: bytes,
+    *,
+    expected_key: projections.ProjectionNamespaceKey,
+) -> ProjectionNamespaceEvidence:
+    """Decode canonical namespace roots against an exact active or prepared key."""
+
+    if type(raw) is not bytes or not isinstance(
+        expected_key, projections.ProjectionNamespaceKey
+    ):
+        raise ProjectionStoreMismatch("projection namespace evidence does not verify")
     try:
         value = json.loads(raw)
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -636,13 +663,9 @@ def namespace_evidence_from_snapshot(
     else:
         raise ProjectionStoreMismatch("projection namespace evidence does not verify")
     roots = tuple(measurement_roots)
-    active = snapshot.active
     if (
-        key.policy_fingerprint != active.policy_fingerprint
-        or key.projector_schema_version != active.projector_schema_version
-        or key.catalog_generation != active.catalog_generation
+        key != expected_key
         or manifest.namespace_id != key.namespace_id
-        or active.projection_namespace_id != key.namespace_id
         or projections.canonical_jcs(value) != raw
         or projection_namespace_evidence_bytes(
             manifest,

@@ -1171,15 +1171,15 @@ def _visible_excerpt(raw_segment: str) -> str:
     return " ".join(visible.split())
 
 
-def _connected(context: EvidenceContext, page: Any, target: RegistryEntry) -> bool:
+def _connected(context: EvidenceContext, body: str, target: RegistryEntry) -> bool:
     """Whether this exact qualifying context visibly connects to the target."""
     identities = set(target.identities)
     identities.add(identity_key(target.path.removesuffix(".md")))
     identities.add(identity_key(Path(target.path).stem))
-    if _accepted_relation_connects(page.body, identities):
+    if _accepted_relation_connects(body, identities):
         return True
     wanted_excerpt = " ".join(context.excerpt.split())
-    for raw_line in page.body.splitlines():
+    for raw_line in body.splitlines():
         if (
             _visible_excerpt(raw_line) == wanted_excerpt
             and _segment_connects(raw_line, identities)
@@ -1217,15 +1217,21 @@ def collect(
     suffixed: dict[str, set[str]] = {}
     ordinary: dict[str, list[EvidenceContext]] = {}
     pages_by_path: dict[str, Any] = {}
+    # An origin carrier is attribution, not prose or a link: its payload never
+    # becomes a mention, a context excerpt or a page reaching for a name.
+    from . import provenance
+
+    bodies: dict[str, str] = {}
     for page in eligible_pages:
         rel_path = str(page.rel_path)
         pages_by_path[rel_path] = page
+        body = bodies[rel_path] = provenance.withheld_prose(page.body, owner_path=rel_path)
         self_identities = {
             identity_key(page.title),
             identity_key(Path(rel_path).stem),
         }
         for context in extract_identity_frames(
-            page.body,
+            body,
             path=rel_path,
             origin=_origin_ref(page),
             entity_types=entity_types,
@@ -1241,7 +1247,7 @@ def collect(
             # never anchors a finding -- and left alone for the ordinary-text
             # grammar lane above, whose gates this change does not touch.
             continue
-        for match in find_body_wikilinks(page.body):
+        for match in find_body_wikilinks(body):
             link = parse_link(match.group(1))
             if link is None:
                 continue
@@ -1323,7 +1329,7 @@ def collect(
             disconnected = tuple(
                 row
                 for row in rows
-                if not _connected(row, pages_by_path[row.path], resolved_target)
+                if not _connected(row, bodies[row.path], resolved_target)
             )
             if not disconnected:
                 continue

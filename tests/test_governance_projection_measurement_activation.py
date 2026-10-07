@@ -37,7 +37,9 @@ def _private_writer_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 def _fixture(tmp_path: Path):
     scope = Scope(id="visible", source="scopes/visible.yaml")
     policy = Policy(fingerprint="f" * 64, scopes={scope.id: scope})
-    key = projections.ProjectionNamespaceKey(policy.fingerprint, 1, 7)
+    key = projections.ProjectionNamespaceKey(
+        policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 7
+    )
     variant = projections.build_projection_variant(
         item_identity="Knowledge Base/visible.md",
         content_hash="1" * 64,

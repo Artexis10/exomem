@@ -154,6 +154,7 @@ def _policy_seed(
     predecessor_generation_id: str | None,
     event_suffix: str,
     now: int,
+    projector_version: int = 1,
 ) -> schema_v4.PolicyGenerationSeed:
     compiled = _compiled(documents)
     return schema_v4.PolicyGenerationSeed(
@@ -164,7 +165,7 @@ def _policy_seed(
         compiled_policy=policy.canonical_compiled_bytes(compiled),
         policy_fingerprint=compiled.fingerprint,
         compiler_schema_version=1,
-        projector_schema_version=1,
+        projector_schema_version=projector_version,
         predecessor_generation_id=predecessor_generation_id,
         authoring_event_id=f"authoring-{event_suffix}",
         receipt_event_id=f"receipt-{event_suffix}",
@@ -357,12 +358,13 @@ def _migrate_with_empty_projection_catalog(
     vault: Path,
     *,
     now: int,
+    projector_version: int = projections.PROJECTOR_SCHEMA_VERSION,
 ) -> schema_v4.MigrationResult:
     documents = _documents(ceiling=2)
     compiled = _compiled(documents)
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=compiled.fingerprint,
-        projector_schema_version=1,
+        projector_schema_version=projector_version,
         catalog_generation=1,
     )
     manifest = projection_store.stage_variant_store(vault, key=key, items=())
@@ -380,6 +382,7 @@ def _migrate_with_empty_projection_catalog(
                     predecessor_generation_id=None,
                     event_suffix="first",
                     now=now,
+                    projector_version=projector_version,
                 ),
                 catalog=schema_v4.CatalogGenerationSeed(
                     catalog_generation=1,
@@ -409,6 +412,7 @@ def _projection_item(
     path: str,
     source: str,
     catalog_generation: int,
+    projector_version: int = projections.PROJECTOR_SCHEMA_VERSION,
 ) -> projection_store.ProjectionItemVariants:
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
@@ -425,7 +429,7 @@ def _projection_item(
     )
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=compiled.fingerprint,
-        projector_schema_version=1,
+        projector_schema_version=projector_version,
         catalog_generation=catalog_generation,
     )
     search_fields = {
@@ -478,17 +482,15 @@ def _migrate_with_projection_items(
     ceiling: int = 2,
     policy_documents: tuple[tuple[str, bytes], ...] | None = None,
     graph_edges: tuple[projected_graph.ProjectionGraphEdge, ...] | None = None,
+    retained_levels: frozenset[int] | None = None,
+    projector_version: int = projections.PROJECTOR_SCHEMA_VERSION,
     now: int,
 ) -> schema_v4.MigrationResult:
-    documents = (
-        _documents(ceiling=ceiling)
-        if policy_documents is None
-        else policy_documents
-    )
+    documents = _documents(ceiling=ceiling) if policy_documents is None else policy_documents
     compiled = _compiled(documents)
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=compiled.fingerprint,
-        projector_schema_version=1,
+        projector_schema_version=projector_version,
         catalog_generation=1,
     )
     projected_items = tuple(
@@ -498,9 +500,22 @@ def _migrate_with_projection_items(
             path=path,
             source=source,
             catalog_generation=1,
+            projector_version=projector_version,
         )
         for path, source in items
     )
+    if retained_levels is not None:
+        projected_items = tuple(
+            dataclasses.replace(
+                item,
+                variants=tuple(
+                    variant
+                    for variant in item.variants
+                    if variant.decision_level in retained_levels
+                ),
+            )
+            for item in projected_items
+        )
     manifest = projection_store.stage_variant_store(
         vault,
         key=key,
@@ -562,6 +577,7 @@ def _migrate_with_projection_items(
                     predecessor_generation_id=None,
                     event_suffix="first",
                     now=now,
+                    projector_version=projector_version,
                 ),
                 catalog=schema_v4.CatalogGenerationSeed(
                     catalog_generation=1,
@@ -605,7 +621,7 @@ def _migrate_with_vector_projection_items(
     compiled = _compiled(documents)
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=compiled.fingerprint,
-        projector_schema_version=1,
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
         catalog_generation=1,
     )
     projected_items = tuple(
@@ -712,6 +728,7 @@ def _migrate_with_vector_projection_items(
                     predecessor_generation_id=None,
                     event_suffix="first",
                     now=now,
+                    projector_version=projections.PROJECTOR_SCHEMA_VERSION,
                 ),
                 catalog=schema_v4.CatalogGenerationSeed(
                     catalog_generation=1,
@@ -1230,11 +1247,12 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
     target_policy = _compiled(_documents(ceiling=1))
     target_key = projections.ProjectionNamespaceKey(
         policy_fingerprint=target_policy.fingerprint,
-        projector_schema_version=1,
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
         catalog_generation=1,
     )
 
-    assert binding["schema"] == "exomem.governance-policy-proposal/v4"
+    assert binding["schema"] == "exomem.governance-policy-proposal/v5"
+    assert binding["publication_mode"] == "policy"
     assert binding["dependent_grants"] == []
     assert reviewed == {
         "activation_epoch": 1,
@@ -1246,10 +1264,10 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         "policy_generation_id": FIRST_GENERATION_ID,
         "projection_namespace_id": projections.ProjectionNamespaceKey(
             policy_fingerprint=_compiled(_documents(ceiling=2)).fingerprint,
-            projector_schema_version=1,
+            projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
             catalog_generation=1,
         ).namespace_id,
-        "projector_schema_version": 1,
+        "projector_schema_version": projections.PROJECTOR_SCHEMA_VERSION,
     }
     assert snapshot["source_fingerprint"] == reviewed["policy_fingerprint"]
     assert snapshot["conflict_set_digest"] == hashlib.sha256(
@@ -1287,10 +1305,283 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
             )
         ).decode("ascii"),
         "namespace_id": target_key.namespace_id,
-        "projector_schema_version": 1,
+        "projector_schema_version": projections.PROJECTOR_SCHEMA_VERSION,
         "ready_at": now + 1,
     }
     assert json.loads(membership_manifest) == binding["membership_manifest"]
+
+
+@pytest.mark.parametrize("retained_levels", [frozenset({1}), frozenset()])
+def test_owner_refresh_rebuilds_canonical_catalog_without_changing_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retained_levels: frozenset[int],
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents(ceiling=2)
+    _write_workspace(vault, documents)
+    path = "Knowledge Base/Notes/visible.md"
+    source = (
+        "---\ntype: note\ntitle: Visible\n---\n"
+        "Useful canonical prose.\n"
+        "<!-- exomem-origin:future private attribution -->\n"
+    )
+    target = vault / path
+    target.parent.mkdir(parents=True)
+    target.write_text(source)
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((path, source),),
+        retained_levels=retained_levels,
+        projector_version=1,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    # Pending authoring is unrelated to a representation-only refresh.
+    pending = policy.governance_root(vault) / "rules" / "external.yaml"
+    pending.write_bytes(dict(_documents(ceiling=1))["rules/external.yaml"])
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        before = schema_v4.load_active_tuple_pointer(connection)
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="retained",
+            policy_fingerprint=before.policy_fingerprint,
+            membership_manifest="[]",
+            now=now,
+        )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(catalog_publication.CatalogPublicationError, match="projector"):
+            catalog_publication.prepare_markdown_upsert(
+                vault, path=path, source=source+"A new edit.\n",
+                expected_before_hash=hashlib.sha256(source.encode()).hexdigest(), now=now+1,
+            )
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Refresh the current search representation",
+            documents={},
+            now=now + 1,
+        )
+        # Grant lifecycle can change after preparation without changing policy.
+        with sqlite3.connect(store.sidecar_path(vault)) as connection:
+            _insert_active_dependent_grant(
+                connection,
+                grant_id="concurrent",
+                policy_fingerprint=before.policy_fingerprint,
+                membership_manifest="[]",
+                now=now + 1,
+            )
+            connection.execute(
+                "UPDATE governance_session_grants SET status='revoked', revoked_at=? "
+                "WHERE grant_id='retained'",
+                (now + 1,),
+            )
+            grants = connection.execute(
+                "SELECT * FROM governance_session_grants ORDER BY grant_id",
+            ).fetchall()
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+    assert committed["status"] == "committed"
+    assert committed["mirror_status"] == "not_required"
+    assert target.read_text() == source
+    assert pending.read_bytes() == dict(_documents(ceiling=1))["rules/external.yaml"]
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        after = schema_v4.load_active_tuple_pointer(connection)
+        assert after.policy_generation_id != before.policy_generation_id
+        assert after.policy_fingerprint == before.policy_fingerprint
+        assert after.catalog_generation == before.catalog_generation
+        assert after.projector_schema_version == projections.PROJECTOR_SCHEMA_VERSION
+        assert (
+            schema_v4.load_policy_generation(
+                connection, after.policy_generation_id
+            ).source_documents
+            == documents
+        )
+        assert (
+            connection.execute(
+                "SELECT * FROM governance_session_grants ORDER BY grant_id"
+            ).fetchall()
+            == grants
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+    _, _, items = _load_active_projection_items(
+        vault,
+        activation_epoch=after.activation_epoch,
+        activation_state_digest=after.activation_state_digest,
+    )
+    assert items[0].content_hash == hashlib.sha256(source.encode()).hexdigest()
+    assert items[0].variants
+    assert any(
+        "Useful canonical prose." in variant.search_fields.get("body", "")
+        for variant in items[0].variants
+    )
+    assert all(
+        "private attribution" not in json.dumps(dict(variant.search_fields))
+        for variant in items[0].variants
+    )
+
+
+def test_owner_runtime_refreshes_an_obsolete_projector_with_no_manual_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An upgrade that bumps the projector must not strand content writes on a manual step."""
+    from exomem import server_runtime
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    path = "Knowledge Base/Notes/visible.md"
+    source = "---\ntype: note\ntitle: Visible\n---\nUseful canonical prose.\n"
+    (vault / path).parent.mkdir(parents=True)
+    (vault / path).write_text(source)
+    migration = _migrate_with_projection_items(
+        vault, items=((path, source),), projector_version=1, now=now
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    begin = tool._begin_v4_policy_publication_receipt
+
+    def crash_after_reserving(*args, **kwargs):
+        begin(*args, **kwargs)
+        raise tool.GovernanceCrash("refresh interrupted")
+
+    monkeypatch.setattr(tool, "_begin_v4_policy_publication_receipt", crash_after_reserving)
+    with pytest.raises(tool.GovernanceCrash):
+        server_runtime.refresh_obsolete_projector(vault)
+    monkeypatch.setattr(tool, "_begin_v4_policy_publication_receipt", begin)
+
+    assert server_runtime.refresh_obsolete_projector(vault) == "refreshed"
+    assert server_runtime.refresh_obsolete_projector(vault) == "current"
+
+    assert tool._projection_runtime_readiness(vault) == "ready"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active = schema_v4.load_active_tuple_pointer(connection)
+        assert active.projector_schema_version == projections.PROJECTOR_SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        catalog_publication.prepare_markdown_upsert(
+            vault, path=path, source=source + "A new edit.\n",
+            expected_before_hash=hashlib.sha256(source.encode()).hexdigest(), now=now + 1,
+        )
+
+
+def test_owner_refresh_recovers_enrolled_empty_policy_without_republishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(),
+        policy_documents=(),
+        projector_version=1,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceError, match="INVALID_GOVERNANCE_PROPOSAL"):
+            op_govern_memory(
+                vault,
+                operation="propose",
+                principal=owner_principal(),
+                intent="Missing documents are not a refresh",
+                now=now + 1,
+            )
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Refresh the enrolled empty policy",
+            documents={},
+            now=now + 1,
+        )
+
+        def crash(point: str) -> None:
+            if point == "policy-publication-after-commit-before-registry":
+                raise GovernanceCrash(point)
+
+        monkeypatch.setattr(schema_v4, "_crash_point", crash)
+        with pytest.raises(GovernanceCrash):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                now=now + 2,
+            )
+        monkeypatch.setattr(schema_v4, "_crash_point", lambda _point: None)
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+        repeated = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 4,
+        )
+    assert recovered["status"] == repeated["status"] == "committed"
+    assert recovered["event_id"] == repeated["event_id"]
+    assert recovered["mirror_status"] == "not_required"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active = schema_v4.load_active_tuple_pointer(connection)
+        assert active.projector_schema_version == projections.PROJECTOR_SCHEMA_VERSION
+        assert active.catalog_generation == 1
+        assert (
+            schema_v4.load_policy_generation(
+                connection, active.policy_generation_id
+            ).source_documents
+            == ()
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+    assert (
+        authorization_custody.load_authorization_custody(
+            vault, now=now + 4
+        ).control.activation_state_digest
+        == active.activation_state_digest
+    )
 
 
 def _v4_snapshot_value(
@@ -1557,7 +1848,10 @@ def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
             "FROM active_governance_tuple WHERE singleton=1"
         ).fetchone()
         assert active[0] != FIRST_GENERATION_ID
-        assert active[1:] == (_compiled(_documents(ceiling=1)).fingerprint, 1, 1)
+        assert active[1:] == (
+            _compiled(_documents(ceiling=1)).fingerprint,
+            projections.PROJECTOR_SCHEMA_VERSION, 1,
+        )
         assert connection.execute(
             "SELECT COUNT(*) FROM governance_tuple_publications "
             "WHERE publication_kind='policy'"

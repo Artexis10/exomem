@@ -932,7 +932,13 @@ def _sections(body: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _signature(title: str, body: str, *, extra: Iterable[str] = ()) -> str:
+def _signature(title: str, body: str, *, owner_path: str = "", extra: Iterable[str] = ()) -> str:
+    """Title, lede and headline sections. A signature is shared by every caller,
+    so a page body is read withheld: an origin carrier is never its lede."""
+    if body:
+        from . import provenance
+
+        body = provenance.withheld_prose(body, owner_path=owner_path)
     parts = [title.strip(), lede(body), *_sections(body), *extra]
     return "\n".join(part for part in parts if part)[:SIGNATURE_MAX_CHARS]
 
@@ -1079,7 +1085,7 @@ def _walk_page_entries(
     caller that has not already loaded one this build) loads it fresh for
     this one vault — a cheap, memoised read, never a second vault walk.
     """
-    from . import activation_conventions, recall_policy
+    from . import activation_conventions, provenance, recall_policy
 
     if conventions is None:
         conventions = activation_conventions.load_conventions(Path(vault_root)).conventions
@@ -1117,10 +1123,12 @@ def _walk_page_entries(
             bucket = names.setdefault(key, [])
             if rel not in bucket:
                 bucket.append(rel)
+        # A carrier is attribution, not a link (`provenance.without_carriers`),
+        # exactly as in the inbound-link index: its links are never an edge.
         links = tuple(
             dict.fromkeys(
                 normalize(match)
-                for match in _WIKILINK.findall(page.body)
+                for match in _WIKILINK.findall(provenance.without_carriers(page.body))
                 + list(_strings(frontmatter.get("relations")))
                 + list(_strings(frontmatter.get("links")))
                 if normalize(match)
@@ -1303,7 +1311,7 @@ def _finalize_anchor_aliases(
                 title=title,
                 kind=entry["kind"],
                 lifecycle=entry["lifecycle"],
-                signature=_signature(title, entry["body"]),
+                signature=_signature(title, entry["body"], owner_path=entry["path"]),
                 aliases=aliases,
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
                 categories=_categories(sections, tags, semantic_registry=semantic_registry),

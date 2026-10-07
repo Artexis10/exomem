@@ -535,7 +535,8 @@ def context(
                 page = get_page_module.get_page(vault_root, path=path)
             except Exception:  # noqa: BLE001 - a vanished page is reported, not fatal
                 return {"missing": True}
-            text, truncated = _bounded(page.body, limit)
+            prose = egress.prose_for_caller(vault_root, page.body, owner_path=page.path)
+            text, truncated = _bounded(prose, limit)
             return {
                 "title": getattr(page, "title", None),
                 "content_hash": page.content_hash,
