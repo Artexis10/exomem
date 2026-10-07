@@ -22,6 +22,10 @@ _PREFIX = ".exomem-collection-snapshot-"
 _TOKEN = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _BUSY_TIMEOUT_MS = 50
 _COMPANIONS = ("-wal", "-shm", "-journal")
+# How often the copy, validation and hash loops rerun the caller's custody and fencing
+# check. Its cost would otherwise grow with the store. The deadline is compared on every
+# step, and every phase boundary runs the full check.
+_RECHECK_SECONDS = 0.1
 
 
 def _file_sha256(descriptor: int, check: Callable[[], None] | None = None) -> str:
@@ -132,16 +136,30 @@ def staged_snapshot(
     This trusted internal API authorizes only its unique scratch family. The
     caller owns staging-directory access and any later destination publication.
     ``deadline`` is an absolute monotonic cooperative limit; OS I/O can block.
+    ``cancelled`` (the caller's custody and fencing check) may raise its own error.
+    It runs at every phase boundary, and at most every ``_RECHECK_SECONDS`` within a
+    phase. A passed deadline raises ``TimeoutError`` (COLLECTION_SNAPSHOT_DEADLINE),
+    never COLLECTION_SNAPSHOT_INVALID.
     The calling worker thread owns the source reader and closes it after backup.
     """
+    checked_at = 0.0
 
     def check() -> None:
+        nonlocal checked_at
+        if time.monotonic() >= deadline:
+            raise TimeoutError("COLLECTION_SNAPSHOT_DEADLINE: snapshot staging deadline elapsed")
         if cancelled is not None and cancelled():
             raise connection.CollectionStoreError(
                 "COLLECTION_SNAPSHOT_CANCELLED", "snapshot staging was cancelled"
             )
-        if time.monotonic() >= deadline:
+        checked_at = time.monotonic()
+
+    def paced_check() -> None:
+        now = time.monotonic()
+        if now >= deadline:
             raise TimeoutError("COLLECTION_SNAPSHOT_DEADLINE: snapshot staging deadline elapsed")
+        if now - checked_at >= _RECHECK_SECONDS:
+            check()
 
     check()
     if scratch_token is not None and (
@@ -192,16 +210,19 @@ def staged_snapshot(
                             destination,
                             pages=64,
                             sleep=0.01,
-                            progress=lambda _status, _remaining, _total: check(),
+                            progress=lambda _status, _remaining, _total: paced_check(),
                         )
                     check()
+                    # A check that stops the SQL (deadline, cancellation, custody,
+                    # fencing) is re-raised as itself, whatever error type the caller's
+                    # check uses; it says nothing about the copy.
                     interruption = None
 
                     def validation_progress() -> int:
                         nonlocal interruption
                         try:
-                            check()
-                        except (TimeoutError, connection.CollectionStoreError) as error:
+                            paced_check()
+                        except BaseException as error:  # noqa: BLE001 - SQLite would discard it
                             interruption = error
                             return 1
                         return 0
@@ -211,7 +232,7 @@ def staged_snapshot(
                         metadata = _validate(destination, check)
                     except connection.CollectionStoreError as error:
                         if interruption is not None:
-                            raise interruption from error
+                            raise interruption from error.__cause__
                         raise
                     finally:
                         destination.set_progress_handler(None, 0)
@@ -227,7 +248,7 @@ def staged_snapshot(
                             "COLLECTION_SNAPSHOT_INVALID", "snapshot file identity changed"
                         )
                     descriptor = file.descriptor
-                    digest = _file_sha256(descriptor, check)
+                    digest = _file_sha256(descriptor, paced_check)
                     size = os.fstat(descriptor).st_size
                     check()
                     os.fsync(descriptor)
