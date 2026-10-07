@@ -1182,6 +1182,7 @@ def test_supported_runtime_admits_a_fresh_root_copy_of_the_c_vault(abc, tmp_path
 
 def test_staged_restore_carries_the_replica_and_admits_the_c_vault(abc, tmp_path):
     """Defect: a restore drops C's replica, carries live WAL bytes, or refuses the supported runtime."""
+    from conftest import _drain_background_threads
     from test_hosted_restore_candidate import _bootstrap, _request
 
     from exomem import hosted_portability, hosted_restore
@@ -1189,6 +1190,7 @@ def test_staged_restore_carries_the_replica_and_admits_the_c_vault(abc, tmp_path
 
     abc.release()
     init_vault(abc.root, force=True)
+    _drain_background_threads()  # Source workers must finish before restore changes the process state root.
     context = hosted_portability.PortabilityContext(
         cell_id="source-cell", vault_id="logical-vault", operation_id="export-gate",
         created_at="2026-10-06T00:00:00+00:00", operator_authorized=True, lifecycle_state="quiesced",
