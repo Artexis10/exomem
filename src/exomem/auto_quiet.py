@@ -77,6 +77,24 @@ def pressure_active() -> bool | None:
     return None
 
 
+def _manual_mode_decision(
+    state: AutoQuietState, *, current_mode: str, env_pinned: bool
+) -> AutoQuietDecision | None:
+    if env_pinned:
+        return AutoQuietDecision("none", reason="EXOMEM_MODE pins mode")
+    if state.engaged and current_mode != "quiet":
+        state.engaged = False
+        state.previous_mode = None
+        state.pressure_since = None
+        state.clear_since = None
+        return AutoQuietDecision("none", reason="manual mode change detected")
+    if current_mode == "quiet" and not state.engaged:
+        state.pressure_since = None
+        state.clear_since = None
+        return AutoQuietDecision("none", reason="already quiet")
+    return None
+
+
 def decide(
     state: AutoQuietState,
     *,
@@ -91,18 +109,12 @@ def decide(
     """Pure hysteresis decision; mutates only the supplied state object."""
     current_mode = mode.normalize(current_mode) or "normal"
     config_mode = mode.normalize(config_mode) or current_mode
-    if env_pinned:
-        return AutoQuietDecision("none", reason="EXOMEM_MODE pins mode")
+    manual = _manual_mode_decision(state, current_mode=current_mode, env_pinned=env_pinned)
+    if manual is not None:
+        return manual
     if pressure is None:
         state.pressure_since = None
         return AutoQuietDecision("none", reason="pressure probe unavailable")
-
-    if state.engaged and current_mode != "quiet":
-        state.engaged = False
-        state.previous_mode = None
-        state.pressure_since = None
-        state.clear_since = None
-        return AutoQuietDecision("none", reason="manual mode change detected")
 
     if pressure:
         state.clear_since = None
@@ -122,11 +134,6 @@ def decide(
     if not state.engaged:
         state.clear_since = None
         return AutoQuietDecision("none", reason="pressure clear")
-    if current_mode != "quiet":
-        state.engaged = False
-        state.previous_mode = None
-        state.clear_since = None
-        return AutoQuietDecision("none", reason="manual mode change detected")
     if state.clear_since is None:
         state.clear_since = now
         return AutoQuietDecision("none", reason="restore hysteresis started")
@@ -147,15 +154,25 @@ _LOCK = threading.Lock()
 
 def tick(state: AutoQuietState | None = None, *, now: float | None = None) -> AutoQuietDecision:
     state = state or _STATE
+    if not enabled():
+        state.pressure_since = None
+        state.clear_since = None
+        return AutoQuietDecision("none", reason="auto-quiet disabled")
+    current_mode = mode.resolve_mode()
+    env_pinned = bool(os.environ.get("EXOMEM_MODE"))
+    # Manual modes need no pressure signal; only automatic quiet needs it to restore.
+    manual = _manual_mode_decision(state, current_mode=current_mode, env_pinned=env_pinned)
+    if manual is not None:
+        return manual
     now = time.monotonic() if now is None else now
     cfg = mode.read_config()
     decision = decide(
         state,
-        current_mode=mode.resolve_mode(),
+        current_mode=current_mode,
         config_mode=cfg.get("mode"),
         pressure=pressure_active(),
         now=now,
-        env_pinned=bool(os.environ.get("EXOMEM_MODE")),
+        env_pinned=env_pinned,
         enter_after=_float_env(_ENTER_ENV, _DEFAULT_ENTER_SECONDS),
         restore_after=_float_env(_RESTORE_ENV, _DEFAULT_RESTORE_SECONDS),
     )

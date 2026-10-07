@@ -9,7 +9,7 @@ A checked task needs implementation, verification and merge evidence.
 | Work | Contract | Dependency and outcome |
 | --- | --- | --- |
 | RAW originals | [Collection query engine](changes/add-collection-query-engine/tasks.md), S1.5b | Admit protected originals before ranking or reporting. Ship before the first SQLite owner slice. |
-| Compiler follow-up | [Memory loop](changes/close-memory-loop/tasks.md) and [thread-aware compilation](changes/add-thread-aware-compilation/tasks.md) | Integrate RAW admission. Preserve truthful withheld results and useful context without repeated classification. |
+| Compiler follow-up | [Memory loop](changes/close-memory-loop/tasks.md) and [thread-aware compilation](changes/archive/2026-10-06-add-thread-aware-compilation/tasks.md) | Integrate RAW admission. Preserve truthful withheld results and useful context without repeated classification. |
 | Release | [Runtime upgrades](changes/standardize-hosted-runtime-upgrades/tasks.md) | Release 0.110 follows merged RAW and compiler corrections, with the Cloud storage and runtime changes. |
 | Source-kind retirement | `retire-other-source-kind` on its delivery branch | Follow RAW and compiler. Require meaningful agent classification and teach the migration through every bootstrap profile. |
 | Vocabulary registries | `add-vocabulary-registries` on its delivery branch | Follow source-kind retirement. Replace customer vocabulary constants with vault-owned registries. |

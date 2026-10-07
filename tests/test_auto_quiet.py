@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import builtins
+import json
+import os
 import sys
+from pathlib import Path
 
 from exomem import auto_quiet
 
@@ -124,6 +127,7 @@ def test_pressure_probe_uses_non_torch_headroom(monkeypatch) -> None:
 
 
 def test_unavailable_probe_soft_fails_without_mode_change(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_AUTO_QUIET", "1")
     monkeypatch.setattr(
         auto_quiet.resource_status,
         "gpu_headroom",
@@ -139,6 +143,86 @@ def test_unavailable_probe_soft_fails_without_mode_change(monkeypatch) -> None:
 
     assert decision.action == "none"
     assert decision.reason == "pressure probe unavailable"
+
+
+def test_manual_quiet_skips_gpu_queries_and_clears_pending_pressure(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_AUTO_QUIET", "1")
+    auto_quiet.mode.write_mode("quiet")
+    probes = []
+    monkeypatch.setattr(
+        auto_quiet.resource_status,
+        "gpu_headroom",
+        lambda: probes.append("GPU query") or {"status": "marginal"},
+    )
+    state = auto_quiet.AutoQuietState(pressure_since=10.0)
+
+    decision = auto_quiet.tick(state, now=100.0)
+
+    assert decision.action == "none"
+    assert auto_quiet.mode.resolve_mode() == "quiet"
+    assert probes == []
+    assert state.pressure_since is None
+
+
+def test_pinned_mode_skips_gpu_queries(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_AUTO_QUIET", "1")
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    probes = []
+    monkeypatch.setattr(
+        auto_quiet.resource_status,
+        "gpu_headroom",
+        lambda: probes.append("GPU query") or {"status": "marginal"},
+    )
+
+    decision = auto_quiet.tick(auto_quiet.AutoQuietState(), now=100.0)
+
+    assert decision.action == "none"
+    assert auto_quiet.mode.resolve_mode() == "performance"
+    assert probes == []
+
+
+def test_disabling_auto_quiet_stops_queries_from_existing_watcher(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_AUTO_QUIET", raising=False)
+    config = Path(os.environ["EXOMEM_CONFIG_PATH"])
+    config.write_text(json.dumps({"auto_quiet": True}))
+    probes = []
+    monkeypatch.setattr(
+        auto_quiet.resource_status,
+        "gpu_headroom",
+        lambda: probes.append("GPU query") or {"status": "marginal"},
+    )
+    state = auto_quiet.AutoQuietState()
+    auto_quiet.tick(state, now=10.0)
+    assert probes == ["GPU query"]
+
+    config.write_text(json.dumps({"auto_quiet": False}))
+    decision = auto_quiet.tick(state, now=100.0)
+
+    assert decision.action == "none"
+    assert auto_quiet.mode.resolve_mode() == "normal"
+    assert probes == ["GPU query"]
+    assert state.pressure_since is None
+
+
+def test_automatic_quiet_still_monitors_and_restores_previous_mode(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_AUTO_QUIET", "1")
+    auto_quiet.mode.write_mode("quiet")
+    monkeypatch.setattr(auto_quiet.mode, "apply_live", lambda: None)
+    probes = []
+    monkeypatch.setattr(
+        auto_quiet.resource_status,
+        "gpu_headroom",
+        lambda: probes.append("GPU query") or {"status": "capable"},
+    )
+    state = auto_quiet.AutoQuietState(engaged=True, previous_mode="performance")
+
+    first = auto_quiet.tick(state, now=100.0)
+    restored = auto_quiet.tick(state, now=161.0)
+
+    assert first.action == "none"
+    assert restored.action == "restore"
+    assert auto_quiet.mode.resolve_mode() == "performance"
+    assert probes == ["GPU query", "GPU query"]
 
 
 def test_start_if_enabled_is_default_off_and_env_gated(monkeypatch, tmp_path) -> None:

@@ -14,7 +14,7 @@ helper (:func:`run_arm`):
   arms start running with no change here. Their floors are the acceptance run
   of the change (S5), not asserted here.
 
-The baseline manifest (`baseline-arm-a.json` in the change directory) records
+The baseline manifest (`baseline-arm-a.json` in the archived change) records
 what the compiler on `main` served for arm (a) before any product change: the
 fixture digest and corpus hash it references, every case's per-anchor-kind
 result, which incident classes fail, and that the attachment cases abstain.
@@ -72,7 +72,8 @@ BASELINE_PATH = (
     Path(__file__).resolve().parents[1]
     / "openspec"
     / "changes"
-    / "add-thread-aware-compilation"
+    / "archive"
+    / "2026-10-06-add-thread-aware-compilation"
     / "baseline-arm-a.json"
 )
 REFUSED = "refused: unknown argument"

@@ -598,7 +598,9 @@ def build_packet(
             # time or a published compiler input. Charge the visible label too.
             if not entry.get("as_of") and page_updated:
                 label = f" (page updated {page_updated})"
-                statement = statement[: working_set_state.STATEMENT_MAX_CHARS - len(label)] + label
+                statement = working_set_state.bounded_statement(
+                    statement, working_set_state.STATEMENT_MAX_CHARS - len(label)
+                ) + label
                 entry["statement"] = statement
             for key in working_set_currency.INTERNAL_PROVENANCE:
                 entry.pop(key, None)
@@ -634,14 +636,7 @@ def build_packet(
             if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
                 _defer(item, "unit_too_long")
                 continue
-            unit = {
-                "ref": item.ref,
-                "role": item.role,
-                "text": text,
-                "lifecycle": item.lifecycle,
-                "updated": item.updated,
-                "provenance": _provenance(item),
-            }
+            unit = _served_unit(item)
             cost = (
                 working_set_conversation.prose_chars(unit, role_ids=role_ids)
                 if conversation_inferred else served_chars("units", unit)
@@ -780,6 +775,67 @@ def _budgeted_recent(
     return entries, used
 
 
+def _served_unit(item: LaneItem) -> dict[str, Any]:
+    """The `units` entry `item` is served as. A restricted reader's guard
+    decides this same entry before any lane caps it (`_reader_admitted`)."""
+    return {
+        "ref": item.ref,
+        "role": item.role,
+        "text": bounded_text(item.text),
+        "lifecycle": item.lifecycle,
+        "updated": item.updated,
+        "provenance": _provenance(item),
+    }
+
+
+def _reader_admitted(
+    items: Sequence[LaneItem], visible: Callable[[str], bool] | None
+) -> tuple[LaneItem, ...]:
+    """The items a restricted reader's egress guard would not remove silently
+    once served (`egress.in_reader_view`).
+
+    Every lane's items pass here before anything ranks or caps them. A unit
+    the guard would remove then takes no slot, pointer or truncation marker,
+    and a lane left with nothing reports `no_material`, as in a vault without
+    that unit.
+    """
+    from .governance import egress
+
+    if not items:
+        return ()
+    kept = egress.in_reader_view(visible, [_served_unit(item) for item in items])
+    return tuple(item for item, keep in zip(items, kept, strict=True) if keep)
+
+
+def _read_in_view(
+    read: Callable[[int], tuple[Sequence[Any], bool]],
+    in_view: Callable[[Sequence[Any]], list[Any]],
+    limit: int,
+    *,
+    restricted: bool,
+) -> tuple[list[Any], bool]:
+    """Up to `limit` rows a reader may see, and whether there are more.
+
+    `read(size)` returns at most `size` rows and whether its own read cap hid
+    any; `in_view` keeps the rows the reader may see. The owner's one read of
+    `limit + 1` rows is unchanged. A restricted reader's read grows while it
+    loses rows, until `limit + 1` rows survive or none are left, so a withheld
+    row neither takes a place nor reports a cut.
+    """
+    size = limit + 1
+    rows, capped = read(size)
+    if not restricted:
+        return in_view(rows[:limit]), len(rows) > limit or capped
+    kept = in_view(rows)
+    if len(kept) == len(rows):
+        return kept[:limit], len(rows) > limit or capped
+    while len(kept) <= limit and (len(rows) >= size or capped):
+        size *= 2
+        rows, capped = read(size)
+        kept = in_view(rows)
+    return kept[:limit], len(kept) > limit
+
+
 def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
     """A ref the budget could not afford, still saying what it would answer.
 
@@ -869,8 +925,9 @@ def run_lanes(
     Records lane and the packet's own `current_state[]` block are two views of
     the same reads and resolving them twice doubled the collection queries.
 
-    `visible` removes withheld pages before lane reads and caps; the release
-    guard remains the final check on the assembled packet.
+    `visible` removes withheld pages before lane reads and caps, and a
+    restricted reader's view also removes the units its egress guard would
+    (`_reader_admitted`). The guard remains the final check on the packet.
 
     `reached` records page ownership during these reads for promoted budgeting;
     it is request-local and never enters the packet.
@@ -881,6 +938,8 @@ def run_lanes(
     it has no indexed neighbourhood to expand, and expanding it would spend
     graph work to widen a claim that rests on one recall score.
     """
+    from .governance import egress
+
     root = Path(vault_root)
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
@@ -927,9 +986,13 @@ def run_lanes(
                     admit=admit,
                     material_scopes=material_scopes,
                     request_anchors=request_anchors,
+                    visible=visible,
                 )
+                result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
+            except egress.ReaderViewUnavailable:
+                raise
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
                 failed = True
@@ -962,19 +1025,23 @@ def _conclusion_pages(
     candidates: Iterable[str],
     *,
     categories: frozenset[str],
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """The candidates that hold at least one unit of a conclusion category,
     newest first, at most `ENTITY_CONCLUSION_PAGES`.
 
-    One indexed category read (`lexstore.unit_categories_of`) chooses the pages;
+    One indexed category read (`_unit_categories`) chooses the pages;
     every survivor's own date is then read (from the warm page cache; the
     candidates are bounded above) BEFORE the cut, so newest means newest.
     """
-    from . import find_corpus, lexstore
+    from . import find_corpus
+    from .governance import egress
 
     ordered = sorted(candidates)[: 4 * UNIT_LANE_LIMIT]
     try:
-        found = lexstore.get_store(Path(vault_root)).unit_categories_of(tuple(ordered))
+        found = _unit_categories(vault_root, tuple(ordered), visible, wanted=categories)
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - a failed probe reaches no extra page
         log.debug("activation conclusion-page probe failed", exc_info=True)
         return ()
@@ -1049,6 +1116,7 @@ def reach_precedents(
                 root,
                 (path for path in row.linked_by - already if visible is None or visible(path)),
                 categories=frozenset(definition.categories),
+                visible=visible,
             )
             precedent.update(conclusions)
             if reached is not None:
@@ -1135,6 +1203,7 @@ def _lane(
     admit: Callable[[str, Any], bool] | None = None,
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1149,13 +1218,14 @@ def _lane(
     if role.lane == "units":
         return _units_lane(
             vault_root, role, neighbourhood=neighbourhood, freshness_snapshot=freshness_snapshot,
-            admit=admit,
+            admit=admit, visible=visible,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
             vault_root, role, anchors=anchors, neighbourhood=neighbourhood,
             registry=registry, analysis=analysis, freshness_snapshot=freshness_snapshot,
             admit=admit, material_scopes=material_scopes, request_anchors=request_anchors,
+            visible=visible,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1177,6 +1247,7 @@ def _units_lane(
     neighbourhood: frozenset[str],
     freshness_snapshot: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1195,33 +1266,60 @@ def _units_lane(
         None,
         shortcuts=structured_filters.FilterShortcuts(categories=tuple(sorted(role.categories))),
     )
-    capped = []
-    hits = find_module._find_semantic_units(
-        Path(vault_root),
-        query="",
-        limit=UNIT_LANE_LIMIT + 1,
-        scope="kb",
-        plan=plan,
-        snapshot=snapshot,
-        prefer_active=True,
-        config=ranking_config.DEFAULT_RANKING,
-        mode="keyword",
-        degraded_out=None,
-        failed_out=None,
-        allowed_parent_paths=set(neighbourhood),
-        recall_checkpoint=snapshot.recall_checkpoint("kb"),
-        repair=False,
-        max_catalog_candidates=UNIT_LANE_LIMIT + 1,
-        truncated_out=capped,
+    def read(size: int) -> tuple[list[Any], bool]:
+        capped: list[bool] = []
+        found = find_module._find_semantic_units(
+            Path(vault_root),
+            query="",
+            limit=size,
+            scope="kb",
+            plan=plan,
+            snapshot=snapshot,
+            prefer_active=True,
+            config=ranking_config.DEFAULT_RANKING,
+            mode="keyword",
+            degraded_out=None,
+            failed_out=None,
+            allowed_parent_paths=set(neighbourhood),
+            recall_checkpoint=snapshot.recall_checkpoint("kb"),
+            repair=False,
+            max_catalog_candidates=size,
+            truncated_out=capped,
+        )
+        return found, bool(capped)
+
+    hits, truncated = _read_in_view(
+        read, lambda rows: hits_in_view(rows, visible), UNIT_LANE_LIMIT,
+        restricted=_restricted(visible),
     )
-    truncated = len(hits) > UNIT_LANE_LIMIT or bool(capped)
-    hits = hits[:UNIT_LANE_LIMIT]
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
     return LaneResult(_unit_items(role, hits), truncated)
 
 
-def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[LaneItem, ...]:
+def _restricted(visible: Callable[[str], bool] | None) -> bool:
+    """Is `visible` a restricted reader's view, whose guard may remove units?"""
+    from .governance import egress
+
+    return isinstance(visible, egress.ReaderView)
+
+
+def hits_in_view(hits: Sequence[Any], visible: Callable[[str], bool] | None) -> list[Any]:
+    """The semantic-unit hits whose served units `_reader_admitted` keeps.
+    The role a unit is read through plays no part in its release."""
+    from .governance import egress
+
+    if not hits or not _restricted(visible):
+        return list(hits)
+    kept = egress.in_reader_view(
+        visible, [_served_unit(item) for item in _unit_items(None, hits)]
+    )
+    return [hit for hit, keep in zip(hits, kept, strict=True) if keep]
+
+
+def _unit_items(
+    role: context_roles.ContextRole | None, hits: Sequence[Any]
+) -> tuple[LaneItem, ...]:
     out: list[LaneItem] = []
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
@@ -1230,7 +1328,7 @@ def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[L
         supersedes = working_set_currency.relation_targets(getattr(hit, "relations", None))
         out.append(
             LaneItem(
-                role=role.id,
+                role=role.id if role is not None else "",
                 level="unit",
                 ref=str(getattr(hit, "unit_ref", "") or parent),
                 path=parent,
@@ -1250,7 +1348,7 @@ def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[L
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),
                 },
-                why=role.description or f"{role.id} lane",
+                why=(role.description or f"{role.id} lane") if role is not None else "",
             )
         )
     return tuple(out)
@@ -1268,6 +1366,7 @@ def _material_lane(
     admit: Callable[[str, Any], bool] | None = None,
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     from . import (
@@ -1322,30 +1421,49 @@ def _material_lane(
     store = lexstore.get_store(vault_root)
     term_budget = working_set_runtime.material_term_budget()
     retained_query_units: list = []
-    result = store.search_semantic_units_result(
-        [], UNIT_LANE_LIMIT + 1, (), (), "kb", fresh,
-        allowed_parent_paths=set(neighbourhood), excluded_categories_by_parent=excluded,
-        query_units=query_units, term_budget=term_budget,
-        retained_query_units=retained_query_units,
-        recall_checkpoint=checkpoint, allow_delta=False,
+
+    def read(size: int) -> tuple[list[Any], bool]:
+        retained_query_units.clear()
+        result = store.search_semantic_units_result(
+            [], size, (), (), "kb", fresh,
+            allowed_parent_paths=set(neighbourhood), excluded_categories_by_parent=excluded,
+            query_units=query_units, term_budget=term_budget,
+            retained_query_units=retained_query_units,
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        if not result.readiness.complete:
+            raise RuntimeError("material unit catalogue unavailable")
+        return list(result.value or ()), False
+
+    def hydrated(candidates: Sequence[Any]) -> list[Any]:
+        stale: list[str] = []
+        records = find._hydrate_indexed_unit_records(
+            vault_root, list(candidates),
+            plan=structured_filters.compile_filter(None), stale_out=stale,
+        )
+        if stale:
+            raise RuntimeError("material units are stale")
+        return [
+            find._semantic_unit_hit(page, unit, bm25_rank=rank, bm25_score=candidate.lexical_score)
+            for rank, candidate in enumerate(candidates)
+            if candidate.unit_ref in records
+            for page, unit, _order in (records[candidate.unit_ref],)
+        ]
+
+    def in_view(candidates: Sequence[Any]) -> list[Any]:
+        """The candidates whose hits the reader may see; one that did not
+        hydrate stays, as it does for the owner."""
+        hits = hydrated(candidates)
+        seen = {id(hit) for hit in hits_in_view(hits, visible)}
+        shown = {hit.unit_ref for hit in hits if id(hit) in seen}
+        read_refs = {hit.unit_ref for hit in hits}
+        return [c for c in candidates if c.unit_ref not in read_refs or c.unit_ref in shown]
+
+    restricted = _restricted(visible)
+    candidates, truncated = _read_in_view(
+        read, in_view if restricted else list, UNIT_LANE_LIMIT, restricted=restricted,
     )
-    if not result.readiness.complete:
-        raise RuntimeError("material unit catalogue unavailable")
-    candidates = list(result.value or ())
-    truncated = len(candidates) > UNIT_LANE_LIMIT
-    stale: list[str] = []
-    records = find._hydrate_indexed_unit_records(
-        vault_root, candidates[:UNIT_LANE_LIMIT],
-        plan=structured_filters.compile_filter(None), stale_out=stale,
-    )
-    if stale:
-        raise RuntimeError("material units are stale")
-    hits = [
-        find._semantic_unit_hit(page, unit, bm25_rank=rank, bm25_score=candidate.lexical_score)
-        for rank, candidate in enumerate(candidates[:UNIT_LANE_LIMIT])
-        if candidate.unit_ref in records
-        for page, unit, _order in (records[candidate.unit_ref],)
-    ]
+    hits = hydrated(candidates)
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
     items = list(_unit_items(role, hits))
@@ -1475,7 +1593,7 @@ def _records_lane(
             level="page",
             ref=f"{entry.get('anchor')}#current",
             path=str(entry.get("path") or ""),
-            title=str(entry.get("statement") or "")[:80],
+            title=working_set_state.bounded_statement(str(entry.get("statement") or ""), 80),
             text=str(entry.get("statement") or ""),
             lifecycle="active",
             updated=str(entry.get("as_of") or ""),
@@ -2318,18 +2436,62 @@ def _carry_roles(
     )
 
 
+def _unit_categories(
+    vault_root: Path,
+    paths: Sequence[str],
+    visible: Callable[[str], bool] | None,
+    *,
+    wanted: frozenset[str] | None = None,
+) -> dict[str, frozenset[str]] | None:
+    """The categories each page's semantic units are filed under, as the
+    reader sees them, or `None` when the catalogue cannot answer.
+
+    For a restricted reader (`egress.ReaderView`), a unit its egress guard
+    would remove silently does not count: a lens or a conclusion page is then
+    chosen as in a vault without that unit. `wanted` limits the read to the
+    categories the caller asks about.
+    """
+    from . import lexstore
+    from .governance import egress
+
+    store = lexstore.get_store(Path(vault_root))
+    if not _restricted(visible):
+        return store.unit_categories_of(paths)
+    rows = store.units_of(paths, categories=wanted)
+    if rows is None:
+        return None
+    kept = egress.in_reader_view(visible, [
+        _served_unit(LaneItem(
+            role="", level="unit", ref=ref, path=parent, title="", text=content,
+            lifecycle="active", updated="", anchor=parent,
+        ))
+        for parent, ref, _category, content in rows
+    ])
+    out: dict[str, set[str]] = {}
+    for (parent, _ref, category, _content), keep in zip(rows, kept, strict=True):
+        if keep and category:
+            out.setdefault(parent, set()).add(category)
+    return {path: frozenset(found) for path, found in out.items()}
+
+
 def _page_unit_categories(
-    vault_root: Path, path: str, *, freshness_snapshot: Any = None
+    vault_root: Path,
+    path: str,
+    *,
+    freshness_snapshot: Any = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str] | None:
     """The categories a page's own semantic units are filed under, or `None`
     when they cannot be read (the caller then keeps the unfiltered lenses).
 
     One indexed read of the maintained catalogue, never a unit query: the
     answer only chooses which lenses to read the page through."""
-    try:
-        from . import lexstore
+    from .governance import egress
 
-        found = lexstore.get_store(Path(vault_root)).unit_categories_of((path,))
+    try:
+        found = _unit_categories(vault_root, (path,), visible)
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - a probe that fails keeps the unfiltered lenses
         log.debug("activation carried page category probe failed for %s", path, exc_info=True)
         return None
@@ -2618,7 +2780,9 @@ def _carried_material(
             roles = _carry_roles(
                 registry,
                 analysis,
-                _page_unit_categories(vault_root, path, freshness_snapshot=freshness_snapshot),
+                _page_unit_categories(
+                    vault_root, path, freshness_snapshot=freshness_snapshot, visible=visible
+                ),
                 anchor_names=context_intents.anchor_terms((title,)),
                 limit=len(registry.roles),
             )
@@ -3005,10 +3169,11 @@ def _follow_up_packet(
 
 
 def _reader_view(root: Path, purpose: str | None):
-    """The caller's page view for anchor resolution, or `None` for the owner."""
+    """The caller's view of pages and units (`egress.ReaderView`), or `None`
+    for the owner."""
     from .governance import egress
 
-    return egress.visible_page_filter(root, purpose=purpose)
+    return egress.reader_view(root, purpose=purpose)
 
 
 def _conversation_affordable() -> bool:
@@ -4755,7 +4920,7 @@ def _recent_episode_fields(vault_root: Path, rel: str) -> dict[str, str]:
         fields["title"] = " ".join(title.split())
     summary = frontmatter.get("summary")
     if isinstance(summary, str) and summary.strip():
-        fields["statement"] = f"summary: {summary.strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+        fields["statement"] = working_set_state.bounded_statement(f"summary: {summary.strip()}")
     key = frontmatter.get("episode")
     if isinstance(key, str) and episode_capture.EPISODE_KEY_RE.fullmatch(key):
         fields["episode"] = key
@@ -4800,7 +4965,7 @@ def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
             continue
         if name == "status" and working_set_index.normalize(str(value)) in _lifecycle_statuses():
             continue
-        return f"{name}: {str(value).strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+        return working_set_state.bounded_statement(f"{name}: {str(value).strip()}")
     return ""
 
 
