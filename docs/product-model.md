@@ -66,13 +66,15 @@ domain — `Sources/<Kind>/[<Domain>/]` — not the other way round. The folder 
 is a browsing projection of the metadata, never the ontology, and it is capped at
 two levels. Projects deliberately never appear in the path.
 
-`other` is the honest low-confidence fallback: it records that the kind could not
-be determined. It is not the place to put material whose kind is obvious but
-whose label happens to be unfamiliar. When captures keep landing in `other`
-inside one domain, Exomem surfaces an advisory `source_classification_debt`
-suggestion and leaves the decision to you; it never reorganises anything on its
-own. Classification applies at capture time only — sources captured before a
-label existed stay valid, readable, and retrievable exactly where they are.
+There is no catch-all kind. An agent names what a source is, and a capture
+without a kind is refused with the vault's known kinds and their counts. A
+capture with no agent in the loop (the terminal UI, the hosted capture box, the
+upload form, a legacy-vault import) is recorded as `unclassified`, and later
+captures carry an advisory `source_classification_debt` suggestion that counts
+those sources and the legacy `Sources/Other/` pages. Exomem never classifies or
+moves anything on its own: the agent reads each source, chooses its kind, and
+reclassifies it. Until then every such source stays valid, readable, and
+retrievable exactly where it is.
 
 Compiled notes use visible typed Markdown for directional note-level edges:
 

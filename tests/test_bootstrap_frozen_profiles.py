@@ -1,16 +1,11 @@
-"""Released hosted profiles keep their compact bootstrap payload byte for byte.
+"""Historical descriptors stay frozen while bootstrap versions runtime migrations.
 
-`hosted-alpha-agent-v1` to `-v4` are published identities with committed
-candidates. The core/section split (openspec change `shrink-bootstrap`) applies
-to every other surface only, so a client on a released profile is served exactly
-what it was served before the split.
+Hosted v1-v4 retain their pre-split compact bootstrap shape. Contract
+2026-10-07.1 explicitly supersedes optional-kind and `other` capture guidance.
+The payload pins were recorded after proving that undoing only the migration
+fields reproduces every origin/main digest. Only the server version and tool
+surface fingerprints are normalized away.
 
-The digests below were recorded on the base (integration/wave-bcd) before the split
-was applied, and re-recorded from the untouched base when it advanced (efe52086):
-the pin says this change alters no released profile, not that no one ever does. Only
-values that legitimately move between releases are normalised away: the
-server's own version and the tool-surface fingerprints, which the tool-schema
-lane edits independently.
 """
 
 from __future__ import annotations
@@ -23,7 +18,7 @@ import tempfile
 
 import pytest
 
-from exomem import capabilities, commands, hosted_legacy_schemas
+from exomem import capabilities, commands, hosted_legacy_schemas, source_taxonomy
 
 LEGACY_PROFILES = tuple(f"hosted-alpha-agent-v{n}" for n in range(1, 5))
 LEVELS = ("off", "light", "balanced", "maximal")
@@ -31,29 +26,29 @@ LEVELS = ("off", "light", "balanced", "maximal")
 #: profile -> level -> sha256 of the normalised compact payload.
 GOLDEN: dict[str, dict[str, str]] = {
     "hosted-alpha-agent-v1": {
-        "off": "2be2e4fc7b0f2df1ae7ce5e4b00ef00e539e867c0a60ac6789d58ba5ffeb72bb",
-        "light": "a8b86e762cfc4c91dc6fc1264594056b3af0c6cdb004a5fcc8163178fc53f072",
-        "balanced": "628982b4aa3922cd9d7490d1554cb813475c2c80b8c5c7e9f88e49ef45510707",
-        "maximal": "cce587e5241fb1bda5a3399d61fc36b133593ba4ea70969b5b3b839a9d1f666d",
+        "off": "47432b52c7ffba2b4fc86f99b40eddc463b7c1b6cd785a1081829852a82ef86b",
+        "light": "ce36a62fbe8048325487e6857353d40b1cdca63f08c5b89c941b835904f596df",
+        "balanced": "383c646bd92d4e35aa8ac8aadcf94750208c55b6fc03a1f8e67ede2df54ac938",
+        "maximal": "fdba8d1d1866fcc9a319df08427bee7535ccaeb8391f583b4fd6dcd84d014cad"
     },
     "hosted-alpha-agent-v2": {
-        "off": "d62f2fa37e85120bf3a5ff624ff38006e62a22481a14b95a5b09b05a5bc1692b",
-        "light": "181f1b5ce82f7de8caf6198c826d795ac58904d89039d7a589847818467d4d7c",
-        "balanced": "37c1c3bddabfe2be453ef430ac5c5798006a839826aed5737915fb799065cf22",
-        "maximal": "9cb8a290eb1dad908ae525df7b447a4432871a4e62a3ec63b4f5b6ac63337843",
+        "off": "3aaed417196a84e59629d56367a8df74e5b45ced0228cf0e17c9448a7aab7939",
+        "light": "b94b2f3bb5871a6cf7708e4042f63cb189cef7fa208d4f3c1104cddf2ec8e3c2",
+        "balanced": "e243a26d3d49c08c9bc55040a93b59401f857310c2cabeb75c3871afb06ddd25",
+        "maximal": "276aa7f45a22b2561d1382df46d0b9c0d14da208f9adbf23b0adc6052d8d2659"
     },
     "hosted-alpha-agent-v3": {
-        "off": "b80f29ff8d18815f582fa99c83152ee1cccca8ed49f8ad5afc23d542f0084c0b",
-        "light": "e2c1dae68fc930f7a27d0b4569ea9319662f3b21426aba64c664e7a781f3d948",
-        "balanced": "78e03c039a417120eb5da46bac3bdd15d0ec483fee3543ce50cf6337f95374e3",
-        "maximal": "f902ce970997395e43cbea7ae0514762904a5ba12ce2e355733f669872c1e5e8",
+        "off": "cf0e7b499f71e23d426803cb7a720abfca223ef6526757745165dabc842b8f1f",
+        "light": "cd0641fe2c65ca9d8359eaf683bda786065785fe1807827fd765957389d39213",
+        "balanced": "a7634b1720111b027dc5197d457b6fccdab80def7eefa3f44a442354a0dc7a64",
+        "maximal": "3af955e27372c3c605f855f408a47350a7d54daf6f463e265eab64e1c6918846"
     },
     "hosted-alpha-agent-v4": {
-        "off": "d5a967117267a44c35bd30344bde89e638c85f4745278a60fa497ebd3661c6dd",
-        "light": "6953349500e403a5a3687eab84d11ca59646f9855b467fcc4bcaf9537f25f979",
-        "balanced": "b1ffd3f46470a692bf61de2b7d79246258d72bd419290efc6652b9cbac102de4",
-        "maximal": "cc9584123d6d3426a13c0f19b7fb36602170e023dff2d9745700dbd38154937e",
-    },
+        "off": "225e7ba49ad5ea42307a12f1b5edc027774214b1a7a9dcc20e6a099e2f102405",
+        "light": "895751a5378e798ac6562a3e1e7dc7916b8bd49b5cfbc3ad7d46655b90f1374e",
+        "balanced": "175483688259f20a02a22e5187f8f99711910d201e1a6ca3471184ff811c9c39",
+        "maximal": "8b36571706ad2d7cf3fb6f91d1c781e1367e4153d8caeadc1d3e7a272232775a"
+    }
 }
 
 _VOLATILE_SERVER_KEYS = (
@@ -89,11 +84,14 @@ def legacy_compact(monkeypatch: pytest.MonkeyPatch, profile: str, level: str) ->
 
 @pytest.mark.parametrize("level", LEVELS)
 @pytest.mark.parametrize("profile", LEGACY_PROFILES)
-def test_a_released_profile_serves_the_pre_split_payload(monkeypatch, profile, level):
+def test_a_released_profile_serves_its_versioned_payload(monkeypatch, profile, level):
     payload = legacy_compact(monkeypatch, profile, level)
 
     assert payload["profile"] == "compact"
     assert "sections" not in payload
+    assert payload["contract_version"] == "2026-10-07.1"
+    assert payload["source_taxonomy"]["kind_rule"] == source_taxonomy.CAPTURE_KIND_RULE
+    assert payload["source_taxonomy"]["migration"] == source_taxonomy.CAPTURE_KIND_MIGRATION
     assert normalised_digest(payload) == GOLDEN[profile][level]
 
 

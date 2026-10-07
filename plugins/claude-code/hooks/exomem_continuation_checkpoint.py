@@ -45,6 +45,18 @@ EVENT_CONTRACT_VERSION = 1
 OUTPUT_CONTRACT_VERSION = 1
 MAX_CHECKPOINT_BYTES = 64 * 1024
 MAX_CONTEXT_BYTES = 2048
+# Bootstrap reuses this rule; the standalone hook restores it without package imports.
+MEMORY_CITATION_GUIDANCE = (
+    "show the note title by default in normal user-facing prose and do not "
+    "expose the raw canonical ref by default; add the current vault-relative "
+    "path for clarity or disambiguation, or use the path or file name as the "
+    "visible fallback when the title is unusable; keep the canonical "
+    "exomem://memory/<uuid> ref for tool arguments, durable machine state, "
+    "and machine-readable automation; show it only when the user explicitly "
+    "asks for it or the identifier itself is being inspected or debugged; "
+    "do not embed the canonical ref as a Markdown link target; use a plain "
+    "title-first citation"
+)
 MAX_PATH_BYTES = 512
 MAX_IDENTIFIER_BYTES = 512
 MAX_DIRTY_PATHS = 128
@@ -1098,6 +1110,7 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
         "artifacts and continue from evidence, inventing nothing. Capture a genuine durable "
         "stepping-stone through normal Exomem governance; otherwise no memory write. "
         "Advisory only; it does not prove capture completion."
+        "\nMemory citations: " + MEMORY_CITATION_GUIDANCE
     )
     content_budget = MAX_CONTEXT_BYTES - len(("\n" + advisory).encode("utf-8"))
     maximum_footer = (

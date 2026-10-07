@@ -18,12 +18,14 @@ import datetime as dt
 import hashlib
 import logging
 import os
+import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
+    cli_ops,
     corpus_aware,
     indexes,
     memory_refs,
@@ -56,6 +58,7 @@ log = logging.getLogger(__name__)
 # Legacy kind → folder. Retained only so callers that still import it keep
 # working; the live routing decision is `source_taxonomy.source_segments`, which
 # reproduces every one of these mappings from the registry. Do not add to it.
+# `other` names a legacy folder that is read and never written.
 SOURCE_TYPE_TO_FOLDER: dict[str, str] = {
     "article": "Articles",
     "session": "Sessions",
@@ -282,9 +285,16 @@ def add(
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
 
-    # No kind supplied means unclassified, not invalid: capture is never
-    # gated on classification.
-    requested_kind = source_type if source_type else source_taxonomy.FALLBACK_KIND
+    # The caller decides what a missing kind means: an agent-facing surface
+    # refuses it (`capture_kind`), and a surface with no agent in the loop
+    # passes `unclassified`. This layer never invents a kind.
+    if not source_type or not source_type.strip():
+        raise AddError(
+            code="SOURCE_KIND_REQUIRED",
+            missing=["source_type"],
+            reason="a source needs a kind; name what the material is",
+        )
+    requested_kind = source_type
     domain_binding: vocabulary_resolution.SourceDomainBinding | None = None
     try:
         if domain is not None:
@@ -313,6 +323,13 @@ def add(
             missing=["domain"],
             reason=vocabulary_resolution.capture_refusal_reason(vault_root, e),
         ) from e
+
+    if kind.key == source_taxonomy.LEGACY_OTHER_KIND:
+        raise AddError(
+            code="SOURCE_KIND_REQUIRED",
+            missing=["source_type"],
+            reason=f"{kind.key!r} is retired and no new source is filed under it",
+        )
 
     episode_lines = _episode_frontmatter_lines(kind.key, extra_frontmatter, supersede)
 
@@ -489,7 +506,10 @@ def add(
     )
 
     # Pre-compute counts and bump the relevant folder by 1 for the new file.
-    pre_counts = indexes._count_sources(kb_root(vault_root) / "Sources")
+    count_errors: list[OSError] = []
+    pre_counts = indexes._count_sources(
+        kb_root(vault_root) / "Sources", on_error=count_errors.append
+    )
     post_counts = dict(pre_counts)
     post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
 
@@ -725,17 +745,12 @@ def add(
         artifact_size=artifact_size,
         slug=filename_slug,
         structure_suggestion=_classification_suggestion(
-            folder_path, kind, domain_resolution
-        ),
+            vault_root, taxonomy, post_counts
+        ) if not count_errors else None,
         adoption=adoption_receipt,
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
     )
 
-
-#: Fallback captures sharing one domain before the pattern reads as a real,
-#: nameable kind rather than one unusual artifact. Counted post-write, so the
-#: capture that triggers the suggestion is included.
-_FALLBACK_RECURRENCE_THRESHOLD = 3
 
 _SUGGESTION_KIND = "source_classification_debt"
 
@@ -777,50 +792,172 @@ def _vocabulary_warnings(
 
 
 def _classification_suggestion(
-    folder_path: Path,
-    kind: source_taxonomy.Resolution,
-    domain: source_taxonomy.Resolution | None,
+    vault_root: Path,
+    taxonomy: source_taxonomy.SourceTaxonomy,
+    counts: Mapping[str, int],
 ) -> dict | None:
-    """Advisory: this capture used the fallback where a real kind likely exists.
+    """Advisory: this vault holds sources nobody has given a kind yet.
 
-    Deterministic and local — one bounded directory listing that stops at the
-    threshold. No model call, no corpus scan, no persistent state. Wrapped so a
-    fault here can never turn a committed capture into a failure.
+    Reads the per-folder counts this capture already took for the source
+    index, so it adds no scan, model call or persistent state. A caller other
+    than the owner gets no advisory, because those counts include pages it may
+    not see. Wrapped so a fault here can never fail a committed capture.
     """
-    if kind.key != source_taxonomy.FALLBACK_KIND or domain is None:
-        return None
     try:
-        reasons = ["fallback_kind_with_declared_domain"]
-        strength = "moderate"
-        if _count_capped(folder_path, _FALLBACK_RECURRENCE_THRESHOLD) >= (
-            _FALLBACK_RECURRENCE_THRESHOLD
+        from .governance import principal, raw_protection
+
+        who = principal.effective_principal()
+        if not (
+            raw_protection.is_owner(who)
+            and raw_protection.has_unrestricted_access(vault_root, who)
         ):
-            reasons.append("fallback_captures_recur_in_domain")
-            strength = "strong"
+            return None
+        by_folder = {name.casefold(): count for name, count in counts.items()}
+        folders = {
+            name: by_folder[name.casefold()]
+            for name in unclassified_folders(taxonomy)
+            if by_folder.get(name.casefold(), 0) > 0
+        }
+        if not folders:
+            return None
         return {
             "kind": _SUGGESTION_KIND,
-            "strength": strength,
-            "reasons": sorted(reasons),
-            "domain": domain.key,
-            "fallback_captures": _count_capped(
-                folder_path, _FALLBACK_RECURRENCE_THRESHOLD
-            ),
+            "strength": "moderate",
+            "reasons": ["unclassified_sources_present"],
+            "unclassified_sources": sum(folders.values()),
+            "folders": sorted(folders),
         }
     except Exception:  # noqa: BLE001 — advisory only; never fail a capture
         log.debug("source-classification advisory failed (non-fatal)", exc_info=True)
         return None
 
 
-def _count_capped(folder_path: Path, cap: int) -> int:
-    """Count `.md` files in one directory, stopping once `cap` is reached."""
-    total = 0
-    for entry in folder_path.iterdir():
-        if entry.name == "index.md" or entry.suffix != ".md" or not entry.is_file():
-            continue
-        total += 1
-        if total >= cap:
-            break
-    return total
+def unclassified_folders(taxonomy: source_taxonomy.SourceTaxonomy) -> tuple[str, ...]:
+    """The `Sources/` folders whose pages carry no chosen kind."""
+    return (
+        *(taxonomy.kinds[key].path_label for key in sorted(source_taxonomy.UNCHOSEN_KINDS)),
+        source_taxonomy.IMPORTED_PATH_LABEL,
+    )
+
+
+#: At most this many known kinds ride on a refusal, most used first.
+KNOWN_KINDS_SHOWN = 30
+#: What each count on a kind-required refusal measures, and where it comes from.
+KNOWN_KINDS_COUNTED = (
+    "sources: the source pages filed under the kind's Sources/ folder that this "
+    "caller may see, counted from this vault when the capture was refused"
+)
+
+
+def capture_kind(vault_root: Path, supplied: str | None, *, unattended: bool) -> str:
+    """The kind a capture is filed under, or a refusal raised before any write.
+
+    A capture with no agent in the loop (`unattended`) records a missing kind
+    as `unclassified`, the visible classification debt. An agent is refused
+    instead, and so is any caller naming a kind that records no choice: the
+    agent is the one who reads the material, so the choice is its own. Nothing
+    here guesses a kind from the content.
+    """
+    if supplied is None or not supplied.strip():
+        if unattended:
+            return source_taxonomy.UNCLASSIFIED_KIND
+        raise kind_required(vault_root, supplied=None)
+    try:
+        key = source_taxonomy.load_taxonomy(vault_root).resolve_kind(supplied).key
+    except source_taxonomy.TaxonomyError:
+        # `add` refuses it with the near-miss or validity reason it already gives.
+        return supplied
+    if key in source_taxonomy.UNCHOSEN_KINDS:
+        raise kind_required(vault_root, supplied=supplied)
+    return supplied
+
+
+def kind_required(vault_root: Path, *, supplied: str | None) -> cli_ops.OpError:
+    """The refusal for a capture whose kind an agent still has to choose."""
+    taxonomy = source_taxonomy.load_taxonomy(vault_root)
+    known = known_kind_counts(vault_root, taxonomy)
+    if supplied is None:
+        message = "capture_source needs source_kind: what this material IS"
+    else:
+        message = f"source_kind {supplied!r} records no choice; name what this material IS"
+    return cli_ops.OpError(
+        "SOURCE_KIND_REQUIRED",
+        message,
+        f"{source_taxonomy.CAPTURE_KIND_RULE} {source_taxonomy.CAPTURE_KIND_MIGRATION}",
+        details={
+            "known_source_kinds": known[:KNOWN_KINDS_SHOWN],
+            "known_source_kinds_total": len(known),
+            "known_source_kinds_counted": KNOWN_KINDS_COUNTED,
+            "known_source_kinds_state": (
+                "complete" if all(row["sources"] is not None for row in known)
+                else "incomplete" if any(row["sources"] is not None for row in known)
+                else "failed"
+            ),
+        },
+    )
+
+
+def known_kind_counts(
+    vault_root: Path, taxonomy: source_taxonomy.SourceTaxonomy
+) -> list[dict[str, object]]:
+    """Every kind an agent may choose, with its use count, most used first.
+
+    A count is the source pages filed under the kind's folder, counted only
+    over the pages this caller may see.
+    """
+    from .governance import egress
+
+    keep = egress.restricted_release_filter(vault_root)
+
+    def visible(path: str) -> bool:
+        return bool(keep(Path(path).relative_to(vault_root).as_posix()))
+
+    # Walks the folders itself rather than calling `indexes._count_sources`,
+    # which `_compute_updates_with_counts` swaps out process-wide while a
+    # capture in another thread computes its index.
+    by_folder: dict[str, int | None] = {}
+    sources = kb_root(vault_root) / source_taxonomy.SOURCES_ROOT
+    listing_complete = False
+    try:
+        # iterdir distinguishes proven absence from a failed directory read.
+        folders = list(sources.iterdir())
+    except FileNotFoundError:
+        listing_complete = True
+    except OSError:
+        pass
+    else:
+        listing_complete = True
+        for folder in folders:
+            if folder.name.startswith("_"):
+                continue
+            errors: list[OSError] = []
+            try:
+                # stat raises on inaccessible entries; is_dir can suppress errors.
+                if not stat.S_ISDIR(folder.stat().st_mode):
+                    continue
+                count = indexes._count_markdown_pages(
+                    folder,
+                    skip_underscore_dirs=True,
+                    keep=None if keep is None else visible,
+                    on_error=errors.append,
+                )
+            except OSError:
+                by_folder[folder.name.casefold()] = None
+            else:
+                by_folder[folder.name.casefold()] = None if errors else count
+    choosable = [
+        definition
+        for key, definition in taxonomy.kinds.items()
+        if key not in source_taxonomy.UNCHOSEN_KINDS
+        and key != source_taxonomy.EPISODE_KIND
+        and definition.status != "deprecated"
+    ]
+    rows = [
+        (by_folder.get(definition.path_label.casefold(), 0 if listing_complete else None), definition.key)
+        for definition in choosable
+    ]
+    rows.sort(key=lambda row: (row[0] is None, -(row[0] or 0), row[1]))
+    return [{"kind": key, "sources": count} for count, key in rows]
 
 
 def _compute_updates_with_counts(

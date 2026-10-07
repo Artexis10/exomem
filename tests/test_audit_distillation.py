@@ -23,11 +23,11 @@ def test_unprocessed_sources_aged_bucketed_and_oldest_first(
 ) -> None:
     # Two fresh-off-add sources (ingested_into: []), with controlled capture dates.
     add_module.add(
-        vault, source_schema, content="old capture body", source_type="other",
+        vault, source_schema, content="old capture body", source_type="correspondence",
         title="Aging Old One", today=dt.date(2026, 1, 1),
     )
     add_module.add(
-        vault, source_schema, content="recent capture body", source_type="other",
+        vault, source_schema, content="recent capture body", source_type="correspondence",
         title="Aging Recent One", today=dt.date(2026, 5, 20),
     )
 
@@ -74,7 +74,7 @@ def test_an_episode_recap_is_not_an_unprocessed_source(
     """Every conversation writes a recap; an audit finding per conversation
     would be noise. The recap and its ledger are the coverage record."""
     add_module.add(
-        vault, source_schema, content="ordinary capture", source_type="other",
+        vault, source_schema, content="ordinary capture", source_type="correspondence",
         title="Ordinary Capture", today=dt.date(2026, 1, 1),
     )
     add_module.add(

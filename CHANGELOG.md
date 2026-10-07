@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.110.0](https://github.com/Artexis10/exomem/compare/v0.109.0...v0.110.0) (2026-10-07)
+
+
+### Features
+
+* **cloud:** grow local cells online and rehearse node-loss recovery with an S3 test double ([#1603](https://github.com/Artexis10/exomem/issues/1603)) ([37bfb11](https://github.com/Artexis10/exomem/commit/37bfb11753ca0e912b202b5577553f2eb14065ba))
+* **governance:** keep standalone raw originals owner-only until explicit release; defer hosted read protection until tenant-owner binding ([#1581](https://github.com/Artexis10/exomem/issues/1581)) ([8c96fd4](https://github.com/Artexis10/exomem/commit/8c96fd4b1ded6d9b072454c8fb805c8672f56a16))
+* **records:** recover corrected file rows and bind exact episode origins ([#1607](https://github.com/Artexis10/exomem/issues/1607)) ([2e77ac3](https://github.com/Artexis10/exomem/commit/2e77ac33e97d61e3967e062588a8d41ce7021fa5))
+* **upkeep:** add episode-recap fold and profile summary upkeep ([#1600](https://github.com/Artexis10/exomem/issues/1600)) ([6fcdb69](https://github.com/Artexis10/exomem/commit/6fcdb69a956a077e15ffcd25e17e41f46a93951e))
+
+
+### Bug Fixes
+
+* **activation:** read file paths as references and carry links from served units ([#1604](https://github.com/Artexis10/exomem/issues/1604)) ([68c2e4a](https://github.com/Artexis10/exomem/commit/68c2e4a619bda61152704277b5f31f0afd7db3dd))
+* **activation:** select permitted context before disclosure ([#1614](https://github.com/Artexis10/exomem/issues/1614)) ([8365f0e](https://github.com/Artexis10/exomem/commit/8365f0e929c33db805b49a964f953964bc90c0ac))
+* **cloud:** keep ONNX telemetry out of durable cell state ([#1610](https://github.com/Artexis10/exomem/issues/1610)) ([2379822](https://github.com/Artexis10/exomem/commit/237982241222712866119f5b3ebaef2cf39abd85))
+* **resources:** skip GPU polling when automatic mode changes are inactive ([#1615](https://github.com/Artexis10/exomem/issues/1615)) ([c18d8b5](https://github.com/Artexis10/exomem/commit/c18d8b5086f915083de565fb7fcfd176cdb16b44))
+
+
+### Performance
+
+* **cloud:** set chart and cellctl defaults to 512Mi and 125m per cell ([#1605](https://github.com/Artexis10/exomem/issues/1605)) ([fb087a3](https://github.com/Artexis10/exomem/commit/fb087a3ef580d1b50199a3888cd4383242d8e637))
+* **cloud:** ship bge-m3 alone in the cloud image after the multilingual cutover ([#1608](https://github.com/Artexis10/exomem/issues/1608)) ([6325bb9](https://github.com/Artexis10/exomem/commit/6325bb9a7a5336a05b47d0b5f988714c10fe1c2a))
+
 ## [0.109.0](https://github.com/Artexis10/exomem/compare/v0.108.0...v0.109.0) (2026-10-06)
 
 

@@ -323,6 +323,7 @@ def test_the_wrong_lane_is_named_and_leaves_the_hold_redeemable(vault: Path, lea
             vault,
             _source_schema(vault),
             title="Appointment card",
+            source_kind="appointment-card",
             files=[handle],
             idempotency_key="wrong-lane",
         )
@@ -341,6 +342,7 @@ def test_a_source_hold_is_captured_losslessly_by_capture_source(vault: Path, lea
             vault,
             _source_schema(vault),
             title="Field manual",
+            source_kind="manual-documentation",
             files=[handle],
             idempotency_key="source-hold",
         )
@@ -552,6 +554,7 @@ def test_a_failed_capture_leaves_the_claimed_source_hold_redeemable(
                 vault,
                 _source_schema(vault),
                 title="Trail guide",
+                source_kind="manual-documentation",
                 files=[handle],
                 idempotency_key=key,
             )

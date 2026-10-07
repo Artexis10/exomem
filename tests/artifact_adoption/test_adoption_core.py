@@ -175,6 +175,7 @@ def test_source_and_evidence_use_one_receipt_vocabulary_with_lane_specific_paths
         vault,
         source_schema=source_schema,
         title="Reasoning input",
+        source_type="research-report",
         files=[_handle("source-file", "reasoning.bin", "application/octet-stream")],
         adoption=_adoption("source-key", selected="source-file", trigger="approved"),
     )
@@ -191,7 +192,7 @@ def test_source_and_evidence_use_one_receipt_vocabulary_with_lane_specific_paths
     assert source_receipt.keys() == evidence_receipt.keys()
     assert source_receipt["lane"] == "source"
     assert evidence_receipt["lane"] == "evidence"
-    assert source_receipt["destination"] == "Knowledge Base/Sources/Other"
+    assert source_receipt["destination"] == "Knowledge Base/Sources/Reports"
     assert evidence_receipt["destination"] == "Knowledge Base/Evidence/case/outputs"
     assert source_receipt["stored_path"].startswith("Knowledge Base/Sources/")
     assert source_receipt["page_path"].startswith("Knowledge Base/Sources/")
@@ -265,6 +266,7 @@ def test_durable_replay_rechecks_the_original_receipt_page_snapshot_after_restag
             vault,
             source_schema=source_schema,
             title="Selected reasoning input",
+            source_type="research-report",
             **common,
         )
     else:
@@ -366,6 +368,7 @@ def test_changed_request_semantics_beat_missing_canonical_bytes(
             vault,
             source_schema=source_schema,
             title="Wrong semantic lane",
+            source_type="research-report",
             files=[handle],
             adoption=_adoption(f"semantic-before-custody-{changed_semantic}"),
         )
@@ -457,6 +460,7 @@ def test_source_durable_replay_restages_and_returns_its_original_page_receipt(
     kwargs = {
         "source_schema": source_schema,
         "title": "Durable reasoning input",
+        "source_type": "research-report",
         "files": [_handle("file-b", "reasoning.bin", "application/octet-stream")],
         "adoption": _adoption("durable-source-key"),
     }
@@ -648,6 +652,7 @@ def test_reused_key_cannot_change_destination_or_lane_before_retrieval(
         vault,
         source_schema=source_schema,
         title="Wrong lane",
+        source_type="research-report",
         files=[handle],
         adoption=_adoption("durable-key"),
     )
@@ -879,6 +884,7 @@ def test_artifact_and_adoption_receipt_are_one_atomic_write_set(
                 vault,
                 source_schema=source_schema,
                 title="Atomic Source",
+                source_type="research-report",
                 files=[_handle("file-b", "atomic.bin", "application/octet-stream")],
                 adoption=_adoption("atomic-source"),
             )
@@ -1260,6 +1266,7 @@ def test_receipt_path_must_be_the_lane_specific_canonical_companion_pair(
             vault,
             source_schema=source_schema,
             title="Canonical pair",
+            source_type="research-report",
             **common,
         )
     else:
