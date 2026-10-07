@@ -521,11 +521,11 @@ def move_file(
     wikilinks_updated = 0
     # Every linking page is rewritten, including pages the mover may not see,
     # so the vault stays consistent; the counts and paths reported to a mover
-    # other than the owner cover the pages it may see. The activity log keeps
-    # the full figures.
+    # other than the owner cover the pages it may see, by a policy or by RAW.
+    # The activity log keeps the full figures.
     from .governance import egress
 
-    visible = egress.governed_release_filter(vault_root)
+    visible = egress.restricted_release_filter(vault_root)
     reported_touched: list[str] = []
     reported_updated = 0
     # For such a mover, a withheld linker the move cannot rewrite cleanly is
@@ -1118,7 +1118,7 @@ def restricted_mover_terminal(
     """
     from .governance import egress
 
-    if not isinstance(result, Mapping) or egress.governed_release_filter(vault_root) is None:
+    if not isinstance(result, Mapping) or not egress.caller_restricted(vault_root):
         return result
     if "leaf_result" not in result and "new_path" in result and "old_path" in result:
         result = committed(result)

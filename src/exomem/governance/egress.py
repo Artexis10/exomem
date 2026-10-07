@@ -6160,16 +6160,20 @@ def owner_only_aggregate(
     vault_root: Path,
     *,
     principal: RequestPrincipal | None = None,
+    raw_admitted: bool = False,
 ) -> dict[str, Any] | None:
     """The refusal a whole-vault aggregate gives a caller other than the owner.
 
     An audit, a schema inferred from the corpus, or a coverage block reduces
     every page, so no filter applied to its result can remove what a page the
-    caller may not see contributed. Under a governed policy it is therefore
-    served to the owner only, as the relation census is; every other bound
-    audience receives `available: false` with `reason: "audience_restricted"`,
-    decided from the principal and the policy before anything is read. Under
-    an empty file-mode policy, for the owner, and for a call no surface bound,
+    caller may not see contributed. It is therefore served to the owner only,
+    as the relation census is; every other bound audience receives
+    `available: false` with `reason: "audience_restricted"`, decided from the
+    principal and the policy before anything is read. With no file policy RAW
+    is the only floor, and it still withholds a protected capture from every
+    caller but the owner: an aggregate whose producer admits each page through
+    RAW before reducing (`raw_admitted`) is served there, and any other is
+    refused as under a policy. For the owner and for a call no surface bound,
     this is `None` and the aggregate is served as before. A bound preview must
     prove every owned artifact current and fully released before aggregating.
 
@@ -6200,27 +6204,9 @@ def owner_only_aggregate(
             return {"available": False, "reason": AUDIENCE_RESTRICTED}
     if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
         return None
-    if _file_policy_empty(vault_root, policy_module.load(Path(vault_root))):
+    if raw_admitted and _file_policy_empty(vault_root, policy_module.load(Path(vault_root))):
         return None
     return {"available": False, "reason": AUDIENCE_RESTRICTED}
-
-
-def governed_release_filter(
-    vault_root: Path,
-    *,
-    principal: RequestPrincipal | None = None,
-    purpose: str | None = None,
-) -> Any:
-    """`restricted_release_filter` under a governed policy only, else `None`.
-
-    For the write doors whose answers change for a caller other than the
-    owner (folder deletes, a move's report, an occupied entity's refusal):
-    on a vault with no policy they answer every caller as before, even when
-    an erased page's tombstone makes the release filter decide a path.
-    """
-    if owner_only_aggregate(vault_root, principal=principal) is None:
-        return None
-    return restricted_release_filter(vault_root, principal=principal, purpose=purpose)
 
 
 def write_target_withheld(

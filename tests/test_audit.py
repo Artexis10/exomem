@@ -17,23 +17,29 @@ from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
 
 
-def test_raw_source_is_absent_from_guest_audit_summary(vault: Path) -> None:
-    """Dropping a hidden finding after counting must not leak the audit total."""
+def test_a_guest_is_refused_the_audit_before_and_after_a_raw_source_lands(vault: Path) -> None:
+    """The audit's link-existence walks and index checks read every file, so a
+    guest is refused it on a vault with no policy too; the owner's audit
+    counts a protected source."""
     from exomem import commands
-    from exomem.governance import egress, principal
+    from exomem.governance import principal
 
     guest = principal.RequestPrincipal(
         "principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic",
     )
-    with principal.request_scope(guest):
+    owner = principal.owner_principal(surface="library")
+    with principal.request_scope(owner):
         before = commands.op_audit(vault, categories=["unprocessed_source"])
-        hidden = vault / "Knowledge Base/Sources/__exomem_raw_v1__private.md"
-        hidden.write_text("---\ntype: source\ncreated: 2020-01-01\ningested_into: []\n---\nPrivate source\n", encoding="utf-8")
-        after = egress.postfilter("audit", commands.op_audit(vault, categories=["unprocessed_source"]), vault)
-    assert after["summary"] == before["summary"]
-    with principal.request_scope(principal.owner_principal(surface="library")):
-        local = commands.op_audit(vault, categories=["unprocessed_source"])
-    assert local["summary"]["unprocessed_source"] == before["summary"].get("unprocessed_source", 0) + 1
+    with principal.request_scope(guest):
+        refused = commands.op_audit(vault, categories=["unprocessed_source"])
+    hidden = vault / "Knowledge Base/Sources/__exomem_raw_v1__private.md"
+    hidden.write_text("---\ntype: source\ncreated: 2020-01-01\ningested_into: []\n---\nPrivate source\n", encoding="utf-8")
+    with principal.request_scope(guest):
+        assert commands.op_audit(vault, categories=["unprocessed_source"]) == refused
+    with principal.request_scope(owner):
+        after = commands.op_audit(vault, categories=["unprocessed_source"])
+    assert refused == {"available": False, "reason": "audience_restricted"}
+    assert after["summary"]["unprocessed_source"] == before["summary"].get("unprocessed_source", 0) + 1
 
 
 def test_audit_and_reconcile_import_in_fresh_process() -> None:

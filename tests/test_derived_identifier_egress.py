@@ -1465,8 +1465,7 @@ def test_a_restricted_writer_deletes_no_folder(
     refused = _text(
         {
             "__error__": "ValueError",
-            "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only "
-            "under a governed policy",
+            "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only",
         }
     )
     assert answers["visible"] == answers["mixed"] == refused, answers
@@ -1484,55 +1483,6 @@ def test_a_restricted_writer_deletes_no_folder(
         vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True
     )
     assert "__error__" not in deleted, deleted
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_tombstones_alone_leave_a_non_owners_writes_as_the_owners(
-    tmp_path: Path, audience: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The write-door rulings hold under a governed policy only: on a vault
-    with no policy, an erased page's tombstone changes nothing for a caller
-    other than the owner, who may delete a folder."""
-    from exomem.governance import lifecycle
-
-    files = {
-        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
-        f"{NOTES}/linker.md": _page("Linker", f"See [[{NOTES}/alpha]] and [[alpha]]."),
-        f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
-        f"{KB}/Entities/People/Wanda Grey.md": _page(
-            "Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey"
-        ),
-    }
-    monkeypatch.setattr(
-        lifecycle, "tombstoned_paths", lambda _root: frozenset({f"{NOTES}/erased.md"})
-    )
-
-    def answers(name: str, principal: RequestPrincipal) -> list[str]:
-        vault = tmp_path / name / "vault"
-        for rel, text in files.items():
-            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
-            (vault / rel).write_text(text, encoding="utf-8")
-        _reset()
-        with library_scope():
-            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-        moved = _call(
-            vault, principal, "manage_memory_file", operation="move",
-            old_path=f"{NOTES}/alpha.md", new_path=f"{NOTES}/alpha-moved.md",
-            response_detail="legacy",
-        )
-        entity = _call(
-            vault, principal, "connect_memory", operation="create-entity",
-            name="Wanda Grey", entity_type="person", summary="A person.",
-        )
-        deleted = _call(
-            vault, principal, "manage_memory_file", operation="delete",
-            path=f"{NOTES}/Open", confirm=True, recursive=True,
-        )
-        assert "__error__" not in deleted, deleted
-        assert not (vault / NOTES / "Open").exists()
-        return [_VOLATILE_TEXT.sub("<v>", _text(value)) for value in (moved, entity)]
-
-    assert answers("other", _principal(audience)) == answers("owner", owner_principal())
 
 
 #: Run-specific values in a write's answer: request and receipt ids, hashes,
@@ -2536,6 +2486,185 @@ def test_a_guests_referents_count_as_if_the_marked_entity_were_absent(tmp_path: 
     assert local["referents"]["reasons"]["type_mismatch"] == 2, local
     guest = [_call(vaults[variant], _principal("external"), "ask_memory", **query) for variant in vaults]
     assert guest[0]["referents"] == guest[1]["referents"]
+
+
+def _raw_twins(tmp_path: Path, base: dict[str, str], protected: dict[str, str]) -> dict[str, Path]:
+    """Two vaults with no policy: `present` holds the RAW-marked pages, `absent` does not."""
+    import shutil
+
+    vaults = {}
+    for variant, files in {"present": {**base, **protected}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+    return vaults
+
+
+def test_a_guest_deletes_a_page_a_marked_page_links_as_if_the_linker_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: a link from a protected capture does not count against a guest's
+    delete, as a link from a page a policy withholds does not. On a vault with
+    no policy the guest's delete succeeds whether or not the protected linker
+    exists; the owner's delete still counts the link and is refused."""
+    alpha = f"{NOTES}/alpha.md"
+    vaults = _raw_twins(
+        tmp_path,
+        {**_filler(), alpha: _page("Alpha", "Alpha body.", type="insight")},
+        {
+            f"{NOTES}/__exomem_raw_v1__gamma-secret.md": _page(
+                "Gamma", "Secret plan. See [[alpha]].", type="insight"
+            )
+        },
+    )
+
+    def delete(vault: Path, principal: RequestPrincipal | None) -> Any:
+        return _call(
+            vault, principal, "manage_memory_file", operation="delete", path=alpha, confirm=True
+        )
+
+    owner = delete(vaults["present"], None)
+    assert "INBOUND_LINKS" in _text(owner), owner
+    guest = {variant: delete(vault, _principal("external")) for variant, vault in vaults.items()}
+    assert "__error__" not in guest["absent"], guest["absent"]
+    assert "__error__" not in guest["present"], guest["present"]
+    assert not (vaults["present"] / alpha).exists()
+
+
+def test_a_guest_deletes_no_folder_whether_or_not_it_holds_a_marked_page(
+    tmp_path: Path,
+) -> None:
+    """RAW: a folder can hold a protected capture on a vault with no policy too,
+    so a folder delete is the owner's there as well. A guest is refused the
+    same way whether or not the folder holds one, and the capture stays put."""
+    box = f"{NOTES}/Box"
+    marked = f"{box}/__exomem_raw_v1__inside.md"
+    vaults = _raw_twins(
+        tmp_path,
+        {**_filler(), f"{box}/open.md": _page("Open", "Open box page.", type="insight")},
+        {marked: _page("Inside", "Protected inside the box.", type="insight")},
+    )
+
+    guest = {
+        variant: _call(
+            vault, _principal("external"), "manage_memory_file", operation="delete",
+            path=box, recursive=True, confirm=True,
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert guest["present"] == guest["absent"]
+    assert guest["present"]["message"].startswith("AUDIENCE_RESTRICTED"), guest["present"]
+    assert (vaults["present"] / marked).exists()
+
+
+def test_a_guest_moves_a_page_a_marked_page_links_as_if_the_linker_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: a move rewrites every linking page, a protected capture included, so
+    the vault stays consistent. The guest's answer covers the linkers it may
+    see and reads the same whether or not the protected linker exists."""
+    alpha = f"{NOTES}/alpha.md"
+    linker = f"{NOTES}/__exomem_raw_v1__linker.md"
+    vaults = _raw_twins(
+        tmp_path,
+        {**_filler(), alpha: _page("Alpha", "Alpha conclusions.")},
+        {linker: _page("Linker", "See [[alpha]] for the plan.")},
+    )
+
+    guest = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault, _principal("external"), "manage_memory_file", operation="move",
+                    old_path=alpha, new_path=f"{NOTES}/alpha-moved.md", response_detail="legacy",
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert "__error__" not in guest["absent"], guest["absent"]
+    assert guest["present"] == guest["absent"]
+    assert "alpha-moved" in (vaults["present"] / linker).read_text(encoding="utf-8")
+
+
+def test_a_marked_entity_destination_is_refused_as_any_occupied_one(tmp_path: Path) -> None:
+    """RAW: a guest naming an entity whose page is a protected capture is refused
+    as for any occupied destination on a vault with no policy, without the path."""
+    import shutil
+
+    answers = {}
+    for which, name, text in (
+        (
+            "marked",
+            "__exomem_raw_v1__Wanda Grey",
+            _page("Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey"),
+        ),
+        ("visible", "Wanda Grey", _page("Scratch", "Not an entity.", type="note")),
+    ):
+        occupant = f"{KB}/Entities/People/{name}.md"
+        vault = _materialize(tmp_path / which / "vault", {**_filler(), occupant: text}, "external")
+        shutil.rmtree(vault / KB / "_Governance")
+        answer = _call(
+            vault, _principal("external"), "connect_memory", operation="create-entity",
+            name=name, entity_type="person", summary="A person.",
+        )
+        answers[which] = _text(answer).replace(name, "<name>")
+        assert (vault / occupant).read_text(encoding="utf-8") == text
+
+    assert answers["marked"] == answers["visible"]
+    assert "ENTITY_EXISTS" in answers["marked"], answers["marked"]
+
+
+#: Whole-vault aggregates a guest reaches on a vault with no policy.
+_RAW_AGGREGATES: dict[str, tuple[str, dict[str, Any]]] = {
+    "activation": ("review_memory", {"mode": "activation"}),
+    "audit": ("review_memory", {"mode": "audit", "detail": "full"}),
+    "relation-queue": ("review_memory", {"mode": "relation-queue"}),
+    "suggest-relations": (
+        "connect_memory",
+        {"operation": "suggest-relations", "path": f"{NOTES}/alpha.md"},
+    ),
+}
+
+
+def test_a_guests_whole_vault_aggregates_read_as_if_the_marked_page_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: an aggregate reduces every page, so no filter on its result removes
+    a protected capture. Activation coverage admits each page through RAW and is
+    served; the audit, the relation queue and relation proposals read files RAW
+    does not admit and are refused, as under a policy. Either way a guest's
+    answer is the same whether or not the capture exists."""
+    vaults = _raw_twins(
+        tmp_path,
+        {
+            **_filler(),
+            f"{NOTES}/alpha.md": _page(
+                "Alpha", "See [[__exomem_raw_v1__gamma-secret]].", type="insight"
+            ),
+        },
+        {
+            f"{NOTES}/__exomem_raw_v1__gamma-secret.md": _page(
+                "Gamma", "Secret plan. See [[alpha]].", type="insight"
+            ),
+        },
+    )
+    owner = {
+        variant: _call(vault, None, "review_memory", mode="activation")["coverage"]
+        for variant, vault in vaults.items()
+    }
+    assert owner["present"]["eligible_pages"] == owner["absent"]["eligible_pages"] + 1, owner
+
+    for label, (command, kwargs) in _RAW_AGGREGATES.items():
+        guest = [
+            _text(_stable(_call(vault, _principal("external"), command, **kwargs)))
+            for vault in vaults.values()
+        ]
+        assert guest[0] == guest[1], label
+    activation = _call(vaults["present"], _principal("external"), "review_memory", mode="activation")
+    assert activation["coverage"]["eligible_pages"] > 0, activation["coverage"]
 
 
 def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(

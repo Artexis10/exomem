@@ -3558,9 +3558,9 @@ def op_suggest_relations(
         candidate includes from/to, relation_type, method, and evidence.
         `mutated` is always false.
     """
-    # Under a governed policy relation proposals are the owner's, like the
-    # relation queue they feed: their candidates are resolved over the whole
-    # vault. Another audience is refused before the path is resolved.
+    # Relation proposals are the owner's, like the relation queue they feed:
+    # their candidates are resolved over the whole vault, protected captures
+    # included. Another audience is refused before the path is resolved.
     refusal = egress_module.owner_only_aggregate(vault_root)
     if refusal is not None:
         return refusal
@@ -3741,6 +3741,9 @@ def op_audit(
         presentation/truncation facts. Full detail preserves raw findings.
     """
     audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    # Served to the owner only. Its parsed pages are admitted through RAW, but
+    # its link-existence walks and index checks read every file, protected
+    # captures included.
     refusal = egress_module.owner_only_aggregate(vault_root)
     if refusal is not None:
         return refusal
@@ -5689,7 +5692,7 @@ def op_move_file(
 
 
 _FOLDER_DELETE_REFUSAL = (
-    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only under a governed policy"
+    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only"
 )
 
 
@@ -5753,14 +5756,14 @@ def op_delete(
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
             INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
     """
-    # Under a governed policy a folder is deleted by the owner only: a folder
-    # can hold pages the writer may not see, and every answer about them
-    # (counts, refusals, what was trashed) would move with them. One refusal
-    # for a folder the writer may see, whatever it holds; a declared
-    # recursive delete is refused before anything is read. A folder holding
-    # only pages withheld from the writer does not exist for it, as its
-    # listing says, and is answered as a missing path.
-    keep = egress_module.governed_release_filter(vault_root)
+    # A folder is deleted by the owner only: a folder can hold pages the
+    # writer may not see, by a policy or by RAW on any vault, and every answer
+    # about them (counts, refusals, what was trashed) would move with them.
+    # One refusal for a folder the writer may see, whatever it holds; a
+    # declared recursive delete is refused before anything is read. A folder
+    # holding only pages withheld from the writer does not exist for it, as
+    # its listing says, and is answered as a missing path.
+    keep = egress_module.restricted_release_filter(vault_root)
     restricted = keep is not None
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
@@ -9519,8 +9522,8 @@ def op_connect_memory(
             edit_memory=_accept_relations_edit,
         )
     if operation == "suggest-relations":
-        # Relation proposals are owner work under a governed policy (see
-        # `op_suggest_relations`); refused before the path is resolved.
+        # Relation proposals are owner work (see `op_suggest_relations`);
+        # refused before the path is resolved.
         refusal = egress_module.owner_only_aggregate(vault_root)
         if refusal is not None:
             return refusal
@@ -10330,7 +10333,9 @@ def op_schema_memory(
     ):
         # Inferring from the corpus (directly, or as the other side of a
         # diff) reduces every page; it is the owner's under a governed policy.
-        refusal = egress_module.owner_only_aggregate(vault_root)
+        # Its page selection admits each page through RAW
+        # (`memory_schema._select_pages`), so with no policy it is served.
+        refusal = egress_module.owner_only_aggregate(vault_root, raw_admitted=True)
         if refusal is not None:
             return {"subject": subject, **refusal}
     if subject == "entity-types" and operation == "resolve-entity-type":

@@ -230,13 +230,13 @@ def delete_file(
             expected_set.add(n)
 
     # Inbound-link check (with `expected_dead_inbound` filtering). For a
-    # writer other than the owner under a governed policy, only links from
-    # pages it may see are counted, listed and logged: a link from a page
-    # withheld from it is orphaned as `force_orphan` would, and the owner's
+    # writer other than the owner, only links from pages it may see are
+    # counted, listed and logged: a link from a page withheld from it, by a
+    # policy or by RAW, is orphaned as `force_orphan` would, and the owner's
     # audit reports it.
     from .governance import egress
 
-    visible = egress.governed_release_filter(vault_root)
+    visible = egress.restricted_release_filter(vault_root)
     inbound_all = [
         match
         for match in find_inbound_wikilinks(vault_root, rel_path)
