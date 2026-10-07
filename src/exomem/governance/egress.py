@@ -3062,8 +3062,18 @@ def _unit_verdict(
     kept = _guarded_unit(unit, ctx.frozen, ctx.decisions, ctx.invalid_refs)
     if kept is not None:
         return kept, UNIT_KEPT
+    # Only what removes a unit can report its removal. Of its provenance, that
+    # is `path` and `anchor`: `_guarded_unit` strips any other withheld field,
+    # such as a `superseded_by` target, and keeps the unit.
+    provenance = unit.get("provenance")
+    removing = {
+        **unit,
+        "provenance": {
+            key: provenance[key] for key in ("path", "anchor") if key in provenance
+        } if isinstance(provenance, Mapping) else provenance,
+    }
     named_paths, prose_names, _interpretations, _unresolvable = _working_set_paths(
-        {"units": [unit]}
+        {"units": [removing]}
     )
     named_paths |= {
         path for name in prose_names for path in ctx.prose_resolved.get(name, ())
