@@ -789,18 +789,49 @@ def _served_unit(item: LaneItem) -> dict[str, Any]:
 def _reader_admitted(
     items: Sequence[LaneItem], visible: Callable[[str], bool] | None
 ) -> tuple[LaneItem, ...]:
-    """The items whose served units a restricted reader's egress guard keeps.
+    """The items a restricted reader's egress guard would not remove silently
+    once served (`egress.in_reader_view`).
 
-    A lane drops the rest before it ranks or caps anything. A unit the guard
-    would remove then takes no slot, pointer or truncation marker, and a lane
-    left with nothing reports `no_material`, as in a vault without that unit.
+    Every lane's items pass here before anything ranks or caps them. A unit
+    the guard would remove then takes no slot, pointer or truncation marker,
+    and a lane left with nothing reports `no_material`, as in a vault without
+    that unit.
     """
     from .governance import egress
 
-    if not items or not isinstance(visible, egress.ReaderView):
-        return tuple(items)
-    kept = visible.units([_served_unit(item) for item in items])
+    if not items:
+        return ()
+    kept = egress.in_reader_view(visible, [_served_unit(item) for item in items])
     return tuple(item for item, keep in zip(items, kept, strict=True) if keep)
+
+
+def _read_in_view(
+    read: Callable[[int], tuple[Sequence[Any], bool]],
+    in_view: Callable[[Sequence[Any]], list[Any]],
+    limit: int,
+    *,
+    restricted: bool,
+) -> tuple[list[Any], bool]:
+    """Up to `limit` rows a reader may see, and whether there are more.
+
+    `read(size)` returns at most `size` rows and whether its own read cap hid
+    any; `in_view` keeps the rows the reader may see. The owner's one read of
+    `limit + 1` rows is unchanged. A restricted reader's read grows while it
+    loses rows, until `limit + 1` rows survive or none are left, so a withheld
+    row neither takes a place nor reports a cut.
+    """
+    size = limit + 1
+    rows, capped = read(size)
+    if not restricted:
+        return in_view(rows[:limit]), len(rows) > limit or capped
+    kept = in_view(rows)
+    if len(kept) == len(rows):
+        return kept[:limit], len(rows) > limit or capped
+    while len(kept) <= limit and (len(rows) >= size or capped):
+        size *= 2
+        rows, capped = read(size)
+        kept = in_view(rows)
+    return kept[:limit], len(kept) > limit
 
 
 def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
@@ -955,6 +986,7 @@ def run_lanes(
                     request_anchors=request_anchors,
                     visible=visible,
                 )
+                result = LaneResult(_reader_admitted(result.items, visible), result.truncated)
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
             except egress.ReaderViewUnavailable:
@@ -1232,33 +1264,60 @@ def _units_lane(
         None,
         shortcuts=structured_filters.FilterShortcuts(categories=tuple(sorted(role.categories))),
     )
-    capped = []
-    hits = find_module._find_semantic_units(
-        Path(vault_root),
-        query="",
-        limit=UNIT_LANE_LIMIT + 1,
-        scope="kb",
-        plan=plan,
-        snapshot=snapshot,
-        prefer_active=True,
-        config=ranking_config.DEFAULT_RANKING,
-        mode="keyword",
-        degraded_out=None,
-        failed_out=None,
-        allowed_parent_paths=set(neighbourhood),
-        recall_checkpoint=snapshot.recall_checkpoint("kb"),
-        repair=False,
-        max_catalog_candidates=UNIT_LANE_LIMIT + 1,
-        truncated_out=capped,
+    def read(size: int) -> tuple[list[Any], bool]:
+        capped: list[bool] = []
+        found = find_module._find_semantic_units(
+            Path(vault_root),
+            query="",
+            limit=size,
+            scope="kb",
+            plan=plan,
+            snapshot=snapshot,
+            prefer_active=True,
+            config=ranking_config.DEFAULT_RANKING,
+            mode="keyword",
+            degraded_out=None,
+            failed_out=None,
+            allowed_parent_paths=set(neighbourhood),
+            recall_checkpoint=snapshot.recall_checkpoint("kb"),
+            repair=False,
+            max_catalog_candidates=size,
+            truncated_out=capped,
+        )
+        return found, bool(capped)
+
+    hits, truncated = _read_in_view(
+        read, lambda rows: hits_in_view(rows, visible), UNIT_LANE_LIMIT,
+        restricted=_restricted(visible),
     )
-    truncated = len(hits) > UNIT_LANE_LIMIT or bool(capped)
-    hits = hits[:UNIT_LANE_LIMIT]
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    return LaneResult(_reader_admitted(_unit_items(role, hits), visible), truncated)
+    return LaneResult(_unit_items(role, hits), truncated)
 
 
-def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[LaneItem, ...]:
+def _restricted(visible: Callable[[str], bool] | None) -> bool:
+    """Is `visible` a restricted reader's view, whose guard may remove units?"""
+    from .governance import egress
+
+    return isinstance(visible, egress.ReaderView)
+
+
+def hits_in_view(hits: Sequence[Any], visible: Callable[[str], bool] | None) -> list[Any]:
+    """The semantic-unit hits whose served units `_reader_admitted` keeps.
+    The role a unit is read through plays no part in its release."""
+    from .governance import egress
+
+    if not hits or not _restricted(visible):
+        return list(hits)
+    kept = egress.in_reader_view(
+        visible, [_served_unit(item) for item in _unit_items(None, hits)]
+    )
+    return [hit for hit, keep in zip(hits, kept, strict=True) if keep]
+
+
+def _unit_items(
+    role: context_roles.ContextRole | None, hits: Sequence[Any]
+) -> tuple[LaneItem, ...]:
     out: list[LaneItem] = []
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
@@ -1267,7 +1326,7 @@ def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[L
         supersedes = working_set_currency.relation_targets(getattr(hit, "relations", None))
         out.append(
             LaneItem(
-                role=role.id,
+                role=role.id if role is not None else "",
                 level="unit",
                 ref=str(getattr(hit, "unit_ref", "") or parent),
                 path=parent,
@@ -1287,7 +1346,7 @@ def _unit_items(role: context_roles.ContextRole, hits: Sequence[Any]) -> tuple[L
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),
                 },
-                why=role.description or f"{role.id} lane",
+                why=(role.description or f"{role.id} lane") if role is not None else "",
             )
         )
     return tuple(out)
@@ -1359,33 +1418,52 @@ def _material_lane(
     store = lexstore.get_store(vault_root)
     term_budget = working_set_runtime.material_term_budget()
     retained_query_units: list = []
-    result = store.search_semantic_units_result(
-        [], UNIT_LANE_LIMIT + 1, (), (), "kb", fresh,
-        allowed_parent_paths=set(neighbourhood), excluded_categories_by_parent=excluded,
-        query_units=query_units, term_budget=term_budget,
-        retained_query_units=retained_query_units,
-        recall_checkpoint=checkpoint, allow_delta=False,
+
+    def read(size: int) -> tuple[list[Any], bool]:
+        retained_query_units.clear()
+        result = store.search_semantic_units_result(
+            [], size, (), (), "kb", fresh,
+            allowed_parent_paths=set(neighbourhood), excluded_categories_by_parent=excluded,
+            query_units=query_units, term_budget=term_budget,
+            retained_query_units=retained_query_units,
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        if not result.readiness.complete:
+            raise RuntimeError("material unit catalogue unavailable")
+        return list(result.value or ()), False
+
+    def hydrated(candidates: Sequence[Any]) -> list[Any]:
+        stale: list[str] = []
+        records = find._hydrate_indexed_unit_records(
+            vault_root, list(candidates),
+            plan=structured_filters.compile_filter(None), stale_out=stale,
+        )
+        if stale:
+            raise RuntimeError("material units are stale")
+        return [
+            find._semantic_unit_hit(page, unit, bm25_rank=rank, bm25_score=candidate.lexical_score)
+            for rank, candidate in enumerate(candidates)
+            if candidate.unit_ref in records
+            for page, unit, _order in (records[candidate.unit_ref],)
+        ]
+
+    def in_view(candidates: Sequence[Any]) -> list[Any]:
+        """The candidates whose hits the reader may see; one that did not
+        hydrate stays, as it does for the owner."""
+        hits = hydrated(candidates)
+        seen = {id(hit) for hit in hits_in_view(hits, visible)}
+        shown = {hit.unit_ref for hit in hits if id(hit) in seen}
+        read_refs = {hit.unit_ref for hit in hits}
+        return [c for c in candidates if c.unit_ref not in read_refs or c.unit_ref in shown]
+
+    restricted = _restricted(visible)
+    candidates, truncated = _read_in_view(
+        read, in_view if restricted else list, UNIT_LANE_LIMIT, restricted=restricted,
     )
-    if not result.readiness.complete:
-        raise RuntimeError("material unit catalogue unavailable")
-    candidates = list(result.value or ())
-    truncated = len(candidates) > UNIT_LANE_LIMIT
-    stale: list[str] = []
-    records = find._hydrate_indexed_unit_records(
-        vault_root, candidates[:UNIT_LANE_LIMIT],
-        plan=structured_filters.compile_filter(None), stale_out=stale,
-    )
-    if stale:
-        raise RuntimeError("material units are stale")
-    hits = [
-        find._semantic_unit_hit(page, unit, bm25_rank=rank, bm25_score=candidate.lexical_score)
-        for rank, candidate in enumerate(candidates[:UNIT_LANE_LIMIT])
-        if candidate.unit_ref in records
-        for page, unit, _order in (records[candidate.unit_ref],)
-    ]
+    hits = hydrated(candidates)
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    items = list(_reader_admitted(_unit_items(role, hits), visible))
+    items = list(_unit_items(role, hits))
     pages = store.search_bm25_result(
         [], MAX_ITEMS_PER_ROLE + 1, "kb", fresh, set(neighbourhood),
         query_units=query_units, term_budget=term_budget, recall_checkpoint=checkpoint,
@@ -2362,22 +2440,20 @@ def _unit_categories(
     reader sees them, or `None` when the catalogue cannot answer.
 
     For a restricted reader (`egress.ReaderView`), a unit its egress guard
-    would remove does not count: a lens or a conclusion page is then chosen
-    as in a vault without that unit. `wanted` limits that decision to the
-    units of the categories the caller asks about.
+    would remove silently does not count: a lens or a conclusion page is then
+    chosen as in a vault without that unit. `wanted` limits the read to the
+    categories the caller asks about.
     """
     from . import lexstore
     from .governance import egress
 
     store = lexstore.get_store(Path(vault_root))
-    if not isinstance(visible, egress.ReaderView):
+    if not _restricted(visible):
         return store.unit_categories_of(paths)
-    rows = store.units_of(paths)
+    rows = store.units_of(paths, categories=wanted)
     if rows is None:
         return None
-    if wanted is not None:
-        rows = [row for row in rows if row[2] in wanted]
-    kept = visible.units([
+    kept = egress.in_reader_view(visible, [
         _served_unit(LaneItem(
             role="", level="unit", ref=ref, path=parent, title="", text=content,
             lifecycle="active", updated="", anchor=parent,

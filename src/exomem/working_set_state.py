@@ -122,12 +122,19 @@ def _from_canonical_page(
     except Exception:  # noqa: BLE001 - an unreadable unit index costs this entry only
         log.debug("current state: canonical page lookup failed", exc_info=True)
         return None
-    hits = [
-        hit
-        for hit in hits
-        if str(getattr(hit, "parent_path", "") or "") == named
-        and not getattr(hit, "parent_superseded_by", None)
-    ]
+    from . import working_set
+
+    # A unit the reader's egress guard would remove never leads: the next one
+    # is the current state, as on a page without it (`working_set.hits_in_view`).
+    hits = working_set.hits_in_view(
+        [
+            hit
+            for hit in hits
+            if str(getattr(hit, "parent_path", "") or "") == named
+            and not getattr(hit, "parent_superseded_by", None)
+        ],
+        visible,
+    )
     if not hits:
         return None
 
