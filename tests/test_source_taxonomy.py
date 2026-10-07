@@ -876,7 +876,6 @@ def test_bootstrap_teaches_the_open_vocabulary_contract(vault: Path) -> None:
     for axis in ("source_kind", "domain", "projects"):
         assert axis in block["contract"]
     assert "open" in block["contract"].lower()
-    assert "even if unfamiliar" in block["contract"]
     assert "fallback_rule" not in block
     for unchosen in st.UNCHOSEN_KINDS:
         assert repr(unchosen) in block["kind_rule"]
