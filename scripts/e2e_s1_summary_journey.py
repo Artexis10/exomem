@@ -99,12 +99,14 @@ def export_rows() -> list[dict[str, Any]]:
                 "calories": rng.randint(80, 950),
                 "distance_m": float(distance) if index % 2 else distance,
             },
-            "route": {"fixes": [
+        }
+        # Optional locations cover nested shapes without exceeding the preservation tool's text limit.
+        if index < 500:
+            row["route"] = {"fixes": [
                 {"latitude": 12.345 + index / 100000, "longitude": 64.987 - index / 100000},
                 {"latitude": 12.346 + index / 100000, "longitude": 64.988 - index / 100000},
-            ]},
-            "place": {"label": f"Invented place {index % 7}", "region": "Invented region"},
-        }
+            ]}
+            row["place"] = {"label": f"Invented place {index % 7}", "region": "Invented region"}
         # The preview never sees this source subtree; its undeclared values must stay private.
         if index >= 4200:
             row["context"] = {"unreviewed": {"place": f"Late invented place {index}"}}
