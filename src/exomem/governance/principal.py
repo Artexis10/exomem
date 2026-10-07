@@ -193,6 +193,8 @@ def owner_principal(*, surface: str = "cli", purpose: str | None = None) -> Requ
 
 #: The issuer family of a local client token, whichever surface it reaches.
 LOCAL_INGRESS_ISSUER_FAMILY = "mcp-local"
+#: The issuer family of every principal a hosted cell's gateway resolves.
+HOSTED_GATEWAY_ISSUER_FAMILY = "hosted-gateway"
 
 
 def local_owner_principal(*, surface: str) -> RequestPrincipal:
@@ -227,7 +229,7 @@ def _mcp_identity_claims() -> tuple[dict[str, Any] | None, str | None]:
     the resolution contract without pinning FastMCP internals.
     """
     try:
-        from fastmcp.server.dependencies import get_access_token, get_http_headers
+        from fastmcp.server.dependencies import get_access_token, get_http_headers, get_http_request
     except ImportError:  # pragma: no cover - fastmcp is a hard dependency
         return None, None
 
@@ -247,8 +249,18 @@ def _mcp_identity_claims() -> tuple[dict[str, Any] | None, str | None]:
     except (LookupError, RuntimeError):
         return None, None
     if not headers:
-        # No HTTP request bound at all -> local stdio transport -> owner.
-        return None, None
+        # A request containing only excluded headers also produces {}.
+        # Only absence of an HTTP binding, or the stdio transport's own
+        # header-less request, proves the stdio fallback.
+        try:
+            request = get_http_request()
+        except (LookupError, RuntimeError):
+            return None, None
+        from .authorization_transport import is_stdio_request
+
+        if is_stdio_request(request):
+            return None, None
+        return None, "authenticated"
     authorization = str(headers.get("authorization", "")).strip()
     scheme, separator, credential = authorization.partition(" ")
     if separator and scheme.lower() == "bearer" and credential.strip():
@@ -436,7 +448,7 @@ def resolve_hosted_principal(principal_scope: str | None) -> RequestPrincipal:
         audience_id=audience,
         surface="hosted",
         resolved=True,
-        issuer_family="hosted-gateway",
+        issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
     )
 
 

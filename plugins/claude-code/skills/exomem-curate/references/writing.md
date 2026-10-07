@@ -302,15 +302,11 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    change where it is filed.
    The path is a projection of that metadata, `Sources/<Kind>/[<Domain>/]` —
    e.g. `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`,
-   `Sources/Articles/`. Reach for `other` only when the kind genuinely cannot be
-   determined, **never** because no familiar label matches; `other` means low
-   confidence, not missing vocabulary. Filename: ISO-date + slug. Updates
-   `Sources/index.md`.
+   `Sources/Articles/`. There is no catch-all kind: when no familiar label fits,
+   name a new one. Filename: ISO-date + slug. Updates `Sources/index.md`.
    A capture may come back with a `structure_suggestion` of kind
-   `source_classification_debt` when material keeps landing in `other`. Surface a
-   `strong` one in the user's own words — "these keep going into the catch-all;
-   want me to start filing them as X?" — and use judgement on a `moderate` one
-   rather than repeating it.
+   `source_classification_debt` when the vault holds sources nobody has given a
+   kind. Offer once, in the user's own words, to sort them, then reclassify each.
    The display title is stored losslessly as Unicode in frontmatter and the H1.
    When a non-Latin title needs a readable portable filename, pass a separate
    explicit lowercase ASCII `slug`; never treat a transliterated filename as

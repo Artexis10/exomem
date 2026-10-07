@@ -209,3 +209,44 @@ class Timer:
 
     def __exit__(self, *_: object) -> None:
         self.seconds = time.perf_counter() - self.started
+
+
+class StageFailed(Exception):
+    """A stage could not be stood up; the run's harness failed."""
+
+
+class stage:  # noqa: N801 - used as a context manager
+    """Times a setup stage into `report.stages[name]`; a failure is recorded
+    there and re-raised as StageFailed."""
+
+    def __init__(self, report: Any, name: str) -> None:
+        self.report, self.name = report, name
+
+    def __enter__(self) -> None:
+        print(f"[rehearsal] stage {self.name}: start", flush=True)
+        self.started = time.monotonic()
+        self.report.stages[self.name] = {"status": "running"}
+
+    def __exit__(self, kind, error, _tb) -> bool:  # noqa: ANN001
+        record = self.report.stages[self.name]
+        record["seconds"] = round(time.monotonic() - self.started, 1)
+        if error is None:
+            record["status"] = "passed"
+            print(f"[rehearsal] stage {self.name}: done in {record['seconds']}s", flush=True)
+            return False
+        record["status"] = "failed"
+        record["failure"] = failure_record(error)
+        print(f"[rehearsal] stage {self.name}: FAILED -- {str(error)[:1500]}", flush=True)
+        raise StageFailed from error
+
+
+def guarded(report: Any, what: str, action) -> bool:  # noqa: ANN001 - a zero-argument callable
+    """Run one cleanup step and report whether it succeeded; cleanup continues."""
+
+    try:
+        action()
+        return True
+    except Exception as error:  # noqa: BLE001 - cleanup must continue
+        report.notes.append(f"cleanup step {what} failed: {type(error).__name__}: {str(error)[:300]}")
+        print(f"[rehearsal] cleanup {what} failed: {error}", flush=True)
+        return False

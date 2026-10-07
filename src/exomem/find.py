@@ -611,6 +611,44 @@ class FreshnessSnapshot:
             cached = self._recall_paths[scope]
         return self._with_pending(cached)
 
+    def admitted_paths(
+        self, scope: str, admit_path: Callable[[str], bool],
+        *, page_of: Callable[[str], ParsedPage | None] | None = None,
+    ) -> set[str]:
+        """Authorize both scene identities before candidates or corpus statistics."""
+        from . import readiness
+
+        paths = {
+            path for path in self.recall_paths(scope)
+            if (scope == "vault" or path.startswith(kb_prefix())) and admit_path(path)
+        }
+        if not paths:
+            return paths
+        try:
+            metadata = _managed_page_metadata(
+                self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
+                pending=self._pending,
+            )
+            parents = {path: row.parent for path, row in metadata.items()}
+        except RetrievalIndexWarming:
+            if readiness.runtime_managed():
+                raise
+            if self._timings is not None and (stage := self._timings.current_stage()) is not None:
+                self._timings.mark_source(stage, find_types.SOURCE_COMPUTED)
+            # Offline readers keep their canonical fallback over known identities;
+            # managed readers never substitute file reads for unavailable metadata.
+            resolve = page_of or (lambda path: _resolve_page(self._root, path, self._pending))
+            parents = {
+                path: page.parent_media + ".md" if page.parent_media else None
+                for path in paths if (page := resolve(path)) is not None
+            }
+        # Parent authority does not depend on existence: an ordinary orphan stays
+        # visible, while a missing protected parent cannot authorize its child.
+        return {
+            path for path in paths if path in parents
+            and ((parent := parents[path]) is None or admit_path(parent))
+        }
+
     def _with_pending(self, projected: frozenset[str]) -> frozenset[str]:
         """Admit committed pending identities and withdraw committed tombstones.
 
@@ -1062,6 +1100,7 @@ def find(
     failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
     catalog_proof_out: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
+    admit_path: Callable[[str], bool] | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -1436,6 +1475,10 @@ def find(
         return page_memo[rel]
 
     walk_scope = "vault" if scope == "vault" else "kb"
+    admitted_paths = None
+    if admit_path is not None:
+        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            admitted_paths = snapshot.admitted_paths(walk_scope, admit_path, page_of=_page_of)
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
@@ -1448,7 +1491,7 @@ def find(
         degraded.append(_PENDING_VISIBILITY_COMPONENT)
     if effective_result_level == "unit":
         unit_algebra = structured_filters.plan_index_candidates(filter_plan)
-        cache_size = 0 if retrieval_trace is not None or pending_active else _find_cache_size()
+        cache_size = 0 if retrieval_trace is not None or pending_active or admit_path is not None else _find_cache_size()
         if timings is not None:
             timings.cache["enabled"] = cache_size > 0
         _set_rerank_timing_profile(
@@ -1511,6 +1554,7 @@ def find(
             limit=limit,
             scope=walk_scope,
             plan=filter_plan,
+            allowed_parent_paths=admitted_paths,
             snapshot=snapshot,
             prefer_active=prefer_active,
             config=resolved_config,
@@ -1563,7 +1607,7 @@ def find(
     # persistent projections would outlive that retirement.
     cache_size = (
         0
-        if prefer_used or mixed or retrieval_trace is not None or pending_active
+        if prefer_used or mixed or retrieval_trace is not None or pending_active or admit_path is not None
         else _find_cache_size()
     )
     cache_key: tuple | None = None
@@ -1729,6 +1773,7 @@ def find(
                 limit=None,
                 scope=walk_scope,
                 plan=filter_plan,
+                allowed_parent_paths=admitted_paths,
                 snapshot=snapshot,
                 prefer_active=prefer_active,
                 config=resolved_config,
@@ -1749,6 +1794,12 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+
+    if admit_path is not None and scope == "kb" and mode != "keyword" and query_norm:
+        # Primary page semantic recall spans the vault even before widening.
+        # Unit and lexical scoring retain their existing KB scope.
+        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            admitted_paths = snapshot.admitted_paths("vault", admit_path, page_of=_page_of)
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -1771,6 +1822,9 @@ def find(
         relation_set = set(relation_paths)
         eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
 
+    if admitted_paths is not None:
+        eligible_paths = admitted_paths if eligible_paths is None else eligible_paths & admitted_paths
+
     # Empty queries always degrade to keyword behavior — there's no signal
     # to embed or score with, just "give me recent stuff that matches the
     # structured filters."
@@ -1788,6 +1842,7 @@ def find(
                 limit=limit,
                 scope=walk_scope,
                 eligible_paths=eligible_paths,
+                admitted_paths=admitted_paths,
                 freshness_key=snapshot.for_scope(walk_scope),
                 failed_out=failed,
                 pending=pending,
@@ -1824,6 +1879,7 @@ def find(
                 degraded_out=degraded,
                 failed_out=failed,
                 eligible_paths=eligible_paths,
+                admitted_paths=admitted_paths,
                 recall_scope="kb" if scope == "kb-only" else "vault",
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector if mixed else None,
@@ -1883,6 +1939,7 @@ def find(
                     exclude_file_types=exclude_file_types,
                     limit=limit,
                     snapshot=snapshot,
+                    admit_path=admit_path,
                     filter_plan=filter_plan if filter_plan.root is not None else None,
                     exclude_paths=seen,
                     failed_out=failed,
@@ -2055,9 +2112,12 @@ def _eligible_unit_records(
     *,
     scope: str,
     plan: structured_filters.FilterPlan,
+    allowed_parent_paths: set[str] | None = None,
 ) -> dict[str, tuple[ParsedPage, Any, int]]:
     """Return current unit identities satisfying one exact `(page, unit)` plan."""
-    if scope == "kb":
+    if allowed_parent_paths is not None:
+        walk = (vault_root / rel for rel in allowed_parent_paths)
+    elif scope == "kb":
         root = vault_root / kb_dirname()
         walk = _walk_md(root) if root.is_dir() else ()
     else:
@@ -2481,6 +2541,7 @@ def _find_semantic_units(
                             freshness=exact_freshness,
                             recall_checkpoint=exact_checkpoint,
                             allowed_parent_paths=allowed_parent_paths,
+                            admitted_parent_paths=allowed_parent_paths,
                             _repair_stale=True,
                             repair=exact_repair,
                             allow_delta=exact_allow_delta,
@@ -2519,6 +2580,7 @@ def _find_semantic_units(
                         freshness=exact_freshness,
                         recall_checkpoint=exact_checkpoint,
                         allowed_parent_paths=allowed_parent_paths,
+                        admitted_parent_paths=allowed_parent_paths,
                         literal_all=mode == "keyword" and bool(query.strip()),
                         _repair_stale=True,
                         repair=exact_repair,
@@ -2538,6 +2600,8 @@ def _find_semantic_units(
                 vault_root,
                 query,
                 k=candidate_limit + 1,
+                allowed_parent_paths=allowed_parent_paths,
+                admitted_parent_paths=allowed_parent_paths,
                 scope=scope,
                 freshness=snapshot.for_scope(scope),
                 literal_all=mode == "keyword" and bool(query.strip()),
@@ -2561,12 +2625,12 @@ def _find_semantic_units(
                 # query remains answerable from current Markdown; do not turn
                 # that bounded fallback into an authoritative empty result.
                 records = (
-                    _eligible_unit_records(vault_root, scope=scope, plan=plan)
+                    _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
                     if _bounded_lexical_repair_allowed(snapshot.for_scope(scope))
                     else {}
                 )
             else:
-                records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
+                records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
         elif dnf_clauses is None:
             if len(indexed) > candidate_limit:
                 candidate_window_exhausted = True
@@ -2577,7 +2641,7 @@ def _find_semantic_units(
                 else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
             )
     else:
-        records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
+        records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
 
     if not query.strip():
         if not records:
@@ -2649,7 +2713,7 @@ def _find_semantic_units(
             query=query,
             candidate_limit=vector_candidate_limit,
             allowed_unit_refs=vector_allowed_refs,
-            allowed_parent_paths=snapshot.recall_paths(scope),
+            allowed_parent_paths=(snapshot.recall_paths(scope) if allowed_parent_paths is None else snapshot.recall_paths(scope) & allowed_parent_paths),
             degraded_out=degraded_out,
             failed_out=failed_out,
             timings=timings,
@@ -2715,6 +2779,7 @@ def _find_semantic_units(
             scope=scope,
             freshness=snapshot.for_scope(scope),
             allowed_unit_refs=set(records),
+            admitted_parent_paths=allowed_parent_paths,
             _repair_stale=True,
             repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
         )
@@ -3983,6 +4048,7 @@ def _find_keyword(
     limit: int,
     scope: str,
     eligible_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     freshness_key: tuple[int, int, str] | None = None,
     failed_out: list[str] | None = None,
     pending: Any | None = None,
@@ -4022,6 +4088,7 @@ def _find_keyword(
             failed_out=failed_out,
             repair=lexical_repair,
             pending=pending,
+            allowed_paths=eligible_paths,
         )
         if eligible_paths is not None:
             # A finite eligible set (a complete category/kind plan resolved
@@ -4070,6 +4137,8 @@ def _find_keyword(
             continue
         rel_path = _vault_rel(vault_root, path)
         if rel_path is None:
+            continue
+        if admitted_paths is not None and rel_path not in admitted_paths:
             continue
         page = _resolve_page(vault_root, rel_path, pending)
         if page is None:
@@ -4174,6 +4243,7 @@ def _find_semantic(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     eligible_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -4211,7 +4281,7 @@ def _find_semantic(
         return page_memo[rel]
 
     def _keyword_lane(vault_root_arg: Path, *args: Any, **kwargs: Any) -> list[str]:
-        return _keyword_match_paths(vault_root_arg, *args, pending=pending, **kwargs)
+        return _keyword_match_paths(vault_root_arg, *args, pending=pending, allowed_paths=eligible_paths, **kwargs)
 
     def _optional_graph_resolver(root: Path, freshness=None):
         try:
@@ -4258,9 +4328,10 @@ def _find_semantic(
             record_degradation=_record_degradation,
             degraded_out=degraded_out,
             failed_out=failed_out,
-            recall_paths=snapshot.recall_paths(recall_scope or scope),
+            recall_paths=(snapshot.recall_paths(recall_scope or scope) if admitted_paths is None else snapshot.recall_paths(recall_scope or scope) & admitted_paths),
             lexical_repair=lexical_repair,
             eligible_paths=eligible_paths,
+            admitted_paths=admitted_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,
             shadow=(
@@ -4298,6 +4369,7 @@ def _find_semantic(
                 limit=limit,
                 scope=scope,
                 eligible_paths=eligible_paths,
+                admitted_paths=admitted_paths,
                 freshness_key=snapshot.for_scope(scope),
                 failed_out=failed_out,
                 pending=pending,
@@ -4825,6 +4897,7 @@ def _find_outside_kb(
     exclude_file_types: list[str] | None = None,
     limit: int,
     snapshot: FreshnessSnapshot | None = None,
+    admit_path: Callable[[str], bool] | None = None,
     filter_plan: structured_filters.FilterPlan | None = None,
     exclude_paths: set[str] | None = None,
     failed_out: list[str] | None = None,
@@ -4906,6 +4979,13 @@ def _find_outside_kb(
             if eligible_paths is not None
             else None
         )
+    admitted_paths = None
+    if admit_path is not None:
+        with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
+            admitted_paths = snapshot.admitted_paths("vault", admit_path)
+        admitted_outside = {path for path in admitted_paths if not path.startswith(kb_prefix())}
+        allowed_outside = admitted_outside if allowed_outside is None else allowed_outside & admitted_outside
+        post_eligibility = allowed_outside
     # A structured filter ranks the EXACT outside-KB eligible set, so no
     # eligible page can be buried below an over-fetch cap — the per-candidate
     # gates below reject freely, and a short k would underfill. Without a
@@ -4932,6 +5012,7 @@ def _find_outside_kb(
                 scope="vault",
                 freshness=vault_freshness,
                 allowed_paths=allowed_outside,
+                admitted_paths=admitted_paths,
             )
             if not catalog_result.readiness.complete:
                 if managed:
@@ -4953,6 +5034,7 @@ def _find_outside_kb(
                 scope="vault",
                 freshness=vault_freshness,
                 allowed_paths=allowed_outside,
+                admitted_paths=admitted_paths,
                 repair=lexical_repair,
             )
         if bm25_hits is None:
@@ -4966,6 +5048,7 @@ def _find_outside_kb(
                     scope="vault",
                     freshness=vault_freshness,
                     allowed_paths=allowed_outside,
+                    admitted_paths=admitted_paths,
                     repair=lexical_repair,
                 )
                 lexical_backend = "keyword_fallback"
@@ -5220,6 +5303,7 @@ def _keyword_match_paths(
     repair: bool = True,
     k: int | None = None,
     pending: Any | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -5266,6 +5350,8 @@ def _keyword_match_paths(
             query_norm=query_norm,
             scope=scope,
         )
+        if allowed_paths is not None:
+            admitted_pending = [path for path in admitted_pending if path in allowed_paths]
     # The persistent side is over-fetched by exactly the number of pending rows
     # that will lead it, so merging cannot evict a catalogue row the unmerged
     # lane would have kept. Without this, a burst of pending writes silently
@@ -5292,6 +5378,7 @@ def _keyword_match_paths(
             scope=scope,
             freshness=freshness,
             k=persistent_k,
+            allowed_paths=allowed_paths,
         )
         if not catalog_result.readiness.complete:
             _raise_catalog_outcome(catalog_result.readiness)
@@ -5303,6 +5390,7 @@ def _keyword_match_paths(
         freshness=freshness,
         repair=repair,
         k=persistent_k,
+        allowed_paths=allowed_paths,
     )
     if indexed is not None:
         return _merged(indexed)
@@ -5332,7 +5420,9 @@ def _keyword_match_paths(
         if failed_out is not None:
             failed_out.append("keyword_lexical")
         _record_degradation("keyword_lexical")
-    if scope == "kb":
+    if allowed_paths is not None:
+        walk = (vault_root / rel for rel in allowed_paths if scope != "kb" or rel.startswith(kb_prefix()))
+    elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
             return []

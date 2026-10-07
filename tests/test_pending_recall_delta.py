@@ -1115,6 +1115,64 @@ def test_pending_withheld_and_l0_rows_are_absent_before_caps(tmp_path: Path) -> 
     assert all("Withheld" not in component for component in degraded)
 
 
+def test_pending_raw_pages_do_not_displace_managed_guest_recall(tmp_path: Path, monkeypatch, managed_runtime) -> None:
+    from exomem import commands
+    from exomem.governance import principal
+
+    _seed_corpus(tmp_path)
+    visible = "Knowledge Base/Notes/visible.md"
+    _write(tmp_path, visible, _page(title="Visible", body="orchard visible", updated="2026-02-01"))
+    _prime(tmp_path)
+    guest = principal.RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with principal.request_scope(guest):
+        before = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1)
+    changes = tuple(
+        (f"Knowledge Base/Notes/__exomem_raw_v1__pending-{i}.md", None,
+         _page(title="Private", body="orchard private", updated="2026-10-01"), None)
+        for i in range(4)
+    )
+    _publish_change(tmp_path, batch_id="raw-pending", generation="raw-generation", changes=changes)
+    _forbid_whole_corpus(monkeypatch, "RAW admission")
+    with principal.request_scope(guest):
+        after = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1)
+        browse = commands.op_ask_memory(tmp_path, query="", mode="keyword", limit=1)
+    assert [row["path"] for row in before] == [visible]
+    assert after == before
+    assert [row["path"] for row in browse] == [visible]
+
+
+@pytest.mark.parametrize("change", ["reparent", "delete_parent"])
+def test_managed_guest_scene_admission_uses_pending_parent_changes(
+    tmp_path: Path, monkeypatch, managed_runtime, change: str,
+) -> None:
+    from exomem import commands
+    from exomem.governance import principal
+
+    _seed_corpus(tmp_path)
+    parent = "Knowledge Base/Notes/video.mp4.md"
+    child = "Knowledge Base/Notes/frame.jpg.md"
+    parent_text = _page(title="Video", body="video description", updated="2026-02-01")
+    child_text = _page(title="Frame", body="orchard scene", updated="2026-02-01").replace(
+        "type: insight", "type: source\nparent_media: Knowledge Base/Notes/video.mp4",
+    )
+    _write(tmp_path, parent, parent_text)
+    _write(tmp_path, child, child_text)
+    _prime(tmp_path)
+    guest = principal.RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with principal.request_scope(guest):
+        before = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1, graph=False)
+    assert [row["path"] for row in before] == [parent]
+    changes = (
+        ((child, child_text, child_text.replace("Notes/video.mp4", "Notes/__exomem_raw_v1__video.mp4"), None),)
+        if change == "reparent" else ((parent, parent_text, None, None),)
+    )
+    _publish_change(tmp_path, batch_id="scene-parent", generation="scene-generation", changes=changes)
+    _forbid_whole_corpus(monkeypatch, "scene parent admission")
+    with principal.request_scope(guest):
+        after = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1, graph=False)
+    assert [row["path"] for row in after] == ([] if change == "reparent" else [child])
+
+
 def test_pending_operational_status_and_telemetry_are_content_free(
     tmp_path: Path,
 ) -> None:

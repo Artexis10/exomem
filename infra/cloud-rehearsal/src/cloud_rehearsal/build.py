@@ -71,14 +71,7 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
         _derive(workdir / "cell-v2", v1, v2, "LABEL io.exomem.rehearsal.release=v2\n")
     else:
         for tag in (v1, v2):
-            run(
-                [
-                    "docker", "build", "--target", "cloud", "--tag", tag,
-                    "--build-arg", f"EXOMEM_RELEASE_BUILD_TIME={_now_iso()}",
-                    str(images.REPO_ROOT),
-                ],
-                timeout=3600,
-            )
+            build_cell_image(tag)
     broken_dir = workdir / "cell-broken"
     broken_dir.mkdir(parents=True, exist_ok=True)
     (broken_dir / "exomem-shim").write_text(BROKEN_SHIM, encoding="utf-8")
@@ -93,6 +86,19 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
         "USER 10001:10001\n",
     )
     return v1, v2, broken
+
+
+def build_cell_image(tag: str) -> None:
+    """This checkout's `Dockerfile --target cloud`, stamped with a build time."""
+
+    run(
+        [
+            "docker", "build", "--target", "cloud", "--tag", tag,
+            "--build-arg", f"EXOMEM_RELEASE_BUILD_TIME={_now_iso()}",
+            str(images.REPO_ROOT),
+        ],
+        timeout=3600,
+    )
 
 
 def _derive(context: Path, base: str, tag: str, body: str) -> None:

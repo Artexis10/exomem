@@ -2,7 +2,7 @@
 
 # Cloud node loss: relocate cells, reconcile volumes
 
-**Status:** written with `move-cloud-cells-to-local-storage` phase 2. Not yet rehearsed: the node-loss drill (task 4.1) runs the relocation, and its etcd restore from an older snapshot runs the restore and the reconciliation. Until then, treat every step as unproven.
+**Status:** written with `move-cloud-cells-to-local-storage` phase 2. The node-loss drill rehearsed it on disposable K3s, in the cloud rehearsal's `local-storage-drill` mode ([run 37428273291](https://github.com/Artexis10/exomem/actions/runs/37428273291), 2026-10-06). It ran "Relocate the cells of a lost agent" steps 1-4 and 6, "Restore etcd from an older snapshot" steps 3-6 from a snapshot on the server's disk, "After restoring etcd" steps 1-4 and 6, and the `CELL_INIT_EMPTY_VOLUME_REFUSED` steps 1-3 for a row that records its volume, through step 5's mark. It did not rehearse the escrowed-key S3 listing and `--etcd-s3` restore, a real B2 upload time (its object store is a local S3 double), the `CELL_INIT_EMPTY_VOLUME_REFUSED` steps 4-5 for a row that records no volume, the Hetzner `VOLUME_MISSING` steps, or the erase of a removed agent's cells device.
 
 This applies to cells on local storage (the `exomem-cloud-local` class, TopoLVM). A cell on a Hetzner Cloud Volume never needs it: its volume survives its node.
 
@@ -121,6 +121,8 @@ etcd snapshots are taken every 30 minutes. A restore loses the cluster objects o
       lvremove --yes "cells/$NEW_ID" && lvrename cells "$OLD_ID" "$NEW_ID"
       ```
 
+      TopoLVM's published capacity for that node counts the removed volume until lvmd next acts there. The node admits one volume fewer meanwhile, which is safe.
+
    3. If the namespace `exo-cell-<cell id>` still has a `cell-data` claim bound to another volume, that claim is from before the snapshot. Retire it without deleting its volume. Stop the cell's pod first, or the claim stays in use; cellctl starts the pod again when it resumes:
 
       ```bash
@@ -129,7 +131,8 @@ etcd snapshots are taken every 30 minutes. A restore loses the cluster objects o
       kubectl -n "exo-cell-$CELL_ID" delete persistentvolumeclaim cell-data
       ```
 
-      Expect the delete to return once the pod is gone.
+      Expect the delete to return once no pod mounts the claim. A finished restore Job's pod mounts it too, until
+      its Job expires five minutes after finishing.
 
       Then create the PersistentVolume, copying the spec of a surviving cell's PV: the PV name from step 1, `capacity`, `csi.volumeHandle: $NEW_ID`, the node in its node affinity, and `claimRef` set to namespace `exo-cell-<cell id>`, name `cell-data`.
    4. Release the row's old identity, so cellctl records the new one under its usual class and claim checks:
@@ -175,10 +178,28 @@ The usual cause on Hetzner is an etcd restore that drops a cell created after th
 6. Resume cellctl. It recreates the namespace if it is gone, and creates the claim, which binds to the PV that names it.
 7. Check that `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data` shows `Bound` to that PV, and that the row records `$VOLUME_ID` again. Accept the cell with recall, governance status and a governed write.
 
-`CELL_INIT_EMPTY_VOLUME_REFUSED`: the cell has a recorded backup, and it started on an empty volume. It refused to create an empty vault, and stays not ready.
+`CELL_INIT_EMPTY_VOLUME_REFUSED`: the cell has a recorded backup, and it started on a volume that holds no vault. It refused to create an empty vault, and stays not ready.
 
-1. Find the claim's volume: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data`.
-2. Check whether the row's `volume_id` matches it. If not, the cell's real volume may still exist: look for it as for `VOLUME_MISSING`, and re-adopt it.
-3. If the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the empty claim as in step 4.3, mark the volume lost as in step 5, then resume cellctl.
+1. Find the claim's volume ID, the value a row's `volume_id` holds:
+
+   ```bash
+   CLAIM_VOLUME=$(kubectl get pv "$(kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data -o jsonpath='{.spec.volumeName}')" -o jsonpath='{.spec.csi.volumeHandle}')
+   ```
+
+2. Check whether the row's `volume_id` matches `$CLAIM_VOLUME`. If not, the cell's real volume may still exist: look for it as for `VOLUME_MISSING`, and re-adopt it.
+3. If the row records `$CLAIM_VOLUME` and the cell's data is only in its backup, pause cellctl as in "Restore etcd" step 6. Retire the claim as in step 4.3, mark the row's `volume_id` lost as in step 5, then resume cellctl. Expect cellctl to relocate the cell from its backup.
+
+   If the row records no volume, cellctl cannot relocate the cell: it relocates only a recorded volume. Re-adopt the real volume as in step 2.
+4. If the row records no volume and the real volume is gone, record `$CLAIM_VOLUME` on the row. That volume holds no vault, and the relocation retains it, so nothing is deleted. As the control database owner, run `UPDATE exomem_cloud_cells SET volume_id = '<CLAIM_VOLUME>' WHERE cell_id = '<cell id>' AND volume_id IS NULL;`. Expect `UPDATE 1`.
+5. Follow step 3 for that volume. Expect cellctl to relocate the cell from its backup.
 
 Never clear the backup record to get past this refusal: the cell would then serve an empty vault as if it were the tenant's.
+
+`MANIFEST_IMMUTABLE` on a local cell that grew: cellctl renders a local cell's claim at the larger of `storage_gib` and `grown_storage_gib`. Restoring the control database to before a growth, or rolling cellctl back past the release that grows cells, renders a claim smaller than the volume. Kubernetes refuses a smaller claim, and the cell's hourly backups then fail.
+
+1. Read the claim's actual size: `kubectl -n "exo-cell-$CELL_ID" get persistentvolumeclaim cell-data --output=jsonpath='{.spec.resources.requests.storage}'`. Expect whole GiB, such as `14Gi`.
+2. After a control-database restore, set the row's grown size to that number, as the control database owner: `UPDATE exomem_cloud_cells SET grown_storage_gib = 14 WHERE cell_id = '<cell id>';`. It must report `UPDATE 1`.
+3. After a cellctl rollback, roll cellctl forward again. A cellctl from before this change ignores `grown_storage_gib`.
+4. If cellctl must stay rolled back, set the row's `storage_gib` to that number, as the control database owner. The cell restarts once.
+5. Check that the row's error code clears within an hour. The refusal stays parked until its backoff passes, because `grown_storage_gib` does not change the render digest.
+6. Check that the next hourly backup records a new `last_backup_at`.

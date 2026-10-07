@@ -36,6 +36,7 @@ from .capacity import (
 from .decide import (
     DEFAULT_RECONCILE_CONFIG,
     ReconcileConfig,
+    StorageRoom,
     can_relocate,
     decide,
     hourly_backup_due,
@@ -71,7 +72,9 @@ from .rollout import (
 )
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
+    BACKUP_FAILED,
     CANARY_PARKED,
+    GROWTH_NOT_NEEDED,
     MANIFEST_IMMUTABLE,
     RELOCATION_REFUSED,
     RESTORE_FAILED,
@@ -179,7 +182,18 @@ def _describe_error(error: BaseException) -> str:
     frames = traceback.extract_tb(error.__traceback__)
     if frames:
         described += f" at {Path(frames[-1].filename).name}:{frames[-1].lineno} in {frames[-1].name}"
+        # The innermost frame is usually inside the Kubernetes client, and the
+        # innermost cellctl one is its request wrapper; the cellctl frames
+        # around it name the call that failed.
+        own = [frame for frame in frames if Path(frame.filename).parent == _PACKAGE_DIR][-3:]
+        if own and own[-1] is not frames[-1]:
+            described += " via " + " < ".join(
+                f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}" for frame in reversed(own)
+            )
     return described
+
+
+_PACKAGE_DIR = Path(__file__).parent
 
 
 # A lost or half-open database session. It fails every row alike, so it
@@ -233,12 +247,16 @@ class LoopMemory:
     # capability the backup needs is never listed again by this process.
     object_storage_keys_verified: set[str] = field(default_factory=set)
     object_storage_key_checked_at: dict[str, datetime] = field(default_factory=dict)
-    # Task 2.8: the backup-age alert state last delivered (None: nothing yet
-    # this process), the stale cells last logged, and when a failed delivery
-    # may be tried again.
-    backup_alert_delivered: bool | None = None
+    # Task 2.8 and D10: each platform alert's state last delivered (absent:
+    # nothing yet this process) and when a failed delivery may be tried again,
+    # and the stale cells last logged.
+    alert_delivered: dict[str, bool] = field(default_factory=dict)
+    alert_retry_at: dict[str, datetime] = field(default_factory=dict)
     stale_backups: list[str] = field(default_factory=list)
-    backup_alert_retry_at: datetime | None = None
+    # D10: what each local cell's latest measured hourly backup found (a
+    # GROWTH_ value). A restart forgets them, and the growth alert waits until
+    # every serving local cell has been measured again.
+    growth_verdicts: dict[str, str] = field(default_factory=dict)
     # D4: when this process first saw each node absent from the API, until it
     # is seen present again. A restart restarts every clock.
     node_absent_since: dict[str, datetime] = field(default_factory=dict)
@@ -1029,8 +1047,9 @@ async def reconcile_once(
     committed = frozenset(row.cell_id for row in rows if not (
         row.desired_state == "deleted" and row.observed_state == "deleted"
         and row.observed_generation == row.generation))
-    # D6: every non-deleted cell's size, observed this pass or not.
-    committed_sizes = {row.cell_id: row.storage_gib for row in rows if row.cell_id in committed}
+    # D6: every non-deleted cell's size, observed this pass or not. A grown
+    # cell's size is its grown one (D10).
+    committed_sizes = {row.cell_id: row.size_gib for row in rows if row.cell_id in committed}
     rollout = await db.read_rollout(connection)
     cell_image = await db.read_cell_image(connection)
     _log_orphan_namespaces(cluster, rows, now, memory)
@@ -1059,6 +1078,8 @@ async def reconcile_once(
     unobserved_rows = [row for row in rows if row.cell_id not in observations and row.desired_state != "deleted"]
     observations = _with_lost_nodes(observations, memory, now)
     await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
+    await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
+    storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
 
@@ -1162,6 +1183,7 @@ async def reconcile_once(
                 is_render_digest_candidate=row.cell_id == render_digest_candidate,
                 refusal_parked=row.cell_id in parked,
                 memory=memory,
+                storage_room=storage_room,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
@@ -1221,8 +1243,86 @@ async def reconcile_once(
     return fast
 
 
+def _storage_room(
+    cluster: ClusterGateway,
+    storage: StorageConfig,
+    observations: dict[str, ClusterObservation],
+    committed_sizes: dict[str, int],
+) -> StorageRoom | None:
+    """D10: the node pools, read only in a pass where an hourly backup has
+    just reported its use, which is when a growth is planned. A failed read
+    plans no growth: that backup's cell grows, if it must, after its next one."""
+
+    local = storage.local
+    if local is None or not any(
+        observation.statefulset_hold_kind == SNAPSHOT_BACKUP
+        and observation.statefulset_backup_outcome is None
+        and observation.backup_job_used_bytes is not None
+        for observation in observations.values()
+    ):
+        return None
+    try:
+        free_bytes = cluster.local_capacity_inputs(local).free_bytes
+    except Exception as error:  # noqa: BLE001 - a growth waits; the backup still counts
+        logger.error("cellctl: the node pools could not be read, so no cell grows this pass: %s", _describe_error(error))
+        return None
+    return StorageRoom(free_bytes=free_bytes, largest_cell_gib=max(committed_sizes.values(), default=0))
+
+
 # A receiver that is down is asked again at most this often, not every pass.
-BACKUP_ALERT_RETRY = timedelta(minutes=1)
+ALERT_RETRY = timedelta(minutes=1)
+
+
+async def _deliver_alert(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    memory: LoopMemory,
+    alert: str,
+    firing: bool,
+    now: datetime,
+) -> None:
+    """Posts `alert`'s state when it differs from the one last delivered. An
+    alert, never a gate: a failure is logged and retried a minute later, and
+    changes nothing else the pass does. The POST runs on a worker thread, so a
+    slow receiver never stalls the loop."""
+
+    if cluster_config.alert_delivery_secret is None or memory.alert_delivered.get(alert) == firing:
+        return
+    retry_at = memory.alert_retry_at.get(alert)
+    if retry_at is not None and now < retry_at:
+        return
+    try:
+        webhook_url = cluster.read_secret_value(*cluster_config.alert_delivery_secret)
+        await asyncio.to_thread(alerts.deliver, webhook_url, alert=alert, active=firing, observed_at=now)
+    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
+        memory.alert_retry_at[alert] = now + ALERT_RETRY
+        logger.error("cellctl: %s alert delivery failed; retrying in a minute: %s", alert, _describe_error(error))
+        return
+    memory.alert_retry_at.pop(alert, None)
+    memory.alert_delivered[alert] = firing
+
+
+async def _growth_alert(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    now: datetime,
+    memory: LoopMemory,
+) -> None:
+    """D10: one platform alert while a serving local cell past 80% use cannot
+    grow: its node has no room, or it is at its cap. Nothing is sent while
+    the answer is unknown (alerts.growth_blocked), nor where local storage is
+    not configured: there a first "resolved" would email an operator about an
+    alert that never fired."""
+
+    if cluster_config.storage.local is None:
+        return
+    known = {row.cell_id for row in rows}
+    memory.growth_verdicts = {cell: verdict for cell, verdict in memory.growth_verdicts.items() if cell in known}
+    firing = alerts.growth_blocked(rows, observations, memory.growth_verdicts, storage=cluster_config.storage)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.GROWTH_ALERT, firing, now)
 
 
 async def _backup_age_alert(
@@ -1234,9 +1334,7 @@ async def _backup_age_alert(
     memory: LoopMemory,
 ) -> None:
     """Task 2.8: one platform alert while any serving cell's backup is older
-    than its schedule allows. An alert, never a gate: a failure here is logged
-    and retried a minute later, and changes nothing else the pass does. The
-    POST runs on a worker thread, so a slow receiver never stalls the loop."""
+    than its schedule allows."""
 
     stale = alerts.stale_backups(rows, observations, now, storage=cluster_config.storage)
     if stale != memory.stale_backups:
@@ -1246,20 +1344,7 @@ async def _backup_age_alert(
         else:
             logger.info("cellctl: every serving cell has a backup within its schedule")
         memory.stale_backups = stale
-    firing = bool(stale)
-    if cluster_config.alert_delivery_secret is None or memory.backup_alert_delivered == firing:
-        return
-    if memory.backup_alert_retry_at is not None and now < memory.backup_alert_retry_at:
-        return
-    try:
-        webhook_url = cluster.read_secret_value(*cluster_config.alert_delivery_secret)
-        await asyncio.to_thread(alerts.deliver, webhook_url, active=firing, observed_at=now)
-    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
-        memory.backup_alert_retry_at = now + BACKUP_ALERT_RETRY
-        logger.error("cellctl: backup-age alert delivery failed; retrying in a minute: %s", _describe_error(error))
-        return
-    memory.backup_alert_retry_at = None
-    memory.backup_alert_delivered = firing
+    await _deliver_alert(cluster, cluster_config, memory, alerts.BACKUP_ALERT, bool(stale), now)
 
 
 def _in_transition(row: CellRow, observation: ClusterObservation, refusal_parked: bool) -> bool:
@@ -1336,6 +1421,7 @@ async def _reconcile_row(
     refusal_parked: bool,
     memory: LoopMemory,
     start_relocation: bool = False,
+    storage_room: StorageRoom | None = None,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -1355,12 +1441,22 @@ async def _reconcile_row(
     # ready follows the pod on the update revision both ways, observed_state
     # stays served (so it is still backed up), and nothing is written but
     # ready, and observed_at with it, when it changes.
+    # A served cell is in place while its StatefulSet runs one replica over
+    # its claim. Out of place is more than readiness: the node-loss runbook
+    # stops a cell and retires its claim, and expects cellctl to start it
+    # again, or to report its recorded volume missing, so such a row always
+    # goes through decide().
+    out_of_place = already_served and not (
+        observation.statefulset_exists
+        and observation.statefulset_replicas == 1
+        and (observation.pvc_exists or observation.pvc_bound)
+    )
     readiness_only = (
         nothing_to_start
         and already_served
+        and not out_of_place
         and not refusal_parked
         and not dataclass_replace(row, ready=True).is_dirty()
-        and observation.statefulset_exists
         and observation.statefulset_image == row.observed_image
     )
     if readiness_only:
@@ -1368,7 +1464,8 @@ async def _reconcile_row(
         return await _write_observed(connection, row, changed, now)
     # A parked refused row is not dirty, but it still goes through decide(),
     # which applies nothing while it is parked and observes it this pass.
-    if not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start:
+    if (not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start
+            and not out_of_place):
         # D4 amendment: an observation that finds nothing changed writes only
         # a due observed_at refresh.
         return await _write_observed(connection, row, {}, now)
@@ -1391,7 +1488,13 @@ async def _reconcile_row(
         refusal_parked=refusal_parked,
         storage=cluster_config.storage,
         start_relocation=start_relocation,
+        storage_room=storage_room,
     )
+    if decision.storage_growth is not None:
+        _note_growth(memory, row, observation, decision)
+    if decision.row_updates.get("last_error_code") == BACKUP_FAILED and observation.backup_job_failure_code:
+        # D5: the failed Job's own code, value-free; the Job goes a pass later.
+        logger.warning("cellctl: cell %s's backup failed: %s", row.cell_id, observation.backup_job_failure_code)
 
     # D6 step 4.1: a pause is written before the apply it accompanies, so a
     # crash between the two leaves the rollout paused and no other cell can
@@ -1437,6 +1540,15 @@ async def _reconcile_row(
             if row.last_error_code == RELOCATION_REFUSED:
                 decision.row_updates = {**decision.row_updates, "last_error_code": None}
 
+    grown = decision.row_updates.get("grown_storage_gib")
+    if grown is not None:
+        # D10: recorded before the larger claim is applied. A crash after the
+        # apply then never leaves the claim larger than the row, which would
+        # make every later pass render a smaller claim that Kubernetes refuses.
+        await db.write_observed(connection, row.cell_id, {"grown_storage_gib": grown})
+        row = dataclass_replace(row, grown_storage_gib=grown)
+        logger.info("cellctl: cell %s grows to %d GiB", row.cell_id, grown)
+
     refused: list[tuple[str, str]] = []
     applied_cleanly = False
     if decision.apply_manifests and decision.image:
@@ -1481,17 +1593,21 @@ async def _reconcile_row(
             retry_after = observation.statefulset_backup_retry_after
             retry_minutes = observation.statefulset_backup_retry_minutes
         resources, placement = cluster_config.workload_for_cell(row.cell_id)
+        local_volume = cluster_config.storage.is_local(storage_class)
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
             replicas=decision.replicas,
             read_only=decision.read_only,
-            storage_gib=row.storage_gib,
+            # D10: only a local claim grows. A cell back on its retained
+            # Hetzner volume (a D7 rollback) renders storage_gib, that
+            # volume's own size, so its claim still binds and never grows it.
+            storage_gib=row.size_gib if local_volume else row.storage_gib,
             resources=resources,
             model_env=cluster_config.model_env or {},
             placement=placement,
             storage_class=storage_class,
-            local_volume=cluster_config.storage.is_local(storage_class),
+            local_volume=local_volume,
             # D5: a backup this decision records counts at once, so the hold's
             # own exit writes the key.
             backed_up=row.last_backup_at is not None or "last_backup_at" in decision.row_updates,
@@ -1503,6 +1619,7 @@ async def _reconcile_row(
             restored_snapshot=decision.restored_snapshot,
             backup_outcome=decision.backup_outcome,
             relocation_volume=decision.relocation_volume,
+            grow_storage_gib=decision.grow_storage_gib,
             backup_retry_after=retry_after.isoformat() if retry_after else None,
             backup_retry_minutes=retry_minutes,
             render_digest=render_digest,
@@ -1644,6 +1761,18 @@ async def _reconcile_row(
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
+
+
+def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservation, decision) -> None:
+    """D10: keeps the verdict for the growth alert, and logs the measurement,
+    sizes only, never content."""
+
+    memory.growth_verdicts[row.cell_id] = decision.storage_growth
+    used, total = observation.backup_job_used_bytes, observation.backup_job_total_bytes
+    level = logging.INFO if decision.storage_growth == GROWTH_NOT_NEEDED else logging.WARNING
+    logger.log(level, "cellctl: cell %s's volume is %d of %d bytes used at %d GiB: %s%s", row.cell_id, used, total,
+               row.size_gib, decision.storage_growth,
+               f" to {decision.grow_storage_gib} GiB" if decision.grow_storage_gib is not None else "")
 
 
 def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:

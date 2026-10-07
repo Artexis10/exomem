@@ -23,7 +23,7 @@
   - no published pool means zero;
   - only the configured domain publishes slots, and every non-deleted cell counts against them.
   - Evidence: unit tests on recorded observations, including a pass during a backup.
-- [ ] 2.3 Render the hourly online backup as a non-stopping hold:
+- [x] 2.3 Render the hourly online backup as a non-stopping hold:
   - snapshot, read-only clone, restic on the clone, cleanup whatever the outcome;
   - one hold per cell at a time;
   - prune only on the first backup after 02:00 UTC, and never on the pre-upgrade backup;
@@ -33,11 +33,13 @@
   - the stopped pre-upgrade backup unchanged;
   - a cell on a class without snapshot support keeps the nightly stopped backup, window, concurrency 1 and prune.
   - Evidence: unit tests for both classes, and a rehearsal backup of a serving cell.
-- [ ] 2.4 Add operator-triggered relocation:
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). Three snapshot backups ran while the cell served: same pod, 0 restarts, 0 not-ready polls. Each Job and clone ran on the cell's node with no selector, each hold took about 33 s, and the snapshot, clone and Job were gone when the hold ended.
+- [x] 2.4 Add operator-triggered relocation:
   - require the same stop confirmation as node removal;
   - force-delete the pod, set the old PV to Retain, then delete and recreate the claim;
   - restore the last backup, record the new volume identity, start only after the restore succeeds.
   - Evidence: unit tests and a rehearsal relocation.
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). After its agent was destroyed, the cell relocated onto the other agent: old PV set to Retain, restore finished before the pod started, row records the new volume, acceptance with recall and a governed write.
 - [x] 2.5 Make the deletion proof per storage driver: PV, backend volume, snapshots and clones absent. A failed listing is not absence; a volume on a node confirmed destroyed is. Evidence: unit tests.
 - [x] 2.6 Add the empty-vault guard:
   - cellctl writes a `backed_up` key into the cell's Secret after the first recorded backup;
@@ -46,20 +48,22 @@
   - Evidence: tests for a backed-up cell, a new cell, and a first backup that leaves the render digest unchanged.
 - [x] 2.7 Make the JSON-state writers fsync the temp file before renaming it, and write the writer-lease commit counter by rename: `prominence.py`, `envelope.py`, `mode.py`, `dreamer.py`, `writer_lease.py`. Evidence: unit tests that a write goes through the durable path.
 - [x] 2.8 Alert when a running cell's last successful backup is older than two hours, or 26 hours for a cell on the nightly backup. Evidence: an alert-rule test.
-- [ ] 2.9 Add the post-etcd-restore reconciliation:
+- [x] 2.9 Add the post-etcd-restore reconciliation:
   - an Ansible step on each agent lists logical volumes;
   - an operator runbook step re-adopts each one that matches a row's `volume_id` (design D4): it recreates the LogicalVolume object, renames the old volume to the new volume ID in place of the new empty one, creates the PV, and clears the row's `volume_id` by compare-and-set so cellctl records the new one (cellctl gains no PV create);
   - no step deletes a LogicalVolume object except to destroy its volume;
   - volumes that match no row are reported and released only by an operator step on the host;
   - a row whose volume cannot be re-adopted is relocated from backup, and the identity check is never skipped.
   - Evidence: unit tests on a recorded mismatch, and a rehearsal etcd restore from an older snapshot.
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). The server was reset from an older local etcd snapshot; `cellctl.readopt` reported the newer cell for re-adoption, the runbook steps re-adopted its volume, and it served with its data and a matching identity. Not exercised: the escrowed-key S3 snapshot listing.
 
-- [ ] 2.10 Grow a local cell online before it fills (design D10), red-first:
+- [x] 2.10 Grow a local cell online before it fills (design D10), red-first:
   - the hourly backup Job reports the filesystem's used and total bytes in its termination message, and cellctl records them;
   - past 80% use, cellctl grows the claim by one default cell size, up to the configured cap, at most once per backup;
   - only while the node's published free bytes cover the step and the larger snapshot reserve; otherwise an alert through the alert receiver;
   - the grown size is recorded in a cellctl-owned row column (Substrate migration) and the claim renders at the larger of it and `storage_gib`.
   - Evidence: unit tests for growth, the cap, the pool refusal with its alert, and a rehearsal growth of a serving cell.
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). At 85% use a serving cell grew from 4 to 8 GiB online: same pod, 0 restarts, filesystem 4143677440 to 8369172480 bytes, quota applied at 16Gi with no refusal, row `grown_storage_gib` 8, next clone 8Gi, published slots matching D6. At the cap the verdict was `at-cap` and cellctl raised `storage-growth-blocked` (no receiver in the rehearsal).
 
 ## 3. Chart, admission, policy
 
@@ -77,20 +81,24 @@
 
 ## 4. Node-loss drill on disposable infrastructure (no hardware)
 
-- [ ] 4.1 In the rehearsal cluster, with TopoLVM installed from the platform chart's values:
+- [x] 4.1 In the rehearsal cluster, with TopoLVM installed from the platform chart's values:
   - seed a cell and let hourly backups run;
   - write once more;
   - destroy its agent;
   - recover onto another agent through relocation.
   - Record that each hourly backup Job ran on its cell's node with no selector, and the upload time to the bucket.
   - Record the measured recovery point and recovery time, and accept with recall, governance status and a governed write.
-- [ ] 4.2 Prove the empty-vault guard: deliberately start the backed-up cell on an empty claim before any restore, and record that it refuses, stays not ready and reports its reason on the row.
-- [ ] 4.3 Interrupt a relocation's restore and record that the cell does not start and the retained volume is untouched.
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). Recovery time 115.2 s from the agent's loss to serving on the other agent; recovery point 42.9 s of writes (the last write lost, all backed-up writes kept). Run 37428273291 measured 112.5 s and 38.2 s. Backup Jobs ran on the cell's node with no selector. Upload took 2–4 s to an S3 double on the same runner, so B2 upload time is still to measure (task 9.1). Acceptance: recall and a governed write passed; governance status read the same before and after (`GOVERNANCE_SCHEMA_UNAVAILABLE`, as the rehearsal has no custody configured).
+- [x] 4.2 Prove the empty-vault guard: deliberately start the backed-up cell on an empty claim before any restore, and record that it refuses, stays not ready and reports its reason on the row.
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). The backed-up cell on an emptied volume refused with `CELL_INIT_EMPTY_VOLUME_REFUSED` on its row, stayed not ready for the whole minute after, and kept its volume.
+- [x] 4.3 Interrupt a relocation's restore and record that the cell does not start and the retained volume is untouched.
+  - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). With the restore interrupted, the row read `RESTORE_FAILED`, the StatefulSet stayed at 0 replicas with no cell pod, and the retained PV was unchanged (Retain, Released, its LogicalVolume present at the same size). The retried restore served with the backed-up writes.
 
 ## 5. Dedicated host bootstrap (needs the purchased server)
 
 - [ ] 5.1 Install Tang on the server node, and escrow its keys through the secret-destination contract.
-- [ ] 5.2 Write the dedicated-host Ansible role: md RAID1, LUKS, Clevis bound to Tang, the `cells` volume group, and the recovery passphrase escrowed through the secret-destination contract.
+- [x] 5.2 Write the dedicated-host Ansible role: md RAID1, LUKS, Clevis bound to Tang, the `cells` volume group, and the recovery passphrase escrowed through the secret-destination contract.
+  - Done in #1595 (`infra/ansible/roles/dedicated_host`). Evidence: the dedicated-host bootstrap workflow, run 37402002035 at a96ff3ee5, built the role on loop devices: RAID1, LUKS with the escrowed passphrase as its first key, Clevis pinned to Tang's signing thumbprint and proven to unlock, a refused unpinned Tang, and the `cells` thin pool. A first run on purchased hardware stays with 5.3.
 - [ ] 5.3 Make the k3s agent unit wait for the unlock. Evidence: `lsblk` and `cryptsetup status` output, plus a reboot that unlocks unattended and starts K3s afterwards.
 - [ ] 5.4 Add the manual unlock and the Tang rebind to the operator runbook, and exercise the manual unlock once.
 - [ ] 5.5 Alert when a dedicated host's cell array is degraded, through the existing alert receiver. Today `site.yml` only reports it, and the host has no mail transport for `mdmonitor`. Evidence: an alert from a failed member on a disposable host.
@@ -119,6 +127,7 @@
 - [ ] 7.4 Migrate the remaining cells one at a time with the same acceptance.
 - [ ] 7.5 Update `docs/runbooks/cloud-operator-import.md`, which still cites the nightly 02:00–05:00 UTC backup window.
 - [ ] 7.6 Before the cutover (7.2), pin the Hetzner CSI controller to the server node, as the TopoLVM and snapshot controllers are: its token can attach any volume to any node. This moves a live production pod, so it ships on its own. Evidence: the controller pod's node, and a volume attach after the move.
+- [ ] 7.7 Before local storage is enabled in production (6.2, 7.2), rehearse the coexistence configuration end to end: TopoLVM installed, `cellStorage.local.enabled` true, the domain still the Hetzner class, Hetzner-class cells provisioned, backed up and deleted. Neither the P3 rehearsal (local storage off, as production today) nor the drill (local domain) covers it. Evidence: a full P3 run in that configuration.
 
 ## 8. Retire Hetzner volumes
 

@@ -71,6 +71,11 @@ class ActiveSurfaceDescriptor:
         }
 
 
+#: The hosted cell's private command router: the profile the hosted web app
+#: calls on a person's behalf, as distinct from a hosted agent profile.
+HOSTED_PRIVATE_ROUTER_PROFILE = "private-command-router"
+
+
 _ACTIVE_SURFACE: ContextVar[ActiveSurfaceDescriptor | None] = ContextVar(
     "exomem_active_surface", default=None
 )

@@ -68,7 +68,7 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         slug = f"concurrent-capture-{number:02d}"
         return {
             "content": f"bounded concurrent payload {number}",
-            "source_type": "other",
+            "source_type": "correspondence",
             "title": f"Concurrent Capture {number:02d}",
             "slug": slug,
         }
@@ -100,7 +100,8 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         assert len(refused) == 20
         assert all(error.code == "MUTATION_BUSY" for error in refused)
         assert all(error.details.get("committed") is False for error in refused)
-        assert not list((vault / "Knowledge Base/Sources/Other").glob("concurrent-capture-*.md"))
+        correspondence = vault / "Knowledge Base/Sources/Correspondence"
+        assert not list(correspondence.glob("concurrent-capture-*.md"))
 
         release.set()
         thread.join(timeout=_HOLD_SECONDS)
@@ -135,9 +136,9 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         assert slug in sources_index
         assert slug in top_index
         assert slug in activity_log
-    assert "|Other]] — miscellaneous captures (20)" in sources_index
+    assert "|Correspondence]] — letters, email, or message threads (20)" in sources_index
     assert "- Sources: 24 " in top_index
-    assert len(list((vault / "Knowledge Base/Sources/Other").glob("*.md"))) == 20
+    assert len(list((vault / "Knowledge Base/Sources/Correspondence").glob("*.md"))) == 20
 
     residue = [
         path for path in vault.rglob("*") if path.is_file() and path.name.endswith((".tmp", ".bak"))

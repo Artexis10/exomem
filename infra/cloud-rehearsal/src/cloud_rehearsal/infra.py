@@ -69,9 +69,10 @@ class ObjectStore:
 class K3s:
     container: str
     ip: str
-    api_host_port: int
-    ingress_host_port: int
-    kubeconfig: Path
+    # Published only by P3, which reaches the API and ingress from the host.
+    api_host_port: int | None = None
+    ingress_host_port: int | None = None
+    kubeconfig: Path | None = None
 
     def kubectl(self, *args: str, input_text: str | None = None, check: bool = True):
         return run(
@@ -191,32 +192,28 @@ def _start_object_store(stack: Stack) -> ObjectStore:
     return store
 
 
-def _start_k3s(stack: Stack) -> K3s:
-    name = f"exo-rehearsal-k3s-{stack.run_id}"
-    containerd_dir = stack.workdir / "containerd.d"
-    containerd_dir.mkdir(parents=True, exist_ok=True)
-    (containerd_dir / "rehearsal.toml").write_text(
-        "[plugins.'io.containerd.cri.v1.runtime']\n  restrict_oom_score_adj = true\n", encoding="utf-8"
-    )
-    stack.adaptations.append(
-        "containerd restrict_oom_score_adj=true: pods never get a lower OOM score than the node "
-        "(needed where the host withholds CAP_SYS_RESOURCE; affects OOM-kill order only)"
-    )
+SERVER_ARGS = (
+    "--disable=traefik",
+    "--disable=servicelb",
+    "--disable=metrics-server",
+    "--write-kubeconfig-mode=600",
+    f"--cluster-cidr={K3S_POD_CIDR}",
+    f"--service-cidr={K3S_SERVICE_CIDR}",
+    # Secrets are encrypted at rest on the real node (design context).
+    "--secrets-encryption",
+)
+
+
+def node_args(stack: Stack) -> list[str]:
+    """The kubelet and kube-proxy flags every K3s node here runs with, server
+    or agent. Each host adaptation is recorded once per stack."""
+
     args = [
-        "server",
-        "--disable=traefik",
-        "--disable=servicelb",
-        "--disable=metrics-server",
-        "--write-kubeconfig-mode=600",
-        f"--cluster-cidr={K3S_POD_CIDR}",
-        f"--service-cidr={K3S_SERVICE_CIDR}",
         # K3s's kube-proxy sets nf_conntrack_max, which an unprivileged
         # network namespace may not write; 0 leaves the host's value.
         "--kube-proxy-arg=conntrack-max-per-core=0",
         "--kubelet-arg=oom-score-adj=0",
         "--kube-proxy-arg=oom-score-adj=0",
-        # Secrets are encrypted at rest on the real node (design context).
-        "--secrets-encryption",
         # Every image here is imported, none can be re-pulled: image GC on a
         # busy shared disk would delete them, and disk-pressure eviction
         # would evict cells for the host's usage rather than the node's.
@@ -224,28 +221,53 @@ def _start_k3s(stack: Stack) -> K3s:
         "--kubelet-arg=image-gc-low-threshold=99",
         "--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%",
     ]
-    stack.adaptations.append(
+    adaptations = [
         "kubelet image GC off and disk eviction at 1%: imported images cannot be re-pulled, and the "
-        "node shares the host's disk"
-    )
+        "node shares the host's disk",
+    ]
     if cgroup_v1_host():
         args.append("--kubelet-arg=fail-cgroupv1=false")
-        stack.adaptations.append("kubelet fail-cgroupv1=false: this host runs cgroup v1")
+        adaptations.append("kubelet fail-cgroupv1=false: this host runs cgroup v1")
+    stack.adaptations.extend(item for item in adaptations if item not in stack.adaptations)
+    return args
+
+
+def containerd_mount(stack: Stack) -> str:
+    """A `docker run --mount` value adding the rehearsal's containerd drop-in."""
+
+    containerd_dir = stack.workdir / "containerd.d"
+    containerd_dir.mkdir(parents=True, exist_ok=True)
+    (containerd_dir / "rehearsal.toml").write_text(
+        "[plugins.'io.containerd.cri.v1.runtime']\n  restrict_oom_score_adj = true\n", encoding="utf-8"
+    )
+    adaptation = (
+        "containerd restrict_oom_score_adj=true: pods never get a lower OOM score than the node "
+        "(needed where the host withholds CAP_SYS_RESOURCE; affects OOM-kill order only)"
+    )
+    if adaptation not in stack.adaptations:
+        stack.adaptations.append(adaptation)
+    return (
+        f"type=bind,source={containerd_dir / 'rehearsal.toml'},"
+        "target=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/rehearsal.toml,readonly"
+    )
+
+
+def _start_k3s(stack: Stack) -> K3s:
+    name = f"exo-rehearsal-k3s-{stack.run_id}"
+    mount = containerd_mount(stack)
+    args = ["server", *SERVER_ARGS, *node_args(stack)]
     run(
         [
             "docker", "run", "--privileged", "--detach", "--name", name,
             "--network", stack.network,
             "--publish", "127.0.0.1::6443",
             "--publish", "127.0.0.1::30443",
-            "--mount", f"type=bind,source={containerd_dir / 'rehearsal.toml'},target=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/rehearsal.toml,readonly",
+            "--mount", mount,
             images.K3S, *args,
         ]
     )
     stack.containers.append(name)
-    wait_for(
-        lambda: run(["docker", "exec", name, "kubectl", "get", "--raw=/readyz"], check=False).stdout.strip() == "ok",
-        timeout=180, interval=2, description="the K3s API server",
-    )
+    wait_api_server(name)
     import_images(name, list(images.K3S_SYSTEM_IMAGES))
     stack.adaptations.append("K3s system images imported from the host Docker store (no registry egress from K3s)")
     wait_for(
@@ -270,6 +292,13 @@ def _start_k3s(stack: Stack) -> K3s:
         api_host_port=api_port,
         ingress_host_port=_host_port(name, "30443/tcp"),
         kubeconfig=kubeconfig,
+    )
+
+
+def wait_api_server(container: str, *, timeout: float = 180) -> None:
+    wait_for(
+        lambda: run(["docker", "exec", container, "kubectl", "get", "--raw=/readyz"], check=False).stdout.strip() == "ok",
+        timeout=timeout, interval=2, description="the K3s API server",
     )
 
 

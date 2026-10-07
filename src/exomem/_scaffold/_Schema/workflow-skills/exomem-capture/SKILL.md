@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 8553a24f7cc1a91d436dd153cf5cde66d105ec6c19c752144dc78fc8fc4fd093
+  skill_contract: 4867d5c4bc7a6760f1692f84eeb5e9fe9304d1d203fc10d625afd7faf06dfe6e
   version: "0.1.0"
 ---
 
@@ -63,9 +63,9 @@ carry transient progress; capture reusable decisions and verified milestones.
 
 1. Decide whether the material is raw evidence or a compiled conclusion.
 2. Use `capture_source` for raw captured text or source material. Classify it on
-   two open axes when you can: `source_kind` (what it is) and `domain` (what it
-   is about), plus `projects` for the work it serves. Use `other` only when the
-   kind genuinely cannot be determined, never because no familiar label matches.
+   two open axes: `source_kind` (what it is, required) and `domain` (what it is
+   about), plus `projects` for the work it serves. Name the closest known kind
+   or a new one; there is no catch-all.
 3. Pick the lane before the transport. Raw material stays with `capture_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
 4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
 5. Reuse known meaningful connections; use `connect_memory(operation="suggest-links")`

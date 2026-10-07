@@ -31,6 +31,7 @@ from membench.adapters.base import (
     MemoryAdapter,
     Profile,
 )
+from membench.native.exomem_kb import CORPUS_SOURCE_KIND
 
 _VAULT_PREFIXES = (
     "Knowledge Base/Benchmark Corpus/",
@@ -126,7 +127,7 @@ class TrackABridge:
                         "source_id": doc_id,
                         "title": title,
                         "content": text,
-                        "source_type": "other",
+                        "source_type": CORPUS_SOURCE_KIND,
                     },
                     ensure_ascii=False,
                     sort_keys=True,

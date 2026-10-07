@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import hosted_transfer
+from .governance import principal as principal_module, raw_protection
 from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, HostedLifecycleError
 from .vault import VaultPathError, resolve_under_vault
 
@@ -76,6 +78,7 @@ _ERROR_CATALOG: dict[str, tuple[int, str, bool, bool]] = {
         True,
         True,
     ),
+    "RAW_PROTECTION_UNAVAILABLE": (400, raw_protection.UNAVAILABLE_MESSAGE, False, True),
     "TRANSFER_INTERNAL": (500, "transfer failed safely", False, True),
 }
 _RFC8187_ATTR_CHAR = frozenset(
@@ -244,7 +247,12 @@ def register_public_transfer_routes(
 
             def commit() -> None:
                 assert temp_stream is not None
-                with mutation_guard_factory(config.vault_root):
+                with (
+                    principal_module.request_scope(
+                        principal_module.resolve_hosted_principal(grant.principal_scope)
+                    ),
+                    mutation_guard_factory(config.vault_root),
+                ):
                     if metadata["scope"] == _ADOPTION_STAGING_SCOPE:
                         _stage_adoption_upload(
                             vault_root=config.vault_root,
@@ -266,6 +274,8 @@ def register_public_transfer_routes(
                             max_bytes=grant.max_bytes,
                         )
 
+            from .preserve import PreserveError
+
             try:
                 await run_in_threadpool_func(commit)
             except PublicRequestError:
@@ -273,6 +283,9 @@ def register_public_transfer_routes(
                 # invalid run target) keep their exact public code instead of
                 # being masked as a retryable commit fault.
                 raise
+            except PreserveError as exc:
+                code = "RAW_PROTECTION_UNAVAILABLE" if exc.code == "RAW_PROTECTION_UNAVAILABLE" else "TRANSFER_COMMIT_UNAVAILABLE"
+                raise PublicRequestError(code) from exc
             except Exception as exc:  # noqa: BLE001 - governed commit stays redacted
                 raise PublicRequestError("TRANSFER_COMMIT_UNAVAILABLE") from exc
         except hosted_transfer.TransferSecurityUnavailable:
@@ -347,14 +360,14 @@ def register_public_transfer_routes(
             # indistinguishable from one that never existed.
             from .governance import egress as egress_module
             from .governance import principal as principal_module
+            from .governance import raw_protection
 
+            principal = principal_module.resolve_hosted_principal(grant.principal_scope)
             allowed = await run_in_threadpool_func(
                 egress_module.release_allows_download,
                 config.vault_root,
                 requested_path,
-                principal=principal_module.resolve_hosted_principal(
-                    grant.principal_scope
-                ),
+                principal=principal,
             )
             if not allowed:
                 raise VaultPathError(code="NOT_FOUND", reason="path does not exist")
@@ -364,6 +377,17 @@ def register_public_transfer_routes(
                 requested_path,
                 max_bytes=grant.max_bytes,
             )
+            if raw_protection.marked(requested_path):
+                # Hold the exact bytes sent, not a mutable descriptor approved
+                # by pathname before streaming.
+                snapshot = await run_in_threadpool_func(stream.read, size + 1)
+                stream.close()
+                if len(snapshot) != size or not await run_in_threadpool_func(
+                    egress_module.release_allows_download, config.vault_root,
+                    requested_path, principal=principal, snapshot=snapshot,
+                ):
+                    raise VaultPathError(code="NOT_FOUND", reason="path does not exist")
+                stream = io.BytesIO(snapshot)
         except hosted_transfer.TransferSecurityUnavailable:
             _release(admission)
             return _error_response("TRANSFER_SECURITY_UNAVAILABLE", request=request, config=config)
@@ -374,6 +398,8 @@ def register_public_transfer_routes(
             _release(admission)
             return _error_response("TRANSFER_ADMISSION_CLOSED", request=request, config=config)
         except VaultPathError:
+            if stream is not None:
+                stream.close()
             _release(admission)
             return _error_response("TRANSFER_TARGET_UNAVAILABLE", request=request, config=config)
         except PublicRequestError as exc:

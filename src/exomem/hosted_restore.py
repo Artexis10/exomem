@@ -784,6 +784,7 @@ def _require_restore_admission(vault_root: Path, *, restored_root: Path | None =
     from . import held_fs, state_migration
     from .collection_store import authority
     from .collection_store.connection import CollectionStoreError
+    from .governance import raw_protection
     from .vocabulary_admission import VocabularyAdmissionError, require_restore_admission
 
     marker_root = vault_root if restored_root is None else restored_root
@@ -791,6 +792,7 @@ def _require_restore_admission(vault_root: Path, *, restored_root: Path | None =
         if os.path.lexists(marker_root):
             state_migration._require_supported_compatibility(
                 authority.required_state_compatibility_ids(marker_root)
+                | raw_protection.required_compatibility(marker_root)
             )
     except (state_migration.StateMigrationOfflineRequired, CollectionStoreError,
             held_fs.HeldFsError, OSError) as exc:

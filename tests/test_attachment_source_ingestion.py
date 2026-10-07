@@ -133,7 +133,7 @@ def test_an_ordinary_source_page_citation_is_unchanged(
         source_schema,
         content="Notes from the riverside council minutes.",
         title="Riverside council minutes",
-        source_type="other",
+        source_type="correspondence",
         today=TODAY,
     )
     cited = added.path.removesuffix(".md")
@@ -428,7 +428,7 @@ def test_the_artifact_and_its_page_share_one_resolved_stem(
 
     added = add_module.add(
         vault, source_schema, content="", title="Shared stem",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "s1", "shot.png", _PNG), today=TODAY,
     )
 
@@ -443,12 +443,12 @@ def test_a_second_capture_of_the_same_title_does_not_collide(
 
     first = add_module.add(
         vault, source_schema, content="", title="Same title",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "a", "shot.png", _PNG), today=TODAY,
     )
     second = add_module.add(
         vault, source_schema, content="", title="Same title",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "b", "shot.png", _PNG + b"\x00"), today=TODAY,
     )
 
@@ -466,7 +466,7 @@ def test_an_attached_source_is_citable_immediately(
 
     added = add_module.add(
         vault, source_schema, content="", title="Citable attachment",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "c", "notes.txt", b"raw material"), today=TODAY,
     )
 
@@ -569,7 +569,7 @@ def test_identical_bytes_reach_different_lanes_by_command(
 
     captured = add_module.add(
         vault, source_schema, content="", title="Same bytes as a source",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "lane", "shot.png", _PNG), today=TODAY,
     )
     preserved = _preserve_image(vault, "shot.png")
@@ -594,7 +594,7 @@ def test_no_lane_decision_reads_the_file_type(
 
     image_source = add_module.add(
         vault, source_schema, content="", title="Screenshot kept as material",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "img", "diagram.png", _PNG), today=TODAY,
     )
     markdown_evidence = preserve_module.preserve(
@@ -631,7 +631,7 @@ def test_the_artifact_pointer_is_grouped_by_tree_not_by_field_name(
 
     added = add_module.add(
         vault, source_schema, content="", title="Grouped by tree",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "grp", "shot.png", _PNG), today=TODAY,
     )
     frontmatter = {"evidence_file": added.artifact_path}
@@ -666,7 +666,7 @@ def test_promotion_of_a_captured_source_still_requires_a_reason(
 
     added = add_module.add(
         vault, source_schema, content="", title="Promotable attachment",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "p", "receipt.png", _PNG), today=TODAY,
     )
     destination = "Knowledge Base/Evidence/warranty/receipts/receipt.png"
@@ -700,7 +700,7 @@ def _promotable(vault: Path, source_schema, tmp_path: Path, name: str = "receipt
 
     return add_module.add(
         vault, source_schema, content="", title="Warranty receipt",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / "promote", name, _PNG), today=TODAY,
     )
 
@@ -756,6 +756,59 @@ def test_the_moved_page_points_at_the_moved_bytes(
     assert "original_filename: receipt.png" in page
 
 
+def test_raw_text_source_promotion_retains_bytes_identity_and_protection(vault: Path, source_schema) -> None:
+    """A supported promotion must carry the original pair and protection token."""
+    from exomem import add as add_module
+    from exomem import move_file as move_file_module
+    from exomem.governance import raw_protection
+
+    original = "exact UTF-8 source — with trailing whitespace  \n"
+    added = add_module.add(
+        vault, source_schema, content=original, title="Protected source",
+        source_type="transcript", raw_protection=True,
+    )
+    before = raw_protection.binding(vault, added.artifact_path)[0]
+    from exomem.vault import parse_frontmatter
+
+    example = "\n```yaml\nevidence_file: example.txt\ndata_file: example.txt\nraw_protection:\n  artifact_path: example.txt\n```\n"
+    page_path = vault / added.path
+    page_path.write_text(page_path.read_text() + example)
+    body_before = parse_frontmatter(page_path.read_text(), strict=True)[1]
+    moved = move_file_module.move_file(
+        vault, old_path=added.artifact_path,
+        new_path="Knowledge Base/Evidence/Test/raw/promoted.txt",
+        promotion_reason="preserve proof",
+    )
+    after, companion, _ = raw_protection.binding(vault, moved.new_path)
+    assert (vault / after["artifact_path"]).read_bytes() == original.encode()
+    assert after["original_ref"] == before["original_ref"]
+    assert after["revision"] == before["revision"]
+    assert raw_protection.marked(companion)
+    frontmatter, body_after, _ = parse_frontmatter((vault / companion).read_text(), strict=True)
+    assert frontmatter["evidence_file"] == after["artifact_path"]
+    assert after["artifact_path"] == "Knowledge Base/Evidence/Test/raw/__exomem_raw_v1__promoted.txt"
+    assert body_after == body_before
+    assert not (vault / added.path).exists()
+    assert not (vault / added.artifact_path).exists()
+
+
+def test_raw_source_keeps_new_vocabulary_private(vault: Path, source_schema) -> None:
+    """Protected source metadata must not become global schema vocabulary."""
+    from exomem import add, project_keys, source_taxonomy
+
+    saved = add.add(
+        vault, source_schema, content="Exact private original", title="Private source",
+        source_type="private-sensor-kind", projects=["private-expedition"], raw_protection=True,
+    )
+    companion = (vault / saved.path).read_text()
+    assert "private-sensor-kind" in companion
+    assert "private-expedition" in companion
+    registry = source_taxonomy.load_taxonomy(vault)
+    assert "private-sensor-kind" not in registry.kinds
+    assert "private-expedition" not in project_keys.load_project_registry(vault).keys
+    assert not any("registered" in warning.lower() for warning in saved.warnings)
+
+
 def test_moving_the_page_moves_the_artifact_too(
     vault: Path, source_schema, tmp_path: Path
 ) -> None:
@@ -784,7 +837,7 @@ def test_a_lone_page_still_moves_by_itself(vault: Path, source_schema) -> None:
 
     added = add_module.add(
         vault, source_schema, content="Ordinary captured text.",
-        title="No artifact here", source_type="other", today=TODAY,
+        title="No artifact here", source_type="correspondence", today=TODAY,
     )
     destination = "Knowledge Base/Sources/Other/relocated-note.md"
 
@@ -939,7 +992,7 @@ def test_every_media_kind_captures_as_a_source(
 
     added = add_module.add(
         vault, source_schema, content="", title=f"Matrix {kind}",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / kind, filename, payload), today=TODAY,
     )
 
@@ -980,7 +1033,7 @@ def test_no_artifact_is_written_to_both_trees(
 
     add_module.add(
         vault, source_schema, content="", title=f"Single copy {kind}",
-        source_type="other",
+        source_type="correspondence",
         artifact=_staged(tmp_path / f"dup-{kind}", filename, payload), today=TODAY,
     )
 
@@ -1192,10 +1245,12 @@ def test_a_byte_identical_retry_replays_instead_of_capturing_twice(
 
     first = writer_lease.invoke_command(
         command, vault, source_schema=source_schema_obj, title="Retried capture",
+        source_kind="session",
         files=files, idempotency_key="retry-key",
     )
     replay = writer_lease.invoke_command(
         command, vault, source_schema=source_schema_obj, title="Retried capture",
+        source_kind="session",
         files=files, idempotency_key="retry-key",
     )
 
@@ -1261,6 +1316,7 @@ def test_a_file_capture_fetches_before_taking_the_mutation_lock(
 
     result = writer_lease.invoke_command(
         command, vault, source_schema=source_schema, title="Boundary capture",
+        source_kind="session",
         files=[{"download_url": "https://files.example/1", "file_id": "f1"}],
     )
 
@@ -1296,6 +1352,7 @@ def test_every_staged_file_is_fetched_before_the_first_commit(
 
     result = writer_lease.invoke_command(
         command, vault, source_schema=source_schema, title="Batch capture",
+        source_kind="session",
         files=[
             {"download_url": f"https://files.example/{index}", "file_id": f"f{index}"}
             for index in range(3)
@@ -1320,6 +1377,7 @@ def test_a_text_capture_still_runs_under_the_wide_boundary(
 
     result = writer_lease.invoke_command(
         command, vault, source_schema=source_schema, title="Text capture",
+        source_kind="session",
         content="raw material, as text",
     )
 
@@ -1352,6 +1410,7 @@ def test_the_kill_switch_restores_the_wide_boundary_for_a_file_capture(
 
     result = writer_lease.invoke_command(
         command, vault, source_schema=source_schema, title="Kill switch capture",
+        source_kind="session",
         files=[{"download_url": "https://files.example/1", "file_id": "f1"}],
     )
 

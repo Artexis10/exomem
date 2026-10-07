@@ -211,6 +211,10 @@ def _capture_semantics(reference: dict) -> dict:
     unit = semantic.get("minimum_semantic_unit", {})
     entity = reference.get("entity_registry", {})
     out: dict[str, Any] = {}
+    taxonomy = reference.get("source_taxonomy", {})
+    for key in ("kind_rule", "migration"):
+        if key in taxonomy:
+            out[key] = taxonomy[key]
     for key in ("syntax", "canonical_section"):
         if key in compact:
             out[key] = compact[key]

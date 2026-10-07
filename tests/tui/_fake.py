@@ -166,7 +166,9 @@ class FakeBackend:
         self._gate("read_page", path=path)
         return {"path": path, "body": SAMPLE_PAGE}
 
-    def capture_thought(self, content: str, title: str, *, source_type: str = "other") -> dict:
+    def capture_thought(
+        self, content: str, title: str, *, source_type: str | None = None
+    ) -> dict:
         self._gate("capture_thought", title=title)
         record = {"content": content, "title": title, "source_type": source_type}
         self.captured.append(record)

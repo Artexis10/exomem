@@ -74,7 +74,12 @@ entries:
     description: point-in-time captures of a web page
     aliases: [snapshot, snapshots, webpage]
     attributes: {path_label: Snapshots}
+  unclassified:
+    label: Unclassified
+    description: captured with no agent to classify it; needs a kind
+    attributes: {path_label: Unclassified}
   other:
     label: Other
-    description: unclassified captures — a low-confidence fallback
+    description: the retired catch-all; needs a kind
+    status: deprecated
     attributes: {path_label: Other}

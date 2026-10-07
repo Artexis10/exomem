@@ -236,7 +236,8 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 def _duplicate_from_sidecar(
-    vault_root: Path, folder: Path, sidecar: Path
+    vault_root: Path, folder: Path, sidecar: Path, *, raw_protection: bool = False,
+    wanted_hashes: frozenset[str] | None = None,
 ) -> DuplicateArtifact | None:
     """One sidecar's artifact identity, or None when it cannot stand for one."""
     try:
@@ -261,6 +262,8 @@ def _duplicate_from_sidecar(
         or not artifact_path
     ):
         return None
+    if wanted_hashes is not None and digest not in wanted_hashes:
+        return None
     # The page is vault data and its `artifact_path` reaches the client as
     # `duplicate_of.path`. A page that points outside the destination it lives
     # in describes some other artifact, so it cannot stand for a duplicate here.
@@ -273,6 +276,24 @@ def _duplicate_from_sidecar(
     ref = memory_refs.ref_from_markdown(source)
     if not isinstance(ref, str) or not ref:
         return None
+    if raw_protection:
+        from . import reserved_paths
+        from .governance.raw_protection import binding
+
+        relative = sidecar.relative_to(vault_root).as_posix()
+        found = binding(vault_root, relative)
+        if found is None:
+            return None
+        block, paired_companion, _ = found
+        if (paired_companion != relative or block["original_ref"] != ref
+                or block["artifact_path"] != artifact_path or block["artifact_sha256"] != digest):
+            return None
+        try:
+            original = reserved_paths.read_generic_bytes(vault_root, artifact_path).data
+        except (OSError, reserved_paths.ReservedPathLeafError):
+            return None
+        if hashlib.sha256(original).hexdigest() != digest:
+            return None
     return DuplicateArtifact(
         hash=digest,
         path=artifact_path,
@@ -282,7 +303,8 @@ def _duplicate_from_sidecar(
 
 
 def destination_duplicate_index(
-    vault_root: Path, *, scope: str, category: str
+    vault_root: Path, *, scope: str, category: str, raw_protection: bool = False,
+    wanted_hashes: frozenset[str] | None = None,
 ) -> dict[str, DuplicateArtifact]:
     """sha256 -> the artifact already under this destination with those bytes.
 
@@ -295,6 +317,7 @@ def destination_duplicate_index(
     directory once per *file* would make an eight-file batch eight full passes
     over a category that can hold hundreds of sidecars -- and the design's claim
     that this is cheaper than the staging download only holds for one pass.
+    Only wanted hashes, when supplied, reach protected-original byte verification.
     """
     index: dict[str, DuplicateArtifact] = {}
     folder = kb_root(vault_root) / "Evidence" / scope / category
@@ -303,19 +326,28 @@ def destination_duplicate_index(
     except OSError:
         return index
     for sidecar in sidecars:
-        duplicate = _duplicate_from_sidecar(vault_root, folder, sidecar)
+        from .governance.raw_protection import marked
+
+        if marked(sidecar.name) != raw_protection:
+            continue
+        duplicate = _duplicate_from_sidecar(
+            vault_root, folder, sidecar, raw_protection=raw_protection, wanted_hashes=wanted_hashes,
+        )
         if duplicate is not None:
             index.setdefault(duplicate.hash, duplicate)
     return index
 
 
 def find_duplicate_artifact(
-    vault_root: Path, *, scope: str, category: str, sha256: str
+    vault_root: Path, *, scope: str, category: str, sha256: str, raw_protection: bool = False
 ) -> DuplicateArtifact | None:
     """The single-file lane's lookup: one destination index, one probe."""
     if not _SHA256_HEX.fullmatch(sha256 or ""):
         return None
-    return destination_duplicate_index(vault_root, scope=scope, category=category).get(sha256)
+    return destination_duplicate_index(
+        vault_root, scope=scope, category=category, raw_protection=raw_protection,
+        wanted_hashes=frozenset({sha256}),
+    ).get(sha256)
 
 
 @dataclass
@@ -326,6 +358,19 @@ class PreserveError(Exception):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
+
+
+def validate_raw_capture(
+    filename: str | None = None, *, destination: str = "", raw_protection: bool = False,
+) -> bool:
+    """Resolve protection before a canonical write or a duplicate receipt."""
+    from .governance import raw_protection as raw_guard
+    from .governance.principal import effective_principal
+
+    protected = raw_protection or raw_guard.marked(str(Path(destination) / _sanitize_filename(filename)))
+    if protected and not raw_guard.applies_to(effective_principal()):
+        _raise("RAW_PROTECTION_UNAVAILABLE", ["raw_protection"], raw_guard.UNAVAILABLE_REASON)
+    return protected
 
 
 def preserve(
@@ -345,6 +390,7 @@ def preserve(
     max_stream_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
     text_origin: str = "upload",
+    raw_protection: bool = False,
 ) -> PreserveResult:
     """Capture an artifact to Evidence/<scope>/<category>/<filename>.
 
@@ -370,6 +416,14 @@ def preserve(
         missing.append("category")
         reasons.append(category_refusal)
     filename_safe = _sanitize_filename(filename)
+    from .governance import raw_protection as raw_guard
+
+    raw_protection = validate_raw_capture(
+        filename_safe, destination=str(kb_root(vault_root).relative_to(vault_root) / "Evidence" / scope_safe / category_safe),
+        raw_protection=raw_protection,
+    )
+    if raw_protection and filename_safe and not raw_guard.marked(filename_safe):
+        filename_safe = raw_guard.PREFIX + filename_safe
     if not filename_safe:
         missing.append("filename")
         reasons.append("filename is empty or only invalid characters")
@@ -520,7 +574,7 @@ def preserve(
         # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
         # only `.md` is indexed. A preserved transcript used to land exactly
         # that way, which is why citing it reported the source as missing.
-        if filename_safe.lower().endswith(".md"):
+        if filename_safe.lower().endswith(".md") and not raw_protection:
             stem = filename_safe[:-3]
             sidecar_path = folder / f"{stem}-notes.md"
         else:
@@ -590,8 +644,13 @@ def preserve(
                     else None
                 ),
             )
+            if raw_protection:
+                sidecar_md = raw_guard.protect(
+                    sidecar_md, artifact_path=rel_artifact, digest=artifact_hash
+                )
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
-            writes.append(
+            writes.insert(
+                0 if raw_protection else len(writes),
                 PlannedWrite(
                     path=sidecar_path,
                     content=sidecar_md,
@@ -617,7 +676,7 @@ def preserve(
             log_body += f" Description: {desc_one_line}"
 
         top_index = kb / "index.md"
-        if top_index.exists():
+        if top_index.exists() and not raw_protection:
             current_top = top_index.read_text(encoding="utf-8")
             new_top, _trim_note = indexes._prepend_recent_activity(
                 current_top,
@@ -641,11 +700,11 @@ def preserve(
                 )
             )
             writes.extend(sub_writes)
-        else:
+        elif not raw_protection:
             warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
-        if log_file.exists():
+        if log_file.exists() and not raw_protection:
             current_log = log_file.read_text(encoding="utf-8")
             new_log = _prepend_log_entry(
                 current_log,
@@ -660,7 +719,7 @@ def preserve(
                     expected_hash=content_hash(current_log),
                 )
             )
-        else:
+        elif not raw_protection:
             warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer
@@ -738,6 +797,7 @@ def preserve_stream(
     max_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
     text_origin: str = "upload",
+    raw_protection: bool = False,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -763,6 +823,7 @@ def preserve_stream(
         max_stream_bytes=max_bytes,
         adoption_seed=adoption_seed,
         text_origin=text_origin,
+        raw_protection=raw_protection,
     )
 
 
@@ -779,6 +840,7 @@ def preserve_bytes(
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
+    raw_protection: bool = False,
 ) -> PreserveResult:
     """Capture an in-memory `bytes` artifact to Evidence/ (back-compat wrapper).
 
@@ -798,6 +860,7 @@ def preserve_bytes(
         today=today,
         max_bytes=max_bytes,
         adoption_seed=adoption_seed,
+        raw_protection=raw_protection,
     )
 
 

@@ -16,10 +16,21 @@ import json
 from pathlib import Path
 from typing import Any
 
-from test_governance_egress import SCOPE_ID, _external, _gov_dir, _reset_caches, write_rule
+import pytest
+
+from test_governance_egress import (
+    EXTERNAL,
+    SCOPE_ID,
+    _external,
+    _gov_dir,
+    _reset_caches,
+    write_rule,
+)
 from test_working_set_carry import seed_ordinary_notes
+from test_working_set_index import _seed_structure
 
 from exomem import commands, lexstore, working_set_index, working_set_runtime
+from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
 PEOPLE = "Knowledge Base/Entities/People"
@@ -291,3 +302,375 @@ def test_a_withheld_namesake_does_not_make_a_phrase_a_question(vault: Path) -> N
 
     assert restricted == absent
     assert [a["path"] for a in absent["anchors"]] == [plan]
+
+
+def test_a_withheld_units_category_chooses_no_lens(vault: Path) -> None:
+    """The removed unit is the note's only decision. The lenses that read
+    decisions must not be listed, as in a note without it."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    plain = "- [failure] The staging replica migration stalled twice last week. ^r-plain"
+    hidden = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^r-secret"
+    _write(vault, NOTE, _note("Replica migration stall", f"{plain}\n{hidden}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", plain))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [role["id"] for role in clean["roles"]] == ["material"]
+
+
+def test_a_carried_page_left_with_nothing_abstains_like_its_twin(vault: Path) -> None:
+    """The note's only unit links a withheld page. A note with nothing to serve
+    abstains `unresolved`; the restricted packet must say the same."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = (
+        "- [failure] The staging replica migration stalled near [[Secret cluster]] "
+        "last week. ^r-secret"
+    )
+    _write(vault, NOTE, _note("Replica migration stall", hidden))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", ""))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert clean["abstention"] == {"reason": "unresolved"}
+
+
+def test_a_withheld_unit_takes_no_role_slot(vault: Path) -> None:
+    """The removed unit is served first and fills one of a role's three slots.
+    The fourth decision must be served whole, not pointed at as `role_cap`."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^r-a"
+    kept = "\n".join(
+        f"- [decision] The replica migration retry {number} moved to the staging window. ^r-{ref}"
+        for number, ref in ((1, "b"), (2, "c"), (3, "d"))
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{hidden}\n{kept}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [unit["ref"][-4:] for unit in clean["units"]] == ["#r-b", "#r-c", "#r-d"]
+    assert clean["pointers"] == []
+
+
+def test_a_withheld_unit_takes_no_material_slot(vault: Path) -> None:
+    """The material lane serves three units and reads the first one off this
+    note. With it removed, the next unit takes its slot."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = (
+        "- [failure] The staging replica migration stalled near [[Secret cluster]] "
+        "last week. ^r-a"
+    )
+    kept = "\n".join(
+        f"- [failure] The staging replica migration stalled on attempt {number} last week. ^r-{ref}"
+        for number, ref in ((1, "b"), (2, "c"), (3, "d"), (4, "e"))
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{hidden}\n{kept}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert [unit["ref"][-4:] for unit in clean["units"]] == ["#r-b", "#r-c", "#r-d"]
+
+
+def test_a_withheld_unit_past_the_cap_is_not_reported_as_cut(vault: Path) -> None:
+    """The removed unit is never served: it would be the material lane's fourth.
+    Reporting the lane as truncated would say that a fourth unit exists."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    kept = "\n".join(
+        f"- [failure] The staging replica migration stalled on attempt {number} last week. ^r-{ref}"
+        for number, ref in ((1, "a"), (2, "b"), (3, "c"))
+    )
+    hidden = (
+        "- [failure] The staging replica migration stalled near [[Secret cluster]] "
+        "last week. ^r-z"
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{kept}\n{hidden}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert clean["missing"] == []
+
+
+def test_a_withheld_conclusion_takes_no_conclusion_page_slot(vault: Path) -> None:
+    """Past an entity's link cap, its six newest pages holding a conclusion are
+    read. The newest holds only a withheld one, so the seventh newest must be
+    read in its place, as in a vault where the newest page holds no conclusion."""
+    person = f"{PEOPLE}/Ilse Vandermeer.md"
+    _write(vault, person, _person("Ilse Vandermeer"))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    related = "Related: [[Ilse Vandermeer]]"
+    for index in range(45):
+        _write(
+            vault,
+            f"Knowledge Base/Notes/Research/aa-gauge-log-{index:02d}.md",
+            _note(f"Gauge log {index:02d}", f"- [fact] Gauge batch {index:02d} was filed. ^g-{index}", related),
+        )
+
+    def ruling(day: int, units: str) -> str:
+        return (
+            f"---\ntype: note\nstatus: active\nupdated: 2026-09-{day:02d}\n---\n\n"
+            f"# Gauge ruling {day}\n\n## Summary\n\n{units}\n\n## Context\n\n{related}\n"
+        )
+
+    for day in range(1, 8):
+        _write(
+            vault,
+            f"Knowledge Base/Notes/Decisions/zz-ruling-{day}.md",
+            ruling(day, f"- [decision] Gauge ruling {day} keeps the weekly review. ^z-{day}"),
+        )
+    newest = "Knowledge Base/Notes/Decisions/zz-ruling-9.md"
+    _write(vault, newest, ruling(9, "- [decision] Gauge reviews move to the [[Secret cluster]] rota. ^z-9"))
+    turn = "Ilse Vandermeer asked whether the harbour gauges look healthy this week."
+    restricted = _ask(vault, turn)
+
+    _write(vault, newest, ruling(9, ""))
+    clean = _ask(vault, turn)
+
+    assert restricted == clean
+    read = [entry["ref"] for entry in (*clean["units"], *clean["pointers"])]
+    assert any(ref.endswith("zz-ruling-2.md#z-2") for ref in read)
+
+
+def test_a_unit_withheld_at_a_notice_level_is_still_marked(vault: Path) -> None:
+    """At a notice level the caller may know that a section lost something,
+    so a unit linking a page released only at that level is removed and the
+    units section is marked `withheld`, as for any other notice-level item."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=1)
+    plain = "- [failure] The staging replica migration stalled twice last week. ^r-plain"
+    naming = (
+        "- [failure] The migration stalled on the staging replica last week "
+        "near [[Secret cluster]]. ^r-secret"
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{plain}\n{naming}"))
+
+    restricted = _ask(vault, TURN)
+
+    assert [unit["ref"][-8:] for unit in restricted["units"]] == ["#r-plain"]
+    assert {"role": "units", "reason": "withheld"} in restricted["missing"]
+
+
+def test_a_unit_withheld_while_compiling_is_still_receipted(vault: Path) -> None:
+    """The disclosure receipt records that the caller was refused the page a
+    unit links, even when the compiler drops that unit before the guard runs."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    hidden = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^r-a"
+    kept = "- [decision] The replica migration retry moved to the staging window. ^r-b"
+    _write(vault, NOTE, _note("Replica migration stall", f"{hidden}\n{kept}"))
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _reset_caches()
+
+    with egress.disclosure_boundary(vault, "activate_context") as collector:
+        with request_scope(_external()):
+            packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert [unit["ref"][-4:] for unit in packet["units"]] == ["#r-b"]
+    assert (SECRET, "withheld", 0) in collector.path_outcomes
+
+
+def test_a_withheld_unit_at_the_lanes_read_limit_is_not_reported_as_cut(vault: Path) -> None:
+    """A lane reads at most 200 units. With 200 the caller may see and one it
+    may not, the lane read everything the caller may see: `lane_truncated`
+    would say that more exists."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    kept = "\n".join(
+        f"- [decision] The replica migration retry {number} moved to the staging window. ^r-{number}"
+        for number in range(200)
+    )
+    hidden = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^h-1"
+    _write(vault, NOTE, _note("Replica migration stall", f"{kept}\n{hidden}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", kept))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert {"role": "recent_change", "reason": "lane_truncated"} not in clean["missing"]
+
+
+ILSE = f"{PEOPLE}/Ilse Vandermeer.md"
+ILSE_STATUS = "Knowledge Base/Notes/Research/ilse-status.md"
+ILSE_TURN = "Ilse Vandermeer asked whether the harbour gauges look healthy this week."
+
+
+def _person_with_status_page(name: str) -> str:
+    return (
+        "---\ntype: entity\nentity_type: person\nstatus: active\n"
+        'current_state_page: "[[ilse-status]]"\n---\n\n'
+        f"# {name}\n\n## Summary\n\nWorks on storage. Status: [[ilse-status]]\n"
+    )
+
+
+@pytest.mark.parametrize("hidden_count", [1, 64])
+def test_a_withheld_leading_unit_does_not_choose_the_current_state(
+    vault: Path, hidden_count: int
+) -> None:
+    """Hidden facts must not hide the public state, even at the raw read cap."""
+    _write(vault, ILSE, _person_with_status_page("Ilse Vandermeer"))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    lead = "\n".join(
+        f"- [fact] Ilse moved to the [[Secret cluster]] rota {number}. ^hidden-{number}"
+        for number in range(hidden_count)
+    )
+    rest = "- [fact] Ilse runs the harbour gauges from the north office. ^st-2"
+    related = "Related: [[Ilse Vandermeer]]"
+    _write(vault, ILSE_STATUS, _note("Ilse status", f"{lead}\n{rest}", related))
+    restricted = _ask(vault, ILSE_TURN)
+
+    _write(vault, ILSE_STATUS, _note("Ilse status", rest, related))
+    clean = _ask(vault, ILSE_TURN)
+
+    assert restricted == clean
+    assert [entry["statement"][:24] for entry in clean["current_state"]] == [
+        "Ilse runs the harbour ga"
+    ]
+
+
+def test_a_withheld_lede_leaves_its_lanes_without_material(vault: Path) -> None:
+    """A person's page opens with a sentence linking a withheld page. The
+    identity and people lanes then served nothing, and say so as they do for a
+    page with no opening sentence."""
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    head = (
+        "---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n"
+        "# Ilse Vandermeer\n\n## Summary\n"
+    )
+    _write(vault, ILSE, head + "\nWorks on storage near [[Secret cluster]].\n")
+    _write(
+        vault,
+        "Knowledge Base/Notes/Decisions/gauge-ruling.md",
+        _note("Gauge ruling", "- [decision] Gauge reviews stay weekly. ^g-1", "Related: [[Ilse Vandermeer]]"),
+    )
+    restricted = _ask(vault, ILSE_TURN)
+
+    _write(vault, ILSE, head)
+    clean = _ask(vault, ILSE_TURN)
+
+    assert restricted == clean
+    assert {"role": "identity", "reason": "no_material"} in clean["missing"]
+
+
+def test_a_state_is_never_cut_inside_a_link(vault: Path) -> None:
+    """A resource's authored state is cut to 200 characters. A cut that falls
+    inside `[[Secret cluster]]` would serve part of the withheld page's name,
+    which no guard can recognise as a link any more."""
+    _seed_structure(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _withhold(vault, SECRET, ceiling=0)
+    words = "Parked at the north depot with a cracked runner and a spare harness waiting"
+    # "state: " and 180 characters put the cut inside the link's name.
+    state = f"{words} {'x' * (180 - len(words) - 2)} [[Secret cluster]] has the spares."
+    _write(
+        vault,
+        "Knowledge Base/Products/Cargo Sled.md",
+        "---\ntype: note\nstatus: active\nupdated: 2026-09-02\n"
+        f'state: "{state}"\n---\n\n# Cargo Sled\n\n## Summary\n\nA towed cargo sled.\n',
+    )
+    packet = _ask(vault, "What state is the Cargo Sled in?")
+
+    assert [entry["statement"][:12] for entry in packet["current_state"]] == ["state: Parke"]
+    assert "Secret" not in json.dumps(packet)
+
+
+NOTICE_BOARD = "Knowledge Base/Notes/Restricted/notice-board.md"
+
+
+def _withhold_at_two_levels(vault: Path) -> None:
+    """`SECRET` at L0 and `NOTICE_BOARD` at a notice level, for the external caller."""
+    for scope_id, path, rule_id, ceiling in (
+        ("01ARZ3NDEKTSV4RRFFQ69G5FC0", SECRET, "01ARZ3NDEKTSV4RRFFQ69G5FC1", 0),
+        ("01ARZ3NDEKTSV4RRFFQ69G5FD0", NOTICE_BOARD, "01ARZ3NDEKTSV4RRFFQ69G5FD1", 1),
+    ):
+        _write(
+            vault,
+            f"Knowledge Base/_Governance/scopes/s-{scope_id[-2:]}.yaml",
+            f'governance_version: 1\nid: {scope_id}\nname: S{scope_id[-2:]}\npaths: ["{path}"]\n',
+        )
+        _write(
+            vault,
+            f"Knowledge Base/_Governance/rules/r-{scope_id[-2:]}.yaml",
+            f'governance_version: 1\nid: {rule_id}\nscope_ids: ["{scope_id}"]\n'
+            f"audience: {EXTERNAL}\nceiling: {ceiling}\n",
+        )
+
+
+def test_an_l0_unit_beside_a_notice_unit_is_still_absent(vault: Path) -> None:
+    """One lane reads a unit withheld at L0 and one withheld at a notice level.
+    The first is absent; the second is removed and marked, exactly as in a
+    note that never held the first."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _write(vault, NOTICE_BOARD, _note("Notice board", "- [fact] Posted. ^n-1"))
+    _withhold_at_two_levels(vault)
+    silent = "- [decision] The replica migration moved off [[Secret cluster]] last week. ^r-a"
+    noticed = "- [decision] The replica migration retry plan sits on the [[Notice board]]. ^r-b"
+    kept = "\n".join(
+        f"- [decision] The replica migration retry {number} moved to the staging window. ^r-{ref}"
+        for number, ref in ((1, "c"), (2, "d"), (3, "e"))
+    )
+    _write(vault, NOTE, _note("Replica migration stall", f"{silent}\n{noticed}\n{kept}"))
+    restricted = _ask(vault, TURN)
+
+    _write(vault, NOTE, _note("Replica migration stall", f"{noticed}\n{kept}"))
+    clean = _ask(vault, TURN)
+
+    assert restricted == clean
+    assert {"role": "units", "reason": "withheld"} in clean["missing"]
+
+
+def test_an_l0_unit_on_a_page_superseded_by_a_notice_page_is_still_absent(vault: Path) -> None:
+    """A unit links a page withheld at L0, on a page superseded by one withheld
+    at a notice level. The guard strips that pointer and keeps a unit, so the
+    pointer is no reason to report the unit's removal: it is absent."""
+    _write(vault, ILSE, _person("Ilse Vandermeer"))
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _write(vault, NOTICE_BOARD, _note("Notice board", "- [fact] Posted. ^n-1"))
+    _withhold_at_two_levels(vault)
+    ruling = "Knowledge Base/Notes/Decisions/gauge-ruling.md"
+    silent = "- [decision] Gauge reviews moved off the [[Secret cluster]] rota. ^g-a"
+    kept = "- [decision] Gauge reviews stay weekly. ^g-b"
+
+    def superseded(units: str) -> str:
+        return _note("Gauge ruling", units, "Related: [[Ilse Vandermeer]]").replace(
+            "status: active\n", f"status: active\nsuperseded_by: [{NOTICE_BOARD}]\n", 1
+        )
+
+    _write(vault, ruling, superseded(f"{silent}\n{kept}"))
+    restricted = _ask(vault, ILSE_TURN)
+
+    _write(vault, ruling, superseded(kept))
+    clean = _ask(vault, ILSE_TURN)
+
+    assert restricted == clean
+    assert any(unit["ref"].endswith("gauge-ruling.md#g-b") for unit in clean["units"])

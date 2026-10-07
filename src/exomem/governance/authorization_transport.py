@@ -159,6 +159,11 @@ class _StdioAuthorizationRequest:
         return "_StdioAuthorizationRequest(headers={})"
 
 
+def is_stdio_request(request: object) -> bool:
+    """Whether the bound request is this stdio transport's, not an HTTP one."""
+    return isinstance(request, _StdioAuthorizationRequest)
+
+
 @contextmanager
 def authorization_carrier_scope(carrier: CredentialCarrier) -> Iterator[None]:
     token = _REQUEST_CARRIER.set(carrier)

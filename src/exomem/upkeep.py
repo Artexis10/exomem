@@ -130,10 +130,10 @@ def _filters(vault_root: Path) -> tuple[Any, bool]:
     from .governance.principal import effective_principal
 
     who = effective_principal()
-    keep = egress.release_walk_filter(Path(vault_root), principal=who)
-    if keep is None:
-        return None, False
-    return keep, egress.restricted_release_filter(Path(vault_root), principal=who) is not None
+    keep = egress.restricted_release_filter(Path(vault_root), principal=who)
+    if keep is not None:
+        return keep, True
+    return egress.release_walk_filter(Path(vault_root), principal=who), False
 
 
 def _visible(keep, path: str) -> bool:

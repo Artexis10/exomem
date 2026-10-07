@@ -19,7 +19,8 @@ the chart's classes and admission use. One place, so they cannot disagree.
     "driver" "topolvm.io"
     "device_class" $deviceClass
     "topology_key" "topology.topolvm.io/node"
-    "backup_concurrency_per_node" $local.backupConcurrencyPerNode -}}
+    "backup_concurrency_per_node" $local.backupConcurrencyPerNode
+    "max_cell_gib" $local.maxCellGib -}}
 {{- $domain := ternary $config.class_name .Values.cloudStorage.className (eq .Values.cellStorage.domain "local") -}}
 {{- dict "domain" $domain "local" $config | toJson -}}
 {{- end -}}

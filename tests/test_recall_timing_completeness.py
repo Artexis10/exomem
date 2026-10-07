@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem.governance.principal import library_scope
+
 from exomem import commands, find_types, readiness, structured_filters
 from exomem import find as find_module
 from exomem.find_types import FindTimings
@@ -218,6 +220,7 @@ def test_a_stage_that_walked_reports_that_it_computed(
     assert _eligibility_source(vault, _plan(tags=("metabolism",))) == "computed"
 
 
+@library_scope()
 def test_a_hot_cache_hit_reports_itself_as_a_cache(
     vault: Path, warm_managed_cell
 ) -> None:

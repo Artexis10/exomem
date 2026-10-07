@@ -24,7 +24,9 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -47,9 +49,41 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
-#: The low-confidence fallback. It means "could not be determined", never
-#: "this code has no label for it".
-FALLBACK_KIND = "other"
+#: The kind of a capture made with no agent in the loop to classify it: the
+#: terminal UI, the hosted capture box, an out-of-band upload, a legacy-vault
+#: import. It records classification debt; an agent never chooses it.
+UNCLASSIFIED_KIND = "unclassified"
+#: The retired catch-all. Pages already filed under it stay readable and
+#: filterable; no new capture writes it.
+LEGACY_OTHER_KIND = "other"
+#: Kinds that record that nobody chose a kind. An agent-facing capture refuses
+#: them, and every source filed under one counts as classification debt.
+UNCHOSEN_KINDS = frozenset({UNCLASSIFIED_KIND, LEGACY_OTHER_KIND})
+#: Where a legacy-vault import files its copies. Every page there is still
+#: unclassified: reclassifying one moves it to its new kind's folder.
+IMPORTED_PATH_LABEL = "Imported"
+
+# One runtime migration rule serves bootstrap and refusals, including old profiles.
+CAPTURE_KIND_RULE = (
+    "Set source_kind/source_type: known/new slug, "
+    f"not {LEGACY_OTHER_KIND!r}/{UNCLASSIFIED_KIND!r}."
+)
+CAPTURE_KIND_MIGRATION = "Replaces optional-kind capture."
+_HUMAN_CAPTURE = ContextVar("human_capture", default=False)
+
+
+@contextmanager
+def human_capture() -> Iterator[None]:
+    """Bind the human adapter's classification exception for this call only."""
+    token = _HUMAN_CAPTURE.set(True)
+    try:
+        yield
+    finally:
+        _HUMAN_CAPTURE.reset(token)
+
+
+def is_human_capture() -> bool:
+    return _HUMAN_CAPTURE.get()
 
 #: Canonical keys are hyphenated slugs, matching the project-key and tag
 #: conventions rather than the underscore form `semantic_language_registry`
@@ -224,6 +258,7 @@ def _pack_definitions(name: str) -> tuple[Definition, ...]:
             path_label=str(entry.attributes["path_label"]),
             description=entry.description,
             aliases=entry.aliases,
+            status=entry.status,
             builtin=True,
             requires_url=bool(entry.attributes.get("requires_url", False)),
         )
@@ -304,6 +339,11 @@ def normalize(raw: object, *, axis: str = "value") -> str:
             f"cannot be used as a directory. Choose a more specific key",
         )
     return key
+
+
+def is_canonical_key(value: object) -> bool:
+    """Whether `value` already is a canonical key, without normalizing it."""
+    return isinstance(value, str) and _KEY_RE.fullmatch(value) is not None
 
 
 def _validate_path_label(axis: str, key: str, label: str) -> str:

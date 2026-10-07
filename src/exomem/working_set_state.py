@@ -60,6 +60,22 @@ CANONICAL_CATEGORIES = ("fact", "config")
 CANONICAL_UNIT_LIMIT = 64
 
 
+def bounded_statement(text: str, limit: int = STATEMENT_MAX_CHARS) -> str:
+    """`text` cut to at most `limit` characters, never inside a `[[link]]`.
+
+    A cut inside a link leaves part of a page name with no closing brackets,
+    which the egress guard cannot read as a link any more, so a withheld page's
+    name would be served. The cut moves back to before the link instead.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    opened = cut.rfind("[[")
+    if opened != -1 and cut.find("]]", opened) == -1:
+        return cut[:opened].rstrip()
+    return cut
+
+
 def _named_current_page(
     vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
 ) -> str:
@@ -103,7 +119,19 @@ def _from_canonical_page(
         return None
     from . import find as find_module
     from . import ranking_config, structured_filters
-    from . import working_set_currency
+    from . import working_set, working_set_currency
+    from .governance import egress
+
+    def in_view(hits: Sequence[Any]) -> list[Any]:
+        return working_set.hits_in_view(
+            [
+                hit
+                for hit in hits
+                if str(getattr(hit, "parent_path", "") or "") == named
+                and not getattr(hit, "parent_superseded_by", None)
+            ],
+            visible,
+        )
 
     try:
         snapshot = find_module.FreshnessSnapshot(vault_root)
@@ -111,23 +139,31 @@ def _from_canonical_page(
             None,
             shortcuts=structured_filters.FilterShortcuts(categories=CANONICAL_CATEGORIES),
         )
-        hits = find_module._find_semantic_units(
-            vault_root, query="", limit=CANONICAL_UNIT_LIMIT, scope="kb", plan=plan,
-            snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
-            mode="keyword", degraded_out=None, failed_out=None,
-            allowed_parent_paths={named},
-            recall_checkpoint=snapshot.recall_checkpoint("kb"), repair=False,
-            max_catalog_candidates=CANONICAL_UNIT_LIMIT,
-        )
+        checkpoint = snapshot.recall_checkpoint("kb")
+
+        def read(size: int) -> tuple[list[Any], bool]:
+            hits = find_module._find_semantic_units(
+                vault_root, query="", limit=size, scope="kb", plan=plan,
+                snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
+                mode="keyword", degraded_out=None, failed_out=None,
+                allowed_parent_paths={named},
+                recall_checkpoint=checkpoint, repair=False,
+                max_catalog_candidates=size,
+            )
+            # A full raw window cannot prove exhaustion before reader filtering.
+            return hits, len(hits) >= size
+
+        if working_set._restricted(visible):
+            hits, _ = working_set._read_in_view(
+                read, in_view, CANONICAL_UNIT_LIMIT, restricted=True
+            )
+        else:
+            hits = in_view(read(CANONICAL_UNIT_LIMIT)[0])
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - an unreadable unit index costs this entry only
         log.debug("current state: canonical page lookup failed", exc_info=True)
         return None
-    hits = [
-        hit
-        for hit in hits
-        if str(getattr(hit, "parent_path", "") or "") == named
-        and not getattr(hit, "parent_superseded_by", None)
-    ]
     if not hits:
         return None
 
@@ -144,7 +180,7 @@ def _from_canonical_page(
         "source": CANONICAL,
         "path": named,
         "as_of": working_set_currency.own_time(getattr(lead, "context", None)),
-        "statement": content[:STATEMENT_MAX_CHARS],
+        "statement": bounded_statement(content),
     }
     page_updated = str(getattr(lead, "parent_updated", "") or "")
     if not entry["as_of"] and page_updated:
@@ -450,7 +486,7 @@ def _statement_from(
     for name in state_fields:
         value = row.get(name)
         if isinstance(value, (str, int, float)) and str(value).strip():
-            return f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS]
+            return bounded_statement(f"{name}: {str(value).strip()}")
     parts = [
         f"{name}: {str(row[name]).strip()}"
         for name in fields
@@ -458,7 +494,7 @@ def _statement_from(
         and isinstance(row[name], (str, int, float))
         and str(row[name]).strip()
     ]
-    return " · ".join(parts)[:STATEMENT_MAX_CHARS]
+    return bounded_statement(" · ".join(parts))
 
 
 def _from_profile(
@@ -479,7 +515,7 @@ def _from_profile(
                 "source": PROFILE,
                 "path": rel,
                 "as_of": str(frontmatter.get("updated") or ""),
-                "statement": f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS],
+                "statement": bounded_statement(f"{name}: {str(value).strip()}"),
             }
     return None
 
@@ -510,7 +546,7 @@ def _from_neighbourhood(
         "source": NOTE,
         "path": best[2],
         "as_of": best[0],
-        "statement": best[1][:STATEMENT_MAX_CHARS],
+        "statement": bounded_statement(best[1]),
     }
 
 

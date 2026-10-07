@@ -366,6 +366,25 @@ def _unknown_error_streak(vault_root: Path, error_class: str | None) -> int:
         return streak
 
 
+def score_token_corpus(
+    tokens_by_path: dict[str, list[str]],
+    query_tokens: list[str],
+    k: int,
+    *,
+    allowed_paths: set[str] | None = None,
+) -> list[tuple[str, float]]:
+    """Score one admitted corpus; candidate filters never change its statistics."""
+    if not query_tokens or not any(tokens_by_path.values()):
+        return []
+    ranker, paths = BM25Index._derive_bm25({path: tokens_by_path[path] for path in sorted(tokens_by_path)})
+    wanted = set(query_tokens)
+    return sorted(
+        ((path, float(score)) for path, score in zip(paths, ranker.get_scores(query_tokens), strict=True)
+         if (allowed_paths is None or path in allowed_paths) and wanted.intersection(tokens_by_path[path])),
+        key=lambda item: (-item[1], item[0]),
+    )[:max(0, k)]
+
+
 class BM25Index:
     """Per-process BM25 corpus over KB markdown files.
 
@@ -591,6 +610,7 @@ class BM25Index:
         scope: str = "kb",
         freshness: tuple | None = None,
         allowed_paths: set[str] | None = None,
+        admitted_paths: set[str] | None = None,
         repair: bool = True,
     ) -> list[tuple[str, float]]:
         """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → [].
@@ -613,6 +633,7 @@ class BM25Index:
             scope=scope,
             freshness=freshness,
             allowed_paths=allowed_paths,
+            admitted_paths=admitted_paths,
             repair=repair,
         )
         if indexed is not None:
@@ -626,6 +647,12 @@ class BM25Index:
         tokens = tokenize(query, query=True)
         if not tokens:
             return []
+        if admitted_paths is not None:
+            corpus = self._cache[(vault_root, scope)].tokens_by_path
+            return score_token_corpus(
+                {path: doc for path, doc in corpus.items() if path in admitted_paths},
+                tokens, k, allowed_paths=allowed_paths,
+            )
         scores = bm25.get_scores(tokens)
         ranked = sorted(
             (
@@ -739,6 +766,7 @@ def search(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     repair: bool = True,
 ) -> list[tuple[str, float]]:
     """Module-level convenience using the per-process singleton."""
@@ -749,6 +777,7 @@ def search(
         scope=scope,
         freshness=freshness,
         allowed_paths=allowed_paths,
+        admitted_paths=admitted_paths,
         repair=repair,
     )
 

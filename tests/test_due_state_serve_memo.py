@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from exomem import due_state
 from exomem.governance import egress
+from exomem.governance.principal import RequestPrincipal
 
 PAGE = "Knowledge Base/Notes/Insights/one.md"
 
@@ -30,8 +30,8 @@ def _fresh_cache():
     due_state.reset_serve_cache()
 
 
-def _principal(audience: str = "aud-1") -> SimpleNamespace:
-    return SimpleNamespace(audience_id=audience, authorization_session_id="s-1", resolved=True)
+def _principal(audience: str = "aud-1") -> RequestPrincipal:
+    return RequestPrincipal(audience_id=audience, authorization_session_id="s-1", issuer_family="test")
 
 
 def _persist(vault_root: Path, marker: str = "a") -> None:
