@@ -3654,3 +3654,44 @@ def test_v5_curation_commits_and_replays_under_fast_durable_acknowledgement(
     assert after["committed_steps"] == ["one"]
     assert len(after["receipts"]) == 1
     assert len(list(config.vault_root.rglob("*v5-fast-ack*.md"))) == 1
+
+
+def test_hosted_capture_box_saves_a_kindless_memory_as_unclassified(tmp_path: Path) -> None:
+    """The web capture box sends a title and text; nobody there can name a kind."""
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-capture-box",
+        credential="capture-box-private-service-credential-0001",
+    )
+
+    saved = client.post(
+        "/private/exomem/v1/command/capture_source",
+        headers=_headers(config, idempotency_key="capture-box-0001"),
+        json={"title": "Dentist Thursday", "content": "Dentist on Thursday at 3pm."},
+    )
+
+    assert saved.status_code == 200, saved.text
+    pages = list((config.vault_root / "Knowledge Base" / "Sources").rglob("*dentist*.md"))
+    assert [page.parent.name for page in pages] == ["Unclassified"]
+
+
+def test_hosted_agent_kindless_capture_is_refused_with_the_known_kinds(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-agent-kindless",
+        credential="agent-kindless-private-service-credential-0001",
+    )
+
+    refused = client.post(
+        f"/private/exomem/v1/agent/{config.active_agent_profile}/command/capture_source",
+        headers=_headers(config, idempotency_key="agent-kindless-0001"),
+        json={"title": "Loose capture", "content": "Raw notes from a call."},
+    )
+
+    error = refused.json()["error"]
+    assert error["code"] == "SOURCE_KIND_REQUIRED"
+    assert error["remediation"], "the agent must be told how to choose a kind"
+    assert {"kind": "article", "sources": 0} in error["known_source_kinds"]
+    assert not list((config.vault_root / "Knowledge Base" / "Sources").rglob("*loose*.md"))
