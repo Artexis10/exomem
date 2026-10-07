@@ -52,6 +52,7 @@ from exomem.collection_store import (
     runtime,
 )
 from exomem.collection_store.connection import CollectionStoreError
+from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
 
 OWNER = owner_principal(surface="mcp")
@@ -173,6 +174,9 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
     assert ab_bytes(root) == before
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         assert reader.execute("SELECT collection_id,COUNT(*) FROM items GROUP BY 1").fetchall() == [(CID, 2)]
+    inspected = call(root, "record_memory", action="inspect", collection=CID)
+    # The MCP layer's second egress pass runs on its own thread, as this test does.
+    assert egress.postfilter("record_memory", inspected, root) == inspected
     inventory = call(root, "record_memory", action="inspect")
     assert {row["collection_id"]: row["committed"] for row in inventory["collections"]} == {KEY: 1, CID: 2}
     assert inventory["unreadable_manifests"] == []
