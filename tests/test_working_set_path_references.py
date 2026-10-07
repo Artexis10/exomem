@@ -88,6 +88,7 @@ def _reached(packet: dict) -> set[str]:
         "Read {/srv/home/handoff.md} and pick it up.",
         "Read notes,/srv/home/handoffs and pick it up.",
         "Read \u2018/srv/home/handoff.md\u2019 and pick it up.",
+        "Read /srv/vault/Knowledge Base/Records/Home/Sync Notes.md and pick it up.",
     ],
     ids=[
         "posix",
@@ -109,6 +110,7 @@ def _reached(packet: dict) -> set[str]:
         "braces",
         "after-a-comma",
         "curly-single-quotes",
+        "rooted-vault-path-with-spaces",
     ],
 )
 def test_a_quoted_path_names_no_project(project_vault: Path, turn: str) -> None:
@@ -148,9 +150,11 @@ def test_slash_joined_words_are_prose_not_a_path(project_vault: Path, turn: str)
         f"Look at `{MARIT}` please.",
         f"Look at {MARIT} please.",
         f"Look at ./{MARIT} please.",
+        f"Look at /vault/{MARIT} please.",
+        "Look at C:\\example\\" + MARIT.replace("/", "\\") + " please.",
         "Look at Marit Solheim.md please.",
     ],
-    ids=["quoted", "relative", "dot-relative", "bare-file-name"],
+    ids=["quoted", "relative", "dot-relative", "rooted", "rooted-windows", "bare-file-name"],
 )
 def test_a_quoted_vault_page_path_still_names_that_page(project_vault: Path, turn: str) -> None:
     """The page is named and nothing else is reached: the path's folder names

@@ -7495,6 +7495,41 @@ class LexicalStore:
                 out.setdefault(str(parent), set()).add(str(category))
         return {path: frozenset(found) for path, found in out.items()}
 
+    def units_of(
+        self, paths: Iterable[str], *, categories: Iterable[str] | None = None
+    ) -> list[tuple[str, str, str, str]] | None:
+        """`(parent_path, unit_ref, category, content)` for every semantic unit
+        of the given pages, or only those filed under `categories`: the rows
+        `unit_categories_of` reads, with the text a caller needs to decide each
+        unit for a reader. None when the catalogue is absent or stale."""
+        wanted = sorted({str(path) for path in paths if str(path)})
+        filed = None if categories is None else sorted({str(c) for c in categories if str(c)})
+        if not wanted or self._failed or not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit probe declined (%s)")
+            return None
+        try:
+            if not self._schema_is_current(conn):
+                return None
+            query = (
+                "SELECT parent_path, unit_ref, category, content FROM semantic_units "
+                "WHERE parent_path IN (SELECT value FROM json_each(?))"
+            )
+            params = [json.dumps(wanted, ensure_ascii=False)]
+            if filed is not None:
+                query += " AND category IN (SELECT value FROM json_each(?))"
+                params.append(json.dumps(filed, ensure_ascii=False))
+            rows = conn.execute(query + " ORDER BY parent_path, source_order", params).fetchall()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit probe declined (%s)")
+            return None
+        finally:
+            conn.close()
+        return [(str(parent), str(ref), str(category or ""), str(content)) for parent, ref, category, content in rows]
+
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
 

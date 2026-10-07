@@ -324,9 +324,19 @@ def _outcome_for_decision(
     ref: str | None = None,
     purpose_is_bound: bool = False,
 ) -> None:
-    """Project a decision into the receipt union without carrying a path/title."""
+    """Project a decision into the receipt union without carrying a path/title.
+
+    Only inside a disclosure boundary, and once per path, outcome and level:
+    the claim comes before the page is hashed, so a path decided again (by the
+    compiler, then by the guard) is neither hashed nor recorded twice.
+    """
     if (decision is not None and _file_policy_empty(vault_root, policy)
             and not raw_protection.marked(rel_path)):
+        return
+    collector = _collector()
+    if collector is None or not _claim_path_outcome(
+        collector, rel_path, outcome, decision.level if decision is not None else None,
+    ):
         return
     value = _decision_receipt_dimensions(
         vault_root, decision=decision, policy=policy, audience=audience,
@@ -360,11 +370,6 @@ def _outcome_for_decision(
                 else:
                     value["content_hash"] = hashlib.sha256(raw).hexdigest()
                     value["size"] = len(raw)
-    collector = _collector()
-    if collector is not None and not _claim_path_outcome(
-        collector, rel_path, outcome, decision.level if decision is not None else None,
-    ):
-        return
     _record_outcome(value)
 
 
@@ -2879,6 +2884,289 @@ def page_release_filter(
     return released
 
 
+#: What `classify_units` says about one would-be packet unit.
+UNIT_KEPT = "kept"
+#: Removed without a marker (L0): the caller may not learn it existed.
+UNIT_WITHHELD_SILENTLY = "withheld_silently"
+#: Removed with a `missing[] {role, reason: "withheld"}` marker (a notice level).
+UNIT_WITHHELD_NOTICED = "withheld_noticed"
+
+
+@dataclass
+class _PacketRelease:
+    """Every path one packet names, decided once for one caller.
+
+    `decide` decides a further path (a relisted carried link) on the same
+    terms. `record` says which outcomes reach the disclosure receipt: `all`
+    for the packet the caller is served, `withheld` while compiling, when only
+    a refusal is certain to belong to this request.
+    """
+
+    vault_root: Path
+    policy: Policy
+    who: RequestPrincipal
+    record: str
+    policy_decides: bool
+    tombstoned: set[str]
+    withheld: set[str]
+    prose_resolved: dict[str, tuple[str, ...]]
+    decisions: dict[str, Decision | None] = field(default_factory=dict)
+    invalid_refs: frozenset[str] = frozenset()
+    frozen: frozenset[str] = frozenset()
+    declared_purpose: str | None = None
+    grants_hash: str | None = None
+
+    def decide(self, rel_path: str) -> None:
+        """Decide `rel_path` for this caller, record the outcome, and add it to
+        `withheld` when it may not be released. Only with a file policy."""
+        vault_root = self.vault_root
+        decision = _decide_path(
+            vault_root,
+            rel_path,
+            policy=self.policy,
+            principal=self.who,
+            audience=self.who.audience_id,
+            purpose=self.declared_purpose,
+            grants_hash=self.grants_hash,
+            authorization_session=self.who.authorization_session_id,
+            authorization_context=self.who.verified_authorization_session,
+        )
+        self.decisions[rel_path] = decision
+        if decision is not None:
+            if decision.level < RELEASE_FLOOR:
+                self.withheld.add(rel_path)
+        elif rel_path in self.tombstoned or (vault_root / rel_path).exists():
+            # `_decide_path` returns `None` for BOTH a genuinely
+            # tombstoned/unreadable/unclassifiable EXISTING path and a
+            # path that simply does not exist. The latter is expected
+            # for a PHANTOM interpretation reading (R3): `named_paths`
+            # is the union of every candidate's readings
+            # (`_interpretations_for`), and an ambiguous candidate's
+            # non-real readings are validated as safe relative paths
+            # (`_is_safe_relative_path`) but never claimed to exist.
+            # Adding a phantom reading to `withheld` corrupts
+            # `frozen`'s canonical-key comparisons (`_names_withheld`)
+            # against every OTHER field in the packet -- and a phantom
+            # reading is frequently IDENTICAL to the candidate's own
+            # original text (`path.md#current`'s literal-reading IS
+            # `ref` itself), so it falsely matched its own item, as
+            # though a real withheld page shared that exact spelling --
+            # dropping a unit under a policy scoped to an entirely
+            # different folder. Only an existing-but-undecidable path is
+            # withheld here; the invalid_refs computation below makes
+            # the identical existence check for the phantom-vs-denied
+            # distinction, against `decisions`/`tombstoned`/the
+            # filesystem.
+            self.withheld.add(rel_path)
+        outcome = "withheld" if rel_path in self.withheld else "released"
+        if self.record == "all" or outcome == "withheld":
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=self.policy,
+                audience=self.who.audience_id,
+                outcome=outcome,
+                purpose=self.declared_purpose,
+            )
+
+    def noticed(self, rel_path: str) -> bool:
+        """Was `rel_path` withheld at a notice level, which the caller may know of?"""
+        decision = self.decisions.get(rel_path)
+        return rel_path in self.withheld and decision is not None and decision.level > LEVEL_NONE
+
+
+def _floor_withholds(vault_root: Path, rel_path: str, who: RequestPrincipal) -> bool:
+    """Apply tombstone and RAW admission before any file-policy decision."""
+    return lifecycle.is_tombstoned(vault_root, rel_path) or not raw_protection.permits(
+        vault_root, rel_path, who
+    )
+
+
+def _packet_release(
+    vault_root: Path,
+    packet: Mapping[str, Any],
+    release: AnnotatedHits,
+    *,
+    policy: Policy,
+    release_gate_active: bool,
+    who: RequestPrincipal,
+    purpose: str | None,
+    record: str,
+) -> _PacketRelease | None:
+    """Decide every path `packet` names for `who`, or `None` when there is
+    nothing to decide: no governance, no gate and nothing withheld."""
+    named_paths, prose_names, interpretations, unresolvable = _working_set_paths(packet)
+    tombstoned = {
+        path for path in named_paths if path and _floor_withholds(vault_root, path, who)
+    }
+    withheld = set(release.withheld_paths) | tombstoned
+    if not release_gate_active and policy.empty and not withheld:
+        # Nothing to decide, so nothing to resolve. A vault that has opted into no
+        # governance must not depend on a DERIVED index for its reads: resolving
+        # above this line made a sidecar hiccup abstain a request that had no
+        # release decision to take. Governed vaults fall through and keep failing
+        # closed.
+        #
+        # `unresolvable`/`interpretations` are deliberately NOT part of this
+        # condition: an ungoverned vault has no release decision to withhold
+        # from in the first place, so an ambiguous or malformed reference
+        # here changes nothing.
+        return None
+
+    # Prose resolution happens only now, when the decision loop below (or the
+    # already-withheld set) will actually use it.
+    prose_resolved = _resolved_prose_names(vault_root, prose_names)
+    resolved_paths = {path for paths in prose_resolved.values() for path in paths}
+    named_paths |= resolved_paths
+    withheld |= {
+        path
+        for path in resolved_paths
+        if path and _floor_withholds(vault_root, path, who)
+    }
+
+    ctx = _PacketRelease(
+        vault_root=vault_root,
+        policy=policy,
+        who=who,
+        record=record,
+        policy_decides=not _file_policy_empty(vault_root, policy),
+        tombstoned=tombstoned,
+        withheld=withheld,
+        prose_resolved=prose_resolved,
+    )
+    if ctx.policy_decides:
+        ctx.grants_hash = _grants_hash(policy)
+        ctx.declared_purpose = _declared_purpose(vault_root, who, purpose)
+        for rel_path in sorted(path for path in named_paths if path):
+            ctx.decide(rel_path)
+
+    # A candidate the guard could not resolve to a single real page has
+    # a SET of interpretations instead (R3): a plain string containing `#`
+    # or `|` is genuinely ambiguous between "a filename with that
+    # character" and "a path plus a fragment/alias", so every reading is a
+    # hypothesis, not a guess to make. `invalid_refs` starts from
+    # `unresolvable` -- a candidate with no safety-valid interpretation at
+    # all, a pure syntax fact independent of policy -- and, only when an
+    # actual policy exists to decide against, ALSO gains any candidate
+    # whose readings are not every-one-admitted: none of them existed, or
+    # at least one that did was not released. An interpretation the decide
+    # loop above already decided is read from `decisions`; one it never
+    # reached (unresolved names, or simply undecided under an empty
+    # policy) is checked for existence directly -- never `stat()` on one
+    # that failed `_is_safe_relative_path`, since `interpretations` never
+    # contains one. Withheld by exact text match on the ORIGINAL candidate
+    # (`_value_names_an_invalid_reference`, applied per item below), not
+    # through `frozen`/`_names_withheld`: that matcher compares CANONICAL
+    # keys, and `_canonical_reference` returns `None` for a candidate that
+    # unwraps to an empty string, which can never equal any canonical key,
+    # including its own.
+    invalid_refs: set[str] = set(unresolvable)
+    if ctx.policy_decides:
+        for candidate, readings in interpretations.items():
+            existing_decisions: list[Decision | None] = []
+            for reading in readings:
+                decision = ctx.decisions.get(reading)
+                if decision is not None:
+                    existing_decisions.append(decision)
+                elif reading in tombstoned or (vault_root / reading).exists():
+                    existing_decisions.append(None)
+            if not existing_decisions or any(
+                d is None or d.level < RELEASE_FLOOR for d in existing_decisions
+            ):
+                invalid_refs.add(candidate)
+    ctx.invalid_refs = frozenset(invalid_refs)
+
+    # The match set is wider than the withheld PATH set on purpose. `_withheld_keys`
+    # derives its comparison keys from filenames, so a prose link spelled as the
+    # page's TITLE — `[[Kill switch for risky releases]]` — canonicalises to
+    # something that is no filename stem and matched nothing, even though the path
+    # it resolves to was decided and withheld. Every name that resolved to a
+    # withheld path is therefore added as its own match key, in BOTH the spelling
+    # the prose contained and its normalised form: the matcher casefolds without
+    # normalising, so a normalised key alone misses an NBSP or full-width spelling.
+    #
+    # Deliberately local to this guard. The same gap exists in the shared
+    # `_withheld_keys` that `guard_referents` and hit projection use, and fixing it
+    # there changes what every consumer strips; that root cause gets its own change.
+    ctx.frozen = frozenset(
+        withheld
+        | {
+            name
+            for name, paths in prose_resolved.items()
+            if any(path in withheld for path in paths)
+        }
+    )
+    return ctx
+
+
+def _unit_verdict(
+    unit: Mapping[str, Any], ctx: _PacketRelease
+) -> tuple[dict[str, Any] | None, str]:
+    """The unit as the caller may be served it, or `None`, and the verdict.
+
+    A removed unit is `UNIT_WITHHELD_NOTICED` when a path it names was withheld
+    at a notice level, so its removal may be reported; otherwise silently.
+    """
+    kept = _guarded_unit(unit, ctx.frozen, ctx.decisions, ctx.invalid_refs)
+    if kept is not None:
+        return kept, UNIT_KEPT
+    # Only what removes a unit can report its removal. Of its provenance, that
+    # is `path` and `anchor`: `_guarded_unit` strips any other withheld field,
+    # such as a `superseded_by` target, and keeps the unit.
+    provenance = unit.get("provenance")
+    removing = {
+        **unit,
+        "provenance": {
+            key: provenance[key] for key in ("path", "anchor") if key in provenance
+        } if isinstance(provenance, Mapping) else provenance,
+    }
+    named_paths, prose_names, _interpretations, _unresolvable = _working_set_paths(
+        {"units": [removing]}
+    )
+    named_paths |= {
+        path for name in prose_names for path in ctx.prose_resolved.get(name, ())
+    }
+    if any(ctx.noticed(path) for path in named_paths):
+        return None, UNIT_WITHHELD_NOTICED
+    return None, UNIT_WITHHELD_SILENTLY
+
+
+def classify_units(
+    vault_root: Path,
+    units: Sequence[Mapping[str, Any]],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> list[str]:
+    """What the working-set guard would do with each would-be packet unit,
+    decided in one pass by the rule `guard_working_set` applies to `units`.
+
+    The compiler asks this while it chooses lenses, slots, pointers and
+    abstention (`ReaderView`). Each path refused to the caller is receipted
+    here, because a unit removed now never reaches the guard; a released path
+    is receipted only if the served packet names it.
+    """
+    root = Path(vault_root)
+    policy, release_gate_active = gate_state(root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        return [UNIT_WITHHELD_SILENTLY] * len(units)
+    ctx = _packet_release(
+        root,
+        {"units": list(units)},
+        AnnotatedHits(hits=[]),
+        policy=policy,
+        release_gate_active=release_gate_active,
+        who=who,
+        purpose=purpose,
+        record="withheld",
+    )
+    if ctx is None:
+        return [UNIT_KEPT] * len(units)
+    return [_unit_verdict(unit, ctx)[1] for unit in units]
+
+
 def guard_working_set(
     vault_root: Path,
     packet: dict[str, Any],
@@ -2905,6 +3193,9 @@ def guard_working_set(
     resolution state that exists so the compiler can bound its lanes and detect
     ambiguity; publishing it would hand an audience a page list it never asked
     for, and filtering it entry-by-entry would still disclose its SIZE.
+
+    Units are decided by `_unit_verdict`, the rule `classify_units` gives the
+    compiler, so a unit the compiler kept is one this guard keeps.
     """
     if release.blocked:
         return None
@@ -2916,158 +3207,20 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
-    named_paths, prose_names, interpretations, unresolvable = _working_set_paths(guarded)
-    def floor_withholds(path: str) -> bool:
-        """Withheld whatever the policy says: erased, or RAW-protected from this caller."""
-        return lifecycle.is_tombstoned(vault_root, path) or not raw_protection.permits(
-            vault_root, path, who
-        )
-
-    tombstoned = {path for path in named_paths if path and floor_withholds(path)}
-    withheld = set(release.withheld_paths) | tombstoned
-    # Policy state is the right question here: the packet was compiled over this
-    # caller's own view, and `withheld` already holds every named path RAW
-    # withholds from it, so with no policy there is no other decision to take.
-    if not release_gate_active and policy.empty and not withheld:
-        # Nothing to decide, so nothing to resolve. A vault that has opted into no
-        # governance must not depend on a DERIVED index for its reads: resolving
-        # above this line made a sidecar hiccup abstain a request that had no
-        # release decision to take. Governed vaults fall through and keep failing
-        # closed.
-        #
-        # `unresolvable`/`interpretations` are deliberately NOT part of this
-        # condition: an ungoverned vault has no release decision to withhold
-        # from in the first place, so an ambiguous or malformed reference
-        # here changes nothing.
-        return guarded
-
-    # Prose resolution happens only now, when the decision loop below (or the
-    # already-withheld set) will actually use it.
-    prose_resolved = _resolved_prose_names(vault_root, prose_names)
-    resolved_paths = {path for paths in prose_resolved.values() for path in paths}
-    named_paths |= resolved_paths
-    withheld |= {
-        path
-        for path in resolved_paths
-        if path and lifecycle.is_tombstoned(vault_root, path)
-    }
-
-    decisions: dict[str, Decision | None] = {}
-    policy_decides = not _file_policy_empty(vault_root, policy)
-    if policy_decides:
-        grants_hash = _grants_hash(policy)
-        declared_purpose = _declared_purpose(vault_root, who, purpose)
-
-    def decide(rel_path: str) -> None:
-        """Decide `rel_path` for this caller, record the outcome, and add it to
-        `withheld` when it may not be released. Only with a file policy."""
-        decision = _decide_path(
-            vault_root,
-            rel_path,
-            policy=policy,
-            principal=who,
-            audience=who.audience_id,
-            purpose=declared_purpose,
-            grants_hash=grants_hash,
-            authorization_session=who.authorization_session_id,
-            authorization_context=who.verified_authorization_session,
-        )
-        decisions[rel_path] = decision
-        if decision is not None:
-            if decision.level < RELEASE_FLOOR:
-                withheld.add(rel_path)
-        elif rel_path in tombstoned or (vault_root / rel_path).exists():
-            # `_decide_path` returns `None` for BOTH a genuinely
-            # tombstoned/unreadable/unclassifiable EXISTING path and a
-            # path that simply does not exist. The latter is expected
-            # for a PHANTOM interpretation reading (R3): `named_paths`
-            # is the union of every candidate's readings
-            # (`_interpretations_for`), and an ambiguous candidate's
-            # non-real readings are validated as safe relative paths
-            # (`_is_safe_relative_path`) but never claimed to exist.
-            # Adding a phantom reading to `withheld` corrupts
-            # `frozen`'s canonical-key comparisons (`_names_withheld`)
-            # against every OTHER field in the packet -- and a phantom
-            # reading is frequently IDENTICAL to the candidate's own
-            # original text (`path.md#current`'s literal-reading IS
-            # `ref` itself), so it falsely matched its own item, as
-            # though a real withheld page shared that exact spelling --
-            # dropping a unit under a policy scoped to an entirely
-            # different folder. Only an existing-but-undecidable path is
-            # withheld here; the invalid_refs computation below makes
-            # the identical existence check for the phantom-vs-denied
-            # distinction, against `decisions`/`tombstoned`/the
-            # filesystem.
-            withheld.add(rel_path)
-        _outcome_for_decision(
-            vault_root,
-            rel_path,
-            decision=decision,
-            policy=policy,
-            audience=who.audience_id,
-            outcome="withheld" if rel_path in withheld else "released",
-            purpose=declared_purpose,
-        )
-
-    if policy_decides:
-        for rel_path in sorted(path for path in named_paths if path):
-            decide(rel_path)
-
-    # A candidate the guard could not resolve to a single real page has
-    # a SET of interpretations instead (R3): a plain string containing `#`
-    # or `|` is genuinely ambiguous between "a filename with that
-    # character" and "a path plus a fragment/alias", so every reading is a
-    # hypothesis, not a guess to make. `invalid_refs` starts from
-    # `unresolvable` -- a candidate with no safety-valid interpretation at
-    # all, a pure syntax fact independent of policy -- and, only when an
-    # actual policy exists to decide against, ALSO gains any candidate
-    # whose readings are not every-one-admitted: none of them existed, or
-    # at least one that did was not released. An interpretation the decide
-    # loop above already decided is read from `decisions`; one it never
-    # reached (unresolved names, or simply undecided under an empty
-    # policy) is checked for existence directly -- never `stat()` on one
-    # that failed `_is_safe_relative_path`, since `interpretations` never
-    # contains one. Withheld by exact text match on the ORIGINAL candidate
-    # (`_value_names_an_invalid_reference`, applied per item below), not
-    # through `frozen`/`_names_withheld`: that matcher compares CANONICAL
-    # keys, and `_canonical_reference` returns `None` for a candidate that
-    # unwraps to an empty string, which can never equal any canonical key,
-    # including its own.
-    invalid_refs: set[str] = set(unresolvable)
-    if not _file_policy_empty(vault_root, policy):
-        for candidate, readings in interpretations.items():
-            existing_decisions: list[Decision | None] = []
-            for reading in readings:
-                decision = decisions.get(reading)
-                if decision is not None:
-                    existing_decisions.append(decision)
-                elif reading in tombstoned or (vault_root / reading).exists():
-                    existing_decisions.append(None)
-            if not existing_decisions or any(
-                d is None or d.level < RELEASE_FLOOR for d in existing_decisions
-            ):
-                invalid_refs.add(candidate)
-
-    # The match set is wider than the withheld PATH set on purpose. `_withheld_keys`
-    # derives its comparison keys from filenames, so a prose link spelled as the
-    # page's TITLE — `[[Kill switch for risky releases]]` — canonicalises to
-    # something that is no filename stem and matched nothing, even though the path
-    # it resolves to was decided and withheld. Every name that resolved to a
-    # withheld path is therefore added as its own match key, in BOTH the spelling
-    # the prose contained and its normalised form: the matcher casefolds without
-    # normalising, so a normalised key alone misses an NBSP or full-width spelling.
-    #
-    # Deliberately local to this guard. The same gap exists in the shared
-    # `_withheld_keys` that `guard_referents` and hit projection use, and fixing it
-    # there changes what every consumer strips; that root cause gets its own change.
-    frozen = frozenset(
-        withheld
-        | {
-            name
-            for name, paths in prose_resolved.items()
-            if any(path in withheld for path in paths)
-        }
+    ctx = _packet_release(
+        vault_root,
+        guarded,
+        release,
+        policy=policy,
+        release_gate_active=release_gate_active,
+        who=who,
+        purpose=purpose,
+        record="all",
     )
+    if ctx is None:
+        return guarded
+    decisions, withheld = ctx.decisions, ctx.withheld
+    frozen, invalid_refs = ctx.frozen, ctx.invalid_refs
     #: Sections whose removals are reported. `ambiguity` and `missing` are
     #: excluded: the first is a diagnostic about resolution rather than material,
     #: and the second is where the markers themselves live.
@@ -3116,7 +3269,7 @@ def guard_working_set(
     guarded["units"] = []
     lost_unit_pages: set[str] = set()
     for item in original_units:
-        unit = _guarded_unit(item, frozen, decisions, invalid_refs)
+        unit, _verdict = _unit_verdict(item, ctx)
         if unit is None:
             lost_unit_pages.add(str((item.get("provenance") or {}).get("path") or ""))
         else:
@@ -3145,10 +3298,10 @@ def guard_working_set(
             rel_path = str(entry.get("path") or "")
             if not rel_path or rel_path in decisions or rel_path in withheld:
                 continue
-            if floor_withholds(rel_path):
+            if _floor_withholds(vault_root, rel_path, who):
                 withheld.add(rel_path)
-            elif policy_decides:
-                decide(rel_path)
+            elif ctx.policy_decides:
+                ctx.decide(rel_path)
         guarded["anchors"] = [
             anchor
             for anchor in guarded["anchors"]
@@ -6413,6 +6566,91 @@ def visible_page_filter(
         return keep(rel)
 
     return visible
+
+
+class ReaderViewUnavailable(RuntimeError):
+    """`ReaderView.units` could not decide a unit for this reader.
+
+    The compiler lets it through every lane's own soft failure: a release
+    plane that cannot decide abstains the whole packet `unavailable`, exactly
+    as `guard_working_set` failing does, rather than reporting a lane failed.
+    """
+
+
+class ReaderView:
+    """A restricted caller's view of the vault, for the working-set compiler.
+
+    Called with a path, it answers `visible_page_filter`. `verdicts` answers,
+    for would-be packet units, what `classify_units` says the guard would do
+    with each. The compiler asks both before it chooses lenses, slots, pointers
+    or abstention, so a unit the guard would remove silently (L0) is absent
+    from the compile, as in a vault without it. A unit whose removal the guard
+    reports (a notice level) stays in the compile, and the guard removes and
+    marks it in the served packet. Verdicts are kept for the request, so a unit
+    two lanes read is decided once.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        pages: Callable[[str], bool],
+        *,
+        principal: RequestPrincipal | None,
+        purpose: str | None,
+    ) -> None:
+        self._root = Path(vault_root)
+        self._pages = pages
+        self._principal = principal
+        self._purpose = purpose
+        self._verdicts: dict[str, str] = {}
+
+    def __call__(self, rel_path: str) -> bool:
+        return self._pages(rel_path)
+
+    def verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
+        """`classify_units` for each unit, by everything but its `role`."""
+        keys = [
+            json.dumps({k: v for k, v in unit.items() if k != "role"}, sort_keys=True, default=str)
+            for unit in units
+        ]
+        new = list(dict.fromkeys(key for key in keys if key not in self._verdicts))
+        if new:
+            first = {key: unit for key, unit in zip(keys, units, strict=True)}
+            try:
+                found = classify_units(
+                    self._root,
+                    [first[key] for key in new],
+                    principal=self._principal,
+                    purpose=self._purpose,
+                )
+            except Exception as error:  # noqa: BLE001 - the compiler abstains on it
+                raise ReaderViewUnavailable("the release plane could not decide a unit") from error
+            self._verdicts.update(zip(new, found, strict=True))
+        return [self._verdicts[key] for key in keys]
+
+
+def in_reader_view(
+    visible: Callable[[str], bool] | None, units: Sequence[Mapping[str, Any]]
+) -> list[bool]:
+    """For each would-be packet unit, whether the compiler may use it: False
+    only when `visible` is a `ReaderView` whose guard removes it silently."""
+    if not isinstance(visible, ReaderView):
+        return [True] * len(units)
+    return [verdict != UNIT_WITHHELD_SILENTLY for verdict in visible.verdicts(units)]
+
+
+def reader_view(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> ReaderView | None:
+    """The caller's `ReaderView`, or `None` when nothing is withheld from it
+    (`visible_page_filter`: the owner, or no bound caller)."""
+    pages = visible_page_filter(vault_root, principal=principal, purpose=purpose)
+    if pages is None:
+        return None
+    return ReaderView(vault_root, pages, principal=principal, purpose=purpose)
 
 
 def release_allows_download(
