@@ -20,9 +20,30 @@ The existing operation names (`save-entity-types`, `resolve-entity-type`, `propo
 - **THEN** the save is refused and the overlay is unchanged
 
 ### Requirement: Registry saves follow the owner governance rule
-The governance decision for a registry save SHALL be `owner_only_aggregate`. When it returns no refusal, a save SHALL take effect at once. When it refuses the caller, a `save` SHALL leave the registry unchanged and SHALL record a pending work item in `review_memory(mode="vocabulary")`. That item SHALL carry the reason and delta and remain visible to the owner only. A registry without a review family SHALL refuse with `audience_restricted`. A `restore` by such a caller SHALL refuse with `audience_restricted`. Usage counts and save reasons SHALL follow the same shared admission decision, including RAW protection without configured file policy.
+Registry mutation authorization SHALL use existing bound-principal ownership and canonical vocabulary writer authority. Whole-vault disclosure admission SHALL NOT confer or remove write authority. In v1, a valid owner's save SHALL take effect without an approval item. A content restriction alone SHALL NOT route that owner for review. A resolved nonowner's save SHALL preserve the existing pending-item route and leave the registry unchanged. The item SHALL carry the reason and delta and remain visible only to its authorized owner. A registry without a review family SHALL refuse with `audience_restricted`.
+
+Restore SHALL require owner write authority independently of disclosure permission. Missing principal context and the hosted RAW exemption SHALL NOT confer owner write authority. Trusted internal calls SHALL establish their existing explicit library scope without elevating a bound remote principal.
+
+Explicitly activated v2 vaults SHALL retain canonical effect classification and writer authority. Registry code SHALL NOT replace that gate with disclosure admission or a new S1 queue. S1 SHALL NOT activate v2 or require its opt-in owner-control process for v1 owners.
+
+Counts, history reasons, collision details and other private-dependent results SHALL follow content admission independently, including RAW protection without configured file policy. An operation requiring unavailable private information SHALL report unavailable until an admitted or domain-aware implementation exists.
 
 #### Scenario: A delegate's save becomes a pending proposal
-- **WHEN** a bound principal refused by `owner_only_aggregate` saves a new entity type, with or without configured file policy
+- **WHEN** a resolved nonowner saves a new entity type in v1, with or without configured file policy
 - **THEN** the response reports a pending vocabulary item and the registry hash is unchanged
 - **AND** the owner's `review_memory(mode="vocabulary")` lists the item with the delegate's reason and delta
+
+#### Scenario: A limited owner performs a permitted save
+- **WHEN** a verified owner in v1 saves admitted vocabulary without depending on private definitions
+- **THEN** the valid save takes effect without an approval item
+- **AND** unavailable private-dependent counts remain unavailable independently of the write
+
+#### Scenario: A hosted exemption supplies no owner authority
+- **WHEN** a resolved hosted nonowner is exempt from RAW admission and saves vocabulary in v1
+- **THEN** the operation uses the existing nonowner route
+- **AND** unrestricted aggregate disclosure cannot turn the caller into the owner
+
+#### Scenario: An activated v2 write uses its existing authority
+- **WHEN** a caller saves vocabulary in an explicitly activated v2 vault
+- **THEN** the canonical writer applies its existing classification and authority checks
+- **AND** registry routing adds no S1 approval queue and changes no activation mode

@@ -46,17 +46,23 @@ Restore writes the exact bytes of a kept version. It skips the continuity and ob
 
 Under v2 additive authority the batch writer classifies every staged write. The snapshot and the log entry are sealed as derived auxiliaries of the registry write (`registry-history` and `operation-log`), so classification still sees exactly one registry change.
 
-### 7. One governance decision point
+### 7. Separate mutation authority from disclosure admission
 
-`egress.owner_only_aggregate` decides. When it returns no refusal, a save takes effect at once. The shared decision checks verified owner authority, unbound internal calls and the current hosted exemption. Empty file policy alone does not make a bound nonowner unrestricted: RAW protects whole-vault metadata too. Registry code must reuse that decision without a second authority rule. Otherwise:
+Registry writes use the existing bound-principal ownership and canonical vocabulary writer authority. Reuse the existing owner predicate from the principal boundary. Transport and authorization-session boundaries retain authentication and live validation; registry code creates no second authority engine.
 
-- `save` records a pending work item in the owner's `review_memory(mode="vocabulary")` queue, in the registry's review family, carrying the reason and the delta. The registry is unchanged. A registry without a review family refuses with `audience_restricted`.
-- `restore` refuses with `audience_restricted`.
-- `inspect` returns entries without counts, and `history` returns versions without reasons or principals.
+In v1, a valid owner's save takes effect immediately. A content restriction alone never creates an approval item for that owner. A resolved nonowner's save records the existing pending work item in `review_memory(mode="vocabulary")`, carrying the reason and delta. The registry stays unchanged; a registry without a review family refuses with `audience_restricted`. An unresolved caller cannot become an owner or a fabricated delegate through absent context.
+
+Restore requires owner write authority independently of disclosure permission. A trusted internal invocation establishes `library_scope()` at its existing entry point. That scope preserves any already-bound remote principal. The legacy hosted RAW exemption supplies no owner write authority.
+
+Explicitly activated v2 vaults retain the canonical writer's effect classification, grants and approvals. S1 never activates that mode or substitutes a queue for its writer gate. The existing opt-in owner-control work remains T13; S1 does not make its approval process mandatory for v1 owners.
+
+`egress.owner_only_aggregate` remains a disclosure decision for whole-vault counts, reasons and other private-dependent results. Reuse current RAW admission, including protection without configured file policy. This decision neither grants nor removes write authority.
+
+An operation that requires unavailable private registry information reports unavailable. Counts-only filtering does not protect global keys, collisions, aliases, folders or hashes. Complete limited-owner promotion across private domains follows the vault-consolidation domain delivery. A legitimate write whose outcome is independent of private definitions remains available.
 
 What this prevents: a restricted principal reshaping vocabulary for everyone, for example hijacking resolution with an alias. When it fires wrongly, the delegate's label waits for the owner's next session; the delegate pays, and its page write still lands with the raw label.
 
-The pending item targets the registry overlay as a virtual review target that only the owner can see. Its version is the overlay hash, so an unrelated save makes the item stale and the owner refreshes it.
+The pending item targets the registry overlay as a virtual review target that only the authorized owner can see. Its version is the overlay hash, so an unrelated save makes the item stale and the owner refreshes it.
 
 ### 8. Counts come from maintained projections
 

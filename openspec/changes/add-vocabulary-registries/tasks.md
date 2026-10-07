@@ -5,13 +5,13 @@ This change is the programme's one home. S1 is this delivery. S2 to S10 are sequ
 ## S1. Substrate, revert, generic contract, bootstrap section (this delivery)
 
 - [ ] 1.1 Red first: through the MCP surface, promote an entity type, see it in `bootstrap(section="vocabulary")` with a count, use it on a page, restore the previous version, and see the page reported as unregistered debt with its bytes untouched.
-- [ ] 1.2 Red first: a stale `expected_hash` refusal; a restricted principal's save becoming a pending vocabulary item on a governed vault; a hand-edited overlay read with findings and snapshotted on the next save.
+- [ ] 1.2 Red first: a stale `expected_hash` refusal; a resolved nonowner's v1 save becoming a pending item; a limited owner's permitted save without approval; a hand-edited overlay snapshotted on the next save.
 - [ ] 1.3 Add the parity check for entity types, relations and source kinds on an unchanged vault and on legacy overlays; delete it together with the Python constants it compares.
 - [ ] 1.4 Add `src/exomem/vocabulary/` with the registry spec, the generic loader, the stat-then-digest cache, the effective digest and the core packs; move `core-relations.yaml` into the pack directory.
 - [ ] 1.5 Make `entity_types`, `relation_registry`, `source_taxonomy` and `semantic_language_registry` read through the loader, keeping their public APIs.
 - [ ] 1.6 Commit every registry save and restore through `registry_history.commit`, with the principal hash in the snapshot header; seal the snapshot and log entry as derived auxiliaries for the v2 writer gate.
 - [ ] 1.7 Add `inspect`, `propose`, `save`, `history` and `restore` to `schema_memory` for the five subjects; keep the old operation names; change the tool description once; classify `propose` in the egress selector table.
-- [ ] 1.8 Apply the governance rule at `owner_only_aggregate`: owner saves apply; restricted saves become pending vocabulary items; counts and reasons are owner-only.
+- [ ] 1.8 Separate existing owner/write authority from aggregate disclosure: v1 owner saves apply, resolved nonowner saves use the existing queue, and activated v2 retains its writer gate. Prove hosted RAW exemption and absent context grant no owner write authority; counts, reasons and private-dependent operations follow content admission.
 - [ ] 1.9 Serve usage counts from the graph snapshot and the lexical catalogue, `unavailable` when cold; replace the bootstrap `entities` section with `vocabulary` and the core entity-type list with a pointer.
 - [ ] 1.10 Invalidate the registry cache from the `_Schema/` watcher event.
 - [ ] 1.11 Add the repository rule to `CLAUDE.md`.
