@@ -892,6 +892,8 @@ def revised_manifest(recommended: dict[str, Any]) -> str:
     data = yaml.safe_load(summary_manifest(WORKOUTS_ID, "Workout summaries").split("---\n")[1])
     for name, flags in recommended["fields"].items():
         data["item_schema"]["fields"][name].update(flags)
+    # The field-release proof selects one source row through a declared scalar predicate.
+    data["item_schema"]["fields"]["exercise_id"]["filterable"] = True
     data["rollups"] = recommended["rollups"]
     return "---\n" + yaml.safe_dump(data, sort_keys=False) + "---\n"
 
@@ -946,7 +948,7 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 action="revise",
                 collection=WORKOUTS_ID,
                 manifest_text=revised_manifest(recommended),
-                why="declare the recommended index and daily rollups",
+                why="declare the recommended daily rollups and the field-release lookup",
                 **guards,
             )
             job = await service.import_job(WORKOUTS_ID, mode="start", **journey.import_request)
