@@ -297,21 +297,21 @@ def _resolve_view(vault_root: Path, keep: Any) -> _View | str:
         return _View(keep=keep, whole=keep is None)
     from .governance import egress, raw_protection
     from .governance import policy as policy_module
-    from .governance.principal import OWNER_AUDIENCE, effective_principal
+    from .governance.principal import effective_principal
 
     root = Path(vault_root)
     current = policy_module.load(root)
     who = effective_principal()
     if current.empty:
         admitted = egress.release_walk_filter(root, principal=who)
-        return _View(keep=admitted, whole=admitted is None or raw_protection.is_owner(who))
+        return _View(keep=admitted, whole=admitted is None or raw_protection.has_unrestricted_access(root, who))
     # Order matters: the audience is decided before the policy's health, so a
     # non-owner cannot learn whether the governance policy compiles.
-    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+    if not (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(root, who)):
         return AUDIENCE_RESTRICTED
     if current.blocked:
         return POLICY_BLOCKED
-    return _View(keep=egress.release_walk_filter(root, principal=who), whole=raw_protection.is_owner(who))
+    return _View(keep=egress.release_walk_filter(root, principal=who), whole=raw_protection.has_unrestricted_access(root, who))
 
 
 @dataclass(slots=True)

@@ -633,6 +633,8 @@ class FreshnessSnapshot:
         except RetrievalIndexWarming:
             if readiness.runtime_managed():
                 raise
+            if self._timings is not None and (stage := self._timings.current_stage()) is not None:
+                self._timings.mark_source(stage, find_types.SOURCE_COMPUTED)
             # Offline readers keep their canonical fallback over known identities;
             # managed readers never substitute file reads for unavailable metadata.
             resolve = page_of or (lambda path: _resolve_page(self._root, path, self._pending))
@@ -1473,10 +1475,10 @@ def find(
         return page_memo[rel]
 
     walk_scope = "vault" if scope == "vault" else "kb"
-    admitted_paths = (
-        snapshot.admitted_paths(walk_scope, admit_path, page_of=_page_of)
-        if admit_path is not None else None
-    )
+    admitted_paths = None
+    if admit_path is not None:
+        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            admitted_paths = snapshot.admitted_paths(walk_scope, admit_path, page_of=_page_of)
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
@@ -1792,6 +1794,12 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+
+    if admit_path is not None and scope == "kb" and mode != "keyword" and query_norm:
+        # Primary page semantic recall spans the vault even before widening.
+        # Unit and lexical scoring retain their existing KB scope.
+        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            admitted_paths = snapshot.admitted_paths("vault", admit_path, page_of=_page_of)
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -4973,7 +4981,8 @@ def _find_outside_kb(
         )
     admitted_paths = None
     if admit_path is not None:
-        admitted_paths = snapshot.admitted_paths("vault", admit_path)
+        with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
+            admitted_paths = snapshot.admitted_paths("vault", admit_path)
         admitted_outside = {path for path in admitted_paths if not path.startswith(kb_prefix())}
         allowed_outside = admitted_outside if allowed_outside is None else allowed_outside & admitted_outside
         post_eligibility = allowed_outside
@@ -5412,7 +5421,7 @@ def _keyword_match_paths(
             failed_out.append("keyword_lexical")
         _record_degradation("keyword_lexical")
     if allowed_paths is not None:
-        walk = (vault_root / rel for rel in allowed_paths)
+        walk = (vault_root / rel for rel in allowed_paths if scope != "kb" or rel.startswith(kb_prefix()))
     elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():

@@ -70,6 +70,11 @@ def applies_to(who: RequestPrincipal) -> bool:
     )
 
 
+def has_unrestricted_access(root: Path, who: RequestPrincipal) -> bool:
+    """Keep owner recall unrestricted only while its authority remains valid."""
+    return not applies_to(who) or (is_owner(who) and _authority(root, who)[0])
+
+
 #: Why a surface that cannot identify the vault's owner refuses a RAW capture,
 #: and what the person can do instead.
 UNAVAILABLE_MESSAGE = "this cell cannot identify its owner, so it cannot keep an original owner-only"
@@ -127,24 +132,19 @@ def binding(root: Path, path: str) -> tuple[dict, str, str] | None:
     return None
 
 
-def permits(
-    root: Path, path: str, who: RequestPrincipal, *,
-    snapshot: bytes | None = None, derived: bool = False,
-) -> bool:
-    """Meet with ordinary policy; never let a caller-declared purpose widen RAW."""
-    if not marked(path) or not applies_to(who):
-        return True
+def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
+    """Verify issuer and live session once, retaining its trusted release purpose."""
     if not who.resolved or not who.issuer_family:
-        return False
+        return False, None
     trusted_purpose = None
     context = who.verified_authorization_session
     if who.authorization_session_id is not None and context is None:
-        return False
+        return False, None
     if context is not None:
         connection = None
         try:
             if context.issuer_family != who.issuer_family:
-                return False
+                return False, None
             connection = store.open_authorization_session_connection(root)
             now = int(time.time())
             custody = authorization_custody.load_authorization_custody(root, now=now)
@@ -157,10 +157,23 @@ def permits(
         except (OSError, sqlite3.Error, store.UnsupportedGovernanceSchema,
                 authorization_custody.AuthorizationCustodyUnavailable,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
-            return False
+            return False, None
         finally:
             if connection is not None:
                 connection.close()
+    return True, trusted_purpose
+
+
+def permits(
+    root: Path, path: str, who: RequestPrincipal, *,
+    snapshot: bytes | None = None, derived: bool = False,
+) -> bool:
+    """Meet with ordinary policy; never let a caller-declared purpose widen RAW."""
+    if not marked(path) or not applies_to(who):
+        return True
+    valid, trusted_purpose = _authority(root, who)
+    if not valid:
+        return False
     if is_owner(who):
         return True
     # An original's release never approves newly extracted pixels or aliases.

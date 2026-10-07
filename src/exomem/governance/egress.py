@@ -6072,7 +6072,7 @@ class _ArtifactReferenceGate:
 
     def gate_text(self, text: str) -> str:
         if (raw_protection.PREFIX in text.casefold()
-                and raw_protection.applies_to(self.who) and not raw_protection.is_owner(self.who)):
+                and not raw_protection.has_unrestricted_access(self.vault_root, self.who)):
             # The token is recognizable even in an orphan/bare-name citation.
             # Full path strings can prove an exact release without a corpus census.
             if not raw_protection.marked(text) or not raw_protection.permits(self.vault_root, text, self.who):
@@ -6203,7 +6203,7 @@ def release_walk_filter(
     tombstones = lifecycle.tombstoned_paths(vault_root)
     if _file_policy_empty(vault_root, policy) and not tombstones:
         who = principal if principal is not None else effective_principal()
-        if not raw_protection.applies_to(who):
+        if raw_protection.has_unrestricted_access(vault_root, who):
             return None
         return lambda path: raw_protection.permits(vault_root, path, who)
 
@@ -6272,7 +6272,7 @@ def restricted_release_filter(
         # did. Every surface binds a principal before the dispatcher, whose
         # entry filter still decides for the unbound floor.
         return None
-    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+    if raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who):
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
 
@@ -6325,7 +6325,7 @@ def owner_only_aggregate(
     """
     who = principal if principal is not None else current_principal()
     writer = bound_writer(vault_root)
-    if writer is not None and (who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE)):
+    if writer is not None and (who is None or (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who))):
         operation = writer._operation
         try:
             for entry in reserved_paths.list_generic_tree(vault_root, "."):
@@ -6344,7 +6344,7 @@ def owner_only_aggregate(
                     return {"available": False, "reason": AUDIENCE_RESTRICTED}
         except (OSError, reserved_paths.ReservedPathLeafError):
             return {"available": False, "reason": AUDIENCE_RESTRICTED}
-    if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
+    if who is None or (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who)):
         return None
     if (raw_admitted or not raw_protection.applies_to(who)) and _file_policy_empty(
         vault_root, policy_module.load(Path(vault_root))

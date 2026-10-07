@@ -2791,7 +2791,7 @@ def op_find(
         who = principal_module.effective_principal()
         admit_path = (
             (lambda path: raw_protection.permits(vault_root, path, who))
-            if raw_protection.applies_to(who) and not raw_protection.is_owner(who) else None
+            if not raw_protection.has_unrestricted_access(vault_root, who) else None
         )
         # RAW admission precedes candidate selection; ordinary policy still
         # uses its existing annotation pool and final authorization below.

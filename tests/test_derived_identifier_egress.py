@@ -2754,6 +2754,73 @@ def test_raw_recall_admits_before_selection_and_keeps_owner_cache_separate(tmp_p
         assert "alpha.md" in _text(answers[0])
 
 
+def test_owner_session_closure_rechecks_raw_admission_before_ranking(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+    from dataclasses import replace
+
+    from test_authorization_session_lifecycle import NOW, _custody, _file_connection
+
+    from exomem import freshness, lexstore, relation_census
+    from exomem.governance import authorization_session_lifecycle as lifecycle, raw_protection
+
+    root = tmp_path / "vault"
+    folder = root / NOTES
+    folder.mkdir(parents=True)
+    (folder / "alpha.md").write_text(_page("Public", "orchard public", type="insight", updated="2020-01-01"))
+    (folder / "__exomem_raw_v1__original.md").write_text(
+        _page("Protected", "orchard original", type="insight", updated="2026-10-01")
+    )
+    _reset()
+    freshness.rebaseline(root)
+    assert lexstore.get_store(root).rebuild_atomic()
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    owner = owner_principal(surface="library")
+    database = tmp_path / "sessions.sqlite"
+    connection, migration = _file_connection(database)
+    custody = _custody(migration.activation_state_digest)
+    issued = lifecycle.open_session(
+        connection, custody=custody, principal_id=owner.audience_id,
+        issuer_family=owner.issuer_family, now=NOW, ttl_seconds=600,
+    )
+    context = lifecycle.resume_session(
+        connection, custody=custody, bearer=issued.bearer,
+        principal_id=owner.audience_id, issuer_family=owner.issuer_family, now=NOW,
+    )
+    session_owner = owner.with_verified_authorization_session(context, issuer_family=owner.issuer_family)
+    monkeypatch.setattr(raw_protection.time, "time", lambda: NOW)
+    monkeypatch.setattr(raw_protection.store, "open_authorization_session_connection", lambda _root: sqlite3.connect(database))
+    monkeypatch.setattr(raw_protection.authorization_custody, "load_authorization_custody", lambda _root, **_kwargs: custody)
+    args = dict(query="orchard", mode="keyword", limit=1, graph=False)
+    reference = "See [[__exomem_raw_v1__original]] for the original."
+    with request_scope(owner):
+        warm_owner = commands.op_ask_memory(root, **args)
+    with request_scope(session_owner):
+        valid_session = commands.op_ask_memory(root, **args)
+        valid_audit = commands.op_review_memory(root, mode="audit", detail="full")
+        valid_census = relation_census.census(root)
+        assert egress.redact_withheld_references(root, reference, purpose="recall") == reference
+    assert valid_audit.get("available") is not False
+    assert isinstance(valid_census["graph_generation"], int)
+    assert "__exomem_raw_v1__original.md" in _text(warm_owner)
+    assert "__exomem_raw_v1__original.md" in _text(valid_session)
+    lifecycle.close_verified_session(connection, custody=custody, context=context, now=NOW)
+    for invalid_owner in (session_owner, owner.with_authorization_session("unverified"), replace(owner, issuer_family=None)):
+        with request_scope(invalid_owner):
+            if invalid_owner is session_owner:
+                with pytest.raises(egress.AuthorizationSessionDecisionUnavailable):
+                    commands.op_ask_memory(root, **args)
+            else:
+                result = commands.op_ask_memory(root, **args)
+                assert [hit["path"] for hit in result] == [f"{NOTES}/alpha.md"]
+            audit = commands.op_review_memory(root, mode="audit", detail="full")
+            census = relation_census.census(root)
+            assert "__exomem_raw_v1__" not in egress.redact_withheld_references(root, reference, purpose="recall")
+        assert audit["available"] is False
+        assert census["graph_generation"] is None
+        assert census["cohort"]["eligible_pages"] == valid_census["cohort"]["eligible_pages"] - 1
+    connection.close()
+
+
 @pytest.mark.parametrize(("backend", "result_level", "scenes"), [
     ("fts5", "page", False), ("python", "page", False), ("fts5", "unit", False),
     ("fts5", "page", True), ("fts5", "unit", True),

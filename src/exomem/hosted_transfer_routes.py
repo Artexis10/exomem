@@ -27,7 +27,6 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import hosted_transfer
 from .governance import principal as principal_module, raw_protection
-from .preserve import PreserveError
 from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, HostedLifecycleError
 from .vault import VaultPathError, resolve_under_vault
 
@@ -274,6 +273,8 @@ def register_public_transfer_routes(
                             text=None,
                             max_bytes=grant.max_bytes,
                         )
+
+            from .preserve import PreserveError
 
             try:
                 await run_in_threadpool_func(commit)
