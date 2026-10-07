@@ -4419,6 +4419,12 @@ def annotate_page(
     if not raw_protection.permits(vault_root, rel_path, who, snapshot=held):
         return None
 
+    from ..collection_store.preview import released_summary
+
+    is_summary, summary = released_summary(vault_root, rel_path, who, include_raw=include_raw)
+    if is_summary:
+        return summary
+
     if _file_policy_empty(vault_root, policy):
         # No configured audience: the owner reads origin metadata as written.
         return _attach_raw_content(page, snapshot_content) if include_raw else page

@@ -60,7 +60,8 @@ def declaration(manifest, basis, *, projected=frozenset()) -> dict:
     fields = {name: {"type": spec.type, "enum": spec.enum, **({"projected": True} if name in projected else {})}
               for name, spec in manifest.schema.fields.items()}
     fields["item_key"] = {"type": "string"}
-    return {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id, "fields": fields}
+    return {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id,
+            "fields": fields, "field_admission": True}
 
 
 def _validate(query, manifest, basis):
@@ -137,7 +138,9 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             raise QueryError("QUERY_PROJECTION_BUILDING", "this collection's query projection is still building")
         for scalar in projection.scalars:
             spec = manifest.schema.fields.get(scalar.field)
-            if spec is None or spec.type != scalar.kind or scalar.path != (scalar.field,):
+            if spec is None:
+                continue
+            if spec.type != scalar.kind or scalar.path != (scalar.field,):
                 raise QueryError("QUERY_UNAVAILABLE")
         compiled = typed_sql.compile_rows(query, projection, as_of=as_of)
         ordinal = len(session._queries) + 1
@@ -190,13 +193,19 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             else:
                 source = f"temp.{ids} a CROSS JOIN main.{projection.table_name} p NOT INDEXED"
                 where, params = "p.row_id=a.row_id", ()
+            # Projection ordinals are fixed by the validated internal layout; withheld keys never enter TEMP.
+            keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
+                            else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
             conn.execute(f"INSERT INTO {table}(row_id,item_key,row_version,keys_json) "
-                         f"SELECT p.row_id,p.item_key,p.row_version,p.keys_json FROM {source} WHERE {where}", params)
+                         f"SELECT p.row_id,p.item_key,p.row_version,json_array({keys}) FROM {source} WHERE {where}", params)
         session.check_temp()
+        selected = tuple(f.path for f in query.select.fields) or fields
+        dependencies = set(compiled.dependency_paths) | set(selected)
+        schema = tuple(entry for entry in schema if entry[0] in dependencies)
         result = AdmittedQuery(session, query, projection, compiled,
                                (basis.manifest_hash, basis.type_name, basis.type_version, basis.declaration_hash, schema),
                                manifest.schema.version,
-                               tuple(f.path for f in query.select.fields) or fields,
+                               selected,
                                table, index, membership, session.typed_layout(manifest.collection_id),
                                uniform, count, cost, ordinal, _SEAL)
         session._queries[ordinal] = result

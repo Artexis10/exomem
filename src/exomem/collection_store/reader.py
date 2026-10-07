@@ -50,7 +50,7 @@ class StoreAdapter:
             fields.append(grammar.note_field)
         records = []
         for item in items:
-            source = collections.SourceVersion(row_source(manifest, item), self.writer._version(item))
+            source = collections.SourceVersion(row_source(manifest, item), item.get("public_version") or self.writer._version(item))
             stored = json.loads(item["values_json"])
             values = {name: stored[name] for name in fields if name in stored}
             records.append(record_formats.Record(

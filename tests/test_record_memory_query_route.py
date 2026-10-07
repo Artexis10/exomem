@@ -244,6 +244,8 @@ def test_one_analytics_session_per_store_leaves_an_interactive_reader(store):
                         query={**STEPS, "execution_profile": "analytics"})
         assert (error["code"], error["retryable"]) == ("QUERY_BUSY", True)
         assert query(store, STEPS, collection=SUMMARY_CID)["returned"] == 10
+    write_scope(store.root, paths="Records/**")
+    write_rule(store.root, ceiling=0)
 
 
 def test_continuation_without_freshness_coverage_refuses_rows_and_groups_with_one_code(store):
@@ -263,12 +265,14 @@ def test_continuation_without_freshness_coverage_refuses_rows_and_groups_with_on
 
 
 def test_sealed_summary_collection_is_absent_to_another_audience_in_every_mode(store):
-    """An owner-only summary collection whose name, field names or row count reach another audience
+    """A row-withheld summary collection whose name, field names or row count reach another audience
     through a query refusal, a composed declaration or an estimate."""
     store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date"),
                             why="create", scaffold=False)
     load(store, daily_summaries(10))
     assert query(store, STEPS, collection=SUMMARY_CID)["returned"] == 10
+    write_scope(store.root, paths="Records/**")
+    write_rule(store.root, ceiling=0)
     for mode in ("compose", "preview", "execute"):
         sealed = json.dumps(refusal(store, "record_memory", _external(), action="query", collection=SUMMARY_CID,
                                     query={**STEPS, "mode": mode}))
@@ -284,6 +288,8 @@ def test_sealed_collection_under_a_routing_marker_refuses_like_an_absent_one(sto
     store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date"),
                             why="create", scaffold=False)
     load(store, daily_summaries(10))
+    write_scope(store.root, paths="Records/**")
+    write_rule(store.root, ceiling=0)
     sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     marker = authority.marker_path(store.root)
     marker.parent.mkdir(parents=True, exist_ok=True)

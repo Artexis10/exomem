@@ -10,6 +10,7 @@ import pytest
 from exomem import mutation_terminal
 from exomem import structured_collections as collections
 from exomem.collection_store import chain, connection, tokens
+from exomem.governance.principal import library_scope
 
 CID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
 KEY = "11111111-1111-4111-8111-111111111111"
@@ -75,7 +76,7 @@ def store(tmp_path, monkeypatch):
     (root / "Knowledge Base/log.md").write_text("# Existing log\n")
     with connection.open_writer(
         tmp_path / "collections.sqlite", lease_check=lambda: True
-    ) as handle:
+    ) as handle, library_scope():
         yield CollectionWriter(root, handle)
 
 

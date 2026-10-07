@@ -139,6 +139,30 @@ def projection_decision(vault_root, path, *, policy, audience, purpose,
         )
 
 
+def released_summary(vault_root, path, principal, *, include_raw=False):
+    """Resolve a generated recipient overview from canonical admission, including held publication."""
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return False, None
+    with writer.read_snapshot():
+        operation = writer._operation
+        if operation.who != principal:
+            operation.refuse()
+        row = writer.connection.execute(
+            "SELECT collection_id FROM projection_state WHERE path=? AND kind='summary'", (path,)).fetchone()
+        if row is None:
+            return False, None
+        if selected_writer(vault_root, row[0]) is None:
+            return False, None
+        manifest = operation.field_manifest(row[0])
+        plan = operation.field_plan(manifest)
+        if plan.owner:
+            return False, None
+        from .summary import released_page
+
+        return True, released_page(operation, plan.manifest, path, include_raw=include_raw)
+
+
 def _mutate(vault_root, method, *args, **kwargs):
     """Own the leaf boundary when the dispatcher holds only its writer fence."""
     from ..writer_lease import active_manager

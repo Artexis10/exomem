@@ -311,6 +311,7 @@ class ReleaseGrant:
     bridge_of: tuple[ReleaseDependency, ...]
     strip_provenance: tuple[str, ...]
     raw_protection: dict[str, Any] | None = None
+    field_release: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -764,7 +765,7 @@ def canonical_compiled_bytes(policy: Policy) -> bytes:
         "grants": [dataclasses.asdict(grant) for grant in policy.grants],
         "release_grants": [
             {key: value for key, value in dataclasses.asdict(grant).items()
-             if key != "raw_protection" or value is not None}
+             if key not in {"raw_protection", "field_release"} or value is not None}
             for grant in policy.release_grants
         ],
         "findings": list(policy.findings),
@@ -1896,6 +1897,9 @@ def _parse_grant(
     data: dict[str, Any], rel: str
 ) -> tuple[StandingGrant | None, ReleaseGrant | None, list[dict[str, str]]]:
     kind = data.get("kind", "standing")
+    if kind == "collection-fields":
+        release, findings = _parse_field_release_grant(data, rel)
+        return None, release, findings
     if kind == "raw-artifact":
         release, findings = _parse_raw_release_grant(data, rel)
         return None, release, findings
@@ -1946,6 +1950,39 @@ def _parse_grant(
         id=doc_id, source=rel, scope_ids=scope_ids, audience=audience, ceiling=ceiling
     )
     return grant, None, findings
+
+
+def _parse_field_release_grant(data: dict[str, Any], rel: str):
+    # Fixed S1 field-release wire keys; these are authority bindings, not scope selectors.
+    allowed = frozenset({"governance_version", "id", "kind", "path", "ref", "content_hash",
+                         "to_audience", "released_at", "why", "field_release"})
+    findings, doc_id = _check_common(data, rel, allowed)
+    spec = data.get("field_release")
+    valid = (isinstance(spec, dict)
+             and set(spec) == {"version", "store_id", "collection_id", "classification_basis", "paths",
+                               "surface", "issuer_family", "purpose", "release_version"}
+             and type(spec.get("version")) is int and spec["version"] == 1
+             and type(spec.get("release_version")) is int and spec["release_version"] > 0
+             and all(isinstance(spec.get(key), str) and 0 < len(spec[key]) <= 512
+                     for key in ("store_id", "collection_id", "surface", "issuer_family"))
+             and isinstance(spec.get("classification_basis"), str)
+             and _SHA256_RE.fullmatch(spec["classification_basis"]) is not None
+             and data.get("content_hash") == spec["classification_basis"]
+             and isinstance(spec.get("paths"), list) and 0 < len(spec["paths"]) <= 64
+             and all(isinstance(path, dict) and set(path) == {"path", "subtree"}
+                     and isinstance(path["path"], str) and 0 < len(path["path"]) <= 512
+                     and all(path["path"].split(".")) and type(path["subtree"]) is bool for path in spec["paths"])
+             and (spec.get("purpose") is None or isinstance(spec.get("purpose"), str) and bool(spec["purpose"])))
+    audience = (_reject_reserved_audience(data["to_audience"], rel, "to_audience", findings)
+                if isinstance(data.get("to_audience"), str) else None)
+    if (not valid or doc_id is None or audience is None or not _valid_relative_path(data.get("path"))
+            or not all(isinstance(data.get(key), str) and data[key].strip() for key in ("ref", "to_audience", "released_at", "why"))
+            or not _valid_release_time(data["released_at"])):
+        findings.append(_finding("invalid_field", rel, "collection-fields release requires an exact version-1 binding"))
+        return None, findings
+    return ReleaseGrant(id=doc_id, source=rel, path=data["path"], ref=data["ref"], content_hash=data["content_hash"],
+                        to_audience=audience, released_at=data["released_at"], why=data["why"],
+                        bridge_scope="", bridge_of=(), strip_provenance=(), field_release=dict(spec)), findings
 
 
 def _parse_raw_release_grant(data: dict[str, Any], rel: str):

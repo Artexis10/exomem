@@ -6,7 +6,7 @@ import datetime as dt
 import hashlib
 import json
 from contextlib import closing
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, fields, is_dataclass, replace
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -76,21 +76,22 @@ def _codec(session):
 
 
 def _visible(admitted, dependencies):
-    if admitted.uniform:
+    plan = admitted.session._field_plans[admitted.query.source.ref]
+    if admitted.uniform and all(plan.fields.get(name) is True for name in dependencies - {"item_key"}):
         basis = query_freshness.uniform_basis(admitted.session.connection, admitted.query.source.ref, dependencies)
         if basis is None:
             raise QueryError("QUERY_UNAVAILABLE")
         return _hash(basis)
     session = admitted.session
-    count = admitted.released_count
+    base = session.admit(admitted.query.source.ref)
+    count = base.visible_count
     if count is None or count + session._estimated_visits > session.limits.max_row_visits:
         raise QueryError("QUERY_COST_LIMIT")
     session._estimated_visits += count
     digest = hashlib.sha256(b"exomem.typed-visible-dependencies.v1\0")
-    ids = f"query_ids_{admitted.ordinal}"
     cursor = session.connection.execute(
-        f"SELECT i.row_id,CASE WHEN {admitted.membership_sql} THEN i.item_key END "
-        f"FROM temp.{ids} a CROSS JOIN main.items i WHERE i.row_id=a.row_id ORDER BY a.row_id",
+        f"SELECT i.row_id,i.item_key FROM main.items i WHERE i.collection_id=? AND {base.membership_sql} "
+        "ORDER BY i.row_id", (admitted.query.source.ref,),
     )
     with closing(session.fetch(cursor)) as batches:
         for batch in batches:
@@ -115,13 +116,33 @@ def caller_binding(session, query) -> dict[str, str]:
     """The query, caller, policy and store-lineage digests every continuation binds."""
     operation = session._authorization
     principal = operation.who
+    dependencies = set()
+
+    def collect(value):
+        if isinstance(value, ir.Field):
+            dependencies.add(value.path)
+        elif is_dataclass(value):
+            for field in fields(value):
+                collect(getattr(value, field.name))
+        elif isinstance(value, tuple):
+            for child in value:
+                collect(child)
+
+    collect(query)
+    field_plan = session._field_plans.get(query.source.ref)
+    if field_plan is not None and not query.select.fields and query.aggregate is None:
+        dependencies.update(field_plan.fields)
+    # Field release is not row policy. Only grants used by this query invalidate its continuation.
+    row_policy = replace(operation.policy, fingerprint="", release_grants=tuple(
+        grant for grant in operation.policy.release_grants if grant.field_release is None))
     lineage = session.connection.execute(
         "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id','lineage','forks') ORDER BY key",
     ).fetchall()
     return {"query": _hash(replace(query, page=replace(query.page, after=None))),
             "principal": _hash([principal.audience_id, principal.surface, principal.purpose,
                                 principal.authorization_session_id, principal.issuer_family]),
-            "authorization": _hash([operation.policy.fingerprint, operation.access_fingerprint, operation.purpose]),
+            "authorization": _hash([asdict(row_policy), operation.access_fingerprint, operation.purpose,
+                                    [] if field_plan is None else field_plan.binding(dependencies)]),
             "lineage": _hash(lineage)}
 
 

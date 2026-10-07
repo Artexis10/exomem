@@ -173,6 +173,12 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "items": {"$ref": "#/$defs/field"},
             "units": {"type": "array", "items": {"type": "string"}},
             "link_kind": {"type": "string"},
+            # The S1 specification fixes the location class; declarations never infer it from names.
+            "classification": {"enum": [None, "location"]},
+            "properties": {"type": "object", "maxProperties": _MAX_SCHEMA_FIELDS,
+                           "additionalProperties": {"$ref": "#/$defs/field"}},
+            "depends_on": {"type": "array", "maxItems": _MAX_SCHEMA_FIELDS,
+                           "items": {"type": "string"}},
         },
         "additionalProperties": True,
     }
@@ -817,6 +823,9 @@ class FieldSpec:
     link_kind: str | None = None
     #: A datetime field's per-record UTC offset field: the source-local day basis (§3).
     offset: str | None = None
+    classification: str | None = None
+    properties: Mapping[str, FieldSpec] = field(default_factory=lambda: MappingProxyType({}))
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2417,7 +2426,16 @@ def _parse_schema(version: int, value: object) -> ItemSchema:
                 "INVALID_ITEM_SCHEMA", "item schema contains an invalid field name"
             )
         fields[name] = _parse_field_spec(raw_spec)
+    def validate_dependencies(spec):
+        if any(name not in fields for name in spec.depends_on):
+            raise CollectionError("INVALID_ITEM_SCHEMA", "field dependencies must name declared fields")
+        for child in spec.properties.values():
+            validate_dependencies(child)
+        if spec.items is not None:
+            validate_dependencies(spec.items)
+
     for spec in fields.values():
+        validate_dependencies(spec)
         if spec.offset is not None and getattr(fields.get(spec.offset), "type", None) != "string":
             raise CollectionError("INVALID_ITEM_SCHEMA", "a datetime offset must name a declared string field")
     natural_raw = schema.get("natural_key", ())
@@ -2769,7 +2787,21 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     offset = raw.get("offset")
     if offset is not None and (kind != "datetime" or depth or type(offset) is not str):
         raise CollectionError("INVALID_ITEM_SCHEMA", "offset names a top-level datetime field's offset field")
-    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset)
+    classification = raw.get("classification")
+    # Location is the fixed S1 field-protection class, not an inferred customer vocabulary.
+    if classification not in (None, "location"):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "unsupported field classification")
+    properties = raw.get("properties", {})
+    if not isinstance(properties, dict) or (properties and kind != "object") or len(properties) > _MAX_SCHEMA_FIELDS:
+        raise CollectionError("INVALID_ITEM_SCHEMA", "properties must declare bounded object fields")
+    if any(not isinstance(name, str) or not name or len(name.encode()) > 128 for name in properties):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "invalid object property")
+    dependencies = raw.get("depends_on", [])
+    if not isinstance(dependencies, list) or len(dependencies) > _MAX_SCHEMA_FIELDS or any(not isinstance(name, str) or not name for name in dependencies):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "depends_on must name declared fields")
+    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset, classification,
+                     MappingProxyType({name: _parse_field_spec(spec, depth + 1) for name, spec in properties.items()}),
+                     tuple(dependencies))
 
 
 def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:

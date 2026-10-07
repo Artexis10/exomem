@@ -10,8 +10,8 @@ import json
 import sqlite3
 from contextlib import closing, contextmanager
 
-from .. import query_data
 from .. import query_compat as compat
+from .. import query_data
 from .legacy import LegacyQuery
 from .runtime import AdmittedCollection, QueryError
 
@@ -30,6 +30,13 @@ def execute_legacy(admitted: AdmittedCollection, query: LegacyQuery, *, path: st
     if not isinstance(query, LegacyQuery) or query.compatibility_version != compat.VERSION:
         raise QueryError("QUERY_UNSUPPORTED")
     session = admitted.session
+    requested = set(query.columns) | {p["column"] for p in json.loads(query.filters_json)}
+    requested.update(name for name in (query.sort_by, query.date_column) if name)
+    if query.aggregate and ":" in query.aggregate:
+        requested.add(query.aggregate.split(":", 1)[1])
+    plan = session._field_plans[admitted.collection_id]
+    if not plan.owner and any(not plan.admits_path(name) for name in requested):
+        raise QueryError("QUERY_FIELD_UNAVAILABLE")
     # Account for base admission/filtering and the bounded reduction passes.
     passes = 1 + (len(query.available) if query.aggregate and query.aggregate.strip() == "profile" else 1)
     if admitted.visible_count * passes > session.limits.max_row_visits:

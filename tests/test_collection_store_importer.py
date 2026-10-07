@@ -66,6 +66,8 @@ MAPPING = {
         "local_date": "local_date",
     },
     "on_invalid": "skip",
+    "coverage": {path: {"classification": None} for path in (
+        "id", "kind", "duration_s", "metrics.calories", "metrics.distance_m", "start_utc", "utc_offset", "start")},
 }
 DAILY_MAPPING = {
     "fields": {
@@ -73,6 +75,7 @@ DAILY_MAPPING = {
         "resting_hr": {"from": "resting_hr", "type": "integer"},
     },
     "time": {"from": [{"date": "date"}], "local_date": "date"},
+    "coverage": {path: {"classification": None} for path in ("steps", "resting_hr", "date")},
 }
 
 
@@ -263,7 +266,7 @@ ROW_CAP = {
 def test_a_row_over_one_mebibyte_refuses_at_its_position(store, fmt):
     """A parser without a decoded-row cap buffers an unbounded record before mapping it."""
     setup(store, ROW_CAP[fmt]("x" * (1 << 20)))
-    mapping = {"fields": {"exercise_id": "id"}}
+    mapping = {"fields": {"exercise_id": "id"}, "coverage": {"id": {"classification": None}}}
     job = start(store, format=fmt, mapping=mapping)
     run(store)
     result = status(store, job)
@@ -281,9 +284,9 @@ def test_a_governed_session_previews_and_starts_without_loading_the_source(store
     who = _session_at(store, NOW, 600)
     tracemalloc.start()
     try:
-        preview = call(
-            store, who, mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING
-        )
+        assert refused(call, store, who, mode="preview", source_ref=SOURCE, format="ndjson",
+                       mapping=MAPPING).code == "IMPORT_SOURCE_NOT_FOUND"
+        preview = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
         job = start(store, who)
         peak = tracemalloc.get_traced_memory()[1]
     finally:
@@ -346,7 +349,7 @@ def test_nesting_deeper_than_32_refuses_before_decoding(store, fmt):
         deep = {"n": deep}
     rows = [{"id": "ok", "n": 1}, deep]
     setup(store, ndjson(rows) if fmt == "ndjson" else json_array(rows))
-    job = start(store, format=fmt, mapping={"fields": {"exercise_id": "id"}, "on_invalid": "skip"})
+    job = start(store, format=fmt, mapping={"fields": {"exercise_id": "id"}, "coverage": {"id": {"classification": None}}, "on_invalid": "skip"})
     run(store)
     result = status(store, job)
     assert result["state"] == "complete" and result["rows"]["imported"] == 1
@@ -780,7 +783,7 @@ def test_preview_reports_real_time_fields_and_never_guesses_a_day(store):
     setup(store, ndjson(records))
     mapping = {**MAPPING, "fields": {**MAPPING["fields"], "calories": "kind"}}
     before = tuple(store.connection.iterdump())
-    result = call(store, mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping)
+    result = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping)
     assert tuple(store.connection.iterdump()) == before
     assert result["rows"]["sampled"] == 100 and result["rows"]["complete"] is False
     assert {"start", "start_utc", "utc_offset"} <= set(result["time"]["fields"])
@@ -808,7 +811,7 @@ def test_preview_bounds_every_shape_section_and_says_so(store):
         "k" * 300: 1,
     }
     setup(store, ndjson([row]))
-    result = call(store, mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+    result = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
     assert len(json.dumps(result).encode()) < 64 << 10
     assert result["truncated"] == {"fields": True, "nested": True, "time_fields": True}
     assert len(result["fields"]) == len(result["nested"]) == len(result["time"]["fields"]) == 64
@@ -1204,7 +1207,8 @@ def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(sto
     """Batch boundaries decide which duplicate wins, and whether a stop-policy job fails."""
     rows = [{"id": f"r{i}", "kind": "first"} for i in range(12)]
     rows.insert(3, {"id": "r1", "kind": "second"})
-    mapping = {"fields": {"exercise_id": "id", "kind": "kind"}, "on_invalid": "stop"}
+    mapping = {"fields": {"exercise_id": "id", "kind": "kind"}, "on_invalid": "stop",
+               "coverage": {name: {"classification": None} for name in ("id", "kind")}}
     outcomes = []
     for cid, title, size in ((CID, "Workouts", 40), (DAILY, "Workouts B", 2)):
         setup(store, ndjson(rows), cid=cid, title=title)

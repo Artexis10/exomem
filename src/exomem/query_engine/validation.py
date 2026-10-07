@@ -260,6 +260,8 @@ class _Binder:
             fields = self.reduction_fields or {}
             if isinstance(name, str) and name in fields:
                 return fields[name]
+            if self.declarations[self.source.ref].get("field_admission"):
+                _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (), "Describe the admitted collection fields.")
             _fail(
                 "QUERY_FIELD_UNKNOWN",
                 at,
@@ -274,6 +276,8 @@ class _Binder:
                 source, alias, path = self.aliases[prefix], prefix, suffix
         fields = self.declarations[source.ref].get("fields", {})
         if not isinstance(path, str) or path not in fields:
+            if self.declarations[source.ref].get("field_admission"):
+                _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (), "Describe the admitted collection fields.")
             allowed = list(self.declarations[self.source.ref].get("fields", {}))
             allowed.extend(
                 f"{a}.{p}"

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import json
 from contextlib import closing
 from dataclasses import asdict, dataclass
 
@@ -149,8 +148,15 @@ def _plan(session, collection_id: str, shape: _Shape, uniform: bool) -> _Plan:
         return _Plan("base", "mixed_release", "admitted")
     if session._projected_fields & set(shape.reads()):
         return _Plan("base", "fields_projected", "uniform")
+    admitted = session._field_plans[collection_id].fields
+
+    def eligible(definition):
+        rollup = definition[1]
+        dependencies = (*rollup.groups, *(name for name, _ in rollup.values), rollup.basis.field, rollup.basis.offset)
+        return all(name is None or admitted.get(name) is True for name in dependencies)
+
     matching = [definition for definition in rollups.definitions(session.connection, collection_id)
-                if _answers(definition[1], shape)]
+                if eligible(definition) and _answers(definition[1], shape)]
     ready = [definition for definition in matching if definition[2] == "ready"]
     if ready and not _aligned(shape):
         return _Plan("base", "window_unaligned", "uniform")
@@ -209,35 +215,29 @@ def _from_rollup(session, shape: _Shape, plan: _Plan, after: str | None):
         raise QueryError("QUERY_CURSOR_STALE")
 
 
-def _scan_sql(collection_id: str, layout, predicate: str, fields: tuple[str, ...]):
-    """One statement over admitted rows reading only the reduced fields, plus a row decoder."""
-    if layout is None:
-        def decode(row):
-            if len(row[1]) > _MAX_DECODE_BYTES:
-                raise QueryError("QUERY_COST_LIMIT")
-            return json.loads(row[1])
+def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple[str, ...]):
+    """Choose released dependencies before decoding any canonical value."""
+    selection = session._field_plans[collection_id].fields
+    if layout is not None and all(name in layout.fields and selection.get(name) is True for name in fields):
+        # Dense admitted scalars share one scan; residuals still need the bounded field-tree reader.
+        columns = [(name, layout.fields.index(name)) for name in fields]
+        selected = "".join(f",t.t{ordinal},t.v{ordinal},t.k{ordinal}" for _, ordinal in columns)
 
-        return (f"SELECT i.item_key,i.values_json FROM items i "  # noqa: S608 - internal predicate
-                f"WHERE i.collection_id=? AND {predicate}"), decode
-    columns = [(name, layout.fields.index(name)) for name in fields if name in layout.fields]
-    residual = len(columns) != len(fields)
-    selected = "".join(f",t.t{ordinal},t.v{ordinal},t.k{ordinal}" for _, ordinal in columns)
-    missing = typed_storage.MISSING
+        def decode_typed(row):
+            if row[1] != row[2]:
+                raise QueryError("QUERY_UNAVAILABLE")
+            return {name: typed_storage.decode_value(row[3 * index], row[3 * index + 1], row[3 * index + 2])
+                    for index, (name, _) in enumerate(columns, start=1)
+                    if row[3 * index] != typed_storage.MISSING}
+
+        return (f"SELECT i.item_key,i.row_version,t.row_version{selected} FROM items i "
+                f"LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id "
+                f"WHERE i.collection_id=? AND {predicate}"), decode_typed
 
     def decode(row):
-        if row[1] != row[2]:
-            raise QueryError("QUERY_UNAVAILABLE")
-        values = {}
-        for index, (name, _) in enumerate(columns, start=1):
-            tag = row[3 * index]
-            if tag != missing:
-                values[name] = typed_storage.decode_value(tag, row[3 * index + 1], row[3 * index + 2])
-        if residual and row[-1] is not None:
-            values.update(json.loads(row[-1]))
-        return values
+        return session.selected_values(row[1], layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
 
-    return (f"SELECT i.item_key,i.row_version,t.row_version{selected}{',t.r' if residual else ''} "  # noqa: S608
-            f"FROM items i LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id "
+    return (f"SELECT i.item_key,i.row_id FROM items i "  # noqa: S608 - internal membership predicate
             f"WHERE i.collection_id=? AND {predicate}"), decode
 
 
@@ -249,7 +249,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     Rows of buckets before the cursor's bucket are skipped, not retained.
     """
     read = shape.reads()
-    sql, decode = _scan_sql(collection_id, layout, predicate, read)
+    sql, decode = _scan_sql(session, collection_id, layout, predicate, read)
     project = session._project_values
     basis, bucket, timed = shape.basis, "", shape.timed
     start, end = shape.window
@@ -317,16 +317,28 @@ def _binding(session, query, collection_id: str, manifest, shape: _Shape, unifor
     read = {*shape.fields, *shape.others}
     if shape.basis is not None:
         read |= {name for name in (shape.basis.field, shape.basis.offset) if name is not None}
-    basis = query_freshness.uniform_basis(session.connection, collection_id, read) if uniform else None
-    if not uniform:
-        # S1.5b (write-time released-field bases) replaces this refusal with a bound continuation.
-        raise QueryError("QUERY_UNSUPPORTED", "continuation under mixed release is not supported: narrow the "
-                         "local-day window to one page")
-    if basis is None:
-        # The row path's refusal for the same missing coverage (cursors._visible).
-        raise QueryError("QUERY_UNAVAILABLE", "continuation needs the collection's freshness basis")
+    field_plan = session._field_plans[collection_id]
+    if uniform and all(field_plan.fields.get(name) is True for name in read):
+        basis = query_freshness.uniform_basis(session.connection, collection_id, read)
+        if basis is None:
+            raise QueryError("QUERY_UNAVAILABLE", "continuation needs the collection's freshness basis")
+        visible = cursors._hash(asdict(basis))
+    else:
+        admitted = session.admit(collection_id)
+        if admitted.visible_count + session._estimated_visits > session.limits.max_row_visits:
+            raise QueryError("QUERY_COST_LIMIT")
+        session._estimated_visits += admitted.visible_count
+        digest = hashlib.sha256(b"exomem.group-visible-dependencies.v1\0")
+        with closing(session.connection.execute(
+                f"SELECT i.row_id,i.item_key FROM items i WHERE i.collection_id=? AND {admitted.membership_sql} "
+                "ORDER BY i.row_id", (collection_id,))) as rows:
+            for row_id, key in rows:
+                values = session.selected_values(row_id, admitted.layout, read,
+                                                 max_bytes=_MAX_DECODE_BYTES, check=session.check)
+                digest.update(cursors._json([key, values]).encode() + b"\n")
+        visible = digest.hexdigest()
     return {**cursors.caller_binding(session, query), "schema": cursors._hash([collection_id,
-            manifest.manifest_version.hash]), "visible": cursors._hash(["exomem.group-pages.v1", asdict(basis)])}
+            manifest.manifest_version.hash]), "visible": visible}
 
 
 def _assemble(session, query, shape: _Shape, ordered, envelope: dict, mint) -> dict:

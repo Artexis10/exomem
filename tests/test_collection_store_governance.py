@@ -351,7 +351,8 @@ def test_literal_hash_paths_keep_template_and_collection_authority_separate(stor
         ancillary = policy_path + "#private.md"
         (store.root / ancillary).write_text("# Ordinary ancillary file\n")
         with request_scope(_external()), store.handle.transaction(), store._authorization(mutation=False) as authorization:
-            assert authorization.allows_file(f"{policy_path}#{KEY}")
+            # The unclassified object container cannot release the complete log bytes.
+            assert not authorization.allows_file(f"{policy_path}#{KEY}")
             assert not authorization.allows_file(f"{policy_path}#{OTHER}")
             assert authorization.allows_file(ancillary)
 

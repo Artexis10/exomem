@@ -321,7 +321,8 @@ class CollectionWriter:
         if facade_profile is None and isinstance(selector, collections.CollectionManifest):
             facade_profile = selector.semantic_profile
         with self.read_snapshot():
-            yield self._collection(selector, facade_profile=facade_profile)[1]
+            manifest = self._collection(selector, facade_profile=facade_profile)[1]
+            yield self._operation.field_plan(manifest).manifest
 
     def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
         from . import authority
@@ -348,7 +349,8 @@ class CollectionWriter:
                     raise collections.CollectionError(
                         "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
                     )
-                manifests.append(self._collection(cid)[1])
+                manifest = self._collection(cid)[1]
+                manifests.append(self._operation.field_plan(manifest).manifest)
             return tuple(manifests), ()
 
     def _projection_manifest(self, selector):
@@ -405,6 +407,12 @@ class CollectionWriter:
             with self._authorization(mutation=False):
                 result, selection = self._inspect_collection(collection, facade_profile=facade_profile)
                 operation = self._operation
+                from .field_admission import public_basis
+
+                _, manifest, _ = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
+                field_basis = public_basis(operation, manifest)
+                if field_basis is not None:
+                    result["field_release_basis"] = field_basis
                 evidence = operation.inspection_evidence(result, self.handle, selection)
                 vault_id = operation.logical_vault_id
         finally:
@@ -427,6 +435,25 @@ class CollectionWriter:
 
         row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
+        field_plan = self._operation.field_plan(manifest)
+        if not field_plan.owner and (set(field_plan.fields) != set(manifest.schema.fields)
+                                     or any(value is not True for value in field_plan.fields.values())):
+            rows, snapshot, _ = self._operation.authorized_rows(manifest.collection_id)
+            diagnostics = []
+            record_governance._inspection_templates(
+                self.root, field_plan.manifest, diagnostics, policy=self._operation.policy,
+                authorize_path=self._operation.allows_file,
+            )
+            # Recipient inspection cannot publish full-state guards or import provenance; owners retain them below.
+            return {"kind": "collection", "report_only": True,
+                    "contract": record_governance._inspection_contract(field_plan.manifest),
+                    "snapshot": snapshot,
+                    "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
+                                        *({"path": row_source(manifest, item), "hash": item["public_version"]}
+                                          for item in rows[:record_governance._MAX_ITEM_ENTRIES - 1])],
+                    "diagnostics": diagnostics,
+                    "audit": None, "saved_views": [], "lifecycle_guards": {},
+                    "coverage": {"committed": len(rows)}, "legacy": None}, selection
         allowed = selection.released
         basis = selection.inspection_basis
         release = self._operation.summary_release(manifest.collection_id)
