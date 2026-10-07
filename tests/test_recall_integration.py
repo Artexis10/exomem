@@ -41,6 +41,8 @@ from typing import Any
 
 import pytest
 
+from exomem.governance.principal import library_scope
+
 from exomem import bm25, commands, find_corpus, semantic_writes
 from exomem import find as find_module
 from exomem.vault import kb_dirname
@@ -1047,6 +1049,7 @@ def test_the_attribution_allowance_falls_back_only_below_the_contract_scale() ->
     assert _attribution_allowance(10.0) == pytest.approx(8.0)
 
 
+@library_scope()
 def test_the_whitespace_nonce_defeats_the_cache_without_changing_the_answer(
     vault: Path, warm_managed_cell
 ) -> None:

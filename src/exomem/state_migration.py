@@ -41,7 +41,7 @@ _ROLLBACK_OPERATIONS = frozenset({
 _LOCK_NAME = ".state-migration.lock"
 _COPY_CHUNK = 4 * 1024 * 1024
 _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
-_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1"})
+_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1", "raw-protection-v1"})
 
 
 class _MigrationLockBusy(TimeoutError):
@@ -227,7 +227,7 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
 def supported_state_compatibility_ids() -> tuple[str, ...]:
     """Optional state formats this runtime can use, not merely parse."""
 
-    return ()
+    return ("raw-protection-v1",)
 
 
 def partition_state_descriptor_ids(
@@ -463,9 +463,12 @@ def require_vault_state_ready(
     """
 
     from .collection_store.authority import required_state_compatibility_ids
+    from .governance import raw_protection
 
     vault_root = Path(vault_root)
     marker_optional = required_state_compatibility_ids(vault_root)
+    if raw_protection.COMPATIBILITY_ID not in supported_state_compatibility_ids():
+        marker_optional |= raw_protection.required_compatibility(vault_root)
     _require_supported_compatibility(marker_optional)
     state_dir = state_paths.vault_state_dir(vault_root)
     key = _cache_key(vault_root, state_dir)

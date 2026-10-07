@@ -2379,9 +2379,21 @@ def _require_supported_projected_find_request(
         )
 
 
-#: Hit signals ranked or counted over the whole corpus, before any page is
-#: decided: a caller other than the owner does not receive them (see `op_find`).
-_CORPUS_RANK_SIGNALS = ("bm25_rank", "vector_rank", "keyword_rank", "clip_rank", "graph_in_degree")
+#: Hit signals ranked, counted or cut at a candidate boundary over the whole
+#: corpus, before any page is decided: a caller anything could be withheld
+#: from does not receive them (see `op_find`). A lane's score is present only
+#: for a page inside that lane's top candidates, which a withheld page can
+#: occupy, so scores follow the same rule as ranks.
+_PRE_ADMISSION_SIGNALS = (
+    "bm25_rank",
+    "vector_rank",
+    "vector_score",
+    "keyword_rank",
+    "clip_rank",
+    "clip_score",
+    "rerank_score",
+    "graph_in_degree",
+)
 
 
 def op_find(
@@ -2657,20 +2669,17 @@ def op_find(
             explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
-    # A caller other than the owner receives no retrieval diagnostics. Lane
-    # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
-    # graph in-degree and the keyword-fallback marker are computed over the
-    # whole corpus before any page is decided, so each moves with pages the
-    # caller may not see. The hits themselves are unchanged.
-    restricted = (
-        projection_runtime is None
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    # Everything computed from pages before any is decided is content, not a
+    # diagnostic: lane statuses, fusion weights, raw scores, the emit count,
+    # per-lane ranks, graph in-degree, the keyword-fallback marker and the
+    # graph lane itself, whose hops are seeded before admission and follow
+    # link resolution over the whole vault. A restricted caller receives none
+    # of these signals. RAW admission below also controls candidate selection.
+    restricted = projection_runtime is None and egress_module.caller_restricted(
+        vault_root, purpose=purpose
     )
     if restricted:
         explain = False
-        # Graph hops, in-degree and graph enrichment follow link resolution
-        # over the whole vault, and the shared recall cache is keyed by
-        # `graph`, so such a caller recalls without the graph lane.
         graph = False
         graph_enrich = False
     compute_profile: dict[str, str | bool] = {}
@@ -2708,7 +2717,12 @@ def op_find(
     collect_timings = include_timings or call_spans_module.MCP_CALL_TOKEN.get() is not None
     timings = find_module.FindTimings() if collect_timings and projection_runtime is None else None
     timings_suppressed = (
-        {"status": "governed_projection"} if projection_runtime is not None else None
+        {"status": "governed_projection"} if projection_runtime is not None
+        # Which stages ran, their counts and the rerank decision all move with
+        # pages the caller may not see, so a restricted caller asking for
+        # timings gets the status instead, never a subset of the table.
+        else {"status": "release_restricted"} if restricted and include_timings
+        else None
     )
     # Deliberately not declared in retrieval_models.FindEnvelope: its schema
     # permits additive properties, while declaring this optional marker would
@@ -2770,10 +2784,15 @@ def op_find(
         )
         hits = release.hits
     else:
-        # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
-        # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
-        # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
-        # as the caller asked and the latency profile is unchanged.
+        from .governance import raw_protection
+
+        who = principal_module.effective_principal()
+        admit_path = (
+            (lambda path: raw_protection.permits(vault_root, path, who))
+            if not raw_protection.has_unrestricted_access(vault_root, who) else None
+        )
+        # RAW admission precedes candidate selection; ordinary policy still
+        # uses its existing annotation pool and final authorization below.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
         retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
         catalog_proof: dict[str, Any] = {}
@@ -2813,12 +2832,10 @@ def op_find(
             failed_out=failed,
             retrieval_trace=retrieval_trace,
             catalog_proof_out=catalog_proof,
+            admit_path=admit_path,
         )
-        # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
-        # strictly after `find()` has returned and deep-copied its candidates into
-        # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
-        # Nothing principal-dependent may run any earlier than this line, or one
-        # principal's decisions would be cached for the next.
+        # Recheck the selected snapshots before assembly. RAW-admitted searches
+        # bypass both shared caches; ordinary policy retains its final gate.
         with find_module._span(timings, "release_gate"):
             release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
@@ -2881,6 +2898,7 @@ def op_find(
                     deadline=None if active_budget is None else active_budget.deadline,
                     graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
                     timings=timings,
+                    purpose=purpose,
                 )
                 if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
                     pack_obj.get("truncation") or []
@@ -2907,7 +2925,7 @@ def op_find(
                 signals = hit.get("signals")
                 if not isinstance(signals, dict):
                     continue
-                for name in _CORPUS_RANK_SIGNALS:
+                for name in _PRE_ADMISSION_SIGNALS:
                     signals.pop(name, None)
                 if not signals:
                     hit.pop("signals", None)
@@ -2931,7 +2949,9 @@ def op_find(
         # Notices occupy only the slots the over-fetch pool could not backfill.
         hit_dicts.extend(release.notices)
     timings_dict = (
-        timings.as_dict() if timings is not None and include_timings else None
+        timings.as_dict()
+        if timings is not None and include_timings and timings_suppressed is None
+        else None
     )
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
@@ -2956,6 +2976,10 @@ def op_find(
     # these hits are lexical-only ranking. Present only during that window
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
+    if restricted:
+        # These internal status tokens disclose pending writes before RAW admission.
+        hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
+        degraded = [component for component in degraded if component not in hidden_freshness]
     if degraded:
         warming = {"components": sorted(set(degraded))}
         if projection_runtime is None:
@@ -3533,9 +3557,9 @@ def op_suggest_relations(
         candidate includes from/to, relation_type, method, and evidence.
         `mutated` is always false.
     """
-    # Under a governed policy relation proposals are the owner's, like the
-    # relation queue they feed: their candidates are resolved over the whole
-    # vault. Another audience is refused before the path is resolved.
+    # Relation proposals are the owner's, like the relation queue they feed:
+    # their candidates are resolved over the whole vault, protected captures
+    # included. Another audience is refused before the path is resolved.
     refusal = egress_module.owner_only_aggregate(vault_root)
     if refusal is not None:
         return refusal
@@ -3611,6 +3635,7 @@ def _add_source(
     why_captured: str | None,
     domain: str | None,
     projects: list[str] | None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture text as a source under an already-resolved kind."""
     try:
@@ -3626,6 +3651,7 @@ def _add_source(
             why_captured=why_captured,
             domain=domain,
             projects=projects,
+            raw_protection=raw_protection,
         )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -3647,6 +3673,7 @@ def op_add(
     source_kind: str | None = None,
     domain: str | None = None,
     projects: list[str] | None = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture raw content as an immutable source page in the Knowledge Base.
 
@@ -3690,6 +3717,7 @@ def op_add(
         why_captured=why_captured,
         domain=domain,
         projects=projects,
+        raw_protection=raw_protection,
     )
 
 
@@ -3756,6 +3784,9 @@ def op_audit(
         presentation/truncation facts. Full detail preserves raw findings.
     """
     audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    # Served to the owner only. Its parsed pages are admitted through RAW, but
+    # its link-existence walks and index checks read every file, protected
+    # captures included.
     refusal = egress_module.owner_only_aggregate(vault_root)
     if refusal is not None:
         return refusal
@@ -4952,6 +4983,7 @@ def op_preserve(
     filename: str,
     content: str,
     description: str | None = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture a TEXT artifact to Evidence/<scope>/<category>/.
 
@@ -5002,13 +5034,19 @@ def op_preserve(
                     "accepted_form": preserve_module.DESTINATION_ACCEPTED_FORM,
                 },
             )
+    try:
+        raw_protection = preserve_module.validate_raw_capture(
+            filename, destination=str(Path(scope) / category), raw_protection=raw_protection,
+        )
+    except preserve_module.PreserveError as e:
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     # Same destination-scoped lookup the batch command uses, run before the
     # write: Evidence is append-only, so the same bytes under the same family
     # are one fact, and reporting the copy that is already there beats adding a
     # second one that no later reader can tell apart.
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
     duplicate = preserve_module.find_duplicate_artifact(
-        vault_root, scope=scope, category=category, sha256=digest
+        vault_root, scope=scope, category=category, sha256=digest, raw_protection=raw_protection
     )
     if duplicate is not None:
         from .writer_lease import mark_active_mutation_committed
@@ -5048,6 +5086,7 @@ def op_preserve(
             filename=filename,
             content=content,
             description=description,
+            raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
@@ -5714,7 +5753,7 @@ def op_move_file(
 
 
 _FOLDER_DELETE_REFUSAL = (
-    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only under a governed policy"
+    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only"
 )
 
 
@@ -5778,14 +5817,14 @@ def op_delete(
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
             INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
     """
-    # Under a governed policy a folder is deleted by the owner only: a folder
-    # can hold pages the writer may not see, and every answer about them
-    # (counts, refusals, what was trashed) would move with them. One refusal
-    # for a folder the writer may see, whatever it holds; a declared
-    # recursive delete is refused before anything is read. A folder holding
-    # only pages withheld from the writer does not exist for it, as its
-    # listing says, and is answered as a missing path.
-    keep = egress_module.governed_release_filter(vault_root)
+    # A folder is deleted by the owner only: a folder can hold pages the
+    # writer may not see, by a policy or by RAW on any vault, and every answer
+    # about them (counts, refusals, what was trashed) would move with them.
+    # One refusal for a folder the writer may see, whatever it holds; a
+    # declared recursive delete is refused before anything is read. A folder
+    # holding only pages withheld from the writer does not exist for it, as
+    # its listing says, and is answered as a missing path.
+    keep = egress_module.restricted_release_filter(vault_root)
     restricted = keep is not None
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
@@ -6023,6 +6062,9 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
         return True
     from .governance import egress as egress_module
 
+    # Policy state is the right question here: with no policy RAW is the only
+    # floor, and a protected target lists the same links its absent twin does,
+    # since an inbound link resolves by name whether or not its target exists.
     policy, _ = egress_module.gate_state(Path(vault_root))
     if policy.empty:
         return True
@@ -6476,7 +6518,7 @@ def op_activate_context(
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
     _carry_thread_through_abstention(packet, continuity)
-    _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    _withhold_vault_generation(vault_root, packet)
     # Every packet reports how its conversation was bounded; the compiler has
     # already said `absent` when it skipped the stage for the request's budget.
     if isinstance(packet.get("generation"), dict):
@@ -6524,16 +6566,17 @@ def _carry_thread_through_abstention(packet: Any, continuity: str | None) -> Non
 
 #: Packet generation fields that move with every file in the vault: the
 #: freshness key counts and digests them, and the index generation advances on
-#: every write. A reader other than the owner does not receive them.
+#: every write, a protected capture's included. A reader other than the owner
+#: does not receive them, on an ungoverned vault too.
 _VAULT_GENERATION_FIELDS = ("freshness_key", "index_generation")
 
 
-def _withhold_vault_generation(vault_root: Path, packet: Any, *, purpose: str | None) -> None:
+def _withhold_vault_generation(vault_root: Path, packet: Any) -> None:
     generation = packet.get("generation") if isinstance(packet, dict) else None
     if (
         isinstance(generation, dict)
         and any(name in generation for name in _VAULT_GENERATION_FIELDS)
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+        and egress_module.caller_restricted(vault_root)
     ):
         packet["generation"] = {
             key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
@@ -6614,7 +6657,7 @@ def _op_activate_context_body(
                 packet["request_budget"] = block
         if thread_carry is not None:
             identity_now, thread_now, started, state, salt_now = thread_carry
-            _withhold_vault_generation(vault_root, packet, purpose=purpose)
+            _withhold_vault_generation(vault_root, packet)
             token_now = (
                 working_set_runtime_module.mint_continuity(
                     packet,
@@ -6821,6 +6864,7 @@ def _op_activate_context_body(
                     limit=(
                         egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
                         if release_active
+                        or egress_module.caller_restricted(vault_root, purpose=purpose)
                         else ACTIVATE_RETRIEVAL_LIMIT
                     ),
                     freshness=lexical_freshness,
@@ -6984,7 +7028,7 @@ def _op_activate_context_body(
         )
     packet = guarded
     # Before the token is minted: it carries the index generation too.
-    _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    _withhold_vault_generation(vault_root, packet)
     token = working_set_runtime_module.mint_continuity(
         packet, identity=identity, thread=thread, thread_ns=thread_ns, salt=salt
     )
@@ -7705,6 +7749,7 @@ def op_capture_source(
     projects: list[str] | None = None,
     files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
     adoption: _OptionalArtifactAdoption = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
@@ -7731,6 +7776,7 @@ def op_capture_source(
         files: Client file handles, captured instead of `content`.
         adoption: Selects exactly one supplied handle. Establishes eligibility,
             not write consent; agent-initiated use obeys proactive_capture.
+        raw_protection: Keep the original owner-only until a whole-artifact release.
     """
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
@@ -7750,6 +7796,7 @@ def op_capture_source(
             domain=domain,
             projects=projects,
             adoption=adoption,
+            raw_protection=raw_protection,
         )
         _note_committed_artifact_targets(captured)
         return captured
@@ -7765,6 +7812,7 @@ def op_capture_source(
         why_captured=why_captured,
         domain=domain,
         projects=projects,
+        raw_protection=raw_protection,
     )
     out: dict = {"source": source}
     if "vocabulary_resolution" in source:
@@ -8042,6 +8090,7 @@ def op_preserve_evidence(
     filename: str,
     content: str,
     description: str | None = None,
+    raw_protection: bool = False,
 ) -> dict:
     """Preserve text as append-only proof.
 
@@ -8055,6 +8104,7 @@ def op_preserve_evidence(
         filename: Filename with extension.
         content: Exact UTF-8 text.
         description: Sidecar description.
+        raw_protection: Keep the original owner-only until a whole-artifact release.
     """
     return op_preserve(
         vault_root,
@@ -8063,6 +8113,7 @@ def op_preserve_evidence(
         filename=filename,
         content=content,
         description=description,
+        raw_protection=raw_protection,
     )
 
 
@@ -8073,6 +8124,7 @@ def op_preserve_artifacts(
     files: _ClientArtifactFiles,
     adoption: _OptionalArtifactAdoption = None,
     transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
+    raw_protection: bool = False,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -8086,6 +8138,7 @@ def op_preserve_artifacts(
         scope: Case/project key; one path segment.
         category: One path segment.
         adoption: Selected handle: eligibility, not write consent; proactive_capture applies.
+        raw_protection: Keep originals owner-only until whole-artifact release.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -8100,6 +8153,7 @@ def op_preserve_artifacts(
             files=files,
             adoption=adoption,
             transcriptions=transcriptions,
+            raw_protection=raw_protection,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -8131,9 +8185,8 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
-    # `/download` decides every path under the audience the token carries, so
-    # it carries the caller's: the secret that signs it is the owner's, the
-    # caller need not be. An unresolved caller binds the fail-closed floor.
+    # Carrying the full principal (its session and purpose) requires private
+    # signing authority. The legacy bearer can bind an audience, nothing more.
     who = principal_module.effective_principal()
     audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(
@@ -8143,6 +8196,8 @@ def op_transfer_artifact(
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
         audience=audience if operation == "download" else None,
+        principal=who if operation == "download" else None,
+        signing_root=os.environ.get("EXOMEM_JWT_SIGNING_KEY"),
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
@@ -9548,8 +9603,8 @@ def op_connect_memory(
             edit_memory=_accept_relations_edit,
         )
     if operation == "suggest-relations":
-        # Relation proposals are owner work under a governed policy (see
-        # `op_suggest_relations`); refused before the path is resolved.
+        # Relation proposals are owner work (see `op_suggest_relations`);
+        # refused before the path is resolved.
         refusal = egress_module.owner_only_aggregate(vault_root)
         if refusal is not None:
             return refusal
@@ -10359,7 +10414,9 @@ def op_schema_memory(
     ):
         # Inferring from the corpus (directly, or as the other side of a
         # diff) reduces every page; it is the owner's under a governed policy.
-        refusal = egress_module.owner_only_aggregate(vault_root)
+        # Its page selection admits each page through RAW
+        # (`memory_schema._select_pages`), so with no policy it is served.
+        refusal = egress_module.owner_only_aggregate(vault_root, raw_admitted=True)
         if refusal is not None:
             return {"subject": subject, **refusal}
     if subject == "entity-types" and operation == "resolve-entity-type":
@@ -11787,6 +11844,7 @@ def op_govern_memory(
     backfill_action: Literal["preview", "commit"] | None = None,
     companion_input: dict[str, object] | None = None,
     vocabulary_request_id: str | None = None,
+    raw_release: dict[str, object] | None = None,
 ) -> dict:
     """Inspect or author opt-in confidential governance policy.
 
@@ -11810,6 +11868,7 @@ def op_govern_memory(
         backfill_action: Owner-reviewed companion backfill step.
         companion_input: Version-1 artifact, companion, semantics and binding input.
         vocabulary_request_id: Pending additive request id (inspect via vocabulary-request).
+        raw_release: Version-1 whole-artifact recipient surface/issuer, purpose and included-location acknowledgment; use grant, scope=standing, path and audience.
     """
     values = {
         "session_action": session_action,
@@ -11835,6 +11894,7 @@ def op_govern_memory(
         "backfill_action": backfill_action,
         "companion_input": companion_input,
         "vocabulary_request_id": vocabulary_request_id,
+        "raw_release": raw_release,
     }
     return governance_tool_module.op_govern_memory(
         vault_root,

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from exomem.governance.principal import library_scope
+
 from exomem import (
     bm25,
     commands,
@@ -1093,6 +1095,7 @@ def test_unit_filter_only_explanation_uses_parent_date_and_source_order(
         ]
 
 
+@library_scope()
 def test_unit_lexical_fallback_has_raw_score_without_invented_fusion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

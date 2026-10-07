@@ -1,21 +1,11 @@
-"""Released hosted profiles keep their compact bootstrap payload byte for byte.
+"""Historical descriptors stay frozen while bootstrap versions runtime migrations.
 
-`hosted-alpha-agent-v1` to `-v4` are published identities with committed
-candidates. The core/section split (openspec change `shrink-bootstrap`) applies
-to every other surface only, so a client on a released profile is served exactly
-what it was served before the split.
+Hosted v1-v4 retain their pre-split compact bootstrap shape. Contract
+2026-10-07.1 explicitly supersedes optional-kind and `other` capture guidance.
+The payload pins were recorded after proving that undoing only the migration
+fields reproduces every origin/main digest. Only the server version and tool
+surface fingerprints are normalized away.
 
-The digests below were recorded on the base (integration/wave-bcd) before the split
-was applied, and re-recorded from the untouched base when it advanced (efe52086):
-the pin says this change alters no released profile, not that no one ever does. Only
-values that legitimately move between releases are normalised away: the
-server's own version and the tool-surface fingerprints, which the tool-schema
-lane edits independently.
-
-The capture behavior migrates through bootstrap contract 2026-10-07.1. Historical
-command descriptors stay frozen; bootstrap and runtime refusals explicitly
-supersede their optional-kind and `other` guidance. Re-record the payload pins
-only after that migration and its shared rule have been verified.
 """
 
 from __future__ import annotations
@@ -36,29 +26,29 @@ LEVELS = ("off", "light", "balanced", "maximal")
 #: profile -> level -> sha256 of the normalised compact payload.
 GOLDEN: dict[str, dict[str, str]] = {
     "hosted-alpha-agent-v1": {
-        "off": "59a2b5b988633d0013c28d0d0842632f5209577448e86d550fb2c0bc5a303c39",
-        "light": "c9a852ad009e5e6bbfe7a94fc8e9b795a28a91f2b88a888cb4880808e045a0b7",
-        "balanced": "435e642217fea601f56485b55480fdd2b1209016d55bc1d117b333ad97d1b9f6",
-        "maximal": "bd86dfe433a3fe8cea7fd38791b9a0ed8474de468172502db407e61d99385481",
+        "off": "dfdc462e01280cdc5cc7d625773626633cc265bc0ed9e940e265eea2b3fef4e7",
+        "light": "59eb03dc0eb3fdf3021e2029293ec48a2cb8bcd9553a07f8e4b98bea7b1c35a0",
+        "balanced": "4abcae2c87d5e4d4c249126ee45dc63a92812eae5f595054d1fe53f6a0b4cdd7",
+        "maximal": "0b199fa64e0379f51cbe627a8f95576f2f17c038cb9800a90ea883b92085ffd7"
     },
     "hosted-alpha-agent-v2": {
-        "off": "d9602bbbcdfc3581e3f861734f9121c045480a2cbbf1553163f1b6a8fc04eb18",
-        "light": "7093ae98574f5d67b9a1636e7001098d84730b11dab57779101b27f39d074b7a",
-        "balanced": "24996de3edafbfcfa9c1b792d68bc4f5cd4c28eb25d434be02618965348c37cf",
-        "maximal": "1be4f750b419b858f72895ae7e77896c30b85cfdb8ffe742b9408550e16e80d1",
+        "off": "a5844c6eae11f18f3f92dfbe20d24791964372c6a1dbaf28a7cbd0756d300fdd",
+        "light": "e782c24b571aa9864ab3f479a121627328a75ffc1a3581c1a0a05ed299ee65dd",
+        "balanced": "4e4c8e3df1aff14cd9c9f04f9c9422ab88005c78b0ccf36ab258923f45649ab8",
+        "maximal": "9ab97289f0f5090e545a5ab3c0a7a731f0b458092de6fff454f11012b73a3bd5"
     },
     "hosted-alpha-agent-v3": {
-        "off": "4558caa9b0267f72f79d00e3f3cdde81b9d7a6234aa11cde803956a9e5d4cd38",
-        "light": "59afe3ae5424a8c4dc1851e0393a21ca4c0057b9a497506d1454b7355cb172ca",
-        "balanced": "9c850dd7117f1e2b3cbdfd39155149263e76b1f0700bc8358475184019d3c63a",
-        "maximal": "4f6199288b58c7ee6d35ea33fccce129b1e4ee91b6e0e22ff1412a754d2fda3f",
+        "off": "784ae82a0968a7dc72a2c4d726a21dc3b3503e25ca69bcf992adb22bfbe5633c",
+        "light": "177836497958d495ed74976408d7339e283044f21095e3cea9d99669a42d5e9d",
+        "balanced": "ba691b78eb6bf68806ed769058fa190f6a2349b997483930dd4a8f028466b623",
+        "maximal": "06075c15bd77591aede3f4e17e002bf47290743e9476752e2e942ae7beabaa6e"
     },
     "hosted-alpha-agent-v4": {
-        "off": "b48ddc8c0cc452131d7520f0fd91b8f67043eb0956b1ce4e7dc260cd23a61a55",
-        "light": "ff69e381fb81c64ba07354cb6cda87e663457ab51daed1562a0992e61381c75c",
-        "balanced": "274c2c1c35b915426e9bd6126a268df294dafcc64f9e4d3b0589537d97a632bd",
-        "maximal": "c28c64f21a65be60bd9a2395ab5c764a62d10a022050b64c116bb1cef6abcc2f",
-    },
+        "off": "b9f8048ea2b21192a5c0785a027f0f5982bef709db43bd20095cbe841f48b7c2",
+        "light": "ff127de724952bd322ef894c49b8e36ab4a74a0633dc33c83ab6e32ac56fc54a",
+        "balanced": "768b992244e854f103af79d2f1c11d031377529abbccccd66e9fa74472f5ad88",
+        "maximal": "9c684d8eef1bb79ac62ac65382e48d1d66ff379be006ad9c258a27e860bb7f07"
+    }
 }
 
 _VOLATILE_SERVER_KEYS = (

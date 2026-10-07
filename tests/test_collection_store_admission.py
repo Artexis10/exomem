@@ -70,7 +70,7 @@ def test_real_producer_creates_replica_marker_and_exact_receipt(producer):
             json.dumps(result["receipt"], sort_keys=True, separators=(",", ":")),
         )
     assert (session.root / manifest_path()).exists()
-    assert state_migration.supported_state_compatibility_ids() == ()
+    assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
     with pytest.raises(state_migration.StateCompatibilityUnsupported):
         state_migration.require_vault_state_ready(session.root)
 
@@ -351,7 +351,7 @@ def _restart_child(session, config, operator_config, database, phase, sender):
             patch.setattr(session.fs, "rename", rename_and_stop)
         if phase is None:
             result = admission.resume_local(session, manager, fence_client=operator)
-            assert state_migration.supported_state_compatibility_ids() == ()
+            assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
             with pytest.raises(state_migration.StateCompatibilityUnsupported):
                 state_migration.require_vault_state_ready(session.root)
             sender.send(result)

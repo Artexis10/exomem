@@ -104,6 +104,40 @@ def test_mcp_stdio_without_auth_is_owner(monkeypatch: pytest.MonkeyPatch) -> Non
     assert resolved.resolved is True
 
 
+def test_http_request_with_only_excluded_headers_is_not_stdio_owner() -> None:
+    """An empty filtered header map is not proof of owner-local transport."""
+    from fastmcp.server.dependencies import _current_http_request
+    from starlette.requests import Request
+
+    request = Request({"type": "http", "method": "POST", "path": "/mcp", "headers": [(b"host", b"memory.example"), (b"content-type", b"application/json")]})
+    token = _current_http_request.set(request)
+    try:
+        remote = resolve_mcp_principal()
+    finally:
+        _current_http_request.reset(token)
+    assert remote.resolved is False
+    assert remote.audience_id == MOST_RESTRICTIVE_AUDIENCE
+    assert resolve_mcp_principal().issuer_family == "mcp-local-stdio"
+
+
+def test_stdio_authorization_request_stays_the_local_owner() -> None:
+    """The stdio transport binds its own header-less request; that is not HTTP."""
+    from fastmcp.server.dependencies import _current_http_request
+
+    from exomem.governance import authorization_transport
+
+    request = authorization_transport._StdioAuthorizationRequest(
+        authorization_transport.CredentialCarrier.absent()
+    )
+    token = _current_http_request.set(request)
+    try:
+        local = resolve_mcp_principal()
+    finally:
+        _current_http_request.reset(token)
+    assert local.resolved is True
+    assert local.issuer_family == "mcp-local-stdio"
+
+
 def test_mcp_unresolved_but_expected_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,6 +197,16 @@ def test_hosted_missing_principal_fails_closed() -> None:
     resolved = resolve_hosted_principal(None)
     assert resolved.resolved is False
     assert resolved.audience_id == MOST_RESTRICTIVE_AUDIENCE
+
+
+def test_no_hosted_gateway_scope_resolves_to_the_owner() -> None:
+    """RAW admits the owner audience on any surface, so a hosted gateway scope
+    must never fold into it, however it is spelled: a cell caller is always a
+    principal, which needs a whole-artifact release."""
+    from exomem.governance import raw_protection
+
+    for scope in ("owner", f" {OWNER_AUDIENCE} ", "principal:owner", "cf-access:owner"):
+        assert not raw_protection.is_owner(resolve_hosted_principal(scope)), scope
 
 
 def test_hosted_principal_is_stable_for_same_scope() -> None:

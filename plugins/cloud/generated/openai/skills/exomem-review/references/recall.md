@@ -29,6 +29,9 @@ Empty queries degrade to filtered-most-recent regardless of mode.
 - **Never report a search-miss as absence.** An empty result means *"not found in
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
   try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
+- **`RETRIEVAL_INDEX_WARMING` is a refusal, not a miss.** A maintained index is
+  not ready: retry the same call after `retry_after_ms`. With `relations=` or
+  `relation_of=`, the typed graph may be rebuilding: retry, or drop the filter.
 
 ### Referents
 
@@ -43,7 +46,8 @@ Additional knobs exposed through `ask_memory`/`find`: `graph=true` (default; exp
 available — typed and provenance relations rank ahead of plain wikilinks, and a
 hit surfaced this way carries a `graph` annotation naming the relation type,
 direction, and the seed page it came from; without a sidecar the lane falls back
-to plain wikilink expansion, unannotated),
+to plain wikilink expansion, unannotated. The graph lane only adds neighbours and
+reorders, so a graph rebuild is not a recall outage),
 `rerank=true` (CrossEncoder re-sort, explicit precision spend),
 `prefer_compiled=true` (default; favours compiled types over raw `source`),
 `prefer_active=true` (default; soft-demotes superseded pages), `file_types` /

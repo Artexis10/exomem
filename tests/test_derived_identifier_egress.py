@@ -1465,8 +1465,7 @@ def test_a_restricted_writer_deletes_no_folder(
     refused = _text(
         {
             "__error__": "ValueError",
-            "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only "
-            "under a governed policy",
+            "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only",
         }
     )
     assert answers["visible"] == answers["mixed"] == refused, answers
@@ -1484,55 +1483,6 @@ def test_a_restricted_writer_deletes_no_folder(
         vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True
     )
     assert "__error__" not in deleted, deleted
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_tombstones_alone_leave_a_non_owners_writes_as_the_owners(
-    tmp_path: Path, audience: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The write-door rulings hold under a governed policy only: on a vault
-    with no policy, an erased page's tombstone changes nothing for a caller
-    other than the owner, who may delete a folder."""
-    from exomem.governance import lifecycle
-
-    files = {
-        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
-        f"{NOTES}/linker.md": _page("Linker", f"See [[{NOTES}/alpha]] and [[alpha]]."),
-        f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
-        f"{KB}/Entities/People/Wanda Grey.md": _page(
-            "Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey"
-        ),
-    }
-    monkeypatch.setattr(
-        lifecycle, "tombstoned_paths", lambda _root: frozenset({f"{NOTES}/erased.md"})
-    )
-
-    def answers(name: str, principal: RequestPrincipal) -> list[str]:
-        vault = tmp_path / name / "vault"
-        for rel, text in files.items():
-            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
-            (vault / rel).write_text(text, encoding="utf-8")
-        _reset()
-        with library_scope():
-            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-        moved = _call(
-            vault, principal, "manage_memory_file", operation="move",
-            old_path=f"{NOTES}/alpha.md", new_path=f"{NOTES}/alpha-moved.md",
-            response_detail="legacy",
-        )
-        entity = _call(
-            vault, principal, "connect_memory", operation="create-entity",
-            name="Wanda Grey", entity_type="person", summary="A person.",
-        )
-        deleted = _call(
-            vault, principal, "manage_memory_file", operation="delete",
-            path=f"{NOTES}/Open", confirm=True, recursive=True,
-        )
-        assert "__error__" not in deleted, deleted
-        assert not (vault / NOTES / "Open").exists()
-        return [_VOLATILE_TEXT.sub("<v>", _text(value)) for value in (moved, entity)]
-
-    assert answers("other", _principal(audience)) == answers("owner", owner_principal())
 
 
 #: Run-specific values in a write's answer: request and receipt ids, hashes,
@@ -2336,6 +2286,712 @@ def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
     owner = _call(vault, None, "ask_memory", query="Alpha", graph_enrich=True, detail="full")
 
     assert "graph_hop" in _text(owner), owner
+
+
+def test_the_owners_remote_connector_recalls_and_reads_as_the_local_owner_does(
+    tmp_path: Path,
+) -> None:
+    """Owner ruling: the owner is the owner on any surface. An OAuth connector
+    bound as the owner recalls exactly as the local owner does, the graph hop
+    a protected original seeds and explain included, and reads that original."""
+    import shutil
+
+    marked = f"{NOTES}/__exomem_raw_v1__gamma-secret.md"
+    files = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha plain body about orchards.", type="insight"),
+        marked: _page(
+            "Zephyrquux Plan",
+            "Zephyrquux acquisition target details. " + _LINKS_TO.format(t="Alpha"),
+            type="insight",
+            title="Zephyrquux Plan",
+        ),
+    }
+    vault = _materialize(tmp_path / "vault", files, "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    connector = RequestPrincipal(
+        audience_id="owner", surface="mcp", resolved=True,
+        issuer_family="mcp-oauth:" + "c" * 64, remote_owner=True,
+    )
+    recall = {"query": "Zephyrquux", "explain": True, "detail": "full"}
+
+    local = _call(vault, None, "ask_memory", **recall)
+    assert "graph_hop" in _text(local) and marked in _text(local), local
+    assert _call(vault, connector, "ask_memory", **recall) == local
+    assert "Zephyrquux acquisition" in _text(_call(vault, connector, "read_memory", path=marked))
+
+
+def test_a_guest_recalls_as_if_the_marked_page_were_absent(tmp_path: Path) -> None:
+    """RAW: everything computed from pages before admission is content. For a
+    query only a marked page matches, or one it outranks the rest on, a guest
+    on an ungoverned vault gets exactly what it would if the page were absent:
+    no graph hop it seeds, no explain lane status or score, no keyword-fallback
+    marker, no timings, and still `limit` hits. Nor does it receive the vault
+    generation counters, which move with every protected capture."""
+    import shutil
+
+    marked = "__exomem_raw_v1__gamma-secret"
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", "Alpha plain body about orchards and quinces.", type="insight"
+        ),
+    }
+    original = {
+        f"{NOTES}/{marked}.md": _page(
+            "Zephyrquux Plan",
+            "Zephyrquux quinces quinces quinces. " + _LINKS_TO.format(t="Alpha"),
+            type="insight",
+            title="Zephyrquux Plan",
+        ),
+    }
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+    calls = {
+        "plain": {"query": "Zephyrquux", "detail": "full"},
+        "explain": {"query": "Zephyrquux", "explain": True, "detail": "full"},
+        "enrich": {"query": "Zephyrquux", "deep": True, "graph_enrich": True},
+        "timings": {"query": "Zephyrquux", "include_timings": True},
+        "limit": {"query": "quinces", "limit": 1},
+    }
+    guest = _principal("external")
+
+    local = _call(vaults["present"], None, "ask_memory", **calls["limit"])
+    assert marked in _text(local) and "alpha.md" not in _text(local), local
+    answers = {
+        label: [_call(vaults[variant], guest, "ask_memory", **kwargs) for variant in vaults]
+        for label, kwargs in calls.items()
+    }
+    assert "__error__" not in _text(answers), answers
+    assert [label for label, (present, absent) in answers.items() if present != absent] == []
+    packet = _call(vaults["present"], guest, "activate_context", turn="Tell me about Alpha.")
+    assert "index_generation" not in packet["generation"], packet
+
+
+def test_a_review_item_reads_as_if_its_marked_neighbour_were_absent(tmp_path: Path) -> None:
+    """RAW: a review item's graph section is computed from pages before
+    admission, so for a guest on an ungoverned vault a marked page linking to
+    the item is absent, its node and edges and the shown counts alike."""
+    import shutil
+
+    alpha = f"{NOTES}/alpha.md"
+    base = {
+        **_filler(),
+        alpha: _page("Alpha", "Alpha plain body. See [[filler-orchard]].", type="insight"),
+    }
+    original = {
+        f"{NOTES}/__exomem_raw_v1__gamma-secret.md": _page(
+            "Zephyrquux Plan", "Zephyrquux target. " + _LINKS_TO.format(t="Alpha"), type="insight"
+        ),
+    }
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+
+    def context(variant: str, principal: RequestPrincipal | None) -> Any:
+        review = _call(vaults[variant], None, "review_memory", mode="activation", limit=0)
+        ref = next(item["ref"] for item in review["items"] if item["path"] == alpha)
+        return _call(vaults[variant], principal, "review_item_context", ref=ref)
+
+    assert "__exomem_raw_v1__" in _text(context("present", None))
+    present = context("present", _principal("external"))
+    assert "__error__" not in present, present
+    assert present == context("absent", _principal("external"))
+
+
+def _raw_twins(tmp_path: Path, base: dict[str, str], protected: dict[str, str]) -> dict[str, Path]:
+    """Two vaults with no policy: `present` holds the RAW-marked pages, `absent` does not."""
+    import shutil
+
+    vaults = {}
+    for variant, files in {"present": {**base, **protected}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+    return vaults
+
+
+def test_a_review_item_for_a_marked_page_reads_as_if_the_page_were_absent(tmp_path: Path) -> None:
+    """RAW: review_item_context serves an item's own prose (`prose_for_caller`).
+    A guest on a vault with no policy that holds the owner's ref to a protected
+    capture's item is answered as if the page were absent."""
+    marked = f"{NOTES}/__exomem_raw_v1__gamma-secret.md"
+    vaults = _raw_twins(
+        tmp_path, _filler(), {marked: _page("Gamma", "Secret orchard plan.", type="insight")}
+    )
+    review = _call(vaults["present"], None, "review_memory", mode="activation", limit=0)
+    ref = next(item["ref"] for item in review["items"] if item["path"] == marked)
+    assert "Secret orchard plan" in _text(_call(vaults["present"], None, "review_item_context", ref=ref))
+
+    guest = {
+        variant: _call(vault, _principal("external"), "review_item_context", ref=ref)
+        for variant, vault in vaults.items()
+    }
+
+    assert guest["present"] == guest["absent"]
+
+
+def test_a_guest_activates_as_if_the_marked_page_were_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAW: activation's lexical pass is cut at a candidate limit a protected
+    page occupies before admission, so on an ungoverned vault a guest's packet
+    anchors exactly the pages it would were that page absent, not one short."""
+    import shutil
+
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    def insight(title: str, body: str) -> str:
+        return (
+            "---\ntype: insight\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+            f"# {title}\n\n## Summary\n\n{body}\n"
+        )
+
+    marked = f"{NOTES}/Insights/__exomem_raw_v1__quince-secret.md"
+    base = {
+        **_filler(),
+        **{
+            f"{NOTES}/Insights/quince-{n:02d}.md": insight(
+                f"Quince harvest {n}",
+                f"Quince orchard harvest planning note {n}. "
+                + " ".join(f"filler{n}w{word}" for word in range(150)),
+            )
+            for n in range(12)
+        },
+    }
+    original = {marked: insight("Quince harvest secret", "Quince orchard harvest plan " * 2)}
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vault = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vault / KB / "_Governance")
+        lexstore.ensure_fresh(vault)
+        working_set_runtime.reset_caches_for_tests()
+        working_set_index.WorkingSetIndex(vault).rebuild()
+        vaults[variant] = vault
+
+    def activate(variant: str, principal: RequestPrincipal | None) -> Any:
+        monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vaults[variant]))
+        packet = _call(
+            vaults[variant],
+            principal,
+            "activate_context",
+            turn="What is the quince orchard harvest plan?",
+        )
+        return {key: packet.get(key) for key in ("abstention", "ambiguity", "anchors", "units")}
+
+    assert marked in _text(activate("present", None))
+    assert activate("present", _principal("external")) == activate("absent", _principal("external"))
+
+
+def test_a_guests_referents_count_as_if_the_marked_entity_were_absent(tmp_path: Path) -> None:
+    """RAW: a referent's reasons are counted over the whole entity registry
+    before admission, so on an ungoverned vault a guest asking which person a
+    name is gets the counts it would were a protected organization absent."""
+    import shutil
+
+    def entity(entity_type: str, title: str) -> str:
+        return (
+            f"---\ntype: entity\nentity_type: {entity_type}\ntitle: {title}\nstatus: active\n"
+            f"---\n# {title}\n\n{title} entity page.\n"
+        )
+
+    base = {
+        **_filler(),
+        f"{KB}/Entities/People/jane-zephyr.md": entity("person", "Jane Zephyr"),
+        f"{KB}/Entities/Organizations/acme.md": entity("organization", "Acme Corp"),
+    }
+    original = {
+        f"{KB}/Entities/Organizations/__exomem_raw_v1__secretco.md": entity(
+            "organization", "Secretco Holdings"
+        ),
+    }
+    vaults = {}
+    for variant, files in {"present": {**base, **original}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+    query = {"query": "which person is Jane Zephyr", "detail": "full"}
+
+    local = _call(vaults["present"], None, "ask_memory", **query)
+    assert local["referents"]["reasons"]["type_mismatch"] == 2, local
+    guest = [_call(vaults[variant], _principal("external"), "ask_memory", **query) for variant in vaults]
+    assert guest[0]["referents"] == guest[1]["referents"]
+
+
+def test_a_guest_deletes_a_page_a_marked_page_links_as_if_the_linker_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: a link from a protected capture does not count against a guest's
+    delete, as a link from a page a policy withholds does not. On a vault with
+    no policy the guest's delete succeeds whether or not the protected linker
+    exists; the owner's delete still counts the link and is refused."""
+    alpha = f"{NOTES}/alpha.md"
+    vaults = _raw_twins(
+        tmp_path,
+        {**_filler(), alpha: _page("Alpha", "Alpha body.", type="insight")},
+        {
+            f"{NOTES}/__exomem_raw_v1__gamma-secret.md": _page(
+                "Gamma", "Secret plan. See [[alpha]].", type="insight"
+            )
+        },
+    )
+
+    def delete(vault: Path, principal: RequestPrincipal | None) -> Any:
+        return _call(
+            vault, principal, "manage_memory_file", operation="delete", path=alpha, confirm=True
+        )
+
+    owner = delete(vaults["present"], None)
+    assert "INBOUND_LINKS" in _text(owner), owner
+    guest = {variant: delete(vault, _principal("external")) for variant, vault in vaults.items()}
+    assert "__error__" not in guest["absent"], guest["absent"]
+    assert "__error__" not in guest["present"], guest["present"]
+    assert not (vaults["present"] / alpha).exists()
+
+
+def test_a_guest_deletes_no_folder_whether_or_not_it_holds_a_marked_page(
+    tmp_path: Path,
+) -> None:
+    """RAW: a folder can hold a protected capture on a vault with no policy too,
+    so a folder delete is the owner's there as well. A guest is refused the
+    same way whether or not the folder holds one, and the capture stays put."""
+    box = f"{NOTES}/Box"
+    marked = f"{box}/__exomem_raw_v1__inside.md"
+    vaults = _raw_twins(
+        tmp_path,
+        {**_filler(), f"{box}/open.md": _page("Open", "Open box page.", type="insight")},
+        {marked: _page("Inside", "Protected inside the box.", type="insight")},
+    )
+
+    guest = {
+        variant: _call(
+            vault, _principal("external"), "manage_memory_file", operation="delete",
+            path=box, recursive=True, confirm=True,
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert guest["present"] == guest["absent"]
+    assert guest["present"]["message"].startswith("AUDIENCE_RESTRICTED"), guest["present"]
+    assert (vaults["present"] / marked).exists()
+
+
+def test_a_guest_moves_a_page_a_marked_page_links_as_if_the_linker_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: a move rewrites every linking page, a protected capture included, so
+    the vault stays consistent. The guest's answer covers the linkers it may
+    see and reads the same whether or not the protected linker exists."""
+    alpha = f"{NOTES}/alpha.md"
+    linker = f"{NOTES}/__exomem_raw_v1__linker.md"
+    vaults = _raw_twins(
+        tmp_path,
+        {**_filler(), alpha: _page("Alpha", "Alpha conclusions.")},
+        {linker: _page("Linker", "See [[alpha]] for the plan.")},
+    )
+
+    guest = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault, _principal("external"), "manage_memory_file", operation="move",
+                    old_path=alpha, new_path=f"{NOTES}/alpha-moved.md", response_detail="legacy",
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert "__error__" not in guest["absent"], guest["absent"]
+    assert guest["present"] == guest["absent"]
+    assert "alpha-moved" in (vaults["present"] / linker).read_text(encoding="utf-8")
+
+
+def test_a_marked_entity_destination_is_refused_as_any_occupied_one(tmp_path: Path) -> None:
+    """RAW: a guest naming an entity whose page is a protected capture is refused
+    as for any occupied destination on a vault with no policy, without the path."""
+    import shutil
+
+    answers = {}
+    for which, name, text in (
+        (
+            "marked",
+            "__exomem_raw_v1__Wanda Grey",
+            _page("Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey"),
+        ),
+        ("visible", "Wanda Grey", _page("Scratch", "Not an entity.", type="note")),
+    ):
+        occupant = f"{KB}/Entities/People/{name}.md"
+        vault = _materialize(tmp_path / which / "vault", {**_filler(), occupant: text}, "external")
+        shutil.rmtree(vault / KB / "_Governance")
+        answer = _call(
+            vault, _principal("external"), "connect_memory", operation="create-entity",
+            name=name, entity_type="person", summary="A person.",
+        )
+        answers[which] = _text(answer).replace(name, "<name>")
+        assert (vault / occupant).read_text(encoding="utf-8") == text
+
+    assert answers["marked"] == answers["visible"]
+    assert "ENTITY_EXISTS" in answers["marked"], answers["marked"]
+
+
+#: Whole-vault aggregates a guest reaches on a vault with no policy.
+_RAW_AGGREGATES: dict[str, tuple[str, dict[str, Any]]] = {
+    "activation": ("review_memory", {"mode": "activation"}),
+    "audit": ("review_memory", {"mode": "audit", "detail": "full"}),
+    "relation-queue": ("review_memory", {"mode": "relation-queue"}),
+    "suggest-relations": (
+        "connect_memory",
+        {"operation": "suggest-relations", "path": f"{NOTES}/alpha.md"},
+    ),
+}
+
+
+def test_a_guests_whole_vault_aggregates_read_as_if_the_marked_page_were_absent(
+    tmp_path: Path,
+) -> None:
+    """RAW: an aggregate reduces every page, so no filter on its result removes
+    a protected capture. Activation coverage admits each page through RAW and is
+    served; the audit, the relation queue and relation proposals read files RAW
+    does not admit and are refused, as under a policy. Either way a guest's
+    answer is the same whether or not the capture exists."""
+    vaults = _raw_twins(
+        tmp_path,
+        {
+            **_filler(),
+            f"{NOTES}/alpha.md": _page(
+                "Alpha", "See [[__exomem_raw_v1__gamma-secret]].", type="insight"
+            ),
+        },
+        {
+            f"{NOTES}/__exomem_raw_v1__gamma-secret.md": _page(
+                "Gamma", "Secret plan. See [[alpha]].", type="insight"
+            ),
+        },
+    )
+    owner = {
+        variant: _call(vault, None, "review_memory", mode="activation")["coverage"]
+        for variant, vault in vaults.items()
+    }
+    assert owner["present"]["eligible_pages"] == owner["absent"]["eligible_pages"] + 1, owner
+
+    for label, (command, kwargs) in _RAW_AGGREGATES.items():
+        guest = [
+            _text(_stable(_call(vault, _principal("external"), command, **kwargs)))
+            for vault in vaults.values()
+        ]
+        assert guest[0] == guest[1], label
+    activation = _call(vaults["present"], _principal("external"), "review_memory", mode="activation")
+    assert activation["coverage"]["eligible_pages"] > 0, activation["coverage"]
+
+
+#: A hosted tenant: the gateway's principal for one opaque 256-bit scope.
+_HOSTED_SCOPE = "A" * 43
+
+
+def test_a_hosted_tenant_keeps_the_audit_and_folder_delete_on_a_vault_with_no_policy(
+    tmp_path: Path,
+) -> None:
+    """A hosted cell has no owner binding, so RAW does not restrict its tenant:
+    on a vault with no policy the tenant keeps what a guest is refused."""
+    import shutil
+
+    from exomem.governance.principal import resolve_hosted_principal
+
+    box = f"{NOTES}/Box"
+    vault = _materialize(
+        tmp_path / "vault",
+        {**_filler(), f"{box}/open.md": _page("Open", "Open box page.", type="insight")},
+        "external",
+    )
+    shutil.rmtree(vault / KB / "_Governance")
+    tenant = resolve_hosted_principal(_HOSTED_SCOPE)
+
+    audit = _call(vault, tenant, "review_memory", mode="audit", detail="full")
+    deleted = _call(
+        vault, tenant, "manage_memory_file", operation="delete", path=box, recursive=True, confirm=True
+    )
+
+    assert "summary" in audit, audit
+    assert "__error__" not in deleted, deleted
+    assert not (vault / box).exists()
+
+
+@pytest.mark.parametrize("query", ["orchard", "", "privateorchard"])
+def test_raw_recall_admits_before_selection_and_keeps_owner_cache_separate(tmp_path: Path, query: str) -> None:
+    """Protected matches cannot occupy a guest's slots, including after an owner search."""
+    from exomem import freshness, lexstore
+
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    roots = [tmp_path / "absent", tmp_path / "present"]
+    for root in roots:
+        folder = root / NOTES
+        folder.mkdir(parents=True)
+        (folder / "alpha.md").write_text(_page("Alpha", "orchard public fruit", type="insight", updated="2020-01-01"))
+    for index in range(12):
+        (roots[1] / NOTES / f"__exomem_raw_v1__hidden-{index}.md").write_text(
+            _page("Protected orchard", "privateorchard orchard", type="insight", updated="2026-10-01")
+        )
+    answers = []
+    for root in roots:
+        _reset()
+        freshness.rebaseline(root)
+        assert lexstore.get_store(root).rebuild_atomic()
+        with request_scope(guest):
+            first = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
+        with library_scope():
+            owner = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
+        with request_scope(guest):
+            again = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
+        assert again == first
+        if root == roots[1]:
+            assert "__exomem_raw_v1__" in _text(owner)
+        answers.append(first)
+    assert answers[0] == answers[1]
+    if query != "privateorchard":
+        assert "alpha.md" in _text(answers[0])
+
+
+def test_owner_session_closure_rechecks_raw_admission_before_ranking(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+    from dataclasses import replace
+
+    from test_authorization_session_lifecycle import NOW, _custody, _file_connection
+
+    from exomem import freshness, lexstore, relation_census
+    from exomem.governance import authorization_session_lifecycle as lifecycle, raw_protection
+
+    root = tmp_path / "vault"
+    folder = root / NOTES
+    folder.mkdir(parents=True)
+    (folder / "alpha.md").write_text(_page("Public", "orchard public", type="insight", updated="2020-01-01"))
+    (folder / "__exomem_raw_v1__original.md").write_text(
+        _page("Protected", "orchard original", type="insight", updated="2026-10-01")
+    )
+    _reset()
+    freshness.rebaseline(root)
+    assert lexstore.get_store(root).rebuild_atomic()
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    owner = owner_principal(surface="library")
+    database = tmp_path / "sessions.sqlite"
+    connection, migration = _file_connection(database)
+    custody = _custody(migration.activation_state_digest)
+    issued = lifecycle.open_session(
+        connection, custody=custody, principal_id=owner.audience_id,
+        issuer_family=owner.issuer_family, now=NOW, ttl_seconds=600,
+    )
+    context = lifecycle.resume_session(
+        connection, custody=custody, bearer=issued.bearer,
+        principal_id=owner.audience_id, issuer_family=owner.issuer_family, now=NOW,
+    )
+    session_owner = owner.with_verified_authorization_session(context, issuer_family=owner.issuer_family)
+    monkeypatch.setattr(raw_protection.time, "time", lambda: NOW)
+    monkeypatch.setattr(raw_protection.store, "open_authorization_session_connection", lambda _root: sqlite3.connect(database))
+    monkeypatch.setattr(raw_protection.authorization_custody, "load_authorization_custody", lambda _root, **_kwargs: custody)
+    args = dict(query="orchard", mode="keyword", limit=1, graph=False)
+    reference = "See [[__exomem_raw_v1__original]] for the original."
+    with request_scope(owner):
+        warm_owner = commands.op_ask_memory(root, **args)
+    with request_scope(session_owner):
+        valid_session = commands.op_ask_memory(root, **args)
+        valid_audit = commands.op_review_memory(root, mode="audit", detail="full")
+        valid_census = relation_census.census(root)
+        assert egress.redact_withheld_references(root, reference, purpose="recall") == reference
+    assert valid_audit.get("available") is not False
+    assert isinstance(valid_census["graph_generation"], int)
+    assert "__exomem_raw_v1__original.md" in _text(warm_owner)
+    assert "__exomem_raw_v1__original.md" in _text(valid_session)
+    lifecycle.close_verified_session(connection, custody=custody, context=context, now=NOW)
+    for invalid_owner in (session_owner, owner.with_authorization_session("unverified"), replace(owner, issuer_family=None)):
+        with request_scope(invalid_owner):
+            if invalid_owner is session_owner:
+                with pytest.raises(egress.AuthorizationSessionDecisionUnavailable):
+                    commands.op_ask_memory(root, **args)
+            else:
+                result = commands.op_ask_memory(root, **args)
+                assert [hit["path"] for hit in result] == [f"{NOTES}/alpha.md"]
+            audit = commands.op_review_memory(root, mode="audit", detail="full")
+            census = relation_census.census(root)
+            assert "__exomem_raw_v1__" not in egress.redact_withheld_references(root, reference, purpose="recall")
+        assert audit["available"] is False
+        assert census["graph_generation"] is None
+        assert census["cohort"]["eligible_pages"] == valid_census["cohort"]["eligible_pages"] - 1
+    connection.close()
+
+
+@pytest.mark.parametrize(("backend", "result_level", "scenes"), [
+    ("fts5", "page", False), ("python", "page", False), ("fts5", "unit", False),
+    ("fts5", "page", True), ("fts5", "unit", True),
+])
+def test_raw_hidden_term_frequencies_do_not_reorder_guest_hybrid_hits(tmp_path, monkeypatch, backend, result_level, scenes):
+    from exomem import bm25, freshness, lexstore
+
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", backend)
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    answers = []
+    for present in (False, True):
+        root = tmp_path / str(present)
+        folder = root / NOTES
+        folder.mkdir(parents=True)
+        for name, body in {"alpha": "apple apple apple apple apple pear", "beta": "apple pear pear pear pear pear"}.items():
+            (folder / f"{name}.md").write_text(_page(name, f"- [fact] {body} ^fruit", type="insight", updated="2020-01-01"))
+        for i in range(8):
+            (folder / f"filler-{i}.md").write_text(_page("Filler", "- [fact] unrelated public prose ^filler", type="insight"))
+        if present:
+            parent = f"{NOTES}/__exomem_raw_v1__video.mp4"
+            if scenes:
+                (root / (parent + ".md")).write_text(_page("Protected video", "private video", type="source"))
+            for i in range(10):
+                name = f"frame-{i}.jpg.md" if scenes else f"__exomem_raw_v1__hidden-{i}.md"
+                fields = {"parent_media": parent} if scenes else {}
+                (folder / name).write_text(
+                    _page("Protected", "- [fact] apple apple apple apple apple apple ^fruit", type="insight", **fields)
+                )
+        _reset()
+        bm25._INDEX.clear()
+        freshness.rebaseline(root)
+        if backend == "fts5":
+            assert lexstore.get_store(root).rebuild_atomic()
+        with request_scope(guest):
+            result = commands.op_ask_memory(
+                root, query="apple pear", mode="hybrid", limit=2, graph=False, rerank=False,
+                prefer_compiled=False, prefer_active=False, result_level=result_level,
+            )
+        answers.append(result)
+    assert answers[0] == answers[1]
+    assert "alpha.md" in _text(answers[0]) and "beta.md" in _text(answers[0])
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+def test_recall_does_not_emit_a_scene_child_of_a_protected_parent(tmp_path: Path, mode: str) -> None:
+    from exomem import freshness, lexstore
+
+    root = tmp_path / "vault"
+    folder = root / NOTES
+    folder.mkdir(parents=True)
+    parent = f"{NOTES}/__exomem_raw_v1__video.mp4"
+    (root / (parent + ".md")).write_text(_page("Protected video", "private video", type="source"))
+    (folder / "frame.jpg.md").write_text(_page(
+        "Frame", "orchard scene", type="source", parent_media=parent,
+        media_type="image", evidence_file=f"{NOTES}/frame.jpg",
+    ))
+    (folder / "alpha.md").write_text(_page("Alpha", "orchard public", type="insight"))
+    _reset()
+    freshness.rebaseline(root)
+    assert lexstore.get_store(root).rebuild_atomic()
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
+        result = commands.op_ask_memory(root, query="orchard", mode=mode, limit=1, graph=False)
+    assert "alpha.md" in _text(result)
+    assert "frame.jpg" not in _text(result)
+    assert "__exomem_raw_v1__" not in _text(result)
+
+
+@pytest.mark.parametrize(("mode", "query"), [("keyword", "orchard"), ("hybrid", "orchard"), ("keyword", "")])
+@pytest.mark.parametrize("protected_parent", [False, True])
+def test_recall_authorizes_a_declared_missing_parent_without_hiding_public_orphans(
+    tmp_path: Path, mode: str, query: str, protected_parent: bool,
+) -> None:
+    from exomem import freshness, lexstore
+
+    folder = tmp_path / NOTES
+    folder.mkdir(parents=True)
+    parent = "__exomem_raw_v1__missing.mp4" if protected_parent else "missing.mp4"
+    child = f"{NOTES}/frame.jpg.md"
+    (tmp_path / child).write_text(_page(
+        "Frame", "orchard scene", type="source", parent_media=f"{NOTES}/{parent}",
+        media_type="image", evidence_file=f"{NOTES}/frame.jpg",
+    ))
+    _reset()
+    freshness.rebaseline(tmp_path)
+    assert lexstore.get_store(tmp_path).rebuild_atomic()
+    args = dict(query=query, mode=mode, limit=1, graph=False)
+    with library_scope():
+        owner = commands.op_ask_memory(tmp_path, **args)
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
+        result = commands.op_ask_memory(tmp_path, **args)
+    assert child in _text(owner)
+    assert (child in _text(result)) is not protected_parent
+
+
+def test_hosted_imported_raw_reference_obeys_only_configured_policy(tmp_path: Path) -> None:
+    from exomem.governance.principal import resolve_hosted_principal
+
+    tenant = resolve_hosted_principal(_HOSTED_SCOPE)
+    vault = tmp_path / "vault"
+    path = vault / NOTES / "__exomem_raw_v1__alpha.txt.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(_page("Imported", "imported original", type="source"))
+    path.with_suffix("").write_text("imported original")
+    text = "See [[__exomem_raw_v1__alpha.txt]] for the original."
+    assert egress.redact_withheld_references(vault, text, principal=tenant) == text
+    _govern(vault, tenant.audience_id, "Notes/**")
+    _reset()
+    assert "__exomem_raw_v1__alpha.txt" not in egress.redact_withheld_references(vault, text, principal=tenant)
+
+
+def test_a_hosted_tenants_raw_capture_is_refused_before_anything_is_written(
+    tmp_path: Path,
+) -> None:
+    """A hosted cell cannot identify its owner, so it cannot keep an original
+    owner-only: a RAW capture is refused, and the tenant never believes a
+    capture is protected when it is not."""
+    import shutil
+    from types import SimpleNamespace
+
+    from exomem import server_hosted
+    from exomem.governance.principal import resolve_hosted_principal
+
+    vault = _materialize(tmp_path / "vault", _filler(), "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    tenant = resolve_hosted_principal(_HOSTED_SCOPE)
+
+    answer = _call(
+        vault, tenant, "preserve_evidence", scope="Test", category="raw", filename="own.txt",
+        content="tenant original", raw_protection=True,
+    )
+
+    assert "RAW_PROTECTION_UNAVAILABLE" in _text(answer), answer
+    assert not (vault / KB / "Evidence").exists() or not any((vault / KB / "Evidence").rglob("*own*"))
+    # The hosted boundary redacts exception text; the refusal still says why.
+    hosted = json.loads(
+        server_hosted._error_response(
+            "RAW_PROTECTION_UNAVAILABLE", config=SimpleNamespace(cell_id="cell"),
+            operation="preserve_evidence", started=0.0,
+        ).body
+    )["error"]
+    assert "cannot identify its owner" in hosted["message"], hosted
+
+
+def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAW: vector, image and rerank ranks and scores are cut at a candidate
+    boundary that marked pages occupy before admission, so a guest receives
+    none of them. Embeddings are off here, so `find` is stubbed with
+    a hit carrying every lane's signal."""
+    import shutil
+
+    from exomem.find_types import Hit
+
+    vault = _materialize(tmp_path / "vault", _filler(), "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    hit = Hit(
+        path=f"{NOTES}/filler-orchard.md", type="insight", scope=None,
+        title="Filler Orchard", updated="", excerpt="Orchard logistics.",
+        bm25_rank=1, vector_rank=1, vector_score=0.9, clip_rank=1, clip_score=0.8,
+        keyword_rank=1, rerank_score=0.7,
+    )
+    monkeypatch.setattr(find_module, "find", lambda *_args, **_kwargs: [hit])
+
+    local = _call(vault, None, "ask_memory", query="orchard", detail="full")
+    guest = _call(vault, _principal("external"), "ask_memory", query="orchard", detail="full")
+
+    assert {"vector_score", "clip_score", "rerank_score"} <= set(local[0]["signals"]), local
+    assert guest[0]["path"] == hit.path and "signals" not in guest[0], guest
 
 
 def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:

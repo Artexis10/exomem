@@ -2092,6 +2092,7 @@ def search_bm25(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     repair: bool = True,
 ) -> list[tuple[str, float]] | None:
     """Top-k `(rel_path, score)` from the FTS5 index, or None → use the
@@ -2109,7 +2110,7 @@ def search_bm25(
         return []
     store = get_store(vault_root)
     _BM25_ERROR.error_class = None
-    result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
+    result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair, admitted_paths=admitted_paths)
     if repair:
         _admit_after_bounded_runtime_repair(vault_root, result)
     return result
@@ -2132,6 +2133,7 @@ def search_bm25_result(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    admitted_paths: set[str] | None = None,
     allow_delta: bool = True,
     min_matched_terms: int = 1,
     corroboration_tokens: list[str] | None = None,
@@ -2184,6 +2186,7 @@ def search_bm25_result(
         scope,
         freshness,
         allowed_paths,
+        admitted_paths=admitted_paths,
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
         corroboration_tokens=corroboration_tokens,
@@ -2352,6 +2355,7 @@ def search_substring(
     freshness: tuple | None = None,
     repair: bool = True,
     k: int | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> list[str] | None:
     """The keyword lane's match set (every whitespace token a substring of
     title or body), ordered `updated` desc then path desc, navigation files
@@ -2365,7 +2369,7 @@ def search_substring(
     if not tokens:
         return []
     store = get_store(vault_root)
-    result = store.search_substring(tokens, scope, freshness, repair, k)
+    result = store.search_substring(tokens, scope, freshness, repair, k, allowed_paths)
     if repair:
         _admit_after_bounded_runtime_repair(vault_root, result)
     return result
@@ -2378,6 +2382,7 @@ def search_substring_result(
     scope: str = "kb",
     freshness: tuple | None = None,
     k: int | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> CatalogQueryResult[list[str]]:
     """Non-walking maintained-catalog substring query with explicit readiness."""
     if not _usable():
@@ -2392,6 +2397,7 @@ def search_substring_result(
         scope,
         freshness,
         k,
+        allowed_paths,
     )
 
 
@@ -2429,6 +2435,7 @@ def search_semantic_units(
     freshness: tuple | None = None,
     allowed_unit_refs: set[str] | None = None,
     allowed_parent_paths: set[str] | None = None,
+    admitted_parent_paths: set[str] | None = None,
     literal_all: bool = False,
     _repair_stale: bool = False,
     _validate_current: bool = True,
@@ -2469,6 +2476,7 @@ def search_semantic_units(
             freshness=freshness,
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
+            admitted_parent_paths=admitted_parent_paths,
             literal_all=literal_all,
             _repair_stale=_repair_stale,
             _validate_current=_validate_current,
@@ -2498,6 +2506,7 @@ def search_semantic_units(
         repair,
         clauses=clauses,
         allowed_parent_paths=allowed_parent_paths,
+        admitted_parent_paths=admitted_parent_paths,
     )
     if hits is None:
         return None
@@ -2549,6 +2558,7 @@ def search_semantic_units(
             freshness=freshness,
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
+            admitted_parent_paths=admitted_parent_paths,
             literal_all=literal_all,
             _repair_stale=False,
             repair=repair,
@@ -2576,6 +2586,7 @@ def search_semantic_units_result(
     freshness: tuple | None = None,
     allowed_unit_refs: set[str] | None = None,
     allowed_parent_paths: set[str] | None = None,
+    admitted_parent_paths: set[str] | None = None,
     literal_all: bool = False,
     _repair_stale: bool = False,
     _validate_current: bool = True,
@@ -2615,6 +2626,7 @@ def search_semantic_units_result(
         recall_checkpoint=recall_checkpoint,
         allow_delta=allow_delta,
         allowed_parent_paths=allowed_parent_paths,
+        admitted_parent_paths=admitted_parent_paths,
     )
     if not result.readiness.complete or not _validate_current:
         return result
@@ -2662,6 +2674,7 @@ def search_semantic_units_result(
                 freshness=freshness,
                 allowed_unit_refs=allowed_unit_refs,
                 allowed_parent_paths=allowed_parent_paths,
+                admitted_parent_paths=admitted_parent_paths,
                 literal_all=literal_all,
                 _repair_stale=False,
                 repair=repair,
@@ -6752,6 +6765,8 @@ class LexicalStore:
         freshness: tuple | None,
         allowed_paths: set[str] | None = None,
         repair: bool = True,
+        *,
+        admitted_paths: set[str] | None = None,
     ) -> list[tuple[str, float]] | None:
         if self._failed:
             return None
@@ -6764,7 +6779,7 @@ class LexicalStore:
                 freshness,
                 repair=repair,
                 query_fn=lambda conn: self._bm25_query(
-                    conn, stemmed_tokens, k, scope, allowed_paths
+                    conn, stemmed_tokens, k, scope, allowed_paths, admitted_paths=admitted_paths
                 ),
             )
         except sqlite3.Error as e:
@@ -6783,6 +6798,7 @@ class LexicalStore:
         freshness: tuple | None,
         allowed_paths: set[str] | None = None,
         *,
+        admitted_paths: set[str] | None = None,
         allow_delta: bool = True,
         min_matched_terms: int = 1,
         corroboration_tokens: list[str] | None = None,
@@ -6800,6 +6816,7 @@ class LexicalStore:
             freshness,
             lambda conn: self._bm25_query(
                 conn, stemmed_tokens, k, scope, allowed_paths,
+                admitted_paths=admitted_paths,
                 min_matched_terms=min_matched_terms,
                 term_units=term_units,
                 corroboration_tokens=corroboration_tokens,
@@ -7025,6 +7042,7 @@ class LexicalStore:
         scope: str,
         allowed_paths: set[str] | None = None,
         *,
+        admitted_paths: set[str] | None = None,
         min_matched_terms: int = 1,
         term_units: list[list[object]] | None = None,
         corroboration_tokens: list[str] | None = None,
@@ -7035,6 +7053,18 @@ class LexicalStore:
         query_units: list | None = None,
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
+        from . import bm25 as bm25_module
+
+        admitted_corpus = None
+        if admitted_paths is not None:
+            col = "in_vault" if scope == "vault" else "in_kb"
+            admitted_corpus = {
+                path: stemmed.split() for path, stemmed in conn.execute(
+                    "SELECT p.path, fts.stemmed FROM pages p JOIN fts ON fts.rowid = p.rowid "
+                    f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
+                )
+            }
         if term_budget is not None and query_units is not None:
             from . import bm25 as bm25_module
 
@@ -7045,7 +7075,12 @@ class LexicalStore:
                     bm25_module.run_content_stems(unit.stems) if unit.run else unit.stems
                 )
             ]
-            frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
+            if admitted_corpus is None:
+                frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
+            else:
+                document_tokens = [set(doc) for doc in admitted_corpus.values()]
+                frequencies = {token: sum(token in doc for doc in document_tokens) for token in measured}
+                pages = len(admitted_corpus)
             kept, counted, dropped = select_query_units(
                 query_units,
                 frequencies,
@@ -7134,6 +7169,15 @@ class LexicalStore:
         )
         allowed_clause += excluded_clause
         params.extend(excluded_params)
+        if admitted_corpus is not None:
+            candidates = {row[0] for row in conn.execute(
+                "SELECT p.path FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause,
+                params,
+            )}
+            return bm25_module.score_token_corpus(
+                admitted_corpus, tokens, k, allowed_paths=candidates,
+            )
         if term_budget is not None and corroborated:
             # Bounded: rank every row the kept units match that passes the
             # scope, path and exclusion filters, then run the corroboration
@@ -7451,6 +7495,41 @@ class LexicalStore:
                 out.setdefault(str(parent), set()).add(str(category))
         return {path: frozenset(found) for path, found in out.items()}
 
+    def units_of(
+        self, paths: Iterable[str], *, categories: Iterable[str] | None = None
+    ) -> list[tuple[str, str, str, str]] | None:
+        """`(parent_path, unit_ref, category, content)` for every semantic unit
+        of the given pages, or only those filed under `categories`: the rows
+        `unit_categories_of` reads, with the text a caller needs to decide each
+        unit for a reader. None when the catalogue is absent or stale."""
+        wanted = sorted({str(path) for path in paths if str(path)})
+        filed = None if categories is None else sorted({str(c) for c in categories if str(c)})
+        if not wanted or self._failed or not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit probe declined (%s)")
+            return None
+        try:
+            if not self._schema_is_current(conn):
+                return None
+            query = (
+                "SELECT parent_path, unit_ref, category, content FROM semantic_units "
+                "WHERE parent_path IN (SELECT value FROM json_each(?))"
+            )
+            params = [json.dumps(wanted, ensure_ascii=False)]
+            if filed is not None:
+                query += " AND category IN (SELECT value FROM json_each(?))"
+                params.append(json.dumps(filed, ensure_ascii=False))
+            rows = conn.execute(query + " ORDER BY parent_path, source_order", params).fetchall()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit probe declined (%s)")
+            return None
+        finally:
+            conn.close()
+        return [(str(parent), str(ref), str(category or ""), str(content)) for parent, ref, category, content in rows]
+
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
 
@@ -7702,6 +7781,7 @@ class LexicalStore:
         *,
         clauses: tuple | None = None,
         allowed_parent_paths: set[str] | None = None,
+        admitted_parent_paths: set[str] | None = None,
     ) -> list[SemanticUnitLexicalHit] | None:
         if categories or kinds or clauses:
             # Exact category/kind selection (flat axes or a branch-preserving DNF
@@ -7720,7 +7800,7 @@ class LexicalStore:
                 allowed_unit_refs,
                 literal_tokens,
                 clauses=clauses,
-                allowed_parent_paths=allowed_parent_paths,
+                allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
             )
             return result.value if result.readiness.complete else None
         if self._failed:
@@ -7742,7 +7822,7 @@ class LexicalStore:
                     scope,
                     allowed_unit_refs,
                     literal_tokens,
-                    allowed_parent_paths=allowed_parent_paths,
+                    allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 ),
             )
         except sqlite3.Error as e:
@@ -7767,6 +7847,7 @@ class LexicalStore:
         recall_checkpoint: Any | None = None,
         allow_delta: bool = True,
         allowed_parent_paths: set[str] | None = None,
+        admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
         query_units: list | None = None,
         term_budget: QueryTermBudget | None = None,
@@ -7786,7 +7867,18 @@ class LexicalStore:
             tokens: list[str] = []
             if query_units is not None and term_budget is not None:
                 measured = [stem for unit in query_units for stem in unit.stems]
-                frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
+                if admitted_parent_paths is None:
+                    frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
+                else:
+                    col = "in_vault" if scope == "vault" else "in_kb"
+                    corpus = [set(stemmed.split()) for (stemmed,) in conn.execute(
+                        "SELECT unit_fts.stemmed FROM semantic_units u "
+                        "JOIN unit_fts ON unit_fts.rowid = u.rowid "
+                        f"WHERE u.{col} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
+                        (json.dumps(sorted(admitted_parent_paths), ensure_ascii=False),),
+                    )]
+                    frequencies = {token: sum(token in doc for doc in corpus) for token in measured}
+                    pages = len(corpus)
                 kept, _counted, _dropped = select_query_units(
                     query_units, frequencies, pages, term_budget,
                 )
@@ -7798,7 +7890,7 @@ class LexicalStore:
             return self._semantic_unit_query(
                 conn, tokens, k, categories, kinds, scope, allowed_unit_refs,
                 literal_tokens, dnf_clauses=clauses,
-                allowed_parent_paths=allowed_parent_paths,
+                allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
             )
 
@@ -7824,6 +7916,7 @@ class LexicalStore:
         dnf_clauses: tuple | None = None,
         *,
         allowed_parent_paths: set[str] | None = None,
+        admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
@@ -7872,6 +7965,22 @@ class LexicalStore:
                 + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
                 [*params, *literal_tokens, k],
             ).fetchall()
+        elif tokens and admitted_parent_paths is not None:
+            from . import bm25 as bm25_module
+
+            corpus = {
+                ref: stemmed.split() for ref, stemmed in conn.execute(
+                    "SELECT u.unit_ref, unit_fts.stemmed FROM semantic_units u "
+                    "JOIN unit_fts ON unit_fts.rowid = u.rowid "
+                    f"WHERE u.{col} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sorted(admitted_parent_paths), ensure_ascii=False),),
+                )
+            }
+            candidates = {row[1]: row for row in conn.execute(
+                f"SELECT {columns} FROM semantic_units u WHERE " + " AND ".join(clauses), params,
+            )}
+            scored = bm25_module.score_token_corpus(corpus, tokens, k, allowed_paths=set(candidates))
+            rows = [(*candidates[ref], score) for ref, score in scored]
         elif tokens:
             match = " OR ".join(f'"{token}"' for token in tokens)
             rows = conn.execute(
@@ -8185,6 +8294,7 @@ class LexicalStore:
         freshness: tuple | None,
         repair: bool = True,
         k: int | None = None,
+        allowed_paths: set[str] | None = None,
     ) -> list[str] | None:
         if self._failed:
             return None
@@ -8196,7 +8306,7 @@ class LexicalStore:
                 scope,
                 freshness,
                 repair=repair,
-                query_fn=lambda conn: self._substring_query(conn, tokens, scope, k),
+                query_fn=lambda conn: self._substring_query(conn, tokens, scope, k, allowed_paths),
             )
         except sqlite3.Error as e:
             self._note_query_failure(
@@ -8211,16 +8321,18 @@ class LexicalStore:
         scope: str,
         freshness: tuple | None,
         k: int | None = None,
+        allowed_paths: set[str] | None = None,
     ) -> CatalogQueryResult[list[str]]:
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._substring_query(conn, tokens, scope, k),
+            lambda conn: self._substring_query(conn, tokens, scope, k, allowed_paths),
             "lexical sidecar substring query failed (%s)",
         )
 
     def _substring_query(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,
+        allowed_paths: set[str] | None = None,
     ) -> list[str]:
         """Exact keyword contract: trigram MATCH narrows (tokens >= 3 chars),
         then instr() verifies EVERY token against the stored raw text — the
@@ -8244,6 +8356,9 @@ class LexicalStore:
         for t in tokens:
             clauses.append("(instr(tri.title_lower, ?) > 0 OR instr(tri.body_lower, ?) > 0)")
             params.extend((t, t))
+        if allowed_paths is not None:
+            clauses.append("p.path IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         limit = ""
         if k is not None:
             limit = " LIMIT ?"

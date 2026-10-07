@@ -31,6 +31,7 @@ from .preserve import (
     destination_duplicate_index,
     destination_segment_refusal,
     preserve_stream,
+    validate_raw_capture,
 )
 from .vault import (
     FrontmatterError,
@@ -973,11 +974,17 @@ def _existing_receipt(
     *,
     lane: str,
     destination: str,
+    raw_protection: bool = False,
 ) -> AdoptionReceiptSnapshot | None:
     snapshot = _find_adoption_receipt(vault_root, envelope.key_digest)
     if snapshot is None:
         return None
     receipt = snapshot.receipt
+    from .governance.raw_protection import marked
+
+    validate_raw_capture(destination=str(receipt["stored_path"]), raw_protection=raw_protection)
+    if marked(str(receipt["stored_path"])) != raw_protection:
+        raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused with different raw protection")
     expected = {
         "trigger": envelope.trigger,
         "selected_file_id": envelope.selected_file_id,
@@ -1126,10 +1133,12 @@ def _capture_source_adoption(
         return _finish_adoption(outcomes)
     selected = files[selected_index]
     try:
+        validate_raw_capture(destination=destination, raw_protection=bool(source_fields.get("raw_protection")))
         receipt = _existing_receipt(
-            vault_root, envelope, lane="source", destination=destination
+            vault_root, envelope, lane="source", destination=destination,
+            raw_protection=bool(source_fields.get("raw_protection")),
         )
-    except SafeFetchError as error:
+    except (PreserveError, SafeFetchError) as error:
         outcomes[selected_index] = _failed(envelope.selected_file_id, error)
         return _finish_adoption(outcomes)
 
@@ -1178,7 +1187,8 @@ def _capture_source_adoption(
                 holder_kind="command",
             ):
                 raced = _existing_receipt(
-                    vault_root, envelope, lane="source", destination=destination
+                    vault_root, envelope, lane="source", destination=destination,
+                    raw_protection=bool(source_fields.get("raw_protection")),
                 )
                 if raced is not None:
                     _assert_replay_identity(vault_root, raced, artifact, lane="source")
@@ -1232,6 +1242,7 @@ def _preserve_evidence_adoption(
     category: str,
     files: list[Mapping[str, object]],
     adoption: object,
+    raw_protection: bool = False,
 ) -> dict:
     prepared = _adoption_inputs(files, adoption)
     if isinstance(prepared, dict):
@@ -1253,10 +1264,11 @@ def _preserve_evidence_adoption(
     destination = _destination(vault_root, "Evidence", scope, category)
     selected = files[selected_index]
     try:
+        validate_raw_capture(destination=destination, raw_protection=raw_protection)
         receipt = _existing_receipt(
-            vault_root, envelope, lane="evidence", destination=destination
+            vault_root, envelope, lane="evidence", destination=destination, raw_protection=raw_protection,
         )
-    except SafeFetchError as error:
+    except (PreserveError, SafeFetchError) as error:
         outcomes[selected_index] = _failed(envelope.selected_file_id, error)
         return _finish_adoption(outcomes)
 
@@ -1286,6 +1298,12 @@ def _preserve_evidence_adoption(
             outcomes[selected_index] = _failed(envelope.selected_file_id, error)
             return _finish_adoption(outcomes)
 
+        try:
+            validate_raw_capture(artifact.filename, destination=destination, raw_protection=raw_protection)
+        except PreserveError as error:
+            outcomes[selected_index] = _failed(artifact.file_id, error)
+            return _finish_adoption(outcomes)
+
         if receipt is not None:
             try:
                 _assert_replay_identity(vault_root, receipt, artifact, lane="evidence")
@@ -1304,7 +1322,7 @@ def _preserve_evidence_adoption(
                 holder_kind="command",
             ):
                 raced = _existing_receipt(
-                    vault_root, envelope, lane="evidence", destination=destination
+                    vault_root, envelope, lane="evidence", destination=destination, raw_protection=raw_protection,
                 )
                 if raced is not None:
                     _assert_replay_identity(vault_root, raced, artifact, lane="evidence")
@@ -1322,6 +1340,7 @@ def _preserve_evidence_adoption(
                             adoption_seed=envelope.seed(
                                 lane="evidence", destination=destination
                             ),
+                            raw_protection=raw_protection,
                         )
                     payload = result.as_dict()
             if raced is not None:
@@ -1514,6 +1533,7 @@ def preserve_artifacts(
     files: list[Mapping[str, object]],
     adoption: Mapping[str, object] | None = None,
     transcriptions: list[Mapping[str, object]] | tuple = (),
+    raw_protection: bool = False,
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard.
 
@@ -1530,6 +1550,7 @@ def preserve_artifacts(
             category=category,
             files=files,
             adoption=adoption,
+            raw_protection=raw_protection,
         )
     # Before the empty-batch shortcut: a malformed destination is a property of
     # the call, so `files=[]` with `scope="a/b"` must refuse rather than report
@@ -1570,7 +1591,10 @@ def preserve_artifacts(
     # One pass over the destination's sidecars for the whole batch. Every file
     # this call stores is added to it below, so a later file in the same batch
     # still sees an earlier one's bytes.
-    duplicates = destination_duplicate_index(vault_root, scope=scope, category=category)
+    duplicates = destination_duplicate_index(
+        vault_root, scope=scope, category=category, raw_protection=raw_protection,
+        wanted_hashes=frozenset(artifact.sha256 for artifact in staged.values()),
+    )
     try:
         for index, artifact in staged.items():
             try:
@@ -1590,7 +1614,11 @@ def preserve_artifacts(
                 # stored file gets. Without that an all-duplicate batch, which
                 # is what retrying under a new identity produces, would come
                 # back as a bare leaf dict with no request or receipt identity.
-                duplicate = duplicates.get(artifact.sha256)
+                protected = validate_raw_capture(
+                    artifact.filename, destination=_destination(vault_root, "Evidence", scope, category),
+                    raw_protection=raw_protection,
+                )
+                duplicate = duplicates.get(artifact.sha256) if protected == raw_protection else None
                 if duplicate is not None:
                     mark_active_mutation_committed()
                     outcomes[index] = {
@@ -1630,6 +1658,7 @@ def preserve_artifacts(
                             stream=stream,
                             content_type=artifact.content_type,
                             max_bytes=MAX_FILE_BYTES,
+                            raw_protection=raw_protection,
                             **(
                                 {"text": transcription, "text_origin": "client"}
                                 if transcription

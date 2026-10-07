@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 1aef4c0810e63a377b046606677c4e0100ebc534a7973fe81292b21b344241fc
+  skill_contract: 4867d5c4bc7a6760f1692f84eeb5e9fe9304d1d203fc10d625afd7faf06dfe6e
   version: "0.32.0"
 ---
 

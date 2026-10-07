@@ -90,9 +90,9 @@ has a port, and an scp-style remote SHALL contribute no term to any subject evid
 A reference starts after whitespace, a bracket, a quote, a backtick, markdown emphasis,
 `=` or `,`. A relative path SHALL contribute only its final segment. A slash run is a
 relative path when it starts `./` or `../` or its final segment has a file extension,
-and a path into the indexed `Knowledge Base/` folder SHALL be one reference up to its
-file name, spaces included, so a vault page path names its page and none of its folder
-names. Any other slash run, such as `records/staging/prod`, is prose. A run whose final
+and a path into the indexed `Knowledge Base/` folder, rooted or not, SHALL be one
+reference up to its file name, spaces included, so a vault page path names its page and
+none of its folder names. Any other slash run, such as `records/staging/prod`, is prose. A run whose final
 segment is a dotted name, such as `records/Node.js`, loses its other words: an
 accepted residual. A quoted or backticked span SHALL be read as one reference, spaces
 included. Whether a turn only points back or is a follow-up
@@ -177,8 +177,8 @@ derived only from the caller's released view.
   is served, while a turn naming the same project in prose still resolves it
 - **AND** slash-joined words without a root, a leading `./` or `../`, or a file name at
   the end, such as `records/staging/prod` or `Node.js/records`, stay prose
-- **AND** an unquoted `Knowledge Base/.../<Name>.md` reaches that page and no other
-  anchor
+- **AND** an unquoted `Knowledge Base/.../<Name>.md`, or the same path after a root
+  such as `/srv/vault/`, reaches that page and no other anchor
 
 #### Scenario: Two same-kind domains named apart are both served
 - **WHEN** a turn spells the names of two same-kind anchors that share no anchor

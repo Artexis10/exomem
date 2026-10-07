@@ -150,6 +150,31 @@ def census_vault(tmp_path: Path) -> Path:
     return _built(_seed_census_vault(tmp_path / "vault"))
 
 
+def test_raw_write_does_not_change_external_census_freshness(census_vault: Path) -> None:
+    """A content-scoped census must not expose hidden whole-vault write increments."""
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
+        before = relation_census.census(census_vault)
+    _write(census_vault, f"{NOTES}/__exomem_raw_v1__private.md", _page("insight", "Private", "Private original"))
+    _built(census_vault)
+    with request_scope(guest):
+        after = relation_census.census(census_vault)
+    assert after["metrics"] == before["metrics"]
+    assert after["cohort"] == before["cohort"]
+    assert before["graph_generation"] is None
+    assert after["graph_generation"] is None
+    with library_scope():
+        local = relation_census.census(census_vault)
+    assert isinstance(local["graph_generation"], int)
+    from exomem.governance.principal import resolve_hosted_principal
+
+    with request_scope(resolve_hosted_principal("A" * 43)):
+        hosted = relation_census.census(census_vault)
+    assert hosted["graph_generation"] == local["graph_generation"]
+    assert hosted["cohort"] == local["cohort"]
+    assert local["cohort"]["eligible_pages"] == before["cohort"]["eligible_pages"] + 1
+
+
 def test_census_reads_one_snapshot_and_parses_no_markdown(
     census_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -405,8 +430,9 @@ def test_counts_mode_emits_no_path_title_or_vault_key(census_vault: Path) -> Non
 
 
 def test_census_is_byte_identical_for_one_generation_and_registry(census_vault: Path) -> None:
-    first = relation_census.census(census_vault)
-    second = relation_census.census(census_vault)
+    with library_scope():
+        first = relation_census.census(census_vault)
+        second = relation_census.census(census_vault)
     registry = relation_registry.load_registry(census_vault)
 
     assert json.dumps(first) == json.dumps(second)

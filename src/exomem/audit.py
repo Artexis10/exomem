@@ -1910,8 +1910,14 @@ def _complete_semantic_category_summary(
 
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
     """Walk the KB once, parse every .md, return ParsedPage objects."""
+    from .governance import raw_protection
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
+        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+            continue
         try:
             mtime = path.stat().st_mtime
         except OSError:

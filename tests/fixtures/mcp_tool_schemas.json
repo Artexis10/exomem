@@ -652,6 +652,11 @@
           "type": "object",
           "description": "Selects exactly one supplied handle. Establishes eligibility,\nnot write consent; agent-initiated use obeys proactive_capture."
         },
+        "raw_protection": {
+          "default": false,
+          "description": "Keep the original owner-only until a whole-artifact release.",
+          "type": "boolean"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -1756,6 +1761,10 @@
           "type": "string",
           "description": "Pending additive request id (inspect via vocabulary-request)."
         },
+        "raw_release": {
+          "type": "object",
+          "description": "Version-1 whole-artifact recipient surface/issuer, purpose and included-location acknowledgment; use grant, scope=standing, path and audience."
+        },
         "response_detail": {
           "default": "full",
           "description": "Success detail: full (default), compact, or legacy.",
@@ -2448,6 +2457,11 @@
           "maxItems": 8,
           "type": "array"
         },
+        "raw_protection": {
+          "default": false,
+          "description": "Keep originals owner-only until whole-artifact release.",
+          "type": "boolean"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -2495,6 +2509,11 @@
         "description": {
           "type": "string",
           "description": "Sidecar description."
+        },
+        "raw_protection": {
+          "default": false,
+          "description": "Keep the original owner-only until a whole-artifact release.",
+          "type": "boolean"
         },
         "response_detail": {
           "default": "compact",

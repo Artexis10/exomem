@@ -63,13 +63,10 @@ IMPORTED_PATH_LABEL = "Imported"
 
 # One runtime migration rule serves bootstrap and refusals, including old profiles.
 CAPTURE_KIND_RULE = (
-    "Supply source_kind or source_type: the closest known kind or a new lowercase slug. "
-    f"Never {LEGACY_OTHER_KIND!r} or {UNCLASSIFIED_KIND!r}."
+    "Set source_kind/source_type: known/new slug, "
+    f"not {LEGACY_OTHER_KIND!r}/{UNCLASSIFIED_KIND!r}."
 )
-CAPTURE_KIND_MIGRATION = (
-    "Older optional-kind and 'other' instructions no longer govern capture; "
-    "retry with either existing kind argument."
-)
+CAPTURE_KIND_MIGRATION = "Replaces optional-kind capture."
 _HUMAN_CAPTURE = ContextVar("human_capture", default=False)
 
 
