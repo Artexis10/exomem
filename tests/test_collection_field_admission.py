@@ -482,3 +482,46 @@ def test_nested_field_grant_does_not_release_a_literal_dotted_property_or_source
     owner = tool(store, "record_memory", action="query", collection=IMPORT_CID,
                  query={"version": 1, "select": ["place", "alias"]})
     assert owner["rows"] == [{"place": place, "alias": "released-region"}]
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_time_output_classification_protects_source_aliases_and_shared_derivatives(store, classified):
+    """A classified time output whose source alias or derived offset/date remains visible to a recipient."""
+    from copy import deepcopy
+    from datetime import datetime
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    fields = WORKOUT_FIELDS + "    alias: {type: string}\n"
+    if classified:
+        fields = fields.replace("started_at: {type: datetime}", "started_at: {type: datetime, classification: location}")
+    mapping = deepcopy(MAPPING)
+    mapping["fields"]["alias"] = "start"
+    instant = "2026-03-01T00:00:00+00:00"
+    setup(store, ndjson([{"id": "one", "kind": "invented", "duration_s": 10,
+        "metrics": {"calories": 7, "distance_m": 1}, "start": instant}]), fields=fields)
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    result = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                  query={"version": 1})["rows"][0]
+    assert result["calories"] == 7 and result["duration_s"] == 10
+    time_fields = {"started_at", "alias", "utc_offset", "local_date"}
+    if classified:
+        assert not time_fields & result.keys()
+    else:
+        assert datetime.fromisoformat(result["started_at"]) == datetime.fromisoformat(instant)
+        assert {name: result[name] for name in time_fields - {"started_at"}} == {
+            "alias": instant, "utc_offset": "+00:00", "local_date": "2026-03-01"}
+    owner = tool(store, "record_memory", action="query", collection=IMPORT_CID,
+                 query={"version": 1, "select": ["alias", "local_date"]})
+    assert owner["rows"] == [{"alias": instant, "local_date": "2026-03-01"}]

@@ -1797,11 +1797,19 @@ def _is_markdown_path(rel_path: str) -> bool:
     return rel_path.lower().endswith(".md")
 
 
-def _file_policy_empty(vault_root: Path, policy: Policy) -> bool:
-    from ..collection_store.authority import read_marker
+def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
+    from ..collection_store import authority
 
-    # A mixed vault has canonical field policy even when its file policy is empty.
-    return policy.empty and bound_writer(vault_root) is None and read_marker(vault_root) is None
+    if not policy.empty:
+        return False
+    writer = bound_writer(vault_root)
+    if rel_path is None and writer is not None:
+        return False
+    marker = authority.read_marker(vault_root)
+    if rel_path is not None and marker is not None:
+        # Ordinary files keep their file policy; bulk consumers still require canonical C field admission.
+        return authority.owned_entry(vault_root, authority.parse_marker(vault_root, marker), rel_path) is None
+    return writer is None and marker is None
 
 
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
@@ -4428,7 +4436,7 @@ def annotate_page(
     if is_summary:
         return summary
 
-    if _file_policy_empty(vault_root, policy):
+    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
         # No configured audience: the owner reads origin metadata as written.
         return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:

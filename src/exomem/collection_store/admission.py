@@ -243,6 +243,7 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
               "collection_store_fence": {"capability": "collections-store-v1", "generation": 1}
               if old is None else old["collection_store_fence"]}
     authority.parse_marker(writer.root, json.dumps(target))
+    authority.require_new_file_ownership(writer.root, old, target["collections"][-1])
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
                            target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode())

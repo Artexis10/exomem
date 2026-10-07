@@ -44,6 +44,11 @@ def mapping_classes(mapping, manifest, fmt):
     fields = {target: source_path(source.get("from") if isinstance(source, dict) else source)
               for target, source in mapping.get("fields", {}).items()}
     result = {}
+    time_mapping = mapping.get("time") or {}
+    # The mapping grammar fixes these keys; all time outputs share the declared source dependencies.
+    time_sources = [source_path(value) for source in time_mapping.get("from", [])
+                    for key, value in source.items() if key in {"instant", "offset", "date"}]
+    time_targets = [time_mapping[key] for key in ("instant", "offset", "local_date") if time_mapping.get(key)]
 
     def protect(source, spec):
         if spec.classification == "location":
@@ -57,6 +62,10 @@ def mapping_classes(mapping, manifest, fmt):
     for target, source in fields.items():
         if target in manifest.schema.fields:
             protect(source, manifest.schema.fields[target])
+    for target in time_targets:
+        if target in manifest.schema.fields:
+            for source in time_sources:
+                protect(source, manifest.schema.fields[target])
 
     def classify(path):
         if any(path[:len(parent)] == parent for parent in protected):
@@ -75,15 +84,12 @@ def mapping_classes(mapping, manifest, fmt):
             descendants((target,), source, manifest.schema.fields[target])
         else:
             result[(target,)] = classify(source)
-    time_mapping = mapping.get("time") or {}
-    classes = [classify(source_path(value)) for source in time_mapping.get("from", [])
-               for key, value in source.items() if key in {"instant", "offset", "date"}]
+    classes = [classify(source) for source in time_sources]
     if classes:
         classification = ("location" if "location" in classes
                           else UNRESOLVED if UNRESOLVED in classes else None)
-        for key in ("instant", "offset", "local_date"):
-            if time_mapping.get(key):
-                result[(time_mapping[key],)] = classification
+        for target in time_targets:
+            result[(target,)] = classification
     return result
 
 

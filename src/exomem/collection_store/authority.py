@@ -94,8 +94,7 @@ def parse_marker(root, raw):
     if marker["version"] == 2:
         for index, entry in enumerate(marker["collections"]):
             for other in marker["collections"][:index]:
-                if any(_owns(entry, path) for path, _ in _owned_regions(other)) or any(
-                        _owns(other, path) for path, _ in _owned_regions(entry)):
+                if _overlap(entry, other):
                     raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection ownership namespaces overlap")
     return marker
 
@@ -120,6 +119,29 @@ def _owned_regions(entry):
             ((directory / records._HELD_DIRECTORY).as_posix(), True),
             ((directory / "_history").as_posix(), True),
             ((directory / "_history.md").as_posix(), False))
+
+
+def _overlap(entry, other):
+    return any(_owns(entry, path) for path, _ in _owned_regions(other)) or any(
+        _owns(other, path) for path, _ in _owned_regions(entry))
+
+
+def require_new_file_ownership(root, marker, entry):
+    from .preview import unbound
+
+    # File declarations retain authority before cutover, including when first enrollment has no routing marker.
+    with unbound():
+        manifests, errors = collections.discover_collections_with_errors(
+            root, authorize_path=lambda path: marker is None or selected_entry(root, marker, path) is None)
+    # An incomplete declaration cannot prove separation; its owner must repair it before creating C.
+    if any(marker is None or selected_entry(root, marker, error.path) is None for error in errors):
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "file collection ownership is incomplete")
+    for manifest in manifests:
+        other = {"manifest_path": manifest.path, "source_path": manifest.storage.source,
+                 "layout": manifest.storage.strategy}
+        if _overlap(entry, other):
+            # Prevent taking a file collection's source or audit namespace; a false refusal costs another destination.
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection ownership namespaces overlap")
 
 
 def _owns(entry, path):

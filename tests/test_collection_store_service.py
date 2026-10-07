@@ -704,3 +704,71 @@ def test_new_marker_entry_cannot_overlap_existing_owned_source(service):
     refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
                          manifest_text=text, why="overlapping source"), "COLLECTION_STORE_MARKER_CONFLICT")
     assert authority.read_marker(root) == marker and titles(root, CID) == ["Canonical"]
+
+
+def test_new_c_cannot_take_a_file_collection_source_or_mutation_authority(service):
+    """An absent C source below A's items that steals A's public writes and contaminates its history."""
+    root = service.root
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Before"},
+                item_key=ROW, why="file baseline")["outcome"] == "committed"
+    before = call(root, "record_memory", action="inspect", collection=KEY)
+    marker = authority.read_marker(root)
+    source = "Knowledge Base/Records/Legacy/Items/Nested"
+    assert not (root / source).exists()
+    text = DAILY_TEXT.replace("source: Items", "source: " + source)
+    refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                         manifest_text=text, why="overlapping file source"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker
+    assert not (root / DAILY_PATH).exists() and not (root / source).exists()
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert reader.execute("SELECT collection_id FROM collections ORDER BY collection_id").fetchall() == [(CID,)]
+        assert authority.pending_create(reader) is None
+    after = call(root, "record_memory", action="inspect", collection=KEY)
+    assert after["source_versions"] == before["source_versions"] and after["audit"] == before["audit"]
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "After"},
+                item_key=LATER, why="file still writable")["outcome"] == "committed"
+    assert titles(root, KEY) == ["After", "Before"] and titles(root, CID) == ["Canonical"]
+
+
+def test_new_c_requires_readable_file_ownership_and_succeeds_after_declaration_repair(service):
+    """Skipping an unreadable file declaration that could own the proposed source namespace."""
+    root = service.root
+    original = (root / A_PATH).read_bytes()
+    marker = authority.read_marker(root)
+    (root / A_PATH).write_text("not a collection declaration")
+    refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                         manifest_text=DAILY_TEXT, why="new separate collection"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker and not (root / DAILY_PATH).exists()
+    (root / A_PATH).write_bytes(original)
+    assert call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                manifest_text=DAILY_TEXT, why="file declaration repaired")["status"] == "committed"
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Still writable"},
+                item_key=ROW, why="file authority retained")["outcome"] == "committed"
+
+
+def test_mixed_vault_owner_reads_original_bytes_and_recipient_still_cannot_read_protected_raw(service):
+    """A vault-wide C gate that sends unrelated original bytes through the Markdown-only bridge gate."""
+    import hashlib
+
+    from test_collection_field_admission import GUEST
+
+    root = service.root
+    body = '{"measurement":7}\n'
+    receipt = call(root, "preserve_evidence", scope="Test", category="export", filename="original.ndjson",
+                   content=body, raw_protection=True, response_detail="full")["diagnostics"]
+    original = receipt["path"]
+    ordinary = "Knowledge Base/Records/Work/ordinary.ndjson"
+    (root / ordinary).write_text(body)
+    for path in (original, ordinary):
+        page = call(root, "read_memory", path=path, include_raw=True)
+        assert page["content"] == body
+        assert page["content_hash"] == hashlib.sha256(body.encode()).hexdigest()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
+    denials = []
+    with request_scope(GUEST):
+        for path in (original, original + ".missing"):
+            with pytest.raises(ValueError) as error:
+                writer_lease.invoke_command(command, root, path=path, include_raw=True)
+            denials.append(str(error.value).replace(path, "<requested>"))
+        assert writer_lease.invoke_command(command, root, path=ordinary, include_raw=True)["content"] == body
+    assert denials[0] == denials[1]
