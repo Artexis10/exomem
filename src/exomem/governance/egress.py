@@ -6518,7 +6518,8 @@ def filter_withheld_entries(
         if operation is None:
             from ..collection_store import runtime as store_runtime
 
-            if not store_runtime.served(vault_root):
+            if (not store_runtime.served(vault_root) or inspection_evidence.root != vault_root.resolve()
+                    or inspection_evidence.principal != (principal if principal is not None else effective_principal())):
                 canonical_governance.OperationAuthorization.refuse()
             # Only a store writer in this process seals an inspection, and the serving store
             # thread admitted it in the dispatcher's pass. A caller's later pass, such as the
