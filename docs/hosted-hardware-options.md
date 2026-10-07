@@ -49,8 +49,8 @@ These are engineering inferences, not measured capacity or throughput claims.
 
 An advertised GPU does not establish model fit or inference speed. System RAM and VRAM are separate budgets.
 Extra RAM also does not establish cells per host: requests, warm peaks, filesystem use, and headroom all limit admission.
-The accepted 512 MiB / 125m request pair still needs production occupancy qualification.
-Current production requests remain 1 GiB / 250m. No candidate machine has an accepted cells-per-host measurement.
+The accepted 512 MiB / 125m request pair still needs the occupancy qualification in [resource policy task 3.9](../openspec/changes/add-cloud-service-resource-policy/tasks.md).
+No candidate machine has an accepted cells-per-host measurement.
 
 ## Embedding isolation and shared sensing
 
