@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
 
+from .. import vault
 from ..query_engine.indexes import (
     IndexDeclarationError,
     normalize_indexes,
@@ -196,17 +197,72 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
     return True
 
 
-def prepare_manifest(conn, manifest, data, declared) -> None:
-    """Resolve logical index and rollup intent at governed create/revise, never at query."""
-    _transaction(conn)
-    rollups.prepare(conn, manifest, data)
+def _declared(data, declared):
+    """A manifest's declared fields and normalized index intent, inherited type indexes first."""
     fields = data["item_schema"]["fields"]
     inherited = {index.name: {"keys": [{"field": key.field, "direction": key.direction}
                  for key in index.keys]} for index in declared.indexes}
     authored = data.get("indexes", {})
     if not isinstance(authored, Mapping):
         raise ValueError("collection indexes must be a mapping")
-    specifications = normalize_indexes(fields, {**inherited, **authored})
+    return fields, normalize_indexes(fields, {**inherited, **authored})
+
+
+def _declare_paths(conn, collection_id, fields, plan) -> None:
+    paths = {name: (name,) for name in fields}
+    paths.update((scalar.field, scalar.path) for scalar in plan.scalars)
+    query_freshness.declare(conn, collection_id, paths)
+
+
+def begin_missing(conn, collection_id: str, declared) -> bool:
+    """Start the first projection build of a collection that has none; True when one began.
+
+    A collection enrolled before every collection carried a projection, or
+    imported from files, has rows and no mapping in any state. It gets its
+    current manifest's plan as a building candidate, which bounded backfill
+    then fills. A failed build keeps its mapping and waits for a governed revise.
+    """
+    _transaction(conn)
+    if conn.execute("SELECT 1 FROM query_projection_mappings WHERE collection_id=? LIMIT 1",
+                    (collection_id,)).fetchone() is not None:
+        return False
+    text = conn.execute("SELECT m.manifest_text FROM collection_manifests m JOIN collections c "
+                        "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version "
+                        "WHERE c.collection_id=?", (collection_id,)).fetchone()[0]
+    data, _, _ = vault.parse_frontmatter(text, strict=True)
+    fields, specifications = _declared(data, declared)
+    plan = build_projection_plan(collection_id, fields, specifications)
+    _declare_paths(conn, collection_id, fields, plan)
+    conn.execute("UPDATE collections SET query_plan_hash=? WHERE collection_id=?", (_hash(plan), collection_id))
+    begin_build(conn, plan)
+    return True
+
+
+def backfill_due(conn) -> tuple[tuple[str, bool, bool], ...]:
+    """Each collection whose projection or rollups await backfill: (id, projection, rollups).
+
+    One read over the collections, for the serving store thread. A collection
+    with no projection mapping in any state is due: ``begin_missing`` starts it.
+    """
+    return tuple((cid, bool(projection), bool(rollup)) for cid, projection, rollup in conn.execute(
+        "SELECT * FROM (SELECT c.collection_id,"
+        " EXISTS(SELECT 1 FROM query_projection_mappings m WHERE m.collection_id=c.collection_id"
+        "  AND m.state='building') OR NOT EXISTS(SELECT 1 FROM query_projection_mappings m"
+        "  WHERE m.collection_id=c.collection_id) AS projection,"
+        " EXISTS(SELECT 1 FROM rollup_definitions r WHERE r.collection_id=c.collection_id"
+        "  AND r.state='building') AS rollup"
+        " FROM collections c) WHERE projection OR rollup ORDER BY collection_id"))
+
+
+def prepare_manifest(conn, manifest, data, declared) -> None:
+    """Resolve logical index and rollup intent at governed create/revise, never at query.
+
+    Every collection gets a projection, one with no index included: the typed
+    row route reads a collection only through its ready projection.
+    """
+    _transaction(conn)
+    rollups.prepare(conn, manifest, data)
+    fields, specifications = _declared(data, declared)
     current = ready_plan(conn, manifest.collection_id)
     if current is not None:
         current_leading = {index.keys[0].field for index in current.indexes}
@@ -235,9 +291,7 @@ def prepare_manifest(conn, manifest, data, declared) -> None:
     generation = conn.execute("SELECT COALESCE(MAX(generation),0)+1 FROM query_projection_mappings "
                               "WHERE collection_id=?", (manifest.collection_id,)).fetchone()[0]
     plan = build_projection_plan(manifest.collection_id, fields, specifications, generation=generation)
-    paths = {name: (name,) for name in fields}
-    paths.update((scalar.field, scalar.path) for scalar in plan.scalars)
-    query_freshness.declare(conn, manifest.collection_id, paths)
+    _declare_paths(conn, manifest.collection_id, fields, plan)
     # A revise owns replacing its previous candidate, not the ready contract.
     pending = conn.execute("SELECT generation,plan_json FROM query_projection_mappings "
                            "WHERE collection_id=? AND state='building'", (manifest.collection_id,)).fetchone()
@@ -247,7 +301,7 @@ def prepare_manifest(conn, manifest, data, declared) -> None:
         conn.execute("DELETE FROM query_projection_mappings WHERE collection_id=? AND generation=?",
                      (manifest.collection_id, old.generation))
     conn.execute("UPDATE collections SET query_plan_hash=? WHERE collection_id=?", (_hash(plan), manifest.collection_id))
-    if (not specifications and current is None) or (current is not None and _encoded(current) == _encoded(plan)):
+    if current is not None and _encoded(current) == _encoded(plan):
         return
     begin_build(conn, plan)
     # Empty newly created collections can publish immediately. Populated ones

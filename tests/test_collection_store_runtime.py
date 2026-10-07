@@ -574,9 +574,11 @@ def test_standalone_preview_close_drains_without_claiming_or_closing_store(tmp_p
         assert client.released.is_set()
         assert client.release_head is None
         assert handle.connection.execute("SELECT 1").fetchone() == (1,)
-        with pytest.raises(OpError, match="COLLECTION_STORE_BUSY"):
+        with pytest.raises(OpError, match="COLLECTION_STORE_BUSY") as busy:
             with preview_store(root, handle):
                 pass
+        # The one shape every BUSY takes, so a caller retries instead of failing.
+        assert busy.value.details == {"status": "retryable", "committed": False}
         manager.close()
 
 

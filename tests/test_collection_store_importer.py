@@ -654,8 +654,9 @@ def test_status_after_a_restart_reports_what_a_fresh_check_finds(store, monkeypa
 
 
 def _on(found, work):
+    # The gate's C is a summary collection, whose routes are the owner's.
     with (
-        request_scope(_external()),
+        request_scope(owner_principal()),
         preview_store(found.root, found.manager._collection_store),
         found.manager.mutation_guard(found.root),
     ):

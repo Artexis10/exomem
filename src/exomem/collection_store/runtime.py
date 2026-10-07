@@ -617,6 +617,8 @@ _STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
 IMPORT_IDLE_SECONDS = 1.0
 #: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
 IMPORT_RETRY_SECONDS = 30.0
+#: Rows per derived backfill batch: one batch per building collection each tick.
+BACKFILL_BATCH_ROWS = 128
 #: How often it retries a vault whose store it could not open.
 OPEN_RETRY_SECONDS = 30.0
 _SERVERS: dict[Path, StoreServer] = {}
@@ -714,7 +716,8 @@ def served_create(vault_root, arguments):
             "COLLECTION_STORE_UNAVAILABLE", "only the service serving this vault creates a summary collection")
     session = server.session
     if not session.fence_client.collection_store_fence().enrolled:
-        raise admission.enrollment_required()
+        # Served, so this vault's store was enrolled: a coordinator that no longer knows it was replaced.
+        raise admission.adoption_required()
     with server.lent():
         return admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
@@ -722,10 +725,32 @@ def served_create(vault_root, arguments):
             fence_client=session.fence_client, scaffold=arguments.get("scaffold", True))
 
 
+def _closed(manager):
+    return manager._stop.is_set() or manager._store_closed
+
+
+def _serving_manager(root):
+    """The lease manager of the running service serving ``root``; a closed service's entry is dropped.
+
+    The caller holds ``_SERVERS_LOCK``.
+    """
+    manager = _SERVED.get(root)
+    if manager is not None and _closed(manager):
+        del _SERVED[root]
+        return None
+    return manager
+
+
+def served(root):
+    """Whether a running service in this process serves ``root``."""
+    with _SERVERS_LOCK:
+        return _serving_manager(Path(root).resolve()) is not None
+
+
 def _server(root):
     with _SERVERS_LOCK:
-        server, manager = _SERVERS.get(root), _SERVED.get(root)
-        if server is None and manager is not None and not manager._stop.is_set():
+        server, manager = _SERVERS.get(root), _serving_manager(root)
+        if server is None and manager is not None:
             server = _SERVERS[root] = StoreServer(root, manager)
         return server
 
@@ -751,7 +776,9 @@ class StoreServer:
     store-routed request runs on it in turn, with the caller's context and principal and
     the writer bound. Between requests, while this release enables records-summary-v1,
     it advances running import jobs one batch at a time; each batch runs under its job's
-    own bound principal, never the service's. A request it cannot take within the
+    own bound principal, never the service's. It also advances each building projection
+    or rollup by one bounded batch, as the in-process owner. Between two requests it runs
+    one tick, the one that has waited longer. A request it cannot take within the
     mutation timeout refuses as retryable, so a running batch never holds an
     acknowledgement past that timeout. A vault it cannot open refuses store-routed
     requests with the reason and retries; file collections never wait on it.
@@ -763,7 +790,8 @@ class StoreServer:
         self.refusal = ("COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
         self._stack = self._scope = None
         self._retry_at = 0.0
-        self._next_tick = 0.0
+        self._next_tick = self._next_backfill = 0.0
+        self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._requests = deque()
         self._closed = False
         self._condition = threading.Condition()
@@ -772,8 +800,6 @@ class StoreServer:
 
     def call(self, work):
         """Run ``work`` on the store thread and return its result or raise its error."""
-        from ..cli_ops import OpError
-
         request = _Call(work)
         with self._condition:
             if not self._closed:
@@ -785,12 +811,8 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
-                    raise OpError(
-                        "COLLECTION_STORE_BUSY",
-                        "the collection store did not take this request within the mutation timeout",
-                        "Retry shortly.",
-                        details={"status": "retryable", "committed": False},
-                    )
+                    raise connection.busy(
+                        "the collection store did not take this request within the mutation timeout")
                 self._condition.wait(remaining)
         request.done.wait()
         if request.error is not None:
@@ -798,7 +820,7 @@ class StoreServer:
         return request.result
 
     def _stopping(self):
-        return self.manager._stop.is_set() or self.manager._store_closed
+        return _closed(self.manager)
 
     def _run(self):
         try:
@@ -806,13 +828,18 @@ class StoreServer:
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
-                request = self._take(max(0.0, min(self._next_tick, now + IMPORT_IDLE_SECONDS) - now))
+                due = min(self._next_tick, self._next_backfill)
+                request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
                 if request is not None:
                     self._serve(request)
-                    # The request may have started or continued a job.
-                    self._next_tick = 0.0
-                elif time.monotonic() >= self._next_tick:
-                    self._next_tick = time.monotonic() + self._import_tick()
+                    # The request may have started or continued a job, or revised a declaration.
+                    self._next_tick = self._next_backfill = 0.0
+                elif time.monotonic() >= due:
+                    # One tick per turn, so a waiting request is taken between any two.
+                    if self._next_tick <= self._next_backfill:
+                        self._next_tick = time.monotonic() + self._import_tick()
+                    else:
+                        self._next_backfill = time.monotonic() + self._backfill_tick()
         finally:
             self._close()
 
@@ -840,9 +867,9 @@ class StoreServer:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
             if not fence_client.collection_store_fence().enrolled:
-                # A copied vault meeting a coordinator that never enrolled it: the first fence
-                # cut is the owner's offline step, which the writer credential cannot make.
-                raise admission.enrollment_required()
+                # A copied vault, or a replaced coordinator, that never enrolled this store: the
+                # fence cut is the owner's offline step, which the writer credential cannot make.
+                raise admission.adoption_required()
             try:
                 admission.open_store(session, self.manager, fence_client=fence_client)
             except (OpError, connection.CollectionStoreError):
@@ -852,7 +879,9 @@ class StoreServer:
                 logger.info("collection store takeover is pending", exc_info=True)
         except Exception as error:  # noqa: BLE001 - store-routed requests refuse with the reason
             stack.close()
-            self.refusal = (getattr(error, "code", "COLLECTION_STORE_UNAVAILABLE"), str(error))
+            code = getattr(error, "code", "COLLECTION_STORE_UNAVAILABLE")
+            # Store errors read "CODE: message"; the refusal adds the code once.
+            self.refusal = (code, str(error).removeprefix(f"{code}: "))
             self._retry_at = time.monotonic() + OPEN_RETRY_SECONDS
             logger.warning("the collection store could not be served; retrying", exc_info=True)
             return
@@ -878,9 +907,7 @@ class StoreServer:
             request.result = request.context.run(bound)
         except BaseException as error:  # noqa: BLE001 - raised again on the caller's thread
             if isinstance(error, connection.CollectionStoreError) and error.code == "COLLECTION_STORE_BUSY":
-                # One shape for every BUSY a caller sees: retryable, nothing committed.
-                error = OpError("COLLECTION_STORE_BUSY", str(error).removeprefix("COLLECTION_STORE_BUSY: "),
-                                "Retry shortly.", details={"status": "retryable", "committed": False})
+                error = connection.busy(str(error).removeprefix("COLLECTION_STORE_BUSY: "))
             request.error = error
         finally:
             request.done.set()
@@ -932,15 +959,60 @@ class StoreServer:
             return IMPORT_RETRY_SECONDS
         return 0.0 if done["batches"] else IMPORT_RETRY_SECONDS
 
-    def _close(self):
-        from ..cli_ops import OpError
+    def _backfill_tick(self):
+        """Advance each building projection or rollup by one batch; returns the seconds until the next tick.
 
+        A plain read finds the work, so an idle store takes no lease and no checkout. Each
+        batch is its own writer transaction under the mutation boundary, as the in-process
+        owner, and re-resolves that authority. The tick starts no batch past half the
+        mutation timeout, so a request waiting for the thread is taken in time. A collection
+        whose batch is refused waits the retry interval; the others keep advancing.
+        """
+        from ..governance import principal
+        from . import index_migrations
+        from .preview import _mutate, preview_store
+
+        if self.runtime is None:
+            return IMPORT_IDLE_SECONDS
+        try:
+            with closing(connection.open_reader(self.runtime.path)) as reader:
+                due = index_migrations.backfill_due(reader)
+        except Exception:  # noqa: BLE001 - an unreadable store is retried later
+            logger.warning("derived backfill could not read its work; retrying later", exc_info=True)
+            return IMPORT_RETRY_SECONDS
+        now = time.monotonic()
+        self._backfill_refused = {cid: at for cid, at in self._backfill_refused.items()
+                                  if at > now and any(cid == row[0] for row in due)}
+        due = [row for row in due if row[0] not in self._backfill_refused]
+        if not due:
+            return min((at - now for at in self._backfill_refused.values()), default=IMPORT_IDLE_SECONDS)
+        deadline = now + self.manager._mutation_timeout_seconds / 2
+        try:
+            with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                for collection_id, projection, rollup in due:
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        if projection:
+                            _mutate(self.root, writer.backfill_query_indexes, collection_id,
+                                    limit=BACKFILL_BATCH_ROWS)
+                        if rollup:
+                            _mutate(self.root, writer.backfill_rollups, collection_id, limit=BACKFILL_BATCH_ROWS)
+                    except Exception:  # noqa: BLE001 - one refused collection leaves the others to advance
+                        logger.warning("derived backfill of %s could not advance; retrying later",
+                                       collection_id, exc_info=True)
+                        self._backfill_refused[collection_id] = time.monotonic() + IMPORT_RETRY_SECONDS
+        except Exception:  # noqa: BLE001 - a store that cannot be checked out is retried later
+            logger.warning("derived backfill could not check out the store; retrying later", exc_info=True)
+            return IMPORT_RETRY_SECONDS
+        return 0.0
+
+    def _close(self):
         with self._condition:
             self._closed = True
             for request in self._requests:
                 request.taken = True
-                request.error = OpError("COLLECTION_STORE_BUSY", "the collection store is shutting down",
-                                        "Retry shortly.", details={"status": "retryable", "committed": False})
+                request.error = connection.busy("the collection store is shutting down")
                 request.done.set()
             self._requests.clear()
             self._condition.notify_all()

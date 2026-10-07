@@ -992,6 +992,9 @@ class UnreadableManifest:
     path: str
     code: str
     message: str
+    #: The profile a store-routed row's manifest declares, so a profile-scoped consumer
+    #: skips another profile's row; None when no profile is legible, which counts for all.
+    semantic_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1148,6 +1151,17 @@ def discover_collections(
     return manifests
 
 
+def _declared_profile(root: Path, rel: str) -> str | None:
+    """The semantic profile a manifest view declares, read without loading it as a collection."""
+    try:
+        data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)
+        frontmatter, _, _ = vault.parse_frontmatter(data.decode("utf-8"), strict=True)
+    except (vault.PathGuardError, ValueError):
+        return None
+    profile = frontmatter.get("semantic_profile")
+    return profile if isinstance(profile, str) and profile in _SUPPORTED_PROFILES else None
+
+
 def discover_collections_with_errors(
     vault_root: Path,
     *,
@@ -1188,9 +1202,11 @@ def discover_collections_with_errors(
         )
     root = Path(vault_root)
     from .collection_store import authority
+    from .collection_store.connection import CollectionStoreError
     from .collection_store.preview import bound_writer
 
     writer = bound_writer(root)
+    marker_error = None
     if writer is not None:
         marker = authority.routing_marker(writer)
         stored, store_errors = writer.discover_collections(
@@ -1200,8 +1216,12 @@ def discover_collections_with_errors(
         if marker is None:
             return stored, store_errors
     else:
-        raw = authority.read_marker(root)
-        marker = None if raw is None else authority.parse_marker(root, raw)
+        try:
+            raw = authority.read_marker(root)
+            marker = None if raw is None else authority.parse_marker(root, raw)
+        except CollectionStoreError as error:
+            # Which collections the store owns is unknown, so none can be read as a file.
+            marker, marker_error = None, error
         stored, store_errors = (), ()
     kb = vault.kb_root(root)
     if not kb.is_dir():
@@ -1214,14 +1234,24 @@ def discover_collections_with_errors(
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
-        if marker is not None and authority.selected_entry(root, marker, safe[1]) is not None:
+        if marker_error is not None or (
+                marker is not None and authority.selected_entry(root, marker, safe[1]) is not None):
             if writer is None and authorize(safe[1]):
                 # A routed manifest is the store's generated view, never a file collection,
-                # and only the service that serves the store can read it.
-                unreadable.append(UnreadableManifest(
-                    safe[1], "COLLECTION_STORE_UNAVAILABLE",
-                    "this collection lives in the collection store, which only the running Exomem service serves",
-                ))
+                # and only the service that serves the store can read it. Under an unreadable
+                # marker, any manifest may be one.
+                if marker_error is None:
+                    code, message = "COLLECTION_STORE_UNAVAILABLE", (
+                        "this collection lives in the collection store, which only the running Exomem service serves")
+                else:
+                    code, message = marker_error.code, (
+                        "the collection store's authority marker is unreadable, so no collection here can be "
+                        "told apart from one the store owns")
+                unreadable.append(UnreadableManifest(safe[1], code, message, _declared_profile(root, safe[1])))
+                if len(stored) + len(unreadable) > max_raw_candidates:
+                    raise CollectionError(
+                        "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
+                    )
             continue
         if not authorize(safe[1]):
             continue

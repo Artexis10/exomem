@@ -1806,6 +1806,21 @@ def _truthy(value: str) -> bool:
 
 
 COLLECTION_STORE_CAPABILITY = "collections-store-v1"
+#: An offline owner step (``collection_store.admission``) holds the lease as its replica id
+#: plus this suffix, so the coordinator arbitrates it against that replica's own service.
+OFFLINE_OWNER_SUFFIX = "-owner"
+
+
+def holder_text(holder: str | None, expires_at: float | None) -> str:
+    """How a refusal names a lease holder; an offline owner step says so and when its lease expires."""
+    if holder is None:
+        return "unassigned"
+    if not holder.endswith(OFFLINE_OWNER_SUFFIX):
+        return holder
+    if expires_at is None:
+        return f"an offline owner step ({holder})"
+    expiry = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at))
+    return f"an offline owner step ({holder}, whose lease expires at {expiry})"
 
 
 def _collection_store_uuid(value: object) -> str:
@@ -4250,7 +4265,7 @@ class LeaseManager:
                 self._record_lease_op("acquire", "refused")
                 raise OpError(
                     "WRITER_LEASE_REQUIRED",
-                    f"replica is read-only; current writer is {record.holder or 'unassigned'}",
+                    f"replica is read-only; current writer is {holder_text(record.holder, record.expires_at)}",
                     "Send the mutation to the current writer or retry after its lease expires.",
                 )
             self._record_lease_op("acquire", "granted")
@@ -5954,7 +5969,9 @@ class LeaseManager:
         thread = threading.get_ident()
         with self._lock:
             if self._stop.is_set() or self._store_refused():
-                raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+                from .collection_store import connection as store_connection
+
+                raise store_connection.busy("collection store handoff is in progress")
             self._store_bound = True
             self._store_borrowers[thread] = self._store_borrowers.get(thread, 0) + 1
         try:

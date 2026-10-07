@@ -180,6 +180,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
         capability.require_records_summary()
+        require_summary_manifest(session.root, manifest_path, manifest_text)
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
@@ -489,15 +490,25 @@ def _require_no_service(config):
     """
     record = writer_lease.LeaseCoordinatorClient(config).status()
     if record.holder is not None and record.expires_at is not None and record.expires_at > time.time():
+        holder = writer_lease.holder_text(record.holder, record.expires_at)
+        if record.holder.endswith(writer_lease.OFFLINE_OWNER_SUFFIX):
+            raise CollectionStoreError(
+                "COLLECTION_STORE_SERVICE_ACTIVE",
+                f"{holder} holds this vault's writer lease; retry once it finishes or its lease expires")
         raise CollectionStoreError(
             "COLLECTION_STORE_SERVICE_ACTIVE",
-            f"a service ({record.holder}) holds this vault's writer lease; apply through its "
+            f"a service ({holder}) holds this vault's writer lease; apply through its "
             "maintain_memory(mode=\"collections-store-adopt-local\") or stop it first")
 
 
 def _apply_step(session, manager, fence_client, step, *, why, preview_id, acknowledge_skipped=False):
     if step == "adopt-local":
-        return adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
+        result = adopt_local(session, manager, why=why, fence_client=fence_client, preview_id=preview_id)
+        if result["status"] == "in_sync":
+            # A store in sync with its replica may still be unknown to this coordinator (a copied
+            # vault or a replaced coordinator): adopt-local cut its fence, so admit the store here.
+            result = {**result, "store": open_store(session, manager, fence_client=fence_client)}
+        return result
     open_store(session, manager, fence_client=fence_client)
     return reconcile_store(session, manager, why=why, fence_client=fence_client, preview_id=preview_id,
                            acknowledge_skipped=acknowledge_skipped)
@@ -536,9 +547,9 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
             raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
         return {"step": step, **_apply_step(serving, serving.manager, fence_client, step, why=why,
                                             preview_id=preview_id, acknowledge_skipped=acknowledge_skipped)}
-    from .runtime import _SERVED, _SERVERS
+    from .runtime import _SERVERS, served
 
-    if root in _SERVED:
+    if served(root):
         # This process serves the vault but its store is not open: answer as its routes do,
         # never with the offline step that needs the operator credential.
         server = _SERVERS.get(root)
@@ -560,13 +571,46 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
     """
     _require_owner("create")
     capability.require_records_summary()  # before any lease, fence or operator credential
+    require_summary_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
     return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
         session, manager, manifest_path, manifest_text, why=why, request_id=request_id,
         fence_client=fence_client))
 
 
+def require_summary_manifest(root, manifest_path, manifest_text):
+    """Refuse a production store create whose manifest is not a summary collection (S1).
+
+    Items mode stays in files under this slice. A manifest that does not parse passes
+    on, so the create's own validation names what is wrong with it.
+    """
+    from .summary import SUMMARY
+
+    try:
+        manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode())
+    except ValueError:  # CollectionError included
+        return
+    if manifest.view_mode != SUMMARY:
+        raise CollectionStoreError(
+            "COLLECTION_STORE_SUMMARY_REQUIRED",
+            "the collection store creates only summary collections: add \"view_mode: summary\" to the "
+            "manifest, or create an items-mode collection with record_memory(action=\"create\"), "
+            "which keeps it in files")
+
+
 ENROLLMENT_COMMAND = ("exomem collections create --manifest-path PATH --manifest-file FILE --why REASON, "
                       "with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+
+
+ADOPTION_COMMAND = ("exomem collections adopt-local --why REASON --dry-run, then again with --preview-id ID "
+                    "instead of --dry-run, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+
+
+def adoption_required():
+    """The refusal for a routed vault whose coordinator never enrolled its store (a copy or a new coordinator)."""
+    return CollectionStoreError(
+        "COLLECTION_STORE_ADOPTION_REQUIRED",
+        "this coordinator never enrolled this vault's collection store, as when the vault was copied or its "
+        f"coordinator replaced; continuing it is the owner's offline step: run {ADOPTION_COMMAND}")
 
 
 def enrollment_required():
@@ -597,7 +641,7 @@ def _offline_owner(root, operation, work):
     _require_no_service(config)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.
-    config = replace(config, replica_id=f"{config.replica_id}-owner")
+    config = replace(config, replica_id=config.replica_id + writer_lease.OFFLINE_OWNER_SUFFIX)
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
         try:

@@ -1192,15 +1192,16 @@ class CollectionWriter:
     def backfill_query_indexes(self, collection, *, limit=128) -> bool:
         """Resume one derived batch under the writer lease and current authority.
 
-        This is internal maintenance, not a public query or an automatic job.
-        Canonical items, generations and mutation audit remain unchanged.
+        This is internal maintenance, not a public query; the serving store
+        thread drives it. A collection with no projection at all starts its
+        first build here. Canonical items, generations and mutation audit
+        remain unchanged.
         """
         with self._mutation():
-            _, manifest, _ = self._collection(collection)
-            complete = index_migrations.backfill_batch(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                manifest.collection_id, limit=limit,
-            )
+            _, manifest, declared = self._collection(collection)
+            accounted = index_migrations.AccountedWriter(self.connection, self._execute)
+            index_migrations.begin_missing(accounted, manifest.collection_id, declared)
+            complete = index_migrations.backfill_batch(accounted, manifest.collection_id, limit=limit)
             self._precommit(manifest)
         return complete
 
