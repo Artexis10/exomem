@@ -172,7 +172,7 @@ def test_cloud_doctor_reports_reembedding_instead_of_warming_a_refused_encoder(
     monkeypatch.setattr(doctor, "_vector_stack_available", lambda _backend: True)
     monkeypatch.setattr(doctor, "_model_cached", lambda _hub, _dirname: False)
 
-    checks = {check.id: check for check in doctor.doctor(vault=str(vault)).checks}
+    checks = {check.id: check for check in doctor.doctor(vault=str(vault), profile="hybrid").checks}
 
     assert "embeddings.sidecar" not in checks
     reembed = checks["embeddings.reembed"]
