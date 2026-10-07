@@ -347,6 +347,7 @@ class Refused(RuntimeError):
     def __init__(self, tool: str, code: str, message: str) -> None:
         super().__init__(f"{tool} refused {code}: {message}")
         self.code = code
+        self.message = message
 
 
 def expect(condition: object, message: str, observed: object = None) -> None:
@@ -1159,7 +1160,29 @@ async def field_release_journey(journey: Journey) -> None:
                 ):
                     await recipient.refused("QUERY_FIELD_UNAVAILABLE", "record_memory", action="query",
                                             collection=WORKOUTS_ID, query={"version": 1, **request})
-            await recipient.refused("NOT_FOUND", "read_memory", path=journey.export_path)
+            original = await owner.call("read_memory", path=journey.export_path)
+            expect(original["body"].encode("utf-8") == journey.export
+                   and original["content_hash"] == hashlib.sha256(journey.export).hexdigest(),
+                   "the authenticated owner could not read the exact preserved original")
+
+            async def raw_private() -> None:
+                missing_path = journey.export_path + ".absent"
+                expect(not (journey.vault / missing_path).exists(), "the missing RAW probe exists")
+                messages = []
+                for path in (journey.export_path, missing_path):
+                    try:
+                        await recipient.call("read_memory", path=path)
+                    except Refused as refusal:
+                        # The terminal RAW gate serves this fixed opaque token on MCP, including errors.
+                        message = refusal.message.removeprefix("Error calling tool 'read_memory': ")
+                        expect(refusal.code == "UNKNOWN" and message == "[withheld]",
+                               "the RAW read did not return its opaque refusal", refusal.message)
+                        messages.append(refusal.message)
+                    else:
+                        raise RuntimeError("the recipient read a protected or absent RAW original")
+                expect(messages[0] == messages[1], "the RAW refusal disclosed existence")
+
+            await raw_private()
             metric = {"version": 1, "select": ROW_FIELDS,
                       "order_by": [{"field": "local_date"}], "page": {"limit": 2}}
             first = await recipient.query(metric)
@@ -1215,7 +1238,7 @@ async def field_release_journey(journey: Journey) -> None:
                    "a field release changed the summary's row membership basis")
             expect((await recipient.query(second_query))["rows"] == second["rows"],
                    "an unrelated location release invalidated or changed the second metric page")
-            await recipient.refused("NOT_FOUND", "read_memory", path=journey.export_path)
+            await raw_private()
             location_page = {"version": 1, "select": ["exercise_id", "place_label"], "page": {"limit": 2}}
             location_first = await recipient.query(location_page)
             expect(location_first["has_more"] and location_first["next_cursor"],
@@ -1236,7 +1259,7 @@ async def field_release_journey(journey: Journey) -> None:
             owner_summary = await owner.call("read_memory", path=summary_path)
             expect("exomem_view" in owner_summary["frontmatter"],
                    "the owner summary lost its full-state view stamp", owner_summary)
-            await recipient.refused("NOT_FOUND", "read_memory", path=journey.export_path)
+            await raw_private()
             await file_collections_unchanged(journey, recipient, "after the field revocation")
 
 
