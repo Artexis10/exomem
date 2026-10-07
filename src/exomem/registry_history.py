@@ -120,7 +120,7 @@ def commit(
     why: str | None,
     before_hash: str,
     after_hash: str,
-    added: tuple[str, ...] = (),
+    added: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     """Write `rendered` to `path` with its snapshot and log entry in one batch.
 

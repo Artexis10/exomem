@@ -1067,7 +1067,9 @@ def _domain_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> A
     return usage.catalogue_axis(vault_root, snapshot, column="domain")
 
 
-_LABEL_FIELDS = frozenset({"label", "description", "aliases", "status", "replaced_by", "attributes"})
+_LABEL_FIELDS = frozenset(
+    {"label", "description", "aliases", "status", "replaced_by", "attributes"}
+)
 
 def _spec_for_axis(axis: str) -> vocabulary_registry.RegistrySpec:
     return KIND_SPEC if axis == "source_kind" else DOMAIN_SPEC

@@ -58,7 +58,9 @@ Explicitly activated v2 vaults retain the canonical writer's effect classificati
 
 `egress.owner_only_aggregate` remains a disclosure decision for whole-vault counts, reasons and other private-dependent results. Reuse current RAW admission, including protection without configured file policy. This decision neither grants nor removes write authority.
 
-An operation that requires unavailable private registry information reports unavailable. Counts-only filtering does not protect global keys, collisions, aliases, folders or hashes. Complete limited-owner promotion across private domains follows the vault-consolidation domain delivery. A legitimate write whose outcome is independent of private definitions remains available.
+An operation that requires unavailable private registry information reports unavailable. Counts-only filtering does not protect global keys, collisions, aliases, folders or hashes. Each adapter admits its declared overlay before it reads private definitions. History admits each snapshot before reading its bytes.
+
+A pending proposal requires admitted inputs and a server-verified target hash. The queue binds that target alone when validation reads no other overlay. Complete limited-owner promotion across private domains follows the vault-consolidation domain delivery. A legitimate write whose outcome is independent of private definitions remains available.
 
 What this prevents: a restricted principal reshaping vocabulary for everyone, for example hijacking resolution with an alias. When it fires wrongly, the delegate's label waits for the owner's next session; the delegate pays, and its page write still lands with the raw label.
 
@@ -66,7 +68,7 @@ The pending item targets the registry overlay as a virtual review target that on
 
 ### 8. Counts come from maintained projections
 
-Usage counts are read from projections that the indexer already maintains: the graph snapshot for entity types and relations, and the lexical catalogue for source kinds, domains and semantic categories. A projection that is absent, warming, stale or refused makes that registry's counts `unavailable` with a reason. A zero is only ever a counted zero. Counts are never computed by scanning Markdown on a read path.
+Usage counts are read from projections that the indexer already maintains: the graph snapshot for entity pages, authored relations and semantic units by category, and the lexical catalogue for source kinds and domains. A projection that is absent, warming, stale or refused makes that registry's counts `unavailable` with a reason. A zero is only ever a counted zero. Counts are never computed by scanning Markdown on a read path.
 
 ### 9. Bootstrap
 

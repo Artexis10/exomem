@@ -7577,26 +7577,24 @@ class LexicalStore:
         """
         if column not in {"source_kind", "domain"}:
             raise ValueError(f"page_axis_counts: unsupported column {column!r}")
-        if self._failed or not self.path.exists():
+        from . import freshness as freshness_module
+
+        checkpoint = freshness_module.live_recall_checkpoint(self.vault_root, "kb")
+        if checkpoint is None:
             return None
-        try:
-            conn = self._connect()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical axis-count probe declined (%s)")
-            return None
-        try:
-            if not self._schema_is_current(conn):
-                return None
+
+        def read(conn: sqlite3.Connection) -> dict[str, int]:
             rows = conn.execute(
                 f"SELECT {column}, COUNT(*) FROM pages "  # noqa: S608 — closed column set above
                 f"WHERE in_kb = 1 AND {column} IS NOT NULL GROUP BY {column}"
             ).fetchall()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical axis-count probe declined (%s)")
-            return None
-        finally:
-            conn.close()
-        return {str(value): int(count) for value, count in rows}
+            return {str(value): int(count) for value, count in rows}
+
+        result = self._serve_from_ready_catalog_result(
+            "kb", checkpoint.triple, read, "lexical axis-count probe declined (%s)",
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        return result.value if result.readiness.complete else None
 
     def tag_usage_aggregate(
         self, excluded_dirs: Iterable[str], whitespace: str

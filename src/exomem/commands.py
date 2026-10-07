@@ -683,6 +683,11 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     """
     from . import source_taxonomy as source_taxonomy_module
 
+    from .vocabulary.contract import admission_refusal
+
+    refusal = admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
+    if refusal is not None:
+        return refusal
     taxonomy = source_taxonomy_module.load_taxonomy(vault_root)
     projection: dict = {
         "contract": (
@@ -1012,7 +1017,12 @@ def op_bootstrap(
             "resolution_required": workflow_resolution_required,
             "status": workflow_public_status,
         }
-    entity_type_registry = entity_types_module.load_entity_types(vault_root)
+    from .vocabulary.contract import admission_refusal
+
+    entity_registry_refusal = admission_refusal(vault_root, entity_types_module.SPEC)
+    entity_type_registry = entity_types_module.load_entity_types(
+        None if entity_registry_refusal else vault_root
+    )
     entity_recurrence_available = "review_memory" in active_product_names
     if entity_recurrence_available:
         ordinary_mode = (
@@ -1096,7 +1106,10 @@ def op_bootstrap(
                 "due-state",
             ],
         }
-    relation_registry = relation_registry_module.load_registry(vault_root)
+    relation_registry_refusal = admission_refusal(vault_root, relation_registry_module.SPEC)
+    relation_registry = relation_registry_module.load_registry(
+        None if relation_registry_refusal else vault_root
+    )
     legacy_commands = None
     if active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS:
         legacy_commands = {
@@ -1130,7 +1143,7 @@ def op_bootstrap(
                 }
         return {"available": True, "route": {"tool": tool, "args": args}}
 
-    relation_vocabulary_projection = {
+    relation_vocabulary_projection = relation_registry_refusal or {
         "contract_version": "2026-09-01.1",
         "core_version": relation_registry.core_version,
         **({"core_vocabulary": sorted(relation_registry.core)} if profile != "compact" else {}),
@@ -1676,7 +1689,7 @@ def op_bootstrap(
         },
         "source_taxonomy": source_taxonomy_projection,
         **({"vocabulary": vocabulary_projection} if vocabulary_projection is not None else {}),
-        "entity_registry": {
+        "entity_registry": entity_registry_refusal or {
             # The live types are in `vocabulary` (by use); a compact payload lists
             # here only what that block does not carry: declared facets.
             **({
@@ -10400,19 +10413,17 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash.
+    the current hash. For entity-types, relations, source-kinds, domains and
+    categories: inspect lists the live vocabulary and usage; propose previews
+    a delta; save applies upsert, alias or deprecate with expected_hash and why;
+    history lists kept versions; restore reverts one without rewriting pages.
     Operations: references/operation-routing.md.
 
     Args:
-        operation: Subject-specific operation. Saves need `why` and, when updating,
-            `expected_hash`; relations: propose-relation, save-relations, census;
-            entity-types: resolve-entity-type, save-entity-types; workflow-contracts:
-            inventory, inspect, validate, resolve, preview, save, refresh;
-            context-roles and activation-conventions: validate, diff, save-roles or
-            save-conventions, history, restore (infer is refused).
+        operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, traversal-profiles,
-            context-roles, activation-conventions, or workflow-contracts.
+        subject: contract, categories, entity-types, relations, source-kinds, domains,
+            traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.
@@ -10440,6 +10451,19 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    from .vocabulary import contract as vocabulary_contract
+    from .vocabulary import registry_spec
+
+    registry_subject = "entity-types" if operation == "save-entity-types" else subject
+    if registry_subject in _registry_subjects() and operation not in _REGISTRY_OPERATIONS:
+        spec = registry_spec(registry_subject)
+        if operation in {"save", "save-entity-types", "save-relations"} or save:
+            queued = vocabulary_contract.queues_for_owner(vault_root)
+            if queued is not None and spec.family is None:
+                return {"subject": registry_subject, "available": False, "reason": queued}
+        refusal = vocabulary_contract.admission_refusal(vault_root, spec)
+        if refusal is not None:
+            return refusal
     if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
         return _registry_schema_operation(
             vault_root,
@@ -10586,6 +10610,12 @@ def op_schema_memory(
         restricted = vocabulary_contract.queues_for_owner(vault_root)
         before = load_vocabulary(entity_types_module.SPEC, vault_root)
         if restricted is not None:
+            if expected_hash != before.content_hash and not (
+                expected_hash is None and before.content_hash == "none"
+            ):
+                raise ValueError(
+                    "STALE_ENTITY_TYPE_REGISTRY: expected_hash does not match current hash"
+                )
             return vocabulary_contract.queue_for_owner(
                 vault_root,
                 entity_types_module.SPEC,
@@ -10881,6 +10911,7 @@ def op_schema_memory(
             restricted = vocabulary_contract.queues_for_owner(vault_root)
             if restricted is not None:
                 current = relation_registry_module.load_registry(vault_root)
+                relation_registry_module.require_current_hash(current.extension_hash, expected_hash)
                 relation_registry_module.merge_extension_delta(
                     memory_schema_module.relation_registry_proposal(current), proposal
                 )
@@ -10965,6 +10996,24 @@ def op_schema_memory(
                 # meaning-continuity check already refuses dropping a used key or
                 # alias, so this guard is defence in depth.
                 current = relation_registry_module.load_registry(vault_root)
+                restricted = vocabulary_contract.queues_for_owner(vault_root)
+                if restricted is not None:
+                    if not why or not why.strip():
+                        raise ValueError("WHY_REQUIRED: a pending registry proposal requires why")
+                    relation_registry_module.require_current_hash(
+                        current.extension_hash, expected_hash
+                    )
+                    findings = relation_registry_module.validate_proposal(proposal, vault_root)
+                    if findings:
+                        return {"subject": "relations", "valid": False,
+                                "findings": findings, "saved": None}
+                    from .vocabulary import load as load_vocabulary
+
+                    return vocabulary_contract.queue_for_owner(
+                        vault_root, relation_registry_module.SPEC,
+                        load_vocabulary(relation_registry_module.SPEC, vault_root),
+                        proposal, why.strip(), restricted, operation="infer",
+                    )
                 observed: set[str] = set()
                 for item in memory_schema_module.relation_observations(
                     vault_root, registry=current

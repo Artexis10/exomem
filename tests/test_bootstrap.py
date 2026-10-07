@@ -54,7 +54,7 @@ def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> Non
 
     # With no projection to order by use, the compact block names the vault's own
     # types; the full profile carries every definition.
-    assert result["vocabulary"]["entity-types"]["top"] == ["place"]
+    assert "place" in result["vocabulary"]["entity-types"]["top"]
     full = commands.op_bootstrap(tmp_path, profile="full")
     assert [item["id"] for item in full["entity_registry"]["types"]] == [
         *entity_types.ENTITY_TYPE_IDS,

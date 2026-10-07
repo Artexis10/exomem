@@ -1177,7 +1177,9 @@ class _Adapter:
         if existing and isinstance(raw, dict):
             # Meaning fields were checked unchanged; only the mutable ones move,
             # so the rest of the row keeps its bytes.
-            raw["aliases"] = list(dict.fromkeys(normalize_relation(alias) for alias in entry.aliases))
+            raw["aliases"] = list(
+                dict.fromkeys(normalize_relation(alias) for alias in entry.aliases)
+            )
             raw["status"] = entry.status
             if entry.replaced_by:
                 raw["replaced_by"] = entry.replaced_by

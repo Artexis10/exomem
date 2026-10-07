@@ -53,6 +53,10 @@ def _read_registry_overlay(vault_root: Path, spec: Any, ref: str) -> dict[str, A
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
     from .vocabulary import load
 
+    from .vocabulary.contract import admission_refusal
+
+    if admission_refusal(vault_root, spec) is not None:
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
     snapshot = load(spec, Path(vault_root))
     return {
         "path": ref,
@@ -186,8 +190,14 @@ def _path(vault_root: Path, item: Mapping[str, Any], ref: str) -> str:
 def _visible(vault_root: Path, item: Mapping[str, Any]) -> bool:
     if item.get("signal") == REGISTRY_PROPOSAL_SIGNAL:
         # A registry proposal is the owner's to decide, whatever its target.
+        from .governance.principal import effective_principal
+        from .governance.raw_protection import is_owner
+
         try:
-            return egress.owner_only_aggregate(vault_root) is None
+            return (
+                is_owner(effective_principal())
+                and egress.owner_only_aggregate(vault_root) is None
+            )
         except (ValueError, OSError):
             return False
     refs = list(

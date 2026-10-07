@@ -2,9 +2,8 @@
 
 For each registry the block lists at most `TOP_KEYS` active keys, ordered by
 use and carrying their counts, from a current projection. Without one there is
-no order by use: it lists the vault's own active keys in registry order, since
-the shipped keys are the same in every vault and one `inspect` away, and names
-the reason under `unavailable`. `more` counts the active keys a listing left
+no order by use: it lists active keys in registry order and names the reason
+under `unavailable`. `more` counts the active keys a listing left
 out. It never reports a zero it did not count.
 
 A key a save or an auto-registration added within `NEW_WINDOW_DAYS` is listed
@@ -34,7 +33,9 @@ _ADDED_CACHE: dict[tuple[str, str, str], tuple[tuple[str, dict[str, list[str]]],
 _ADDED_LOCK = threading.Lock()
 
 
-def _additions(vault_root: Path, stem: str, content_hash: str) -> tuple[tuple[str, dict[str, list[str]]], ...]:
+def _additions(
+    vault_root: Path, stem: str, content_hash: str
+) -> tuple[tuple[str, dict[str, list[str]]], ...]:
     """`(at, added)` per kept version of one overlay, cached on the overlay's hash."""
     from .. import registry_history
 
@@ -72,8 +73,14 @@ def recently_added(
 def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None) -> dict[str, Any]:
     """The bootstrap's view of every vocabulary registry."""
     since = (today or dt.datetime.now(dt.UTC).date()) - dt.timedelta(days=NEW_WINDOW_DAYS)
+    from .contract import admission_refusal, history_refusal
+
     registries: dict[str, Any] = {}
     for name, spec in registry_specs().items():
+        refusal = admission_refusal(vault_root, spec)
+        if refusal is not None:
+            registries[name] = {"unavailable": refusal["reason"]}
+            continue
         snapshot = registry.load(spec, vault_root)
         active = [entry for entry in snapshot.entries.values() if entry.status == "active"]
         row: dict[str, Any] = {}
@@ -81,19 +88,23 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
         if usage is not None and usage.available:
             ordered = sorted(active, key=lambda entry: (-usage.counts.get(entry.key, 0), entry.key))
             row["top"] = {entry.key: usage.counts.get(entry.key, 0) for entry in ordered[:TOP_KEYS]}
+            row["count_source"] = usage.source
         else:
-            own = [entry.key for entry in active if entry.origin == "vault"][:TOP_KEYS]
-            if own:
-                row["top"] = own
+            row["top"] = [entry.key for entry in active[:TOP_KEYS]]
             row["unavailable"] = usage.reason if usage is not None else "not_counted"
         listed = len(row.get("top", ()))
         if listed and len(active) > listed:
             row["more"] = f"+{len(active) - listed} more"
-        if snapshot.findings:
-            row["findings"] = len(snapshot.findings)
-        new = recently_added(vault_root, spec, snapshot, since=since)
+        row["findings"] = len(snapshot.findings)
+        new = (
+            recently_added(vault_root, spec, snapshot, since=since)
+            if history_refusal(vault_root, spec) is None
+            else []
+        )
         if new:
-            row["new"] = new[:NEW_KEYS] + ([f"+{len(new) - NEW_KEYS} more"] if len(new) > NEW_KEYS else [])
+            row["new"] = new[:NEW_KEYS] + (
+                [f"+{len(new) - NEW_KEYS} more"] if len(new) > NEW_KEYS else []
+            )
         registries[name] = row
     # Registry names are hyphenated, so they never meet the two plain keys.
     out: dict[str, Any] = {**registries, "inspect": inspect_route}

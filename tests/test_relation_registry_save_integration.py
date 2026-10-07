@@ -42,6 +42,14 @@ def _delta() -> dict[str, object]:
     }
 
 
+@pytest.fixture(autouse=True)
+def owner_library_scope():
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        yield
+
+
 def test_save_registry_supplies_only_complete_registry_yaml_to_canonical_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1053,7 +1053,9 @@ SPEC = vocabulary_registry.RegistrySpec(
     stem="entity-types",
     overlay=extension_registry_path,
     adapter=_Adapter(),
-    fields=frozenset({"label", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}),
+    fields=frozenset(
+        {"label", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
+    ),
     attributes=frozenset({"folder", "cue_nouns", "optional_frontmatter"}),
     # A type's family and its folder are what its pages already rely on.
     immutable=frozenset({"parent", "attributes.folder"}),

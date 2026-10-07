@@ -4,16 +4,10 @@
 `commands.op_schema_memory` routes a registry subject here; the old operation
 names keep their own handlers.
 
-Governance has one decision point, `egress.owner_only_aggregate`. When it
-returns no refusal (the owner, an ungoverned vault, an unbound call) a save
-takes effect at once. Otherwise a save leaves the registry unchanged and is
-queued for the owner in `review_memory(mode="vocabulary")`, a restore is
-refused, and usage counts and save reasons are withheld.
-
-What the restricted rule prevents: a principal other than the owner reshaping
-vocabulary for everyone, for example hijacking resolution with an alias. When
-it fires wrongly the delegate's label waits for the owner's next session; the
-delegate pays, and its page write still lands with the raw label.
+Mutation authority uses the bound owner principal and the activated v2 writer.
+Disclosure admission runs separately before any private registry bytes are read.
+A resolved nonowner may queue an admitted, validated proposal for the owner.
+An unresolved caller cannot mutate or queue a proposal.
 
 Every registry write answers with `vocabulary_receipt`: one line per key it
 registered or changed, naming the registry, the key, the parent and the
@@ -38,11 +32,12 @@ INSPECT_MAX_LIMIT = 200
 PENDING_MAX_CHARS = 2000
 #: Near-duplicates are keys within this edit distance of a proposed key or alias.
 NEAR_DUPLICATE_DISTANCE = 2
+# Continuations use the fixed v1 protocol: a digest prefix and a bounded page offset.
 _CONTINUATION_RE = re.compile(r"^v1:([0-9a-f]{16}):(\d{1,6})$")
 
 
 def restricted_reason(vault_root: Path) -> str | None:
-    """Why the caller is not the owner for registry purposes, or None."""
+    """Why whole-vault content is unavailable to the caller, or None."""
     from ..governance import egress
 
     refusal = egress.owner_only_aggregate(vault_root)
@@ -56,16 +51,63 @@ def queues_for_owner(vault_root: Path) -> str | None:
     its writer gate admits a save only under an exact approval or a current
     grant, so a restricted save goes to that gate rather than to the queue.
     """
-    reason = restricted_reason(vault_root)
-    if reason is None:
-        return None
+    from ..governance.principal import effective_principal
+    from ..governance.raw_protection import is_owner
     from ..vocabulary_authority import VocabularyAuthority
 
+    who = effective_principal()
+    if not who.resolved:
+        raise RegistryError("UNRESOLVED_PRINCIPAL: registry mutation requires a bound principal")
+    if is_owner(who):
+        return None
     try:
         mode = VocabularyAuthority(Path(vault_root)).runtime_status().mode
     except Exception:  # noqa: BLE001 — unreadable authority: the writer gate refuses
         return None
-    return reason if mode == "v1" else None
+    return "audience_restricted" if mode == "v1" else None
+
+
+def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
+    """Admit the adapter's complete overlay before hashes, aliases or entries are read.
+
+    Each S1 adapter reads only its declared overlay and shipped packs. The two
+    taxonomy subjects share one overlay, so admission covers both axes together.
+    A withheld overlay makes the operation unavailable until domain-aware delivery.
+    """
+    from ..governance import egress
+    from ..governance.principal import effective_principal
+    from ..governance.raw_protection import is_owner
+
+    root = Path(vault_root)
+    who = effective_principal()
+    if is_owner(who) and restricted_reason(root) is None:
+        return None
+    path = spec.overlay(root).relative_to(root).as_posix()
+    if egress.release_level_for_path_only(root, path) < egress.LEVEL_FULL:
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+    return None
+
+
+def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
+    """Admit every kept snapshot before a history producer reads its header or bytes."""
+    from .. import registry_history
+    from ..governance import egress
+    from ..governance.principal import effective_principal
+    from ..governance.raw_protection import is_owner
+
+    root = Path(vault_root)
+    if is_owner(effective_principal()) and restricted_reason(root) is None:
+        return None
+    directory = registry_history.history_dir(root, spec.stem).relative_to(root).as_posix()
+    if egress.release_level_for_path_only(root, directory) < egress.LEVEL_FULL:
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+    names = registry_history.kept_names(root, directory, suffix=".yaml")
+    if names is None or any(
+        egress.release_level_for_path_only(root, f"{directory}/{name}") < egress.LEVEL_FULL
+        for name in names[: registry_history.HISTORY_KEEP]
+    ):
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+    return None
 
 
 def _usage(vault_root: Path, spec: RegistrySpec, snapshot: Snapshot) -> Any:
@@ -80,9 +122,14 @@ def _ordered(snapshot: Snapshot, usage: Any) -> list[Entry]:
     entries = list(snapshot.entries.values())
     if usage.available:
         return sorted(
-            entries, key=lambda entry: (entry.status != "active", -usage.counts.get(entry.key, 0), entry.key)
+            entries,
+            key=lambda entry: (
+                entry.status != "active",
+                -usage.counts.get(entry.key, 0),
+                entry.key,
+            ),
         )
-    return sorted(entries, key=lambda entry: (entry.status != "active", entry.key))
+    return entries
 
 
 def save_contract(spec: RegistrySpec) -> dict[str, Any]:
@@ -108,6 +155,9 @@ def inspect(
     size = INSPECT_DEFAULT_LIMIT if limit is None else int(limit)
     if not 1 <= size <= INSPECT_MAX_LIMIT:
         raise RegistryError(f"INVALID_REGISTRY_ARGUMENT: limit must be 1 to {INSPECT_MAX_LIMIT}")
+    refusal = admission_refusal(vault_root, spec)
+    if refusal is not None:
+        return refusal
     snapshot = registry.load(spec, vault_root)
     offset = 0
     if continuation is not None:
@@ -246,6 +296,9 @@ def _candidate(
 
 def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, Any]:
     """Read-only: what a save of `delta` would register, and what it resembles."""
+    refusal = admission_refusal(vault_root, spec)
+    if refusal is not None:
+        return refusal
     snapshot = registry.load(spec, vault_root)
     out: dict[str, Any] = {"subject": spec.name, "expected_hash": snapshot.content_hash}
     try:
@@ -317,7 +370,11 @@ def receipt_lines(
         if previous is None:
             verb = "registered"
         elif entry.status == "deprecated" and previous.status != "deprecated":
-            verb = f"deprecated in favour of {entry.replaced_by}" if entry.replaced_by else "deprecated"
+            verb = (
+                f"deprecated in favour of {entry.replaced_by}"
+                if entry.replaced_by
+                else "deprecated"
+            )
         else:
             verb = "changed"
         parent = f"parent {entry.parent}" if entry.parent else "no parent"
@@ -383,8 +440,11 @@ def queue_for_owner(
         family=spec.family,
         signal=vocabulary_review.REGISTRY_PROPOSAL_SIGNAL,
         targets={target: snapshot.content_hash},
-        evidence=[Evidence(target, snapshot.content_hash, vocabulary_review.REGISTRY_PROPOSAL_SIGNAL)],
-        registry_hashes=vocabulary_review.registry_hashes(root),
+        evidence=[
+            Evidence(target, snapshot.content_hash, vocabulary_review.REGISTRY_PROPOSAL_SIGNAL)
+        ],
+        # Validation reads only this target overlay; its server hash binds currency.
+        registry_hashes={},
         projection_status="current",
         paths={target: target},
         question=question,
@@ -416,11 +476,16 @@ def save(
     if not isinstance(why, str) or not why.strip():
         raise RegistryError("WHY_REQUIRED: save requires why")
     if not isinstance(expected_hash, str) or not expected_hash:
-        raise RegistryError("EXPECTED_HASH_REQUIRED: save requires expected_hash from inspect or propose")
+        raise RegistryError(
+            "EXPECTED_HASH_REQUIRED: save requires expected_hash from inspect or propose"
+        )
     root = Path(vault_root)
-    snapshot = registry.load(spec, root)
     reason = queues_for_owner(root)
-    if reason is None and expected_hash != snapshot.content_hash:
+    refusal = admission_refusal(root, spec)
+    if refusal is not None:
+        return refusal
+    snapshot = registry.load(spec, root)
+    if expected_hash != snapshot.content_hash:
         raise RegistryError(
             f"STALE_REGISTRY: {spec.name} changed since expected_hash was read; inspect again"
         )
@@ -433,12 +498,18 @@ def save(
     rendered = spec.adapter.render(document)
     if len(rendered.encode("utf-8")) > registry.MAX_OVERLAY_BYTES:
         raise RegistryError(
-            f"REGISTRY_TOO_LARGE: {spec.name} overlay would exceed {registry.MAX_OVERLAY_BYTES} bytes"
+            f"REGISTRY_TOO_LARGE: {spec.name} overlay would exceed "
+            f"{registry.MAX_OVERLAY_BYTES} bytes"
         )
     after_entries = spec.adapter.entries(candidate)
     added = registry.added_keys(snapshot.entries, after_entries)
     history = registry.commit(
-        spec, root, rendered, operation="save", why=why.strip(), before_hash=snapshot.content_hash,
+        spec,
+        root,
+        rendered,
+        operation="save",
+        why=why.strip(),
+        before_hash=snapshot.content_hash,
         added=added,
     )
     _mark_committed()
@@ -467,13 +538,20 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
     from .. import registry_history
 
     root = Path(vault_root)
+    refusal = admission_refusal(root, spec) or history_refusal(root, spec)
+    if refusal is not None:
+        return refusal
     snapshot = registry.load(spec, root)
     versions = registry_history.versions(root, stem=spec.stem)
     out: dict[str, Any] = {"subject": spec.name, "content_hash": snapshot.content_hash}
     reason = restricted_reason(root)
     if reason is not None:
         versions = [
-            {key: value for key, value in item.items() if key not in {"why", "principal", "principal_kind"}}
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"why", "principal", "principal_kind"}
+            }
             for item in versions
         ]
         out["withheld"] = {"fields": ["why", "principal"], "reason": reason}
@@ -503,9 +581,14 @@ def restore(
     if not isinstance(expected_hash, str) or not expected_hash:
         raise RegistryError("EXPECTED_HASH_REQUIRED: restore requires expected_hash")
     root = Path(vault_root)
-    reason = restricted_reason(root)
-    if reason is not None:
-        return {"subject": spec.name, "available": False, "reason": reason, "saved": None}
+    from ..governance.principal import effective_principal
+    from ..governance.raw_protection import is_owner
+
+    if not is_owner(effective_principal()):
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+    refusal = admission_refusal(root, spec) or history_refusal(root, spec)
+    if refusal is not None:
+        return refusal
     snapshot = registry.load(spec, root)
     if expected_hash != snapshot.content_hash:
         raise RegistryError(
@@ -515,9 +598,33 @@ def restore(
     restored = spec.adapter.parse(text, registry.content_hash(text))
     after_entries = spec.adapter.entries(restored)
     removed = sorted(set(snapshot.entries) - set(after_entries))
+    # Taxonomy subjects share one overlay; an exact restore can remove keys on both axes.
+    from . import registry_specs
+
+    removed_by_registry = {}
+    for related in registry_specs().values():
+        if related.overlay(root) != spec.overlay(root):
+            continue
+        before = related.adapter.entries(
+            related.adapter.parse(
+                snapshot.overlay_text,
+                snapshot.content_hash,
+            )
+        )
+        after_related = related.adapter.entries(
+            related.adapter.parse(text, registry.content_hash(text))
+        )
+        missing = sorted(set(before) - set(after_related))
+        if missing:
+            removed_by_registry[related.name] = missing
     added = registry.added_keys(snapshot.entries, after_entries)
     history = registry.commit(
-        spec, root, text, operation="restore", why=why.strip(), before_hash=snapshot.content_hash,
+        spec,
+        root,
+        text,
+        operation="restore",
+        why=why.strip(),
+        before_hash=snapshot.content_hash,
         added=added,
     )
     _mark_committed()
@@ -528,6 +635,7 @@ def restore(
         "why": why.strip(),
         "restored": version,
         "removed_keys": removed,
+        "removed_by_registry": removed_by_registry,
         "findings": [dict(item) for item in after.findings],
         "vocabulary_receipt": [
             f"{spec.name}: restored version {version}"

@@ -52,6 +52,7 @@ _DELTA_VERBS = frozenset({"upsert", "alias", "deprecate"})
 _STATUSES = frozenset({"active", "deprecated"})
 #: A save that would grow an overlay past this many bytes is refused.
 MAX_OVERLAY_BYTES = 256 * 1024
+# Collision comparison normalizes registry token spelling, never the meaning of prose.
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -211,7 +212,13 @@ def content_hash(text: str) -> str:
 
 
 def effective_digest(registry: str, entries: Mapping[str, Entry]) -> str:
-    payload = [registry, [entries[key].as_dict() for key in sorted(entries)]]
+    # Provenance describes where an entry came from, not its effective meaning.
+    effective = []
+    for key in sorted(entries):
+        entry = entries[key].as_dict()
+        entry.pop("origin", None)
+        effective.append(entry)
+    payload = [registry, effective]
     return content_hash(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
@@ -373,7 +380,8 @@ def _patch(spec: RegistrySpec, key: str, raw: object, base: Entry | None) -> Ent
     if unknown_attributes:
         raise RegistryError(
             f"INVALID_REGISTRY_DELTA: upsert.{key}.attributes has names {spec.name} does not "
-            "take: " + ", ".join(unknown_attributes)
+            "take: "
+            + ", ".join(unknown_attributes)
             + (f"; it takes {', '.join(sorted(spec.attributes))}" if spec.attributes else "")
         )
     for name in ("label", "description", "guidance", "parent", "replaced_by", "status"):
@@ -381,7 +389,9 @@ def _patch(spec: RegistrySpec, key: str, raw: object, base: Entry | None) -> Ent
             raise RegistryError(f"INVALID_REGISTRY_DELTA: upsert.{key}.{name} must be a string")
     status = str(raw.get("status") or (base.status if base else "active"))
     if status not in _STATUSES:
-        raise RegistryError(f"INVALID_REGISTRY_DELTA: upsert.{key}.status must be active or deprecated")
+        raise RegistryError(
+            f"INVALID_REGISTRY_DELTA: upsert.{key}.status must be active or deprecated"
+        )
     aliases = _string_list(raw["aliases"], f"upsert.{key}.aliases") if "aliases" in raw else ()
     merged_attributes = dict(base.attributes) if base else {}
     merged_attributes.update(dict(attributes))
@@ -402,7 +412,9 @@ def _patch(spec: RegistrySpec, key: str, raw: object, base: Entry | None) -> Ent
         ),
         parent=str(raw["parent"]).strip() if raw.get("parent") else (base.parent if base else None),
         attributes=MappingProxyType(merged_attributes),
-        guidance=str(raw["guidance"]).strip() if raw.get("guidance") else (base.guidance if base else ""),
+        guidance=str(raw["guidance"]).strip()
+        if raw.get("guidance")
+        else (base.guidance if base else ""),
         origin="vault",
     )
 
@@ -429,7 +441,8 @@ def _check_in_place(spec: RegistrySpec, before: Entry, after: Entry) -> None:
         after.status != "deprecated" or after.replaced_by != before.replaced_by
     ):
         raise RegistryError(
-            f"IMMUTABLE_REPLACEMENT: {after.key} is deprecated; its status and replacement are fixed"
+            f"IMMUTABLE_REPLACEMENT: {after.key} is deprecated; "
+            "its status and replacement are fixed"
         )
 
 
@@ -456,9 +469,7 @@ def apply_delta(
             raise RegistryError(f"INVALID_REGISTRY_DELTA: {verb} keys must be strings")
         key = spec.adapter.normalize_key(raw_key)
         if key != raw_key:
-            raise RegistryError(
-                f"INVALID_REGISTRY_KEY: {raw_key!r} is not canonical; use {key!r}"
-            )
+            raise RegistryError(f"INVALID_REGISTRY_KEY: {raw_key!r} is not canonical; use {key!r}")
         return key
 
     upserts = delta.get("upsert", {})
@@ -483,7 +494,9 @@ def apply_delta(
         key = canonical(raw_key, "alias")
         base = working.get(key)
         if base is None:
-            raise RegistryError(f"UNKNOWN_REGISTRY_KEY: alias names {key!r}, which is not registered")
+            raise RegistryError(
+                f"UNKNOWN_REGISTRY_KEY: alias names {key!r}, which is not registered"
+            )
         added = _string_list(raw, f"alias.{key}")
         entry = _patch(spec, key, {"aliases": list(added)}, base)
         spec.adapter.put(document, key, entry, existing=True)
@@ -497,11 +510,17 @@ def apply_delta(
         key = canonical(raw_key, "deprecate")
         base = working.get(key)
         if base is None:
-            raise RegistryError(f"UNKNOWN_REGISTRY_KEY: deprecate names {key!r}, which is not registered")
+            raise RegistryError(
+                f"UNKNOWN_REGISTRY_KEY: deprecate names {key!r}, which is not registered"
+            )
         if replacement is not None and not isinstance(replacement, str):
-            raise RegistryError(f"INVALID_REGISTRY_DELTA: deprecate.{key} names a replacement key or null")
+            raise RegistryError(
+                f"INVALID_REGISTRY_DELTA: deprecate.{key} names a replacement key or null"
+            )
         if spec.replacement_required and not replacement:
-            raise RegistryError(f"MISSING_REPLACEMENT: deprecating {key} needs an active replacement")
+            raise RegistryError(
+                f"MISSING_REPLACEMENT: deprecating {key} needs an active replacement"
+            )
         if replacement:
             survivor = working.get(replacement)
             seen = {key}
@@ -510,7 +529,7 @@ def apply_delta(
                     survivor = None
                     break
                 seen.add(survivor.key)
-                survivor = working.get(survivor.replaced_by)
+                survivor = working.get(survivor.replaced_by or "")
             if survivor is None or survivor.status != "active":
                 raise RegistryError(
                     f"INVALID_REPLACEMENT: {key} must be replaced by a chain that ends in an "
@@ -522,8 +541,14 @@ def apply_delta(
                     f"IMMUTABLE_REPLACEMENT: {key} is deprecated; its replacement is fixed"
                 )
             continue
-        entry = Entry(**{**_fields(base), "status": "deprecated",
-                         "replaced_by": replacement or None, "origin": "vault"})
+        entry = Entry(
+            **{
+                **_fields(base),
+                "status": "deprecated",
+                "replaced_by": replacement or None,
+                "origin": "vault",
+            }
+        )
         spec.adapter.put(document, key, entry, existing=True)
         working[key] = entry
         touched.append(key)
@@ -534,7 +559,11 @@ def added_keys(before: Mapping[str, Entry], after: Mapping[str, Entry]) -> tuple
     """Keys active in `after` that were not active in `before`."""
     was_active = {key for key, entry in before.items() if entry.status == "active"}
     return tuple(
-        sorted(key for key, entry in after.items() if entry.status == "active" and key not in was_active)
+        sorted(
+            key
+            for key, entry in after.items()
+            if entry.status == "active" and key not in was_active
+        )
     )
 
 
@@ -542,7 +571,9 @@ def _fields(entry: Entry) -> dict[str, Any]:
     return {name: getattr(entry, name) for name in Entry.__slots__}
 
 
-def new_findings(before: Snapshot | None, after_findings: tuple[Mapping[str, Any], ...]) -> list[dict[str, Any]]:
+def new_findings(
+    before: Snapshot | None, after_findings: tuple[Mapping[str, Any], ...]
+) -> list[dict[str, Any]]:
     """Blocking findings the save introduces.
 
     A finding the current overlay already carries, such as a hand edit's, never

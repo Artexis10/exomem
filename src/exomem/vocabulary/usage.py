@@ -98,15 +98,15 @@ def entity_types(vault_root: Path, snapshot: Snapshot) -> Usage:
             "WHERE kind = 'file' AND page_type = 'entity' GROUP BY 1",
         )
         if isinstance(rows, str):
-            return _unavailable(rows, "graph")
+            return _unavailable(rows, "graph entity pages")
         resolve = snapshot.typed.resolve
         return Usage(
             True,
             _canonical_counts(rows, snapshot, lambda value: getattr(resolve(value), "id", None)),
-            source="graph",
+            source="graph entity pages",
         )
 
-    return _guarded(vault_root, "graph", read)
+    return _guarded(vault_root, "graph entity pages", read)
 
 
 def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
@@ -120,10 +120,14 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
             f"WHERE relation_type IS NOT NULL AND origin IN ({origins}) GROUP BY 1",
         )
         if isinstance(rows, str):
-            return _unavailable(rows, "graph")
-        return Usage(True, _canonical_counts(rows, snapshot, lambda value: value), source="graph")
+            return _unavailable(rows, "graph authored edges")
+        return Usage(
+            True,
+            _canonical_counts(rows, snapshot, lambda value: value),
+            source="graph authored edges",
+        )
 
-    return _guarded(vault_root, "graph", read)
+    return _guarded(vault_root, "graph authored edges", read)
 
 
 def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
@@ -136,14 +140,16 @@ def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
             "WHERE unit_category IS NOT NULL GROUP BY 1",
         )
         if isinstance(rows, str):
-            return _unavailable(rows, "graph")
+            return _unavailable(rows, "graph semantic units")
 
         def resolve(value: str) -> str | None:
             return snapshot.typed.resolve_category(value).resolved
 
-        return Usage(True, _canonical_counts(rows, snapshot, resolve), source="graph")
+        return Usage(
+            True, _canonical_counts(rows, snapshot, resolve), source="graph semantic units"
+        )
 
-    return _guarded(vault_root, "graph", read)
+    return _guarded(vault_root, "graph semantic units", read)
 
 
 def catalogue_axis(vault_root: Path, snapshot: Snapshot, *, column: str) -> Usage:
@@ -154,14 +160,18 @@ def catalogue_axis(vault_root: Path, snapshot: Snapshot, *, column: str) -> Usag
 
         rows = lexstore.get_store(Path(vault_root)).page_axis_counts(column)
         if rows is None:
-            return _unavailable("catalogue_cold", "catalogue")
+            return _unavailable("catalogue_unavailable", "catalogue Knowledge Base pages")
         aliases = (
-            snapshot.typed.kind_aliases if column == "source_kind" else snapshot.typed.domain_aliases
+            snapshot.typed.kind_aliases
+            if column == "source_kind"
+            else snapshot.typed.domain_aliases
         )
         return Usage(
             True,
-            _canonical_counts(list(rows.items()), snapshot, lambda value: aliases.get(value, value)),
-            source="catalogue",
+            _canonical_counts(
+                list(rows.items()), snapshot, lambda value: aliases.get(value, value)
+            ),
+            source="catalogue Knowledge Base pages",
         )
 
-    return _guarded(vault_root, "catalogue", read)
+    return _guarded(vault_root, "catalogue Knowledge Base pages", read)
