@@ -801,8 +801,8 @@ def unclassified_folders(taxonomy: source_taxonomy.SourceTaxonomy) -> tuple[str,
 KNOWN_KINDS_SHOWN = 30
 #: What each count on a kind-required refusal measures, and where it comes from.
 KNOWN_KINDS_COUNTED = (
-    "sources: the source pages filed under the kind's Sources/ folder, counted "
-    "from this vault when the capture was refused"
+    "sources: the source pages filed under the kind's Sources/ folder that this "
+    "caller may see, counted from this vault when the capture was refused"
 )
 
 
