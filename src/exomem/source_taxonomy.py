@@ -701,10 +701,27 @@ class TaxonomyPlan:
     #: The registry text the writes were planned against; None when the
     #: registry did not exist. Meaningful only when there are writes.
     source_text: str | None = None
+    #: The kept version of the replaced registry, when there are writes.
+    version: str | None = None
 
     @property
     def introduced_keys(self) -> tuple[str, ...]:
         return tuple(item.key for item in self.introductions)
+
+    def added(self) -> dict[str, list[str]]:
+        """Introduced keys per registry name (`source-kinds`, `domains`)."""
+        out: dict[str, list[str]] = {}
+        for item in self.introductions:
+            out.setdefault(_spec_for_axis(item.axis).name, []).append(item.key)
+        return out
+
+    def receipt(self) -> list[str]:
+        """One `vocabulary_receipt` line per key this write registered."""
+        if self.version is None:
+            return []
+        from .vocabulary import contract as vocabulary_contract
+
+        return vocabulary_contract.first_use_lines(self.added(), self.version)
 
 
 _BOOTSTRAP_HEADER = f"""\
@@ -790,6 +807,25 @@ def plan_registrations(
         create_only=not path_exists,
         guard=guard,
     )
+    # The capture's batch also keeps the replaced registry, so bootstrap can
+    # mark the keys new and the owner can restore the version before them.
+    from . import registry_history
+
+    plan = TaxonomyPlan(taxonomy, introductions=tuple(introductions))
+    version, kept = registry_history.plan_snapshot(
+        root,
+        path=path,
+        stem=KIND_SPEC.stem,
+        previous=text if path_exists else None,
+        operation="auto-register",
+        before_hash=(
+            vocabulary_registry.content_hash(text)
+            if path_exists
+            else vocabulary_registry.NO_OVERLAY_HASH
+        ),
+        after_hash=vocabulary_registry.content_hash(updated),
+        added=plan.added(),
+    )
     return TaxonomyPlan(
         taxonomy=SourceTaxonomy(
             kinds=definitions["source_kind"],
@@ -799,8 +835,9 @@ def plan_registrations(
             findings=taxonomy.findings,
         ),
         introductions=tuple(introductions),
-        writes=(write,),
+        writes=(write, kept),
         source_text=text if path_exists else None,
+        version=version,
     )
 
 
@@ -991,6 +1028,10 @@ def _domain_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> A
 
 
 _LABEL_FIELDS = frozenset({"label", "description", "aliases", "status", "replaced_by", "attributes"})
+
+def _spec_for_axis(axis: str) -> vocabulary_registry.RegistrySpec:
+    return KIND_SPEC if axis == "source_kind" else DOMAIN_SPEC
+
 
 KIND_SPEC = vocabulary_registry.RegistrySpec(
     name="source-kinds",

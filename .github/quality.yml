@@ -190,6 +190,13 @@ duplicates:
 # and upgrade scripts and the plugin hooks when they change. The action skips templates.
 shellcheck: {}
 
+# Semgrep C6 gate (banned patterns): word lists, word regexes and regexes over SQL, HTML
+# or XML, on added lines in product code. An ERROR fails only on an added line; a
+# WARNING is listed for the reviewer. Vocabulary cluster slices add their rules to one
+# repository rule file listed under `rules` when the first one lands.
+semgrep:
+  paths: ["src/exomem"]
+
 test_jobs:
   - "core tests (py3.13, shard 1/12)"
   - "core tests (py3.13, shard 2/12)"

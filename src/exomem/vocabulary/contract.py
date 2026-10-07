@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -326,6 +326,23 @@ def receipt_lines(
             f"Revert: {_restore_route(spec, version)}"
         )
     return lines
+
+
+def first_use_lines(added: Mapping[str, Sequence[str]], version: str) -> list[str]:
+    """One line per key a write registered on first use, with its revert route.
+
+    An open registry (source kinds, domains) registers a key the first time a
+    write uses it. The line is the write's own receipt: it appears once, in
+    that write's response, and asks for nothing.
+    """
+    from . import registry_spec
+
+    return [
+        f"{name}: registered {key} on first use; in effect now for every agent. "
+        f"Revert: {_restore_route(registry_spec(name), version)}"
+        for name, keys in added.items()
+        for key in keys
+    ]
 
 
 def queue_for_owner(

@@ -7780,9 +7780,10 @@ def op_capture_source(
         projects=projects,
     )
     out: dict = {"source": source}
-    if "vocabulary_resolution" in source:
-        # The terminal reads the identity record from the leaf's top level.
-        out["vocabulary_resolution"] = source["vocabulary_resolution"]
+    # The terminal reads these from the leaf's top level.
+    for key in ("vocabulary_resolution", "vocabulary_receipt"):
+        if key in source:
+            out[key] = source[key]
     if compile_guidance:
         try:
             out["compile_guidance"] = op_propose_compilation(
