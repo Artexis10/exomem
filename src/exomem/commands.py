@@ -633,6 +633,7 @@ class GetResponse(TypedDict):
     frontmatter: dict[str, Any]
     body: NotRequired[str]
     content_hash: NotRequired[str]
+    evidence_version: NotRequired[str]
     mtime: NotRequired[float]
     content: NotRequired[str]
     has_frontmatter: NotRequired[bool]
@@ -3420,7 +3421,8 @@ def op_suggest_links(
         suggestions = corpus_aware_module.suggest_related(
             vault_root,
             title=page.title,
-            body=page.body,
+            # The query is built from prose: a carrier's words never steer it.
+            body=egress_module.prose_for_caller(vault_root, page.body, owner_path=page.rel_path),
             self_path=page.rel_path,
             existing_links=existing_links,
             limit=limit,
@@ -4272,6 +4274,18 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
+    if (
+        not frontmatter_only
+        and str(result.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+        and out.get("body") == result.body
+        and out.get("frontmatter") == result.frontmatter
+        and out.get("content_hash") == result.content_hash
+        and not out.get("body_truncated")
+    ):
+        try:
+            out["evidence_version"] = provenance_module.evidence_version(result.content)
+        except ValueError:
+            pass
     if "body" in out and not frontmatter_only:
         # Pull-first sensing (default off): what released later notes did to
         # this page. Absent when there is nothing to say, or when the snapshot
@@ -7124,9 +7138,16 @@ def op_read_memory(
             snapshot_content=page.content,
             stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
         )
+        withheld_spans: tuple[tuple[int, int], ...] = ()
+        if released is not None and released.get("body") != page.body:
+            # A full release whose only change is a removed origin carrier
+            # still serves every unit outside it.
+            carriers = provenance_module.withheld_spans(page.body, owner_path=page.path)
+            if released.get("body") == provenance_module.remove_carriers(page.body, carriers):
+                withheld_spans = carriers
         if (
             released is None
-            or released.get("body") != page.body
+            or (released.get("body") != page.body and not withheld_spans)
             or released.get("content_hash") != page.content_hash
         ):
             raise ValueError(
@@ -7139,12 +7160,25 @@ def op_read_memory(
             include_history=False,
         )
         working_set_heat_module.note_selection(vault_root, [page.path], "read")
-        return semantic_unit_read_module.read_semantic_unit(
+        unit = semantic_unit_read_module.read_semantic_unit(
             vault_root,
             page=page,
             unit_ref=unit_ref,
             frontmatter=released.get("frontmatter"),
-        ).as_dict()
+            withheld_spans=withheld_spans,
+        )
+        out = unit.as_dict()
+        if (
+            unit.status == "found"
+            and unit.unit is not None
+            and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            and released.get("frontmatter") == page.frontmatter
+        ):
+            try:
+                out["evidence_version"] = provenance_module.evidence_version(page.content)
+            except ValueError:
+                pass
+        return out
     return op_get(
         vault_root,
         path=path,
@@ -11551,6 +11585,7 @@ def op_record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "history",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,

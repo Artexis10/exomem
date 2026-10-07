@@ -1190,7 +1190,12 @@ def _scan_category_observations(
                 page_type=page.page_type,
                 preferred_project=project,
             )
-            excerpt, truncated = _bounded_excerpt(unit.content)
+            # Examples are served to callers: a carrier in a unit's code is withheld.
+            from .provenance import withheld_prose
+
+            excerpt, truncated = _bounded_excerpt(
+                withheld_prose(unit.content, owner_path=page.rel_path)
+            )
             observations.append(
                 {
                     "category_raw": unit.category_raw,

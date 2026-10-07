@@ -38,3 +38,5 @@ An absent or empty active sidecar has no serving space. The job plans an initial
 - **The kill switch on a cell** (`EXOMEM_RECALL_REEMBED=off`) keeps dense recall off. The cloud image also carries bge-base, inherited from the hosted image, so before the cutover `EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5` on a cell serves its old sidecar again.
 - **The cloud image grows** by the bge-m3 artefact (~0.55 GB; 1.53 to 2.22 GB measured), and the release build fetches a release asset.
 - **Rolling back** to an older cloud image after the cutover leaves the cell with a bge-m3 sidecar it refuses. Older images neither carry the bge-m3 artefact nor re-embed on a cell, so dense recall is off until the next roll forward. Until the first start after the cutover retires it, the bge-base sidecar is still on disk; removing `.embeddings.active` then lets an older image serve it.
+
+> **Superseded on 2026-10-06 (#1608):** the cloud image no longer builds on the hosted image. Both build on a shared `cell-runtime` stage; the cloud image carries bge-m3 alone, so `EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5` on a cloud cell no longer serves an old sidecar.

@@ -143,6 +143,8 @@ class ActiveProjectionRuntime:
                 self.namespace,
                 projection_store.VerifiedProjectionNamespace,
             )
+            or self.snapshot.active.projector_schema_version
+            != projections.PROJECTOR_SCHEMA_VERSION
             or self.namespace.active_state_digest
             != self.snapshot.active.activation_state_digest
             or self.namespace.namespace_key.policy_fingerprint
@@ -469,6 +471,13 @@ def _projection_runtime_request_scope(
             else _lookup_projected_continuation(Path(vault_root), continuation)
         )
         selected = runtime if record is None else record.runtime
+        if (
+            selected.snapshot.active.projector_schema_version
+            != projections.PROJECTOR_SCHEMA_VERSION
+        ):
+            raise ProjectionRuntimeUnavailable(
+                "governed projected retrieval is unavailable"
+            )
         pin = (root_key, selected.namespace.namespace_key.namespace_id)
         _ACTIVE_PROJECTED_REQUESTS[pin] = _ACTIVE_PROJECTED_REQUESTS.get(pin, 0) + 1
     try:
@@ -819,6 +828,13 @@ def _preactivated_runtime(vault_root: Path) -> ActiveProjectionRuntime | None:
         record = _PREACTIVATED_RUNTIMES.get(key)
     if record is None:
         return None
+    if (
+        record.runtime.snapshot.active.projector_schema_version
+        != projections.PROJECTOR_SCHEMA_VERSION
+    ):
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
     try:
         custody = authorization_custody.load_authorization_custody(
             root,

@@ -280,12 +280,12 @@ class GraphNode:
             "kind": self.kind,
             "path": self.path,
             "anchor": self.anchor,
-            "title": self.title,
-            "text": self.text,
+            "title": _served(self.path, self.title),
+            "text": _served(self.path, self.text),
             "source_hash": self.source_hash,
             "line_start": self.line_start,
             "line_end": self.line_end,
-            "metadata": dict(self.metadata or {}),
+            "metadata": _served(self.path, dict(self.metadata or {})),
         }
 
 
@@ -331,7 +331,7 @@ class GraphEdge:
             "origin": self.origin,
             "source_path": self.source_path,
             "source_anchor": self.source_anchor,
-            "metadata": dict(self.metadata or {}),
+            "metadata": _served(self.source_path, dict(self.metadata or {})),
         }
 
 
@@ -10178,6 +10178,30 @@ def _block_anchor(unit: semantic_units.SemanticUnit) -> str:
     return unit.anchor or semantic_blocks.normalize_label(unit.title or "") or f"line-{unit.line}"
 
 
+def _served(path: str, value: Any) -> Any:
+    """A graph field as every audience is served it: no reserved origin opener.
+
+    Unit fields, contexts and titles reach node and edge metadata verbatim, and
+    a stored graph predates any later fix, so every emitted node and edge
+    passes through here. Strings are withheld wherever they nest.
+    """
+    if isinstance(value, str):
+        from . import provenance
+
+        return provenance.withheld_prose(value, owner_path=path)
+    if isinstance(value, dict):
+        return {key: _served(path, item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_served(path, item) for item in value]
+    return value
+
+
+def _node_text(page, text: str) -> str:
+    """Unit text as stored: withheld before it is written, because node text is
+    what a graph query's `LIKE` matches, so a payload must not decide a match."""
+    return _served(page.rel_path, text)
+
+
 def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> GraphNode:
     return GraphNode(
         node_key=_block_key(page, unit),
@@ -10185,7 +10209,7 @@ def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> Graph
         path=page.rel_path,
         anchor=_block_anchor(unit),
         title=unit.title,
-        text=unit.body or unit.title or "",
+        text=_node_text(page, unit.body or unit.title or ""),
         source_hash=vault_module.content_hash(raw_text),
         line_start=unit.line,
         line_end=unit.end_line,
@@ -10249,7 +10273,7 @@ def _unit_node(
         path=page.rel_path,
         anchor=unit.anchor,
         title=None,
-        text=unit.content,
+        text=_node_text(page, unit.content),
         source_hash=state.parent_source_hash,
         line_start=unit.line,
         line_end=unit.end_line,
@@ -10857,12 +10881,12 @@ def _node_row_to_dict(row) -> dict[str, Any]:
         "kind": row[1],
         "path": row[2],
         "anchor": row[3],
-        "title": row[4],
-        "text": row[5],
+        "title": _served(row[2], row[4]),
+        "text": _served(row[2], row[5]),
         "source_hash": row[6],
         "line_start": row[7],
         "line_end": row[8],
-        "metadata": _json(row[9]),
+        "metadata": _served(row[2], _json(row[9])),
     }
 
 
@@ -10880,7 +10904,7 @@ def _edge_row_to_dict(row) -> dict[str, Any]:
         "origin": row[9],
         "source_path": row[10],
         "source_anchor": row[11],
-        "metadata": _json(row[12]),
+        "metadata": _served(row[10], _json(row[12])),
     }
 
 

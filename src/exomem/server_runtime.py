@@ -109,7 +109,11 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 
     project_keys_hint = project_keys.keys_hint(vault_root)
-    projection_runtime.preactivate_projection_runtime(vault_root)
+    try:
+        projection_runtime.preactivate_projection_runtime(vault_root)
+    except projection_runtime.ProjectionRuntimeUnavailable:
+        # The projected content boundary stays closed while owner repair serves.
+        log.warning("governed projected retrieval is unavailable")
     _start_metrics_persistence()
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     return ServerRuntime(
@@ -218,6 +222,10 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._start_component("retrieval", _start_compute_runtime)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("projector refresh", refresh_obsolete_projector)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
@@ -404,8 +412,8 @@ class LocalRuntimeActivation:
             name="exomem-vocabulary-recovery",
             daemon=True,
         )
-        self.vocabulary_recovery = thread
         thread.start()
+        self.vocabulary_recovery = thread
 
     def _start_recall_reembed(self, vault_root: Path) -> None:
         """Bring the recall sidecar into the recall encoder's space, off-request.
@@ -558,7 +566,10 @@ def _initialize_locked_hosted_runtime(
 
     source_schema = schema.load_source_schema(vault_root)
     project_keys_hint = project_keys.keys_hint(vault_root)
-    projection_runtime.preactivate_projection_runtime(vault_root)
+    try:
+        projection_runtime.preactivate_projection_runtime(vault_root)
+    except projection_runtime.ProjectionRuntimeUnavailable:
+        log.warning("governed projected retrieval is unavailable")
     log.info(
         "hosted_cell=%s source_types=%s",
         config.cell_id,
@@ -602,6 +613,10 @@ def _initialize_locked_hosted_runtime(
             _start_compute_runtime(vault_root)
         else:
             _start_retrieval_runtime(vault_root)
+        try:
+            refresh_obsolete_projector(vault_root)
+        except Exception:  # noqa: BLE001 - serving continues; the next owner start retries
+            log.warning("projector refresh failed; transport continuing", exc_info=True)
     if not mutation_ready:
         for feature in ("embeddings", "file-watcher", "media"):
             if config.has_feature(feature):
@@ -961,6 +976,17 @@ def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> No
                 log.warning("vocabulary recovery redrain failed", exc_info=True)
     finally:
         vocabulary_recovery.release_publication_signal(vault_root, published)
+
+
+def refresh_obsolete_projector(vault_root: Path) -> str:
+    """Refresh an obsolete projector namespace as the owner, under the writer lease."""
+    from .governance import projector_refresh
+    from .writer_lease import get_manager
+
+    with get_manager().mutation_guard(
+        vault_root, operation="projector_refresh", holder_kind="background"
+    ):
+        return projector_refresh.converge(vault_root)
 
 
 def _start_metrics_persistence() -> None:

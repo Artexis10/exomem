@@ -2402,6 +2402,37 @@ def test_a_review_item_reads_as_if_its_marked_neighbour_were_absent(tmp_path: Pa
     assert present == context("absent", _principal("external"))
 
 
+def _raw_twins(tmp_path: Path, base: dict[str, str], protected: dict[str, str]) -> dict[str, Path]:
+    """Two vaults with no policy: `present` holds the RAW-marked pages, `absent` does not."""
+    import shutil
+
+    vaults = {}
+    for variant, files in {"present": {**base, **protected}, "absent": base}.items():
+        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
+        shutil.rmtree(vaults[variant] / KB / "_Governance")
+    return vaults
+
+
+def test_a_review_item_for_a_marked_page_reads_as_if_the_page_were_absent(tmp_path: Path) -> None:
+    """RAW: review_item_context serves an item's own prose (`prose_for_caller`).
+    A guest on a vault with no policy that holds the owner's ref to a protected
+    capture's item is answered as if the page were absent."""
+    marked = f"{NOTES}/__exomem_raw_v1__gamma-secret.md"
+    vaults = _raw_twins(
+        tmp_path, _filler(), {marked: _page("Gamma", "Secret orchard plan.", type="insight")}
+    )
+    review = _call(vaults["present"], None, "review_memory", mode="activation", limit=0)
+    ref = next(item["ref"] for item in review["items"] if item["path"] == marked)
+    assert "Secret orchard plan" in _text(_call(vaults["present"], None, "review_item_context", ref=ref))
+
+    guest = {
+        variant: _call(vault, _principal("external"), "review_item_context", ref=ref)
+        for variant, vault in vaults.items()
+    }
+
+    assert guest["present"] == guest["absent"]
+
+
 def test_a_guest_activates_as_if_the_marked_page_were_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2486,17 +2517,6 @@ def test_a_guests_referents_count_as_if_the_marked_entity_were_absent(tmp_path: 
     assert local["referents"]["reasons"]["type_mismatch"] == 2, local
     guest = [_call(vaults[variant], _principal("external"), "ask_memory", **query) for variant in vaults]
     assert guest[0]["referents"] == guest[1]["referents"]
-
-
-def _raw_twins(tmp_path: Path, base: dict[str, str], protected: dict[str, str]) -> dict[str, Path]:
-    """Two vaults with no policy: `present` holds the RAW-marked pages, `absent` does not."""
-    import shutil
-
-    vaults = {}
-    for variant, files in {"present": {**base, **protected}, "absent": base}.items():
-        vaults[variant] = _materialize(tmp_path / variant / "vault", files, "external")
-        shutil.rmtree(vaults[variant] / KB / "_Governance")
-    return vaults
 
 
 def test_a_guest_deletes_a_page_a_marked_page_links_as_if_the_linker_were_absent(

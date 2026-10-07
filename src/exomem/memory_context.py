@@ -105,7 +105,8 @@ def assemble_context(
     history: dict[str, list[dict[str, str]]] = {}
     truncation = list(pack.get("truncation", []))
     for page in pages:
-        body, truncated = _bounded(page.body, max_body_chars)
+        prose = egress.prose_for_caller(vault_root, page.body, owner_path=page.rel_path)
+        body, truncated = _bounded(prose, max_body_chars)
         document: dict[str, Any] = {
             "path": page.rel_path,
             "title": page.title,

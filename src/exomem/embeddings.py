@@ -1051,11 +1051,11 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
         ss.semantic_segments_enabled()
         and getattr(page, "media_type", None) in ("audio", "video")
     ):
-        return chunk_text(page.title, page.body)
+        return chunk_text(page.title, page.search_body)
     body = page.body or ""
     idx = body.find("## Extracted text")
     if idx == -1:
-        return chunk_text(page.title, page.body)
+        return chunk_text(page.title, page.search_body)
     head = body[:idx]
     rest = body[idx + len("## Extracted text"):]
     nxt = rest.find("\n## ")
@@ -1063,7 +1063,7 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     tail = "" if nxt == -1 else rest[nxt + 1 :]
     timed_lines = sum(1 for line in transcript.splitlines() if ss.TIMED_LINE_RE.match(line))
     if timed_lines < ss.MIN_TIMED_LINES:
-        return chunk_text(page.title, page.body)
+        return chunk_text(page.title, page.search_body)
     if not allow_encode:
         return None
     events = (
@@ -1073,7 +1073,7 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     )
     segs = ss.segment_transcript(transcript, events=events)
     if segs is None:
-        return chunk_text(page.title, page.body)
+        return chunk_text(page.title, page.search_body)
     title = (page.title or "").strip()
     out: list[str] = []
     if head.strip():

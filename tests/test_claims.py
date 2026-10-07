@@ -622,3 +622,20 @@ def test_rebuild_all_builds_real_claim_vectors(vault: Path, monkeypatch) -> None
     assert row is not None
     assert row[1].shape == (recall_space.declared_dim(embeddings.MODEL_NAME),)
     assert np.isfinite(row[1]).all()
+
+
+def test_a_claim_never_falls_back_to_an_origin_carrier(vault: Path) -> None:
+    """With no claim section the lead paragraph is the claim, and a carrier is not prose."""
+    page_path = vault / "Knowledge Base" / "Notes" / "Insights" / "carrier-lead.md"
+    page_path.write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n# Carrier lead\n\n"
+        '<!-- exomem-origin:v1 {"reason":"PRIVATEREASON"} -->\n\n'
+        "Plain lead paragraph.\n",
+        encoding="utf-8",
+    )
+    page = find_module._CACHE.get(page_path, vault)
+
+    claim = claims.extract_claim_for_page(page)
+
+    assert "Plain lead paragraph." in claim
+    assert "PRIVATEREASON" not in claim

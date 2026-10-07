@@ -791,3 +791,20 @@ def test_embedding_drift_flags_never_embedded_file(vault: Path) -> None:
     assert "Knowledge Base/Notes/Insights/brand-new-out-of-band.md" in flagged, flagged
     assert embedded_rel not in flagged  # already embedded + fresh → not flagged
     assert all(f.category == "embedding_drift" for f in findings)
+
+
+def test_a_link_inside_an_origin_carrier_does_not_adopt_an_orphan_entity(tmp_path: Path) -> None:
+    """A carrier is recorded data, not a use of the entity it names."""
+    entity = _write_entity(tmp_path, folder="Places", name="Aster Hall", entity_type="place")
+    note = tmp_path / "Knowledge Base" / "Notes" / "Insights" / "carrier-only.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n"
+        '<!-- exomem-origin:v1 {"reason":"Met at [[Entities/Places/Aster Hall]]."} -->\n\n'
+        "No prose link.\n",
+        encoding="utf-8",
+    )
+
+    findings = audit_module.audit(tmp_path, categories=["orphan_entity"]).findings
+
+    assert [finding.path for finding in findings] == [entity.relative_to(tmp_path).as_posix()]
