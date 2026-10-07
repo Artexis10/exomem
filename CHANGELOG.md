@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **cloud:** grow local cells online and prove node-loss recovery ([#1603](https://github.com/Artexis10/exomem/issues/1603)) ([37bfb11](https://github.com/Artexis10/exomem/commit/37bfb11753ca0e912b202b5577553f2eb14065ba))
-* **governance:** keep raw originals owner-only until explicitly released ([#1581](https://github.com/Artexis10/exomem/issues/1581)) ([8c96fd4](https://github.com/Artexis10/exomem/commit/8c96fd4b1ded6d9b072454c8fb805c8672f56a16))
+* **cloud:** grow local cells online and rehearse node-loss recovery with an S3 test double ([#1603](https://github.com/Artexis10/exomem/issues/1603)) ([37bfb11](https://github.com/Artexis10/exomem/commit/37bfb11753ca0e912b202b5577553f2eb14065ba))
+* **governance:** keep standalone raw originals owner-only until explicit release; defer hosted read protection until tenant-owner binding ([#1581](https://github.com/Artexis10/exomem/issues/1581)) ([8c96fd4](https://github.com/Artexis10/exomem/commit/8c96fd4b1ded6d9b072454c8fb805c8672f56a16))
 * **records:** recover corrected file rows and bind exact episode origins ([#1607](https://github.com/Artexis10/exomem/issues/1607)) ([2e77ac3](https://github.com/Artexis10/exomem/commit/2e77ac33e97d61e3967e062588a8d41ce7021fa5))
 * **upkeep:** add episode-recap fold and profile summary upkeep ([#1600](https://github.com/Artexis10/exomem/issues/1600)) ([6fcdb69](https://github.com/Artexis10/exomem/commit/6fcdb69a956a077e15ffcd25e17e41f46a93951e))
 
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-* **cloud:** request 512Mi and 125m per cell ([#1605](https://github.com/Artexis10/exomem/issues/1605)) ([fb087a3](https://github.com/Artexis10/exomem/commit/fb087a3ef580d1b50199a3888cd4383242d8e637))
+* **cloud:** set chart and cellctl defaults to 512Mi and 125m per cell ([#1605](https://github.com/Artexis10/exomem/issues/1605)) ([fb087a3](https://github.com/Artexis10/exomem/commit/fb087a3ef580d1b50199a3888cd4383242d8e637))
 * **cloud:** ship bge-m3 alone in the cloud image after the multilingual cutover ([#1608](https://github.com/Artexis10/exomem/issues/1608)) ([6325bb9](https://github.com/Artexis10/exomem/commit/6325bb9a7a5336a05b47d0b5f988714c10fe1c2a))
 
 ## [0.109.0](https://github.com/Artexis10/exomem/compare/v0.108.0...v0.109.0) (2026-10-06)
