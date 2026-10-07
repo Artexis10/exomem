@@ -59,6 +59,14 @@ class CollectionStoreError(RuntimeError):
         self.code = code
 
 
+def busy(message: str):
+    """The one shape of every COLLECTION_STORE_BUSY a caller sees: retryable, nothing committed."""
+    from ..cli_ops import OpError
+
+    return OpError("COLLECTION_STORE_BUSY", message, "Retry shortly.",
+                   details={"status": "retryable", "committed": False})
+
+
 def store_path(vault_root: Path) -> Path:
     """The live store for one vault, under its external state root."""
     from .. import state_paths

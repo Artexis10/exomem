@@ -110,7 +110,8 @@ def offline_create(root, manifest_file, path, *, why):
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
-    """A/B in files, C enrolled offline by the owner, then the service started without the operator credential."""
+    """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
+    credential, all under a release that enables records-summary-v1."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
@@ -132,11 +133,11 @@ def service(tmp_path, monkeypatch):
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
     }.items():
         monkeypatch.setenv(name, value)
-    (tmp_path / "c.md").write_text(manifest_text())
+    (tmp_path / "c.md").write_text(summary_text())
+    # Only a release that enables the slice enrols a vault and serves its summary collection C.
+    monkeypatch.setattr(capability, "RELEASED", ON)
     with coordinator(tmp_path / "coordinator.sqlite"):
-        with pytest.MonkeyPatch.context() as release:  # only a release that enables the slice enrols a vault
-            release.setattr(capability, "RELEASED", ON)
-            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
+        assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
         started = Service(root, writer_lease.start_server_lifecycle())
         try:
             _until(lambda: started.manager.status().get("collection_store", {}).get("status") == "admitted")
@@ -157,7 +158,8 @@ def test_the_service_startup_gate_admits_the_mixed_vault(service):
 def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(service):
     """Defect: the installed service never opens its store, so C refuses or reads its views as
     files; A/B rows reach the store or C traffic changes A/B bytes; or the in-service owner
-    route refuses SERVICE_ACTIVE; or an inventory lists C's generated view as a file collection."""
+    route refuses SERVICE_ACTIVE or drops the owner's acknowledgement of skipped changes; or an
+    inventory lists C's generated view as a file collection."""
     root = service.root
     assert call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
                 item_key=ROW, why="file write")["outcome"] == "committed"
@@ -181,6 +183,10 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
         (manifest_path(), "COLLECTION_STORE_UNAVAILABLE")]
     _published(SimpleNamespace(meta=lambda: store_meta(root)))  # the off-ack publisher settles first
     preview = call(root, "maintain_memory", mode="collections-store-adopt-local")
+    # The acknowledgement reaches the route, which keeps it for the reconcile step.
+    refused(lambda: call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
+                         plan_id=preview["plan_id"], why="acknowledge", acknowledge_skipped=True),
+            "COLLECTION_STORE_ACKNOWLEDGE_UNAVAILABLE")
     assert call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
                 plan_id=preview["plan_id"], why="nothing to adopt")["status"] == "in_sync"
 
@@ -188,10 +194,12 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
 def test_records_summary_v1_gates_summary_create_import_and_query_until_released(
         service, tmp_path, monkeypatch, capsys):
     """Defect: the service creates, imports into or answers a summary collection before the release
-    enables records-summary-v1, a disabled summary route answers as empty, the gate also stops C's
-    items-mode reads, an unenrolled vault's summary create needs no operator step, the offline
-    create runs beside the service, or the offline create enrols a vault the release keeps dark."""
+    enables records-summary-v1, a disabled summary route answers as empty, the gate also stops the
+    file collections, an unenrolled vault's summary create needs no operator step, the offline
+    create runs beside the service or enrols an items-mode collection in the store, or the offline
+    create enrols a vault the release keeps dark."""
     root = service.root
+    monkeypatch.setattr(capability, "RELEASED", frozenset())
     write_source(root, ndjson({"title": f"Row {i}", "count": i} for i in range(3)), SOURCE)
     marker = authority.read_marker(root)
     unreleased = tmp_path / "unreleased"
@@ -207,11 +215,16 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
 
     refused(create_daily)
     refused(lambda: imported(root, mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING))
-    assert authority.read_marker(root) == marker and titles(root, CID) == ["Canonical"]
+    refused(lambda: titles(root, CID))
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
+                item_key=ROW, why="file write")["outcome"] == "committed"
+    assert authority.read_marker(root) == marker and titles(root, KEY) == ["File row"]
     monkeypatch.setattr(capability, "RELEASED", ON)
     plain = tmp_path / "plain"
     (plain / "Knowledge Base/_Schema").mkdir(parents=True)
     refused(lambda: create_daily(plain), "COLLECTION_STORE_ENROLLMENT_REQUIRED")
+    assert offline_create(root, tmp_path / "items.md", DAILY_PATH, why="items mode") == 1
+    assert "COLLECTION_STORE_SUMMARY_REQUIRED" in capsys.readouterr().err
     (tmp_path / "daily.md").write_text(DAILY_TEXT)
     assert offline_create(root, tmp_path / "daily.md", DAILY_PATH, why="beside the service") == 1
     assert "COLLECTION_STORE_SERVICE_ACTIVE" in capsys.readouterr().err
@@ -220,6 +233,8 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Daily row"},
                 why="summary write")["outcome"] == "committed"
     assert titles(root, DAILY) == ["Daily row"]
+    typed = call(root, "record_memory", action="query", collection=DAILY, query={"version": 1, "select": ["title"]})
+    assert typed["rows"] == [{"title": "Daily row"}]
     preview = imported(root, DAILY, mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
     assert preview["rows"]["valid"] == 3
     monkeypatch.setattr(capability, "RELEASED", frozenset())
@@ -229,7 +244,65 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     assert DAILY not in {row["collection_id"] for row in inventory["collections"]}
     assert (DAILY_PATH, capability.UNAVAILABLE) in {
         (row["path"], row["error_code"]) for row in inventory["unreadable_manifests"]}
-    assert titles(root, CID) == ["Canonical"]
+    assert titles(root, KEY) == ["File row"]
+
+
+def test_the_service_builds_a_rollup_a_revise_adds_to_a_populated_collection(service, monkeypatch):
+    """Defect: nothing in the service drives derived backfill, so a rollup that a governed revise
+    adds to a populated collection stays building and every daily sum reads base rows, or the
+    built rollup answers differently from them."""
+    root = service.root
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    activity = "77777777-7777-4777-8777-777777777777"
+    text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Activity")
+                        .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
+    call(root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Activity"),
+         manifest_text=text, why="activity")
+    for title, day, count in (("a", "2026-10-01", 3), ("b", "2026-10-01", 4), ("c", "2026-10-02", 5)):
+        call(root, "record_memory", action="append", collection=activity, item={"title": title, "day": day,
+                                                                                "count": count}, why="row")
+    daily = {"version": 1, "group_by": [{"field": "day", "bucket": "day"}],
+             "aggregates": {"total": {"op": "sum", "field": "count"}}}
+    base = call(root, "record_memory", action="query", collection=activity, query=daily)
+    assert base["plan"]["strategy"] == "base"
+    guards = call(root, "record_memory", action="inspect", collection=activity)["lifecycle_guards"]
+    rollup = "rollups:\n  daily:\n    bucket: day\n    timestamp: day\n    values:\n      count: [sum]\n"
+    call(root, "record_memory", action="revise", collection=activity, manifest_text=text.removesuffix("---\n")
+         + rollup + "---\n", why="daily rollup", **guards)
+    _until(lambda: call(root, "record_memory", action="query", collection=activity,
+                        query={**daily, "mode": "explain"})["plan"]["strategy"] == "rollup")
+    rolled = call(root, "record_memory", action="query", collection=activity, query=daily)
+    assert rolled["plan"]["strategy"] == "rollup" and rolled["groups"] == base["groups"]
+
+
+def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_serves_it(
+        service, tmp_path, capsys):
+    """Defect: a vault whose coordinator never enrolled its store (a copy, or a replaced coordinator)
+    tells the owner to run `collections create`, which refuses CREATE_CONFLICT; the refusal repeats
+    its code; or adopt-local, run in the same process after the service stops, refuses as opening."""
+    root = service.root
+    service.stop()
+    with coordinator(tmp_path / "replaced-coordinator.sqlite"):
+        replaced = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            with pytest.raises(OpError) as refusal:
+                titles(root, CID)
+        finally:
+            replaced.stop()
+        assert refusal.value.code == "COLLECTION_STORE_ADOPTION_REQUIRED"
+        assert "exomem collections adopt-local" in refusal.value.message
+        assert refusal.value.code not in refusal.value.message
+        with pytest.MonkeyPatch.context() as shell:  # the owner's offline step, in this same process
+            shell.setenv(OPERATOR, "operator")
+            adopt = ["adopt-local", "--vault", str(root), "--why", "the coordinator was replaced"]
+            assert cli._collections_main([*adopt, "--dry-run"]) == 0, capsys.readouterr().err
+            preview = json.loads(capsys.readouterr().out)
+            assert cli._collections_main([*adopt, "--preview-id", preview["preview_id"]]) == 0, capsys.readouterr().err
+        adopted = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            assert titles(root, CID) == ["Canonical"]
+        finally:
+            adopted.stop()
 
 
 def _finish_after_restart(found, continuation):

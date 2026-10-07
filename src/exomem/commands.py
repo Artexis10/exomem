@@ -9832,6 +9832,7 @@ def op_maintain_memory(
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
     exclude_groups: list[str] | None = None,
+    acknowledge_skipped: bool | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
@@ -9839,8 +9840,6 @@ def op_maintain_memory(
     Remote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.
     Run those writes with exomem maintain on the host; remote dry_run=true works.
 
-    structured-files, tag-variants and collections-store-adopt-local apply need the preview's
-    `plan_id` and `why`.
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
 
@@ -9870,6 +9869,7 @@ def op_maintain_memory(
         vocabulary_ref: Vocabulary decision for curation apply or resume.
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
+        acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -9879,6 +9879,8 @@ def op_maintain_memory(
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if exclude_groups is not None and mode != "tag-variants":
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
+    if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
+        raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -10094,7 +10096,8 @@ def op_maintain_memory(
             # This surface names the preview identity `plan_id`, as its other preview-first modes do.
             preview["plan_id"] = preview.pop("preview_id")
             return preview
-        return store_admission.adopt_local_route(vault_root, why=why, preview_id=plan_id)
+        return store_admission.adopt_local_route(vault_root, why=why, preview_id=plan_id,
+                                                 acknowledge_skipped=acknowledge_skipped is True)
     if mode == "audit":
         return op_audit(
             vault_root,

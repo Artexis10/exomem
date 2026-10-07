@@ -11,6 +11,7 @@ from test_incident_records_routing import _routed_state
 from exomem import (
     collection_claims,
     due_state,
+    plan_progress,
     record_formats,
     records,
     records_disposition,
@@ -124,6 +125,27 @@ def test_mixed_foreign_store_identity_refuses_c_without_displacing_file_a(mixed)
         assert record_memory(mixed.root, "query", collection=KEY, columns=["title"])["rows"] == []
         with pytest.raises(CollectionStoreError, match="COLLECTION_STORE_MARKER_CONFLICT"):
             record_memory(mixed.root, "query", collection=manifest_path())
+
+
+def test_an_unbound_sweep_names_the_profile_of_a_routed_row_so_a_planning_scan_skips_it(mixed):
+    """Defect: a planning scan counts a store-routed Records collection as an unavailable Planning collection."""
+    _, errors = collections.discover_collections_with_errors(mixed.root)
+    assert [(error.path, error.code, error.semantic_profile) for error in errors] == [
+        (manifest_path(), "COLLECTION_STORE_UNAVAILABLE", "records")]
+    assert plan_progress.review(mixed.root)["collections_unavailable"] == 0
+
+
+def test_a_malformed_marker_leaves_every_manifest_unreadable_and_no_sweep_crashing(mixed):
+    """Defect: a malformed marker raises out of every unbound sweep, or a sweep reads a manifest
+    the store may own as a file collection."""
+    authority.marker_path(mixed.root).write_text("{")
+    manifests, errors = collections.discover_collections_with_errors(mixed.root)
+    assert manifests == ()
+    assert sorted(error.path for error in errors) == sorted(
+        [manifest_path().replace("Work", "Legacy"), manifest_path(), manifest_path("planning").replace("Work", "Legacy")])
+    assert {error.code for error in errors} == {"COLLECTION_STORE_MARKER_CONFLICT"}
+    # Only the Planning manifest counts against a planning scan.
+    assert plan_progress.review(mixed.root)["collections_unavailable"] == 1
 
 
 def test_mixed_hidden_store_projection_does_not_consume_discovery_budget(mixed):

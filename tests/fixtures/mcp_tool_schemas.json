@@ -1778,7 +1778,7 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nstructured-files, tag-variants and collections-store-adopt-local apply need the preview's\n`plan_id` and `why`.\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
+    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1916,6 +1916,10 @@
           },
           "type": "array",
           "description": "Tag-variant groups to skip; part of plan_id."
+        },
+        "acknowledge_skipped": {
+          "type": "boolean",
+          "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
         },
         "response_detail": {
           "default": "compact",

@@ -25,6 +25,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
 from exomem import records, state_migration
@@ -43,6 +44,7 @@ from exomem.collection_store import (
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.preview import preview_store
+from exomem.governance.principal import library_scope
 from exomem.plan_memory import plan_memory
 from exomem.record_memory import record_memory
 
@@ -130,7 +132,7 @@ def _host_main(sender, state, base, name, action, root, database, vault_id):
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
     capability.RELEASED = RELEASED
     try:
-        with coordinator(database), host(root, base, name, vault_id=vault_id) as found:
+        with coordinator(database), host(root, base, name, vault_id=vault_id) as found, library_scope():
             sender.send(("ok", action(found)))
     except BaseException as error:  # noqa: BLE001 - reported to the parent assertion
         sender.send(("error", f"{type(error).__name__}: {error}"))
@@ -177,7 +179,7 @@ def create_c(found, **changes):
     arguments = dict(why="new store collection", request_id="create-c", scaffold=True,
                      fence_client=found.operator)
     arguments.update(changes)
-    return admission.create_new(found.session, found.manager, manifest_path(), manifest_text(), **arguments)
+    return admission.create_new(found.session, found.manager, manifest_path(), summary_text(), **arguments)
 
 
 def refused(call, code):
@@ -198,7 +200,8 @@ def ab(tmp_path, monkeypatch):
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     (root / "Knowledge Base/log.md").write_text("# Activity\n")
-    with coordinator(tmp_path / "coordinator.sqlite"), host(root, tmp_path, "host-a") as found:
+    # C is a summary collection: its routes need the owner, here the in-process owner.
+    with coordinator(tmp_path / "coordinator.sqlite"), host(root, tmp_path, "host-a") as found, library_scope():
         for path, profile, cid in ((A_PATH, "records", KEY), (B_PATH, "planning", OTHER)):
             records.create_collection(root, path, manifest_text(profile).replace(CID, cid),
                                       why="file fixture", scaffold=True)
@@ -254,6 +257,16 @@ def test_precommit_failure_leaves_no_c_scaffold_marker_or_fence(ab, monkeypatch)
     assert file_bytes(ab.root) == before
     assert not authority.marker_path(ab.root).exists()
     assert not (ab.root / manifest_path()).parent.exists()
+    assert not ab.operator.collection_store_fence().enrolled
+
+
+def test_a_production_create_refuses_an_items_mode_collection(ab):
+    """Defect: the production producer enrols an items-mode collection in the store, which S1 keeps in files."""
+    before = file_bytes(ab.root)
+    refused(lambda: admission.create_new(ab.session, ab.manager, manifest_path(), manifest_text(), why="items",
+                                         request_id="create-items", fence_client=ab.operator),
+            "COLLECTION_STORE_SUMMARY_REQUIRED")
+    assert file_bytes(ab.root) == before and not authority.marker_path(ab.root).exists()
     assert not ab.operator.collection_store_fence().enrolled
 
 
@@ -853,7 +866,6 @@ def test_owner_route_previews_in_maintain_memory_and_applies_in_the_cli_against_
     """Defect: the owner's real route cannot apply adopt-local with the configured lease and coordinator."""
     from exomem import __main__ as cli
     from exomem import commands
-    from exomem.governance.principal import library_scope
 
     abc.release()
     _lease_environment(abc, monkeypatch)
@@ -876,7 +888,6 @@ def test_owner_route_applies_inside_the_running_service_which_keeps_its_lease_an
     """Defect: adopt-local applied while the service runs hands its lease back or strands its old identity."""
     from exomem import commands
     from exomem.collection_store import runtime
-    from exomem.governance.principal import library_scope
 
     monkeypatch.setattr(runtime, "WATCH_SECONDS", 0.05)
     _lease_environment(abc, monkeypatch)
@@ -1057,7 +1068,7 @@ def _write_and_create_on_the_copy(found):
     assert found.open() == {"status": "admitted"}
     found.write_c(LATER, "From the other host")
     created = admission.create_new(found.session, found.manager, manifest_path().replace("Work", "Copy"),
-                                   manifest_text().replace(CID, ONLY_ON_COPY), why="a collection only the copy has",
+                                   summary_text().replace(CID, ONLY_ON_COPY), why="a collection only the copy has",
                                    request_id="create-d", fence_client=found.operator)
     assert created["status"] == "marker_admitted", created
     with preview_store(found.root, found.manager._collection_store) as writer:

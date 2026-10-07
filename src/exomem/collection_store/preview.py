@@ -161,6 +161,9 @@ def dispatch(
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
+    elif action == "create" and binding[2]:
+        # Only admission writes a production store's marker; a create cannot stand in for it.
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the store's authority marker is missing")
     if action == "describe":
         if profile == "records":
             from ..record_memory import parse_manifest_contract

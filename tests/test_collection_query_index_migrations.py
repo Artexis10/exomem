@@ -166,3 +166,35 @@ def test_rebuild_requires_current_full_collection_authority(store):
     with request_scope(_external()), pytest.raises(collections.CollectionError):
         store.backfill_query_indexes(CID, limit=1)
     assert store.connection.execute("SELECT * FROM query_projection_mappings").fetchall() == before
+
+
+def test_a_populated_collection_without_a_projection_gets_one_by_backfill_never_by_a_query(tmp_path, store):
+    """Defect: a collection imported from files, or enrolled before every collection carried a
+    projection, refuses typed queries forever, or a query builds its projection."""
+    from test_collection_store_legacy_import import CONTEXT, _capture, _items
+
+    from exomem.collection_store import legacy_import
+    from exomem.query_engine import runtime
+    from exomem.query_engine.typed_rows import execute_rows
+    from exomem.query_engine.validation import normalize_query
+
+    root, path = _items(tmp_path, values={"title": "Imported", "count": 3})
+    with _capture(tmp_path, root, path) as (audit, captured):
+        store.connection.execute("BEGIN")
+        legacy_import.import_legacy_collection(store.connection, captured, audit=audit, context=CONTEXT)
+        store.connection.commit()
+    logical = normalize_query({"version": 1, "select": ["title", "count"]}, collection=CID, declarations={CID: {
+        "domain": "collections", "type": "records", "vault": "fixture",
+        "fields": {"item_key": {"type": "string"}, "title": {"type": "string"}, "count": {"type": "integer"}}}}).query
+
+    def rows():
+        with runtime.read_session(store.root, store.handle.path) as session:
+            return execute_rows(session.admit_query(logical, as_of="2026-10-07T00:00:00+00:00")).rows
+
+    with pytest.raises(runtime.QueryError, match="QUERY_UNAVAILABLE"):
+        rows()
+    assert store.connection.execute("SELECT COUNT(*) FROM query_projection_mappings").fetchone() == (0,)
+    assert store.backfill_query_indexes(CID)
+    manager, plan = ready(store)
+    assert plan is not None and plan.indexes == () and plan.scalars == ()
+    assert rows() == [{"title": "Imported", "count": 3}]
