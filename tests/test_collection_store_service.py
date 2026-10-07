@@ -50,7 +50,6 @@ from exomem.collection_store import (
     runtime,
 )
 from exomem.collection_store.connection import CollectionStoreError
-from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
 
 OWNER = owner_principal(surface="mcp")
@@ -61,14 +60,6 @@ MAPPING = {"fields": {"title": "title", "count": "count"}}
 ON = frozenset({capability.RECORDS_SUMMARY_V1})
 OPERATOR = "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"
 DAILY_TEXT = summary_text(manifest_text().replace(CID, DAILY).replace("title: Work", "title: Daily"))
-
-
-def cover_import(setitem):
-    """The dispatcher's release coverage of record_memory's import selector, which the
-    route-binding lane's governance/egress.py change adds; delete this when it merges."""
-    selector = ("record_memory", "action")
-    setitem(egress._SELECTOR_ADAPTERS[selector], "import", "mutation")
-    setitem(egress._SELECTOR_TOMBSTONE_ADAPTERS[selector], "import", "not-applicable")
 
 
 def call(root, tool, **arguments):
@@ -127,7 +118,6 @@ def service(tmp_path, monkeypatch):
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
     monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
-    cover_import(monkeypatch.setitem)
     (root / "Knowledge Base/_Schema").mkdir(parents=True)
     (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")  # what makes it a vault to the service
     (root / "Knowledge Base/log.md").write_text("# Activity\n")
@@ -245,7 +235,6 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
 def _finish_after_restart(found, continuation):
     """The restarted service, in a fresh interpreter: nothing here calls run_jobs."""
     capability.RELEASED = ON
-    cover_import(dict.__setitem__)
     manager = writer_lease.start_server_lifecycle()
     try:
         deadline = time.monotonic() + 60

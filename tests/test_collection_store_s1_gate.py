@@ -883,7 +883,12 @@ def test_owner_route_applies_inside_the_running_service_which_keeps_its_lease_an
     _published(abc)
     path = replica.replica_path(abc.root)
     path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
-    _until(lambda: abc.manager.status()["collection_store"]["status"] == "diverged")
+
+    def preserved():  # the marker lands before the foreign bytes move aside; preview after both
+        marker = abc.meta().get(schema.META_REPLICA_DIVERGENCE)
+        return marker is not None and (path.parent / json.loads(marker)["foreign_leaf"]).exists()
+
+    _until(preserved)
     token = abc.manager._fencing_token
     with library_scope():
         preview = commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local")

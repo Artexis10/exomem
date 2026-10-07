@@ -7,8 +7,8 @@ error object those surfaces send. The preview cannot cross the MCP tool layer:
 its writer belongs to the opening thread and FastMCP runs a sync tool on a
 worker thread. Cases that need no store therefore run through an in-process MCP
 server. Answers are compared with the independent ``s1_export_fixture``
-reference. A case that needs the installed service's own store session is a
-strict xfail until that slice (s1-R2b) lands.
+reference. The installed service's own store session answers the route in
+test_collection_store_service.py.
 """
 
 from __future__ import annotations
@@ -375,14 +375,3 @@ def test_query_engine_chapters_are_bounded_read_only_and_name_what_is_unavailabl
     assert vault_files() == before
     graph = mcp("schema_memory", operation="inspect", subject="query-engine", name="graph")
     assert (graph["code"], graph["at"], graph["retryable"]) == ("QUERY_CAPABILITY_UNAVAILABLE", "name", False)
-
-
-@pytest.mark.xfail(strict=True, raises=OpError, reason="s1-R2b: production store session")
-def test_installed_service_serves_the_query_route_from_its_own_store_session(store):
-    """The installed service's store session, not a test binding, answering the query route."""
-    store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date"),
-                            why="create", scaffold=False)
-    load(store, daily_summaries(10))
-    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
-    result = invoke_command(command, store.root, action="query", collection=SUMMARY_CID, query=STEPS)
-    assert json.loads(json.dumps(result))["returned"] == 10
