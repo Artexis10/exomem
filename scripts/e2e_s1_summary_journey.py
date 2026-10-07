@@ -1112,7 +1112,19 @@ async def narrowing_rollback(journey: Journey) -> None:
     """Disable this vault through its public route, then prove retained data and paused work."""
     with journey.step("6. narrow the vault capability and keep A/B usable"):
         async with journey.service("before-rollback") as service:
-            pending = await service.import_job(WORKOUTS_ID, mode="start", **journey.import_request)
+            # Identical starts return the completed job; a distinct source gives rollback live work to stop.
+            stoppable_export = journey.export + b"\n"
+            receipt = await service.mutate(
+                "preserve_evidence", scope=EXPORT_SCOPE, category=EXPORT_CATEGORY,
+                filename="rollback-workouts.ndjson", content=stoppable_export.decode("utf-8"),
+                description="invented export for the interrupted rollback job", raw_protection=True,
+            )
+            expect(receipt.get("state") == "stored"
+                   and receipt.get("hash") == hashlib.sha256(stoppable_export).hexdigest(),
+                   "rollback source preservation did not retain its exact bytes", receipt)
+            pending = await service.import_job(
+                WORKOUTS_ID, mode="start", source_ref=receipt["stored_path"], format="ndjson", mapping=MAPPING,
+            )
             expect(pending["state"] == "running", "rollback has no active import to stop", pending)
         before = snapshot_state(journey, "before-rollback")
         marker = (journey.vault / STORE_FILES[1]).read_bytes()
