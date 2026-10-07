@@ -196,6 +196,7 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
     remediation — the safe direction for anything unrecognised.
     """
     from . import semantic_authoring, source_closure
+    from .governance import raw_protection
 
     findings = semantic_authoring.AUTHORING_CONTRACT.findings
     unit = findings["missing_semantic_unit"]
@@ -220,6 +221,10 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         "RECORD_RECOVERY_REQUIRED": (
             record_recovery.message,
             record_recovery.remediation,
+        ),
+        "RAW_PROTECTION_UNAVAILABLE": (
+            raw_protection.UNAVAILABLE_MESSAGE,
+            raw_protection.UNAVAILABLE_REMEDIATION,
         ),
         "missing_semantic_unit": (
             "the memory has no semantic unit to record",

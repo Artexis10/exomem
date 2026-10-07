@@ -20,7 +20,7 @@ from . import (
     authorization_session_lifecycle,
     store,
 )
-from .principal import OWNER_AUDIENCE, RequestPrincipal
+from .principal import HOSTED_GATEWAY_ISSUER_FAMILY, OWNER_AUDIENCE, RequestPrincipal
 
 PREFIX = "__exomem_raw_v1__"
 COMPATIBILITY_ID = "raw-protection-v1"
@@ -58,6 +58,25 @@ def is_owner(who: RequestPrincipal) -> bool:
     """The owner on any surface: local, a remote connector, the REST key or the
     transfer bearer. Every other audience needs a whole-artifact release."""
     return who.resolved and who.audience_id == OWNER_AUDIENCE
+
+
+def applies_to(who: RequestPrincipal) -> bool:
+    """Whether RAW governs `who`: it withholds from it and accepts its RAW captures.
+
+    A hosted cell has no owner binding, so RAW there would protect the tenant's data from the tenant.
+    """
+    return not (
+        who.resolved and who.surface == "hosted" and who.issuer_family == HOSTED_GATEWAY_ISSUER_FAMILY
+    )
+
+
+#: Why a surface that cannot identify the vault's owner refuses a RAW capture,
+#: and what the person can do instead.
+UNAVAILABLE_MESSAGE = "this cell cannot identify its owner, so it cannot keep an original owner-only"
+UNAVAILABLE_REMEDIATION = (
+    "Capture it without raw protection, or from a surface that identifies the vault's owner."
+)
+UNAVAILABLE_REASON = f"{UNAVAILABLE_MESSAGE}. {UNAVAILABLE_REMEDIATION}"
 
 
 def protect(page: str, *, artifact_path: str, digest: str) -> str:
@@ -113,7 +132,7 @@ def permits(
     snapshot: bytes | None = None, derived: bool = False,
 ) -> bool:
     """Meet with ordinary policy; never let a caller-declared purpose widen RAW."""
-    if not marked(path):
+    if not marked(path) or not applies_to(who):
         return True
     if not who.resolved or not who.issuer_family:
         return False

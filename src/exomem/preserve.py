@@ -408,6 +408,11 @@ def preserve(
     if raw_protection and filename_safe and not raw_guard.marked(filename_safe):
         filename_safe = raw_guard.PREFIX + filename_safe
     raw_protection = raw_protection or raw_guard.marked(filename_safe)
+    if raw_protection:
+        from .governance.principal import effective_principal
+
+        if not raw_guard.applies_to(effective_principal()):
+            return _raise("RAW_PROTECTION_UNAVAILABLE", ["raw_protection"], raw_guard.UNAVAILABLE_REASON)
     if not filename_safe:
         missing.append("filename")
         reasons.append("filename is empty or only invalid characters")

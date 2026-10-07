@@ -2687,6 +2687,71 @@ def test_a_guests_whole_vault_aggregates_read_as_if_the_marked_page_were_absent(
     assert activation["coverage"]["eligible_pages"] > 0, activation["coverage"]
 
 
+#: A hosted tenant: the gateway's principal for one opaque 256-bit scope.
+_HOSTED_SCOPE = "A" * 43
+
+
+def test_a_hosted_tenant_keeps_the_audit_and_folder_delete_on_a_vault_with_no_policy(
+    tmp_path: Path,
+) -> None:
+    """A hosted cell has no owner binding, so RAW does not restrict its tenant:
+    on a vault with no policy the tenant keeps what a guest is refused."""
+    import shutil
+
+    from exomem.governance.principal import resolve_hosted_principal
+
+    box = f"{NOTES}/Box"
+    vault = _materialize(
+        tmp_path / "vault",
+        {**_filler(), f"{box}/open.md": _page("Open", "Open box page.", type="insight")},
+        "external",
+    )
+    shutil.rmtree(vault / KB / "_Governance")
+    tenant = resolve_hosted_principal(_HOSTED_SCOPE)
+
+    audit = _call(vault, tenant, "review_memory", mode="audit", detail="full")
+    deleted = _call(
+        vault, tenant, "manage_memory_file", operation="delete", path=box, recursive=True, confirm=True
+    )
+
+    assert "summary" in audit, audit
+    assert "__error__" not in deleted, deleted
+    assert not (vault / box).exists()
+
+
+def test_a_hosted_tenants_raw_capture_is_refused_before_anything_is_written(
+    tmp_path: Path,
+) -> None:
+    """A hosted cell cannot identify its owner, so it cannot keep an original
+    owner-only: a RAW capture is refused, and the tenant never believes a
+    capture is protected when it is not."""
+    import shutil
+    from types import SimpleNamespace
+
+    from exomem import server_hosted
+    from exomem.governance.principal import resolve_hosted_principal
+
+    vault = _materialize(tmp_path / "vault", _filler(), "external")
+    shutil.rmtree(vault / KB / "_Governance")
+    tenant = resolve_hosted_principal(_HOSTED_SCOPE)
+
+    answer = _call(
+        vault, tenant, "preserve_evidence", scope="Test", category="raw", filename="own.txt",
+        content="tenant original", raw_protection=True,
+    )
+
+    assert "RAW_PROTECTION_UNAVAILABLE" in _text(answer), answer
+    assert not (vault / KB / "Evidence").exists() or not any((vault / KB / "Evidence").rglob("*own*"))
+    # The hosted boundary redacts exception text; the refusal still says why.
+    hosted = json.loads(
+        server_hosted._error_response(
+            "RAW_PROTECTION_UNAVAILABLE", config=SimpleNamespace(cell_id="cell"),
+            operation="preserve_evidence", started=0.0,
+        ).body
+    )["error"]
+    assert "cannot identify its owner" in hosted["message"], hosted
+
+
 def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

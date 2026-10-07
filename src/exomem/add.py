@@ -243,7 +243,12 @@ def add(
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     from .governance import raw_protection as raw_guard
+    from .governance.principal import effective_principal
 
+    if raw_protection and not raw_guard.applies_to(effective_principal()):
+        raise AddError(
+            code="RAW_PROTECTION_UNAVAILABLE", missing=["raw_protection"], reason=raw_guard.UNAVAILABLE_REASON
+        )
     if raw_protection and artifact is None:
         with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
             original = Path(staging) / "source.txt"

@@ -6202,6 +6202,8 @@ def release_walk_filter(
     tombstones = lifecycle.tombstoned_paths(vault_root)
     if _file_policy_empty(vault_root, policy) and not tombstones:
         who = principal if principal is not None else effective_principal()
+        if not raw_protection.applies_to(who):
+            return None
         return lambda path: raw_protection.permits(vault_root, path, who)
 
     vault_root = Path(vault_root)
@@ -6343,7 +6345,9 @@ def owner_only_aggregate(
             return {"available": False, "reason": AUDIENCE_RESTRICTED}
     if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
         return None
-    if raw_admitted and _file_policy_empty(vault_root, policy_module.load(Path(vault_root))):
+    if (raw_admitted or not raw_protection.applies_to(who)) and _file_policy_empty(
+        vault_root, policy_module.load(Path(vault_root))
+    ):
         return None
     return {"available": False, "reason": AUDIENCE_RESTRICTED}
 
