@@ -114,6 +114,24 @@ def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: 
     assert not egress.release_allows_download(vault, protected["path"], principal=guest)
 
 
+@pytest.mark.parametrize("marker", [False, True], ids=["raw-option", "raw-filename"])
+def test_hosted_duplicate_capture_refuses_raw_before_returning_a_receipt(vault: Path, marker: bool) -> None:
+    from exomem import commands
+    from exomem.governance import principal, raw_protection
+
+    arguments = dict(scope="Test", category="raw", content="existing original")
+    commands.op_preserve_evidence(vault, filename="legacy.txt", **arguments)
+    commands.op_preserve_evidence(vault, filename="protected.txt", raw_protection=True, **arguments)
+    before = {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()}
+    with principal.request_scope(principal.resolve_hosted_principal("A" * 43)):
+        with pytest.raises(ValueError, match="RAW_PROTECTION_UNAVAILABLE"):
+            commands.op_preserve_evidence(
+                vault, filename=(raw_protection.PREFIX if marker else "") + "retry.txt",
+                raw_protection=not marker, **arguments,
+            )
+    assert {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()} == before
+
+
 def test_protected_dedup_requires_a_real_pair_and_matching_original_bytes(vault: Path) -> None:
     """Authored Markdown cannot substitute an unrelated or changed original for new bytes."""
     import hashlib

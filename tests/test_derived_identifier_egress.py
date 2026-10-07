@@ -2719,6 +2719,153 @@ def test_a_hosted_tenant_keeps_the_audit_and_folder_delete_on_a_vault_with_no_po
     assert not (vault / box).exists()
 
 
+@pytest.mark.parametrize("query", ["orchard", "", "privateorchard"])
+def test_raw_recall_admits_before_selection_and_keeps_owner_cache_separate(tmp_path: Path, query: str) -> None:
+    """Protected matches cannot occupy a guest's slots, including after an owner search."""
+    from exomem import freshness, lexstore
+
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    roots = [tmp_path / "absent", tmp_path / "present"]
+    for root in roots:
+        folder = root / NOTES
+        folder.mkdir(parents=True)
+        (folder / "alpha.md").write_text(_page("Alpha", "orchard public fruit", type="insight", updated="2020-01-01"))
+    for index in range(12):
+        (roots[1] / NOTES / f"__exomem_raw_v1__hidden-{index}.md").write_text(
+            _page("Protected orchard", "privateorchard orchard", type="insight", updated="2026-10-01")
+        )
+    answers = []
+    for root in roots:
+        _reset()
+        freshness.rebaseline(root)
+        assert lexstore.get_store(root).rebuild_atomic()
+        with request_scope(guest):
+            first = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
+        with library_scope():
+            owner = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
+        with request_scope(guest):
+            again = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
+        assert again == first
+        if root == roots[1]:
+            assert "__exomem_raw_v1__" in _text(owner)
+        answers.append(first)
+    assert answers[0] == answers[1]
+    if query != "privateorchard":
+        assert "alpha.md" in _text(answers[0])
+
+
+@pytest.mark.parametrize(("backend", "result_level", "scenes"), [
+    ("fts5", "page", False), ("python", "page", False), ("fts5", "unit", False),
+    ("fts5", "page", True), ("fts5", "unit", True),
+])
+def test_raw_hidden_term_frequencies_do_not_reorder_guest_hybrid_hits(tmp_path, monkeypatch, backend, result_level, scenes):
+    from exomem import bm25, freshness, lexstore
+
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", backend)
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    answers = []
+    for present in (False, True):
+        root = tmp_path / str(present)
+        folder = root / NOTES
+        folder.mkdir(parents=True)
+        for name, body in {"alpha": "apple apple apple apple apple pear", "beta": "apple pear pear pear pear pear"}.items():
+            (folder / f"{name}.md").write_text(_page(name, f"- [fact] {body} ^fruit", type="insight", updated="2020-01-01"))
+        for i in range(8):
+            (folder / f"filler-{i}.md").write_text(_page("Filler", "- [fact] unrelated public prose ^filler", type="insight"))
+        if present:
+            parent = f"{NOTES}/__exomem_raw_v1__video.mp4"
+            if scenes:
+                (root / (parent + ".md")).write_text(_page("Protected video", "private video", type="source"))
+            for i in range(10):
+                name = f"frame-{i}.jpg.md" if scenes else f"__exomem_raw_v1__hidden-{i}.md"
+                fields = {"parent_media": parent} if scenes else {}
+                (folder / name).write_text(
+                    _page("Protected", "- [fact] apple apple apple apple apple apple ^fruit", type="insight", **fields)
+                )
+        _reset()
+        bm25._INDEX.clear()
+        freshness.rebaseline(root)
+        if backend == "fts5":
+            assert lexstore.get_store(root).rebuild_atomic()
+        with request_scope(guest):
+            result = commands.op_ask_memory(
+                root, query="apple pear", mode="hybrid", limit=2, graph=False, rerank=False,
+                prefer_compiled=False, prefer_active=False, result_level=result_level,
+            )
+        answers.append(result)
+    assert answers[0] == answers[1]
+    assert "alpha.md" in _text(answers[0]) and "beta.md" in _text(answers[0])
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+def test_recall_does_not_emit_a_scene_child_of_a_protected_parent(tmp_path: Path, mode: str) -> None:
+    from exomem import freshness, lexstore
+
+    root = tmp_path / "vault"
+    folder = root / NOTES
+    folder.mkdir(parents=True)
+    parent = f"{NOTES}/__exomem_raw_v1__video.mp4"
+    (root / (parent + ".md")).write_text(_page("Protected video", "private video", type="source"))
+    (folder / "frame.jpg.md").write_text(_page(
+        "Frame", "orchard scene", type="source", parent_media=parent,
+        media_type="image", evidence_file=f"{NOTES}/frame.jpg",
+    ))
+    (folder / "alpha.md").write_text(_page("Alpha", "orchard public", type="insight"))
+    _reset()
+    freshness.rebaseline(root)
+    assert lexstore.get_store(root).rebuild_atomic()
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
+        result = commands.op_ask_memory(root, query="orchard", mode=mode, limit=1, graph=False)
+    assert "alpha.md" in _text(result)
+    assert "frame.jpg" not in _text(result)
+    assert "__exomem_raw_v1__" not in _text(result)
+
+
+@pytest.mark.parametrize(("mode", "query"), [("keyword", "orchard"), ("hybrid", "orchard"), ("keyword", "")])
+@pytest.mark.parametrize("protected_parent", [False, True])
+def test_recall_authorizes_a_declared_missing_parent_without_hiding_public_orphans(
+    tmp_path: Path, mode: str, query: str, protected_parent: bool,
+) -> None:
+    from exomem import freshness, lexstore
+
+    folder = tmp_path / NOTES
+    folder.mkdir(parents=True)
+    parent = "__exomem_raw_v1__missing.mp4" if protected_parent else "missing.mp4"
+    child = f"{NOTES}/frame.jpg.md"
+    (tmp_path / child).write_text(_page(
+        "Frame", "orchard scene", type="source", parent_media=f"{NOTES}/{parent}",
+        media_type="image", evidence_file=f"{NOTES}/frame.jpg",
+    ))
+    _reset()
+    freshness.rebaseline(tmp_path)
+    assert lexstore.get_store(tmp_path).rebuild_atomic()
+    args = dict(query=query, mode=mode, limit=1, graph=False)
+    with library_scope():
+        owner = commands.op_ask_memory(tmp_path, **args)
+    guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with request_scope(guest):
+        result = commands.op_ask_memory(tmp_path, **args)
+    assert child in _text(owner)
+    assert (child in _text(result)) is not protected_parent
+
+
+def test_hosted_imported_raw_reference_obeys_only_configured_policy(tmp_path: Path) -> None:
+    from exomem.governance.principal import resolve_hosted_principal
+
+    tenant = resolve_hosted_principal(_HOSTED_SCOPE)
+    vault = tmp_path / "vault"
+    path = vault / NOTES / "__exomem_raw_v1__alpha.txt.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(_page("Imported", "imported original", type="source"))
+    path.with_suffix("").write_text("imported original")
+    text = "See [[__exomem_raw_v1__alpha.txt]] for the original."
+    assert egress.redact_withheld_references(vault, text, principal=tenant) == text
+    _govern(vault, tenant.audience_id, "Notes/**")
+    _reset()
+    assert "__exomem_raw_v1__alpha.txt" not in egress.redact_withheld_references(vault, text, principal=tenant)
+
+
 def test_a_hosted_tenants_raw_capture_is_refused_before_anything_is_written(
     tmp_path: Path,
 ) -> None:

@@ -2675,11 +2675,8 @@ def op_find(
     # diagnostic: lane statuses, fusion weights, raw scores, the emit count,
     # per-lane ranks, graph in-degree, the keyword-fallback marker and the
     # graph lane itself, whose hops are seeded before admission and follow
-    # link resolution over the whole vault (the shared recall cache is keyed
-    # by `graph`). Each moves with pages the caller may not see, down to
-    # whether a withheld page contains a word, so a caller anything could be
-    # withheld from, RAW included, receives none of them. The hits are
-    # unchanged.
+    # link resolution over the whole vault. A restricted caller receives none
+    # of these signals. RAW admission below also controls candidate selection.
     restricted = projection_runtime is None and egress_module.caller_restricted(
         vault_root, purpose=purpose
     )
@@ -2789,17 +2786,17 @@ def op_find(
         )
         hits = release.hits
     else:
-        # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
-        # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
-        # an ungoverned vault, so the owner's empty-policy fast path keeps `limit`
-        # exactly as asked and the latency profile is unchanged. A restricted
-        # caller over-fetches there too: RAW can still withhold a hit, and an
-        # unfilled slot would say so. Policy state still counts on its own: a
-        # tombstone withholds from the owner as well.
-        _release_policy, _release_active = egress_module.gate_state(vault_root)
-        retrieval_limit = (
-            egress_module.pool_limit(limit) if _release_active or restricted else limit
+        from .governance import raw_protection
+
+        who = principal_module.effective_principal()
+        admit_path = (
+            (lambda path: raw_protection.permits(vault_root, path, who))
+            if raw_protection.applies_to(who) and not raw_protection.is_owner(who) else None
         )
+        # RAW admission precedes candidate selection; ordinary policy still
+        # uses its existing annotation pool and final authorization below.
+        _release_policy, _release_active = egress_module.gate_state(vault_root)
+        retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
         catalog_proof: dict[str, Any] = {}
         hits = find_module.find(
             vault_root,
@@ -2837,12 +2834,10 @@ def op_find(
             failed_out=failed,
             retrieval_trace=retrieval_trace,
             catalog_proof_out=catalog_proof,
+            admit_path=admit_path,
         )
-        # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
-        # strictly after `find()` has returned and deep-copied its candidates into
-        # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
-        # Nothing principal-dependent may run any earlier than this line, or one
-        # principal's decisions would be cached for the next.
+        # Recheck the selected snapshots before assembly. RAW-admitted searches
+        # bypass both shared caches; ordinary policy retains its final gate.
         with find_module._span(timings, "release_gate"):
             release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
@@ -2983,6 +2978,10 @@ def op_find(
     # these hits are lexical-only ranking. Present only during that window
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
+    if restricted:
+        # These internal status tokens disclose pending writes before RAW admission.
+        hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
+        degraded = [component for component in degraded if component not in hidden_freshness]
     if degraded:
         warming = {"components": sorted(set(degraded))}
         if projection_runtime is None:
@@ -4993,6 +4992,12 @@ def op_preserve(
                     "accepted_form": preserve_module.DESTINATION_ACCEPTED_FORM,
                 },
             )
+    try:
+        raw_protection = preserve_module.validate_raw_capture(
+            filename, destination=str(Path(scope) / category), raw_protection=raw_protection,
+        )
+    except preserve_module.PreserveError as e:
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     # Same destination-scoped lookup the batch command uses, run before the
     # write: Evidence is append-only, so the same bytes under the same family
     # are one fact, and reporting the copy that is already there beats adding a

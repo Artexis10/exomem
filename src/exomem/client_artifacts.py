@@ -31,6 +31,7 @@ from .preserve import (
     destination_duplicate_index,
     destination_segment_refusal,
     preserve_stream,
+    validate_raw_capture,
 )
 from .vault import (
     FrontmatterError,
@@ -980,6 +981,7 @@ def _existing_receipt(
     receipt = snapshot.receipt
     from .governance.raw_protection import marked
 
+    validate_raw_capture(destination=str(receipt["stored_path"]), raw_protection=raw_protection)
     if marked(str(receipt["stored_path"])) != raw_protection:
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused with different raw protection")
     expected = {
@@ -1130,11 +1132,12 @@ def _capture_source_adoption(
         return _finish_adoption(outcomes)
     selected = files[selected_index]
     try:
+        validate_raw_capture(destination=destination, raw_protection=bool(source_fields.get("raw_protection")))
         receipt = _existing_receipt(
             vault_root, envelope, lane="source", destination=destination,
             raw_protection=bool(source_fields.get("raw_protection")),
         )
-    except SafeFetchError as error:
+    except (PreserveError, SafeFetchError) as error:
         outcomes[selected_index] = _failed(envelope.selected_file_id, error)
         return _finish_adoption(outcomes)
 
@@ -1260,10 +1263,11 @@ def _preserve_evidence_adoption(
     destination = _destination(vault_root, "Evidence", scope, category)
     selected = files[selected_index]
     try:
+        validate_raw_capture(destination=destination, raw_protection=raw_protection)
         receipt = _existing_receipt(
             vault_root, envelope, lane="evidence", destination=destination, raw_protection=raw_protection,
         )
-    except SafeFetchError as error:
+    except (PreserveError, SafeFetchError) as error:
         outcomes[selected_index] = _failed(envelope.selected_file_id, error)
         return _finish_adoption(outcomes)
 
@@ -1291,6 +1295,12 @@ def _preserve_evidence_adoption(
                     "previous adoption bytes could not be reverified",
                 )
             outcomes[selected_index] = _failed(envelope.selected_file_id, error)
+            return _finish_adoption(outcomes)
+
+        try:
+            validate_raw_capture(artifact.filename, destination=destination, raw_protection=raw_protection)
+        except PreserveError as error:
+            outcomes[selected_index] = _failed(artifact.file_id, error)
             return _finish_adoption(outcomes)
 
         if receipt is not None:
@@ -1603,7 +1613,11 @@ def preserve_artifacts(
                 # stored file gets. Without that an all-duplicate batch, which
                 # is what retrying under a new identity produces, would come
                 # back as a bare leaf dict with no request or receipt identity.
-                duplicate = duplicates.get(artifact.sha256)
+                protected = validate_raw_capture(
+                    artifact.filename, destination=_destination(vault_root, "Evidence", scope, category),
+                    raw_protection=raw_protection,
+                )
+                duplicate = duplicates.get(artifact.sha256) if protected == raw_protection else None
                 if duplicate is not None:
                     mark_active_mutation_committed()
                     outcomes[index] = {

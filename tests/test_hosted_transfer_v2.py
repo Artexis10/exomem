@@ -242,7 +242,7 @@ def test_implemented_public_error_catalog_exactly_matches_normative_artifact() -
         }
         for code, values in hosted_transfer_routes._ERROR_CATALOG.items()
     }
-    assert implemented == {
+    expected = {
         code: {
             "status": values["status"],
             "message": values["message"],
@@ -251,6 +251,18 @@ def test_implemented_public_error_catalog_exactly_matches_normative_artifact() -
         }
         for code, values in catalog.items()
     }
+
+    from exomem.governance import raw_protection
+
+    # The current RAW contract adds this refusal; the archived protocol entries stay exact.
+    expected["RAW_PROTECTION_UNAVAILABLE"] = {
+        "status": 400,
+        "message": raw_protection.UNAVAILABLE_MESSAGE,
+        "retryable": False,
+        "requires_new_grant": True,
+    }
+    assert implemented == expected
+
 
 
 def test_grant_v2_has_exact_canonical_claims_and_uses_versioned_authority() -> None:
@@ -919,110 +931,64 @@ def test_missing_download_is_existence_neutral_and_burns_grant(tmp_path: Path) -
     assert security.consumed == {JTI}
 
 
-def test_raw_hosted_download_decides_the_held_snapshot(tmp_path, monkeypatch) -> None:
-    """An approved pathname cannot authorize different bytes returned by safe-open."""
-    import io
+@pytest.mark.parametrize("protocol", ["public-v2", "private-v1"])
+@pytest.mark.parametrize("marked_field", [None, "filename", "category", "scope"], ids=["ordinary", "raw-filename", "raw-category", "raw-scope"])
+def test_hosted_upload_preserves_only_when_raw_protection_is_available(tmp_path, protocol, marked_field):
+    """Both signed upload surfaces bind the tenant before the canonical write."""
+    from exomem.governance import raw_protection
 
-    from exomem import commands
-    from exomem.governance import principal
-    from exomem.writer_lease import invoke_command
-
-    security = FakeSecurityAuthority()
-    app, config, lifecycle = _app(tmp_path, security)
-    root = config.vault_root
-    recipient = principal.resolve_hosted_principal(PRINCIPAL)
-    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
-    with principal.request_scope(principal.owner_principal(surface="library")):
-        saved = commands.op_preserve_evidence(
-            root, scope="Test", category="raw", filename="route.csv",
-            content="timestamp,latitude\n2026-10-01,12.345\n", raw_protection=True,
-        )
-        released = invoke_command(
-            govern, root, operation="grant", scope="standing",
-            grant_id="01ARZ3NDEKTSV4RRFFQ69G5FB0", path=saved["path"],
-            audience=recipient.audience_id,
-            raw_release={"version": 1, "surface": recipient.surface,
-                         "issuer_family": recipient.issuer_family,
-                         "purpose": None, "includes_location": True},
-        )
-    assert released["ok"], released
-    held = io.BytesIO(b"unapproved held bytes")
-    monkeypatch.setattr(hosted_transfer_routes, "_open_bounded_vault_file", lambda *_a, **_kw: (held, len(held.getvalue()), "route.csv"))
-    response = asyncio.run(_request(
-        app, "GET", hosted_transfer.TRANSFER_DOWNLOAD_PATH,
-        headers={"Origin": ORIGIN, hosted_transfer.TRANSFER_GRANT_HEADER: _grant(
-            operation="download", target={"kind": "download-v1", "path": saved["path"]},
-        )},
-    ))
-    assert response.status_code == 404, response.text
-    assert response.json()["error"]["code"] == "TRANSFER_TARGET_UNAVAILABLE"
-    assert "unapproved" not in response.text
-    assert held.closed
-    assert lifecycle.snapshot().active_transfers == 0
-
-
-def test_private_v1_raw_download_rechecks_companion_updated_during_open(tmp_path, monkeypatch):
-    """A supported extraction update must not ride an earlier whole-artifact grant."""
-    from datetime import UTC, datetime
-
-    from exomem import commands, preserve, server_hosted
-    from exomem.governance import principal
-    from exomem.writer_lease import invoke_command
-
-    config = replace(
-        _config(tmp_path), enforce_transfer_v1_compatibility=True,
-        signed_release_build_time=datetime.fromtimestamp(NOW - 60, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        transfer_v1_compat_until=datetime.fromtimestamp(NOW + 3600, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
-    app, config, lifecycle = _app(tmp_path, FakeSecurityAuthority(), config_value=config)
-    recipient = principal.resolve_hosted_principal(PRINCIPAL)
-    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
-    with principal.request_scope(principal.owner_principal(surface="library")):
-        saved = commands.op_preserve_evidence(
-            config.vault_root, scope="Test", category="raw", filename="original.txt",
-            content="approved original", raw_protection=True,
-        )
-        released = invoke_command(
-            govern, config.vault_root, operation="grant", scope="standing",
-            grant_id="01ARZ3NDEKTSV4RRFFQ69G5FB0", path=saved["path"], audience=recipient.audience_id,
-            raw_release={"version": 1, "surface": recipient.surface,
-                         "issuer_family": recipient.issuer_family,
-                         "purpose": None, "includes_location": True},
-        )
-    assert released["ok"], released
-    open_file = server_hosted._open_bounded_vault_file
-    opened = []
-
-    def update_then_open(root, path, **kwargs):
-        preserve.update_sidecar_extraction(root, root / path, text="new unapproved extraction", engine="upload")
-        result = open_file(root, path, **kwargs)
-        opened.append(result[0])
-        return result
-
-    request = {
-        "headers": {
-            "Authorization": f"Bearer {config.service_credential}",
-            gateway.CELL_HEADER: config.cell_id, gateway.PROTOCOL_HEADER: config.protocol_version,
-            gateway.REQUEST_HEADER: "33333333-3333-4333-8333-333333333333",
-            gateway.PRINCIPAL_HEADER: PRINCIPAL,
-            gateway.TRANSFER_GRANT_HEADER: gateway.mint_transfer_grant(
-                config, tenant_scope="tenant-alpha", principal_scope=PRINCIPAL,
-                operation="download", jti="raw-companion-swap", max_bytes=65536,
-            ),
-        },
-        "json": {"path": saved["sidecar_path"]},
-    }
-    approved = (config.vault_root / saved["sidecar_path"]).read_bytes()
-    positive = asyncio.run(_request(app, "POST", "/private/exomem/v1/download", **request))
-    assert positive.status_code == 200, positive.text
-    assert positive.content == approved
-    monkeypatch.setattr(server_hosted, "_open_bounded_vault_file", update_then_open)
-    response = asyncio.run(_request(
-        app, "POST", "/private/exomem/v1/download", **request,
-    ))
-    assert response.status_code == 404, response.text
-    assert "new unapproved extraction" not in response.text
-    assert opened and all(stream.closed for stream in opened)
+    app, config, lifecycle = _app(tmp_path, FakeSecurityAuthority())
+    metadata = {"filename": "alpha.txt", "scope": "research", "category": "documents"}
+    if marked_field:
+        metadata[marked_field] = raw_protection.PREFIX + metadata[marked_field]
+    filename = metadata["filename"]
+    before = {str(p.relative_to(config.vault_root)): p.read_bytes()
+              for p in config.vault_root.rglob("*") if p.is_file()}
+    if protocol == "public-v2":
+        target = _upload_target()
+        target["metadata"].update(metadata)
+        target["metadata_sha256"] = hashlib.sha256(
+            hosted_transfer.canonical_json(target["metadata"])
+        ).hexdigest()
+        response = asyncio.run(_request(
+            app, "PUT", hosted_transfer.TRANSFER_UPLOAD_PATH,
+            headers={"Origin": ORIGIN, "Content-Type": "text/plain",
+                     hosted_transfer.TRANSFER_GRANT_HEADER: _grant(target=target)},
+            content=b"alpha",
+        ))
+    else:
+        response = asyncio.run(_request(
+            app, "POST", "/private/exomem/v1/upload",
+            headers={
+                "Authorization": f"Bearer {config.service_credential}",
+                gateway.CELL_HEADER: config.cell_id,
+                gateway.PROTOCOL_HEADER: config.protocol_version,
+                gateway.REQUEST_HEADER: "33333333-3333-4333-8333-333333333333",
+                gateway.PRINCIPAL_HEADER: PRINCIPAL,
+                "Idempotency-Key": "raw-upload",
+                gateway.TRANSFER_GRANT_HEADER: gateway.mint_transfer_grant(
+                    config, tenant_scope="tenant-alpha", principal_scope=PRINCIPAL,
+                    operation="upload", jti="raw-upload", max_bytes=65536,
+                ),
+            },
+            files={"file": (filename, b"alpha", "text/plain")},
+            data={key: metadata[key] for key in ("scope", "category")},
+        ))
+    if marked_field:
+        error = response.json()["error"]
+        assert error["code"] == "RAW_PROTECTION_UNAVAILABLE", response.text
+        assert error["message"] == raw_protection.UNAVAILABLE_MESSAGE
+        if protocol == "public-v2":
+            assert error["retryable"] is False
+            assert error["requires_new_grant"] is True
+        after = {str(p.relative_to(config.vault_root)): p.read_bytes()
+                 for p in config.vault_root.rglob("*") if p.is_file()}
+        assert after == before
+    else:
+        assert response.status_code == 201, response.text
+        artifact = config.vault_root / "Knowledge Base/Evidence/research/documents/alpha.txt"
+        assert artifact.read_bytes() == b"alpha"
+        assert artifact.with_name("alpha.txt.md").is_file()
     assert lifecycle.snapshot().active_transfers == 0
 
 

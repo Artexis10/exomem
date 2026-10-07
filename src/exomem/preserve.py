@@ -360,6 +360,19 @@ class PreserveError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
+def validate_raw_capture(
+    filename: str | None = None, *, destination: str = "", raw_protection: bool = False,
+) -> bool:
+    """Resolve protection before a canonical write or a duplicate receipt."""
+    from .governance import raw_protection as raw_guard
+    from .governance.principal import effective_principal
+
+    protected = raw_protection or raw_guard.marked(str(Path(destination) / _sanitize_filename(filename)))
+    if protected and not raw_guard.applies_to(effective_principal()):
+        _raise("RAW_PROTECTION_UNAVAILABLE", ["raw_protection"], raw_guard.UNAVAILABLE_REASON)
+    return protected
+
+
 def preserve(
     vault_root: Path,
     *,
@@ -405,14 +418,12 @@ def preserve(
     filename_safe = _sanitize_filename(filename)
     from .governance import raw_protection as raw_guard
 
+    raw_protection = validate_raw_capture(
+        filename_safe, destination=str(kb_root(vault_root).relative_to(vault_root) / "Evidence" / scope_safe / category_safe),
+        raw_protection=raw_protection,
+    )
     if raw_protection and filename_safe and not raw_guard.marked(filename_safe):
         filename_safe = raw_guard.PREFIX + filename_safe
-    raw_protection = raw_protection or raw_guard.marked(filename_safe)
-    if raw_protection:
-        from .governance.principal import effective_principal
-
-        if not raw_guard.applies_to(effective_principal()):
-            return _raise("RAW_PROTECTION_UNAVAILABLE", ["raw_protection"], raw_guard.UNAVAILABLE_REASON)
     if not filename_safe:
         missing.append("filename")
         reasons.append("filename is empty or only invalid characters")

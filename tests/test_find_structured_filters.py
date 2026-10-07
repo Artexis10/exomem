@@ -81,6 +81,31 @@ def filter_vault(vault: Path) -> Path:
     return vault
 
 
+@pytest.mark.parametrize("result_level", ["unit", "mixed"])
+def test_raw_unit_candidates_do_not_displace_guest_recall_or_cross_cache_views(filter_vault, result_level):
+    from exomem import commands
+    from exomem.governance import principal
+
+    original = filter_vault / "Knowledge Base/Notes/matching.md"
+    hidden = original.with_name("__exomem_raw_v1__matching.md")
+    hidden.write_text(original.read_text().replace("2026-01-03", "2026-10-01"))
+    find_module.clear_cache()
+    _prepare_semantic_catalog(filter_vault)
+    args = dict(query="Matching", categories=["config"], result_level=result_level,
+                mode="keyword", scope="kb-only", limit=1, graph=False)
+    guest = principal.RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
+    with principal.request_scope(guest):
+        first = commands.op_ask_memory(filter_vault, **args)
+    with principal.library_scope():
+        owner = commands.op_ask_memory(filter_vault, **args)
+    with principal.request_scope(guest):
+        again = commands.op_ask_memory(filter_vault, **args)
+    assert first == again
+    assert "__exomem_raw_v1__" not in str(first)
+    assert "Knowledge Base/Notes/matching.md" in str(first)
+    assert "__exomem_raw_v1__" in str(owner)
+
+
 @pytest.mark.parametrize("mode", ["keyword", "hybrid", "vector"])
 def test_every_lane_consumes_the_same_page_filter_eligibility(
     filter_vault: Path, mode: str

@@ -365,6 +365,22 @@ Protected text-only capture SHALL preserve exact submitted UTF-8 bytes as its or
 
 Protected preservation SHALL retain supplied metadata privately without introducing its new source-kind/domain/project keys into shared registries or reporting those registrations as completed. Existing keys SHALL continue resolving. Content-scoped schema inference, audit and relation aggregates SHALL apply RAW admission in their existing path producers before deriving counts, fields or frequencies; unreleased captures SHALL match absent captures. Account/operator resource and health accounting SHALL remain available under its existing authority.
 
+RAW-restricted recall SHALL admit maintained identities before candidate selection, keyword fallback, browsing and result limits. Lexical scoring and query-term selection SHALL use corpus statistics from admitted pages or semantic units of admitted parents. Candidate eligibility SHALL NOT substitute for admitted corpus statistics. Restricted requests SHALL bypass shared page/unit result caches and SHALL NOT expose content-derived warming markers caused only by hidden pending writes. Managed requests SHALL preserve indexed admission and unavailable-index behavior without adding a source walk. Owners and exempt hosted callers SHALL retain their existing retrieval path.
+
+#### Scenario: Protected matches do not crowd out public recall
+- **WHEN** a restricted caller searches present and absent twins with enough protected matches to fill the requested result limit
+- **THEN** keyword, empty-query browse and unit results contain the same admitted results, without hidden-dependent fallback or warming markers
+- **AND** alternating owner and restricted requests does not share a result cache across their views
+
+#### Scenario: Protected document frequencies do not reorder public recall
+- **WHEN** two twins contain the same admitted pages or units, and one adds protected documents with different query-term frequencies
+- **THEN** restricted lexical retrieval returns the same public ordering and query-term selection on both lexical backends
+
+#### Scenario: Scene lineage admission precedes lexical scoring
+- **WHEN** one twin adds a protected parent and unmarked scene children that declare that parent
+- **THEN** restricted page and unit scoring excludes those children before deriving corpus statistics, including current pending parent references
+- **AND** a public child whose declared parent is missing and unmarked retains ordinary orphan recall
+
 #### Scenario: Protected capture does not publish private vocabulary or schema evidence
 - **WHEN** an owner preserves a protected capture containing a new private domain/project key and distinctive frontmatter, then a non-owner audience with no policy inspects shared registries or infers a content schema
 - **THEN** the metadata survives in the protected companion for local recovery, shared registries gain no private key, and inferred fields/frequencies/sample size equal the absent-capture twin; existing registered keys, unmarked captures and operator health remain usable

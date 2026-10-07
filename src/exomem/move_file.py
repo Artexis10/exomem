@@ -18,7 +18,6 @@ import dataclasses
 import datetime as dt
 import hashlib
 import logging
-import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -144,12 +143,6 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
         raise MoveFileError("MOVE_FAILED", "held file move was refused") from None
 
 
-#: Frontmatter key holding a page's pointer at the bytes it describes. The
-#: name is a misnomer once a Source uses it, and is kept because roughly fifteen
-#: readers depend on it.
-_ARTIFACT_POINTER_RE = re.compile(r"(?m)^(evidence_file:[ \t]*)(.+?)[ \t]*$")
-
-
 def _compose_transforms(first, second):
     """Run a caller's own content transform, then this module's repointing.
 
@@ -195,20 +188,26 @@ def _repoint_artifact(old_binary: str, new_binary: str):
     """A content transform that repoints a moved page at its moved bytes."""
 
     def transform(text: str) -> str:
-        def replace(match: re.Match[str]) -> str:
-            return f"{match.group(1)}{new_binary}" if match.group(2) == old_binary else match.group(0)
+        from .vault import document_newline, parse_frontmatter, render_frontmatter_document, serialize_frontmatter
 
-        from .governance.raw_protection import marked
-
-        result = _ARTIFACT_POINTER_RE.sub(replace, text)
-        if marked(old_binary):
-            from .vault import yaml_scalar
-
-            result = re.sub(
-                r"(?m)^(  artifact_path:).*$", r"\g<1> " + yaml_scalar(new_binary), result
-            )
-            result = re.sub(r"(?m)^(data_file:).*$", r"\g<1> " + yaml_scalar(new_binary), result)
-        return result
+        frontmatter, body, block = parse_frontmatter(text, strict=True)
+        if block is None:
+            return text
+        changed = False
+        # These two pointer fields belong to the Source/Evidence companion schema.
+        for field in ("evidence_file", "data_file"):
+            if frontmatter.get(field) == old_binary:
+                frontmatter[field] = new_binary
+                changed = True
+        protection = frontmatter.get("raw_protection")
+        if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
+            protection["artifact_path"] = new_binary
+            changed = True
+        if not changed:
+            return text
+        return render_frontmatter_document(
+            serialize_frontmatter(frontmatter), body, newline=document_newline(text), blank_line=True,
+        )
 
     return transform
 

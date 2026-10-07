@@ -26,6 +26,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import hosted_transfer
+from .governance import principal as principal_module, raw_protection
+from .preserve import PreserveError
 from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, HostedLifecycleError
 from .vault import VaultPathError, resolve_under_vault
 
@@ -77,6 +79,7 @@ _ERROR_CATALOG: dict[str, tuple[int, str, bool, bool]] = {
         True,
         True,
     ),
+    "RAW_PROTECTION_UNAVAILABLE": (400, raw_protection.UNAVAILABLE_MESSAGE, False, True),
     "TRANSFER_INTERNAL": (500, "transfer failed safely", False, True),
 }
 _RFC8187_ATTR_CHAR = frozenset(
@@ -245,7 +248,12 @@ def register_public_transfer_routes(
 
             def commit() -> None:
                 assert temp_stream is not None
-                with mutation_guard_factory(config.vault_root):
+                with (
+                    principal_module.request_scope(
+                        principal_module.resolve_hosted_principal(grant.principal_scope)
+                    ),
+                    mutation_guard_factory(config.vault_root),
+                ):
                     if metadata["scope"] == _ADOPTION_STAGING_SCOPE:
                         _stage_adoption_upload(
                             vault_root=config.vault_root,
@@ -274,6 +282,9 @@ def register_public_transfer_routes(
                 # invalid run target) keep their exact public code instead of
                 # being masked as a retryable commit fault.
                 raise
+            except PreserveError as exc:
+                code = "RAW_PROTECTION_UNAVAILABLE" if exc.code == "RAW_PROTECTION_UNAVAILABLE" else "TRANSFER_COMMIT_UNAVAILABLE"
+                raise PublicRequestError(code) from exc
             except Exception as exc:  # noqa: BLE001 - governed commit stays redacted
                 raise PublicRequestError("TRANSFER_COMMIT_UNAVAILABLE") from exc
         except hosted_transfer.TransferSecurityUnavailable:

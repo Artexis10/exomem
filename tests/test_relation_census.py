@@ -166,6 +166,12 @@ def test_raw_write_does_not_change_external_census_freshness(census_vault: Path)
     with library_scope():
         local = relation_census.census(census_vault)
     assert isinstance(local["graph_generation"], int)
+    from exomem.governance.principal import resolve_hosted_principal
+
+    with request_scope(resolve_hosted_principal("A" * 43)):
+        hosted = relation_census.census(census_vault)
+    assert hosted["graph_generation"] == local["graph_generation"]
+    assert hosted["cohort"] == local["cohort"]
     assert local["cohort"]["eligible_pages"] == before["cohort"]["eligible_pages"] + 1
 
 

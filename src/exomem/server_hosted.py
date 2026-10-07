@@ -2079,7 +2079,18 @@ def register_hosted_routes(
                     ).hexdigest()
 
                     def commit_upload() -> Any:
-                        with lifecycle.admit_mutation():
+                        from .governance import principal as principal_module
+                        from .preserve import validate_raw_capture
+
+                        with (
+                            principal_module.request_scope(
+                                principal_module.resolve_hosted_principal(context.principal_scope)
+                            ),
+                            lifecycle.admit_mutation(),
+                        ):
+                            validate_raw_capture(
+                                metadata["filename"], destination=str(Path(metadata["scope"]) / metadata["category"]),
+                            )
                             with guard_factory(config.vault_root):
                                 return upload_idempotency.run(
                                     idempotency_key,

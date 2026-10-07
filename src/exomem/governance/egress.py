@@ -6071,7 +6071,8 @@ class _ArtifactReferenceGate:
         return allowed
 
     def gate_text(self, text: str) -> str:
-        if raw_protection.PREFIX in text.casefold() and not raw_protection.is_owner(self.who):
+        if (raw_protection.PREFIX in text.casefold()
+                and raw_protection.applies_to(self.who) and not raw_protection.is_owner(self.who)):
             # The token is recognizable even in an orphan/bare-name citation.
             # Full path strings can prove an exact release without a corpus census.
             if not raw_protection.marked(text) or not raw_protection.permits(self.vault_root, text, self.who):

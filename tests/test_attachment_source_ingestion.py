@@ -767,6 +767,12 @@ def test_raw_text_source_promotion_retains_bytes_identity_and_protection(vault: 
         vault, source_schema, content=original, title="Protected source", raw_protection=True,
     )
     before = raw_protection.binding(vault, added.artifact_path)[0]
+    from exomem.vault import parse_frontmatter
+
+    example = "\n```yaml\nevidence_file: example.txt\ndata_file: example.txt\nraw_protection:\n  artifact_path: example.txt\n```\n"
+    page_path = vault / added.path
+    page_path.write_text(page_path.read_text() + example)
+    body_before = parse_frontmatter(page_path.read_text(), strict=True)[1]
     moved = move_file_module.move_file(
         vault, old_path=added.artifact_path,
         new_path="Knowledge Base/Evidence/Test/raw/promoted.txt",
@@ -777,6 +783,10 @@ def test_raw_text_source_promotion_retains_bytes_identity_and_protection(vault: 
     assert after["original_ref"] == before["original_ref"]
     assert after["revision"] == before["revision"]
     assert raw_protection.marked(companion)
+    frontmatter, body_after, _ = parse_frontmatter((vault / companion).read_text(), strict=True)
+    assert frontmatter["evidence_file"] == after["artifact_path"]
+    assert after["artifact_path"] == "Knowledge Base/Evidence/Test/raw/__exomem_raw_v1__promoted.txt"
+    assert body_after == body_before
     assert not (vault / added.path).exists()
     assert not (vault / added.artifact_path).exists()
 
