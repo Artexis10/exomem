@@ -38,6 +38,7 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
     env.update(
         {
             "HOME": str(home),
+            "FASTMCP_HOME": str(home / "fastmcp"),
             "EXOMEM_VAULT_PATH": str(vault),
             "EXOMEM_DISABLE_EMBEDDINGS": "1",
             "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",

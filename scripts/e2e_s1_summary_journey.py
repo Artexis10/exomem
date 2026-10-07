@@ -33,6 +33,7 @@ import math
 import os
 import random
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -283,6 +284,7 @@ LEASE_VAULT_ID = "s1-journey-vault"
 LEASE_TOKEN = "s1-journey-writer-token"
 OPERATOR_TOKEN = "s1-journey-operator-token"
 LEASE_TTL = 4.0
+RECIPIENT_ID = 20261007
 CAPABILITY_OFF = "RELEASED: frozenset[str] = frozenset()"
 CAPABILITY_ON = "RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1})"
 
@@ -358,8 +360,10 @@ class Journey:
         self.timings: dict[str, float] = {}
         self.coordinator_url = ""
         self.lease_state = self.work / "lease-service"
+        self.lease_state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.file_collections: dict[str, Any] = {}
         self.source_receipt: dict[str, Any] = {}
+        self.rest_key = secrets.token_hex(32)
 
     @property
     def export_path(self) -> str:
@@ -426,6 +430,65 @@ class Journey:
                     f"service '{label}' did not start ({error})\n--- {log.name} tail ---\n{tail}"
                 ) from error
             yield Session(client, self.timeout)
+
+    @contextlib.asynccontextmanager
+    async def recipient_service(self) -> AsyncIterator[tuple[str, Session]]:
+        """One installed writer: recipient MCP reads and owner REST release changes."""
+        import httpx
+        from fastmcp import Client
+
+        (reservation,) = loop._reserve_port_reservations(1)
+        port = int(reservation.getsockname()[1])
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.lease_env()
+        env.update({
+            "EXOMEM_BASE_URL": base_url,
+            "GITHUB_CLIENT_ID": "s1-test-client",
+            "GITHUB_CLIENT_SECRET": "s1-test-secret",
+            "EXOMEM_GITHUB_USERNAME": "s1-recipient",
+            "EXOMEM_GITHUB_USER_ID": str(RECIPIENT_ID),
+            "EXOMEM_JWT_SIGNING_KEY": secrets.token_hex(32),
+            "EXOMEM_REST_API_KEY": self.rest_key,
+            "EXOMEM_OAUTH_STORAGE_URL": self.coordinator_url,
+            "EXOMEM_OAUTH_STORAGE_NAMESPACE": LEASE_VAULT_ID,
+            "EXOMEM_OAUTH_STORAGE_TOKEN": LEASE_TOKEN,
+        })
+        token_file = self.work / "recipient-token"
+        try:
+            loop._run([
+                str(self.python), str(Path(__file__).resolve()),
+                "--issue-recipient-session", str(token_file),
+                "--python", str(self.python), "--executable", str(self.executable),
+                "--vault", str(self.vault), "--work", str(self.work), "--home", str(self.home),
+            ], env=env, cwd=self.work, timeout=self.timeout)
+        finally:
+            reservation.close()
+        log = self.work / "service-recipient.log"
+        with log.open("w", encoding="utf-8") as handle:
+            process = subprocess.Popen([
+                str(self.python), "-m", "exomem", "--transport", "http",
+                "--host", "127.0.0.1", "--port", str(port),
+            ], cwd=self.work, env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
+            try:
+                loop._wait_http_ready(
+                    lambda: loop._http_json(f"{base_url}/api/openapi.json", timeout=1)[0] == 200,
+                    proc=process, deadline=time.monotonic() + self.timeout,
+                    log=log, label="recipient service",
+                )
+                for bearer in (None, "invalid-s1-token"):
+                    # HTTP authentication can refuse with an empty body; only its status is relevant here.
+                    response = httpx.get(
+                        f"{base_url}/mcp", timeout=self.timeout,
+                        headers={"Authorization": f"Bearer {bearer}"} if bearer else {},
+                    )
+                    expect(response.status_code == 401, "unauthenticated MCP ingress was accepted", response.status_code)
+                async with Client(
+                    f"{base_url}/mcp", auth=token_file.read_text(encoding="utf-8"), timeout=self.timeout,
+                ) as client:
+                    yield base_url, Session(client, self.timeout)
+            finally:
+                loop._terminate(process, self.timeout)
+                token_file.unlink(missing_ok=True)
 
     def owner_cli(self, *arguments: str, operator: bool = True) -> subprocess.CompletedProcess[str]:
         """The owner's offline `exomem collections ...`, with the operator credential in its shell."""
@@ -945,6 +1008,26 @@ async def compare_queries(journey: Journey, service: Session) -> None:
 # --- entry point --------------------------------------------------------------
 
 
+def issue_recipient_session(path: Path) -> int:
+    """Seed synthetic login identity through the installed durable session authority."""
+    from exomem.auth_sessions import SessionIdentity
+    from exomem.server_auth import build_session_authority
+
+    async def issue() -> str:
+        authority = build_session_authority(base_url=os.environ["EXOMEM_BASE_URL"])
+        bearer, _record = await authority.issue(
+            client_id="s1-recipient", scopes=["exomem:read", "exomem:write"],
+            identity=SessionIdentity(github_user_id=RECIPIENT_ID, github_login="s1-recipient"),
+        )
+        return bearer
+
+    bearer = asyncio.run(issue())
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(bearer)
+    return 0
+
+
 def start_coordinator(journey: Journey) -> tuple[subprocess.Popen, Any]:
     """The writer-lease coordinator, a real local HTTP process of the installed wheel."""
     (reservation,) = loop._reserve_port_reservations(1)
@@ -1026,7 +1109,9 @@ def main() -> int:
     parser.add_argument("--work", required=True)
     parser.add_argument("--home", required=True)
     parser.add_argument("--request-timeout", type=float, default=20.0)
-    return run(parser.parse_args())
+    parser.add_argument("--issue-recipient-session", type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    return issue_recipient_session(args.issue_recipient_session) if args.issue_recipient_session else run(args)
 
 
 if __name__ == "__main__":
