@@ -134,6 +134,30 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
     assert [finding["path"] for finding in debt] == [created["path"]]
 
 
+def test_a_first_use_registration_is_announced_and_marked_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call = _served(tmp_path, monkeypatch)
+
+    # A capture that names an unfamiliar kind registers it and says so once.
+    captured = call(
+        "capture_source",
+        {
+            "title": "Spring survey notes",
+            "content": "Hand-written notes from the spring bird survey.",
+            "source_kind": "field-notebook",
+        },
+    )
+    [receipt] = captured["vocabulary_receipt"]
+    assert "source-kinds: registered field-notebook on first use" in receipt
+    assert 'operation="restore"' in receipt
+
+    # Another agent's next bootstrap marks it new.
+    served = call("bootstrap", {"section": "vocabulary"})
+    assert "field-notebook" in served["vocabulary"]["source-kinds"]["new"]
+    assert served["vocabulary"]["new_since"]
+
+
 def test_a_stale_hash_refuses_the_second_save(vault: Path) -> None:
     current = commands.op_schema_memory(vault, subject="entity-types", operation="inspect")
     commands.op_schema_memory(
