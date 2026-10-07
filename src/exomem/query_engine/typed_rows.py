@@ -51,13 +51,13 @@ class RowPage:
     total: int | None = None
 
 
-def declaration(manifest, basis, *, withheld=frozenset()) -> dict:
+def declaration(manifest, basis, *, projected=frozenset()) -> dict:
     """The validator's declaration of one admitted collection.
 
-    ``withheld`` names fields some of whose values may be withheld from the caller;
-    the validator lets a query select them but not filter, sort, group or join on them.
+    ``projected`` names fields whose values are projected per caller before a result
+    is built; the validator lets a query read them but not filter, sort or join on them.
     """
-    fields = {name: {"type": spec.type, "enum": spec.enum, **({"withheld_values": True} if name in withheld else {})}
+    fields = {name: {"type": spec.type, "enum": spec.enum, **({"projected": True} if name in projected else {})}
               for name, spec in manifest.schema.fields.items()}
     fields["item_key"] = {"type": "string"}
     return {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id, "fields": fields}

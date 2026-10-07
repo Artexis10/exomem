@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from conftest import initialize_vault_state_offline
 from s1_export_fixture import daily_summaries, expected_daily, iter_exercises
-from test_collection_rollups import SUMMARY_FIELDS, load, manifest
+from test_collection_rollups import DAILY, FIELDS, SUMMARY_FIELDS, exercise, load, manifest, request
 from test_collection_store_importer import (
     CID,
     MAPPING,
@@ -249,33 +249,55 @@ def test_sealed_collection_under_a_routing_marker_refuses_like_an_absent_one(sto
         assert len(answers) == 1 and "COLLECTION_NOT_FOUND" in answers.pop(), call["action"]
 
 
-def test_a_link_to_a_page_another_audience_cannot_read_is_omitted_and_cannot_drive_a_query(store):
-    """A typed row or group label naming a page the caller cannot read, where the legacy query omits
-    it, or a filter, order or group on link values that reveals what the row omits."""
+def test_a_link_to_a_page_the_caller_cannot_read_never_shows_and_cannot_filter_or_sort(store):
+    """A typed row or group label naming a page the caller cannot read, for another audience or for the
+    owner under an access exclusion, or a filter or sort on stored link values that recovers what a
+    row omits."""
+    link = "[[Private/Secret Plan]]"
     fields = {"id": "{type: string, required: true}", "count": "{type: integer, sortable: true}",
-              "related": "{type: link}"}
+              "related": "{type: link, sortable: true}"}
     store.create_collection(manifest_path(), manifest(fields=fields, summary=False), why="create", scaffold=False)
     secret = store.root / "Knowledge Base/Private/Secret Plan.md"
     secret.parent.mkdir(parents=True)
     secret.write_text("# Secret Plan\n")
-    store.append_record(SUMMARY_CID, item={"id": "linked", "count": 1, "related": "[[Private/Secret Plan]]"},
-                        item_key=KEY, why="observe")
+    store.append_record(SUMMARY_CID, item={"id": "linked", "count": 1, "related": link}, item_key=KEY, why="observe")
     store.append_record(SUMMARY_CID, item={"id": "unlinked", "count": 2}, item_key=OTHER, why="observe")
-    write_scope(store.root, paths="Private/**")
-    write_rule(store.root, ceiling=0)
     rows = {"version": 1, "select": ["id", "related"], "order_by": [{"field": "count"}]}
     by_link = {"version": 1, "group_by": [{"field": "related"}], "aggregates": {"rows": {"op": "count"}}}
-    assert query(store, rows, collection=SUMMARY_CID)["rows"] == [
-        {"id": "linked", "related": "[[Private/Secret Plan]]"}, {"id": "unlinked"}]
-    assert {"related": "[[Private/Secret Plan]]", "rows": 1} in query(store, by_link, collection=SUMMARY_CID)["groups"]
-    external = tool(store, "record_memory", _external(), action="query", collection=SUMMARY_CID, query=rows)
-    assert external["rows"] == [{"id": "linked"}, {"id": "unlinked"}]
-    for raw, at in ((by_link, "group_by[0].field"),
-                    ({**rows, "where": {"field": "related", "op": "exists"}}, "where.field"),
-                    ({**rows, "order_by": [{"field": "related"}]}, "order_by[0].field")):
-        error = refusal(store, "record_memory", _external(), action="query", collection=SUMMARY_CID, query=raw)
-        assert (error["code"], error["at"]) == ("QUERY_FIELD_UNAVAILABLE", at)
-        assert "Secret" not in json.dumps(error)
+
+    def answers(who):
+        def read(raw):
+            return tool(store, "record_memory", who, action="query", collection=SUMMARY_CID, query=raw)
+        return read(rows)["rows"], read(by_link)["groups"]
+
+    released_rows, released_groups = answers(OWNER)
+    assert released_rows == [{"id": "linked", "related": link}, {"id": "unlinked"}]
+    assert released_groups == [{"rows": 1}, {"related": link, "rows": 1}]
+    # Withheld, the linked row reads exactly like its unlinked twin and joins the absent-link group.
+    withheld = ([{"id": "linked"}, {"id": "unlinked"}], [{"rows": 2}])
+    write_scope(store.root, paths="Private/**")
+    write_rule(store.root, ceiling=0)
+    assert answers(_external()) == withheld
+    (store.root / "Knowledge Base/_access.yaml").write_text('excluded: ["Private/Secret Plan.md"]\n')
+    assert answers(OWNER) == withheld
+    for who in (OWNER, _external()):
+        for raw, at in (({**rows, "where": {"field": "related", "op": "eq", "value": link}}, "where.field"),
+                        ({**rows, "order_by": [{"field": "related"}]}, "order_by[0].field")):
+            error = refusal(store, "record_memory", who, action="query", collection=SUMMARY_CID, query=raw)
+            assert (error["code"], error["at"]) == ("QUERY_FIELD_UNAVAILABLE", at)
+
+
+def test_only_a_reduction_that_reads_a_link_leaves_its_ready_rollup(store):
+    """A link-bearing collection whose every reduction loses its ready rollup, or a reduction grouped on
+    the link answered from buckets that never saw the caller's link projection."""
+    rollups = {"daily": DAILY, "by_link": {**DAILY, "group_by": ["related"]}}
+    store.create_collection(manifest_path(), manifest(fields={**FIELDS, "related": "{type: link}"},
+                                                      rollups=rollups, summary=False), why="create", scaffold=False)
+    load(store, [exercise(record) for record in iter_exercises(20)])
+    daily = query(store, {**request(), "mode": "explain"}, collection=SUMMARY_CID)
+    by_link = query(store, {**request(groups=("related",)), "mode": "explain"}, collection=SUMMARY_CID)
+    assert daily["plan"]["strategy"] == "rollup"
+    assert (by_link["plan"]["strategy"], by_link["plan"]["reason"]) == ("base", "fields_projected")
 
 
 def test_compose_refuses_every_shape_and_profile_that_execute_refuses(store):

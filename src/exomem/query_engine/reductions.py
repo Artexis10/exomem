@@ -60,6 +60,11 @@ class _Shape:
     latest: bool
     values: tuple[ir.NamedAggregate, ...]
 
+    def reads(self) -> tuple[str, ...]:
+        """Every declared field the reduction reads: aggregated values, group keys and the timing basis."""
+        timing = () if self.basis is None else (self.basis.field, self.basis.offset)
+        return tuple(dict.fromkeys(name for name in (*self.fields, *self.others, *timing) if name is not None))
+
 
 @dataclass(frozen=True, slots=True)
 class _Plan:
@@ -142,7 +147,8 @@ def _aligned(shape: _Shape) -> bool:
 def _plan(session, collection_id: str, shape: _Shape, uniform: bool) -> _Plan:
     if not uniform:
         return _Plan("base", "mixed_release", "admitted")
-    if session._project_values is not None:
+    projected = session._projected_fields
+    if session._project_values is not None and (projected is None or projected & set(shape.reads())):
         return _Plan("base", "fields_projected", "uniform")
     matching = [definition for definition in rollups.definitions(session.connection, collection_id)
                 if _answers(definition[1], shape)]
@@ -243,8 +249,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     Flagged rows count whatever the window, since their local day is unknown.
     Rows of buckets before the cursor's bucket are skipped, not retained.
     """
-    timing = () if shape.basis is None else (shape.basis.field, shape.basis.offset)
-    read = tuple(dict.fromkeys(name for name in (*shape.fields, *shape.others, *timing) if name is not None))
+    read = shape.reads()
     sql, decode = _scan_sql(collection_id, layout, predicate, read)
     project = session._project_values
     basis, bucket, timed = shape.basis, "", shape.timed

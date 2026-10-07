@@ -3091,6 +3091,9 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         for mode in ("preview", "status", "start", "cancel")
     } == {"preview": True, "status": True, "start": False, "cancel": False}
     assert not commands.invocation_is_read_only(record, {"action": "import"})
+    for malformed in (["preview"], {"preview": True}):
+        assert not commands.invocation_is_read_only(
+            record, {"action": "import", "import_request": {"mode": malformed}})
 
 
 def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:

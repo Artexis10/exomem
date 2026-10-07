@@ -17,7 +17,6 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import asdict, replace
 
-from ..governance.principal import OWNER_AUDIENCE
 from . import cursors, reductions, runtime, typed_rows, validation
 from .runtime import QueryError, QueryLimits
 
@@ -65,9 +64,9 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
     """Validate ``raw`` against the admitted collection and run it in its mode and profile.
 
     Link values pass the legacy query's own projector, so a link to a page the
-    caller cannot read is omitted. Unless the caller is the owner, a link field
-    may be selected but cannot filter, sort, group or join, since those evaluate
-    the unprojected values.
+    caller cannot read is omitted, whoever the caller is. A link field may be
+    selected, aggregated or grouped, which read projected values, but cannot
+    filter, sort or join, which would evaluate the stored ones.
     """
     from ..record_governance import _LinkProjector
 
@@ -80,11 +79,13 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
         with session._manifest(collection_id) as (manifest, basis, _, _):
             links = frozenset(name for name, spec in manifest.schema.fields.items()
                               if _LinkProjector.carries_links(spec))
-            owner = operation.who.resolved and operation.who.audience_id == OWNER_AUDIENCE
-            declaration = typed_rows.declaration(manifest, basis, withheld=frozenset() if owner else links)
+            declaration = typed_rows.declaration(manifest, basis, projected=links)
         if links:
+            # No cold vault walk inside the query deadline: a bare-title or memory link that needs the
+            # candidate index is omitted, as on the legacy bounded-latency path.
             session.project_with(_LinkProjector.create(writer.root, manifest, policy=operation.policy,
-                                                       authorize_path=operation.allows_file))
+                                                       allow_cold_index=False, authorize_path=operation.allows_file),
+                                 fields=links)
         result = validation.normalize_query(raw, declarations={collection_id: declaration}, collection=collection_id)
         if result.findings:
             raise Refusal(result.findings[0])
@@ -206,7 +207,7 @@ def chapter(name: str | None) -> dict:
             "percentile and distinct_count",
             "where on a grouped query: use group_by[n].from/to",
             "execution_profile analytics on row queries",
-            "filter, sort, group or join on a link field, except for the owner: QUERY_FIELD_UNAVAILABLE",
+            "filter, sort or join on a link field: QUERY_FIELD_UNAVAILABLE",
             "the graph chapter: QUERY_CAPABILITY_UNAVAILABLE",
             "continuation of a group page under mixed release",
             "a query on a file-mode collection: QUERY_UNAVAILABLE",

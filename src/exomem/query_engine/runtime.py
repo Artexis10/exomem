@@ -149,15 +149,18 @@ class ReadSession:
         self._queries = {}
         self._cursors = set()
         self._estimated_visits = 0
+        # Fields the projection can change; None means any field may change.
+        self._projected_fields = None
 
     def __reduce__(self):
         raise TypeError("query sessions are request-local")
 
-    def project_with(self, project_values) -> None:
-        """Install the value projection that this session's own manifest calls for, before any query runs."""
+    def project_with(self, project_values, *, fields) -> None:
+        """Install the projection of ``fields`` that this session's own manifest calls for, before any query runs."""
         if self._project_values is not None or self._admitted or self._queries or self._estimated_visits:
             raise QueryError("QUERY_UNAVAILABLE", "a session's value projection is fixed before its first query")
         self._project_values = project_values
+        self._projected_fields = frozenset(fields)
 
     def check(self) -> None:
         if self._failure is not None:

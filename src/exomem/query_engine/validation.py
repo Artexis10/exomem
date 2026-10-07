@@ -255,7 +255,7 @@ class _Binder:
         self.leaves = 0
 
     def field(self, name: Any, at: str, *, reduction=False, evaluated=False) -> Field:
-        """Bind a declared field; ``evaluated`` marks a use that filters, sorts, groups or joins on its values."""
+        """Bind a declared field; ``evaluated`` marks a use that SQL evaluates on stored values."""
         if reduction:
             fields = self.reduction_fields or {}
             if isinstance(name, str) and name in fields:
@@ -287,11 +287,11 @@ class _Binder:
                 allowed,
                 "Describe the source and choose a declared field.",
             )
-        if evaluated and fields[path].get("withheld_values"):
-            # The declaration says some of this field's values may be withheld from the caller, so
-            # evaluating them would let a filter, order, group or join reveal what a row omits.
-            _fail("QUERY_FIELD_UNAVAILABLE", at, "a field whose values are all released to this caller", (),
-                  "Select the field; filter, sort, group and join on fully released fields.")
+        if evaluated and fields[path].get("projected"):
+            # Each caller sees this field's values only after projection, so a filter, sort or join
+            # on the stored values would reveal what a row omits, to the owner as to anyone else.
+            _fail("QUERY_FIELD_UNAVAILABLE", at, "a field stored as each caller sees it", (),
+                  "Select, aggregate or group the field; filter and sort on another field.")
         kind = fields[path].get("type")
         enum = tuple(fields[path].get("enum", ()))
         if kind == "enum":
@@ -451,7 +451,8 @@ class _Binder:
         for i, value in enumerate(_list(groups, "group_by", LIMITS["group_by"])):
             at = f"group_by[{i}]"
             raw = _object(value, at, {"field", "bucket", "from", "to"}, {"field"})
-            field = self.field(raw["field"], f"{at}.field", evaluated=True)
+            # Reductions group projected values, so a projected field may group.
+            field = self.field(raw["field"], f"{at}.field")
             if raw["field"] in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "unique group field path")
             if field.value_type not in _SCALARS:

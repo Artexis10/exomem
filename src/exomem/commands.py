@@ -11878,7 +11878,9 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             from .collection_store.importer import READ_ONLY_MODES
 
             request = kwargs.get("import_request")
-            return isinstance(request, dict) and request.get("mode") in READ_ONLY_MODES
+            mode = request.get("mode") if isinstance(request, dict) else None
+            # A malformed mode stays on the writer path, where the importer refuses it.
+            return isinstance(mode, str) and mode in READ_ONLY_MODES
         if adapter == "question-conditional":
             return not _review_question_submission(
                 kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")
