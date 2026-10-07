@@ -1936,10 +1936,12 @@ def test_health_reports_stale_missing_and_invalid_metadata_log(
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("source", ["compact", "resume"])
 def test_isolated_installed_continuation_adapter_and_config_integration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     client: str,
+    source: str,
 ) -> None:
     home = tmp_path / f"{client} home"
     monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
@@ -1985,7 +1987,7 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
             {
                 "hook_event_name": "SessionStart",
                 "session_id": "installed-session",
-                "source": "resume",
+                "source": source,
                 "transcript_path": str(transcript),
             }
         ),
@@ -1998,6 +2000,11 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
 
     assert written.stdout == ""
     assert "additionalContext" in resumed.stdout
+    context = json.loads(resumed.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "show the note title by default" in context
+    assert "path or file name as the visible fallback" in context
+    assert "do not embed the canonical ref as a Markdown link target" in context
+    assert "show it only when the user explicitly asks" in context
     assert "private installed-adapter content" not in resumed.stdout
     if client == "claude":
         ended = subprocess.run(
