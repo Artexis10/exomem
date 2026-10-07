@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 from conftest import initialize_vault_state_offline
-from fastmcp.exceptions import ToolError
 from s1_export_fixture import daily_summaries, expected_daily, iter_exercises
 from test_collection_rollups import SUMMARY_FIELDS, load, manifest
 from test_collection_store_importer import (
@@ -37,13 +36,14 @@ from test_collection_store_importer import (
     write_source,
 )
 from test_collection_store_writer import CID as SUMMARY_CID
-from test_collection_store_writer import manifest_path
+from test_collection_store_writer import KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
-from test_governance_egress import _external
+from test_governance_egress import _external, write_rule, write_scope
 
 import exomem
-from exomem import commands, server
+from exomem import commands, records, server
 from exomem.cli_ops import OpError
+from exomem.collection_store import authority
 from exomem.collection_store.preview import preview_store
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.query_engine import runtime
@@ -57,6 +57,7 @@ DAILY_CALORIES = {"version": 1, "group_by": [{"field": "local_date", "bucket": "
                                  "avg": {"op": "avg", "field": "calories"}}}
 STEPS = {"version": 1, "group_by": [{"field": "date", "bucket": "day"}],
          "aggregates": {"sum": {"op": "sum", "field": "steps"}}}
+ABSENT = "00000000-0000-4000-8000-000000000000"
 
 
 @pytest.fixture(autouse=True)
@@ -140,9 +141,9 @@ def test_agent_imports_and_reads_source_local_daily_totals_in_every_mode(store, 
     composed = query(store, {**DAILY_CALORIES, "mode": "compose"})
     assert composed["kind"] == "groups" and len(composed["fingerprint"]) == 64 and "groups" not in composed
     explained = query(store, {**DAILY_CALORIES, "mode": "explain"})
-    assert explained["plan"]["strategy"] == "base" and "estimated_row_visits" not in explained
+    assert explained["plan"]["strategy"] == "base" and "admitted_rows" not in explained
     previewed = query(store, {**DAILY_CALORIES, "mode": "preview"})
-    assert previewed["estimated_row_visits"] == len(valid(records)) and "groups" not in previewed
+    assert previewed["admitted_rows"] == len(valid(records)) and "groups" not in previewed
     assert query(store, {**DAILY_CALORIES, "mode": "dry_run"})["admitted"] is True
 
     pages = [query(store, {**DAILY_CALORIES, "page": {"limit": 10}})]
@@ -217,14 +218,77 @@ def test_sealed_summary_collection_is_absent_to_another_audience_in_every_mode(s
                             why="create", scaffold=False)
     load(store, daily_summaries(10))
     assert query(store, STEPS, collection=SUMMARY_CID)["returned"] == 10
-    absent = "00000000-0000-4000-8000-000000000000"
     for mode in ("compose", "preview", "execute"):
         sealed = json.dumps(refusal(store, "record_memory", _external(), action="query", collection=SUMMARY_CID,
                                     query={**STEPS, "mode": mode}))
-        missing = json.dumps(refusal(store, "record_memory", _external(), action="query", collection=absent,
+        missing = json.dumps(refusal(store, "record_memory", _external(), action="query", collection=ABSENT,
                                      query={**STEPS, "mode": mode}))
-        assert sealed.replace(SUMMARY_CID, absent) == missing
+        assert sealed.replace(SUMMARY_CID, ABSENT) == missing
         assert "steps" not in sealed and "10" not in sealed
+
+
+def test_sealed_collection_under_a_routing_marker_refuses_like_an_absent_one(store):
+    """Under a routing marker an unlisted selector falls to file mode, so a file-mode query or import
+    refusal that skips resolution tells another audience which selectors name sealed store collections."""
+    store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date"),
+                            why="create", scaffold=False)
+    load(store, daily_summaries(10))
+    sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    marker = authority.marker_path(store.root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid, "authority_epoch": 1,
+        "collections": [{"collection_id": SUMMARY_CID, "manifest_path": manifest_path(), "authority": "store",
+                         "store_id": sid}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1}}))
+    selectors = (SUMMARY_CID, manifest_path(), ABSENT, manifest_path().replace("/Work/", "/Absent/"))
+    for call in ({"action": "query", "query": STEPS},
+                 {"action": "import", "import_request": {"mode": "preview", "source_ref": SOURCE, "format": "ndjson"}}):
+        answers = {json.dumps(refusal(store, "record_memory", _external(), collection=selector, **call))
+                   for selector in selectors}
+        assert len(answers) == 1 and "COLLECTION_NOT_FOUND" in answers.pop(), call["action"]
+
+
+def test_a_link_to_a_page_another_audience_cannot_read_is_omitted_and_cannot_drive_a_query(store):
+    """A typed row or group label naming a page the caller cannot read, where the legacy query omits
+    it, or a filter, order or group on link values that reveals what the row omits."""
+    fields = {"id": "{type: string, required: true}", "count": "{type: integer, sortable: true}",
+              "related": "{type: link}"}
+    store.create_collection(manifest_path(), manifest(fields=fields, summary=False), why="create", scaffold=False)
+    secret = store.root / "Knowledge Base/Private/Secret Plan.md"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("# Secret Plan\n")
+    store.append_record(SUMMARY_CID, item={"id": "linked", "count": 1, "related": "[[Private/Secret Plan]]"},
+                        item_key=KEY, why="observe")
+    store.append_record(SUMMARY_CID, item={"id": "unlinked", "count": 2}, item_key=OTHER, why="observe")
+    write_scope(store.root, paths="Private/**")
+    write_rule(store.root, ceiling=0)
+    rows = {"version": 1, "select": ["id", "related"], "order_by": [{"field": "count"}]}
+    by_link = {"version": 1, "group_by": [{"field": "related"}], "aggregates": {"rows": {"op": "count"}}}
+    assert query(store, rows, collection=SUMMARY_CID)["rows"] == [
+        {"id": "linked", "related": "[[Private/Secret Plan]]"}, {"id": "unlinked"}]
+    assert {"related": "[[Private/Secret Plan]]", "rows": 1} in query(store, by_link, collection=SUMMARY_CID)["groups"]
+    external = tool(store, "record_memory", _external(), action="query", collection=SUMMARY_CID, query=rows)
+    assert external["rows"] == [{"id": "linked"}, {"id": "unlinked"}]
+    for raw, at in ((by_link, "group_by[0].field"),
+                    ({**rows, "where": {"field": "related", "op": "exists"}}, "where.field"),
+                    ({**rows, "order_by": [{"field": "related"}]}, "order_by[0].field")):
+        error = refusal(store, "record_memory", _external(), action="query", collection=SUMMARY_CID, query=raw)
+        assert (error["code"], error["at"]) == ("QUERY_FIELD_UNAVAILABLE", at)
+        assert "Secret" not in json.dumps(error)
+
+
+def test_compose_refuses_every_shape_and_profile_that_execute_refuses(store):
+    """A request that composes cleanly and then fails in every other mode, so an agent's refinement
+    loop accepts a query it can never run."""
+    store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date"),
+                            why="create", scaffold=False)
+    for raw in ({"version": 1, "select": ["date"], "execution_profile": "analytics"},
+                {**STEPS, "where": {"field": "steps", "op": "gt", "value": 1}}):
+        composed = refusal(store, "record_memory", action="query", collection=SUMMARY_CID,
+                           query={**raw, "mode": "compose"})
+        assert composed["code"] == "QUERY_UNSUPPORTED"
+        assert composed == refusal(store, "record_memory", action="query", collection=SUMMARY_CID, query=raw)
 
 
 def test_query_object_refuses_legacy_shaping_arguments(mcp):
@@ -236,11 +300,11 @@ def test_query_object_refuses_legacy_shaping_arguments(mcp):
         "repair": "Remove filters, or omit query.", "retryable": False}
 
 
-def test_file_mode_collection_refuses_the_query_object(mcp):
+def test_a_visible_file_mode_collection_refuses_the_query_object(mcp):
     """A v1 query on a file collection answered by the legacy reader under a v1-looking envelope."""
-    error = mcp("record_memory", action="query", collection="Knowledge Base/Records/Any/_collection.md",
-                query=STEPS)
-    assert error["code"] == "QUERY_UNAVAILABLE"
+    (mcp.vault / "Knowledge Base/log.md").write_text("# Log\n")
+    records.create_collection(mcp.vault, manifest_path(), manifest_text(), why="file collection", scaffold=True)
+    assert mcp("record_memory", action="query", collection=manifest_path(), query=STEPS)["code"] == "QUERY_UNAVAILABLE"
 
 
 def test_query_engine_chapters_are_bounded_read_only_and_name_what_is_unavailable(mcp):
@@ -257,8 +321,8 @@ def test_query_engine_chapters_are_bounded_read_only_and_name_what_is_unavailabl
         assert chapter["capability"] and chapter["unavailable"]
         assert runtime.wire_bytes(chapter) <= runtime.MAX_RESULT_BYTES
     assert vault_files() == before
-    with pytest.raises(ToolError, match="INVALID_SCHEMA_ARGUMENT"):
-        mcp("schema_memory", operation="inspect", subject="query-engine", name="graph")
+    graph = mcp("schema_memory", operation="inspect", subject="query-engine", name="graph")
+    assert (graph["code"], graph["at"], graph["retryable"]) == ("QUERY_CAPABILITY_UNAVAILABLE", "name", False)
 
 
 @pytest.mark.xfail(strict=True, raises=OpError, reason="s1-R2b: production store session")

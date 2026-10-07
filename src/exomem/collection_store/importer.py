@@ -207,6 +207,8 @@ class _Request:
     job_id: str | None
 
 
+#: Modes that write nothing. Lease and egress classify these as reads and every other mode as a mutation.
+READ_ONLY_MODES = frozenset({"preview", "status"})
 _MODE_FIELDS = {
     "preview": ({"source_ref", "format"}, {"mapping"}),
     "start": ({"source_ref", "format", "mapping"}, set()),

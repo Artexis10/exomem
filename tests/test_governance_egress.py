@@ -3084,6 +3084,14 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "apply-compensation": False,
     }
 
+    # A Records import's mode decides: preview and status read, start and cancel write.
+    record = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    assert {
+        mode: commands.invocation_is_read_only(record, {"action": "import", "import_request": {"mode": mode}})
+        for mode in ("preview", "status", "start", "cancel")
+    } == {"preview": True, "status": True, "start": False, "cancel": False}
+    assert not commands.invocation_is_read_only(record, {"action": "import"})
+
 
 def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:
     dataset = "Knowledge Base/Notes/Patterns/private.csv"

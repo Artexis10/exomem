@@ -51,11 +51,20 @@ class RowPage:
     total: int | None = None
 
 
-def _validate(query, manifest, basis):
-    """Rebind raw IR to the current schema using the existing closed validator."""
-    fields = {name: {"type": spec.type, "enum": spec.enum}
+def declaration(manifest, basis, *, withheld=frozenset()) -> dict:
+    """The validator's declaration of one admitted collection.
+
+    ``withheld`` names fields some of whose values may be withheld from the caller;
+    the validator lets a query select them but not filter, sort, group or join on them.
+    """
+    fields = {name: {"type": spec.type, "enum": spec.enum, **({"withheld_values": True} if name in withheld else {})}
               for name, spec in manifest.schema.fields.items()}
     fields["item_key"] = {"type": "string"}
+    return {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id, "fields": fields}
+
+
+def _validate(query, manifest, basis):
+    """Rebind raw IR to the current schema using the existing closed validator."""
     def literal(value):
         if isinstance(value, tuple):
             return [literal(item) for item in value]
@@ -84,9 +93,8 @@ def _validate(query, manifest, basis):
         request["where"] = predicate(query.where)
     if query.as_of is not None:
         request["as_of"] = query.as_of
-    declaration = {manifest.collection_id: {"domain": "collections", "type": basis.type_name,
-                                           "vault": basis.logical_vault_id, "fields": fields}}
-    result = validation.normalize_query(request, declarations=declaration, collection=manifest.collection_id)
+    result = validation.normalize_query(request, declarations={manifest.collection_id: declaration(manifest, basis)},
+                                        collection=manifest.collection_id)
     if result.findings:
         raise QueryError(result.findings[0].code)
     # Re-normalization also verifies source/type/enum bindings and tie-breakers.
@@ -95,13 +103,27 @@ def _validate(query, manifest, basis):
     return tuple(manifest.schema.fields), tuple((name, spec.type, tuple(spec.enum)) for name, spec in manifest.schema.fields.items())
 
 
-def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> AdmittedQuery:
-    session.check()
+def _refuse_request(query) -> None:
+    """Refusals a row query's request decides alone, before any declaration or value is read."""
     if (not isinstance(query, ir.Query) or query.source.domain != "collections"
-            or query.mode != "execute" or query.execution_profile != "interactive"
             or query.joins or query.aggregate is not None or query.having is not None
             or query.text is not None or query.graph is not None):
         raise QueryError("QUERY_UNSUPPORTED")
+    if query.execution_profile != "interactive":
+        raise QueryError("QUERY_UNSUPPORTED", "row pages run under the interactive profile")
+
+
+def check_shape(query, manifest, basis) -> None:
+    """Every refusal a row query gets from its request and declaration; compose runs it too."""
+    _refuse_request(query)
+    _validate(query, manifest, basis)
+
+
+def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> AdmittedQuery:
+    session.check()
+    if getattr(query, "mode", None) != "execute":
+        raise QueryError("QUERY_UNSUPPORTED")
+    _refuse_request(query)
     if query.page.after is not None:
         raise QueryError("QUERY_VALUE_INVALID", "an authenticated continuation is required")
     conn = session.connection

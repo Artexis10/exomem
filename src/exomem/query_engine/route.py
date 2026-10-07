@@ -17,7 +17,8 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import asdict, replace
 
-from . import cursors, runtime, validation
+from ..governance.principal import OWNER_AUDIENCE
+from . import cursors, reductions, runtime, typed_rows, validation
 from .runtime import QueryError, QueryLimits
 
 VERSION = 1
@@ -32,6 +33,7 @@ _REPAIRS = {
     "QUERY_CURSOR_INVALID": ("page.after", "Send next_cursor unchanged with the same query.", False),
     "QUERY_CURSOR_STALE": ("page.after", "The collection changed; restart from the first page.", False),
     "QUERY_UNSUPPORTED": ("query", "Use only the operations the query-engine chapter lists.", False),
+    "QUERY_CAPABILITY_UNAVAILABLE": ("name", "Use name collections or import.", False),
 }
 
 
@@ -60,21 +62,39 @@ def _profile(raw) -> str:
 
 
 def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
-    """Validate ``raw`` against the admitted collection and run it in its mode and profile."""
+    """Validate ``raw`` against the admitted collection and run it in its mode and profile.
+
+    Link values pass the legacy query's own projector, so a link to a page the
+    caller cannot read is omitted. Unless the caller is the owner, a link field
+    may be selected but cannot filter, sort, group or join, since those evaluate
+    the unprojected values.
+    """
+    from ..record_governance import _LinkProjector
+
     with writer.read_collection(selector, facade_profile=facade_profile) as manifest:
         collection_id = manifest.collection_id
     limits = QueryLimits(profile=_profile(raw))
     with runtime.read_session(writer.root, writer.handle.path, limits=limits) as session:
+        # The session's own authorization snapshot decides links, as it decides rows.
+        operation = session._authorization
         with session._manifest(collection_id) as (manifest, basis, _, _):
-            fields = {name: {"type": spec.type, "enum": spec.enum} for name, spec in manifest.schema.fields.items()}
-            fields["item_key"] = {"type": "string"}
-            declaration = {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id,
-                           "fields": fields}
+            links = frozenset(name for name, spec in manifest.schema.fields.items()
+                              if _LinkProjector.carries_links(spec))
+            owner = operation.who.resolved and operation.who.audience_id == OWNER_AUDIENCE
+            declaration = typed_rows.declaration(manifest, basis, withheld=frozenset() if owner else links)
+        if links:
+            session.project_with(_LinkProjector.create(writer.root, manifest, policy=operation.policy,
+                                                       authorize_path=operation.allows_file))
         result = validation.normalize_query(raw, declarations={collection_id: declaration}, collection=collection_id)
         if result.findings:
             raise Refusal(result.findings[0])
         query = result.query
         if query.mode == "compose":
+            # Compose reads no values, but refuses every shape and profile the other modes refuse.
+            if query.aggregate is None:
+                typed_rows.check_shape(replace(query, mode="execute"), manifest, basis)
+            else:
+                reductions.check_shape(query, manifest, limits)
             return {"source": asdict(query.source), "query_version": query.version,
                     "schema_version": manifest.schema.version, "mode": "compose",
                     "kind": "rows" if query.aggregate is None else "groups",
@@ -89,8 +109,6 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
 
 def _admitted_rows(session, query, limits) -> dict:
     """Explain, preview or dry-run a row query: admission and preparation, no result rows."""
-    if query.execution_profile != "interactive":
-        raise QueryError("QUERY_UNSUPPORTED", "row pages run under the interactive profile")
     as_of = query.as_of or dt.datetime.now(dt.UTC).isoformat()
     admitted = session.admit_query(replace(query, mode="execute", page=replace(query.page, after=None)),
                                    as_of=as_of)
@@ -106,9 +124,10 @@ def _admitted_rows(session, query, limits) -> dict:
                        "fields": list(admitted.fields)}}
     if query.mode == "explain":
         return result
+    # Admission's charge against bounds.max_row_visits: a bound on the work, not a count of rows.
     if query.mode == "preview":
-        return {**result, "estimated_row_visits": admitted.estimated_visits}
-    return {**result, "admitted": True, "estimated_row_visits": admitted.estimated_visits}
+        return {**result, "visit_charge": admitted.estimated_visits}
+    return {**result, "admitted": True, "visit_charge": admitted.estimated_visits}
 
 
 def contract() -> dict:
@@ -122,9 +141,11 @@ def contract() -> dict:
 
 def chapter(name: str | None) -> dict:
     """One bounded query-engine chapter: capability, version, grammar and unavailable operations."""
+    if name == "graph":
+        raise QueryError("QUERY_CAPABILITY_UNAVAILABLE",
+                         'graph queries ship with connect_memory(operation="query"), which is not available yet')
     if name not in CHAPTERS:
-        raise ValueError(f"INVALID_SCHEMA_ARGUMENT: query-engine inspect needs name in {list(CHAPTERS)}; "
-                         "the graph chapter is not available yet")
+        raise ValueError(f"INVALID_SCHEMA_ARGUMENT: query-engine inspect needs name in {[*CHAPTERS, 'graph']}")
     head = {"subject": "query-engine", "chapter": name, "version": VERSION}
     if name == "import":
         from ..collection_store import importer
@@ -142,7 +163,8 @@ def chapter(name: str | None) -> dict:
             "version": "required; 1",
             "mode": {"compose": "validate and fingerprint; reads no values",
                      "explain": "release, access path, declared index or rollup, bounds",
-                     "preview": "explain plus estimated row visits",
+                     "preview": "explain plus what the plan reads: visit_charge for rows (admission's charge "
+                                "against bounds.max_row_visits), admitted_rows or rollup_buckets for groups",
                      "dry_run": "admission and preparation without result rows",
                      "execute": "the default; one page of rows or groups"},
             "execution_profile": {name: {**bounds, **({"concurrent_per_store": runtime.MAX_ANALYTICS_SESSIONS}
@@ -172,9 +194,11 @@ def chapter(name: str | None) -> dict:
             "groups": "also plan (strategy, reason, release, rollup, basis with from/to), flagged_rows and "
                       "flagged_scope: rows whose local day is unknown, counted over the collection, never guessed",
             "local_day": "a bucketed datetime uses its declared offset field; without one, its own numeric offset",
+            "links": "a link to a page the caller cannot read is omitted from the row",
         },
         "errors": {"shape": ["code", "at", "expected", "allowed", "repair", "retryable"],
-                   "codes": sorted({"QUERY_FIELD_UNKNOWN", "QUERY_KEY_UNKNOWN", "QUERY_VALUE_INVALID",
+                   "codes": sorted({"QUERY_FIELD_UNKNOWN", "QUERY_FIELD_UNAVAILABLE", "QUERY_KEY_UNKNOWN",
+                                    "QUERY_VALUE_INVALID",
                                     "QUERY_INPUT_LIMIT", "QUERY_ARGUMENT_CONFLICT", "QUERY_UNAVAILABLE",
                                     *_REPAIRS})},
         "unavailable": [
@@ -182,6 +206,8 @@ def chapter(name: str | None) -> dict:
             "percentile and distinct_count",
             "where on a grouped query: use group_by[n].from/to",
             "execution_profile analytics on row queries",
+            "filter, sort, group or join on a link field, except for the owner: QUERY_FIELD_UNAVAILABLE",
+            "the graph chapter: QUERY_CAPABILITY_UNAVAILABLE",
             "continuation of a group page under mixed release",
             "a query on a file-mode collection: QUERY_UNAVAILABLE",
         ],

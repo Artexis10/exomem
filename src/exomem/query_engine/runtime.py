@@ -32,12 +32,13 @@ MAX_RESULT_BYTES = 64 * 1024
 
 
 def wire_bytes(value) -> int:
-    """Bytes of ``value`` as the widest shipped transport serializes a result.
+    """Bytes of ``value`` as REST and the CLI's JSON output serialize a result.
 
-    MCP sends compact UTF-8 JSON (FastMCP's pydantic serializer); REST and the CLI
-    use ``json.dumps(..., ensure_ascii=False)`` with spaced separators, which is never
-    smaller. No transport escapes non-ASCII text, so a result measured here fits
-    every surface.
+    Both use ``json.dumps(..., ensure_ascii=False)`` with spaced separators. MCP's
+    compact UTF-8 JSON (FastMCP's pydantic serializer) is never larger, and no
+    result transport escapes non-ASCII text. The CLI's human output re-indents a
+    result with ``indent=2`` for reading; that display, like the envelope around a
+    result, is outside the cap.
     """
     return len(json.dumps(value, ensure_ascii=False).encode())
 
@@ -151,6 +152,12 @@ class ReadSession:
 
     def __reduce__(self):
         raise TypeError("query sessions are request-local")
+
+    def project_with(self, project_values) -> None:
+        """Install the value projection that this session's own manifest calls for, before any query runs."""
+        if self._project_values is not None or self._admitted or self._queries or self._estimated_visits:
+            raise QueryError("QUERY_UNAVAILABLE", "a session's value projection is fixed before its first query")
+        self._project_values = project_values
 
     def check(self) -> None:
         if self._failure is not None:

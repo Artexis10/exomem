@@ -10279,7 +10279,13 @@ def op_schema_memory(
         if operation != "inspect" or any(value is not None for value in others) or save or strict \
                 or include_model_suggestions or limit != 20:
             raise ValueError("INVALID_SCHEMA_ARGUMENT: query-engine accepts operation inspect and name only")
-        return query_route.chapter(name)
+        from .cli_ops import OpError
+
+        try:
+            return query_route.chapter(name)
+        except query_route.QueryError as error:
+            refusal = query_route.details(error)
+            raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation == "save-entity-types"
@@ -11868,6 +11874,11 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "import-conditional":
+            from .collection_store.importer import READ_ONLY_MODES
+
+            request = kwargs.get("import_request")
+            return isinstance(request, dict) and request.get("mode") in READ_ONLY_MODES
         if adapter == "question-conditional":
             return not _review_question_submission(
                 kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")

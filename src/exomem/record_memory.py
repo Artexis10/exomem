@@ -299,11 +299,16 @@ def record_memory(
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
-        if action == "import":
-            raise CollectionError(
-                "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
-            )
-        if query is not None:
+        if action == "import" or query is not None:
+            # Resolve under the caller's authority first: an absent or withheld selector
+            # answers exactly as a sealed store-routed collection does, so the refusal
+            # below never confirms that a collection exists.
+            assert collection is not None
+            record_governance.resolve_collection(vault_root, collection)
+            if action == "import":
+                raise CollectionError(
+                    "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
+                )
             raise CollectionError(
                 "QUERY_UNAVAILABLE", "a v1 query runs only on a store-routed Records collection"
             )

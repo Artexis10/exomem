@@ -84,11 +84,17 @@ def _refuse_request(query, limits) -> None:
         raise QueryError("QUERY_PROFILE_UNAVAILABLE", "the request names a profile this session does not run")
     if query.where is not None:
         raise QueryError("QUERY_UNSUPPORTED", "bound a reduction by its local-day window: group_by[n].from and .to")
-    if (query.mode == "compose" or query.joins or query.having is not None or query.text is not None
+    if (query.joins or query.having is not None or query.text is not None
             or query.graph is not None or sum(key.bucket is not None for key in query.aggregate.groups) > 1):
         raise QueryError("QUERY_UNSUPPORTED", "this reduction shape is not available")
     if any(value.op in _UNSUPPORTED for value in query.aggregate.values):
         raise QueryError("QUERY_UNSUPPORTED", "percentile and distinct count are not assembled from rollups")
+
+
+def check_shape(query, manifest, limits) -> None:
+    """Every refusal a reduction gets from its request and declaration; compose runs it too."""
+    _refuse_request(query, limits)
+    _shape(query, manifest)
 
 
 def _shape(query, manifest) -> _Shape:
@@ -354,6 +360,8 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
     """
     session.check()
     limits = session.limits
+    if getattr(query, "mode", None) == "compose":
+        raise QueryError("QUERY_UNSUPPORTED", "compose reads no values")
     _refuse_request(query, limits)
     collection_id = query.source.ref
     codec = payload = None
@@ -391,10 +399,12 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
         # Uniform admission counts rows; mixed admission streams released row ids to bounded temp.
         admitted = session.admit(collection_id)
         visits, layout, predicate = admitted.visible_count, admitted.layout, admitted.membership_sql
+    # What the plan reads, exactly: released rows on the base path, stored buckets on the rollup path.
+    read = {"rollup_buckets" if plan.strategy == "rollup" else "admitted_rows": visits}
     if query.mode == "preview":
-        return {**result, "estimated_row_visits": visits}
+        return {**result, **read}
     if query.mode == "dry_run":
-        return {**result, "admitted": True, "estimated_row_visits": visits}
+        return {**result, "admitted": True, **read}
     if plan.strategy == "rollup":
         ordered, flagged = _from_rollup(session, shape, plan, after), plan.rollup[3]
     else:
@@ -407,7 +417,7 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
         return codec.mint(binding, as_of=frozen, boundary=boundary)
 
     # Flagged rows have no local day, so they are counted over the released collection, not the window.
-    envelope = {**result, "flagged_rows": flagged, "flagged_scope": "collection", "row_visits": visits}
+    envelope = {**result, "flagged_rows": flagged, "flagged_scope": "collection", **read}
     try:
         return _assemble(session, query, shape, ordered, envelope, mint)
     finally:

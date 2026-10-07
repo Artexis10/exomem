@@ -254,7 +254,8 @@ class _Binder:
         self.reduction_fields: dict[str, Field] | None = None
         self.leaves = 0
 
-    def field(self, name: Any, at: str, *, reduction=False) -> Field:
+    def field(self, name: Any, at: str, *, reduction=False, evaluated=False) -> Field:
+        """Bind a declared field; ``evaluated`` marks a use that filters, sorts, groups or joins on its values."""
         if reduction:
             fields = self.reduction_fields or {}
             if isinstance(name, str) and name in fields:
@@ -286,6 +287,11 @@ class _Binder:
                 allowed,
                 "Describe the source and choose a declared field.",
             )
+        if evaluated and fields[path].get("withheld_values"):
+            # The declaration says some of this field's values may be withheld from the caller, so
+            # evaluating them would let a filter, order, group or join reveal what a row omits.
+            _fail("QUERY_FIELD_UNAVAILABLE", at, "a field whose values are all released to this caller", (),
+                  "Select the field; filter, sort, group and join on fully released fields.")
         kind = fields[path].get("type")
         enum = tuple(fields[path].get("enum", ()))
         if kind == "enum":
@@ -326,7 +332,7 @@ class _Binder:
         self.leaves += 1
         if self.leaves > LIMITS["predicate_leaves"]:
             _fail("QUERY_INPUT_LIMIT", "where", f"at most {LIMITS['predicate_leaves']} predicate leaves")
-        field = self.field(raw["field"], f"{at}.field", reduction=reduction)
+        field = self.field(raw["field"], f"{at}.field", reduction=reduction, evaluated=True)
         op = raw["op"]
         if not isinstance(op, str) or op not in _OPS:
             _fail("QUERY_OPERATOR_UNKNOWN", f"{at}.op", "closed predicate operator", _OPS)
@@ -426,7 +432,7 @@ class _Binder:
             field_name = (
                 f"{parent_alias}.{relation['field']}" if parent_alias else relation["field"]
             )
-            source_field = self.field(field_name, f"{at}.relation")
+            source_field = self.field(field_name, f"{at}.relation", evaluated=True)
             if source_field.value_type not in {"string", "link"}:
                 _fail("QUERY_RELATION_INVALID", f"{at}.relation", "opaque reference field")
             bound = Source("collections", target_ref, target["type"])
@@ -445,7 +451,7 @@ class _Binder:
         for i, value in enumerate(_list(groups, "group_by", LIMITS["group_by"])):
             at = f"group_by[{i}]"
             raw = _object(value, at, {"field", "bucket", "from", "to"}, {"field"})
-            field = self.field(raw["field"], f"{at}.field")
+            field = self.field(raw["field"], f"{at}.field", evaluated=True)
             if raw["field"] in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", f"{at}.field", "unique group field path")
             if field.value_type not in _SCALARS:
@@ -602,7 +608,7 @@ def normalize_query(
         for i, value in enumerate(_list(raw.get("order_by", []), "order_by", LIMITS["order_by"])):
             at = f"order_by[{i}]"
             key = _object(value, at, {"field", "direction", "nulls"}, {"field"})
-            field = binder.field(key["field"], f"{at}.field", reduction=aggregate is not None)
+            field = binder.field(key["field"], f"{at}.field", reduction=aggregate is not None, evaluated=True)
             if field.value_type not in _SCALARS:
                 _fail("QUERY_UNSUPPORTED", f"{at}.field", "scalar sort field")
             sort.append(
