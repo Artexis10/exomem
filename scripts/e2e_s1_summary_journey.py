@@ -584,6 +584,16 @@ class Journey:
             check=False,
         )
 
+    def owner_cli_after_stop(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        """Wait for the stopped service's lease before the owner's offline operation."""
+        deadline = time.monotonic() + LEASE_TTL * 3 + 10
+        while True:
+            result = self.owner_cli(*arguments)
+            # This protocol code refuses before effects; the stopped service's lease can outlive it.
+            if SERVICE_ACTIVE not in result.stderr or time.monotonic() > deadline:
+                return result
+            time.sleep(0.5)
+
     def fork(self, label: str, vault: Path) -> Journey:
         child = Journey(argparse.Namespace(
             executable=str(self.executable), python=str(self.python), older_python=self.older_python,
@@ -864,16 +874,10 @@ async def released_phase_enrol(journey: Journey) -> None:
             await file_collections_unchanged(journey, service, "while the vault is unenrolled")
     with journey.step("2. owner enrols the vault: offline `exomem collections create`"):
         enrolment = journey.work / "enrolment.md"
-        deadline = time.monotonic() + LEASE_TTL * 3 + 10
-        while True:
-            enrolled = journey.owner_cli(
-                "create", "--manifest-path", ENROLMENT_PATH, "--manifest-file", str(enrolment),
-                "--why", "enrol the vault's collection store",
-            )  # fmt: skip
-            # The service's lease may outlive its stop by up to one TTL; the refusal says to retry.
-            if SERVICE_ACTIVE not in enrolled.stderr or time.monotonic() > deadline:
-                break
-            time.sleep(0.5)
+        enrolled = journey.owner_cli_after_stop(
+            "create", "--manifest-path", ENROLMENT_PATH, "--manifest-file", str(enrolment),
+            "--why", "enrol the vault's collection store",
+        )  # fmt: skip
         expect(
             enrolled.returncode == 0,
             "the owner's offline create did not enrol the vault",
@@ -1359,7 +1363,7 @@ async def narrowing_rollback(journey: Journey) -> None:
             expect(pending["state"] == "running", "rollback has no active import to stop", pending)
         before = snapshot_state(journey, "before-rollback")
         marker = (journey.vault / STORE_FILES[1]).read_bytes()
-        rollback = journey.owner_cli("rollback")
+        rollback = journey.owner_cli_after_stop("rollback")
         expect(rollback.returncode == 0, "the public vault rollback refused", rollback.stderr)
         expect(json.loads(rollback.stdout.strip().splitlines()[-1])["status"] == "disabled",
                "rollback did not disable the vault", rollback.stdout)
