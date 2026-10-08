@@ -37,7 +37,7 @@ PAGE_CAP, PAGE_BYTES, PAGES_TOTAL = 16, 64 * 1024, 1024 * 1024
 
 @pytest.fixture(autouse=True)
 def owner():
-    """Summary collections are owner-only until field release exists; the owner drives each case."""
+    """The owner creates each fixture; recipient checks bind their own principal."""
     with request_scope(owner_principal()):
         yield
 
@@ -417,37 +417,26 @@ def test_summary_rows_live_only_in_the_external_store_while_items_stays_default(
 
 
 @pytest.mark.parametrize("rule", ["none", "broad-external"])
-def test_summary_store_reads_are_owner_only_before_field_governance(store, rule):
-    """A non-owner reading summary rows, pages, counts or existence before field release exists, even
-    where a configured rule releases the path to them, or the owner failing on path-less rows."""
+def test_summary_store_metrics_follow_declared_row_policy(store, rule):
+    """A blanket owner floor that suppresses ordinary summary metrics even when row policy releases them."""
     if rule == "broad-external":
         write_scope(store.root, paths="Records/**")
         write_rule(store.root, ceiling=6)
     create(store)
     bulk(store, [{"title": "One", "count": 1}, {"title": "Two", "count": 2}])
     store.reconcile_views()
-    with request_scope(_external()):
-        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
-            store.inspect_collection(CID)
-        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+    for who in (_external(), owner_principal()):
+        with request_scope(who):
+            assert store.inspect_collection(CID)["coverage"]["committed"] == 2
             with store.read_collection(CID) as manifest:
-                StoreAdapter(store, manifest, None)._read(manifest)
-        assert store.discover_collections() == ((), ())
-        with store.read_snapshot():
-            assert not any(store._operation.allows_file(path) for path in (manifest_path(), *pages(store)))
-        with runtime.read_session(store.root, store.handle.path) as session:
-            with pytest.raises(runtime.QueryError) as refused:
-                session.admit(CID)
-        assert refused.value.code == "COLLECTION_NOT_FOUND"
-    with request_scope(owner_principal()):
-        with store.read_collection(CID) as manifest:
-            titles = [record.values["title"] for record in StoreAdapter(store, manifest, None)._read(manifest).records]
-        assert sorted(titles) == ["One", "Two"]
-        with runtime.read_session(store.root, store.handle.path) as session:
-            admitted = session.admit(CID)
-            plan = legacy.normalize(columns_available=admitted.fields, columns=["title"], sort_by="title")
-            result = legacy_sql.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
-        assert [row["title"] for row in result["rows"]] == ["One", "Two"]
+                titles = [record.values["title"] for record in StoreAdapter(store, manifest, None)._read(manifest).records]
+            assert sorted(titles) == ["One", "Two"]
+            assert len(store.discover_collections()[0]) == 1
+            with runtime.read_session(store.root, store.handle.path) as session:
+                admitted = session.admit(CID)
+                plan = legacy.normalize(columns_available=admitted.fields, columns=["title"], sort_by="title")
+                result = legacy_sql.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
+            assert [row["title"] for row in result["rows"]] == ["One", "Two"]
 
 
 def test_summary_inspection_and_guards_read_no_rows(store, monkeypatch):

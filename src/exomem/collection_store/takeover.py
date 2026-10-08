@@ -125,9 +125,14 @@ def staged_replica(session, check, heads):
         try:
             metadata = snapshot._validate(conn, check)
             chain.verify_store_chain(conn)
+            marker = authority.parse_marker(session.root, authority.read_marker(session.root))
+            collections = dict(conn.execute("SELECT collection_id,manifest_path FROM collections"))
+            # Preserve the takeover decision's foreign-store and lagging-replica verdicts before checking owned paths.
+            if metadata[schema.META_STORE_ID] == marker["store_id"] and all(
+                    collections.get(entry["collection_id"]) == entry["manifest_path"] for entry in marker["collections"]):
+                authority.require_marker(conn, marker, root=session.root)
             result = Staged(
-                leaf, digest.hexdigest(), signature, metadata,
-                dict(conn.execute("SELECT collection_id,manifest_path FROM collections")),
+                leaf, digest.hexdigest(), signature, metadata, collections,
                 {head: chain.head_relation(conn, *head) for head in heads if head is not None},
                 json.loads(metadata[schema.META_LINEAGE]),
             )

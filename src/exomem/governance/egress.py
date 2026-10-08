@@ -1797,11 +1797,22 @@ def _is_markdown_path(rel_path: str) -> bool:
     return rel_path.lower().endswith(".md")
 
 
-def _file_policy_empty(vault_root: Path, policy: Policy) -> bool:
-    return policy.empty and bound_writer(vault_root) is None
+def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
+    from ..collection_store import authority
+
+    if not policy.empty:
+        return False
+    writer = bound_writer(vault_root)
+    if rel_path is None and writer is not None:
+        return False
+    marker = authority.read_marker(vault_root)
+    if rel_path is not None and marker is not None:
+        # Ordinary files keep their file policy; bulk consumers still require canonical C field admission.
+        return authority.owned_entry(vault_root, authority.parse_marker(vault_root, marker), rel_path) is None
+    return writer is None and marker is None
 
 
-@canonical_read
+@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -4391,7 +4402,7 @@ def _project_page_origin(
     return out, True
 
 
-@canonical_read
+@canonical_read(projection=True)
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -4419,7 +4430,13 @@ def annotate_page(
     if not raw_protection.permits(vault_root, rel_path, who, snapshot=held):
         return None
 
-    if _file_policy_empty(vault_root, policy):
+    from ..collection_store.preview import released_summary
+
+    is_summary, summary = released_summary(vault_root, rel_path, who, include_raw=include_raw)
+    if is_summary:
+        return summary
+
+    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
         # No configured audience: the owner reads origin metadata as written.
         return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
@@ -5895,7 +5912,7 @@ def unit_parent_withheld(
     return False
 
 
-@canonical_read
+@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
 def release_level_for_path_only(
     vault_root: Path,
     rel_path: str,

@@ -103,3 +103,39 @@ def render_page(conn: sqlite3.Connection, manifest: collections.CollectionManife
     if len(text.encode()) > MAX_PAGE_BYTES:
         raise RuntimeError("summary page exceeds its byte bound")
     return text
+
+
+def released_page(operation, manifest, path, *, include_raw=False):
+    """A recipient overview uses only row membership, never the private publication generation."""
+    import hashlib
+    import json
+
+    from . import query_freshness
+
+    release = operation.summary_release(manifest.collection_id)
+    if release is None:
+        operation.refuse()
+    if release.complete:
+        basis = query_freshness.uniform_basis(operation.conn, manifest.collection_id, ())
+        if basis is None:
+            operation.refuse()
+        from dataclasses import asdict
+
+        state = asdict(basis)
+    else:
+        # The existing release bound limits this stream; withheld row versions never enter the public basis.
+        state = ([] if release.released == 0 else
+                 [subject.basis.identity for subject in operation.released_subjects(manifest.collection_id)
+                  if isinstance(subject.row_id, int)])
+    digest = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+    frontmatter = {"type": "collection-summary", "collection_id": manifest.collection_id,
+                   "metric": "released rows", "value": release.released, "window": "all released rows",
+                   "source": "collection store", "basis": {"released_rows": digest},
+                   "completeness": "complete at basis"}
+    body = f"# {manifest.title}: summary\n\n{release.released} released rows at the stated canonical basis.\n"
+    content = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n\n" + body
+    result = {"path": path, "title": manifest.title, "frontmatter": frontmatter, "body": body,
+              "content_hash": hashlib.sha256(content.encode()).hexdigest()}
+    if include_raw:
+        result["content"] = content
+    return result

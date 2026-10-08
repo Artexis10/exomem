@@ -30,12 +30,9 @@ from ..governance import (
     store,
 )
 from ..governance.decisions import Decision, decide
-from ..governance.principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
+from ..governance.principal import RequestPrincipal, effective_principal
 from . import tokens, types
 
-#: A summary collection's subjects: released to the owner alone, whatever configured rules say,
-#: until field release governs summary rows (S1.5b). A non-owner sees no rows, pages or counts.
-OWNER_ONLY = "owner-only"
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
 RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
@@ -270,10 +267,9 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     if (declared.name, declared.version) != (name, type_version):
         raise ValueError("canonical type identity differs")
     manifest_meta = _metadata(metadata)
-    # Summary rows have no view file: they take the manifest's subject, and stay
-    # owner-only until field release governs them (S1.5b).
+    # Summary rows have no view file; ordinary declared row policy still governs them.
     summary = view_mode == "summary"
-    audience = OWNER_ONLY if summary else declared.default_audience
+    audience = declared.default_audience
 
     def make(ref, row_id, policy_path, item_type, raw_metadata, row_version, payload, domain):
         meta = _metadata(raw_metadata)
@@ -611,6 +607,49 @@ class OperationAuthorization:
             self.authority.close()
             self.authority = None
 
+    def field_plan(self, manifest):
+        from .field_admission import resolve
+
+        return resolve(self, manifest)
+
+    def field_manifest(self, cid):
+        row = self.conn.execute(
+            "SELECT c.manifest_path,m.manifest_text,m.manifest_hash FROM collections c "
+            "JOIN collection_manifests m ON c.collection_id=m.collection_id "
+            "AND c.manifest_version=m.manifest_version WHERE c.collection_id=?", (cid,)).fetchone()
+        if row is None:
+            self.refuse()
+        path, text, digest = row
+        manifest = collections.parse_manifest_bytes(self.root, path, text.encode())
+        if manifest.collection_id != cid or manifest.manifest_version.hash != digest:
+            self.refuse()
+        return manifest
+
+    def field_rows(self, cid, rows, snapshot):
+        """Read only admitted columns; public versions describe their released values."""
+        from io import BytesIO
+
+        from ..query_engine.selected_values import read_selected_tree
+        from . import typed_storage
+
+        plan = self.field_plan(self.field_manifest(cid))
+        if plan.owner:
+            return typed_storage.hydrate(self.conn, rows), snapshot
+        layout = (typed_storage.require_layout(self.conn, cid)
+                  if typed_storage.collection_encoding(self.conn, cid) == typed_storage.TYPED_V1 else None)
+        for row in rows:
+            if layout is None:
+                values = read_selected_tree(BytesIO(row["values_json"].encode()), plan.fields,
+                                            max_bytes=256 * 1024, check=lambda: None)
+            else:
+                values = typed_storage.selected_current_values(self.conn, layout, row["row_id"], plan.fields,
+                                                               max_bytes=256 * 1024, check=lambda: None)
+            row["values_json"] = _json(values)
+            row["body"] = ""
+            row["public_version"] = hashlib.sha256(_json([cid, row["item_key"], values]).encode()).hexdigest()
+        visible = hashlib.sha256(_json(sorted((row["item_key"], row["public_version"]) for row in rows)).encode()).hexdigest()
+        return rows, visible
+
     @property
     def logical_vault_id(self) -> str:
         return self.context.logical_vault_id if isinstance(
@@ -686,9 +725,6 @@ class OperationAuthorization:
         path = basis.subject.path
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
-        if basis.default_audience == OWNER_ONLY and not (self.who.resolved
-                                                         and self.who.audience_id == OWNER_AUDIENCE):
-            return Decision(0)
         if self.tombstones and (lifecycle.is_tombstoned_in(self.tombstones, path)
                                or lifecycle.is_tombstoned_in(self.tombstones, basis.identity)):
             return Decision(0)
@@ -712,7 +748,7 @@ class OperationAuthorization:
                 grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
                                                    grant.audience, grant.ceiling))
         effective = self.policy
-        if basis.default_audience in {"owner", OWNER_ONLY}:
+        if basis.default_audience == "owner":
             scopes = {key: replace(scope, default_deny=True) for key, scope in effective.scopes.items()}
             if not scope_ids:
                 default = f"collection-type-default:{basis.type_name}:{basis.type_version}"
@@ -739,7 +775,7 @@ class OperationAuthorization:
     def summary_release(self, cid: str) -> SummaryRelease | None:
         """Decide a summary collection without a row-subject state; None for an items collection.
 
-        Summary rows share the manifest's path, projects and owner-only
+        Summary rows share the manifest's path, projects and declared
         audience. Unless a scope selects by identity, tag or class, a session
         grant names a row or a tombstone names one, a single row's decision is
         every row's, so time and memory stay independent of the row count.
@@ -865,6 +901,12 @@ class OperationAuthorization:
         return subject if subject is not None and subject.collection_id == cid else None
 
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
+        if complete and self.mutation:
+            manifest = self.field_manifest(cid)
+            plan = self.field_plan(manifest)
+            # Partial field readers cannot guard full-state writes; a false refusal costs them a retry by the owner.
+            if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
+                self.refuse()
         try:
             head = self.summary_manifest(cid)
             if head is not None:
@@ -1095,6 +1137,14 @@ class OperationAuthorization:
         raw = collection_authority.read_marker(self.root)
         if raw is not None:
             marker = collection_authority.parse_marker(self.root, raw)
+            if marker["version"] == 2:
+                entry = collection_authority.owned_entry(self.root, marker, path)
+                if entry is None:
+                    return None
+                collection_authority.require_selected(self.conn, marker, entry, root=self.root)
+                if owners - {entry["collection_id"]}:
+                    return ()
+                owners = {entry["collection_id"]}
             entries = {cid: collection_authority.selected_entry(self.root, marker, cid) for cid in owners}
             intent = collection_authority.pending_create(self.conn)
             if intent is not None and intent["collection_id"] in owners and entries[intent["collection_id"]] is None:
@@ -1109,7 +1159,7 @@ class OperationAuthorization:
                 projection = None
         if not owners:
             return None
-        if projection is not None and projection[2] not in {"manifest", "item", "held", "log"}:
+        if projection is not None and projection[2] not in {"manifest", "item", "held", "log", "summary"}:
             return ()
         if len(owners) != 1:
             return ()
@@ -1118,6 +1168,9 @@ class OperationAuthorization:
             "SELECT manifest_path,source_path,layout FROM collections WHERE collection_id=?", (cid,),
         ).fetchone()
         self._load_grants()
+        if projection is not None and projection[2] == "summary":
+            release = self.summary_release(cid)
+            return (release.manifest,) if release is not None else ()
         if path == manifest_path:
             if projection is not None and projection[2] != "manifest":
                 return ()
@@ -1148,6 +1201,16 @@ class OperationAuthorization:
                 return None
             if not targets:
                 return Decision(0)
+            manifest = self.field_manifest(targets[0].collection_id)
+            plan = self.field_plan(manifest)
+            projection_kind = self.conn.execute("SELECT kind FROM projection_state WHERE path=?", (path,)).fetchone()
+            if not plan.owner and projection_kind == ("summary",):
+                # The stored page carries private stamps; direct reads use the canonical released overview instead.
+                return Decision(0)
+            if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
+                # Raw file views carry complete fields and guards. Recipients use canonical record/summary projections.
+                if projection_kind != ("summary",):
+                    return Decision(0)
             decisions = tuple(self.decision(subject) for subject in targets)
             if path != targets[0].basis.identity:
                 if decisions[0].level < 6:
@@ -1164,7 +1227,7 @@ class OperationAuthorization:
                 if row is None:
                     return Decision(0)
                 projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
-                if projection["kind"] not in {"manifest", "item", "held"}:
+                if projection["kind"] not in {"manifest", "item", "held", "summary"}:
                     return Decision(0)
                 if projection["kind"] == "item" and not any(
                     subject.row_id == projection["row_id"] for subject in targets[1:]
@@ -1305,11 +1368,9 @@ class OperationAuthorization:
             cursor = self.conn.execute(f"SELECT * FROM items WHERE row_id IN ({','.join('?' for _ in batch)})", batch)
             names = [column[0] for column in cursor.description]
             rows.extend(dict(zip(names, row, strict=True)) for row in cursor)
-        from .typed_storage import hydrate
-
-        hydrate(self.conn, rows)
+        rows, snapshot = self.field_rows(cid, rows, self.visible_snapshot(cid, allowed))
         rows.sort(key=lambda row: (row["view_path"] or "", row["item_key"]))
-        return rows, self.visible_snapshot(cid, allowed), {
+        return rows, snapshot, {
             subject.row_id for subject in allowed if isinstance(subject.row_id, str)
         }
 
@@ -1321,8 +1382,6 @@ class OperationAuthorization:
         this never returns some of the rows as if they were all of them.
         """
         from ..query_engine.runtime import QueryLimits
-        from .typed_storage import hydrate
-
         limits = QueryLimits()
         if release.released > limits.max_row_visits:
             raise collections.CollectionError(
@@ -1342,10 +1401,11 @@ class OperationAuthorization:
                     batch = [dict(zip(names, row, strict=True)) for row in batch]
                     if not uniform:
                         batch = [row for row in batch if self._summary_row_released(release, row)]
-                    rows.extend(hydrate(self.conn, batch))
+                    rows.extend(batch)
         rows.sort(key=lambda row: row["item_key"])
         held = {subject.row_id for subject, decision in release.held if decision.level >= 6}
-        return rows, release.snapshot, held
+        rows, snapshot = self.field_rows(cid, rows, release.snapshot)
+        return rows, snapshot, held
 
     def _summary_row_released(self, release: SummaryRelease, row: Mapping[str, Any]) -> bool:
         found = subjects(self.conn, release.manifest.collection_id, self.logical_vault_id,

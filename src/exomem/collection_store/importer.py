@@ -98,6 +98,11 @@ def contract() -> dict[str, Any]:
                     "instant?, offset?, local_date}: the first basis present gives the UTC "
                     "instant, its offset and the source-local day; a day is never guessed"
                 ),
+                "coverage": (
+                    "owner-reviewed source paths mapped to {classification: null or location, subtree?: boolean}; "
+                    "null covers one leaf, location with subtree true covers every descendant. "
+                    "Uncovered or newly encountered subtrees remain owner-only, including mapped aliases"
+                ),
                 "on_invalid": "stop (default) fails at the first invalid row; skip records each one",
             },
             "continuation": (
@@ -111,7 +116,7 @@ def contract() -> dict[str, Any]:
             "status counts the superseded ones as duplicates"
         ),
         "preview": (
-            f"reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
+            f"owner-only; reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
             "fields, flagged rows, mapping findings, row identity and recommended_declarations"
         ),
         "states": {
@@ -887,10 +892,21 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
     declared = manifest.schema.fields
     if not isinstance(raw, Mapping):
         _mapping_invalid("mapping", "mapping must be an object", expected="object")
-    for key in sorted(set(raw) - {"fields", "time", "on_invalid"}):
+    for key in sorted(set(raw) - {"fields", "time", "on_invalid", "coverage"}):
         _mapping_invalid(
-            f"mapping.{key}", "unknown mapping key", allowed=["fields", "on_invalid", "time"]
+            f"mapping.{key}", "unknown mapping key", allowed=["fields", "on_invalid", "time", "coverage"]
         )
+    coverage = raw.get("coverage", {})
+    if not isinstance(coverage, Mapping) or len(coverage) > 256:
+        _mapping_invalid("mapping.coverage", "coverage must be a bounded source-path map")
+    for path, spec in coverage.items():
+        _path(path, "mapping.coverage", fmt)
+        # S1 fixes location versus explicitly reviewed ordinary leaves; null never covers future descendants.
+        if (not isinstance(spec, Mapping) or set(spec) - {"classification", "subtree"}
+                or "classification" not in spec or spec["classification"] not in (None, "location")
+                or type(spec.get("subtree", False)) is not bool
+                or (spec.get("subtree") and spec["classification"] is None)):
+            _mapping_invalid("mapping.coverage", "declare a leaf classification or a protected location subtree")
     fields_raw = raw.get("fields")
     if not isinstance(fields_raw, Mapping) or not fields_raw or len(fields_raw) > MAX_MAPPED_FIELDS:
         _mapping_invalid(
@@ -1003,6 +1019,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         },
         "on_invalid": on_invalid,
         "format": fmt,
+        "coverage": dict(coverage),
     }
     return Plan(
         tuple(fields),
@@ -1875,6 +1892,12 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
         plan = compile_mapping(request.mapping, manifest, request.format)
+        if not writer._operation.field_plan(manifest).owner:
+            from .field_admission import UNRESOLVED, mapping_classes
+
+            # Missing coverage could publish private data; the recipient must obtain a reviewed mapping from the owner.
+            if UNRESOLVED in mapping_classes(request.mapping, manifest, request.format).values():
+                _mapping_invalid("mapping.coverage", "external import requires reviewed source-path coverage")
     cid = row["collection_id"]
     with _snapshot(writer):
         operation = writer._fresh_authorization()
@@ -2151,6 +2174,9 @@ class _Sample:
 def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     with writer.read_snapshot():
         row, manifest, declared = writer._collection(collection, facade_profile="records")
+        # Raw shape previews cannot attest to field-only disclosure; a refused recipient asks the owner to preview.
+        if not writer._operation.field_plan(manifest).owner:
+            _source_not_found()
         source, _, size = resolve_source(root, writer._operation, request.source_ref)
         plan, findings = None, []
         if request.mapping is not None:

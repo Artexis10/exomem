@@ -146,6 +146,7 @@ class ReadSession:
         self._failure = None
         self._authorization = None
         self._admitted = {}
+        self._field_plans = {}
         self._queries = {}
         self._cursors = set()
         self._estimated_visits = 0
@@ -206,9 +207,18 @@ class ReadSession:
                 raise QueryError("COLLECTION_NOT_FOUND")
             # Bound an individual decode independently of total row count.
             maximum = min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes)
-            if len(raw) > maximum or len(raw.encode()) > maximum:
-                raise QueryError("QUERY_COST_LIMIT")
-            stored = json.loads(raw)
+            from io import BytesIO
+
+            from .selected_values import read_selected_tree
+
+            plan = self._field_plans[collection_id]
+            if plan.owner:
+                if len(raw) > maximum or len(raw.encode()) > maximum:
+                    raise QueryError("QUERY_COST_LIMIT")
+                stored = json.loads(raw)
+            else:
+                stored = read_selected_tree(BytesIO(raw.encode()), plan.fields,
+                                            max_bytes=maximum, check=self.check)
             self.check()
             values = {name: stored[name] for name in admitted.fields if name in stored}
             if self._project_values is not None:
@@ -233,8 +243,9 @@ class ReadSession:
             admitted = self._admitted.get(collection_id)
             if admitted is None or admitted.layout is None:
                 raise QueryError("COLLECTION_NOT_FOUND")
-            encoded = typed_storage.canonical_json(
-                typed_storage.current_values(self.connection, admitted.layout, row_id))
+            encoded = typed_storage.canonical_json(self.selected_values(
+                row_id, admitted.layout, admitted.fields,
+                max_bytes=min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes), check=self.check))
             if len(encoded.encode()) > min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes):
                 raise QueryError("QUERY_COST_LIMIT")
             self.check()
@@ -248,14 +259,23 @@ class ReadSession:
 
     def selected_values(self, row_id, layout, fields, *, max_bytes, check):
         """Selected top-level values of one admitted row under either encoding."""
-        from .selected_values import read_selected_values
+        from .selected_values import read_selected_tree
+
+        cid = layout.collection_id if layout is not None else self.connection.execute(
+            "SELECT collection_id FROM items WHERE row_id=?", (row_id,)).fetchone()[0]
+        plan = self._field_plans[cid]
+        fields = frozenset(fields)
+        selection = {name: tree for name, tree in plan.fields.items() if name in fields}
+        if set(fields) - set(selection):
+            raise QueryError("QUERY_FIELD_UNAVAILABLE")
 
         if layout is None:
             with self.connection.blobopen("items", "values_json", row_id, readonly=True) as blob:
-                return read_selected_values(blob, fields, max_bytes=max_bytes, check=check)
+                return read_selected_tree(blob, selection, max_bytes=max_bytes, check=check)
         check()
         try:
-            values = typed_storage.current_values(self.connection, layout, row_id)
+            values = typed_storage.selected_current_values(self.connection, layout, row_id, selection,
+                                                          max_bytes=max_bytes, check=check)
         except typed_storage.TypedStorageError as error:
             raise QueryError("QUERY_UNAVAILABLE") from error
         fields = frozenset(fields)
@@ -362,6 +382,9 @@ class ReadSession:
                 manifest = collections.parse_manifest_bytes(self._root, subject.basis.subject.path, row[0].encode())
                 if manifest.collection_id != collection_id or manifest.manifest_version.hash != subject.basis.manifest_hash:
                     raise QueryError("COLLECTION_NOT_FOUND")
+                plan = operation.field_plan(manifest)
+                self._field_plans[collection_id] = plan
+                manifest = plan.manifest
                 # An admitted manifest proves uniformity only without any
                 # row-varying policy, grant, exclusion or session context, or
                 # for a summary collection by its one representative decision.

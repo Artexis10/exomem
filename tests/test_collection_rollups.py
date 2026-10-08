@@ -305,9 +305,8 @@ def test_withheld_member_forces_an_exact_base_reduction_equal_to_its_absent_twin
     assert mixed["flagged_rows"] == twin["flagged_rows"] == 0
 
 
-def test_mixed_release_answers_one_page_and_refuses_an_unbound_continuation(store):
-    """A mixed-release answer longer than one page that issues a cursor no visible-state basis
-    binds, so its pages could silently mix two states."""
+def test_mixed_release_binds_continuation_to_selected_authorized_values(store):
+    """A grouped continuation that includes a hidden row or mixes released values across pages."""
     store.create_collection(manifest_path(), manifest(rollups={"daily": DAILY}, summary=False),
                             why="create", scaffold=False)
     for day, key in enumerate((KEY, OTHER, THIRD), start=1):
@@ -315,8 +314,9 @@ def test_mixed_release_answers_one_page_and_refuses_an_unbound_continuation(stor
                             item_key=key, why="observe")
     write_scope(store.root, paths=f"Records/Work/Items/{THIRD}.md")
     write_rule(store.root, ceiling=0)
-    with pytest.raises(runtime.QueryError, match="QUERY_UNSUPPORTED: continuation under mixed release"):
-        reduce(store, {**request(), "page": {"limit": 1}}, principal=_external())
+    first = reduce(store, {**request(), "page": {"limit": 1}}, principal=_external())
+    second = reduce(store, {**request(), "page": {"limit": 1, "after": first["next_cursor"]}}, principal=_external())
+    assert second["groups"][0]["start"] == "2026-03-02" and second["next_cursor"] is None
     whole = reduce(store, {**request(), "page": {"limit": 2}}, principal=_external())
     assert whole["plan"]["reason"] == "mixed_release" and whole["next_cursor"] is None
     assert [group["start"] for group in whole["groups"]] == ["2026-03-01", "2026-03-02"]

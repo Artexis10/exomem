@@ -391,7 +391,8 @@ def test_launcher_refuses_an_actual_older_interpreter_on_a_fresh_root_copy(abc, 
         [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
          " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(copy)],
         capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
-    assert started.returncode != 0 and "StateCompatibilityUnsupported" in started.stderr
+    assert started.returncode != 0
+    assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr
     assert not (tmp_path / "old-state").exists() or not any((tmp_path / "old-state").rglob("collections.sqlite"))
 
 
@@ -588,8 +589,9 @@ def _foreign_store(copy):
 
 def _missing_marker_collection(copy):
     marker = json.loads(authority.read_marker(copy))
-    marker["collections"].append({"collection_id": LATER, "authority": "store", "store_id": marker["store_id"],
-                                  "manifest_path": manifest_path().replace("Work", "Later")})
+    marker["collections"].append(authority.marker_entry(
+        LATER, manifest_path().replace("Work", "Later"), marker["store_id"], "records",
+        "Knowledge Base/Records/Later/Items", "markdown-items"))
     authority.marker_path(copy).write_text(json.dumps(marker))
 
 
@@ -1272,3 +1274,57 @@ def test_fresh_copy_adoption_previews_before_installing_the_replica(abc, tmp_pat
     shutil.copytree(abc.root, copy)
     assert run_host(tmp_path, tmp_path / "copy-state", "copy", _adopt_fresh_copy,
                     root=copy, database=tmp_path / "copy-coordinator.sqlite") == "committed"
+
+
+def test_launcher_refuses_an_actual_v1_marker_candidate_before_handoff(abc, tmp_path, monkeypatch):
+    """A store-aware candidate that passes capability admission but cannot preserve version-two path ownership."""
+    import asyncio
+
+    from exomem.service_manager import WorkerRuntime
+
+    interpreter = os.environ.get("EXOMEM_TEST_MARKER_V1_PYTHON")
+    if not interpreter:
+        pytest.skip("requires an installed version-one marker candidate")
+    before = authority.read_marker(abc.root)
+    assert authority.parse_marker(abc.root, before)["version"] == 2
+    copy = tmp_path / "marker-copy"
+    shutil.copytree(abc.root, copy)
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "marker-fresh-state"))
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(copy))
+    probe = subprocess.run([interpreter, "-I", "-c", "import json; from importlib.metadata import version; "
+        "from exomem.state_migration import supported_state_compatibility_ids; "
+        "print(json.dumps([version('exomem'), supported_state_compatibility_ids()]))"],
+        capture_output=True, text=True, check=True)
+    version, supported = json.loads(probe.stdout)
+    assert "collections-store-v1" in supported and state_migration.COLLECTION_MARKER_COMPATIBILITY_ID not in supported
+    runtime = WorkerRuntime(tmp_path / "marker-worker.sock", host="127.0.0.1", port=8765)
+    target = asyncio.run(runtime.inspect({"python": interpreter, "version": version}))
+    with pytest.raises(ValueError, match="does not support required state compatibility"):
+        runtime.migration_required(target)
+    assert authority.read_marker(copy) == before
+
+
+@pytest.mark.parametrize("field,value", [("source_path", "Knowledge Base/Records/Other/Items"),
+                                          ("layout", "markdown-log")])
+def test_marker_ownership_must_match_canonical_storage(abc, field, value):
+    """A valid-shaped marker that contradicts the canonical source declaration."""
+    marker = json.loads(authority.read_marker(abc.root))
+    marker["collections"][0][field] = value
+    authority.marker_path(abc.root).write_text(json.dumps(marker))
+    refused(abc.read_c, "COLLECTION_STORE_MARKER_CONFLICT")
+
+
+def test_log_marker_ownership_preserves_structural_path_boundaries(abc):
+    """A log namespace that either misses portable aliases or claims unrelated siblings and malformed fragments."""
+    marker = json.loads(authority.read_marker(abc.root))
+    entry = marker["collections"][0]
+    entry.update(layout="markdown-log", source_path="Knowledge Base/Records/Detached/Log.md")
+    marker = authority.parse_marker(abc.root, json.dumps(marker))
+    for path in (entry["source_path"], entry["source_path"] + "#" + KEY,
+                 "Knowledge Base/Records/Detached/./LOG.md#" + KEY,
+                 "Knowledge Base/Records/Work/Held/unknown.md",
+                 "Knowledge Base/Records/Work/_history/unknown.md"):
+        assert authority.owned_entry(abc.root, marker, path)["collection_id"] == CID
+    for path in (entry["source_path"] + "/other.md", entry["source_path"] + "#not-an-item",
+                 "Knowledge Base/Records/Detached/Other.md", "Knowledge Base/Records/Work/Notes.md"):
+        assert authority.owned_entry(abc.root, marker, path) is None

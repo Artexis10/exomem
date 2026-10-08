@@ -40,10 +40,11 @@ def mixed(store, monkeypatch):
     store.append_record(CID, item={"title": "Canonical"}, item_key=KEY, why="fixture")
     sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     marker = {
-        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
+        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
         "authority_epoch": 1,
         "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
-                         "authority": "store", "store_id": sid}],
+                         "authority": "store", "store_id": sid,
+                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
         "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
     }
     path = authority.marker_path(store.root)
@@ -100,8 +101,8 @@ def test_mixed_missing_store_collection_never_reads_valid_projection(mixed):
     marker = authority.parse_marker(mixed.root, authority.read_marker(mixed.root))
     absent = "33333333-3333-4333-8333-333333333333"
     path = manifest_path().replace("Work", "Missing")
-    marker["collections"].append({"collection_id": absent, "manifest_path": path,
-                                  "authority": "store", "store_id": marker["store_id"]})
+    marker["collections"].append(authority.marker_entry(
+        absent, path, marker["store_id"], "records", "Knowledge Base/Records/Missing/Items", "markdown-items"))
     authority.marker_path(mixed.root).write_text(json.dumps(marker))
     projection = mixed.root / path
     projection.parent.mkdir(parents=True)
@@ -158,12 +159,13 @@ def test_an_unbound_sweep_takes_a_routed_row_profile_from_the_marker_never_its_v
     """Defect: a planning scan counts a store-routed Records collection as an unavailable Planning
     collection, or an edit of its generated view drops it from the Records inventory, which then
     reports a complete scan."""
-    # The fixture's marker predates entries recording their profile: the row counts for every profile.
+    # Without a verified canonical profile, the row counts against every profile.
     assert plan_progress.review(mixed.root)["collections_unavailable"] == 1
     # This isolated writer uses an arbitrary path; make its actual canonical file discoverable.
     monkeypatch.setattr("exomem.collection_store.connection.store_path", lambda root: mixed.handle.path)
     marker = authority.parse_marker(mixed.root, authority.read_marker(mixed.root))
-    marker["collections"] = [authority.marker_entry(CID, manifest_path(), marker["store_id"], "records")]
+    marker["collections"] = [authority.marker_entry(CID, manifest_path(), marker["store_id"], "records",
+                                                     "Knowledge Base/Records/Work/Items", "markdown-items")]
     authority.marker_path(mixed.root).write_text(json.dumps(marker))
     view = mixed.root / manifest_path()
     view.write_text(view.read_text().replace("semantic_profile: records", "semantic_profile: planning", 1))
@@ -296,3 +298,19 @@ def test_mixed_file_routing_keeps_owner_natural_key_evidence(mixed):
         assert routed == baseline
         target = next(target for target in targets if target.collection == path)
         assert collection_claims.normalize_text(title) in target.natural_key_values
+
+
+@pytest.mark.parametrize("identity", ["unissued-owner", "hosted-tenant"])
+def test_unavailable_store_notices_require_fresh_owner_authority(mixed, monkeypatch, tmp_path, identity):
+    """An owner label or RAW tenant exemption that exposes otherwise withheld C inventory metadata."""
+    from exomem.governance.principal import RequestPrincipal, resolve_hosted_principal
+
+    broken = tmp_path / "unavailable.sqlite"
+    broken.write_bytes(b"not a database")
+    monkeypatch.setattr("exomem.collection_store.connection.store_path", lambda root: broken)
+    who = (RequestPrincipal("owner", surface="mcp") if identity == "unissued-owner"
+           else resolve_hosted_principal("tenant:unrelated"))
+    with request_scope(who):
+        inventory = record_governance.inventory_collections(mixed.root)
+    assert not any(row["path"] == manifest_path() for row in inventory["unreadable_manifests"])
+    assert not any(row["collection_id"] == CID for row in inventory["collections"])

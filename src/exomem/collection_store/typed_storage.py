@@ -305,6 +305,41 @@ def current_values(conn, layout: Layout, row_id: int) -> dict[str, Any]:
     return rows[0][2]
 
 
+def selected_current_values(conn, layout: Layout, row_id: int, selection, *, max_bytes, check):
+    """Select admitted typed columns before hydration; never fetch withheld residuals."""
+    from io import BytesIO
+
+    from ..query_engine.selected_values import read_selected_tree
+    from .field_admission import WHOLE_SUBTREE
+
+    selected = [(ordinal, name) for ordinal, name in enumerate(layout.fields) if name in selection]
+    columns = [f"t.{part}{ordinal}" for ordinal, _ in selected for part in "tvk"]
+    residual = {name: tree for name, tree in selection.items() if name not in layout.fields}
+    if residual:
+        columns.append("t.r")
+    values = conn.execute(
+        f"SELECT i.row_version,t.row_version{',' if columns else ''}{','.join(columns)} FROM items i "
+        f"LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id WHERE i.row_id=? AND i.collection_id=?",
+        (row_id, layout.collection_id),
+    ).fetchone()
+    if values is None or values[0] != values[1]:
+        raise TypedStorageError("typed current row is missing or stale")
+    result = {}
+    for index, (_, name) in enumerate(selected):
+        tag, value, key = values[2 + index * 3:5 + index * 3]
+        if tag == JSON and selection[name] is not WHOLE_SUBTREE:
+            decoded = read_selected_tree(BytesIO(value.encode()), selection[name], max_bytes=max_bytes, check=check)
+        else:
+            if selection[name] is not True and selection[name] is not WHOLE_SUBTREE and tag not in (MISSING, NULL):
+                raise TypedStorageError("stored scalar does not match admitted field shape")
+            decoded = decode_value(tag, value, key)
+        if decoded is not _ABSENT:
+            result[name] = decoded
+    if residual and values[-1] is not None:
+        result.update(read_selected_tree(BytesIO(values[-1].encode()), residual, max_bytes=max_bytes, check=check))
+    return result
+
+
 def item_values(conn, row_id: int) -> dict[str, Any]:
     """Current logical values of one item under its collection's single encoding."""
     row = conn.execute("SELECT collection_id,encoding,values_json FROM items WHERE row_id=?", (row_id,)).fetchone()

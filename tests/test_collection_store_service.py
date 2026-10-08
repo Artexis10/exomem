@@ -560,3 +560,323 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
     restarted = functools.partial(_finish_after_restart, continuation=job["continuation"])
     assert run_host(tmp_path, tmp_path / "state", "restart", restarted, root=root,
                     database=tmp_path / "coordinator.sqlite") == ("complete", 60)
+
+
+def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):
+    """Public reads or governance that fall through to physical C bytes outside an explicit preview binding."""
+    import yaml
+    from test_collection_field_admission import GRANT, GUEST, release_document
+
+    from exomem import vault
+
+    root = service.root
+    front, body, _ = vault.parse_frontmatter(summary_text(), strict=True)
+    front["item_schema"]["fields"].update({
+        "place": {"type": "object", "classification": "location", "properties": {"label": {"type": "string"}}},
+        "label": {"type": "string", "depends_on": ["place"]},
+    })
+    text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
+    guards = call(root, "record_memory", action="inspect", collection=CID)["lifecycle_guards"]
+    call(root, "record_memory", action="revise", collection=CID, manifest_text=text,
+         why="declare reviewed location", **guards)
+    call(root, "record_memory", action="append", collection=CID, item_key=LATER,
+         item={"title": "Located", "place": {"label": "invented-place"}, "label": "invented-place"},
+         why="record location")
+    path = manifest_path().replace("_collection.md", "Items/_summary.md")
+    _until(lambda: (root / path).exists())
+
+    def recipient(tool, **arguments):
+        command = next(command for command in commands.product_commands_for("mcp") if command.name == tool)
+        with request_scope(GUEST):
+            return writer_lease.invoke_command(command, root, **arguments)
+
+    page = recipient("read_memory", path=path.removeprefix("Knowledge Base/").removesuffix(".md"))
+    assert page["frontmatter"]["metric"] == "released rows"
+    assert page["frontmatter"]["value"] == 2
+    assert "exomem_view" not in page["frontmatter"]
+    with pytest.raises(ValueError, match="NOT_FOUND"):
+        recipient("read_memory", path=manifest_path())
+    assert "exomem_view" in call(root, "read_memory", path=path)["frontmatter"]
+    assert recipient("read_memory", path=A_PATH)["path"] == A_PATH
+    basis = call(root, "record_memory", action="inspect", collection=CID)["field_release_basis"]
+    proposed = call(root, "govern_memory", operation="propose", intent="Release invented location",
+                    documents={"grants/collection-location.yaml": release_document(basis)},
+                    selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    assert proposed["ok"], proposed
+    committed = call(root, "govern_memory", operation="commit", proposal_id=proposed["diagnostics"]["proposal_id"])
+    assert committed["ok"], committed
+    rows = recipient("record_memory", action="query", collection=CID,
+                     query={"version": 1, "select": ["place", "label"]})["rows"]
+    assert any(row.get("place") == {"label": "invented-place"} for row in rows)
+    assert call(root, "govern_memory", operation="revoke", scope="standing", grant_id=GRANT)["ok"]
+    refused(lambda: recipient("record_memory", action="query", collection=CID,
+                              query={"version": 1, "select": ["place"]}), "QUERY_FIELD_UNAVAILABLE")
+    service.stop()
+    assert recipient("read_memory", path=A_PATH)["path"] == A_PATH
+    refused(lambda: recipient("read_memory", path=path), "COLLECTION_STORE_UNAVAILABLE")
+
+
+def test_marker_ownership_keeps_file_reads_available_when_the_store_is_corrupt(service, tmp_path):
+    """A missing store or edited projection header that either discloses C bytes or disables unrelated A/B pages."""
+    from test_collection_field_admission import GUEST
+
+    root = service.root
+    external = "Knowledge Base/Records/DetachedRows"
+    text = DAILY_TEXT.replace("source: Items", "source: " + external)
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=text, why="external source")
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    assert marker["version"] == 2
+    assert authority.owned_entry(root, marker, external + "/unknown.md")["collection_id"] == DAILY
+    service.stop()
+    protected = [manifest_path(), "Knowledge Base/Records/Work/Items/_summary.md",
+                 external + "/unknown.md", "Knowledge Base/Records/Daily/Held/unknown.md",
+                 "Knowledge Base/Records/Daily/_history/unknown.md", "Knowledge Base/Records/Daily/_history.md"]
+    for path in protected:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("# Edited view\n\nprivate-projection-content\n")
+    ordinary = "Knowledge Base/Records/Daily/Notes.md"
+    (root / ordinary).write_text("# Independent knowledge\n\nordinary-content\n")
+    connection.store_path(root).write_bytes(b"unreadable sqlite fixture")
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS.get(root) is not None and runtime._SERVERS[root].runtime is None)
+        for path in (A_PATH, B_PATH, ordinary):
+            assert call(root, "read_memory", path=path)["path"] == path
+        command = next(command for command in commands.product_commands_for("mcp") if command.name == "read_memory")
+        for who in (OWNER, GUEST):
+            with request_scope(who):
+                for path in protected:
+                    try:
+                        result = writer_lease.invoke_command(command, root, path=path)
+                    except (OpError, CollectionStoreError, ValueError) as error:
+                        assert "private-projection-content" not in str(error)
+                    else:
+                        pytest.fail(f"unavailable owned path returned content: {path}: {result}")
+    finally:
+        restarted.stop()
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+def test_legacy_marker_upgrade_recovers_after_atomic_publication_interruption(service, monkeypatch, phase):
+    """A restart that derives ownership from edited views or leaves an interrupted v1 upgrade ambiguous."""
+    root = service.root
+    service.stop()
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    marker["version"] = 1
+    for entry in marker["collections"]:
+        entry.pop("source_path")
+        entry.pop("layout")
+    authority.marker_path(root).write_text(json.dumps(marker))
+    (root / manifest_path()).write_text("# Edited view without declaration\n")
+    publish = admission._replace_marker
+    interrupted = []
+
+    def interrupt(session, token, expected, raw):
+        if not interrupted and phase == "before":
+            interrupted.append(True)
+            raise OSError("injected marker publication interruption")
+        publish(session, token, expected, raw)
+        if not interrupted:
+            interrupted.append(True)
+            raise OSError("injected marker publication interruption")
+
+    monkeypatch.setattr(admission, "_replace_marker", interrupt)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS.get(root) is not None and runtime._SERVERS[root].runtime is not None)
+        assert titles(root, CID) == ["Canonical"]
+        _until(lambda: restarted.manager.status().get("collection_store", {}).get("status") == "admitted")
+        upgraded = authority.parse_marker(root, authority.read_marker(root))
+        assert interrupted and upgraded["version"] == 2
+        assert upgraded["authority_epoch"] == marker["authority_epoch"] + 1
+        assert upgraded["collections"][0]["source_path"] == "Knowledge Base/Records/Work/Items"
+        assert titles(root, CID) == ["Canonical"]
+        assert state_migration.COLLECTION_MARKER_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(root)
+    finally:
+        restarted.stop()
+
+
+def test_new_marker_entry_cannot_overlap_existing_owned_source(service):
+    """A new collection that changes which canonical collection authorizes an already owned source subtree."""
+    root = service.root
+    marker = authority.read_marker(root)
+    text = DAILY_TEXT.replace("source: Items", "source: Knowledge Base/Records/Work/Items/Nested")
+    refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                         manifest_text=text, why="overlapping source"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker and titles(root, CID) == ["Canonical"]
+
+
+def test_new_c_cannot_take_a_file_collection_source_or_mutation_authority(service):
+    """An absent C source below A's items that steals A's public writes and contaminates its history."""
+    root = service.root
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Before"},
+                item_key=ROW, why="file baseline")["outcome"] == "committed"
+    before = call(root, "record_memory", action="inspect", collection=KEY)
+    marker = authority.read_marker(root)
+    source = "Knowledge Base/Records/Legacy/Items/Nested"
+    assert not (root / source).exists()
+    text = DAILY_TEXT.replace("source: Items", "source: " + source)
+    refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                         manifest_text=text, why="overlapping file source"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker
+    assert not (root / DAILY_PATH).exists() and not (root / source).exists()
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert reader.execute("SELECT collection_id FROM collections ORDER BY collection_id").fetchall() == [(CID,)]
+        assert authority.pending_create(reader) is None
+    after = call(root, "record_memory", action="inspect", collection=KEY)
+    assert after["source_versions"] == before["source_versions"] and after["audit"] == before["audit"]
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "After"},
+                item_key=LATER, why="file still writable")["outcome"] == "committed"
+    assert titles(root, KEY) == ["After", "Before"] and titles(root, CID) == ["Canonical"]
+
+
+def test_new_c_requires_readable_file_ownership_and_succeeds_after_declaration_repair(service):
+    """Skipping an unreadable file declaration that could own the proposed source namespace."""
+    root = service.root
+    original = (root / A_PATH).read_bytes()
+    marker = authority.read_marker(root)
+    (root / A_PATH).write_text("not a collection declaration")
+    refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                         manifest_text=DAILY_TEXT, why="new separate collection"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker and not (root / DAILY_PATH).exists()
+    (root / A_PATH).write_bytes(original)
+    assert call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                manifest_text=DAILY_TEXT, why="file declaration repaired")["status"] == "committed"
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Still writable"},
+                item_key=ROW, why="file authority retained")["outcome"] == "committed"
+
+
+def test_mixed_vault_owner_reads_original_bytes_and_recipient_still_cannot_read_protected_raw(service):
+    """A vault-wide C gate that sends unrelated original bytes through the Markdown-only bridge gate."""
+    import hashlib
+
+    from test_collection_field_admission import GUEST
+
+    root = service.root
+    body = '{"measurement":7}\n'
+    receipt = call(root, "preserve_evidence", scope="Test", category="export", filename="original.ndjson",
+                   content=body, raw_protection=True, response_detail="full")["diagnostics"]
+    original = receipt["path"]
+    ordinary = "Knowledge Base/Records/Work/ordinary.ndjson"
+    (root / ordinary).write_text(body)
+    for path in (original, ordinary):
+        page = call(root, "read_memory", path=path, include_raw=True)
+        assert page["content"] == body
+        assert page["content_hash"] == hashlib.sha256(body.encode()).hexdigest()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
+    denials = []
+    with request_scope(GUEST):
+        for path in (original, original + ".missing"):
+            with pytest.raises(ValueError) as error:
+                writer_lease.invoke_command(command, root, path=path, include_raw=True)
+            denials.append(str(error.value).replace(path, "<requested>"))
+        assert writer_lease.invoke_command(command, root, path=ordinary, include_raw=True)["content"] == body
+    assert denials[0] == denials[1]
+
+
+@pytest.mark.parametrize("arrival", ["after_discovery", "before_commit"])
+def test_new_file_declaration_arrival_cannot_lose_its_authority_to_c(service, monkeypatch, arrival):
+    """A file declaration arriving after discovery must survive the C transaction's ownership recheck."""
+    root = service.root
+    late_id = "77777777-7777-4777-8777-777777777777"
+    late_path = root / "Knowledge Base/Records/LateA/_collection.md"
+    source = "Knowledge Base/Records/Shared"
+    marker = authority.read_marker(root)
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Before"},
+                item_key=ROW, why="existing file baseline")["outcome"] == "committed"
+    baseline = call(root, "record_memory", action="inspect", collection=KEY)
+
+    def arrive():
+        late_path.parent.mkdir(parents=True)
+        late_path.write_text(manifest_text().replace(CID, late_id).replace("source: Items", "source: " + source))
+        (root / source).mkdir()
+
+    with monkeypatch.context() as fault:
+        if arrival == "after_discovery":
+            original = admission._prepare_create
+
+            def prepare(*args, **kwargs):
+                arrive()
+                return original(*args, **kwargs)
+
+            fault.setattr(admission, "_prepare_create", prepare)
+        else:
+            original = admission._CreateAdmission.record
+
+            def record(self, *args, **kwargs):
+                result = original(self, *args, **kwargs)
+                arrive()
+                return result
+
+            fault.setattr(admission._CreateAdmission, "record", record)
+        refused(lambda: call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                             manifest_text=DAILY_TEXT.replace("source: Items", "source: " + source + "/Nested"),
+                             why="concurrent file arrival"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert authority.read_marker(root) == marker
+    assert not (root / DAILY_PATH).exists() and not (root / source / "Nested").exists()
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader) is None
+        assert reader.execute("SELECT collection_id FROM collections ORDER BY collection_id").fetchall() == [(CID,)]
+        assert reader.execute("SELECT COUNT(*) FROM txns WHERE collection_id=?", (DAILY,)).fetchone() == (0,)
+    after = call(root, "record_memory", action="inspect", collection=KEY)
+    assert after["audit"] == baseline["audit"] and after["source_versions"] == baseline["source_versions"]
+    assert call(root, "record_memory", action="append", collection=late_id, item={"title": "Arrived file row"},
+                item_key=ROW, why="retained file authority")["outcome"] == "committed"
+    assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Existing file row"},
+                item_key=LATER, why="existing authority")["outcome"] == "committed"
+    assert call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+                why="retry with separate source")["status"] == "committed"
+    assert titles(root, late_id) == ["Arrived file row"] and titles(root, KEY) == ["Before", "Existing file row"]
+
+
+@pytest.mark.parametrize("arrival", ["interrupted", "after_publication"])
+def test_pending_create_cannot_publish_over_an_arriving_file_declaration(service, monkeypatch, arrival):
+    """Recovery must retain a committed intent instead of seizing a file source that arrived during interruption."""
+    root = service.root
+    late_id = "77777777-7777-4777-8777-777777777777"
+    late_path = root / "Knowledge Base/Records/LateA/_collection.md"
+    source = "Knowledge Base/Records/Shared"
+    marker = authority.read_marker(root)
+
+    def arrive():
+        late_path.parent.mkdir(parents=True)
+        late_path.write_text(manifest_text().replace(CID, late_id).replace("source: Items", "source: " + source))
+        (root / source).mkdir()
+
+    with monkeypatch.context() as deadline:
+        if arrival == "interrupted":
+            deadline.setattr(admission, "time", SimpleNamespace(
+                monotonic=lambda: time.monotonic() - 31, time=time.time, sleep=time.sleep))
+        else:
+            original = admission._publish_current_epoch
+
+            def publish(*args, **kwargs):
+                result = original(*args, **kwargs)
+                if result.status == "published" and not late_path.exists():
+                    arrive()
+                return result
+
+            deadline.setattr(admission, "_publish_current_epoch", publish)
+        created = call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                       manifest_text=DAILY_TEXT.replace("source: Items", "source: " + source + "/Nested"),
+                       why="interrupted create", idempotency_key="arrival-pending")
+        assert created["status"] == "committed" and created["warnings"]
+        if arrival == "interrupted":
+            arrive()
+        else:
+            assert "COLLECTION_STORE_MARKER_CONFLICT" in created["warnings"][0]
+            assert not service.manager._collection_store.reporting_ready(service.manager._fencing_token)
+        intent = store_meta(root)[authority.PENDING_CREATE]
+    assert call(root, "record_memory", action="append", collection=late_id, item={"title": "File during interruption"},
+                item_key=ROW, why="file still authoritative")["outcome"] == "committed"
+    assert authority.read_marker(root) == marker and store_meta(root)[authority.PENDING_CREATE] == intent
+    assert not (root / DAILY_PATH).exists() and not (root / source / "Nested").exists()
+    assert titles(root, late_id) == ["File during interruption"]
+    # Repair the overlapping declaration. The pending C intent then uses its original canonical target.
+    (root / source).rename(late_path.parent / "Items")
+    late_path.write_text(late_path.read_text().replace("source: " + source, "source: Items"))
+    _until(lambda: authority.read_marker(root) != marker)
+    _until(lambda: authority.PENDING_CREATE not in store_meta(root))
+    assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Recovered C row"},
+                item_key=LATER, why="recovered publication")["outcome"] == "committed"
+    assert titles(root, late_id) == ["File during interruption"]

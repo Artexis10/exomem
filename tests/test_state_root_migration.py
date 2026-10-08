@@ -1257,7 +1257,8 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
     enrolled = json.loads(path.read_text())
     assert enrolled == {
         **original,
-        "descriptors": sorted([*original["descriptors"], "collections-store-v1"]),
+        "descriptors": sorted([*original["descriptors"], "collections-store-v1",
+                               state_migration.COLLECTION_MARKER_COMPATIBILITY_ID]),
     }
     replay = path.read_bytes()
     enroll(vault, authority_check=lambda: True)
@@ -1276,7 +1277,10 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
     assert path.read_bytes() == replay
 
     # A supported runtime admits the same state without rewriting its descriptor.
-    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ("collections-store-v1",))
+    monkeypatch.setattr(
+        state_migration, "supported_state_compatibility_ids",
+        lambda: ("collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID),
+    )
     assert state_migration.require_vault_state_ready(vault).state_dir == ready.state_dir
     assert state_migration.migration_status(vault) == "complete"
 

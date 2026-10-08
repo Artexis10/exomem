@@ -1452,6 +1452,14 @@ def prepare_restore(
 
         raw_marker = authority.read_marker(temporary)
         marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
+        if marker is not None:
+            from contextlib import closing
+
+            from .collection_store import chain, connection, replica
+
+            with closing(connection.open_reader(replica.replica_path(temporary))) as reader:
+                chain.verify_store_chain(reader)
+                authority.require_marker(reader, marker, root=temporary)
         for record in records:
             relative = record["path"]
             # The manifest filename and storage strategy are fixed by structured-collections.

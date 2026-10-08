@@ -687,6 +687,28 @@ def route(command, vault_root, arguments):
     return server
 
 
+
+def projection_route(vault_root, path):
+    """Route only canonically owned paths; a view never substitutes for an unavailable store."""
+    from ..cli_ops import OpError
+    from . import authority
+    from .preview import bound_writer
+
+    root = Path(vault_root).resolve()
+    if bound_writer(root) is not None:
+        return None
+    raw = authority.read_marker(root)
+    if raw is None:
+        return None
+    marker = authority.parse_marker(root, raw)
+    entry = authority.owned_entry(root, marker, path)
+    if entry is None:
+        return None
+    server = _server(root)
+    if server is None:
+        raise OpError("COLLECTION_STORE_UNAVAILABLE", "canonical projections require the serving collection store")
+    return server
+
 def _durable_create(root):
     """The marker entry of a create left pending on disk, or None when there is none or it cannot be read.
 

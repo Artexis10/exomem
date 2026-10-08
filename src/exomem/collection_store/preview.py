@@ -101,12 +101,32 @@ def selected_projection_writer(vault_root, path):
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
-def canonical_read(function):
+def canonical_read(function=None, *, projection=False, unavailable=None):
     """Keep a structured consumer's canonical reads under one request snapshot."""
+    from ..cli_ops import OpError
+
+    if function is None:
+        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable)
+
     @wraps(function)
     def read(vault_root, *args, **kwargs):
         writer = bound_writer(vault_root)
         if writer is None:
+            if not projection:
+                return function(vault_root, *args, **kwargs)
+            from .runtime import projection_route
+
+            # These consumers take a canonical path or page as their first argument; bulk callers decide each path below.
+            value = args[0] if args else kwargs.get("rel_path", kwargs.get("page"))
+            path = value.get("path") if isinstance(value, Mapping) else value
+            try:
+                if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
+                    return server.call(lambda: read(vault_root, *args, **kwargs))
+            except (CollectionStoreError, OpError):
+                if unavailable is None:
+                    raise
+                # Discovery withholds this C candidate instead of making unrelated A/B unavailable.
+                return unavailable()
             return function(vault_root, *args, **kwargs)
         with writer.read_snapshot():
             principal = kwargs.get("principal")
@@ -137,6 +157,30 @@ def projection_decision(vault_root, path, *, policy, audience, purpose,
             path, content=content,
             manifest_for=lambda cid: writer._collection_manifest(writer._collection_row(cid))[0],
         )
+
+
+def released_summary(vault_root, path, principal, *, include_raw=False):
+    """Resolve a generated recipient overview from canonical admission, including held publication."""
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return False, None
+    with writer.read_snapshot():
+        operation = writer._operation
+        if operation.who != principal:
+            operation.refuse()
+        row = writer.connection.execute(
+            "SELECT collection_id FROM projection_state WHERE path=? AND kind='summary'", (path,)).fetchone()
+        if row is None:
+            return False, None
+        if selected_writer(vault_root, row[0]) is None or selected_projection_writer(vault_root, path) is None:
+            return False, None
+        manifest = operation.field_manifest(row[0])
+        plan = operation.field_plan(manifest)
+        if plan.owner:
+            return False, None
+        from .summary import released_page
+
+        return True, released_page(operation, plan.manifest, path, include_raw=include_raw)
 
 
 def _mutate(vault_root, method, *args, **kwargs):
