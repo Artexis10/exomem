@@ -489,32 +489,6 @@ Bootstrap SHALL NOT publish the fallback kind as the default argument for captur
 - **WHEN** the bootstrap payload is inspected for classification guidance
 - **THEN** every example kind, domain, and project label is generic
 
-### Requirement: Bootstrap teaches how to treat the fallback and a classification suggestion
-
-Bootstrap SHALL tell an agent to classify a source semantically when it can, to use the fallback kind only when classification genuinely cannot be determined, and specifically not to use the fallback merely because no built-in label matches.
-
-Bootstrap SHALL tell an agent to inspect an advisory classification suggestion returned after a capture, to surface a strong one in the user's own domain language rather than in product-internal terms, and to exercise judgement on a weaker one rather than repeating advice.
-
-This guidance SHALL fit within the existing compact-profile size budget.
-
-#### Scenario: The contract distinguishes low confidence from missing vocabulary
-
-- **WHEN** an agent reads the source-capture guidance
-- **THEN** it learns to name the kind it believes is correct even when that label is unfamiliar to the product
-- **AND** it learns that the fallback means low confidence, not absent vocabulary
-
-#### Scenario: The contract teaches suggestion handling
-
-- **WHEN** an agent reads the post-write guidance
-- **THEN** it learns to inspect a returned classification suggestion
-- **AND** it learns to present a strong one in domain language
-- **AND** it learns not to repeat the same advice within one interaction
-
-#### Scenario: Compact guidance stays within budget
-
-- **WHEN** the compact bootstrap payload is produced with this guidance present
-- **THEN** its serialized size remains within the established compact ceiling
-
 ### Requirement: Bootstrap exposes configured classification vocabulary without becoming a second ontology
 
 Bootstrap SHALL be able to surface the classification labels a selected knowledge pack makes discoverable, so a configured agent sees relevant vocabulary immediately.
@@ -992,3 +966,36 @@ Where a client Stop hook blocks to ask for a capture or an episode record, the r
 
 - **WHEN** an agent with only the MCP connection follows the capture check's pointer
 - **THEN** `read_memory` returns the shipped engagement reference from the vault
+
+### Requirement: Bootstrap teaches that every capture names a kind
+
+Bootstrap SHALL tell an agent to name a source kind on every capture: the closest known kind, or a new slug, which registers on capture. It SHALL tell the agent never to choose `other` or `unclassified`, and SHALL NOT describe any kind as a fallback.
+
+Bootstrap SHALL tell an agent to inspect an advisory classification suggestion returned after a capture and to exercise judgement on it rather than repeating advice.
+
+This guidance SHALL fit within the existing compact-profile size budget.
+
+Bootstrap SHALL advance its existing operating-contract version and carry a bounded migration notice. The notice SHALL state that current capture rules supersede historical descriptions permitting an omitted kind or `other`. Current compact, session, full and historical bootstrap profiles SHALL convey the rule from the same source.
+
+#### Scenario: The contract states the kind rule
+
+- **WHEN** an agent reads the source-capture guidance in any bootstrap profile
+- **THEN** it learns to name the closest known kind or a new slug
+- **AND** it learns never to choose `other` or `unclassified`
+
+#### Scenario: The contract teaches suggestion handling
+
+- **WHEN** an agent reads the post-write guidance
+- **THEN** it learns to inspect a returned classification suggestion
+- **AND** it learns not to repeat the same advice within one interaction
+
+#### Scenario: Compact guidance stays within budget
+
+- **WHEN** the compact bootstrap payload is produced with this guidance present
+- **THEN** its serialized size remains within the established compact ceiling
+
+#### Scenario: Historical instructions receive a versioned correction
+
+- **WHEN** a current or historical client reads bootstrap after this behavioral migration
+- **THEN** it sees the operating-contract version and the corrected capture rule
+- **AND** it learns that older optional-kind and `other` guidance no longer governs new captures
