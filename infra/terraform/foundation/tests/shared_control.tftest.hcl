@@ -12,17 +12,7 @@ variables {
   control_hostname      = "control.example.test"
   transfer_hostname     = "transfer.example.test"
   ssh_public_key        = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenericSyntheticKey"
-  shared_control = {
-    schema_version = 1
-    owner          = "substrate-infra"
-    server_id      = "4242"
-    public_ipv4    = "192.0.2.20"
-    private_ipv4   = "10.50.1.20"
-    hostname       = "db.example.test"
-    direct_port    = 5432
-    pooled_port    = 6432
-    sslmode        = "verify-full"
-  }
+  shared_control        = jsondecode(file("tests/shared_control.fixture.json"))
 }
 
 run "published_dependency_preserves_consumer_coordinates" {
