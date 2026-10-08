@@ -19,12 +19,31 @@ Task 2.3 adoption checkpoint: the shared NetBird source is merged in Substrate-i
 
 Desktop and future laptop coexistence in task 2.3 requires concurrent POLLY and Substrate access, not profile switching. Prove the isolated user-owned netstack arrangement in design decision 9 before adopting either workstation; a successful laptop native-client enrollment alone does not close that requirement.
 
-- [ ] 3.1 Extend the existing plan inspector with a manifest-bound state-handover mode rejecting provider mutations, then rehearse source forget, target import and inverse recovery with disposable resources and the pinned providers; verify exact IDs, empty imported B2 secret outputs resolved only through preserved custody and no duplicate owners.
-- [ ] 3.2 Restore a selected recent backup into an isolated environment with production consumers and external effects blocked; verify lineage, selected integrity checks and retained encryption/retention contracts without exposing data.
-- [ ] 3.3 Freeze Terraform and Ansible source/target writers in both lifecycle domains and retain private state-version IDs and provider manifests; obtain independent approval of exact saved state-only plans and verify workspace identities immediately before mutation.
-- [ ] 3.4 Transfer foundation and durability ownership one domain at a time using reviewed forget/import checkpoints; verify one target owner per ID and no source ownership, preserving the freeze until source retirement and integrated live checks complete.
+- [x] 3.1 Extend the existing inspector with state-only plans and manifest-bound snapshot comparison. Rehearse native forward, inverse and interrupted state transfer in explicit local replicas with pinned providers and read-only provider access; prove preserved IDs, resource contents, independent BWS/SOPS recovery and no duplicate active owners.
+- [x] 3.2 Restore a selected recent backup into an isolated environment with production consumers and external effects blocked; verify lineage, selected integrity checks and retained encryption/retention contracts without exposing data.
+- [ ] 3.3 Freeze Terraform and Ansible source/target writers in both lifecycle domains. Retain private state-version IDs and manifests; independently review exact snapshot hashes, configuration revisions and saved state-only plans. Verify workspace identities immediately before each push.
+- [ ] 3.4 Transfer foundation and durability ownership one domain at a time with native moves and source-before-target pushes. Reconcile remote state after each checkpoint; prove one target owner per ID and no source ownership. Keep writers frozen until source retirement and live checks pass.
 
 ## 4. Integrated closure
+
+Task 3.1 local recovery checkpoint (2026-10-08): an independent verifier ran
+55 native Terraform commands in explicit local backends. Fresh pulls proved
+source removal, the interrupted ownership gap, target adoption, and the inverse
+source adoption for all six resources. Full resource attributes, private state,
+sensitive markings, unrelated resources, and backend lineages remained intact.
+No forced push, manual state edit, provider installation, credential, or live
+backend was used. Private evidence: `local-push-recovery/receipt.json` and its
+command log. Production backend acceptance remains pending.
+
+Task 3.2 recovery checkpoint (2026-10-08): the independently reviewed probe restored
+`20261008-030313F` with nine selected WAL segments. Its scratch PostgreSQL instance
+used a separate network namespace, no network listener, no archiving or replication,
+and remapped tablespaces. Cluster lineage matched, recovery completed, and
+`pg_amcheck --all --heapallindexed --parent-check` passed. Production PostgreSQL
+and PgBouncer process IDs stayed unchanged. The owned unit stopped and scratch
+was removed. Private receipt: `restore-retry-receipt.json` in the operator's
+protected handover evidence. The earlier attempt rejected an unsupported flag
+before restoring data; its cleanup passed. Ownership transfer remains pending.
 
 - [ ] 4.1 Independently verify preserved DNS/IP/private attachment, managed tailnet SSH, database TLS/role boundaries, backup/WAL continuity and representative Substrate/Exomem consumer health; keep any failed check explicitly open.
 - [ ] 4.2 Retire transferred product management code and old control-node targeting, deliver repository dependency updates, and verify no recreation/configuration paths from actual merged delivery revisions before releasing writer freezes; move shared contracts into their owning repository through strict OpenSpec closure before archiving this change.
