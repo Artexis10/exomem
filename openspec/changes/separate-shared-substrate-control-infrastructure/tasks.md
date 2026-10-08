@@ -47,9 +47,17 @@ before restoring data; its cleanup passed. Ownership transfer remains pending.
 
 Shared ownership checkpoint for tasks 2.1, 2.2 and 2.5 (2026-10-08):
 Substrate-infra #12 (merge `496676d`) and Exomem #1629 (squash `57b432e`)
-merged with independent approvals. Substrate-infra now holds the guarded
-`substrate-control-*` roots, the extracted base and PostgreSQL roles, and the
-shared contracts. Exomem consumes the typed `shared_control` dependency.
+merged with independent approvals.
+- 2.1: the HCP bootstrap guard verified both `substrate-control-*` workspaces
+  before their first state version: local execution, no automatic apply, no
+  VCS, no remote-state sharing, Terraform 1.15.8, and lock and history access.
+- 2.2: the extracted roles converged in an isolated PostgreSQL and MinIO test
+  without credential rotation, and the eight SOPS ciphertexts are unchanged.
+  The backup bucket name now comes from an explicit input, and Exomem no
+  longer outputs the pgBackRest application key.
+- 2.5: Exomem consumes the typed `shared_control` dependency, and a mocked
+  test refuses an incompatible schema version. The selected endpoint, ports
+  and `verify-full` transport are unchanged.
 
 Live handover checkpoint for tasks 3.3, 3.4, 4.1 and 4.2 (2026-10-08):
 1. The operator froze all four HCP workspaces before the merges.
@@ -57,23 +65,26 @@ Live handover checkpoint for tasks 3.3, 3.4, 4.1 and 4.2 (2026-10-08):
    independent reviewer approved the candidates and the push driver.
 3. Pushes ran one domain at a time, source removal before target adoption.
    Each pushed state matched its reviewed candidate.
-4. Reviewed output-only plans reconciled the outputs. No provider resource
-   changed.
+4. Reviewed reconciliation plans updated outputs and refreshed resource
+   metadata. No provider resource changed.
 5. Fresh ordinary plans in all four workspaces reported no changes.
 6. Final HCP reads gave each of the six provider IDs exactly one owner, in
-   its `substrate-control-*` workspace, and none in Exomem.
+   the `substrate-control-foundation` or `substrate-control-durability`
+   workspace, and none in Exomem.
 
 Live checks against the pre-handover baselines:
 - PostgreSQL and PgBouncer PIDs, the certificate, roles and the system
-  identifier were unchanged.
+  identifier were unchanged. The host probe ran over managed NetBird SSH.
 - WAL archiving advanced, and the read-only verify-full application
   connection was unchanged.
 - DNS, the address and the private attachment were unchanged.
-- The Exomem Cloud pods were unchanged.
+- The long-running Exomem Cloud pods kept their identities and restart
+  counts; only scheduled CronJob pods rotated.
 
-An independent verifier accepted the full evidence before the operator lifted
-the freeze. The private receipts are under the operator's protected handover
-evidence. Physical project relocation (section 5) remains open.
+An independent verifier accepted the evidence before the operator lifted the
+freeze, and listed the items it could not check itself. The private receipts
+are under the operator's protected handover evidence. Physical project
+relocation (section 5) remains open.
 
 - [x] 4.1 Independently verify preserved DNS/IP/private attachment, managed tailnet SSH, database TLS/role boundaries, backup/WAL continuity and representative Substrate/Exomem consumer health; keep any failed check explicitly open.
 - [x] 4.2 Retire transferred product management code and old control-node targeting, deliver repository dependency updates, and verify no recreation/configuration paths from actual merged delivery revisions before releasing writer freezes; move shared contracts into their owning repository through strict OpenSpec closure before archiving this change.
