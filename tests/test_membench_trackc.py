@@ -18,9 +18,8 @@ from __future__ import annotations
 import re
 
 import pytest
-
 from benchmark_capabilities import require_posix_executable_scripts
-
+from hook_cli_observer import observe_hook_cli
 from membench.trackc import checkpoint_driver, injection_ladder
 from membench.trackc.control_prompts import (
     CONTROL_SUITE,
@@ -216,18 +215,21 @@ def test_injection_cli_rung_and_degradation(claude_home, monkeypatch) -> None:
         # exact root the seed migration completed under for its CLI subprocess.
         seeded.env["EXOMEM_STATE_ROOT"] = str(state_root)
         # Happy path: CLI rung reachable -> stub block cites corpus content.
-        happy = injection_ladder.run_injection(
-            claude_home, seeded, state_home=workdir / "state-happy"
-        )
-        assert happy.fired, happy.raw_stdout
-        assert happy.result_kind == "injected"
-        assert injection_ladder.STUB_HEADER in happy.context
-        assert happy.cited_corpus, (
-            f"stub block does not cite corpus token {seeded.probe_token!r}: "
-            f"{happy.context[-400:]!r}"
-        )
-        # Reminder floor always present under the injected block.
-        assert happy.context.startswith(injection_ladder.REMINDER_PREFIX)
+        with observe_hook_cli(claude_home, workdir / "hook-cli.jsonl") as evidence:
+            happy = injection_ladder.run_injection(
+                claude_home, seeded, state_home=workdir / "state-happy"
+            )
+            assert happy.fired, (happy.raw_stdout, evidence.read_text()[-8192:])
+            assert happy.result_kind == "injected", (
+                evidence.read_text()[-8192:] or "CLI rung was not entered"
+            )
+            assert injection_ladder.STUB_HEADER in happy.context
+            assert happy.cited_corpus, (
+                f"stub block does not cite corpus token {seeded.probe_token!r}: "
+                f"{happy.context[-400:]!r}"
+            )
+            # Reminder floor always present under the injected block.
+            assert happy.context.startswith(injection_ladder.REMINDER_PREFIX)
 
         # Degradation: CLI executable unresolvable (PATH without the shim;
         # the hook resolves via shutil.which — exomem_retrieve_nudge.py:295)
