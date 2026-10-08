@@ -120,6 +120,24 @@ Delivery B SHALL prove domain-scoped resolution, collisions, folders, aliases, h
 - **THEN** equivalent allowed public authoring has the same success, conflict, and returned hash behavior
 - **AND** private definitions neither join the public registry nor suppress allowed promotion
 
+#### Scenario: Admitted pages use colliding extension definitions
+
+- **WHEN** public and private pages use identical extension spellings and a public definition changes
+- **THEN** each page keeps its selected interpretation and both remain useful to an admitted connector
+- **AND** selected-instance history and restore preserve that distinction without changing shared core identities
+
+#### Scenario: Instance paths or page bindings do not establish admission
+
+- **WHEN** a denied connector addresses private overlay/history paths or a page has ambiguous instance bindings
+- **THEN** direct private reads remain withheld and ambiguous dependent operations remain unavailable
+- **AND** ordinary admitted reads continue without a new approval queue
+
+#### Scenario: Private saves and prospective destinations differ
+
+- **WHEN** a private save occurs and public/private definitions assign different folders to a new page's type
+- **THEN** shared log reads remain independent and creation selects its instance before deriving the destination
+- **AND** moves and reclassification validate both bindings without silently changing interpretation
+
 ### Requirement: Offline import acceptance proves complete preservation and recovery
 
 Delivery C SHALL use disposable managed vaults to prove complete inventory, conflict reconciliation, exact duplicate provenance, canonical integrity, source immutability, and no copied authority. Process interruption and exact retries SHALL prove recovery and rollback without deleting the last imported copy or overwriting later work.

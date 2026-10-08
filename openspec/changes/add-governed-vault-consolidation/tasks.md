@@ -64,10 +64,10 @@ Delivery A is the current implementation batch. Deliveries B and C remain requir
 
 ## 7. Delivery B: private vocabulary domains after the registry foundation
 
-- [ ] 7.1 Reconcile domain details against the merged vocabulary foundation; verify the contract covers entity/relation types, aliases, folders, hashes, and promotion.
-- [ ] 7.2 Separate explicit public core and owner-selected public extension from Scope-bound private domains; prove private definitions never enter a public union.
-- [ ] 7.3 Scope collisions, resolution, aliases, folders, and hashes to admitted domains; prove hidden-only changes cannot affect limited-client success or conflict.
-- [ ] 7.4 Preserve legitimate owner promotion within admitted domains without a new human gate; prove public and private authoring workflows remain useful.
+- [ ] 7.1 Reuse the merged registry foundation for core-plus-one-extension instances; verify typed references and canonical Scope binding for overlays and history.
+- [ ] 7.2 Add registry and prospective page selection before lookup; recheck destinations and before/after bindings while preserving instance identity across consumers.
+- [ ] 7.3 Scope collisions, aliases, folders, usage, cache identity, and hashes to admitted instances; prove private edits cannot affect public outcomes.
+- [ ] 7.4 Preserve promotion, restore, and protected history without private shared-log entries; prove direct-read protection, ambiguous bindings, and legacy assignment.
 - [ ] 7.5 Document domains and run paired acceptance, independent review, and ordinary release; record evidence before beginning managed-vault import.
 
 ## 8. Delivery C: offline managed-vault import and recovery

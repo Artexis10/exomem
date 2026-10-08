@@ -18,6 +18,8 @@ The destination SHALL preserve one owner identity while enforcing independently 
 
 Delivery B SHALL provide an explicit public core, an owner-selected public extension, and private domains tied to canonical Scope IDs. Keys, aliases, folder resolution, collisions, hashes, and promotion SHALL use admitted domains. Private definitions SHALL NOT automatically join the public registry or influence public operation outcomes.
 
+Each registry instance SHALL combine the core with exactly one public or Scope-bound extension. Private instances SHALL NOT inherit the public extension. Registry operations SHALL select one admitted instance. Page interpretation SHALL use configured bindings and canonical membership, preserving instance identity across consumers. An unresolved multiple binding SHALL make only dependent interpretation or mutation unavailable.
+
 #### Scenario: A private definition shares a public candidate key
 
 - **WHEN** an owner connector proposes a key in an admitted public domain while the same key exists privately
@@ -29,6 +31,52 @@ Delivery B SHALL provide an explicit public core, an owner-selected public exten
 - **WHEN** a limited owner performs a legitimate promotion within an admitted domain
 - **THEN** the existing governed authoring flow remains usable without a new human approval gate
 - **AND** no private definition becomes public through automatic union
+
+#### Scenario: Public promotion collides with a private definition
+
+- **WHEN** the public extension adds a key, alias, or folder already used by a private extension
+- **THEN** the public operation ignores that private definition and leaves its interpretation unchanged
+- **AND** admitted public and private pages remain readable together under their own instances
+
+#### Scenario: Two private bindings apply to one page
+
+- **WHEN** canonical membership selects multiple private instances without a configured selection
+- **THEN** dependent vocabulary interpretation or mutation returns an unavailable outcome
+- **AND** ordinary admitted reads continue without choosing an instance by lookup success or iteration order
+
+### Requirement: Vocabulary instance bytes and history require canonical admission
+
+Private overlay and history paths SHALL retain their canonical Scope protection through direct reads, registry operations, and supported portability. An instance selector or filename SHALL NOT confer authority. Inspect, propose, save, history, restore, usage, and cache reuse SHALL use the selected instance and current admission. Unarmed vaults SHALL retain legacy behavior. Arming SHALL explicitly assign legacy definitions and page bindings without declaring them public automatically.
+
+Private mutations SHALL keep reasons and before/after hashes in protected instance history without copying them into the shared operation log or its rotation archives. Public mutation logs SHALL remain useful.
+
+#### Scenario: A denied connector directly addresses a private overlay
+
+- **WHEN** a connector supplies the private overlay path, history path, or canonical instance selector
+- **THEN** existing admission withholds the bytes before definition or history lookup
+- **AND** the Scope's metadata selectors cannot leave those paths unprotected
+
+#### Scenario: Public authoring follows a hidden-only edit
+
+- **WHEN** private definitions or history change while admitted public content stays fixed
+- **THEN** public inspect, propose, save, history, and restore retain the same outcomes and hashes
+- **AND** no private cache identity, collision, or usage count enters the result
+
+#### Scenario: A private registry save produces auxiliary history
+
+- **WHEN** an administrator saves or restores a private extension
+- **THEN** protected instance history retains the reason and version evidence
+- **AND** shared log reads and rotation disclose no private path, reason, hash, or private-write count
+
+### Requirement: Prospective vocabulary selection precedes destination derivation
+
+Creation SHALL select one admitted prospective instance before registry lookup, folder resolution, candidate enumeration, or collision checks. Supplied metadata, independently configured destination bindings, or an explicit non-authorizing selector SHALL establish that selection. Unresolved selection SHALL make only dependent creation unavailable. The mutation boundary SHALL recheck the resulting destination and proposed membership. Moves and reclassification SHALL validate both instance interpretations and report interpretation changes without copying definitions.
+
+#### Scenario: A type resolves to different public and private folders
+
+- **WHEN** a new page's supplied metadata and configured destination do not select one instance
+- **THEN** creation requires an explicit admitted selection or returns dependent unavailability before lookup
+- **AND** lookup success or a derived destination cannot silently select the instance
 
 ### Requirement: Offline inventory accounts for every canonical object
 

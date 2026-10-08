@@ -100,6 +100,34 @@ Delivery B follows the vocabulary registry foundation. It defines an explicit pu
 
 Delivery A protects any whole registry whose output or mutation depends on hidden definitions and returns the existing unavailable outcome when it cannot compute an admitted view. It cannot claim complete limited-owner vocabulary promotion. The exact public-write seam must be checked against current registry code before implementation proceeds there.
 
+#### Registry instances and page interpretation
+
+Each instance combines the public core with one extension: the public extension or one Scope-bound private extension. Private instances do not inherit the public extension. Existing keys, aliases, parents, replacements, and folders remain unqualified within that instance. A public promotion cannot invalidate or redirect a private definition.
+
+Reuse `RegistrySpec`, its typed adapter, loader, history, delta validator, and mutation owner. Bind an instance to its canonical Scope ID, overlay path, and history stem. Extend existing cache identity and invalidation with that instance; add no second registry cache or journal. Source kinds and domains retain their shared taxonomy overlay and history within each instance.
+
+Public operations select only the public instance, including for unrestricted owners. A private registry operation supplies an optional `registry_scope` containing a canonical Scope ID. The selector grants no authority. Admit its canonical binding, overlay, and history through the complete existing governance and connector decision before reading definitions or snapshots. Do not use a Scope ID in a filename as proof of protection.
+
+Page interpretation selects its instance through configured bindings and canonical membership. A page with no private binding uses the public instance. Multiple applicable bindings require an explicit configured selection. Missing selection makes only dependent interpretation or mutation unavailable; ordinary admitted reads continue. This prevents silent meaning changes and costs the caller that dependent operation until configuration is repaired.
+
+Creation selects its prospective instance before registry lookup, folder resolution, candidate enumeration, or collision checks. Use supplied authored metadata and independently configured destination bindings. If they do not select one instance, an explicit non-authorizing `registry_scope` may select it; otherwise dependent creation is unavailable. The resulting destination must have a canonical binding consistent with that selection. Recheck the destination and proposed membership under the existing mutation boundary. Moves and reclassification validate both instance interpretations and report any change; they never copy definitions or silently select an instance by lookup success.
+
+Keep each page's instance when a consumer combines pages. Core identities are shared; identically spelled extension entries in different instances are distinct. Cross-page constraints must retain that distinction. Wikilinks still address pages, so admitted public and private knowledge remains readable together. A private page does not acquire public-extension definitions by linking to a public page.
+
+#### Authoring, history, and migration
+
+Inspect, propose, save, history, and restore use the same selected instance. Resolution, collision checks, folder lookup, usage counts, and hashes depend only on admitted contributors to that instance. Public operations never enumerate private instances, even to validate a conflict. A save changes only its selected extension; it never serializes inherited core entries or private definitions into the public overlay.
+
+Private saves retain reasons and before/after hashes in protected instance history. The existing history writer omits their entries from the shared operation log and its rotation archives. Adapt its current auxiliary-write contract; add no journal. Public saves retain their shared log behavior. Include shared log reads and rotation in the hidden-only-change proof.
+
+Keep the existing target byte hash contract and recheck the selected instance's admitted validation dependencies under the existing mutation boundary. Restore validates a kept snapshot against the current core and selected instance, without unioning other extensions. Folder resolution does not authorize file creation or bypass Delivery A's capture and target admission.
+
+Unarmed vaults retain the existing overlay paths and behavior. Arming requires an explicit assignment of legacy definitions and page bindings. Do not automatically declare a legacy overlay public. Preserve private overlays, history, and canonical bindings through supported portability without copying source connector authority.
+
+The custom gap is instance selection and admission, not registry parsing or storage. Before implementation, verify that the canonical membership owner protects direct path reads of instance overlays and history. Reuse that owner for any missing binding, including Scopes selected by metadata rather than paths. Apply the lifecycle adapter's existing public canonical-class invariant when it is available; add no second lifecycle classifier.
+
+The paired proof uses public and private pages with colliding extension keys, aliases, and folders. Public promotion must leave private interpretation unchanged. Both pages remain useful to an admitted connector, while public authoring matches the hidden-absent twin. The proof also exercises direct overlay/history reads, selected-instance restore, and ambiguous page bindings.
+
 ### 6. Arm durably under stopped maintenance authority
 
 Arming requires a stopped and drained destination. Validate the configuration and every canonical Scope reference, enroll `connector-content-ceiling-v1` under the existing manifest lock and durable publication owner, then publish a reserved portable armed requirement. Do not use the store-custody migration method.
