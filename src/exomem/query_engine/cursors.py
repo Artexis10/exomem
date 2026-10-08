@@ -133,7 +133,8 @@ def caller_binding(session, query) -> dict[str, str]:
     if field_plan is not None and not query.select.fields and query.aggregate is None:
         dependencies.update(field_plan.fields)
     # Field release is not row policy. Only grants used by this query invalidate its continuation.
-    row_policy = replace(operation.policy, fingerprint="", release_grants=tuple(
+    # Compiler findings are diagnostics; fresh admission still refuses blocked policy before cursor binding.
+    row_policy = replace(operation.policy, fingerprint="", findings=(), release_grants=tuple(
         grant for grant in operation.policy.release_grants if grant.field_release is None))
     lineage = session.connection.execute(
         "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id','lineage','forks') ORDER BY key",

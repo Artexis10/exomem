@@ -147,7 +147,12 @@ def test_location_edits_and_removal_preserve_metrics_cursor_legacy_snapshot_and_
 
 def test_public_owner_release_and_revoke_leave_metric_continuation_valid(store):
     """A field grant that bypasses owner authority, depends on view bytes, releases RAW, or stales unrelated metrics."""
+    from exomem.governance.policy import governance_root
+    from exomem.init import _SCAFFOLD
+
     initialize_vault_state_offline(store.root, source="field release fixture")
+    governance_root(store.root).mkdir(parents=True, exist_ok=True)
+    (governance_root(store.root) / "README.md").write_bytes((_SCAFFOLD / "_Governance/README.md").read_bytes())
     create(store)
     raw = {"select": ["count"], "order_by": [{"field": "count"}], "page": {"limit": 1}}
     first = query(store, raw)
