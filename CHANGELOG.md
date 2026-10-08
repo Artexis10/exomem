@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.111.1](https://github.com/Artexis10/exomem/compare/v0.111.0...v0.111.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **media:** avoid repeated idle ledger reads ([#1622](https://github.com/Artexis10/exomem/issues/1622)) ([69213df](https://github.com/Artexis10/exomem/commit/69213df9655e49bae51f9e58f9aff0504025b749))
+
 ## [0.111.0](https://github.com/Artexis10/exomem/compare/v0.110.0...v0.111.0) (2026-10-08)
 
 
