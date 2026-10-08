@@ -1798,6 +1798,7 @@ def _is_markdown_path(rel_path: str) -> bool:
 
 
 def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
+    from .. import held_fs
     from ..collection_store import authority
 
     if not policy.empty:
@@ -1805,7 +1806,10 @@ def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None
     writer = bound_writer(vault_root)
     if rel_path is None and writer is not None:
         return False
-    marker = authority.read_marker(vault_root)
+    try:
+        marker = authority.read_marker(vault_root)
+    except held_fs.HeldFsError:
+        return False  # Unreadable ownership never qualifies for the empty-policy shortcut.
     if rel_path is not None and marker is not None:
         # Ordinary files keep their file policy; bulk consumers still require canonical C field admission.
         return authority.owned_entry(vault_root, authority.parse_marker(vault_root, marker), rel_path) is None

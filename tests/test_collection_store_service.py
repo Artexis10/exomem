@@ -989,3 +989,44 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
             timer.join(2)
         occupied.result(timeout=5)
     assert titles(service.root, CID) == ["Canonical"]
+
+
+def test_projection_admission_accepts_the_served_vault_through_a_root_alias(service, tmp_path):
+    """A final-root alias must retain the real store's projection authority."""
+    alias = tmp_path / "vault-alias"
+    alias.symlink_to(service.root, target_is_directory=True)
+    path = "Knowledge Base/Records/Work/Items/_summary.md"
+    with request_scope(OWNER):
+        assert egress.release_level_for_path_only(service.root, path) == 6
+        assert egress.release_level_for_path_only(alias, path) == 6
+
+
+@pytest.mark.parametrize("boundary", ["marker", "collections", "knowledge", "unreadable"])
+def test_unreadable_marker_ownership_never_admits_a_physical_projection(service, tmp_path, boundary):
+    """Unreadable or symlinked ownership must not turn a C projection into an ordinary file."""
+    import os
+
+    from exomem import held_fs
+
+    service.stop()
+    root = service.root
+    marker = authority.marker_path(root)
+    target = marker if boundary in ("marker", "unreadable") else (
+        marker.parent if boundary == "collections" else root / "Knowledge Base")
+    if boundary == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root can read mode-zero files")
+        target.chmod(0)
+    else:
+        outside = tmp_path / "detached-ownership"
+        target.rename(outside)
+        target.symlink_to(outside, target_is_directory=outside.is_dir())
+    try:
+        with request_scope(OWNER), pytest.raises(held_fs.HeldFsError):
+            egress.release_level_for_path_only(root, "Knowledge Base/Records/Work/Items/_summary.md")
+    finally:
+        if boundary == "unreadable":
+            target.chmod(0o600)
+        else:
+            target.unlink()
+            outside.rename(target)

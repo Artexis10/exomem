@@ -694,9 +694,16 @@ def projection_route(vault_root, path):
     from . import authority
     from .preview import bound_writer
 
-    root = Path(vault_root).resolve()
+    root = Path(vault_root)
     if bound_writer(root) is not None:
         return None
+    if root.is_symlink():
+        root = root.resolve()
+    raw = authority.read_marker(root)
+    if raw is None:
+        return None
+    root = root.resolve()
+    # Bind marker bytes to the canonical root, never to the earlier path spelling.
     raw = authority.read_marker(root)
     if raw is None:
         return None
