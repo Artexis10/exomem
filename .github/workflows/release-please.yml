@@ -24,6 +24,14 @@ permissions:
   issues: write
   pull-requests: write
 
+# Each Dockerfile target owns a cache; the default scope overwrites prior builds.
+env:
+  IMAGE_CACHE_LEAN: exomem-lean
+  IMAGE_CACHE_ML: exomem-ml
+  IMAGE_CACHE_CUDA: exomem-cuda
+  IMAGE_CACHE_HOSTED: exomem-hosted
+  IMAGE_CACHE_CLOUD: exomem-cloud
+
 jobs:
   release-please:
     if: ${{ github.event_name == 'push' }}
@@ -345,8 +353,8 @@ jobs:
           tags: |
             ghcr.io/artexis10/exomem:latest
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_LEAN }}
 
       - name: Build and push ml image (multi-arch)
         uses: docker/build-push-action@v6
@@ -358,8 +366,8 @@ jobs:
           tags: |
             ghcr.io/artexis10/exomem:ml
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-ml
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_ML }}
 
       - name: Build and push cuda image (linux/amd64)
         uses: docker/build-push-action@v6
@@ -371,8 +379,8 @@ jobs:
           tags: |
             ghcr.io/artexis10/exomem:cuda
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_CUDA }}
 
       - name: Build and push hosted image (linux/amd64)
         id: hosted-build
@@ -391,8 +399,8 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_HOSTED }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_HOSTED }}
 
       - name: Attest the exact hosted runtime image
         id: hosted-attestation
@@ -533,8 +541,8 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CLOUD }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_CLOUD }}
 
       - name: Attest the exact Exomem Cloud cell image
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
@@ -664,8 +672,8 @@ jobs:
           push: true
           tags: |
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_LEAN }}
 
       - name: Build and push ml image (multi-arch)
         uses: docker/build-push-action@v6
@@ -676,8 +684,8 @@ jobs:
           push: true
           tags: |
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-ml
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_ML }}
 
       - name: Build and push cuda image (linux/amd64)
         uses: docker/build-push-action@v6
@@ -688,8 +696,8 @@ jobs:
           push: true
           tags: |
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_CUDA }}
 
       - name: Build and push hosted image (linux/amd64)
         id: hosted-build
@@ -707,8 +715,8 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_HOSTED }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_HOSTED }}
 
       - name: Attest the exact hosted runtime image
         id: hosted-attestation
