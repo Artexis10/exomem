@@ -18,10 +18,13 @@ Every fixture here is synthetic.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import shutil
 from pathlib import Path
 
 import pytest
 import yaml
+from test_connector_boundary import configured_boundary as configured_boundary
 
 from exomem import adopt as adopt_module
 from exomem import commands, mutation_terminal, product_invoke
@@ -114,6 +117,70 @@ def test_a_restricted_caller_counts_only_the_sources_it_may_see(
         )
 
     assert {"kind": "article", "sources": 1} in refused.value.details["known_source_kinds"]
+
+
+def test_owner_connector_source_counts_and_capture_debt_ignore_hidden_sources(
+    configured_boundary, vault: Path, tmp_path: Path,
+) -> None:
+    """A limited owner can capture publicly without learning another connector's source debt."""
+    from exomem import state_migration
+    from exomem.governance import principal, raw_protection
+
+    config, authenticate = configured_boundary
+    configuration = json.loads(config.read_text())
+    configuration["capture_paths"].append(f"{KB}/Sources/Sessions")
+    config.write_text(json.dumps(configuration))
+    clients = {name: authenticate(name) for name in ("limited", "full")}
+    assert all(raw_protection.is_owner(who) for who in clients.values())
+    assert clients["limited"].audience_id == clients["full"].audience_id
+
+    hidden = tmp_path / "hidden-twin"
+    shutil.copytree(vault, hidden)
+    for folder, kind in (("Articles", "article"), ("Other", "other")):
+        target = hidden / KB / "Sources" / folder / "private-source.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            f"---\ntype: source\nsource_type: {kind}\nproject: private-project\n"
+            "title: Private source\n---\n\nPrivate source canary.\n",
+        )
+
+    refusals = {name: [] for name in clients}
+    advisories = {name: [] for name in clients}
+    for root in (vault, hidden):
+        authority = state_migration.assert_offline_migration_authority(source="isolated source-kind twin")
+        state_migration.arm_connector_boundary_offline(root, authority=authority)
+        source_schema = schema_module.load_source_schema(root)
+        before = _vault_files(root)
+        for name, who in clients.items():
+            with principal.request_scope(who), pytest.raises(OpError) as refused:
+                commands.op_capture_source(root, source_schema, title="Public session", content="Public meeting notes.")
+            refusals[name].append(refused.value.as_public_dict())
+        assert _vault_files(root) == before
+
+        for name, who in clients.items():
+            content = f"Public meeting notes captured by the {name} connector."
+            with principal.request_scope(who):
+                leaf = commands.op_capture_source(
+                    root, source_schema, title=f"Public {name} session", content=content,
+                    source_kind="session",
+                )
+                terminal = _committed_envelope(leaf)
+            path = leaf["source"]["path"]
+            assert path.startswith(f"{KB}/Sources/Sessions/")
+            assert _frontmatter(root, path)["source_type"] == "session"
+            assert content in (root / path).read_text()
+            advisories[name].append(terminal.get("structure_suggestion"))
+
+    assert refusals["limited"][0] == refusals["limited"][1]
+    assert refusals["limited"][0]["code"] == "SOURCE_KIND_REQUIRED"
+    assert {"kind": "article", "sources": 2} in refusals["limited"][0]["known_source_kinds"]
+    assert refusals["full"][0] == refusals["limited"][0]
+    assert {"kind": "article", "sources": 3} in refusals["full"][1]["known_source_kinds"]
+    assert advisories["full"][0] is None
+    assert advisories["full"][1]["kind"] == "source_classification_debt"
+    assert advisories["full"][1]["unclassified_sources"] == 1
+    assert advisories["full"][1]["folders"] == ["Other"]
+    assert advisories["limited"] == [None, None]
 
 
 @pytest.mark.parametrize("unchosen", ["other", "unclassified"])

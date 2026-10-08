@@ -805,17 +805,17 @@ def _classification_suggestion(
     """Advisory: this vault holds sources nobody has given a kind yet.
 
     Reads the per-folder counts this capture already took for the source
-    index, so it adds no scan, model call or persistent state. A caller other
-    than the owner gets no advisory, because those counts include pages it may
-    not see. Wrapped so a fault here can never fail a committed capture.
+    index, so it adds no scan, model call or persistent state. Only an owner
+    with whole-corpus access gets this advisory; its counts can include hidden
+    pages. Wrapped so a fault here can never fail a committed capture.
     """
     try:
-        from .governance import principal, raw_protection
+        from .governance import egress, principal, raw_protection
 
         who = principal.effective_principal()
         if not (
             raw_protection.is_owner(who)
-            and raw_protection.has_unrestricted_access(vault_root, who)
+            and egress.unrestricted_content_access(vault_root, who)
         ):
             return None
         by_folder = {name.casefold(): count for name, count in counts.items()}
