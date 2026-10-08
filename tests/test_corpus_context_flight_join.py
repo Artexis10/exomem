@@ -209,7 +209,9 @@ def test_already_settled_corpus_flight_never_invokes_timed_wait(vault: Path) -> 
     done = _ControlledDone(settled=True, wait_result=True, fail_on_wait=True)
     _register_flight(vault, done, result=expected)
 
-    actual, census = semantic_contract.build_corpus_context_with_census(vault)
+    # The flight belongs to the shared structural cache; the public builder
+    # returns a detached, request-enriched copy of its result.
+    actual, census = semantic_contract._build_corpus_context_with_census(vault)
 
     assert actual is expected
     assert census is None
@@ -227,7 +229,9 @@ def test_settled_or_absent_corpus_flight_never_waits(
         result=expected,
     )
 
-    settled, settled_census = semantic_contract.build_corpus_context_with_census(vault)
+    # The flight belongs to the shared structural cache; the public builder
+    # returns a detached, request-enriched copy of its result.
+    settled, settled_census = semantic_contract._build_corpus_context_with_census(vault)
 
     assert settled is expected
     assert settled_census is None

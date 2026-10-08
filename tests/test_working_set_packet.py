@@ -1343,7 +1343,7 @@ def test_the_reserved_planning_slot_never_shrinks_the_block(
     """
     others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(2)}
     plans = tuple(f"Knowledge Base/Planning/Plan {index}/_collection.md" for index in range(5))
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
     monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
@@ -1364,7 +1364,7 @@ def test_the_reserved_slot_still_holds_when_the_block_is_full(
     slots, the newest open plan still gets one."""
     others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
     plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
     monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
@@ -1399,7 +1399,7 @@ def test_collection_storage_stays_out_on_the_cold_path(
         ),
     ]
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     # Both were read; neither is in any freshness map (no watcher).
     profile = _profile(reads={item: _minutes_ago(1), manifest: _minutes_ago(2)})
 
@@ -1929,7 +1929,7 @@ def test_the_planning_and_episode_reservations_coexist(
     others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
     episode = {_episode_path(1): _minutes_ago(600)}
     plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
     monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
@@ -1949,7 +1949,7 @@ def test_episodes_take_at_most_four_slots(monkeypatch: pytest.MonkeyPatch) -> No
     """A burst of conversations must not crowd out the edits."""
     episodes = {_episode_path(index): _minutes_ago(index) for index in range(6)}
     others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(100 + index) for index in range(6)}
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
     monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
@@ -1975,7 +1975,7 @@ def test_an_activated_older_revision_never_enters_beside_the_newest(
     group = episode_capture.key_group(_episode_key(1), "owner")
     older = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t090000000000-11111111.md"
     newer = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t100000000000-22222222.md"
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
     monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
@@ -2258,7 +2258,7 @@ def test_the_recent_edits_are_identical_to_the_full_sort(
     pages, zero times, captures and collection storage) at every limit.
     Re-based: the registry reaches the block through the cold seed, the one
     place the burst rule still runs over it."""
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
     collections = frozenset({"Knowledge Base/Records/Depot Stock"})
@@ -2289,7 +2289,7 @@ def test_the_recent_block_never_computes_every_burst(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(working_set_heat, "burst_paths", every_burst)
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
-    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a, **_k: True)
 
     entries = working_set._recent_context(Path("/nonexistent"), rows=[], profile=profile)
 
