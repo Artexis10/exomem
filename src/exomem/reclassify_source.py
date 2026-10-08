@@ -757,7 +757,11 @@ def reclassify(
 def _previous_location(vault_root: Path, recorded: str) -> str:
     """The location a history entry records, refused unless it is a source page."""
     rel = recorded.replace("\\", "/").strip().lstrip("/")
-    if not rel.startswith(f"{_sources_root()}/") or not rel.lower().endswith(".md"):
+    if (
+        ".." in rel.split("/")
+        or not rel.startswith(f"{_sources_root()}/")
+        or not rel.lower().endswith(".md")
+    ):
         raise ReclassifyError(
             "INVALID_HISTORY",
             f"the latest history entry names {recorded!r}, which is not a source "

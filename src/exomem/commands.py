@@ -11912,7 +11912,7 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             expected_dead_inbound=expected_dead_inbound,
         )
-    if operation in {"reclassify", "propose-reclassification", "revert-reclassification"}:
+    if operation in {"reclassify", "propose-reclassification", "revert-reclassification"}:  # nosemgrep: ep-word-membership -- manage_memory_file defines these closed operation selectors.
         target = path or old_path
         if not target:
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")

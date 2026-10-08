@@ -5592,7 +5592,7 @@ class LeaseManager:
             or (
                 command.name == "manage_memory_file"
                 and kwargs.get("operation")
-                in {"move", "reclassify", "revert-reclassification"}
+                in {"move", "reclassify", "revert-reclassification"}  # nosemgrep: ep-word-membership -- closed manage_memory_file operation selectors that relocate pages.
             )
         ):
             from . import move_file as move_file_module

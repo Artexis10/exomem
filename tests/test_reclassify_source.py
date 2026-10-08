@@ -834,7 +834,8 @@ def test_an_evidence_path_link_refuses_the_move_and_nothing_changes(vault: Path)
         f"{KB}/Evidence/Harbor/tide-proof.md",
         f"---\ntype: evidence\n---\n\nTable: [[{source.removesuffix('.md')}]].\n",
     )
-    before = {rel: (vault / rel).read_bytes() for rel in (source, evidence.relative_to(vault).as_posix())}
+    paths = (source, evidence.relative_to(vault).as_posix())
+    before = {rel: (vault / rel).read_bytes() for rel in paths}
 
     proposal = rc.propose(vault, source, source_kind="dataset", domain="travel")
     with pytest.raises(rc.ReclassifyError) as refused:
