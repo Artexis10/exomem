@@ -1453,11 +1453,13 @@ def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
     from exomem.collection_store import authority
     from exomem.governance import raw_protection
     from exomem.service_manager import WorkerRuntime
+    from exomem.state_migration import COLLECTION_MARKER_COMPATIBILITY_ID
 
     root = args.unsupported_launcher.resolve()
     expect(not raw_protection.required_compatibility(root), "RAW would mask the store fence in this fixture")
-    expect(authority.required_state_compatibility_ids(root) == frozenset({"collections-store-v1"}),
-           "the compatibility fixture does not require the store format")
+    expect(authority.required_state_compatibility_ids(root) == frozenset({
+        "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
+    }), "the compatibility fixture does not require the store and marker formats")
     os.environ["EXOMEM_VAULT_PATH"] = str(root)
     fresh_state = Path(args.work) / "unsupported-state"
     os.environ["EXOMEM_STATE_ROOT"] = str(fresh_state)
