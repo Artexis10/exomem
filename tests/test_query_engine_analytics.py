@@ -14,7 +14,6 @@ import sqlite3
 import sys
 import time
 import traceback
-from itertools import batched
 
 import pytest
 from s1_export_fixture import START_DAY, expected_daily, iter_exercises
@@ -83,9 +82,10 @@ def seed(store, items, *, cid=CID):
         ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
         _, _, upsert, insert_version = typed_storage._declarations(layout)
         # Core batches seed canonical fixtures without per-row dispatch or unbounded parameters.
-        for batch in batched(keyed, 128):
+        batch_size = 128
+        for start in range(0, len(keyed), batch_size):
             current_rows, versions, identities = [], [], []
-            for key, values in batch:
+            for key, values in keyed[start:start + batch_size]:
                 encoded = dict(zip((*layout.value_columns, "r"), typed_storage.encode_row(layout, values), strict=True))
                 current = {"row_id": ids[key], "row_version": 1, **encoded}
                 current_rows.append(current)
