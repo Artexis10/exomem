@@ -33,6 +33,7 @@ hide. Re-measure (don't hand-tune) if the corpus generator or lane code changes.
 
 from __future__ import annotations
 
+import gc
 import json
 import statistics
 import sys
@@ -750,6 +751,10 @@ def measure_conversation_gate(vault: Path) -> dict:
 
     def call(with_conversation: bool) -> dict:
         working_set_runtime.reset_caches_for_tests()
+        # The stage budget covers the stage's own work. On Python 3.12 a full
+        # collection over this vault's heap pauses about 100 ms wherever the
+        # allocation count trips it, so settle earlier garbage before each sample.
+        gc.collect()
         extra = {"conversation": conversation} if with_conversation else {}
         return commands.op_activate_context(
             vault, turn=WORKING_SET_TURN, include_timings=True, **extra
