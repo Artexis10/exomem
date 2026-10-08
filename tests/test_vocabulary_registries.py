@@ -1061,6 +1061,34 @@ def test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_ali
         assert lifecycle_statuses.Basis(vault).classify("at-anchor").require() == "pending"
 
 
+def test_malformed_status_does_not_require_private_definitions_for_search_or_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import audit
+    from exomem import find as find_module
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    vault = tmp_path
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    path = "Knowledge Base/Notes/Insights/malformed-status.md"
+    source = "---\ntype: insight\nstatus: true\n---\n\nHarbourquartz remains readable.\n"
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(source)
+    _govern(vault, scope_path="_Schema/statuses.yaml")
+    _reset_governance()
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        hits = find_module.find(
+            vault, query="Harbourquartz", mode="hybrid", prefer_active=True,
+            graph=False, rerank=False,
+        )
+        findings = audit.audit(vault, categories=["relation_debt"]).findings
+
+    assert path in {hit.path for hit in hits}
+    assert path in {finding.path for finding in findings}
+    assert (vault / path).read_text() == source
+
+
 @pytest.mark.usefixtures("owner_scope")
 def test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes(
     vault: Path,

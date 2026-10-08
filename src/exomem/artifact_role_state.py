@@ -324,11 +324,7 @@ def _origin(index: dict[str, Any], path: str, *, bounded: bool = False) -> dict[
         if index.get("_authorize") is not None and not index["_authorize"](dest):
             continue
         destination = index["pages"].get(dest)
-        if (
-            destination
-            and destination["complete"]
-            and _eligible(index, destination)
-        ):
+        if destination and destination["complete"] and _eligible(index, destination):
             _, _, external_superseded, _ = _resolved(index, destination)
             superseded.update(external_superseded)
     result = sensor.detect(
@@ -522,7 +518,7 @@ def compose(
     }
     try:
         recomposed = _origin(audience_index, path, bounded=True)
-    except (OSError, lifecycle_statuses.OpError):
+    except (OSError, lifecycle_statuses.ClassificationUnavailable):
         return [], dict.fromkeys(sensor.FAMILIES, "unknown")
     for family in sensor.FAMILIES:
         if coverage[family] != "unknown":
@@ -607,7 +603,9 @@ def inspect(
     order = {"complete": 0, "capped": 1, "unknown": 2}
     for path in index.get("origins", {}):
         _checkpoint(index)
-        rows, states = compose(root, index, path, authorize, validate=validate, status_basis=status_basis)
+        rows, states = compose(
+            root, index, path, authorize, validate=validate, status_basis=status_basis
+        )
         findings.extend(rows)
         for family, status in states.items():
             if order[status] > order[coverage[family]]:

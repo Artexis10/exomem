@@ -142,6 +142,10 @@ SPEC = registry.RegistrySpec(
 )
 
 
+class ClassificationUnavailable(OpError):
+    """A dependent operation needs a page lifecycle class that no admitted definition supplies."""
+
+
 @dataclass(frozen=True)
 class Classification:
     lifecycle_class: str | None
@@ -149,7 +153,7 @@ class Classification:
 
     def require(self) -> str:
         if self.lifecycle_class is None:
-            raise OpError(
+            raise ClassificationUnavailable(
                 "STATUS_CLASSIFICATION_UNAVAILABLE",
                 "Page status classification is unavailable.",
                 "Use an admitted status definition before this dependent operation.",

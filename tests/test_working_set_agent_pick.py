@@ -27,6 +27,7 @@ from test_governance_egress import _external, _reset_caches, write_rule, write_s
 from test_working_set_carry import (
     CARRY_PAGE,
     CARRY_SOURCE,
+    CARRY_TURN,
     _seed_carry_pages,
     _seed_live_cell,
     _write,
@@ -92,6 +93,32 @@ def test_an_agent_picked_research_note_returns_its_units_not_invalid_anchor(
     assert all(
         unit["provenance"]["path"] == CARRY_PAGE for unit in packet["units"]
     ), packet["units"]
+
+
+def test_malformed_status_keeps_picked_units_when_status_definitions_are_withheld(
+    tmp_path: Path,
+) -> None:
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    _seed_carry_pages(tmp_path)
+    page = tmp_path / CARRY_PAGE
+    source = page.read_text().replace("status: active", "status: true")
+    page.write_text(source)
+    write_scope(tmp_path, paths="_Schema/statuses.yaml", name="Status definitions")
+    write_rule(tmp_path, ceiling=0)
+    _reset_caches()
+    _seed_live_cell(tmp_path)
+    assert lexstore.get_store(tmp_path).rebuild_atomic()
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(tmp_path, turn=CARRY_TURN, anchor=CARRY_PAGE)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert _anchor(packet)["ref"] == CARRY_PAGE
+    assert len(packet["units"]) == 3
+    assert all(unit["provenance"]["path"] == CARRY_PAGE for unit in packet["units"])
+    assert page.read_text() == source
 
 
 def test_a_real_anchor_override_is_unaffected(carry_vault: Path) -> None:

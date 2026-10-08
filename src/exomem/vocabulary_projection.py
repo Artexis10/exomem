@@ -445,7 +445,7 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
                 current_pair &= status_basis.classify(
                     page.get("frontmatter", {}).get("status")
                 ).live
-            except lifecycle_statuses.OpError:
+            except lifecycle_statuses.ClassificationUnavailable:
                 return {
                     "status": "unavailable",
                     "reason": "status_classification_unavailable",

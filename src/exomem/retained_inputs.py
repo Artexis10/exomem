@@ -147,7 +147,7 @@ def _release_snapshot(
             try:
                 if basis.classify(page.frontmatter.get("status")).require() == "superseded":
                     raise _unavailable()
-            except lifecycle_statuses.OpError as error:
+            except lifecycle_statuses.ClassificationUnavailable as error:
                 raise _unavailable() from error
         unit = None
         if snapshot.unit_ref is not None:
@@ -220,7 +220,9 @@ def recheck_retained_inputs(
     """Refresh a bounded set's release checks, not an atomic cross-system snapshot."""
     status_basis = lifecycle_statuses.Basis(vault_root)
     for snapshot, text in selections:
-        released = _release_snapshot(vault_root, snapshot, disclosure=disclosure, status_basis=status_basis)
+        released = _release_snapshot(
+            vault_root, snapshot, disclosure=disclosure, status_basis=status_basis
+        )
         if (
             released.released is None
             or released.released.get("frontmatter") != snapshot.page.frontmatter

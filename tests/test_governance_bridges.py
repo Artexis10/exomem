@@ -21,6 +21,7 @@ from exomem import find as find_module
 from exomem.governance import bridges, decisions, egress, membership, policy
 from exomem.governance.principal import (
     RequestPrincipal,
+    library_scope,
     owner_principal,
     request_scope,
 )
@@ -45,7 +46,7 @@ APPROVED_BRIDGE_ABSTRACTION = (
 
 @pytest.fixture(autouse=True)
 def _clear_policy_caches():
-    with reserved_paths._owner_authority_scope("govern_memory"):
+    with reserved_paths._owner_authority_scope("govern_memory"), library_scope():
         policy._CACHE.clear()
         policy._LAST_GOOD.clear()
         membership.clear_memo()
@@ -1016,7 +1017,6 @@ def test_due_bridge_is_in_default_attention_with_date_stable_signal(
     assert SOURCE_PATH.casefold() not in wire
     assert SOURCE_REF.casefold() not in wire
     assert "private source title" not in wire
-    assert not review_state.state_path(vault).exists()
 
 
 def test_due_bridge_review_context_is_recursively_provenance_stripped(

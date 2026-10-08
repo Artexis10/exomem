@@ -1011,7 +1011,7 @@ def run_lanes(
                 result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
-            except (egress.ReaderViewUnavailable, lifecycle_statuses.OpError):
+            except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
                 raise
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
