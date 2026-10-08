@@ -17,6 +17,7 @@ from .. import structured_collections as collections
 from ..collection_store import connection, governance, typed_storage
 from ..governance import membership
 from ..governance.principal import effective_principal
+from .errors import QueryError
 
 _READERS_GUARD = threading.Lock()
 _READERS: dict[Path, int] = {}
@@ -41,15 +42,6 @@ def wire_bytes(value) -> int:
     result, is outside the cap.
     """
     return len(json.dumps(value, ensure_ascii=False).encode())
-
-
-class QueryError(RuntimeError):
-    """A bounded query refusal without physical store diagnostics."""
-
-    def __init__(self, code: str, message: str = "collection query could not complete") -> None:
-        self.code = code
-        self.message = message
-        super().__init__(f"{code}: {message}")
 
 
 _MIB = 1024 * 1024

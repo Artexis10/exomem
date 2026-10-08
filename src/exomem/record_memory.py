@@ -295,7 +295,7 @@ def record_memory(
         "query": query,
     }
     _validate_arguments(action, values)
-    from .query_engine.runtime import QueryError
+    from .query_engine.errors import QueryError
 
     try:
         from .collection_store import preview
