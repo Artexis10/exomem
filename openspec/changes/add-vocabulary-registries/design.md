@@ -30,11 +30,13 @@ Per-entry provenance in S1 lives in history: each snapshot header records the op
 
 ### 4. Two hashes with two jobs
 
-`content_hash` is the hash of the overlay bytes, or `none` when there is no overlay. It is the `expected_hash` that guards a save, and it equals today's `extension_hash` and `content_hash`, so a hash an old client read still works. `effective_digest` is the hash of the canonical effective entries, pack and overlay merged. Two overlays that resolve to the same entries share it. Consumers that need to know whether the vocabulary changed key on it.
+`content_hash` preserves the legacy hash of UTF-8 overlay text with universal-newline normalization, or `none` without an overlay. It is the public `expected_hash` checked by a save, so a hash an old client read still works. `effective_digest` hashes the canonical effective entries, with pack and overlay merged. Two overlays that resolve to the same entries share it. Consumers use that digest to detect vocabulary changes.
 
-### 5. Cache keyed on stat, then digest
+The snapshot retains the exact UTF-8 decoded overlay text for history and publication. The canonical writer guards its raw bytes independently of the public text hash. Roles and conventions keep their existing effective audit hashes.
 
-The loader caches one snapshot per vault and registry. An unchanged `(mtime_ns, size, inode)` returns the cached snapshot without a read. A changed stat reads the file and returns the cached snapshot when the digest still matches. A governed save drops the entry, and the file watcher drops it when it sees a `_Schema/*.yaml` event, which covers a same-second, same-size hand edit.
+### 5. Cache keyed on stat, then exact text
+
+The loader caches one snapshot per vault and registry. An unchanged `(mtime_ns, ctime_ns, size, inode)` returns the cached snapshot without a read. A changed stat reads the exact text and reuses the snapshot only when that text is unchanged. A newline-only edit refreshes the raw preimage even when the public hash and effective entries stay unchanged. A governed save drops the entry, as does a `_Schema/*.yaml` watcher event.
 
 ### 6. Saves are deltas with meaning rules
 

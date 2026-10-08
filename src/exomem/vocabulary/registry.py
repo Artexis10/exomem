@@ -12,15 +12,17 @@ and writes a generic entry back into that grammar.
 Everything else lives here once: reading and caching, the two hashes, delta
 application and its meaning rules, and the history-backed save and restore.
 
-Two hashes, two jobs. `content_hash` is the sha256 of the overlay bytes, or
-`none` without an overlay; it is the `expected_hash` that guards a save, and it
+Two hashes, two jobs. `content_hash` is the sha256 of the overlay's UTF-8
+text with universal newlines, or `none` without an overlay. It is the public
+`expected_hash` checked by a save, and it
 equals each module's existing hash. `effective_digest` is the sha256 of the
 canonical effective entries, so two overlays that resolve to the same
-vocabulary share it.
+vocabulary share it. `overlay_text` retains exact decoded bytes for the
+canonical writer's independent raw-content guard and the kept snapshot.
 
 The cache holds one snapshot per vault and registry. An unchanged file stat
 returns it without a read; a changed stat reads the file and keeps the
-snapshot when the digest still matches. A governed save drops the entry, and
+snapshot when the exact text still matches. A governed save drops the entry, and
 the file watcher drops it on a `_Schema/` event.
 """
 
@@ -208,7 +210,9 @@ def pack_entries(name: str) -> tuple[Entry, ...]:
 
 
 def content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    """Preserve the legacy public hash from a universal-newline UTF-8 read."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def effective_digest(registry: str, entries: Mapping[str, Entry]) -> str:
@@ -276,11 +280,10 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
         snapshot = _pack_only(spec)
     else:
         try:
-            text: str | None = path.read_text(encoding="utf-8")
+            text: str | None = path.read_bytes().decode("utf-8")
         except (FileNotFoundError, NotADirectoryError):
             text = None
-        digest = content_hash(text) if text is not None else NO_OVERLAY_HASH
-        if cached is not None and cached.snapshot.content_hash == digest:
+        if cached is not None and cached.snapshot.overlay_text == text:
             snapshot = cached.snapshot
         else:
             snapshot = _build(spec, text)

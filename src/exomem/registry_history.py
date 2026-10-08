@@ -421,6 +421,30 @@ def versions(vault_root: Path, *, stem: str) -> list[dict[str, Any]]:
     return out
 
 
+def history_view(vault_root: Path, *, stem: str) -> dict[str, Any]:
+    """Project admitted history metadata with private fields for the bound owner only."""
+    from .governance import egress
+    from .governance.principal import effective_principal
+    from .governance.raw_protection import is_owner
+
+    items = versions(vault_root, stem=stem)
+    refusal = egress.owner_only_aggregate(vault_root)
+    if is_owner(effective_principal()) and refusal is None:
+        return {"versions": items}
+    # These history protocol fields belong only to the explicitly bound owner.
+    owner_fields = ("why", "principal", "principal_kind")
+    return {
+        "versions": [
+            {key: value for key, value in item.items() if key not in owner_fields}
+            for item in items
+        ],
+        "withheld": {
+            "fields": list(owner_fields),
+            "reason": (refusal or {}).get("reason") or "audience_restricted",
+        },
+    }
+
+
 def _read_added(value: Any) -> dict[str, list[str]]:
     if not isinstance(value, dict):
         return {}

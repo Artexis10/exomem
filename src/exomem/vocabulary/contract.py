@@ -544,27 +544,11 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
     if refusal is not None:
         return refusal
     snapshot = registry.load(spec, root)
-    versions = registry_history.versions(root, stem=spec.stem)
-    out: dict[str, Any] = {"subject": spec.name, "content_hash": snapshot.content_hash}
-    from ..governance.principal import effective_principal
-    from ..governance.raw_protection import is_owner
-
-    reason = restricted_reason(root)
-    if reason is not None or not is_owner(effective_principal()):
-        versions = [
-            {
-                key: value
-                for key, value in item.items()
-                if key not in {"why", "principal", "principal_kind"}
-            }
-            for item in versions
-        ]
-        out["withheld"] = {
-            "fields": ["why", "principal", "principal_kind"],
-            "reason": reason or "audience_restricted",
-        }
-    out["versions"] = versions
-    return out
+    return {
+        "subject": spec.name,
+        "content_hash": snapshot.content_hash,
+        **registry_history.history_view(root, stem=spec.stem),
+    }
 
 
 def restore(

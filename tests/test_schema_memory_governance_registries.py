@@ -501,7 +501,10 @@ def _governed_save(root: Path, subject: str, value: str, why: str) -> dict:
 
 
 def _history(root: Path, subject: str) -> list[dict]:
-    return commands.op_schema_memory(root, subject=subject, operation="history")["versions"]
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        return commands.op_schema_memory(root, subject=subject, operation="history")["versions"]
 
 
 @pytest.mark.parametrize("subject", sorted(_SUBJECTS))

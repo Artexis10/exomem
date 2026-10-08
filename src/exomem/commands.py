@@ -682,7 +682,6 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     agent that never sees the lists still classifies correctly.
     """
     from . import source_taxonomy as source_taxonomy_module
-
     from .vocabulary.contract import admission_refusal
 
     refusal = admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
@@ -11522,7 +11521,7 @@ def _governed_registry_schema_operation(
         return {
             "subject": subject,
             "content_hash": getattr(load_fn(vault_root), hash_attribute),
-            "versions": registry_history_module.versions(vault_root, stem=stem),
+            **registry_history_module.history_view(vault_root, stem=stem),
         }
     if operation == "restore":
         if proposal is not None:

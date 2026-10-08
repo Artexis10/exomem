@@ -806,7 +806,10 @@ def test_taxonomy_saves_cannot_redirect_registered_keys_or_aliases(
     assert registry_history.versions(vault, stem="source-taxonomy") == []
 
 
-def test_admitted_hosted_nonowners_cannot_read_owner_history_fields(vault: Path) -> None:
+@pytest.mark.parametrize("subject", ["entity-types", "context-roles"])
+def test_admitted_hosted_nonowners_cannot_read_owner_history_fields(
+    vault: Path, subject: str
+) -> None:
     from exomem.governance.principal import (
         HOSTED_GATEWAY_ISSUER_FAMILY,
         RequestPrincipal,
@@ -815,21 +818,34 @@ def test_admitted_hosted_nonowners_cannot_read_owner_history_fields(vault: Path)
     )
 
     with library_scope():
+        from exomem import context_roles
+
         commands.op_schema_memory(
-            vault, subject="entity-types", operation="save",
-            proposal={"upsert": {"venue": _VENUE}}, expected_hash="none",
+            vault, subject=subject,
+            operation="save" if subject == "entity-types" else "save-roles",
+            proposal={"upsert": {"venue": _VENUE}} if subject == "entity-types" else {
+                "schema_version": 1, "roles": {"constraints": {"add_cues": ["ceiling"]}},
+            },
+            expected_hash="none" if subject == "entity-types" else
+            context_roles.load_roles(vault).roles_hash,
             why="OWNER PRIVATE REASON",
         )
-        owner = commands.op_schema_memory(vault, subject="entity-types", operation="history")
+        owner = commands.op_schema_memory(vault, subject=subject, operation="history")
     assert owner["versions"][0]["why"] == "OWNER PRIVATE REASON"
     assert owner["versions"][0]["principal_kind"] == "owner"
     assert owner["versions"][0]["principal"]
+    from exomem.governance import egress
+
     with request_scope(RequestPrincipal(
         audience_id="tenant", surface="hosted", issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
     )):
-        hosted = commands.op_schema_memory(vault, subject="entity-types", operation="history")
-    assert hosted["versions"][0]["version"] == owner["versions"][0]["version"]
-    assert not {"why", "principal", "principal_kind"} & hosted["versions"][0].keys()
+        hosted = commands.op_schema_memory(vault, subject=subject, operation="history")
+        hosted = egress.postfilter("schema_memory", hosted, vault)
+    assert hosted["content_hash"] == owner["content_hash"]
+    assert hosted["versions"] == [
+        {key: value for key, value in owner["versions"][0].items()
+         if key not in {"why", "principal", "principal_kind"}}
+    ]
     assert hosted["withheld"]["reason"] == "audience_restricted"
 
 
@@ -912,3 +928,47 @@ def test_a_first_relation_save_preserves_an_overlay_racing_root_preparation(
         })
     assert path.read_text() == hand_edit
     assert registry_history.versions(root, stem=relation_registry.SPEC.stem) == []
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_crlf_edits_keep_legacy_hashes_and_exact_snapshot_restore_bytes(vault: Path) -> None:
+    import hashlib
+
+    commands.op_schema_memory(
+        vault, subject="entity-types", operation="save",
+        proposal={"upsert": {"venue": _VENUE}}, expected_hash="none", why="first entry",
+    )
+    overlay = entity_types.extension_registry_path(vault)
+    crlf = overlay.read_bytes().replace(b"\n", b"\r\n")
+    overlay.write_bytes(crlf)
+    # The legacy reader normalized newlines before publishing its expected_hash.
+    expected = hashlib.sha256(overlay.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    assert entity_types.load_entity_types(vault).extension_hash == expected
+    saved = commands.op_schema_memory(
+        vault, subject="entity-types", operation="save",
+        proposal={"upsert": {"arena": {
+            **_VENUE, "label": "Arena", "attributes": {"folder": "Arenas"},
+        }}}, expected_hash=expected, why="add another place type",
+    )["saved"]
+    version = saved["history"]["version"]
+    assert registry_history.read_version(
+        vault, stem="entity-types", version=version,
+    ).encode("utf-8") == crlf
+
+    original = overlay.read_bytes()
+    first = original.replace(b"\n", b"\r\n", 1)
+    head, _, tail = original.partition(b"\n")
+    second = head + b"\n" + tail.replace(b"\n", b"\r\n", 1)
+    assert len(first) == len(second)
+    overlay.write_bytes(first)
+    before = commands.op_schema_memory(vault, subject="entity-types", operation="inspect")
+    overlay.write_bytes(second)
+    restored = commands.op_schema_memory(
+        vault, subject="entity-types", operation="restore", version=version,
+        expected_hash=before["content_hash"], why="restore the hand-edited bytes",
+    )["saved"]
+    assert overlay.read_bytes() == crlf
+    assert entity_types.load_entity_types(vault).extension_hash == expected
+    assert registry_history.read_version(
+        vault, stem="entity-types", version=restored["history"]["version"],
+    ).encode("utf-8") == second
