@@ -19,7 +19,9 @@ import re
 
 from .scalars import ScalarValueError, parse_instant, scalar_key
 
+# nosemgrep: ep-word-set -- The rollup grammar fixes these aggregate operators.
 REDUCTIONS = ("count", "sum", "avg", "min", "max", "latest")
+# nosemgrep: ep-word-set -- Operators whose result is one of the field's own values.
 EXTREMES = frozenset({"min", "max", "latest"})
 NUMERIC = frozenset({"integer", "number"})
 #: Every finite binary64 value is an integer multiple of 2**-1074.
@@ -137,6 +139,7 @@ def rank(value, kind: str):
             return instant_order(parse_instant(value)) if type(value) is str else None
         except ScalarValueError:
             return None
+    # nosemgrep: ep-word-membership -- SCALAR_TYPES kinds whose canonical encoding is a string.
     if kind in {"string", "link", "date"}:
         return value if type(value) is str else None
     if kind == "enum":

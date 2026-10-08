@@ -51,6 +51,7 @@ from . import connection, governance, import_recommendations, schema, takeover, 
 
 log = logging.getLogger(__name__)
 
+# nosemgrep: ep-word-set -- The import request grammar fixes these source formats.
 FORMATS = ("ndjson", "json-array", "csv")
 MAX_ROW_BYTES = 1 << 20
 MAX_DEPTH = 32
@@ -60,6 +61,7 @@ PREVIEW_ROWS = 100
 JOB_WINDOW_SECONDS = 3600
 MAX_REQUEST_BYTES = 16 << 10
 MAX_MAPPED_FIELDS = 64
+# nosemgrep: ep-word-set -- The scalar kinds a CSV cell coerces to; a subset of SCALAR_TYPES.
 CSV_TYPES = ("string", "integer", "number", "boolean")
 _CHUNK = 1 << 16
 _LISTED = 20

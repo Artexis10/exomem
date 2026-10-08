@@ -1162,6 +1162,7 @@ class OperationAuthorization:
                 projection = None
         if not owners:
             return None
+        # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
         if projection is not None and projection[2] not in {"manifest", "item", "held", "log", "summary"}:
             return ()
         if len(owners) != 1:
@@ -1230,6 +1231,7 @@ class OperationAuthorization:
                 if row is None:
                     return Decision(0)
                 projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
+                # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
                 if projection["kind"] not in {"manifest", "item", "held", "summary"}:
                     return Decision(0)
                 if projection["kind"] == "item" and not any(

@@ -32,9 +32,11 @@ _CLIENT_PATH_COMPONENTS = ("com~apple~CloudDocs", "Mobile Documents")
 _PLATFORM_SYNC_ENV = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
 # Windows sync folders keep no metadata in the tree, so on a Windows-mounted path their
 # conventional names ("OneDrive - Contoso", "Dropbox (Personal)") are the evidence.
+# nosemgrep: ep-word-set -- Provider folder-name fingerprints, not meaning; see the boundary above.
 _WINDOWS_SYNC_FOLDERS = ("onedrive", "dropbox", "google drive", "iclouddrive")
 _WINDOWS_FILESYSTEMS = frozenset({"9p", "drvfs"})
 # Vault-application sync: Obsidian Sync and the community plugins that replicate files.
+# nosemgrep: ep-word-set -- Exact plugin identifiers from community-plugins.json.
 _SYNC_PLUGINS = frozenset({"obsidian-livesync", "remotely-save", "obsidian-git", "remotely-secure"})
 
 
@@ -90,6 +92,7 @@ def _windows_mounts() -> list[Path] | None:
             fields = [line.split() for line in mounts]
     except OSError:
         return []
+    # nosemgrep: ep-lexical-intent -- /proc/self/mounts fstype tokens are kernel names.
     return [Path(entry[1].replace("\\040", " ")) for entry in fields
             if len(entry) > 2 and entry[2] in _WINDOWS_FILESYSTEMS]
 

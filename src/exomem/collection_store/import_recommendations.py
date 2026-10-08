@@ -20,6 +20,7 @@ from . import rollups
 #: The time basis is read and ordered by timestamp, so it gets the one index both flags declare.
 TIME_FLAGS = {"filterable": True, "sortable": True}
 #: What a daily total needs to answer count, sum and mean exactly.
+# nosemgrep: ep-word-set -- A chosen subset of buckets.REDUCTIONS, the rollup operators.
 REDUCTIONS = ("count", "sum", "avg")
 
 

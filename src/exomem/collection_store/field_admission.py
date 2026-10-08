@@ -118,6 +118,7 @@ def _mapping_sources(mapping, manifest, fmt):
                     manifest.schema.fields.get(target))
     time_mapping = mapping.get("time") or {}
     # The mapping grammar fixes these keys; all time outputs share the declared source dependencies.
+    # nosemgrep: ep-word-membership -- The time-mapping grammar fixes these source keys.
     time_sources = tuple(source_path(value) for source in time_mapping.get("from", [])
                          for key, value in source.items() if key in {"instant", "offset", "date"})
     time_targets = tuple((time_mapping[key],) for key in ("instant", "offset", "local_date") if time_mapping.get(key))

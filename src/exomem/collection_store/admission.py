@@ -339,6 +339,7 @@ def _resolve(session, *, force=False):
                 staged = stack.enter_context(takeover.staged_replica(session, check, heads))
                 action, reason = ((takeover.SYNC_PENDING, "the vault replica has not arrived")
                                   if staged is None else takeover.decide(staged=staged, **facts))
+            # nosemgrep: ep-word-membership -- takeover.decide returns these action tokens.
             if action in {"admit", "adopt", "continue"} or (
                     action == takeover.DIVERGED and local is not None and not diverged):
                 with manager.consistency_guard(session.root, operation="collection_store_takeover"):

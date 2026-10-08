@@ -801,6 +801,7 @@ class CollectionWriter:
     ) -> None:
         descriptor = None
         digest = hashlib.sha256(text.encode()).hexdigest()
+        # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
         if kind in {"manifest", "item", "held", "summary"}:
             descriptor = self._publication.prepare({
                 "path": path, "collection_id": cid, "kind": kind, "row_id": row_id,

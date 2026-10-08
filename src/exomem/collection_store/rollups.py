@@ -33,6 +33,7 @@ from ..query_engine.buckets import (
     declared_kind,
     group_key,
 )
+from ..query_engine.scalars import SCALAR_TYPES
 from . import typed_storage
 
 #: Each item mutation updates at most an old and a new bucket per rollup, so
@@ -42,7 +43,6 @@ MAX_GROUP_DIMENSIONS = 4
 MAX_VALUE_FIELDS = 8
 _KEYS = frozenset({"bucket", "timestamp", "group_by", "values"})
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_SCALARS = frozenset({"string", "integer", "number", "boolean", "date", "datetime", "enum", "link"})
 _FLAGGED = object()
 
 
@@ -125,7 +125,7 @@ def normalize(fields: Mapping, raw) -> tuple[Rollup, ...]:
         if len(groups) > MAX_GROUP_DIMENSIONS:
             _refuse("ROLLUP_LIMIT", f"at most {MAX_GROUP_DIMENSIONS} group dimensions", f"{at}.group_by")
         if (len(set(map(str, groups))) != len(groups) or timestamp in groups
-                or any(kinds.get(group) not in _SCALARS for group in groups)):
+                or any(kinds.get(group) not in SCALAR_TYPES for group in groups)):
             _refuse(invalid, "group dimensions are distinct declared scalar fields", f"{at}.group_by")
         values = declaration.get("values", {})
         if not isinstance(values, Mapping):
@@ -135,7 +135,7 @@ def normalize(fields: Mapping, raw) -> tuple[Rollup, ...]:
         reduced = []
         for field, ops in values.items():
             kind = kinds.get(field)
-            if kind not in _SCALARS or not isinstance(ops, list) or not ops or len(set(map(str, ops))) != len(ops):
+            if kind not in SCALAR_TYPES or not isinstance(ops, list) or not ops or len(set(map(str, ops))) != len(ops):
                 _refuse(invalid, "each value field is declared and lists distinct reductions", f"{at}.values.{field}")
             unsupported = [op for op in ops if op not in REDUCTIONS]
             if unsupported:

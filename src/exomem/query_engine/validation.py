@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..structured_collections import CollectionError, FieldSpec, validate_field_value
+from .buckets import EXTREMES
 from .ir import (
     Aggregate,
     Field,
@@ -76,6 +77,7 @@ _NULL_OPS = frozenset({"exists", "missing", "is_null", "is_missing", "is_not_nul
 #: query-engine discovery chapter reports these same objects.
 MODES = ("compose", "explain", "preview", "dry_run", "execute")
 PROFILES = ("interactive", "analytics")
+# nosemgrep: ep-word-set -- The query grammar fixes these bucket granularities.
 BUCKETS = ("day", "week", "month")
 AGGREGATE_OPS = ("count", "sum", "avg", "min", "max", "latest", "percentile", "distinct_count")
 LIMITS = {
@@ -526,7 +528,7 @@ class _Binder:
                 "integer"
                 if op in {"count", "distinct_count"}
                 else field.value_type
-                if op in {"min", "max", "latest"}
+                if op in EXTREMES
                 else "number"
             )
             self.reduction_fields[name] = Field(self.source, name, output_type)

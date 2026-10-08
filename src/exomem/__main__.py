@@ -89,6 +89,7 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
 # command gets its own log file; `serve` configures server-role logging
 # itself from `server.run()`, and `hosted` emits a JSON-only operator protocol,
 # so they are deliberately excluded here.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
 _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "setup",
