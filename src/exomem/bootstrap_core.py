@@ -25,9 +25,15 @@ SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
         ("authoring_contract", "semantic_authoring"),
         "writing a compiled note or a semantic unit: recipes, reviewed creation, advisories",
     ),
-    "entities": (
-        ("entity_registry", "vocabulary_workflow", "relation_vocabulary", "source_taxonomy"),
-        "vocabulary_workflow (the workflow loop's vocabulary steps), entity types, relations, source classification",
+    "vocabulary": (
+        (
+            "vocabulary",
+            "vocabulary_workflow",
+            "entity_registry",
+            "relation_vocabulary",
+            "source_taxonomy",
+        ),
+        "the live registries by use and what is new; vocabulary_workflow; entity, relation and source rules",
     ),
     "records_planning": (
         ("records", "planning", "workflow_contracts"),
@@ -68,9 +74,12 @@ SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
 #: `diagnostics_reading` section and in a session profile.
 LATENCY_POINTER = "breach; section=diagnostics_reading"
 
-#: The core lists at most this many entity type ids; the rest are in the `entities`
-#: section. Vault-declared types are unbounded, so the core's size must not follow them.
-CORE_ENTITY_TYPE_CAP = 12
+#: Section names a released skill may still request, and the section that now serves them.
+SECTION_ALIASES = {"entities": "vocabulary"}
+
+#: Where the core points for the live vocabulary. The core lists none of it: every
+#: registry is unbounded, so the core's size must not follow them.
+VOCABULARY_POINTER = "section=vocabulary"
 
 #: Keys the core carries verbatim from the reference payload.
 _VERBATIM = ("contract_version", "profile", "governance", "workflow", "active_capabilities")
@@ -95,7 +104,7 @@ _PASSTHROUGH = ("due_state", "latency")
 
 
 def accepted_sections() -> tuple[str, ...]:
-    return ("all", "index", *SECTIONS)
+    return ("all", "index", *SECTIONS, *SECTION_ALIASES)
 
 
 def _size(value: object) -> int:
@@ -119,6 +128,7 @@ def sections_index(reference: dict) -> dict[str, int]:
 
 def section_payload(reference: dict, name: str) -> dict:
     """The blocks of one section, byte-identical to the reference payload."""
+    name = SECTION_ALIASES.get(name, name)
     if name == "all":
         return reference
     if name == "index":
@@ -212,13 +222,8 @@ def _capture_semantics(reference: dict) -> dict:
         out["minimum_unit"] = unit["rule"]
     if "capture_rule" in entity:
         out["entity_capture_rule"] = entity["capture_rule"]
-    if "types" in entity:
-        ids = [t["id"] for t in entity["types"] if isinstance(t, dict) and "id" in t]
-        out["entity_types"] = ids[:CORE_ENTITY_TYPE_CAP]
-        if len(ids) > CORE_ENTITY_TYPE_CAP:
-            out["entity_types_more"] = (
-                f"+{len(ids) - CORE_ENTITY_TYPE_CAP} more: section=entities"
-            )
+    if "vocabulary" in reference:
+        out["vocabulary"] = VOCABULARY_POINTER
     return out
 
 
@@ -316,6 +321,7 @@ _SESSION_LIVE_KEYS = (
     "entity_registry",
     "source_taxonomy",
     "vocabulary_workflow",
+    "vocabulary",
 )
 
 

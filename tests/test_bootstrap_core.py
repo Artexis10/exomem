@@ -33,7 +33,7 @@ CORE_HEADROOM_WARNING_BYTES = 512
 #: section cannot quietly regrow into a second full payload.
 SECTION_BYTE_CEILINGS = {
     "authoring": 20_900,
-    "entities": 11_900,
+    "vocabulary": 11_900,
     "records_planning": 5_900,
     "routing": 12_500,
     "adoption": 7_200,
@@ -183,7 +183,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "workflow-loop-names-the-vocabulary-section": (
         prominence.CANON,
-        lambda core: "vocabulary_workflow (section entities)"
+        lambda core: "vocabulary_workflow (section vocabulary)"
         in " ".join(core["workflow"]["loop"]),
     ),
     "sections-index": (
@@ -360,21 +360,19 @@ def test_the_populated_core_stays_under_the_hard_ceiling(monkeypatch, level, sur
 @pytest.mark.parametrize("surface", SURFACES)
 def test_the_vault_derived_blocks_are_bounded_in_the_core(monkeypatch, surface):
     core = _bootstrap(monkeypatch, "maximal", surface, populated=True)
-    types = core["capture_semantics"]["entity_types"]
-    assert len(types) == bootstrap_core.CORE_ENTITY_TYPE_CAP < CUSTOM_ENTITY_TYPES
-    listed_total = len(bootstrap_core_registry_ids(monkeypatch, surface))
-    assert core["capture_semantics"]["entity_types_more"] == (
-        f"+{listed_total - bootstrap_core.CORE_ENTITY_TYPE_CAP} more: section=entities"
-    )
+    # The live vocabulary is a section: the core names it and lists no type, so a
+    # vault's registries cannot grow the core.
+    assert core["capture_semantics"]["vocabulary"] == "section=vocabulary"
+    assert "entity_types" not in core["capture_semantics"]
+    # The section lists a bounded number of them and counts the rest.
+    section = _bootstrap(monkeypatch, "maximal", surface, populated=True, section="vocabulary")
+    listed = section["vocabulary"]["entity-types"]
+    assert len(listed["top"]) == 12 < CUSTOM_ENTITY_TYPES
+    assert listed["more"].startswith("+")
     assert len(_text(core["due_state"])) <= 200
     assert core["due_state"]["list"] == "section=epistemics"
     assert core["latency"] == bootstrap_core.LATENCY_POINTER
     assert len(_text({"latency": core["latency"]})) <= 60
-
-
-def bootstrap_core_registry_ids(monkeypatch, surface) -> list[str]:
-    section = _bootstrap(monkeypatch, "maximal", surface, populated=True, section="entities")
-    return [item["id"] for item in section["entity_registry"]["types"]]
 
 
 @pytest.mark.parametrize("surface", SURFACES)

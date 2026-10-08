@@ -1,4 +1,10 @@
-"""Core entity kinds plus a validated vault-owned extension registry."""
+"""Core entity kinds plus a validated vault-owned extension registry.
+
+The core kinds ship in `vocabulary/packs/core/entity-types.yaml`. The vault
+overlay `_Schema/entity-types.yaml` keeps its own grammar and is read and
+cached through the generic vocabulary loader (`SPEC`); this module is the
+registry's adapter and keeps its public API.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +23,7 @@ import yaml
 
 from . import vault
 from .kbdir import kb_dirname
+from .vocabulary import registry as vocabulary_registry
 
 EXTENSION_SCHEMA_VERSION = 1
 CORE_REGISTRY_VERSION = 1
@@ -118,85 +125,27 @@ class EntityFacetDefinition:
         return {"cardinality": self.cardinality, "value": self.value}
 
 
-# Backward-compatible core-only tuple. These five definitions remain unchanged.
-ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
-    EntityTypeDefinition(
-        id="person",
-        folder="People",
-        label="Person",
-        aliases=("people", "individual", "individuals", "human", "humans"),
-        capture_guidance="A stable person identity with reusable facts, history, or relations.",
-        optional_frontmatter=("affiliation", "relationship"),
-        cue_nouns=("person", "people", "individual", "individuals", "human", "humans"),
-    ),
-    EntityTypeDefinition(
-        id="organization",
-        folder="Organizations",
-        label="Organization",
-        aliases=(
-            "organizations",
-            "organisation",
-            "organisations",
-            "company",
-            "companies",
-            "institution",
-            "institutions",
-        ),
-        capture_guidance=(
-            "A stable organization identity with reusable facts, history, or relations."
-        ),
-        cue_nouns=(
-            "organization",
-            "organizations",
-            "organisation",
-            "organisations",
-            "company",
-            "companies",
-            "institution",
-            "institutions",
-        ),
-    ),
-    EntityTypeDefinition(
-        id="concept",
-        folder="Concepts",
-        label="Concept",
-        aliases=("concepts", "idea", "ideas"),
-        capture_guidance="A reusable concept that anchors conclusions across sources.",
-        optional_frontmatter=("domain",),
-        cue_nouns=("concept", "concepts", "idea", "ideas"),
-    ),
-    EntityTypeDefinition(
-        id="library",
-        folder="Libraries",
-        label="Library",
-        aliases=(
-            "libraries",
-            "software-library",
-            "software-libraries",
-            "package",
-            "packages",
-        ),
-        capture_guidance="A reusable software library or package with durable project context.",
-        optional_frontmatter=("language", "repo", "license", "used_in"),
-        cue_nouns=(
-            "library",
-            "libraries",
-            "software-library",
-            "software-libraries",
-            "package",
-            "packages",
-        ),
-    ),
-    EntityTypeDefinition(
-        id="decision",
-        folder="Decisions",
-        label="Decision",
-        aliases=("decisions", "adr", "adrs"),
-        capture_guidance="A durable decision whose identity is useful as a graph node.",
-        optional_frontmatter=("decided", "project", "decision_status"),
-        cue_nouns=("decision", "decisions", "adr", "adrs"),
-    ),
-)
+def _pack_definitions() -> tuple[EntityTypeDefinition, ...]:
+    """The core kinds from the shipped pack, in pack order."""
+    out: list[EntityTypeDefinition] = []
+    for entry in vocabulary_registry.pack_entries("entity-types.yaml"):
+        attributes = entry.attributes
+        out.append(
+            EntityTypeDefinition(
+                id=entry.key,
+                folder=str(attributes["folder"]),
+                label=entry.label,
+                aliases=entry.aliases,
+                capture_guidance=entry.guidance,
+                optional_frontmatter=tuple(attributes.get("optional_frontmatter") or ()),
+                cue_nouns=tuple(attributes.get("cue_nouns") or ()),
+            )
+        )
+    return tuple(out)
+
+
+#: The core-only definitions, read from the shipped pack.
+ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = _pack_definitions()
 
 
 def normalize_entity_token(value: str) -> str:
@@ -396,9 +345,6 @@ def extension_registry_path(vault_root: Path) -> Path:
     return Path(vault_root) / kb_dirname() / "_Schema" / "entity-types.yaml"
 
 
-_CACHE: dict[Path, tuple[str, EntityTypeRegistry]] = {}
-
-
 def load_entity_types(
     vault_root: Path | None = None,
     *,
@@ -411,28 +357,28 @@ def load_entity_types(
         return _parse_extension_data(proposal, _content_hash(raw), core)
     if vault_root is None:
         return core
-    path = extension_registry_path(vault_root)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    return vocabulary_registry.load(SPEC, Path(vault_root)).typed
+
+
+def clear_cache() -> None:
+    """Drop every vault's cached entity-type snapshot."""
+    vocabulary_registry.invalidate_registry(SPEC.name)
+
+
+def _parse_overlay_text(raw: str | None, digest: str) -> EntityTypeRegistry:
+    core = core_registry()
+    if raw is None:
         return core
-    digest = _content_hash(raw)
-    cached = _CACHE.get(path)
-    if cached is not None and cached[0] == digest:
-        return cached[1]
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        loaded = _registry(
+        return _registry(
             core.core_version,
             digest,
             core.core,
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
         )
-    else:
-        loaded = _parse_extension_data(data, digest, core)
-    _CACHE[path] = (digest, loaded)
-    return loaded
+    return _parse_extension_data(data, digest, core)
 
 
 def validate_proposal(proposal: dict[str, Any]) -> list[dict[str, str]]:
@@ -445,7 +391,10 @@ def save_registry(
     *,
     expected_hash: str | None,
     observed_ids: Iterable[str],
+    why: str | None = None,
+    operation: str = "save-entity-types",
 ) -> dict[str, Any]:
+    """Replace the overlay with one complete reviewed document, keeping history."""
     from .governance import connector_boundary
 
     connector_boundary.require_global_observation(vault_root)
@@ -459,9 +408,10 @@ def save_registry(
             f"{removed}"
         )
     path = extension_registry_path(vault_root)
+    inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     current_hash: str | None = None
-    if path.exists():
-        current_hash = _content_hash(path.read_text(encoding="utf-8"))
+    if inspected.overlay_text is not None:
+        current_hash = inspected.content_hash
         if expected_hash is None:
             raise ValueError("REGISTRY_EXISTS: provide current expected_hash")
         if expected_hash != current_hash:
@@ -469,16 +419,25 @@ def save_registry(
                 "STALE_ENTITY_TYPE_REGISTRY: expected_hash does not match current hash"
             )
     rendered = yaml.safe_dump(proposal, sort_keys=False, allow_unicode=True)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(path=path, content=rendered)],
-        vault_root=vault_root,
+    history = vocabulary_registry.commit(
+        SPEC,
+        Path(vault_root),
+        rendered,
+        operation=operation,
+        why=why,
+        before_hash=current_hash or vocabulary_registry.NO_OVERLAY_HASH,
+        previous=inspected.overlay_text,
+        added=vocabulary_registry.added_keys(
+            inspected.entries,
+            SPEC.adapter.entries(registry),
+        ),
     )
-    _CACHE.pop(path, None)
     return {
         "path": path.relative_to(vault_root).as_posix(),
         "content_hash": _content_hash(rendered),
         "previous_hash": current_hash,
         "created": current_hash is None,
+        "history": history,
     }
 
 
@@ -974,3 +933,141 @@ def _finding(
 
 def _content_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# The registry adapter (`add-vocabulary-registries`)
+# --------------------------------------------------------------------------- #
+
+
+class _Adapter:
+    """`_Schema/entity-types.yaml` in its own grammar, as generic entries."""
+
+    def parse(self, text: str | None, digest: str) -> EntityTypeRegistry:
+        # Looked up at call time so a test can time or replace the parser.
+        return _parse_overlay_text(text, digest)
+
+    def parse_document(self, document: Mapping[str, Any]) -> EntityTypeRegistry:
+        return load_entity_types(proposal=dict(document))
+
+    def entries(self, typed: EntityTypeRegistry) -> dict[str, vocabulary_registry.Entry]:
+        out: dict[str, vocabulary_registry.Entry] = {}
+        for definition in (*typed.core.values(), *typed.extensions.values()):
+            attributes: dict[str, Any] = {"folder": definition.folder}
+            if definition.optional_frontmatter:
+                attributes["optional_frontmatter"] = list(definition.optional_frontmatter)
+            # Cue nouns default to the aliases; only a declared list is an attribute.
+            if definition.cue_nouns and definition.cue_nouns != definition.aliases:
+                attributes["cue_nouns"] = list(definition.cue_nouns)
+            out[definition.id] = vocabulary_registry.Entry(
+                key=definition.id,
+                label=definition.label,
+                aliases=definition.aliases,
+                status=definition.status,
+                replaced_by=definition.replaced_by,
+                parent=definition.parent,
+                attributes=MappingProxyType(attributes),
+                guidance=definition.capture_guidance,
+                origin="pack" if definition.core else "vault",
+            )
+        return out
+
+    def findings(self, typed: EntityTypeRegistry) -> tuple[dict[str, str], ...]:
+        return typed.findings
+
+    def document(self, text: str | None) -> dict[str, Any]:
+        if text is None:
+            return empty_proposal()
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise vocabulary_registry.RegistryError(
+                "INVALID_REGISTRY_OVERLAY: entity-types.yaml does not parse; fix it or "
+                f"restore a kept version ({exc})"
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("entity_types") or {}, dict):
+            raise vocabulary_registry.RegistryError(
+                "INVALID_REGISTRY_OVERLAY: entity-types.yaml is not a registry document; fix "
+                "it or restore a kept version"
+            )
+        data.setdefault("schema_version", EXTENSION_SCHEMA_VERSION)
+        data["entity_types"] = dict(data.get("entity_types") or {})
+        return data
+
+    def put(
+        self,
+        document: dict[str, Any],
+        key: str,
+        entry: vocabulary_registry.Entry,
+        *,
+        existing: bool,
+    ) -> None:
+        if key in ENTITY_TYPES_BY_ID:
+            raise vocabulary_registry.RegistryError(
+                f"PACK_ENTRY_FIXED: {key!r} ships with Exomem; this overlay grammar cannot "
+                "patch a shipped entity type"
+            )
+        rows = document["entity_types"]
+        raw = rows.get(key)
+        if existing and isinstance(raw, dict):
+            # The parent and folder were checked unchanged; only the mutable
+            # fields move, so the rest of the row keeps its bytes.
+            raw["label"] = entry.label
+            raw["aliases"] = list(entry.aliases)
+            raw["capture_guidance"] = entry.guidance
+            for name in ("cue_nouns", "optional_frontmatter"):
+                if name in entry.attributes:
+                    raw[name] = list(entry.attributes[name] or ())
+            raw["status"] = entry.status
+            if entry.replaced_by:
+                raw["replaced_by"] = entry.replaced_by
+            return
+        row: dict[str, Any] = {
+            "folder": entry.attributes.get("folder"),
+            "label": entry.label,
+            "aliases": list(entry.aliases),
+            "capture_guidance": entry.guidance,
+        }
+        for name in ("cue_nouns", "optional_frontmatter"):
+            if name in entry.attributes:
+                row[name] = list(entry.attributes[name] or ())
+        if entry.parent:
+            row["parent"] = entry.parent
+        row["status"] = entry.status
+        if entry.replaced_by:
+            row["replaced_by"] = entry.replaced_by
+        rows[key] = row
+
+    def render(self, document: Mapping[str, Any]) -> str:
+        return yaml.safe_dump(dict(document), sort_keys=False, allow_unicode=True)
+
+    def normalize_key(self, raw: str) -> str:
+        key = normalize_entity_token(raw)
+        if not _ID_RE.fullmatch(key):
+            raise vocabulary_registry.RegistryError(
+                f"INVALID_REGISTRY_KEY: {raw!r} cannot become an entity type id ({_ID_RE.pattern})"
+            )
+        return key
+
+
+def _usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.entity_types(vault_root, snapshot)
+
+
+SPEC = vocabulary_registry.RegistrySpec(
+    name="entity-types",
+    stem="entity-types",
+    overlay=extension_registry_path,
+    adapter=_Adapter(),
+    fields=frozenset(
+        {"label", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
+    ),
+    attributes=frozenset({"folder", "cue_nouns", "optional_frontmatter"}),
+    # A type's family and its folder are what its pages already rely on.
+    immutable=frozenset({"parent", "attributes.folder"}),
+    family="entity-type/v1",
+    cap=256,
+    usage=_usage,
+)

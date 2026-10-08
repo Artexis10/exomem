@@ -21,7 +21,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import (
@@ -112,6 +112,8 @@ class AddResult:
     adoption: dict[str, object] | None = None
     # The shared domain identity record, present only when a domain was given.
     vocabulary_resolution: dict[str, str] | None = None
+    # One line per source kind or domain this capture registered on first use.
+    vocabulary_receipt: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -128,6 +130,8 @@ class AddResult:
             out["adoption"] = self.adoption
         if self.vocabulary_resolution is not None:
             out["vocabulary_resolution"] = self.vocabulary_resolution
+        if self.vocabulary_receipt:
+            out["vocabulary_receipt"] = list(self.vocabulary_receipt)
         return out
 
 
@@ -755,6 +759,7 @@ def add(
         ) if not count_errors else None,
         adoption=adoption_receipt,
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
+        vocabulary_receipt=taxonomy_plan.receipt(),
     )
 
 

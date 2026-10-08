@@ -128,7 +128,7 @@ entity_types:
 """,
         encoding="utf-8",
     )
-    entity_types._CACHE.clear()
+    entity_types.clear_cache()
 
 
 def test_edge_cursor_can_resume_every_pair_without_duplicates(tmp_path):

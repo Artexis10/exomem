@@ -307,6 +307,10 @@ def save_roles(
     `rendered` is a restore's verbatim version bytes, so a restored file
     reproduces the exact `roles_hash` it had.
     """
+    from . import registry_history
+
+    path = override_path(vault_root)
+    previous, guard = registry_history.read_previous(Path(vault_root), path)
     current = load_roles(vault_root)
     if current.roles_hash != expected_hash:
         raise ValueError(
@@ -317,7 +321,6 @@ def save_roles(
         raise ValueError(
             f"INVALID_CONTEXT_ROLE_REGISTRY: {[dict(item) for item in candidate.findings]!r}"
         )
-    path = override_path(vault_root)
     if rendered is None:
         rendered = yaml.safe_dump(proposal, sort_keys=True)
     # The hash the file on disk will carry: over the rendered bytes, which
@@ -327,8 +330,6 @@ def save_roles(
         _hash(rendered),
         semantic_language_registry.load_registry(vault_root).content_hash,
     )
-    from . import registry_history
-
     history = registry_history.commit(
         Path(vault_root),
         path=path,
@@ -336,6 +337,8 @@ def save_roles(
         rendered=rendered,
         operation=operation,
         why=why,
+        previous=previous,
+        guard=guard,
         before_hash=current.roles_hash,
         after_hash=after_hash,
     )

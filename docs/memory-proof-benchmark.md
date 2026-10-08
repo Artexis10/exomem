@@ -63,7 +63,7 @@ requiring the missing structure.
 |---|---|---|
 | Sources/Evidence append-only separation | S+T | `access.py`; `tests/test_access.py`, `test_tier2.py` |
 | Provenance (sources:/ingested_into:, provenance_report, derived_from/evidenced_by) | S+T | `note.py`, `provenance.py`; `tests/test_provenance_report.py` |
-| Typed semantic units (26 kinds) + 26 core relations + graph sidecar + traversal lenses | S+T | `semantic_units.py`, `core-relations.yaml`, `epistemic_graph.py`; 59+20 tests |
+| Typed semantic units (26 kinds) + 26 core relations + graph sidecar + traversal lenses | S+T | `semantic_units.py`, `vocabulary/packs/core/relations.yaml`, `epistemic_graph.py`; 59+20 tests |
 | Supersession lifecycle (demote-not-hide, evolution chains) | S+T | `replace.py`, `evolution.py`; `tests/test_replace.py`, `test_supersession_surface.py` |
 | Contradiction *detection* + review queue (cosine band 0.82–0.90) | S+T | `corpus_aware.py`, `audit.py`; `tests/test_audit_corpus_contradictions.py` |
 | Review surfaces (review_memory 13 modes, review_item_context, triage fingerprints, Studio) | S+T | `attention.py`, `review_context.py`, `review_state.py`; 40+ tests |

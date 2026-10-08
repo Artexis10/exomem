@@ -12,6 +12,14 @@ import yaml
 from exomem import commands, entity_candidates, entity_types, link
 
 
+@pytest.fixture
+def owner_library_scope():
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        yield
+
+
 def test_core_entity_registry_is_complete_unique_and_immutable() -> None:
     definitions = entity_types.ENTITY_TYPE_REGISTRY
 
@@ -427,6 +435,7 @@ def test_save_registry_refuses_observed_deletion_and_stale_hash(tmp_path: Path) 
         )
 
 
+@pytest.mark.usefixtures("owner_library_scope")
 def test_save_registry_ignores_unregistered_authored_types(tmp_path: Path) -> None:
     for name in ("Aster Hall", "Beryl Room"):
         _entity_page(
@@ -514,6 +523,7 @@ def test_unsupported_optional_frontmatter_is_a_finding(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.usefixtures("owner_library_scope")
 def test_schema_memory_saves_entity_types_only_with_why(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="WHY_REQUIRED"):
         commands.op_schema_memory(

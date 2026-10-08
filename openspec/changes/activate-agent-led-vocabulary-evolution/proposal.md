@@ -26,6 +26,14 @@ Exomem can register custom entity and relationship types, but ordinary agent wor
 - `agent-bootstrap-contract`: Teach and advertise the complete evolving-vocabulary loop, supported families and actual authority capabilities.
 - `mutation-terminal-contract`: Expose bounded vocabulary review context without changing mutation success or replay identity.
 
+## Amendment (2026-10-07)
+
+`add-vocabulary-registries` builds on this change and does not supersede it:
+
+- Under v1, an entity-type or relation save takes effect immediately, for every future agent. Revert belongs to `add-vocabulary-registries`: every save keeps a snapshot and the owner restores it through `schema_memory(operation="restore")`.
+- The fingerprinted work-item queue and the family descriptor defined here become the nudge channel for the vocabulary programme. A restricted principal's registry save becomes a pending item in this queue.
+- The v2 additive authority contract is unchanged and stays opt-in.
+
 ## Impact
 
 Expected implementation areas are `commands.py`, `mutation_terminal.py`, the entity and relation registries/resolvers, review projections/state, engagement and authorization binding, MCP/REST/CLI adapters, and the generic skill scaffold. No live policy, registry or graph is changed by this proposal.

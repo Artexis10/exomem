@@ -913,40 +913,43 @@ def _register_corpus_vocabulary(root: Path) -> None:
 
     from exomem import context_roles, semantic_language_registry
     from exomem.commands import op_schema_memory
+    from exomem.governance.principal import library_scope
 
     current = semantic_language_registry.load_registry(root)
-    op_schema_memory(
-        root,
-        operation="infer",
-        subject="categories",
-        save=True,
-        proposal={
-            "schema_version": 1,
-            "categories": {key: {"description": text} for key, text in CORPUS_CATEGORIES.items()},
-            "kinds": {},
-        },
-        expected_hash=current.content_hash,
-    )
+    with library_scope():
+        op_schema_memory(
+            root,
+            operation="infer",
+            subject="categories",
+            save=True,
+            proposal={
+                "schema_version": 1,
+                "categories": {key: {"description": text} for key, text in CORPUS_CATEGORIES.items()},
+                "kinds": {},
+            },
+            expected_hash=current.content_hash,
+        )
     registered = semantic_language_registry.load_registry(root)
     unregistered = sorted(
         key for key in CORPUS_CATEGORIES if registered.resolve_category(key).status == "unregistered"
     )
     if unregistered:
         raise FixtureError(f"corpus categories did not register: {unregistered}")
-    saved = op_schema_memory(
-        root,
-        operation="save-roles",
-        subject="context-roles",
-        proposal={
-            "schema_version": 1,
-            "roles": {
-                role: {"add_categories": list(categories)}
-                for role, categories in CORPUS_ROLE_CATEGORIES.items()
+    with library_scope():
+        saved = op_schema_memory(
+            root,
+            operation="save-roles",
+            subject="context-roles",
+            proposal={
+                "schema_version": 1,
+                "roles": {
+                    role: {"add_categories": list(categories)}
+                    for role, categories in CORPUS_ROLE_CATEGORIES.items()
+                },
             },
-        },
-        why="route the corpus vault's own observation categories to their roles",
-        expected_hash=context_roles.load_roles(root).roles_hash,
-    )
+            why="route the corpus vault's own observation categories to their roles",
+            expected_hash=context_roles.load_roles(root).roles_hash,
+        )
     if saved.get("findings"):
         raise FixtureError(f"corpus role override refused: {saved['findings']!r}")
     roles = context_roles.load_roles(root).roles

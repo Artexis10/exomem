@@ -540,19 +540,20 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
     assert graph["edges"], graph
     assert graph["edges"][0]["relation_type"] == "venue.hosts"
 
-    deprecated = manager.invoke(
-        _command("schema_memory"),
-        (tmp_path,),
-        {
-            "subject": "relations",
-            "operation": "save-relations",
-            "proposal": {"deprecate": {"venue.hosts": "relates_to"}},
-            "expected_hash": relation_registry.load_registry(tmp_path).extension_hash,
-            "why": "Retire the old name while retaining its history.",
-        },
-        idempotency_key="venue-hosts-deprecation",
-        read_only=False,
-    )
+    with library_scope():
+        deprecated = manager.invoke(
+            _command("schema_memory"),
+            (tmp_path,),
+            {
+                "subject": "relations",
+                "operation": "save-relations",
+                "proposal": {"deprecate": {"venue.hosts": "relates_to"}},
+                "expected_hash": relation_registry.load_registry(tmp_path).extension_hash,
+                "why": "Retire the old name while retaining its history.",
+            },
+            idempotency_key="venue-hosts-deprecation",
+            read_only=False,
+        )
     assert deprecated["state"] == "committed"
     historical = commands.op_connect_memory(
         tmp_path, operation="resolve-relation", requested_relation="venue.hosts"

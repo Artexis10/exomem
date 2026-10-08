@@ -127,7 +127,15 @@
 - [ ] 7.4 Migrate the remaining cells one at a time with the same acceptance.
 - [ ] 7.5 Update `docs/runbooks/cloud-operator-import.md`, which still cites the nightly 02:00–05:00 UTC backup window.
 - [ ] 7.6 Before the cutover (7.2), pin the Hetzner CSI controller to the server node, as the TopoLVM and snapshot controllers are: its token can attach any volume to any node. This moves a live production pod, so it ships on its own. Evidence: the controller pod's node, and a volume attach after the move.
-- [ ] 7.7 Before local storage is enabled in production (6.2, 7.2), rehearse the coexistence configuration end to end: TopoLVM installed, `cellStorage.local.enabled` true, the domain still the Hetzner class, Hetzner-class cells provisioned, backed up and deleted. Neither the P3 rehearsal (local storage off, as production today) nor the drill (local domain) covers it. Evidence: a full P3 run in that configuration.
+- [x] 7.7 Before local storage is enabled in production (6.2, 7.2), rehearse the coexistence configuration end to end: TopoLVM installed, `cellStorage.local.enabled` true, the domain still the Hetzner class, Hetzner-class cells provisioned, backed up and deleted. Neither the P3 rehearsal (local storage off, as production today) nor the drill (local domain) covers it. Evidence: a full P3 run in that configuration.
+  - Shipped proof: [#1620](https://github.com/Artexis10/exomem/pull/1620), merge `a9dbf068cf18a067f88ba844dc084536a1cc6acb`.
+    Strict [full-coexistence P3 37736543082](https://github.com/Artexis10/exomem/actions/runs/37736543082) passed all 12 steps and all gating targets at exact head `8f2c74a6ecf9a2aa26082a9436e8c23d68f91233`.
+    Real TopoLVM and snapshot controllers became ready; the local domain published no pool, and the serving claim selected `exomem-cloud-encrypted`.
+    The upgrade took 49.2858 seconds, including the stopped D6 backup; target readiness, hold removal and recall passed.
+    Diagnostic logs took 1.4798 seconds before the corrected timer; the release request took 0.0362 seconds inside it.
+    Earlier strict attempts retained their failures at 62.3219 and 67.7132 seconds; the unchanged limit remains below 60 seconds.
+    Non-gating capture p95 was 1.1452 seconds against its 1.0-second target; that target remained unmet.
+    Hetzner CSI and object storage retain P3 doubles. This proof authorizes no local production cutover or hardware adoption.
 
 ## 8. Retire Hetzner volumes
 

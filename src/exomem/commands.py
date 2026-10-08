@@ -683,7 +683,11 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     agent that never sees the lists still classifies correctly.
     """
     from . import source_taxonomy as source_taxonomy_module
+    from .vocabulary.contract import admission_refusal
 
+    refusal = admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
+    if refusal is not None:
+        return refusal
     taxonomy = source_taxonomy_module.load_taxonomy(vault_root)
     projection: dict = {
         "contract": (
@@ -888,7 +892,7 @@ def op_bootstrap(
     # Where the compact core points for the vocabulary workflow's full contract: it is
     # served on demand in a section, and a released profile keeps its published text.
     vocabulary_workflow_home = (
-        " (section entities)" if profile == "compact" and not frozen_profile else ""
+        " (section vocabulary)" if profile == "compact" and not frozen_profile else ""
     )
     active_product_names = frozenset(active_descriptor.product_commands)
     # The recall contract opens with a line that names `activate_context`. Where the
@@ -1013,12 +1017,12 @@ def op_bootstrap(
             "resolution_required": workflow_resolution_required,
             "status": workflow_public_status,
         }
-    entity_extensions_visible = egress_module.content_permits(
-        vault_root, entity_types_module.extension_registry_path(vault_root).relative_to(vault_root).as_posix(),
-        principal_module.effective_principal(),
+    from .vocabulary.contract import admission_refusal
+
+    entity_registry_refusal = admission_refusal(vault_root, entity_types_module.SPEC)
+    entity_type_registry = entity_types_module.load_entity_types(
+        None if entity_registry_refusal else vault_root
     )
-    entity_type_registry = (entity_types_module.load_entity_types(vault_root) if entity_extensions_visible
-                            else entity_types_module.core_registry())
     entity_recurrence_available = "review_memory" in active_product_names
     if entity_recurrence_available:
         ordinary_mode = (
@@ -1102,12 +1106,10 @@ def op_bootstrap(
                 "due-state",
             ],
         }
-    relation_extensions_visible = egress_module.content_permits(
-        vault_root, relation_registry_module.extension_registry_path(vault_root).relative_to(vault_root).as_posix(),
-        principal_module.effective_principal(),
+    relation_registry_refusal = admission_refusal(vault_root, relation_registry_module.SPEC)
+    relation_registry = relation_registry_module.load_registry(
+        None if relation_registry_refusal else vault_root
     )
-    relation_registry = (relation_registry_module.load_registry(vault_root) if relation_extensions_visible
-                         else relation_registry_module.core_registry())
     legacy_commands = None
     if active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS:
         legacy_commands = {
@@ -1141,22 +1143,38 @@ def op_bootstrap(
                 }
         return {"available": True, "route": {"tool": tool, "args": args}}
 
-    relation_vocabulary_projection = {
+    relation_vocabulary_projection = relation_registry_refusal or {
         "contract_version": "2026-09-01.1",
         "core_version": relation_registry.core_version,
         **({"core_vocabulary": sorted(relation_registry.core)} if profile != "compact" else {}),
-        **({"extension_hash": relation_registry.extension_hash,
-            "extension_count": len(relation_registry.extensions)} if relation_extensions_visible else {
-                "extension_registry": {"available": False, "reason": egress_module.AUDIENCE_RESTRICTED},
-            }),
+        "extension_hash": relation_registry.extension_hash,
+        "extension_count": len(relation_registry.extensions),
         "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
-            "resolve: specific truthful, relates_to generic/no edge. "
-            "propose-relation only for durable recurring meaning; explicit question is "
-            "consideration, never automatic type. Hash guard save-relations; new canonical "
-            "key deprecates old"
+            "Resolve truthfully: specific, relates_to or no edge. Propose durable recurring "
+            "meaning, never automatically from questions. Hash-guard saves. New meaning uses a "
+            "new canonical key; deprecate replaced key."
+            if profile == "compact" and not frozen_profile else
+            (
+                "resolve: specific truthful, relates_to generic/no edge. "
+                "propose-relation only for durable recurring meaning; explicit question is "
+                "consideration, never automatic type. Hash guard save-relations; new canonical "
+                "key deprecates old"
+            )
         ),
     }
+    from .vocabulary import bootstrap as vocabulary_bootstrap_module
+
+    # The live registries by use. A released profile keeps its published payload.
+    vocabulary_projection = (
+        None
+        if frozen_profile
+        else vocabulary_bootstrap_module.block(
+            vault_root,
+            # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
+            inspect_route="schema_memory(operation=inspect, subject=<registry>)",
+        )
+    )
     vocabulary_workflow_projection = {
         "version": "v1",
         "families": [
@@ -1164,17 +1182,46 @@ def op_bootstrap(
             "entity-type/v1",
             "relation-type/v1",
         ],
+        # The live wording is shorter to fund the `vocabulary` block; a released
+        # profile keeps the wording it was published with.
         "consideration": (
-            "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
-            "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
-            "choice and any new definition to the active agent."
+            "Choose reuse/enrich/propose-new or generic/no-edge/defer from source evidence; no quota."
+            if profile == "compact" and not frozen_profile else
+            (
+                (
+                    "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
+                    "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
+                    "choice and any new definition to the active agent."
+                )
+                if frozen_profile
+                else (
+                    "Choose reuse, enrich or propose-new from source evidence; generic, "
+                    "no-edge and defer stay valid. No quota; the active agent decides."
+                )
+            )
         ),
         "cadence": (
-            "At a durable capture boundary, use the available review route and inspect "
-            "relevant items with context. If a useful identity or meaning question is "
-            "missing, use a source-page or existing-entity anchor. For a selected edge, "
-            "use relation_question with the current relation-queue candidate so both "
-            "endpoints are reviewed. Record the typed decision before its structural write."
+            "At capture, review relevant pending vocabulary items with context. "
+            "Anchor a question on a source page/entity; "
+            "relation_question uses both current endpoints. Record a typed decision before "
+            "structural writes."
+            if profile == "compact" and not frozen_profile else
+            (
+                (
+                    "At a durable capture boundary, use the available review route and inspect "
+                    "relevant items with context. If a useful identity or meaning question is "
+                    "missing, use a source-page or existing-entity anchor. For a selected edge, "
+                    "use relation_question with the current relation-queue candidate so both "
+                    "endpoints are reviewed. Record the typed decision before its structural write."
+                )
+                if frozen_profile
+                else (
+                    "At a capture boundary, review items with context; anchor a missing identity "
+                    "or meaning question on a source page or entity, and an edge question on the "
+                    "current relation-queue candidate (relation_question). Record the typed "
+                    "decision before its structural write."
+                )
+            )
         ),
         "review_route": {"default_limit": 4, **vocabulary_operation("review_memory", {"mode": "vocabulary"})},
         "context": vocabulary_operation(
@@ -1224,11 +1271,24 @@ def op_bootstrap(
         "application": {
             "correlation_fields": ["vocabulary_ref", "vocabulary_fingerprint"],
             "rule": (
-                "On a supported canonical writer, pass the reviewed ref and fingerprint "
-                "to bind the result to its decision. Use one stable transport idempotency "
-                "identity for the operation (REST: Idempotency-Key header), retain it on "
-                "retry, and inspect the canonical receipt. A saved type alone does not "
-                "complete a separately proposed entity or edge."
+                "Bind ref/fingerprint via supported writers; keep retry identity (REST: "
+                "Idempotency-Key); read receipts. Types do not apply proposed entities/edges."
+                if profile == "compact" and not frozen_profile else
+                (
+                    (
+                        "On a supported canonical writer, pass the reviewed ref and fingerprint "
+                        "to bind the result to its decision. Use one stable transport idempotency "
+                        "identity for the operation (REST: Idempotency-Key header), retain it on "
+                        "retry, and inspect the canonical receipt. A saved type alone does not "
+                        "complete a separately proposed entity or edge."
+                    )
+                    if frozen_profile
+                    else (
+                        "Pass the reviewed ref and fingerprint to a supported writer; reuse one "
+                        "idempotency identity (REST: Idempotency-Key) across retries and read the "
+                        "receipt. A saved type does not complete a separately proposed entity or edge."
+                    )
+                )
             ),
         },
         "entity_instance": {
@@ -1650,10 +1710,23 @@ def op_bootstrap(
             ),
         },
         "source_taxonomy": source_taxonomy_projection,
-        "entity_registry": {
-            **({"extension_registry": {"available": False, "reason": egress_module.AUDIENCE_RESTRICTED}}
-               if not entity_extensions_visible else {}),
-            "types": [
+        **({"vocabulary": vocabulary_projection} if vocabulary_projection is not None else {}),
+        "entity_registry": entity_registry_refusal or {
+            # The live types are in `vocabulary` (by use); a compact payload lists
+            # here only what that block does not carry: declared facets.
+            **({
+                "facets": {
+                    definition.id: {
+                        facet.name: f"{facet.cardinality} {facet.value}"
+                        for facet in entity_type_registry.facets_for(definition.id)
+                    }
+                    for definition in entity_type_registry.active_definitions
+                    if entity_type_registry.facets_for(definition.id)
+                }
+            } if vocabulary_projection is not None and profile == "compact"
+            and any(entity_type_registry.facets_for(item) for item in entity_type_registry.active_ids)
+            else {}),
+            **({} if vocabulary_projection is not None and profile == "compact" else {"types": [
                 {
                     **({
                         "id": definition.id,
@@ -1678,7 +1751,7 @@ def op_bootstrap(
                     } if entity_type_registry.facets_for(definition.id) else {}),
                 }
                 for definition in entity_type_registry.active_definitions
-            ],
+            ]}),
             "capture_rule": (
                 "After durable work: bounded pass. Enrich existing for new durable "
                 "facts or relations; skip incidental. Registration requires why; never invent "
@@ -1707,23 +1780,36 @@ def op_bootstrap(
                 MEMORY_CITATION_GUIDANCE,
                 "reason in the agent",
                 (
+                    "Before saving: vocabulary_workflow (section vocabulary); resolve "
+                    "recurring identities/relations, enrich entities. Add types only if "
+                    "current types distort evidence; skip incidental names."
+                    if profile == "compact" and not frozen_profile else
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
                     "a missing type when existing types would distort the evidence. Keep "
                     "incidental names unpromoted; generic/no-edge/defer remain valid."
                 ),
                 (
+                    "Follow vocabulary_workflow.cadence; bind writes through "
+                    "vocabulary_workflow.application."
+                    if profile == "compact" and not frozen_profile else
                     "follow vocabulary_workflow.cadence: review relevant pending work, "
                     "anchor a missing meaning question, record the typed decision, then "
                     "bind its supported canonical write through vocabulary_workflow.application"
                 ),
                 (
+                    "Address post-write link/duplicate warnings. write_feedback needs "
+                    "response_detail='full'; suggestions need remember(suggestions=true)."
+                    if profile == "compact" and not frozen_profile else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
                     "remember(suggestions=true)"
                 ),
                 (
+                    "Inspect vocabulary_sync; if warming/unavailable, use its recovery route "
+                    "once; preserve writes/retry identity; never repeat writes."
+                    if profile == "compact" and not frozen_profile else
                     "also inspect vocabulary_sync: if guidance is warming or unavailable, "
                     "follow its recovery route for one bounded review pass. Preserve the "
                     "committed write and its retry identity; recovery does not repeat it."
@@ -7819,9 +7905,10 @@ def op_capture_source(
         raw_protection=raw_protection,
     )
     out: dict = {"source": source}
-    if "vocabulary_resolution" in source:
-        # The terminal reads the identity record from the leaf's top level.
-        out["vocabulary_resolution"] = source["vocabulary_resolution"]
+    # The terminal reads these from the leaf's top level.
+    for key in ("vocabulary_resolution", "vocabulary_receipt"):
+        if key in source:
+            out[key] = source[key]
     if compile_guidance:
         try:
             out["compile_guidance"] = op_propose_compilation(
@@ -10364,19 +10451,17 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash.
+    the current hash. For entity-types, relations, source-kinds, domains and
+    categories: inspect lists the live vocabulary and usage; propose previews
+    a delta; save applies upsert, alias or deprecate with expected_hash and why;
+    history lists kept versions; restore reverts one without rewriting pages.
     Operations: references/operation-routing.md.
 
     Args:
-        operation: Subject-specific operation. Saves need `why` and, when updating,
-            `expected_hash`; relations: propose-relation, save-relations, census;
-            entity-types: resolve-entity-type, save-entity-types; workflow-contracts:
-            inventory, inspect, validate, resolve, preview, save, refresh;
-            context-roles and activation-conventions: validate, diff, save-roles or
-            save-conventions, history, restore (infer is refused).
+        operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, traversal-profiles,
-            context-roles, activation-conventions, or workflow-contracts.
+        subject: contract, categories, entity-types, relations, source-kinds, domains,
+            traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.
@@ -10404,33 +10489,14 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
-    # These are schema protocol subjects. Each owner supplies its registry path;
-    # hidden global hashes and collisions cost the caller this operation, not a review queue.
-    registry_paths = {
-        "entity-types": entity_types_module.extension_registry_path,
-        "relations": relation_registry_module.extension_registry_path,
-        "categories": semantic_language_registry_module.registry_path,
-        "traversal-profiles": traversal_profiles_module.profile_path,
-    }
-    registry_path = (entity_types_module.extension_registry_path if operation == "save-entity-types"
-                     else registry_paths.get(subject))
-    who = principal_module.effective_principal()
-    if registry_path is not None and not egress_module.content_permits(
-        vault_root, registry_path(vault_root).relative_to(vault_root).as_posix(), who,
+    from .vocabulary import contract as vocabulary_contract
+    from .vocabulary import registry_spec
+
+    if operation == "save-entity-types" and not connector_boundary.unrestricted(
+        vault_root, principal_module.effective_principal()
     ):
-        return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
-    if operation == "save-entity-types" and not connector_boundary.unrestricted(vault_root, who):
         # Entity saves validate global usage, including hidden rows.
         return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
-    if detail is not None and not (subject == "relations" and operation == "census"):
-        raise ValueError(
-            "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
-        )
-    _validate_vocabulary_binding(
-        vocabulary_ref, vocabulary_fingerprint,
-        supported=operation == "save-entity-types"
-        or (subject == "relations" and operation == "save-relations"),
-    )
     if subject in {"categories", "relations", "contract"} and (
         operation == "infer"
         or (
@@ -10446,6 +10512,59 @@ def op_schema_memory(
         refusal = egress_module.owner_only_aggregate(vault_root, raw_admitted=True)
         if refusal is not None:
             return {"subject": subject, **refusal}
+    registry_subject = "entity-types" if operation == "save-entity-types" else subject
+    # Census owns its audience-first refusal before consulting registry state.
+    if (
+        registry_subject in _registry_subjects()
+        and operation not in _REGISTRY_OPERATIONS
+        and not (subject == "relations" and operation == "census")
+    ):
+        spec = registry_spec(registry_subject)
+        if operation in {"save", "save-entity-types", "save-relations"} or save:  # nosemgrep: ep-word-membership -- schema_memory defines these mutation operation tokens.
+            queued = vocabulary_contract.queues_for_owner(vault_root)
+            if queued is not None and spec.family is None:
+                return {"subject": registry_subject, "available": False, "reason": queued}
+        refusal = vocabulary_contract.admission_refusal(vault_root, spec)
+        if refusal is not None:
+            return refusal
+    if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
+        return _registry_schema_operation(
+            vault_root,
+            subject=subject,
+            operation=operation,
+            proposal=proposal,
+            expected_hash=expected_hash,
+            why=why,
+            version=version,
+            limit=limit,
+            continuation=continuation,
+            unexpected={
+                "name": name,
+                "project": project,
+                "page_type": page_type,
+                "save": save or None,
+                "strict": strict or None,
+                "compare_to": compare_to,
+                "include_model_suggestions": include_model_suggestions or None,
+                "context": context,
+                "date_from": date_from,
+                "date_to": date_to,
+                "query": query,
+                "requested_type": requested_type,
+                "vocabulary_ref": vocabulary_ref,
+                "vocabulary_fingerprint": vocabulary_fingerprint,
+                "detail": detail,
+            },
+        )
+    if detail is not None and not (subject == "relations" and operation == "census"):
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
+        )
+    _validate_vocabulary_binding(
+        vocabulary_ref, vocabulary_fingerprint,
+        supported=operation == "save-entity-types"
+        or (subject == "relations" and operation == "save-relations"),
+    )
     if subject == "entity-types" and operation == "resolve-entity-type":
         if (
             any(
@@ -10533,17 +10652,47 @@ def op_schema_memory(
                 "findings": findings,
                 "saved": None,
             }
+        from .vocabulary import contract as vocabulary_contract
+        from .vocabulary import load as load_vocabulary
+
+        restricted = vocabulary_contract.queues_for_owner(vault_root)
+        before = load_vocabulary(entity_types_module.SPEC, vault_root)
+        if restricted is not None:
+            if expected_hash != before.content_hash and not (
+                expected_hash is None and before.content_hash == "none"
+            ):
+                raise ValueError(
+                    "STALE_ENTITY_TYPE_REGISTRY: expected_hash does not match current hash"
+                )
+            return vocabulary_contract.queue_for_owner(
+                vault_root,
+                entity_types_module.SPEC,
+                before,
+                proposal,
+                why.strip(),
+                restricted,
+                operation="save-entity-types",
+            )
         saved = entity_types_module.save_registry(
             vault_root,
             proposal,
             expected_hash=expected_hash,
             observed_ids=entity_types_module.observed_extension_ids(vault_root),
+            why=why.strip(),
         )
+        after = load_vocabulary(entity_types_module.SPEC, vault_root)
         return {
             "subject": "entity-types",
             "valid": True,
             "findings": [],
             "why": why.strip(),
+            "vocabulary_receipt": vocabulary_contract.receipt_lines(
+                entity_types_module.SPEC,
+                before,
+                after.entries,
+                _changed_entries(before, after),
+                saved["history"]["version"],
+            ),
             "saved": saved,
         }
     if subject == "categories":
@@ -10586,6 +10735,7 @@ def op_schema_memory(
                     vault_root,
                     proposal,
                     expected_hash=expected_hash,
+                    why=why,
                 )
             return result
         if save:
@@ -10803,6 +10953,25 @@ def op_schema_memory(
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: save-relations accepts only delta, hash, and why"
                 )
+            from .vocabulary import contract as vocabulary_contract
+            from .vocabulary import load as load_vocabulary
+
+            restricted = vocabulary_contract.queues_for_owner(vault_root)
+            if restricted is not None:
+                current = relation_registry_module.load_registry(vault_root)
+                relation_registry_module.require_current_hash(current.extension_hash, expected_hash)
+                relation_registry_module.merge_extension_delta(
+                    memory_schema_module.relation_registry_proposal(current), proposal
+                )
+                return vocabulary_contract.queue_for_owner(
+                    vault_root,
+                    relation_registry_module.SPEC,
+                    load_vocabulary(relation_registry_module.SPEC, vault_root),
+                    proposal,
+                    why.strip(),
+                    restricted,
+                    operation="save-relations",
+                )
             # Pure validation happens before the invocation-specific inner
             # mutation boundary. The guarded section reloads and repeats the
             # hash/merge against the bytes it will actually commit.
@@ -10828,10 +10997,12 @@ def op_schema_memory(
                 merged = relation_registry_module.merge_extension_delta(
                     memory_schema_module.relation_registry_proposal(current), proposal
                 )
+                before = load_vocabulary(relation_registry_module.SPEC, vault_root)
                 saved = relation_registry_module.save_registry(
                     vault_root,
                     merged,
                     expected_hash=expected_hash,
+                    why=why.strip(),
                 )
             changed_keys = sorted(
                 set(proposal.get("upsert") or {})
@@ -10842,6 +11013,13 @@ def op_schema_memory(
                 "valid": True,
                 "why": why.strip(),
                 "changed_keys": changed_keys,
+                "vocabulary_receipt": vocabulary_contract.receipt_lines(
+                    relation_registry_module.SPEC,
+                    before,
+                    load_vocabulary(relation_registry_module.SPEC, vault_root).entries,
+                    tuple(changed_keys),
+                    saved["history"]["version"],
+                ),
                 "saved": saved,
             }
         if operation == "infer":
@@ -10866,6 +11044,24 @@ def op_schema_memory(
                 # meaning-continuity check already refuses dropping a used key or
                 # alias, so this guard is defence in depth.
                 current = relation_registry_module.load_registry(vault_root)
+                restricted = vocabulary_contract.queues_for_owner(vault_root)
+                if restricted is not None:
+                    if not why or not why.strip():
+                        raise ValueError("WHY_REQUIRED: a pending registry proposal requires why")
+                    relation_registry_module.require_current_hash(
+                        current.extension_hash, expected_hash
+                    )
+                    findings = relation_registry_module.validate_proposal(proposal, vault_root)
+                    if findings:
+                        return {"subject": "relations", "valid": False,
+                                "findings": findings, "saved": None}
+                    from .vocabulary import load as load_vocabulary
+
+                    return vocabulary_contract.queue_for_owner(
+                        vault_root, relation_registry_module.SPEC,
+                        load_vocabulary(relation_registry_module.SPEC, vault_root),
+                        proposal, why.strip(), restricted, operation="infer",
+                    )
                 observed: set[str] = set()
                 for item in memory_schema_module.relation_observations(
                     vault_root, registry=current
@@ -10882,6 +11078,8 @@ def op_schema_memory(
                     proposal,
                     expected_hash=expected_hash,
                     observed_keys=observed,
+                    why=why,
+                    operation="infer",
                 )
             return result
         if save:
@@ -10912,6 +11110,12 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "traversal-profiles":
+        profile_path = traversal_profiles_module.profile_path(vault_root)
+        if not egress_module.content_permits(
+            vault_root, profile_path.relative_to(vault_root).as_posix(),
+            principal_module.effective_principal(),
+        ):
+            return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
         if operation == "infer":
             result = memory_schema_module.infer_traversal_profiles(vault_root)
             if save:
@@ -11007,6 +11211,91 @@ def op_schema_memory(
         )
         return result
     raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+
+
+def _changed_entries(before: Any, after: Any) -> tuple[str, ...]:
+    """Keys whose effective entry a whole-document save added or changed."""
+    return tuple(
+        sorted(
+            key
+            for key, entry in after.entries.items()
+            if before.entries.get(key) != entry
+        )
+    )
+
+
+#: The generic registry contract (`add-vocabulary-registries`). A registry
+#: subject routes these here; its older operation names keep their handlers.
+_REGISTRY_OPERATIONS = frozenset({"inspect", "propose", "save", "history", "restore"})  # nosemgrep: ep-word-set -- add-vocabulary-registries defines these generic operation tokens.
+
+
+def _registry_subjects() -> frozenset[str]:
+    from .vocabulary import registry_specs
+
+    return frozenset(registry_specs())
+
+
+def _registry_schema_operation(
+    vault_root: Path,
+    *,
+    subject: str,
+    operation: str,
+    proposal: dict[str, Any] | None,
+    expected_hash: str | None,
+    why: str | None,
+    version: str | None,
+    limit: int,
+    continuation: str | None,
+    unexpected: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One registry contract for every vocabulary subject."""
+    from .vocabulary import contract, registry_spec
+
+    supplied = sorted(name for name, value in unexpected.items() if value is not None)
+    allowed = {
+        "inspect": {"limit", "continuation"},
+        "propose": {"proposal"},
+        "save": {"proposal", "expected_hash", "why"},
+        "history": set(),
+        "restore": {"version", "expected_hash", "why"},
+    }[operation]
+    given = {
+        "proposal": proposal,
+        "expected_hash": expected_hash,
+        "why": why,
+        "version": version,
+        "continuation": continuation,
+        "limit": None if limit == 20 else limit,
+    }
+    extra = supplied + sorted(
+        name for name, value in given.items() if value is not None and name not in allowed
+    )
+    if extra:
+        raise ValueError(
+            f"INVALID_SCHEMA_ARGUMENT: {subject} {operation} takes "
+            + (", ".join(sorted(allowed)) or "no arguments")
+            + "; also got "
+            + ", ".join(extra)
+        )
+    spec = registry_spec(subject)
+    if operation == "inspect":
+        return contract.inspect(vault_root, spec, limit=limit, continuation=continuation)
+    if operation == "history":
+        return contract.history(vault_root, spec)
+    if operation == "restore":
+        return contract.restore(
+            vault_root, spec, version=version, expected_hash=expected_hash, why=why
+        )
+    if proposal is None:
+        raise ValueError(
+            f"INCOMPLETE_REGISTRY_PROPOSAL: {operation} takes a delta in proposal, e.g. "
+            '{"upsert": {"<key>": {...}}}'
+        )
+    if operation == "propose":
+        return contract.propose(vault_root, spec, proposal)
+    return contract.save(
+        vault_root, spec, delta=proposal, expected_hash=expected_hash, why=why
+    )
 
 
 def _workflow_contract_schema_operation(
@@ -11287,7 +11576,7 @@ def _governed_registry_schema_operation(
         return {
             "subject": subject,
             "content_hash": getattr(load_fn(vault_root), hash_attribute),
-            "versions": registry_history_module.versions(vault_root, stem=stem),
+            **registry_history_module.history_view(vault_root, stem=stem),
         }
     if operation == "restore":
         if proposal is not None:

@@ -3029,6 +3029,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "inspect": "structure",
         "resolve": "structure",
         "preview": "structure",
+        "propose": "structure",
         "save": "mutation",
         "refresh": "mutation",
         "save-entity-types": "mutation",

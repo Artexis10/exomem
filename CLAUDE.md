@@ -14,6 +14,13 @@ Read `CONTRIBUTING.md` before committing: use the pinned project-local uv writer
 
 When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief, first read `docs/agent-guidance/workers.md`. Its scope, verification and no-push rules apply to those delegated workers. The current orchestrator owns integration; Codex and Claude can both hold that role. Ordinary inline work follows the shared task-routing rules.
 
+## Vocabulary lives in registries
+
+- Every category set (entity types, relations, source kinds, domains, semantic categories, and later statuses and note types) lives in one vocabulary registry: a shipped pack under `src/exomem/vocabulary/packs/` plus the vault overlay in `_Schema/`. Never add a vocabulary list, set or keyed dict to code.
+- Code branches only on closed attribute values that a registry schema declares and code implements (`family`, `role`, status `class`). It never branches on an entry key.
+- Every review verdict names C4 (vocabulary fixed in code): absent, found in the change, or reported as old debt.
+- The semgrep C6 gate in `.github/quality.yml` flags word lists and word regexes on added lines in `src/exomem`.
+
 ## Editing the skill scaffold (hand-authored — keep it generic)
 
 The skill shipped to new users lives at `src/exomem/_scaffold/_Schema/`

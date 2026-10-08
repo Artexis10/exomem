@@ -8,7 +8,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-_ROLES = frozenset({"relation-review", "lifecycle-review", "source-backref", "index", "operation-log"})
+_ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer manifest defines these code-owned output roles.
+    {
+        "relation-review",
+        "lifecycle-review",
+        "source-backref",
+        "index",
+        "operation-log",
+        # The snapshot of the bytes a registry save replaced (`registry_history`).
+        "registry-history",
+    }
+)
 _SEAL = object()
 
 

@@ -396,7 +396,7 @@ def test_mcp_content_is_withheld_when_origin_session_ends_during_read(configured
 
 def test_private_registries_cannot_change_resolution_bootstrap_or_save_outcomes(configured_boundary, vault):
     """Global vocabulary hashes, aliases and collisions stay unavailable until domains isolate them."""
-    from exomem import commands, entity_types, relation_registry
+    from exomem import commands, entity_types, relation_registry, traversal_profiles
 
     _, authenticate = configured_boundary
     limited = authenticate("limited")
@@ -408,6 +408,8 @@ def test_private_registries_cannot_change_resolution_bootstrap_or_save_outcomes(
                 commands.op_connect_memory(vault, operation="resolve-relation", query="supports"),
                 commands.op_schema_memory(vault, operation="save-entity-types", proposal=entity_types.empty_proposal(),
                                           expected_hash="untrusted-client-guard", why="save public definition"),
+                commands.op_schema_memory(vault, subject="traversal-profiles", operation="diff",
+                                          proposal={"schema_version": 1, "profiles": {}}),
                 commands.op_bootstrap(vault, profile="full"),
             )
 
@@ -420,22 +422,32 @@ def test_private_registries_cannot_change_resolution_bootstrap_or_save_outcomes(
         relation_registry.save_registry(vault, {"schema_version": 1, "extensions": {"private.correlates": {
             "parent": "supports", "description": "Private correlation", "aliases": ["private-correlation"],
         }}}, expected_hash=None)
+        traversal_profiles.save_profiles(vault, {"schema_version": 1, "profiles": {"private-hop": {
+            "extends": "provenance", "direction": "outgoing", "max_nodes": 20,
+        }}})
     after = observe()
     assert before == after
-    assert all(result["available"] is False for result in after[:3])
-    assert after[3]["entity_registry"]["types"]
+    assert all(result["available"] is False for result in after[:4])
     assert "private-kind" not in json.dumps(after)
+    assert "private-hop" not in json.dumps(after)
 
 
 def test_limited_owner_can_update_a_wholly_admitted_public_relation_registry(configured_boundary, vault):
     """A ceiling alone must not put an independent public registry update into review."""
-    from exomem import commands, relation_registry
+    from exomem import commands, registry_history, relation_registry, state_migration
 
-    _, authenticate = configured_boundary
+    config, authenticate = configured_boundary
     scope = vault / "Knowledge Base/_Governance/scopes/private.yaml"
     scope.write_text(scope.read_text().replace("projects: [private-project]", "paths: [Notes/private.md]"))
     with principal.request_scope(principal.owner_principal(surface="library")):
         relation_registry.save_registry(vault, relation_registry.empty_proposal())
+    # A public save creates canonical history, so its namespace must satisfy the
+    # same all-writer visibility rule as other connector creation destinations.
+    host = json.loads(config.read_text())
+    host["capture_paths"].append(registry_history.history_dir(vault, relation_registry.SPEC.stem).relative_to(vault).as_posix())
+    config.write_text(json.dumps(host))
+    authority = state_migration.assert_offline_migration_authority(source="isolated public history stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
     before = relation_registry.load_registry(vault).extension_hash
     with principal.request_scope(authenticate("limited")):
         result = commands.op_schema_memory(vault, subject="relations", operation="save-relations", expected_hash=before,
