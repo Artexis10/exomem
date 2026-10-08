@@ -28,6 +28,22 @@ run "published_dependency_preserves_consumer_coordinates" {
   }
 }
 
+run "published_fleet_dependency_carries_the_database_client_address" {
+  command = plan
+  override_resource {
+    target          = hcloud_primary_ip.node
+    override_during = plan
+    values          = { ip_address = "198.51.100.7" }
+  }
+  assert {
+    condition = (
+      output.fleet_dependency.schema_version == 2 &&
+      output.fleet_dependency.database_client_ipv4_cidr == "198.51.100.7/32"
+    )
+    error_message = "Substrate-infra admits the database only from the published schema 2 server-node /32."
+  }
+}
+
 run "incompatible_version_refuses_deployment" {
   command = plan
   variables {

@@ -115,27 +115,43 @@ Do not use forced server-side-apply ownership to hide retained foreign fields.
 ## Render and review
 
 Keep the certificate hostname in both PostgreSQL DSNs and use port 5432 with
-`sslmode=verify-full`. Set the paired `cloudDatabase.hostname` and
-`cloudDatabase.privateIp` values to resolve that hostname through a pod-local
-host alias on the Cloud gateway and cellctl. Include the private IP as a `/32`
-in both workloads' `databaseEgressCidrs`. These aliases do not change public DNS
-or tenant workloads. Changing the private address later requires updating both
-the mapping and the egress lists and rolling these two Deployments.
+`sslmode=verify-full`. Until the control host moves to its own Hetzner project,
+the database admits the gateway and cellctl roles on two routes. Design
+decision 10 of `separate-shared-substrate-control-infrastructure` defines them.
+
+- **Public route:** leave both `cloudDatabase` values empty. The hostname then
+  resolves through public DNS to the database's public listener. That listener
+  admits these roles only from the K3s server's `/32`. The chart pins the
+  gateway and cellctl to the server node, so their egress leaves from that address.
+- **Private route, kept during the transition:** set the paired
+  `cloudDatabase.hostname` and `cloudDatabase.privateIp` values. They resolve
+  that hostname through a pod-local host alias on the Cloud gateway and cellctl.
+  These aliases do not change public DNS or tenant workloads.
+
+List both database addresses as `/32` entries in both workloads'
+`databaseEgressCidrs` until the move closes: the public `167.233.57.60/32` and
+the private address. NetworkPolicy `ipBlock` entries are literal addresses, not
+DNS names. Changing either address requires updating the egress lists, and the
+mapping for the private route, then rolling these two Deployments.
 
 For cellctl, also set the DSN parameter
 `sslrootcert=/etc/ssl/certs/ca-certificates.crt` after confirming that bundle
 exists in the pinned image. The gateway uses Node's trusted roots. Verify each
 actual image client accepts the intended hostname and rejects a mismatched or
 untrusted certificate against disposable TLS PostgreSQL before sealing the
-production DSNs. Do not replace the hostname with the private IP or disable
-certificate verification to make the connection pass.
+production DSNs. Do not replace the hostname with either database address or
+disable certificate verification to make the connection pass.
 
 The values worksheet must resolve these current chart inputs:
 
 - `cellctl.image`, `cellctl.cellImageRepository`, the four `cellctl.b2*` identity/
-  endpoint values, and `cellctl.databaseEgressCidrs`;
-- `cloudDatabase.hostname` matching the certificate and DSNs, and
-  `cloudDatabase.privateIp` matching both database egress `/32` entries;
+  endpoint values, and `cellctl.databaseEgressCidrs` with the database's public
+  `/32` and, during the transition, its private `/32`;
+- `cloudDatabase` empty for the public route; or, for the private route,
+  `cloudDatabase.hostname` matching the certificate and DSNs, and
+  `cloudDatabase.privateIp` matching both private database egress `/32` entries;
+- `cellctl.nodeSelector` and `cloudGateway.nodeSelector` left at the K3s server
+  default, which the database's client allowlist requires;
 - `cloudGateway.image`, `hostname`, `publicBaseUrl`, `/mcp`, matching database
   CIDRs, and the unguessable trusted-ingress source value;
 - `cloudIngress.hostname` equal to the gateway hostname, ACME contact and DNS

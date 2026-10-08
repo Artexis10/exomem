@@ -274,6 +274,36 @@ def test_private_database_egress_check_skips_a_disabled_workload() -> None:
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_both_database_clients_are_pinned_to_the_k3s_server_node() -> None:
+    # Decision 10: the shared database admits the Exomem roles only from the
+    # K3s server's public /32, so a client scheduled on an agent is refused.
+    documents = _helm_template()
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        pod = _find(documents, "Deployment", name)["spec"]["template"]["spec"]
+        assert pod["nodeSelector"] == {"node-role.kubernetes.io/control-plane": "true"}, name
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_public_database_route_has_no_alias_and_egresses_to_the_public_address() -> None:
+    # Decision 10: an empty alias resolves the certificate hostname through
+    # public DNS, so each client's 5432 egress must name the public /32.
+    result = _helm_template_result(
+        "--set-string", "cellctl.databaseEgressCidrs[0]=203.0.113.20/32",
+        "--set-string", "cloudGateway.databaseEgressCidrs[0]=203.0.113.20/32",
+    )
+    assert result.returncode == 0, result.stderr
+    documents = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        assert "hostAliases" not in _find(documents, "Deployment", name)["spec"]["template"]["spec"]
+        egress = _find(documents, "NetworkPolicy", name)["spec"]["egress"]
+        database_rules = [rule for rule in egress if _ports([rule]) == {5432}]
+        assert database_rules == [{
+            "to": [{"ipBlock": {"cidr": "203.0.113.20/32"}}],
+            "ports": [{"port": 5432, "protocol": "TCP"}],
+        }], name
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_backup_window_schema_accepts_a_midnight_crossing_and_rejects_an_empty_window() -> None:
     # D8: a window may cross midnight, and the schema rejects an empty one.
     for window in ("2-5", "22-3", "02-05"):

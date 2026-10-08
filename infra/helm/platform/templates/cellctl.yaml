@@ -186,6 +186,10 @@ spec:
       serviceAccountName: cellctl
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 30
+      {{- with .Values.cellctl.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.cloudDatabase.hostname }}
       hostAliases:
         - ip: {{ .Values.cloudDatabase.privateIp | quote }}
