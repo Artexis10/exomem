@@ -50,6 +50,7 @@ ENTRY_FIELDS = frozenset(
     # nosemgrep: ep-word-set -- The generic registry entry schema defines these field names.
     {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
 )
+# nosemgrep: ep-word-set -- The save protocol fixes these three operation names.
 _DELTA_VERBS = frozenset({"upsert", "alias", "deprecate"})
 _STATUSES = frozenset({"active", "deprecated"})
 #: A save that would grow an overlay past this many bytes is refused.
