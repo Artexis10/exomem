@@ -664,16 +664,20 @@ def route(command, vault_root, arguments):
     root = Path(vault_root).resolve()
     if command not in _STORE_COMMANDS or bound_writer(root) is not None:
         return None
-    # Only store commands pay for the store libraries that admission imports.
-    from . import connection
-
-    connection.load_store_libraries()
-    from . import admission, authority, capability
+    from . import authority
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
     raw = authority.read_marker(root)
-    if command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments):
+    creating = command == "record_memory" and arguments.get("action") == "create"
+    if raw is not None or creating:
+        # Only a vault with a store, or a create that may enrol one, pays for the store libraries.
+        from . import connection
+
+        connection.load_store_libraries()
+    if creating and summary_create(root, arguments):
         if raw is None:
+            from . import admission, capability
+
             capability.require_records_summary(root)
             raise admission.enrollment_required()
     elif command == "record_memory" and arguments.get("action") == "inspect" and selector is None:

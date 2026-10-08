@@ -45,11 +45,14 @@ _LIBRARIES_LOCK = threading.Lock()
 
 
 def load_store_libraries() -> None:
-    """Import SQLAlchemy and Alembic whole, one thread at a time, before store work.
+    """Import SQLAlchemy and Alembic, one thread at a time, before store work.
 
     The CLI imports this module without them. Two threads importing their submodules
-    for the first time at once can see a partially initialised module, so every store
-    entry loads them here first.
+    for the first time at once can see a partially initialised module. Threads start
+    store work only through ``runtime.route``, ``open_writer`` or ``open_reader``,
+    which call this first, or after ``server.run`` has called it on the main thread.
+    Module-level imports in ``tables``, ``typed_storage`` and ``query_indexes`` are
+    safe only under that rule.
     """
     with _LIBRARIES_LOCK:
         import alembic.command  # noqa: F401
