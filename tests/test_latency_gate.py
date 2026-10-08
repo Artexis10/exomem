@@ -754,6 +754,8 @@ def measure_conversation_gate(vault: Path) -> dict:
         # The stage budget covers the stage's own work. On Python 3.12 a full
         # collection over this vault's heap pauses about 100 ms wherever the
         # allocation count trips it, so settle earlier garbage before each sample.
+        # The warm totals then also exclude that debt; a collection that the
+        # sample's own allocation triggers still counts against it.
         gc.collect()
         extra = {"conversation": conversation} if with_conversation else {}
         return commands.op_activate_context(
