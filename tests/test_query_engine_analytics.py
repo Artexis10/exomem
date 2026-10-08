@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import time
 import traceback
+from itertools import batched
 
 import pytest
 from s1_export_fixture import START_DAY, expected_daily, iter_exercises
@@ -58,7 +59,7 @@ def seed(store, items, *, cid=CID):
     per-test budget; the reduction under test reads only canonical rows. An
     items collection's rows get the view paths their files would have.
     """
-    from exomem.collection_store import governance, tokens, typed_storage
+    from exomem.collection_store import governance, tables, tokens, typed_storage
 
     conn = store.connection
     text, metadata, path, mode = conn.execute(
@@ -80,10 +81,21 @@ def seed(store, items, *, cid=CID):
               folder and f"{folder}{key}.md", txn, txn, governance.row_metadata(stored.schema, values, metadata))
              for key, values in keyed))
         ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
-        for key, values in keyed:
-            typed_storage.write_version(store.handle, layout, row_id=ids[key], row_version=1, values=values, body="",
-                                        payload_hash=tokens.payload_hash(1, key, values, ""), txn_id=txn,
-                                        schema_version=1)
+        _, _, upsert, insert_version = typed_storage._declarations(layout)
+        # Core batches seed canonical fixtures without per-row dispatch or unbounded parameters.
+        for batch in batched(keyed, 128):
+            current_rows, versions, identities = [], [], []
+            for key, values in batch:
+                encoded = dict(zip((*layout.value_columns, "r"), typed_storage.encode_row(layout, values), strict=True))
+                current = {"row_id": ids[key], "row_version": 1, **encoded}
+                current_rows.append(current)
+                versions.append({**current, "body": ""})
+                identities.append({"row_id": ids[key], "row_version": 1, "encoding": typed_storage.TYPED_V1,
+                                   "payload_hash": tokens.payload_hash(1, key, values, ""), "txn_id": txn,
+                                   "schema_version": 1})
+            store.handle.execute(upsert, current_rows)
+            store.handle.execute(insert_version, versions)
+            store.handle.execute(tables.INSERT_IDENTITY, identities)
 
 
 def create(store, rollups=None):
