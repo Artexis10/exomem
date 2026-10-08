@@ -113,8 +113,9 @@ def test_ansible_secret_runner_rejects_extra_vars_passthrough(
 
 
 @pytest.mark.skipif(not Path("/dev/shm").is_dir(), reason="tmpfs is unavailable")
+@pytest.mark.parametrize("shared_playbook", [False, True])
 def test_ansible_secret_runner_decrypts_only_on_tmpfs_and_removes_files(
-    tmp_path: Path,
+    tmp_path: Path, shared_playbook: bool,
 ) -> None:
     fake_sops = tmp_path / "sops"
     fake_ansible = tmp_path / "ansible-playbook"
@@ -168,6 +169,11 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     encrypted.write_text('{"sops":{}}', encoding="utf-8")
     inventory = tmp_path / "inventory.yml"
     inventory.write_text("all: {}\n", encoding="utf-8")
+    playbook = tmp_path / "shared-control.yml" if shared_playbook else ROOT / "infra/ansible/site.yml"
+    config = tmp_path / "shared-ansible.cfg" if shared_playbook else ROOT / "infra/ansible/ansible.cfg"
+    if shared_playbook:
+        playbook.write_text("[]\n", encoding="utf-8")
+        config.write_text("[defaults]\ninject_facts_as_vars = False\n", encoding="utf-8")
     result = subprocess.run(
         [
             str(RUNNER),
@@ -175,6 +181,7 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
             str(inventory),
             "--vars",
             str(encrypted),
+            *(["--playbook", str(playbook), "--config", str(config)] if shared_playbook else []),
             "--",
             "--check",
         ],
@@ -203,7 +210,8 @@ pathlib.Path(os.environ['TEST_MARKER']).write_text(
     assert not Path(invocation["local_temp"]).exists()
     # Run from any directory, the repository's configuration still applies; it
     # keeps module-returned facts from shadowing inventory variables.
-    assert invocation["config"] == str(ROOT / "infra" / "ansible" / "ansible.cfg")
+    assert invocation["config"] == str(config)
+    assert str(playbook) in invocation["args"]
     # An operator's environment cannot switch fact injection back on.
     assert invocation["inject"] is None
     assert stat.S_IMODE(RUNNER.stat().st_mode) & stat.S_IXUSR

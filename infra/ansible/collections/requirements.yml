@@ -1,5 +1,8 @@
 ---
 collections:
+  # Generated from the canonical shared source; adjacent provenance pins its revision.
+  - name: infra/ansible/collections/artifacts/substrate-infrastructure-0.1.0.tar.gz
+    type: file
   - name: community.general
     version: 13.2.0
   - name: community.library_inventory_filtering_v1

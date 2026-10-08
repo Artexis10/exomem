@@ -65,29 +65,32 @@ output "estimated_fixed_monthly_eur_ex_vat" {
 
 output "control_db_server_id" {
   description = "Opaque Hetzner control database server identifier."
-  value       = hcloud_server.control.id
+  value       = var.shared_control.server_id
 }
 
 output "control_db_server_ipv4" {
   description = "Stable primary IPv4 used only for restricted SSH administration and the public PgBouncer listener."
-  value       = hcloud_primary_ip.control_db.ip_address
+  value       = var.shared_control.public_ipv4
 }
 
 output "control_db_private_ip" {
   description = "Stable private-network address consumed by generated Ansible inventory."
-  value       = var.control_db_private_ip
+  value       = var.shared_control.private_ipv4
 }
 
 output "database_hostname" {
   description = "DNS-only public hostname carrying the control database's PgBouncer TLS listener."
-  value       = var.database_hostname
+  value       = var.shared_control.hostname
 }
 
-output "control_db_estimated_fixed_monthly_eur_ex_vat" {
-  # Approximate list price for cx23 in fsn1 plus a primary IPv4; not fetched
-  # from the live Hetzner pricing API, unlike the alpha estimate above.
-  description = "Approximate control-database server cost; excludes usage-priced B2."
-  value       = 5.99
+output "fleet_dependency" {
+  description = "Non-secret versioned coordinates consumed by the shared infrastructure owner."
+  value = {
+    schema_version = 1
+    network_id     = hcloud_network.alpha.id
+    subnet_id      = hcloud_network_subnet.alpha.id
+    ssh_key_ids    = [hcloud_ssh_key.admin.id]
+  }
 }
 
 output "k3s_agent_nodes" {

@@ -42,7 +42,7 @@
       when: k3s_removed_marker.stat.exists
 
   roles:
-    - base
+    - substrate.infrastructure.base
 
   tasks:
     - name: Converge the K3s inter-node firewall
@@ -122,14 +122,3 @@
 
   roles:
     - k3s
-
-- name: Harden and provision the Exomem control database server
-  hosts: control_nodes
-  become: true
-  gather_facts: true
-  serial: 1
-  any_errors_fatal: true
-
-  roles:
-    - base
-    - postgres
