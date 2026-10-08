@@ -262,6 +262,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     floor = "" if after is None else after.partition("|")[0]
     reduced = tuple(zip(shape.fields, shape.kinds, shape.extremes, strict=True))
     groups, retained, flagged, visited = {}, 0, 0, 0
+    empty_group = rollups.group_text({}, ())
     cursor = session.connection.execute(sql, (collection_id,))
     try:
         for row in cursor:
@@ -287,7 +288,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
                 if bucket < floor:
                     continue
                 order = located[1] if shape.latest else None
-            identity = (bucket, rollups.group_text(values, shape.others))
+            identity = (bucket, rollups.group_text(values, shape.others) if shape.others else empty_group)
             group = groups.get(identity)
             if group is None:
                 if len(groups) == limits.max_groups:
