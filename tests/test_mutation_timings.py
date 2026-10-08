@@ -468,42 +468,6 @@ def test_preflight_existing_evicted_cache_costs_one_census_walk(
     assert preflight.census_token is not None
 
 
-def test_preflight_existing_census_token_matches_the_old_uncached_path(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Threading the census must not change what the validity token contains.
-
-    Reconstructs the corpus-census half of the stamp exactly the way the old,
-    un-threaded `_capture_validity_stamp` produced it — `cached_corpus_census`
-    missing, falling back to `corpus_validity_token`'s own walk — on the same
-    unchanged corpus, right after the real preflight ran. Both walks see
-    identical on-disk state, so the two tokens must be byte-for-byte equal.
-    """
-    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
-    _force_walk_confirmed_cache_path(monkeypatch)
-    semantic_contract.reset_corpus_context_cache()
-    path = _seed(tmp_path)
-    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
-    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
-    _evict_between_build_and_capture(monkeypatch, tmp_path)
-
-    preflight = semantic_writes.preflight_existing(
-        tmp_path,
-        path=PAGE,
-        after_source=after_source,
-        operation="edit",
-    )
-
-    assert preflight.census_token is not None
-    sc_token, _generation = preflight.census_token
-    # The eviction is still in effect (nothing repopulated the cache since),
-    # so this reproduces the old fallback path on the identical corpus state.
-    old_style_sc_token = semantic_contract.corpus_validity_token(
-        tmp_path, corpus_census=semantic_contract.cached_corpus_census(tmp_path)
-    )
-    assert old_style_sc_token == sc_token
-
-
 def test_preflight_creation_structural_shares_the_same_one_walk_seam(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -1087,3 +1087,31 @@ def test_the_displayed_candidate_comes_from_the_anchor_page(tmp_path: Path) -> N
     assert finding.path == "Knowledge Base/Notes/a.md"
     assert finding.meta["candidate"] == "MARIN OSK"
     assert finding.meta["page_count"] == 3
+
+
+def test_pending_evidence_does_not_supply_spread_but_abandoned_evidence_does(
+    tmp_path: Path,
+) -> None:
+    from exomem import entity_recurrence as sensor
+
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES):
+        _note(
+            tmp_path,
+            f"Knowledge Base/Notes/note-{index}.md",
+            title=f"Note {index}",
+            body=f"[[{_RECURRING}]] supplied the calibration notes.",
+        )
+    last = tmp_path / "Knowledge Base/Notes" / f"note-{sensor.WIKILINK_SPREAD_MIN_PAGES - 1}.md"
+    source = last.read_text()
+    last.write_text(source.replace("status: active", "status: planned"))
+    assert _findings(tmp_path) == []
+    last.write_text(source.replace("status: active", "status: dropped"))
+    assert len(_findings(tmp_path)) == 1
+    # Planned entity pages still resolve an identity; evidence eligibility is separate.
+    _entity(
+        tmp_path,
+        f"Knowledge Base/Entities/People/{_RECURRING}.md",
+        title=_RECURRING,
+        status="planned",
+    )
+    assert _findings(tmp_path) == []

@@ -588,6 +588,10 @@ def restore(
         )
     text = registry_history.read_version(root, stem=spec.stem, version=version)
     restored = spec.adapter.parse(text, registry.content_hash(text))
+    # Restore preserves legacy reader meaning, but never republishes invalid bytes.
+    blocking = registry.new_findings(None, tuple(spec.adapter.findings(restored)))
+    if blocking:
+        return {"subject": spec.name, "valid": False, "findings": blocking, "saved": None}
     after_entries = spec.adapter.entries(restored)
     removed = sorted(set(snapshot.entries) - set(after_entries))
     # Taxonomy subjects share one overlay; an exact restore can remove keys on both axes.

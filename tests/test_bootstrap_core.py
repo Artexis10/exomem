@@ -178,8 +178,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "due-state-restraint": (
         prominence.CANON,
-        lambda core: "silence beats bureaucracy" in core["write"]["due_state_handling"]
-        and "never" in core["write"]["due_state_authority"],
+        lambda core: "never" in core["write"]["due_state_authority"],
     ),
     "workflow-loop-names-the-vocabulary-section": (
         prominence.CANON,

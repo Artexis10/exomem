@@ -58,6 +58,7 @@ from typing import Any
 from . import (
     activation_conventions,
     context_roles,
+    lifecycle_statuses,
     sidecar_store,
     working_set,
     working_set_conversation,
@@ -116,7 +117,7 @@ UNAVAILABLE = "unavailable"
 DISABLED = "disabled"
 
 _CACHE_LOCK = threading.Lock()
-_PACKET_CACHE: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+_PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
 _BUILDS: set[Path] = set()
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
@@ -1246,58 +1247,41 @@ def rare_turn_terms(
     *,
     freshness=None,
     recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    admitted_paths: set[str] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[str, ...], int, str]:
-    """`(distinctive stems, indexed pages, readiness status)` for `stems`.
-
-    One document-frequency lookup per stem over the maintained catalogue,
-    bounded by the turn's own content words and measured on the same
-    `fts`/`pages` join the ranking uses. Measured at 34.8 ms for a four-stem
-    turn and 41.6 ms for a twenty-seven-stem turn against a 1,539-page
-    knowledge base, with the request's own recall checkpoint supplied — the
-    per-term cost is small and nearly all of it is the one readiness proof.
-    """
+    """Distinctive stems and corpus size over this request's admitted pages."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
+    from .governance import egress
 
-    # Navigation pages are not counted: an index or a log repeats the titles
-    # it lists, so a folder-level one beside the vault's own pushed a title
-    # word past the cap and the page named by its title was never carried.
-    # Raw material is not counted either, nor counted as a page: four
-    # captured sessions that discussed a page did the same to its title.
-    # Nor retired revisions: the carry never serves one, and a page revised
-    # three times repeated its own name words past the cap.
-    result = lexstore.term_document_frequencies(
+    # An omitted predicate is not proof of complete admission. Ask the existing
+    # walk owner; its None result proves the unrestricted empty-policy case.
+    admitted = visible if visible is not None else egress.release_walk_filter(vault_root)
+    result = lexstore.carry_term_statistics(
         vault_root,
         stems,
-        scope="kb",
+        visible=admitted if admitted is not None else lambda _path: True,
+        status_basis=status_basis,
+        path_limit=lambda pages: (
+            working_set.rare_document_cap(pages) + working_set.RETRIEVAL_CARRY_FETCH
+        ),
         freshness=freshness,
-        allow_delta=False,
         recall_checkpoint=recall_checkpoint,
-        exclude_navigation=True,
-        exclude_raw_material=True,
-        exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
-    frequencies, corpus_pages = result.value or ({}, 0)
+    frequencies, corpus_pages, paths, admitted_set = result.value
+    if admitted_paths is not None:
+        admitted_paths.update(admitted_set)
     cap = working_set.rare_document_cap(corpus_pages)
-
-    def paths_for(near: Sequence[str], limit: int) -> Mapping[str, Sequence[str]]:
-        listed = lexstore.term_document_paths(
-            vault_root,
-            near,
-            limit=limit,
-            scope="kb",
-            freshness=freshness,
-            allow_delta=False,
-            recall_checkpoint=recall_checkpoint,
-            exclude_navigation=True,
-            exclude_raw_material=True,
-            exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
-        )
-        return (listed.value or {}) if listed.readiness.complete else {}
-
     frequencies = working_set.discount_superseded_pages(
-        vault_root, frequencies, paths_for, cap=cap
+        vault_root,
+        frequencies,
+        lambda near, limit: {stem: paths[stem][:limit] for stem in near},
+        cap=cap,
+        status_basis=status_basis,
     )
     rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
     return rare, int(corpus_pages), "available"
@@ -1376,6 +1360,8 @@ def carry_named_groups(
     recall_checkpoint=None,
     skip_terms: str = "",
     contacts: dict[str, set[tuple[int, int]]] | None = None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[tuple[tuple[str, float], ...], ...], str]:
     """The pages this turn NAMED, one group per phrase that named them.
     Returns `(groups, readiness status)`.
@@ -1396,6 +1382,7 @@ def carry_named_groups(
     reported rather than repaired, raw material, navigation and retired
     pages dropped before anyone counts.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find, lexstore
 
     # The resolver's own reading of the turn (`analyze_turn`): pair positions
@@ -1407,11 +1394,15 @@ def carry_named_groups(
         stems = tuple(stem for stem in stems if stem not in skipped) if skipped else stems
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
+        admitted_paths: set[str] = set()
         rare, corpus_pages, state = rare_turn_terms(
             vault_root,
             stems,
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
+            status_basis=status_basis,
+            visible=visible,
+            admitted_paths=admitted_paths,
         )
         if state != "available":
             return (), state
@@ -1446,6 +1437,7 @@ def carry_named_groups(
                 term_budget=lexical_term_budget(),
                 exclude_navigation=True,
                 exclude_raw_material=True,
+                admitted_paths=admitted_paths,
             )
             if not result.readiness.complete:
                 return (), result.readiness.status
@@ -1454,7 +1446,7 @@ def carry_named_groups(
                 for path, score in (result.value or ())
                 if not _is_raw_material(path)
                 and not _is_navigation_page(path)
-                and working_set._is_current_page(vault_root, str(path))
+                and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
             )
             if hits:
                 groups.append(hits)
@@ -1479,8 +1471,14 @@ def carry_named_groups(
                 freshness=freshness,
                 recall_checkpoint=recall_checkpoint,
                 contacts=contacts,
+                status_basis=status_basis,
+                admitted_paths=admitted_paths,
             )
         return tuple(groups), "available"
+    except lifecycle_statuses.OpError as error:
+        from .governance import egress
+
+        raise egress.ReaderViewUnavailable("status classification is unavailable") from error
     except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
         log.debug("activation carry recall unavailable", exc_info=True)
         return (), "unavailable"
@@ -1497,7 +1495,9 @@ def _carry_title_groups(
     limit: int | None,
     freshness,
     recall_checkpoint,
+    admitted_paths: set[str],
     contacts: dict[str, set[tuple[int, int]]] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[tuple[tuple[str, float], ...]]:
     """Pages a turn names by TITLE when no two distinctive words name them.
 
@@ -1513,6 +1513,7 @@ def _carry_title_groups(
     containing that whole phrase still compete. Runs only when the strict
     phrase rule found no page.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
 
     sentences = _positioned_words(turn)
@@ -1538,6 +1539,7 @@ def _carry_title_groups(
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
         exclude_raw_material=True,
+        admitted_paths=admitted_paths,
     )
     if not result.readiness.complete or len(result.value or ()) >= fetch:
         # A bounded prefix cannot prove that a namesake was not cut off.
@@ -1548,7 +1550,7 @@ def _carry_title_groups(
         if (
             _is_raw_material(path)
             or _is_navigation_page(path)
-            or not working_set._is_current_page(vault_root, path)
+            or not working_set._is_current_page(vault_root, path, status_basis=status_basis)
         ):
             continue
         title = working_set._page_title(vault_root, path)
@@ -1663,6 +1665,8 @@ def carry_candidates(
     limit: int | None = None,
     freshness=None,
     recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[tuple[str, float], ...], str]:
     """Pages this turn NAMED, for a turn that resolved no anchor at all.
     Returns `(hits, readiness status)`.
@@ -1709,8 +1713,15 @@ def carry_candidates(
     rather than repaired. Callers that need to know WHICH phrase named which
     page use `carry_named_groups`, which this flattens.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     groups, state = carry_named_groups(
-        vault_root, turn, limit=limit, freshness=freshness, recall_checkpoint=recall_checkpoint
+        vault_root,
+        turn,
+        limit=limit,
+        freshness=freshness,
+        recall_checkpoint=recall_checkpoint,
+        status_basis=status_basis,
+        visible=visible,
     )
     if len(groups) == 1:
         return groups[0], state
@@ -1807,6 +1818,7 @@ def serve(
     lexical_seconds: float = 0.0,
     attribution: working_set_heat.Attribution | None = None,
     conversation: working_set_conversation.Conversation | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -1826,6 +1838,7 @@ def serve(
     the profile it was keyed on. `attribution` is the caller's derived keys
     (ruling S5-1).
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     limit = working_set.clamp_budget(max_chars)
     registry = context_roles.load_roles(root)
@@ -1988,8 +2001,8 @@ def serve(
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
         if cached is not None:
             _PACKET_CACHE.move_to_end(cache_identity)
-    if cached is not None:
-        return copy.deepcopy(cached)
+    if cached is not None and status_basis.matches(cached[1]):
+        return copy.deepcopy(cached[0])
 
     def _abstain_unavailable() -> dict[str, Any]:
         return working_set.abstained_packet(
@@ -2026,6 +2039,7 @@ def serve(
             attribution=attribution,
             marks=marks,
             conversation=conversation if with_conversation else None,
+            status_basis=status_basis,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The
@@ -2073,7 +2087,7 @@ def serve(
     if not cacheable:
         return packet
     with _CACHE_LOCK:
-        _PACKET_CACHE[cache_identity] = copy.deepcopy(packet)
+        _PACKET_CACHE[cache_identity] = (copy.deepcopy(packet), status_basis.dependency)
         _PACKET_CACHE.move_to_end(cache_identity)
         while len(_PACKET_CACHE) > CACHE_SIZE:
             _PACKET_CACHE.popitem(last=False)

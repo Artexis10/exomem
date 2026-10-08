@@ -17,7 +17,9 @@ from typing import Any
 
 import yaml
 
+from . import activation, find_corpus, lifecycle_statuses
 from . import artifact_role_review as sensor
+from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
 MAX_EDGES = sensor.MAX_UNITS * sensor.MAX_EVIDENCE
@@ -35,7 +37,7 @@ def _generation(root: Path, path: str) -> list[int] | None:
 def _state(root: Path, parsed: Any) -> Any:
     from . import semantic_contract
 
-    return semantic_contract.build_page_state(
+    return semantic_contract._parse_page_state(
         root,
         parsed.rel_path,
         "---\n" + yaml.safe_dump(parsed.frontmatter) + "---\n" + parsed.body,
@@ -114,8 +116,19 @@ def describe(root: Path, state: Any) -> dict[str, Any]:
         "identity": state.identity,
         "parent_ref": state.document.parent_ref,
         "type": state.page_type,
-        "eligible": state.eligible_compiled,
-        "status": state.status,
+        "eligible": activation.structurally_eligible_for_types(
+            root,
+            ParsedPage(
+                path=root / state.path,
+                rel_path=state.path,
+                frontmatter=dict(state.frontmatter),
+                body="",
+                title=state.title,
+                mtime=0.0,
+            ),
+            page_types=activation._COMPILED_PAGE_TYPES,
+        ),
+        "status": state.frontmatter.get("status"),
         "n": state.frontmatter.get("n"),
         "generation": _generation(root, state.path),
         "aliases": list(
@@ -232,6 +245,19 @@ def _candidate_row(candidate: Any) -> dict[str, Any]:
     }
 
 
+def _eligible(index: Mapping[str, Any], page: Mapping[str, Any]) -> bool:
+    basis = index.get("_status_basis")
+    if basis is None:
+        return bool(page["eligible"])
+    if not index["_authorize"](page["path"]):
+        return False
+    root = index["_root"]
+    current = find_corpus.CACHE.get(root / page["path"], root)
+    if current is None:
+        raise OSError("artifact role page is unavailable")
+    return activation.is_eligible_compiled_page(root, current, status_basis=basis)
+
+
 def _covers(
     index: Mapping[str, Any],
     origin: str,
@@ -240,10 +266,9 @@ def _covers(
 ) -> dict[str, Any] | None:
     if (
         not destination["complete"]
-        or not destination["eligible"]
+        or not _eligible(index, destination)
         or destination["path"] == origin
         or destination["type"] == "experiment"
-        or destination["status"] not in {None, "", "active"}
     ):
         return None
     if candidate["role"] == "research_synthesis" and destination["type"] != "research-note":
@@ -302,13 +327,12 @@ def _origin(index: dict[str, Any], path: str, *, bounded: bool = False) -> dict[
         if (
             destination
             and destination["complete"]
-            and destination["eligible"]
-            and destination["status"] in {None, "", "active", "ongoing"}
+            and _eligible(index, destination)
         ):
             _, _, external_superseded, _ = _resolved(index, destination)
             superseded.update(external_superseded)
     result = sensor.detect(
-        _view(page),
+        _view({**page, "eligible": _eligible(index, page)}),
         source_documents=sources,
         exact_links=links,
         superseded_refs=frozenset(superseded),
@@ -478,6 +502,7 @@ def compose(
     authorize: Callable[[str], bool],
     *,
     validate: bool = True,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[list[Any], dict[str, str]]:
     from .audit import AuditFinding
 
@@ -489,8 +514,16 @@ def compose(
     if row["epoch"] != index["support_epoch"]:
         return [], dict.fromkeys(sensor.FAMILIES, "unknown")
     coverage.update(row["coverage"])
-    audience_index = {**index, "_authorize": authorize}
-    recomposed = _origin(audience_index, path, bounded=True)
+    audience_index = {
+        **index,
+        "_authorize": authorize,
+        "_root": root,
+        "_status_basis": status_basis or lifecycle_statuses.Basis(root),
+    }
+    try:
+        recomposed = _origin(audience_index, path, bounded=True)
+    except (OSError, lifecycle_statuses.OpError):
+        return [], dict.fromkeys(sensor.FAMILIES, "unknown")
     for family in sensor.FAMILIES:
         if coverage[family] != "unknown":
             coverage[family] = recomposed["coverage"][family]
@@ -561,14 +594,20 @@ def compose(
 
 
 def inspect(
-    root: Path, index: Mapping[str, Any], authorize: Callable[[str], bool], *, validate: bool = True
+    root: Path,
+    index: Mapping[str, Any],
+    authorize: Callable[[str], bool],
+    *,
+    validate: bool = True,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[list[Any], dict[str, str]]:
     findings = []
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
     coverage = dict.fromkeys(sensor.FAMILIES, "complete")
     order = {"complete": 0, "capped": 1, "unknown": 2}
     for path in index.get("origins", {}):
         _checkpoint(index)
-        rows, states = compose(root, index, path, authorize, validate=validate)
+        rows, states = compose(root, index, path, authorize, validate=validate, status_basis=status_basis)
         findings.extend(rows)
         for family, status in states.items():
             if order[status] > order[coverage[family]]:

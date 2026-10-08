@@ -32,6 +32,7 @@ from . import (
     find_types,
     foreground_priority,
     freshness,
+    lifecycle_statuses,
     recall_policy,
     recall_space,
     request_budget,
@@ -212,7 +213,7 @@ def auto_rerank_allowed_by_policy() -> bool:
 # values are deep-copied on the way in AND out so caller mutation can never
 # poison a later response. `EXOMEM_FIND_CACHE_SIZE=0` disables it.
 # --------------------------------------------------------------------------- #
-_FIND_CACHE: OrderedDict[tuple, list[Hit]] = OrderedDict()
+_FIND_CACHE: OrderedDict[tuple, tuple[list[Hit], tuple[str, str]]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
 _FIND_CACHE_CHECKPOINTS: dict[
     tuple, tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...]
@@ -1101,6 +1102,7 @@ def find(
     retrieval_trace: Any | None = None,
     catalog_proof_out: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
     admit_path: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -1210,6 +1212,7 @@ def find(
     over the index-resolved out-of-KB eligible set, and declines rather than
     scanning when the catalogue cannot answer.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
     if scope not in ("kb", "vault", "kb-only"):
@@ -1536,7 +1539,7 @@ def find(
                     cached_units = _FIND_CACHE.get(unit_cache_key)
                     if cached_units is not None:
                         _FIND_CACHE.move_to_end(unit_cache_key)
-            if cached_units is not None:
+            if cached_units is not None and status_basis.matches(cached_units[1]):
                 if timings is not None:
                     timings.cache["hit"] = True
                 if unit_algebra.status == "complete":
@@ -1547,7 +1550,7 @@ def find(
                 # and it is proportional to `limit`. Unspanned it was reported
                 # as unattributed remainder on every hot request.
                 with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
-                    return copy.deepcopy(cached_units)
+                    return copy.deepcopy(cached_units[0])
         unit_hits = _find_semantic_units(
             vault_root,
             query=query,
@@ -1557,6 +1560,7 @@ def find(
             allowed_parent_paths=admitted_paths,
             snapshot=snapshot,
             prefer_active=prefer_active,
+            status_basis=status_basis,
             config=resolved_config,
             mode=mode,
             degraded_out=degraded,
@@ -1575,7 +1579,7 @@ def find(
                     unit.relation_match = _relation_match_dict(match, matched="parent")
         if unit_cache_key is not None and not degraded and not failed:
             with _FIND_CACHE_LOCK:
-                _FIND_CACHE[unit_cache_key] = copy.deepcopy(unit_hits)
+                _FIND_CACHE[unit_cache_key] = (copy.deepcopy(unit_hits), status_basis.dependency)
                 _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
                 _FIND_CACHE.move_to_end(unit_cache_key)
                 _trim_find_cache(cache_size)
@@ -1690,7 +1694,7 @@ def find(
             )
         cache_key = (request_key, fresh)
         prior_key: tuple | None = None
-        prior_hits: list[Hit] | None = None
+        prior_hits: tuple[list[Hit], tuple[str, str]] | None = None
         prior_checkpoints: tuple[
             tuple[str, freshness.RecallFreshnessCheckpoint], ...
         ] | None = None
@@ -1715,11 +1719,12 @@ def find(
             and prior_key is not None
             and prior_hits is not None
             and prior_checkpoints is not None
+            and status_basis.matches(prior_hits[1])
         ):
             safe, advanced = _keyword_cache_delta_is_safe(
                 vault_root,
                 query_norm=query_norm,
-                cached_hits=prior_hits,
+                cached_hits=prior_hits[0],
                 cached_freshness=prior_key[1],
                 current_freshness=fresh,
                 checkpoints=prior_checkpoints,
@@ -1737,7 +1742,7 @@ def find(
                         _FIND_CACHE[cache_key] = cached
                         _FIND_CACHE_CHECKPOINTS[cache_key] = advanced
                         _FIND_CACHE.move_to_end(cache_key)
-        if cached is not None:
+        if cached is not None and status_basis.matches(cached[1]):
             if timings is not None:
                 timings.cache["hit"] = True
             _set_rerank_timing_profile(
@@ -1756,7 +1761,7 @@ def find(
                 _record_filter_eligibility_cache_hit(timings)
                 _set_catalog_timing_profile(timings, cache_hit=True)
             with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
-                return copy.deepcopy(cached)
+                return copy.deepcopy(cached[0])
 
     # Track warm-window degradation even when the caller passed no list —
     # internal callers (suggest_links, evolution, note/add sweeps) must never
@@ -1776,6 +1781,7 @@ def find(
                 allowed_parent_paths=admitted_paths,
                 snapshot=snapshot,
                 prefer_active=prefer_active,
+                status_basis=status_basis,
                 config=resolved_config,
                 mode=mode,
                 degraded_out=degraded,
@@ -1871,6 +1877,7 @@ def find(
                 intent=intent,
                 prefer_compiled=prefer_compiled,
                 prefer_active=prefer_active,
+                status_basis=status_basis,
                 prefer_used=prefer_used,
                 config=resolved_config,
                 timings=timings,
@@ -2055,7 +2062,7 @@ def find(
         and not unproven_graph_key
     ):
         with _FIND_CACHE_LOCK:
-            _FIND_CACHE[cache_key] = copy.deepcopy(hits)
+            _FIND_CACHE[cache_key] = (copy.deepcopy(hits), status_basis.dependency)
             if cache_checkpoints is not None:
                 _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
             else:
@@ -2306,8 +2313,9 @@ def _unit_rank_score(
     page: ParsedPage,
     prefer_active: bool,
     config: RankingConfig,
+    status_basis: lifecycle_statuses.Basis,
 ) -> float:
-    if not prefer_active or page.status != "superseded":
+    if not prefer_active or status_basis.classify(page.frontmatter.get("status")).require() != "superseded":
         return raw_score
     penalty = config.superseded_penalty
     return raw_score * penalty if raw_score >= 0 else raw_score / penalty
@@ -2472,10 +2480,12 @@ def _find_semantic_units(
     repair: bool | None = None,
     max_catalog_candidates: int | None = None,
     truncated_out: list[bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
 
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     # Empty queries carry no vector signal. Match the page lane's contract and
     # treat them as filter-only keyword recall before deciding whether exact
     # catalog rows can stay cold for vector ranking.
@@ -2682,14 +2692,21 @@ def _find_semantic_units(
             reverse=True,
         )
         if prefer_active:
-            ordered.sort(key=lambda record: record[0].status == "superseded")
+            ordered.sort(
+                key=lambda record: (
+                    status_basis.classify(record[0].frontmatter.get("status")).require()
+                    == "superseded"
+                )
+            )
         selected = ordered if limit is None else ordered[:limit]
         hits = [
             _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
             for page, unit, _source_order in selected
         ]
         if retrieval_trace is not None:
-            retrieval_trace.record_unit_keyword(selected)
+            retrieval_trace.record_unit_keyword(
+                selected, status_basis=status_basis, prefer_active=prefer_active
+            )
         return hits
 
     vector_hits: list[Any] = []
@@ -2821,9 +2838,16 @@ def _find_semantic_units(
                     lane_scores[unit_ref],
                     page=records[unit_ref][0],
                     prefer_active=prefer_active,
+                    status_basis=status_basis,
                     config=config,
                 ),
-                bool(prefer_active and records[unit_ref][0].status == "superseded"),
+                bool(
+                    prefer_active
+                    and status_basis.classify(
+                        records[unit_ref][0].frontmatter.get("status")
+                    ).require()
+                    == "superseded"
+                ),
                 records[unit_ref][0].rel_path,
                 records[unit_ref][2],
                 unit_ref,
@@ -2862,9 +2886,16 @@ def _find_semantic_units(
                         item[1],
                         page=records[item[0]][0],
                         prefer_active=prefer_active,
+                        status_basis=status_basis,
                         config=config,
                     ),
-                    bool(prefer_active and records[item[0]][0].status == "superseded"),
+                    bool(
+                        prefer_active
+                        and status_basis.classify(
+                            records[item[0]][0].frontmatter.get("status")
+                        ).require()
+                        == "superseded"
+                    ),
                     records[item[0]][0].rel_path,
                     records[item[0]][2],
                     item[0],
@@ -2894,6 +2925,7 @@ def _find_semantic_units(
             weights=(intent_weights[0], intent_weights[1]),
             rrf_k=config.rrf_k,
             prefer_active=prefer_active,
+            status_basis=status_basis,
             superseded_penalty=config.superseded_penalty,
             lexical_used=(mode != "vector" or not vector_succeeded),
             vector_used=vector_succeeded,
@@ -4248,6 +4280,7 @@ def _find_semantic(
     retrieval_trace: Any | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
     pending: Any | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -4259,6 +4292,8 @@ def _find_semantic(
     """
     # Lazy imports — keep keyword-mode users out of the torch import path.
     from . import embeddings, lexstore, readiness, scene_frames
+
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
@@ -4317,6 +4352,7 @@ def _find_semantic(
             intent=intent,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
+            status_basis=status_basis,
             prefer_used=prefer_used,
             config=config,
             timings=timings,
@@ -4328,17 +4364,17 @@ def _find_semantic(
             record_degradation=_record_degradation,
             degraded_out=degraded_out,
             failed_out=failed_out,
-            recall_paths=(snapshot.recall_paths(recall_scope or scope) if admitted_paths is None else snapshot.recall_paths(recall_scope or scope) & admitted_paths),
+            recall_paths=(
+                snapshot.recall_paths(recall_scope or scope)
+                if admitted_paths is None
+                else snapshot.recall_paths(recall_scope or scope) & admitted_paths
+            ),
             lexical_repair=lexical_repair,
             eligible_paths=eligible_paths,
             admitted_paths=admitted_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,
-            shadow=(
-                pending.shadow
-                if pending is not None and not pending.empty
-                else None
-            ),
+            shadow=(pending.shadow if pending is not None and not pending.empty else None),
         )
     except lexstore.CatalogUnavailable as error:
         _raise_catalog_outcome(error.readiness)
@@ -4749,7 +4785,9 @@ def _find_semantic(
                                 }
                             )
                     if prefer_active:
-                        factor = _status_multiplier(h.status, config)
+                        factor = _status_multiplier(
+                            status_basis.classify(h.status).require(), config
+                        )
                         before = adjusted
                         adjusted *= factor
                         if chain is not None:
@@ -5259,7 +5297,9 @@ def _apply_status_demotion(
     vault_root: Path,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
-    return find_policy.apply_status_demotion(fused, _page_of(vault_root), config)
+    return find_policy.apply_status_demotion(
+        fused, _page_of(vault_root), config, status_basis=lifecycle_statuses.Basis(vault_root)
+    )
 
 
 def _apply_post_rrf_multipliers(
@@ -5271,6 +5311,7 @@ def _apply_post_rrf_multipliers(
     prefer_active: bool,
     temporal: bool,
     page_of,
+    status_basis: lifecycle_statuses.Basis | None = None,
     usage_map: dict[str, float] | None = None,
 ) -> list[tuple[str, float]]:
     return find_policy.apply_post_rrf_multipliers(
@@ -5279,6 +5320,7 @@ def _apply_post_rrf_multipliers(
         config,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
+        status_basis=status_basis,
         temporal=temporal,
         page_of=page_of,
         usage_map=usage_map,
@@ -6346,7 +6388,7 @@ def cache_status() -> dict:
         resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
-        hot_hits = sum(len(v) for v in _FIND_CACHE.values())
+        hot_hits = sum(len(v[0]) for v in _FIND_CACHE.values())
     return {
         "pages": {
             "entries": len(page_entries),

@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import epistemic_graph, find_corpus, freshness, memory_refs, readiness
+from . import epistemic_graph, find_corpus, freshness, lifecycle_statuses, memory_refs, readiness
 from .entity_registry import load_entity_registry, schedule_entity_registry_warm
 from .entity_types import load_entity_types
 from .find import FreshnessSnapshot
@@ -233,6 +233,7 @@ def resolve_for_find(
             edges=edges,
             anchor_cap=anchor_cap,
             registry=type_registry,
+            status_basis=lifecycle_statuses.Basis(vault_root),
         )
         block = resolution.as_dict()
         if not block["resolved"] and not block["candidates"] and cue.expected_count is None:

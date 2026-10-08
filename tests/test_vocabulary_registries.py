@@ -494,6 +494,7 @@ def test_limited_owner_save_uses_admitted_overlay_without_approval(
         ("source-kinds", "field-notebook", {"label": "Field notebook"}),
         ("domains", "ornithology", {"label": "Ornithology"}),
         ("categories", "field_observation", {"description": "An observation made in the field"}),
+        ("statuses", "awaiting-review", {"attributes": {"class": "pending"}}),
     ],
 )
 def test_each_overlay_adapter_restores_its_legacy_grammar(vault, subject, key, entry):
@@ -972,3 +973,145 @@ def test_crlf_edits_keep_legacy_hashes_and_exact_snapshot_restore_bytes(vault: P
     assert registry_history.read_version(
         vault, stem="entity-types", version=restored["history"]["version"],
     ).encode("utf-8") == second
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_canonical_status_meaning_cannot_be_shadowed_or_replaced(vault):
+    from exomem import lifecycle_statuses
+    from exomem.vocabulary import registry
+
+    before = commands.op_schema_memory(vault, subject="statuses", operation="inspect")
+    for delta in (
+        {"upsert": {"active": {"attributes": {"class": "retired"}}}},
+        {"upsert": {"paused": {"aliases": ["ACTIVE"], "attributes": {"class": "pending"}}}},
+    ):
+        with pytest.raises(registry.RegistryError):
+            commands.op_schema_memory(
+                vault,
+                subject="statuses",
+                operation="save",
+                proposal=delta,
+                expected_hash=before["content_hash"],
+                why="attempt to redefine a public meaning",
+            )
+    assert not lifecycle_statuses.registry_path(vault).exists()
+    # A foreign edit cannot override the canonical meaning or yield a usable extension registry.
+    overlay = lifecycle_statuses.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries:\n  active:\n    attributes: {class: retired}\n")
+    inspected = commands.op_schema_memory(vault, subject="statuses", operation="inspect")
+    assert inspected["findings"]
+    canonical = lifecycle_statuses.Basis(vault)
+    assert canonical.classify("ACTIVE").live
+    assert canonical.classify(None).live
+
+
+def test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_aliases(
+    vault: Path,
+) -> None:
+    from exomem import lifecycle_statuses, semantic_contract
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+
+    _govern(vault, scope_path="_Schema/statuses.yaml")
+    _reset_governance()
+    path = "Knowledge Base/Notes/Insights/harbour-status.md"
+    source = "---\ntype: insight\nstatus: awaiting-tide\n---\n\nThe harbour remains readable.\n"
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(source)
+    outsider = RequestPrincipal(audience_id="external", surface="mcp")
+    refusals = []
+    for delta in (
+        None,
+        {"upsert": {"awaiting-tide": {"attributes": {"class": "pending"}}}},
+        {"upsert": {"awaiting-tide": {"aliases": ["at-anchor"]}}},
+    ):
+        if delta is not None:
+            with library_scope():
+                inspected = commands.op_schema_memory(
+                    vault, subject="statuses", operation="inspect"
+                )
+                commands.op_schema_memory(
+                    vault,
+                    subject="statuses",
+                    operation="save",
+                    proposal=delta,
+                    expected_hash=inspected["content_hash"],
+                    why="define the harbour lifecycle",
+                )
+        with request_scope(outsider):
+            assert "harbour remains readable" in commands.op_read_memory(vault, path=path)["body"]
+            canonical = semantic_contract.build_page_state(
+                vault, path, source.replace("awaiting-tide", "active")
+            )
+            statusless = semantic_contract.build_page_state(
+                vault, path, source.replace("status: awaiting-tide\n", "")
+            )
+            assert canonical.eligible_compiled and statusless.eligible_compiled
+            assert canonical.status_dependency[0] == statusless.status_dependency[0] == "public"
+            for label in ("awaiting-tide", "at-anchor"):
+                with pytest.raises(OpError) as unavailable:
+                    semantic_contract.build_page_state(
+                        vault, path, source.replace("awaiting-tide", label)
+                    )
+                refusals.append((unavailable.value.code, str(unavailable.value)))
+    assert len(set(refusals)) == 1
+    assert refusals[0][0] == "STATUS_CLASSIFICATION_UNAVAILABLE"
+    with library_scope():
+        assert lifecycle_statuses.Basis(vault).classify("at-anchor").require() == "pending"
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes(
+    vault: Path,
+) -> None:
+    from exomem import lifecycle_statuses
+
+    overlay = lifecycle_statuses.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        b"schema_version: 1\r\nentries:\r\n  awaiting-tide:\r\n    attributes: {class: pending}\r\n"
+    )
+    overlay.write_bytes(original)
+    inspected = commands.op_schema_memory(vault, subject="statuses", operation="inspect")
+    saved = commands.op_schema_memory(
+        vault,
+        subject="statuses",
+        operation="save",
+        proposal={"upsert": {"docked": {"attributes": {"class": "live"}}}},
+        expected_hash=inspected["content_hash"],
+        why="add a distinct current lifecycle",
+    )["saved"]
+    snapshot = vault / saved["history"]["snapshot"]
+    retained = snapshot.read_bytes()
+    header = retained.partition(b"\n")[0] + b"\n"
+    snapshot.write_bytes(
+        header + b"schema_version: 1\nentries:\n  active:\n    attributes: {class: retired}\n"
+    )
+    before = overlay.read_bytes()
+    before_history = registry_history.versions(vault, stem="statuses")
+    before_log = (vault / "Knowledge Base/log.md").read_bytes()
+    refused = commands.op_schema_memory(
+        vault,
+        subject="statuses",
+        operation="restore",
+        version=saved["history"]["version"],
+        expected_hash=saved["content_hash"],
+        why="attempt to restore corrupted history",
+    )
+    assert refused["valid"] is False and refused["saved"] is None
+    assert any(item["code"] == "invalid_status_registry" for item in refused["findings"])
+    assert overlay.read_bytes() == before
+    assert registry_history.versions(vault, stem="statuses") == before_history
+    assert (vault / "Knowledge Base/log.md").read_bytes() == before_log
+    snapshot.write_bytes(retained)
+    restored = commands.op_schema_memory(
+        vault,
+        subject="statuses",
+        operation="restore",
+        version=saved["history"]["version"],
+        expected_hash=saved["content_hash"],
+        why="restore the intact retained version",
+    )
+    assert restored["valid"] is True
+    assert overlay.read_bytes() == original

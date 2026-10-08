@@ -1,8 +1,16 @@
 ## Programme order
 
-This change is the programme's one home. S1 is this delivery. S2 to S10 are sequenced here and land as their own pull requests; S3, S4 and S7 also get their own OpenSpec changes (`add-lifecycle-status-registry`, `add-note-type-registry`, `add-language-packs`), and Planning gets a small change when S10 starts. After S1, S2, S3, S5 and S10 can run in parallel; everything else is sequential.
+This change is the programme's one home. S1 shipped in foundation merge `e844290a16b298fa30edfefea5e38d9951d54973` (PR #1623, CI `37762518836`).
+S2 guidance and S3 lifecycle consumers now share one meaning and form one cohesive delivery under `add-lifecycle-status-registry`.
+Their source checkpoint does not claim generated-carrier, runtime or delivery completion.
+Later slices remain sequenced here; S4 and S7 use their own OpenSpec changes, and Planning gets a small change when S10 starts.
+After S1, the coupled S2/S3 batch, S5 and S10 can run in parallel; other dependencies remain unchanged.
 
-## S1. Substrate, revert, generic contract, bootstrap section (this delivery)
+The S3 author verified that base `118f377ab04c595db26f13024a682f05aca31fc0` has the foundation merge's exact tree.
+The delivery owner supplied the CI receipt; the S3 static checkpoint has not independently read its job artifacts.
+Existing S1 boxes remain unchanged until their exact proof is reconciled; S2/S3 boxes remain open.
+
+## S1. Substrate, revert, generic contract, bootstrap section (shipped foundation)
 
 - [ ] 1.1 Red first: through the MCP surface, promote an entity type, see it in `bootstrap(section="vocabulary")` with a count, use it on a page, restore the previous version, and see the page reported as unregistered debt with its bytes untouched.
 - [ ] 1.2 Red first: a stale `expected_hash` refusal; a resolved nonowner's v1 save becoming a pending item; a limited owner's permitted save without approval; a hand-edited overlay snapshotted on the next save.
@@ -24,7 +32,7 @@ This change is the programme's one home. S1 is this delivery. S2 to S10 are sequ
 
 ## S3. Lifecycle statuses (`add-lifecycle-status-registry`)
 
-- [ ] 3.1 Add the status registry with `class` (live, pending, superseded, retired, abandoned) and turn the inactive, retired, history and find-penalty sets into predicates on it; record the `planned` entity-page change.
+- [ ] 3.1 Add the status registry with `class` (live, pending, superseded, retired, abandoned) and turn the inactive, retired, history and find-penalty sets into predicates on it; record the planned-evidence recurrence change while preserving entity identity rules.
 - [ ] 3.2 Keep an unregistered status live and report it as debt. Proof: register `abandoned` with its class and see `activate_context` stop serving that page as current; run the full suite.
 
 ## S4a. Note types, read side (`add-note-type-registry`)

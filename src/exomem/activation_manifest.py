@@ -274,7 +274,24 @@ def ensure_manifest(
     if existing is not None:
         return existing
 
-    candidate = _snapshot(vault_root) if census is None else _snapshot(vault_root, census=census)
+    from . import lifecycle_statuses
+    from .governance import egress
+    from .vocabulary.contract import admission_refusal
+
+    # First-boundary capture must describe the complete admitted corpus; a
+    # restricted first write waits for ordinary canonical/admin preparation.
+    if (
+        egress.owner_only_aggregate(vault_root) is not None
+        or admission_refusal(vault_root, lifecycle_statuses.SPEC) is not None
+    ):
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is unavailable"
+        )
+    if not commit_point and census is None:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNAVAILABLE", "a prepared activation census is required"
+        )
+    candidate = _snapshot(vault_root, census=census)
     path = manifest_path(vault_root)
     with _creation_lock(path):
         winner = load_manifest(vault_root)
@@ -303,8 +320,12 @@ def is_grandfathered(
     exomem_id: object = _UNSET,
     manifest: ActivationManifest | None = None,
     census: ActivationCensus | None = None,
+    identity_census: Any | None = None,
+    eligible_compiled: bool | None = None,
 ) -> bool:
     """Return whether the current page belongs to the activation baseline."""
+    if eligible_compiled is False:
+        return False
     vault_root = Path(vault_root)
     loaded = manifest if manifest is not None else load_manifest(vault_root)
     if loaded is None:
@@ -336,6 +357,22 @@ def is_grandfathered(
         page.identity_kind == "exomem_id" and page.identity == normalized_id
         for page in loaded.pages
     ):
+        if identity_census is not None:
+            from .semantic_contract import StableIdentityCensus, identity_owners_match
+
+            if not isinstance(identity_census, StableIdentityCensus):
+                raise ActivationManifestError(
+                    "ACTIVATION_CENSUS_INVALID", "complete identity evidence is required"
+                )
+            from . import vault
+
+            return identity_owners_match(
+                identity_census.paths_by_identity.get(normalized_id),
+                rel_path,
+                folds=vault.vault_casefolds(vault_root),
+            )
+        if eligible_compiled is not None:
+            return False
         try:
             observed = census if census is not None else build_census(vault_root)
         except ActivationManifestError:
@@ -354,7 +391,18 @@ def is_grandfathered(
 
 
 def build_census(vault_root: Path) -> ActivationCensus:
-    """Walk and read the eligible compiled corpus exactly once."""
+    """Build complete activation evidence after complete-view and registry admission."""
+    from . import lifecycle_statuses
+    from .governance import egress
+    from .vocabulary.contract import admission_refusal
+
+    if (
+        egress.owner_only_aggregate(vault_root) is not None
+        or admission_refusal(vault_root, lifecycle_statuses.SPEC) is not None
+    ):
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is unavailable"
+        )
     return ActivationCensus.from_candidates(_eligible_candidates(Path(vault_root)))
 
 
@@ -388,13 +436,17 @@ def snapshot_from_census(census: ActivationCensus) -> ActivationManifest:
 
 
 def plan_activation_boundary(
-    census: ActivationCensus,
+    census: ActivationCensus | None,
     *,
     manifest: ActivationManifest | None,
 ) -> ActivationBoundaryPlan:
     """Select an observed or prospective boundary without installing it."""
     if manifest is not None:
         return ActivationBoundaryPlan(manifest, False)
+    if census is None:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is required"
+        )
     return ActivationBoundaryPlan(snapshot_from_census(census), True)
 
 
@@ -405,6 +457,9 @@ def _snapshot(vault_root: Path, *, census: ActivationCensus | None = None) -> Ac
 
 def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
     kb = vault_root / kb_dirname()
+    from . import lifecycle_statuses
+
+    status_basis = lifecycle_statuses.Basis(vault_root)
     candidates: list[ActivationCandidate] = []
     if kb.is_dir():
         paths = sorted(
@@ -431,7 +486,9 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
                 title="",
                 mtime=0.0,
             )
-            if not activation.is_eligible_compiled_page(vault_root, page):
+            if not activation.is_eligible_compiled_page(
+                vault_root, page, status_basis=status_basis
+            ):
                 continue
             candidates.append(
                 ActivationCandidate(

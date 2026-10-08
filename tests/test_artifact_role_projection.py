@@ -616,7 +616,7 @@ def test_detector_overrun_invalidates_actual_delta_and_served_coverage(tmp_path,
     assert state.served(tmp_path, lambda _p: True) == ([], dict.fromkeys(FAMILIES, "unknown"))
 
 
-@pytest.mark.parametrize("status", ["superseded", "retracted"])
+@pytest.mark.parametrize("status", ["superseded", "archived"])
 def test_inactive_cross_page_superseder_cannot_settle(tmp_path, status):
     write(tmp_path, pending())
     write(tmp_path, correction(), DEST, "pattern", status)
@@ -634,3 +634,47 @@ def test_authored_reverse_chronology_is_quiet_through_actual_delta(tmp_path):
     due_state.apply_write_delta(tmp_path, ORIGIN)
     assert not report(tmp_path).findings
     assert due_state.served(tmp_path) is None
+
+
+def test_stored_role_support_rechecks_status_definitions_without_reconcile(tmp_path):
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import artifact_role_state, commands
+    from exomem.governance import egress
+    from exomem.governance.principal import library_scope, request_scope
+
+    write(tmp_path, method(), status="awaiting-review")
+    original = (tmp_path / ORIGIN).read_bytes()
+    with library_scope():
+        due_state.reconcile(tmp_path)
+        first, coverage = artifact_role_state.served(tmp_path, lambda _path: True)
+        assert [finding.category for finding in first] == ["artifact_role_promotion"]
+        inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
+        saved = commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"awaiting-review": {"attributes": {"class": "pending"}}}},
+            expected_hash=inspected["content_hash"],
+            why="mark the experiment as pending",
+        )["saved"]
+        pending_rows, pending_coverage = artifact_role_state.served(tmp_path, lambda _path: True)
+        assert pending_rows == []
+        assert pending_coverage == dict.fromkeys(FAMILIES, "complete")
+        commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="restore",
+            version=saved["history"]["version"],
+            expected_hash=saved["content_hash"],
+            why="restore the former lifecycle",
+        )
+        resumed, coverage = artifact_role_state.served(tmp_path, lambda _path: True)
+        assert [finding.category for finding in resumed] == ["artifact_role_promotion"]
+    write_scope(tmp_path, paths="_Schema/statuses.yaml", name="Private statuses")
+    write_rule(tmp_path, ceiling=0)
+    _reset_caches()
+    with request_scope(_external()):
+        hidden, unknown = artifact_role_state.served(tmp_path, egress.release_walk_filter(tmp_path))
+    assert hidden == [] and unknown == dict.fromkeys(FAMILIES, "unknown")
+    assert (tmp_path / ORIGIN).read_bytes() == original

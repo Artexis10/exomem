@@ -1,0 +1,15 @@
+schema_version: 1
+registry: statuses
+entries:
+  active:
+    attributes: {class: live}
+  draft:
+    attributes: {class: pending}
+  planned:
+    attributes: {class: pending}
+  superseded:
+    attributes: {class: superseded}
+  archived:
+    attributes: {class: retired}
+  dropped:
+    attributes: {class: abandoned}
