@@ -59,5 +59,34 @@ Shared-worker follow-through: the released runtime and isolated reviewer rollout
 - [ ] 4.4 Publish through the existing release process and independently verify exact source, artifact signatures and digest. A separately authorized reviewer-only canary may precede owner adoption after its own identity/backup, preservation and measured resource checks, leaving shared-node MemoryQoS and owner/QA unchanged. Roll the authorized owner cell after its identity/backup checks; perform the large owner-vault outcome gates and compare preserved source/engagement state. Record cgroup peaks and measured warm node capacity; hold fleet/friends on failed internal outcomes or a demonstrated state-preservation defect applicable to their rollout.
 
   Release 0.107.0 (2026-10-05): published by run 37309073450 from merge 1f91ba95 (tree equal to the frozen candidate). An independent verifier matched the PyPI wheel/sdist to the release assets and the local build, the SLSA provenance of the cell image index sha256:01830299…e284ea5 to release-please.yml at 1f91ba95, and its amd64 manifest and config digests. The reviewer-only canary (cell xuonhoiy3pvzqom6) rolled from 0.106 to that image after fresh identity/backup checks: Ready, zero restarts, 2 CPU / 3 Gi limits, 1 Gi request, same node and PVC; peers and fleet default unchanged. The owner roll, its large-vault gates and the cgroup/warm-capacity measurements remain open.
+
+  Release 0.110.0 checkpoint (2026-10-07): [publication 37684718316](https://github.com/Artexis10/exomem/actions/runs/37684718316) succeeded from source `68f95f82dddea6faee2ad80e0efa54f6a5663116`.
+  Full base CI `37675900306` and exact candidate CI `37677108352` attempt 2 passed before publication.
+  Independent verification matched the signed Cloud and controller artifacts to that source.
+  The Cloud digest is `sha256:8bda594c88640e69f695fee3a094a49f5ce20990ef3f375af6e1b725fbad4b67`.
+  The controller digest is `sha256:6d613c573c93ff8f8faa132d94b2c00f27a6426148faf0e32e831480192ed00d`.
+
+  The authorized controller update reached Helm revision 80; reviewer, QA and owner cells became Ready with zero restarts after their identity and backup checks.
+  Hash and byte comparisons preserved 9,243 non-hidden Knowledge Base files, totaling 3,597,651,766 bytes, and one preference file.
+  This proves the selected preservation scope, not every hidden or index file.
+  Production keeps requests `1Gi/250m`, limits `3Gi/2CPU`, local storage off, shared selection off and the fleet default unchanged.
+
+  The uncontrolled 22:05:07–22:15:07 UTC window measured owner CPU at 139.984m and ending private memory at 343.234 MiB.
+  Both owner targets remain unmet; these observations establish no causal improvement or capacity qualification.
+  The operator excluded the separate Cloud connector, so owner save/query acceptance remains unverified without a renewed login request.
+  Tasks 3.9 and 4.4–4.6 remain open for their outcome, occupancy and closure obligations.
+
+  Receipt custody: the operator's local state directory, under `cloud-migration-preparation/2026-09-30-friend-delivery/cloud-resource-policy/codex-release-preflight/`.
+  Preservation uses `release-0110-custody-before.json` and `release-0110-custody-after.json`; `release-0110-preservation-proof.json` records their comparison.
+  The resource observation uses `release-0110-resource-after.json`; `release-0110-resource-comparison.json` records the stated target results.
+  The retained SHA-256 hashes bind the source receipts:
+
+  | Receipt | SHA-256 |
+  | --- | --- |
+  | `release-0110-custody-before.json` | `064291a6b2d5f6ac86fd115351f3b51b232f38f2c1f8e8c527f2ed47cf3e2df2` |
+  | `release-0110-custody-after.json` | `66109d5daa3d977f111da0ddf8da702552b981e10b04e6348bbfc3d6b877f9e9` |
+  | `release-0110-preservation-proof.json` | `5fa8fdcb9a95d4b5d153fbc32166c108b45a7b56cead729cd4e60402fac65c9d` |
+  | `release-0110-resource-after.json` | `a0ea9b57127374c4f5d1b988b0d1b8a6142129523688b143c67a45b1c7430572` |
+  | `release-0110-resource-comparison.json` | `3dfb292a9475eb5609235d435ffcfab4265aadd763858b97e31e7f121d5ebb89` |
 - [ ] 4.5 Record the owner outcome, coordinated QA/reviewer applicability and remaining programme gates in the release evidence. Fleet default and friends remain deferred follow-through requiring internal save/search, tenant isolation, preserved preferences and fresh warm-capacity evidence. Marketplace review, directory scans and reviewer-only acceptance govern provider listings, not internal releases or friend admission. Preserve the separate reviewer preference investigation without assuming it affects other cells. An authorized reviewer-only canary may use its separate window before owner adoption, with its own unchanged numeric resource/outcome gates and source/preference proof; its result does not satisfy owner/capacity gates or authorize fleet/friends. Broader QA/reviewer promotion follows owner/capacity acceptance. Neither provider listing acceptance nor a reviewer canary is a prerequisite for archiving this runtime change.
 - [ ] 4.6 Verify post-release behavior independently, record durable outcome/remaining blockers in Exomem, and complete OpenSpec sync/archive only when non-optional tasks have code/test/merge/live evidence. Validate all specs strictly before/after archive, then retire the clean pushed task worktree/branch in the ordinary delivery pass.
