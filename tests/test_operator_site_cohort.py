@@ -27,6 +27,7 @@ from epistemic.memory_loop import supplier_chain as sc
 from epistemic.memory_loop.contract import read_state
 
 from exomem import commands, entity_candidates, relation_registry, writer_lease
+from exomem.governance.principal import library_scope
 from exomem.vault import content_hash, read_log_entries
 
 pytestmark = pytest.mark.timeout(600)
@@ -353,15 +354,16 @@ def test_a_missing_meaning_goes_through_the_governed_relation_extension(
     assert key == "vault.sells_under"
     assert relation_registry.load_registry(root).definition(key) is None
 
-    saved = _invoke(
-        root,
-        "schema_memory",
-        subject="relations",
-        operation="save-relations",
-        proposal=proposed["delta"],
-        expected_hash=proposed["content_hash"],
-        why="Selling under a growers' mark is a durable, recurring distinction.",
-    )
+    with library_scope():
+        saved = _invoke(
+            root,
+            "schema_memory",
+            subject="relations",
+            operation="save-relations",
+            proposal=proposed["delta"],
+            expected_hash=proposed["content_hash"],
+            why="Selling under a growers' mark is a durable, recurring distinction.",
+        )
     assert saved["state"] == "committed", saved
     assert relation_registry.load_registry(root).definition(key) is not None
 
