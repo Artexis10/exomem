@@ -486,12 +486,14 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
             # exomem_tenants is a pre-existing table 0056 only references by FK
             # -- its stub, and one seed cell row the privilege probes act on,
             # live in this test-setup SQL only, never in the fixture files.
+            # Substrate migration 0017 defines status; the real gateway grants require it.
             schema_fixture = (ROOT / "infra/cellctl/tests/fixtures/exomem_cloud_schema.sql").read_text()
             grants_fixture = (ROOT / "infra/cellctl/tests/fixtures/exomem_cloud_grants.sql").read_text()
             migration_sql = work / "c1-migration.sql"
             migration_sql.write_text(
                 "-- Test-setup-only stub and seed row; never part of the fixture files.\n"
-                "CREATE TABLE IF NOT EXISTS exomem_tenants (id uuid PRIMARY KEY);\n"
+                "CREATE TABLE IF NOT EXISTS exomem_tenants "
+                "(id uuid PRIMARY KEY, status text NOT NULL DEFAULT 'provisioning');\n"
                 "INSERT INTO exomem_tenants (id) VALUES ('11111111-1111-1111-1111-111111111111');\n"
                 + schema_fixture
                 + "\nINSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
