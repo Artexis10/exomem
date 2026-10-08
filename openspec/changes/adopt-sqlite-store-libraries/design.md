@@ -52,6 +52,10 @@ Dedicated query readers keep their raw TEMP workflow. `ProjectionPlan.create_ddl
 
 Packaged `migrations/env.py` and eight revision files use Alembic's supported online connection-sharing interface. `Config.attributes["connection"]` supplies the writer-owned SQLAlchemy connection.
 
+Alembic's `context` and `op` proxies are process-global. One process lock covers each stamp and upgrade environment through teardown, including failures.
+
+The lock prevents concurrent vault installations from using another vault's connection. Concurrent installations wait; ordinary writer transactions, reads, snapshots, and runtime backfills stay independent.
+
 Revision identifiers `1` through `8` describe the historical chain. The initial revisions call the frozen historical transformations through the raw connection.
 
 Alembic replaces `MIGRATIONS` as execution authority. Future installation revisions use Alembic operations; runtime declaration backfills retain their checkpoint and publication contracts.
@@ -66,7 +70,7 @@ The compatibility version remains 8 because this adoption changes no canonical d
 
 When Alembic metadata exists, readers, writers, and snapshot validation require one supported revision that agrees with the compatibility field. A truly absent table remains valid legacy metadata.
 
-An empty, malformed, unknown, or conflicting existing table is not legacy absence. The shared validation check prevents migration selection or restore from contradictory schema claims.
+An empty, malformed, unknown, or conflicting existing table is not legacy absence. Metadata lookup follows SQLite identifier case rules, including legal uppercase table names. The shared validation check prevents migration selection or restore from contradictory schema claims.
 
 This refusal protects stored data. A wrong refusal blocks the affected store's access and costs its owner repair time; it must not fence out valid legacy version-8 stores.
 

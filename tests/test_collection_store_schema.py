@@ -428,6 +428,29 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
+@pytest.mark.parametrize("revision", ["8", "7"])
+def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
+    path = store.path
+    store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
+    store.connection.execute("ALTER TABLE intermediate_revision RENAME TO ALEMBIC_VERSION")
+    store.connection.execute("UPDATE ALEMBIC_VERSION SET version_num=?", (revision,))
+    if revision == "7":
+        with pytest.raises(ValueError, match="revision disagrees"):
+            schema.schema_version(store.connection)
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
+            connection.open_reader(path)
+        store.close()
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
+            connection.open_writer(path, lease_check=_allow)
+    else:
+        assert schema.schema_version(store.connection) == 8
+        store.close()
+        with closing(connection.open_reader(path)) as reader:
+            assert schema.schema_version(reader) == 8
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("8",)]
+
+
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
     path = tmp_path / "legacy.sqlite"
     with connection.open_writer(path, lease_check=_allow) as writer:
@@ -472,6 +495,99 @@ def test_forward_migrations_run_in_order_from_the_recorded_version(
     # Earlier revisions cannot run again: their CREATE/ALTER statements would fail.
     with connection.open_writer(target, lease_check=_allow) as writer:
         assert schema.schema_version(writer.connection) == target_version
+
+
+@pytest.mark.parametrize("legacy, fail_first", [(False, False), (True, False), (False, True)])
+def test_concurrent_vault_installations_keep_data_separate_after_failure(
+    tmp_path, monkeypatch, legacy, fail_first,
+):
+    """Overlapping Alembic environments must not migrate another vault's connection."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from alembic.script import ScriptDirectory
+
+    paths = {name: tmp_path / f"{name}.sqlite" for name in ("left", "right")}
+    for name, path in paths.items():
+        if legacy:
+            with connection.open_writer(path, lease_check=_allow) as writer:
+                writer.connection.execute("DROP TABLE alembic_version")
+        with closing(sqlite3.connect(path, isolation_level=None)) as raw:
+            raw.execute("CREATE TABLE vault_probe(value TEXT NOT NULL) STRICT")
+            raw.execute("INSERT INTO vault_probe VALUES(?)", (name,))
+
+    local = threading.local()
+    left_environment, right_ready = threading.Event(), threading.Event()
+    right_environment, left_finished = threading.Event(), threading.Event()
+    original_config = schema._migration_config
+    original_env = ScriptDirectory.run_env
+    original_revision = schema._migrate_to_3
+
+    def config(conn=None):
+        if local.name == "right":
+            assert left_environment.wait(5), "first installation did not reach Alembic"
+            right_ready.set()
+        return original_config(conn)
+
+    def run_env(script):
+        # Reproduce the observed global-proxy overlap, while serializing actual SQL.
+        if local.name == "left" and not left_environment.is_set():
+            left_environment.set()
+            assert right_ready.wait(5), "second installation did not start"
+            right_environment.wait(0.5)
+            try:
+                return original_env(script)
+            finally:
+                left_finished.set()
+        if local.name == "right" and not right_environment.is_set():
+            right_environment.set()
+            assert left_finished.wait(5), "first installation did not finish its SQL"
+        return original_env(script)
+
+    def revision(raw):
+        original_revision(raw)
+        if fail_first and raw.execute("SELECT value FROM vault_probe").fetchone() == ("left",):
+            raise sqlite3.OperationalError("invented interrupted installation")
+
+    def install(name):
+        local.name = name
+        with connection.open_writer(paths[name], lease_check=_allow) as writer:
+            with writer.transaction() as raw:
+                raw.execute("INSERT INTO vault_probe VALUES(?)", (f"{name}-committed",))
+            return schema.schema_version(raw), dict(raw.execute("SELECT key,value FROM store_meta"))["store_id"]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(schema, "_migration_config", config)
+        patch.setattr(ScriptDirectory, "run_env", run_env)
+        patch.setattr(schema, "_migrate_to_3", revision)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            left = pool.submit(install, "left")
+            right = pool.submit(install, "right")
+            results = {name: future.exception(timeout=10) or future.result()
+                       for name, future in (("left", left), ("right", right))}
+
+    if fail_first:
+        assert isinstance(results["left"], sqlite3.OperationalError), results
+        assert str(results["left"]) == "invented interrupted installation"
+        with closing(sqlite3.connect(paths["left"])) as raw:
+            assert raw.execute("SELECT name FROM sqlite_master WHERE name IN ('store_meta','alembic_version')").fetchall() == []
+    else:
+        assert not isinstance(results["left"], Exception), results
+        assert results["left"][0] == schema.SCHEMA_VERSION
+    assert not isinstance(results["right"], Exception), results
+    assert results["right"][0] == schema.SCHEMA_VERSION
+    identities = []
+    for name, path in paths.items():
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            raw = writer.connection
+            assert schema.schema_version(raw) == schema.SCHEMA_VERSION
+            identities.append(dict(raw.execute("SELECT key,value FROM store_meta"))["store_id"])
+            expected = [(name,)] if fail_first and name == "left" else [(name,), (f"{name}-committed",)]
+            assert raw.execute("SELECT value FROM vault_probe ORDER BY rowid").fetchall() == expected
+            with writer.transaction() as raw:
+                raw.execute("INSERT INTO vault_probe VALUES(?)", (f"{name}-reused",))
+            assert raw.execute("SELECT value FROM vault_probe ORDER BY rowid DESC LIMIT 1").fetchone() == (f"{name}-reused",)
+    assert identities[0] != identities[1]
 
 
 def test_open_failure_preserves_the_sqlite_error_contract(tmp_path: Path) -> None:

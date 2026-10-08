@@ -35,6 +35,7 @@ import datetime as dt
 import hashlib
 import json
 import sqlite3
+import threading
 import uuid
 from functools import lru_cache
 from pathlib import Path
@@ -701,6 +702,8 @@ def _migrate_to_8(conn: sqlite3.Connection) -> None:
 
 
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
+# Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
+_ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
 
 
 def _migration_config(conn: Connection | None = None) -> Config:
@@ -743,12 +746,12 @@ def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> i
     if ceiling is not None and version > ceiling:
         raise SchemaVersionError(version, ceiling)
     revision_table = conn.execute(
-        "SELECT type FROM sqlite_master WHERE name='alembic_version'"
+        "SELECT type FROM sqlite_master WHERE name='alembic_version' COLLATE NOCASE"
     ).fetchone()
     if revision_table is not None:
         # Contradictory metadata risks a wrong migration; refuse this store for repair.
         columns = conn.execute("PRAGMA table_xinfo(alembic_version)").fetchall()
-        strict = conn.execute("SELECT strict FROM pragma_table_list WHERE schema='main' AND name='alembic_version'").fetchone()
+        strict = conn.execute("SELECT strict FROM pragma_table_list WHERE schema='main' AND name='alembic_version' COLLATE NOCASE").fetchone()
         if (revision_table != ("table",) or strict != (1,) or len(columns) != 1 or columns[0][1] != "version_num"
                 or columns[0][2].upper() != "TEXT" or columns[0][5] != 1):
             raise SchemaMetadataError("malformed installation revision table")
@@ -776,9 +779,10 @@ def ensure_schema(conn: Connection) -> int:
         try:
             config = _migration_config(conn)
             conn.execute(CreateTable(tables.alembic_version, if_not_exists=True))
-            if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
-                command.stamp(config, str(current))
-            command.upgrade(config, str(target))
+            with _ALEMBIC_ENVIRONMENT_LOCK:
+                if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
+                    command.stamp(config, str(current))
+                command.upgrade(config, str(target))
             for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ())):
                 raw.execute(statement)
             if target >= 5:

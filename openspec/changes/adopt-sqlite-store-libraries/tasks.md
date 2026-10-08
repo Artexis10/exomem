@@ -3,7 +3,7 @@
 - [x] 1.1 Add the dependencies and packaged revisions; verify the pinned lock and a fresh wheel installation.
 - [x] 1.2 Integrate the connection owner; verify raw reads, physical rollback, errors, and accounting with the existing transaction workflows.
 - [x] 1.3 Replace SQL construction with Core; verify canonical writes, exact typed values, projection maintenance, and raw TEMP queries.
-- [x] 1.4 Integrate Alembic revision tracking; verify historical upgrades, ceilings, atomic failure, and metadata validation for readers and snapshots.
+- [x] 1.4 Integrate Alembic revision tracking; verify historical upgrades, ceilings, atomic failure, concurrent vault isolation, and metadata validation for readers and snapshots.
 
 ## 2. Verification and Delivery
 
