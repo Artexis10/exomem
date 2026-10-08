@@ -422,6 +422,7 @@ def load_registry(
     vault_root: Path | None = None,
     *,
     proposal: Any | None = None,
+    registry_scope: str | None = None,
 ) -> SemanticLanguageRegistry:
     core = core_registry()
     if proposal is not None:
@@ -429,7 +430,9 @@ def load_registry(
         return _parse_registry_data(proposal, _content_hash(raw), core)
     if vault_root is None:
         return core
-    return vocabulary_registry.load(CATEGORY_SPEC, Path(vault_root)).typed
+    from .vocabulary import instances
+
+    return vocabulary_registry.load(instances.select(Path(vault_root), CATEGORY_SPEC, registry_scope), Path(vault_root)).typed
 
 
 def clear_cache() -> None:

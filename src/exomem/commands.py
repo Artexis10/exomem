@@ -4944,6 +4944,7 @@ def op_link(
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
     aliases: list[str] | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4987,6 +4988,7 @@ def op_link(
             in another script (a Japanese name for an English-titled page) so
             a turn in that script reaches it. At most 8, one line and 64
             characters each; one any other page already answers to refuses.
+        registry_scope: Public instance token or canonical private Scope ID; grants no authority.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -5024,6 +5026,7 @@ def op_link(
             identity_decision=identity_decision,
             facets=facets,
             aliases=aliases,
+            registry_scope=registry_scope,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -9555,6 +9558,7 @@ def op_connect_memory(
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
     entity_family: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict | list[dict]:
     """Find relations, graph context or entities; propose or accept connections.
 
@@ -9577,7 +9581,10 @@ def op_connect_memory(
         facets: create-entity only. Registry-declared facet values.
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
+        registry_scope: create-entity instance selector; public or a canonical private Scope ID.
     """
+    if registry_scope is not None and operation != "create-entity":
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation in {"create-entity", "accept-relation"},
@@ -9791,6 +9798,7 @@ def op_connect_memory(
             identity_decision=identity_decision,
             facets=facets,
             aliases=aliases,
+            registry_scope=registry_scope,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -10446,6 +10454,7 @@ def op_schema_memory(
     vocabulary_fingerprint: str | None = None,
     detail: Literal["counts", "keys"] | None = None,
     version: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -10486,11 +10495,17 @@ def op_schema_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         detail: Census detail; keys adds predicate keys.
         version: Kept version from `history`, for `restore`.
+        registry_scope: Public instance token or canonical private Scope ID; grants no authority.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
     from .vocabulary import contract as vocabulary_contract
     from .vocabulary import registry_spec
+
+    if registry_scope is not None and not (
+        operation in _REGISTRY_OPERATIONS and subject in _registry_subjects()
+    ):
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires a registry operation")
 
     if operation == "save-entity-types" and not connector_boundary.unrestricted(
         vault_root, principal_module.effective_principal()
@@ -10538,6 +10553,7 @@ def op_schema_memory(
             version=version,
             limit=limit,
             continuation=continuation,
+            registry_scope=registry_scope,
             unexpected={
                 "name": name,
                 "project": project,
@@ -11247,6 +11263,7 @@ def _registry_schema_operation(
     limit: int,
     continuation: str | None,
     unexpected: Mapping[str, Any],
+    registry_scope: str | None = None,
 ) -> dict[str, Any]:
     """One registry contract for every vocabulary subject."""
     from .vocabulary import contract, registry_spec
@@ -11277,7 +11294,15 @@ def _registry_schema_operation(
             + "; also got "
             + ", ".join(extra)
         )
-    spec = registry_spec(subject)
+    from .vocabulary import instances
+
+    try:
+        spec = instances.select(vault_root, registry_spec(subject), registry_scope)
+    except instances.RegistryError as error:
+        reason = ("registry_assignment_required" if str(error).startswith("REGISTRY_ASSIGNMENT_REQUIRED:")
+                  else "audience_restricted")
+        return {"subject": subject, "available": False,
+                "reason": reason}
     if operation == "inspect":
         return contract.inspect(vault_root, spec, limit=limit, continuation=continuation)
     if operation == "history":

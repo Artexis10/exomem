@@ -106,13 +106,23 @@ Each instance combines the public core with one extension: the public extension 
 
 Reuse `RegistrySpec`, its typed adapter, loader, history, delta validator, and mutation owner. Bind an instance to its canonical Scope ID, overlay path, and history stem. Extend existing cache identity and invalidation with that instance; add no second registry cache or journal. Source kinds and domains retain their shared taxonomy overlay and history within each instance.
 
-Public operations select only the public instance, including for unrestricted owners. A private registry operation supplies an optional `registry_scope` containing a canonical Scope ID. The selector grants no authority. Admit its canonical binding, overlay, and history through the complete existing governance and connector decision before reading definitions or snapshots. Do not use a Scope ID in a filename as proof of protection.
+Public operations select only the public instance, including for unrestricted owners. An optional `registry_scope` selects the closed `public` token or a canonical private Scope ID. Omission selects public for registry operations. The selector grants no authority. Admit its canonical binding, overlay, and history through the complete existing governance and connector decision before reading definitions or snapshots. Do not use a Scope ID in a filename as proof of protection.
 
 Page interpretation selects its instance through configured bindings and canonical membership. A page with no private binding uses the public instance. Multiple applicable bindings require an explicit configured selection. Missing selection makes only dependent interpretation or mutation unavailable; ordinary admitted reads continue. This prevents silent meaning changes and costs the caller that dependent operation until configuration is repaired.
 
 Creation selects its prospective instance before registry lookup, folder resolution, candidate enumeration, or collision checks. Use supplied authored metadata and independently configured destination bindings. If they do not select one instance, an explicit non-authorizing `registry_scope` may select it; otherwise dependent creation is unavailable. The resulting destination must have a canonical binding consistent with that selection. Recheck the destination and proposed membership under the existing mutation boundary. Moves and reclassification validate both instance interpretations and report any change; they never copy definitions or silently select an instance by lookup success.
 
 Keep each page's instance when a consumer combines pages. Core identities are shared; identically spelled extension entries in different instances are distinct. Cross-page constraints must retain that distinction. Wikilinks still address pages, so admitted public and private knowledge remains readable together. A private page does not acquire public-extension definitions by linking to a public page.
+
+#### Shared extraction and admitted interpretation
+
+Shared producers retain structural candidates through the existing parsers, before vocabulary recognition. Retain heading order, level, ancestry, source spans, metadata, raw relation operands, and substantive-body results. Retain compact records before rich-range suppression. Keep the note parser's own fence grammar and colon rules. Unknown headings remain prose until selected interpretation recognizes them; candidates have no public unit identity.
+
+Admitted operation views interpret each page with its selected adapters and current binding witnesses. An empty recognized heading suppresses deeper recognition but emits no rich range. Only emitted rich ranges suppress compact records. Legacy note rows without colons require selected key or alias membership. Bare rich-relation targets remain dependency candidates. Invalid explicit categories retain the existing heading fallback, distinct from absent-category kind fallback.
+
+Store complete versioned structural coverage through existing graph tables and file metadata, without another whole-body copy. Keep frontmatter link counts by fixed field, plus body and related counts. The existing activation owner reduces these facts after selected interpretation, preserving project applicability and exact coverage before ranking or caps. Missing definition basis means unavailable dependent coverage, never zero. Raw admitted reads remain useful.
+
+The operation view retains an already-read parent body when selected parsing must recover private-only units. It parses each admitted parent at most once per operation. Shared caches never retain that caller's private interpretation. Unit proof binds selected results to current structural candidates, source hashes, parser generation and provenance-processing identity. Existing rebuild and publication owners replace older interpreted projections; they never stamp them as complete structural coverage.
 
 #### Authoring, history, and migration
 
@@ -122,7 +132,13 @@ Private saves retain reasons and before/after hashes in protected instance histo
 
 Keep the existing target byte hash contract and recheck the selected instance's admitted validation dependencies under the existing mutation boundary. Restore validates a kept snapshot against the current core and selected instance, without unioning other extensions. Folder resolution does not authorize file creation or bypass Delivery A's capture and target admission.
 
-Unarmed vaults retain the existing overlay paths and behavior. Arming requires an explicit assignment of legacy definitions and page bindings. Do not automatically declare a legacy overlay public. Preserve private overlays, history, and canonical bindings through supported portability without copying source connector authority.
+Unarmed vaults retain the existing overlay paths and behavior. Arming requires an explicit assignment of legacy definitions and page bindings.
+
+The existing durable boundary requirement version 2 owns portable vocabulary bindings. Version 1 remains readable but cannot supply a public assignment implicitly. Its dependent registry operations report that stopped maintenance must assign instances. The older runtime rejects version 2 before serving.
+
+The host supplies each instance storage namespace and history prefix during stopped arming. Optional overrides assign existing physical registry files and history stems. `RegistrySpec` derives defaults inside that explicitly assigned namespace; customers need no copied list of registry subjects. Source kinds and domains share their physical storage identity. Instance namespaces and overrides cannot overlap another instance. Exact page selections settle multiple canonical memberships; destination bindings can establish prospective selection. The public selector also establishes prospective intent before any type or folder lookup.
+
+Runtime membership reads bindings from the durable requirement, never from connector authority. It retains canonical path, reference and proven companion matches. An explicit registry binding supplies otherwise missing metadata classification and adds its private Scope membership. It cannot remove canonical membership or grant disclosure. Host configuration keeps issuer/client mappings external. Do not automatically declare a legacy overlay public. Preserve private overlays, history, and canonical bindings through supported portability without copying source connector authority.
 
 The custom gap is instance selection and admission, not registry parsing or storage. Before implementation, verify that the canonical membership owner protects direct path reads of instance overlays and history. Reuse that owner for any missing binding, including Scopes selected by metadata rather than paths. Apply the lifecycle adapter's existing public canonical-class invariant when it is available; add no second lifecycle classifier.
 

@@ -18,7 +18,7 @@ The destination SHALL preserve one owner identity while enforcing independently 
 
 Delivery B SHALL provide an explicit public core, an owner-selected public extension, and private domains tied to canonical Scope IDs. Keys, aliases, folder resolution, collisions, hashes, and promotion SHALL use admitted domains. Private definitions SHALL NOT automatically join the public registry or influence public operation outcomes.
 
-Each registry instance SHALL combine the core with exactly one public or Scope-bound extension. Private instances SHALL NOT inherit the public extension. Registry operations SHALL select one admitted instance. Page interpretation SHALL use configured bindings and canonical membership, preserving instance identity across consumers. An unresolved multiple binding SHALL make only dependent interpretation or mutation unavailable.
+Each registry instance SHALL combine the core with exactly one public or Scope-bound extension. Private instances SHALL NOT inherit the public extension. Registry operations SHALL select one admitted instance. The optional `registry_scope` selector SHALL accept the closed `public` token or a canonical private Scope ID; omission SHALL select public for registry operations. Page interpretation SHALL use configured bindings and canonical membership, preserving instance identity across consumers. An unresolved multiple binding SHALL make only dependent interpretation or mutation unavailable.
 
 #### Scenario: A private definition shares a public candidate key
 
@@ -44,9 +44,27 @@ Each registry instance SHALL combine the core with exactly one public or Scope-b
 - **THEN** dependent vocabulary interpretation or mutation returns an unavailable outcome
 - **AND** ordinary admitted reads continue without choosing an instance by lookup success or iteration order
 
+### Requirement: Shared semantic extraction preserves selected interpretation
+
+Shared producers SHALL retain structural heading, compact and relation candidates before registry recognition or suppression. They SHALL preserve source spans, ancestry, metadata, raw operands and parser-specific fence behavior through the existing parser owners. Candidate occurrence identities SHALL NOT become public semantic-unit references. Selected operation views SHALL admit each page and its required instance definitions before interpreting, ranking or limiting semantic results. Shared caches SHALL NOT store caller-specific private interpretation.
+
+Complete structural summaries SHALL retain fixed-field link counts and applicability inputs for exact selected coverage through the existing activation reducer. Missing required definitions or structural coverage SHALL report dependent unavailability rather than exact empty results. Ordinary admitted reads SHALL remain useful.
+
+#### Scenario: A private heading contains an otherwise compact observation
+
+- **WHEN** the selected private registry recognizes a heading that the public registry does not recognize
+- **THEN** private interpretation applies existing nested-heading and rich-range suppression rules
+- **AND** public interpretation retains ordinary prose and eligible compact observations without borrowing private definitions
+
+#### Scenario: A legacy relation becomes available through its selected instance
+
+- **WHEN** a grammar-valid legacy row without a colon names a private relation alias
+- **THEN** structural extraction retains the row before registry membership filtering
+- **AND** only interpretation with the admitted matching instance includes that relation
+
 ### Requirement: Vocabulary instance bytes and history require canonical admission
 
-Private overlay and history paths SHALL retain their canonical Scope protection through direct reads, registry operations, and supported portability. An instance selector or filename SHALL NOT confer authority. Inspect, propose, save, history, restore, usage, and cache reuse SHALL use the selected instance and current admission. Unarmed vaults SHALL retain legacy behavior. Arming SHALL explicitly assign legacy definitions and page bindings without declaring them public automatically.
+Private overlay and history paths SHALL retain their canonical Scope protection through direct reads, registry operations, and supported portability. An instance selector or filename SHALL NOT confer authority. Inspect, propose, save, history, restore, usage, and cache reuse SHALL use the selected instance and current admission. Unarmed vaults SHALL retain legacy behavior. Arming SHALL explicitly assign legacy definitions and page bindings without declaring them public automatically. The existing portable requirement SHALL version these bindings so older runtimes refuse them before serving. Legacy version 1 SHALL preserve its protection and report dependent registry operations unavailable until stopped maintenance supplies assignment. Instance namespaces and optional physical-storage overrides SHALL derive registry paths from `RegistrySpec` without a copied customer list of subjects.
 
 Private mutations SHALL keep reasons and before/after hashes in protected instance history without copying them into the shared operation log or its rotation archives. Public mutation logs SHALL remain useful.
 

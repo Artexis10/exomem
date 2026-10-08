@@ -6,8 +6,8 @@ A host can give authenticated clients of one owner different content ceilings.
 The ceiling does not change owner identity or grant write authority.
 Ordinary policy and RAW protection still apply.
 
-This capability covers connector admission and portable protection.
-Private vocabulary domains and managed-vault consolidation require later deliveries.
+This capability covers connector admission, portable protection, and private vocabulary instances.
+Managed-vault import remains a separate delivery and requires separate operational authority.
 
 ## Host configuration
 
@@ -78,9 +78,69 @@ Client mappings take effect on subsequent admission checks and result consumptio
 Changing the protected Scope set, its selectors, or capture folders requires stopped maintenance and compatible protection state.
 Do not delete the portable requirement or compatibility enrollment to repair a configuration error.
 
+## Vocabulary assignment
+
+Each instance combines the shipped core with one extension.
+Private instances do not inherit the public extension.
+The same extension key, alias, or folder can therefore have separate meanings in public and private instances.
+
+Add a `vocabulary` member to host configuration before stopped arming:
+
+```json
+{
+  "public": {
+    "namespace": "Knowledge Base/_Schema/public",
+    "history": "public",
+    "overrides": {
+      "entity-types": {
+        "overlay": "Knowledge Base/_Schema/entity-types.yaml",
+        "history": "entity-types"
+      }
+    }
+  },
+  "private": {
+    "01ARZ3NDEKTSV4RRFFQ69G5FAV": {
+      "namespace": "Knowledge Base/_Schema/private",
+      "history": "private"
+    }
+  },
+  "destinations": {},
+  "selections": {}
+}
+```
+
+`namespace` holds the instance overlays. `history` names its prefix under `_Schema/history/`.
+Registry definitions supply filenames and history stems within these explicitly assigned locations.
+Overrides name physical registry storage, so source kinds and domains share the `source-taxonomy` override.
+Assign every existing legacy overlay and history explicitly; the example assigns only the entity registry.
+Storage for different instances cannot overlap.
+
+Private keys must name canonical protective Scopes in the restricted default.
+Canonical page membership selects applicable private instances.
+If several apply, `selections` maps the page's vault-relative path to one applicable Scope ID.
+`destinations` maps an independently configured destination folder to a private Scope ID or `null` for public.
+These bindings do not grant read, write, or creation authority.
+
+Registry operations select public when `registry_scope` is omitted.
+Supply a canonical Scope ID for an admitted private instance.
+Prospective creation can explicitly select `public` or a canonical private Scope ID before resolving a type or folder.
+The resulting destination and authored metadata must agree with that selection.
+Ambiguous bindings make dependent vocabulary operations unavailable; ordinary admitted reads remain available.
+
+Private saves and restores keep full reasons and hashes in protected instance history.
+They do not read, change, or rotate the shared operation log.
+Public saves retain their ordinary log entries.
+Instance usage counts remain unavailable until the maintained projection can separate their contributors.
+
+Stopped arming writes these bindings into version 2 of the existing portable requirement.
+Runtime membership reads that requirement; connector mappings remain external host configuration.
+An older runtime rejects the new requirement before serving.
+Legacy version 1 keeps its protection but requires explicit stopped assignment before dependent registry operations become available.
+
 ## Export and restore
 
 Armed exports use manifest version 2 and carry the protective Scope selectors, their fingerprint, and capture folders.
+Assigned vocabulary namespaces, overlays, history, and page bindings travel with the same protected export.
 Unarmed exports retain manifest version 1.
 Content-limited callers cannot export the whole vault.
 

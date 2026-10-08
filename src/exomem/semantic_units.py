@@ -403,6 +403,55 @@ class _SourceLine:
     end_offset: int
 
 
+@dataclass(frozen=True, slots=True)
+class RichUnitCandidate:
+    """A source heading and category syntax, without selected unit identity."""
+
+    heading: semantic_blocks.SemanticBlockCandidate
+    span: SourceSpan
+    source_hash: str
+    category_raw: str | None
+    category_key: str | None
+    category_valid: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticUnitCandidates:
+    """Lossless parser inputs retained before rich recognition and suppression."""
+
+    rich: tuple[RichUnitCandidate, ...]
+    compact: tuple[SemanticUnit, ...]
+    compact_errors: tuple[SemanticUnitDiagnostic, ...]
+    note_relations: markdown_relations.MarkdownRelationCandidates
+
+
+def scan_semantic_units(
+    markdown: str, *, path: str = "", include_legacy_relations: bool = True,
+) -> SemanticUnitCandidates:
+    """Extract structural candidates without consulting a vocabulary instance."""
+    source = markdown or ""
+    lines = _source_lines(source)
+    line_by_number = {line.number: line for line in lines}
+    rich: list[RichUnitCandidate] = []
+    for heading in semantic_blocks.scan_semantic_blocks(source):
+        span = _span_for_line_range(source, line_by_number, heading.line, heading.end_line)
+        raw = heading.metadata.get("category")
+        key, valid = None, None
+        if raw is not None:
+            try:
+                key, valid = canonicalize_category(raw), True
+            except ValueError:
+                valid = False
+        rich.append(RichUnitCandidate(heading, span, _source_hash(span.text), raw, key, valid))
+    compact: list[SemanticUnit] = []
+    errors: list[SemanticUnitDiagnostic] = []
+    _parse_compact_units(lines, path=path, validate=True, units=compact, errors=errors)
+    return SemanticUnitCandidates(
+        tuple(rich), tuple(compact), tuple(errors),
+        markdown_relations.scan_markdown_relations(source, include_legacy=include_legacy_relations),
+    )
+
+
 def canonicalize_category(raw: str) -> str:
     """Validate and canonicalize one authored category label.
 
@@ -465,6 +514,9 @@ def parse_semantic_units(
     effective_parent_ref = _effective_parent_ref(parent_ref, source_path)
     lines = _source_lines(source)
     line_by_number = {line.number: line for line in lines}
+    candidates = scan_semantic_units(
+        source, path=source_path, include_legacy_relations=include_legacy_relations,
+    )
     units: list[SemanticUnit] = []
     errors: list[SemanticUnitDiagnostic] = []
     warnings: list[SemanticUnitDiagnostic] = []
@@ -515,25 +567,18 @@ def parse_semantic_units(
                 ),
             )
 
-    rich_document = semantic_blocks.parse_semantic_blocks(
-        source,
+    rich_document = semantic_blocks.interpret_semantic_blocks(
+        tuple(candidate.heading for candidate in candidates.rich),
         validate=validate,
         registry=relation_registry,
         kind_resolver=kind_resolver,
     )
-    _parse_compact_units(
-        lines,
-        path=source_path,
-        validate=validate,
-        units=units,
-        errors=errors,
-        excluded_line_ranges=tuple(
-            (block.line, block.end_line) for block in rich_document.blocks
-        ),
-    )
-    note_relation_document = markdown_relations.parse_markdown_relations(
-        source,
-        include_legacy=include_legacy_relations,
+    rich_ranges = tuple((block.line, block.end_line) for block in rich_document.blocks)
+    units.extend(_outside_rich_ranges(candidates.compact, rich_ranges))
+    if validate:
+        errors.extend(_outside_rich_ranges(candidates.compact_errors, rich_ranges))
+    note_relation_document = markdown_relations.interpret_markdown_relations(
+        candidates.note_relations,
         relation_types=(
             relation_registry.keys | frozenset(relation_registry.aliases)
             if relation_registry is not None
@@ -911,11 +956,9 @@ def _parse_compact_units(
     validate: bool,
     units: list[SemanticUnit],
     errors: list[SemanticUnitDiagnostic],
-    excluded_line_ranges: tuple[tuple[int, int], ...] = (),
 ) -> None:
     fence_char: str | None = None
     fence_length = 0
-    range_index = 0
     for line in lines:
         fence = _FENCE_RE.match(line.text)
         if fence_char is not None:
@@ -927,19 +970,6 @@ def _parse_compact_units(
             marker = fence.group("fence")
             fence_char = marker[0]
             fence_length = len(marker)
-            continue
-
-        while (
-            range_index < len(excluded_line_ranges)
-            and line.number > excluded_line_ranges[range_index][1]
-        ):
-            range_index += 1
-        if (
-            range_index < len(excluded_line_ranges)
-            and excluded_line_ranges[range_index][0]
-            <= line.number
-            <= excluded_line_ranges[range_index][1]
-        ):
             continue
 
         match = _COMPACT_RE.match(line.text)
@@ -1007,6 +1037,16 @@ def _parse_compact_units(
                 body=None,
             )
         )
+
+
+def _outside_rich_ranges(items, ranges: tuple[tuple[int, int], ...]):
+    """Keep ordered compact records only outside emitted rich ranges."""
+    index = 0
+    for item in items:
+        while index < len(ranges) and item.line > ranges[index][1]:
+            index += 1
+        if index == len(ranges) or item.line < ranges[index][0]:
+            yield item
 
 
 def _parse_suffixes(value: str) -> tuple[str, tuple[str, ...], str | None, str | None]:

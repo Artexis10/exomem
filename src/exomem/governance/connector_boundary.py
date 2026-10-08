@@ -36,6 +36,7 @@ class Snapshot:
     default_denied_scope_ids: frozenset[str]
     clients: tuple[tuple[ClientBinding, frozenset[str]], ...]
     capture_paths: tuple[str, ...]
+    vocabulary: dict | None = None
 
     def denied_scopes(self, who: RequestPrincipal) -> frozenset[str]:
         if who.administrative_ingress:
@@ -105,7 +106,7 @@ def snapshot(root: Path, compiled: policy.Policy | None = None, *, maintenance: 
         data = json.loads(raw, object_pairs_hook=_object)
         # Version and field names are the closed configuration protocol.
         if (not isinstance(data, dict) or not {"version", "default_denied_scope_ids", "clients"} <= set(data)
-                or set(data) - {"version", "default_denied_scope_ids", "clients", "capture_paths"}):
+                or set(data) - {"version", "default_denied_scope_ids", "clients", "capture_paths", "vocabulary"}):
             raise BoundaryUnavailable()
         if type(data["version"]) is not int or data["version"] != 1 or not isinstance(data["clients"], list):
             raise BoundaryUnavailable()
@@ -117,6 +118,13 @@ def snapshot(root: Path, compiled: policy.Policy | None = None, *, maintenance: 
             raise BoundaryUnavailable()
         default = _scope_ids(data["default_denied_scope_ids"], compiled)
         capture_paths = _capture_paths(data.get("capture_paths", []))
+        vocabulary = data.get("vocabulary", (required or {}).get("vocabulary"))
+        if vocabulary is not None:
+            from ..vocabulary import instances
+
+            instances.validate(vocabulary, compiled)
+            if not set(vocabulary["private"]) <= default:
+                raise BoundaryUnavailable()
         if not default or required is not None and not set(required["protected_scopes"]) <= default:
             raise BoundaryUnavailable()
         if required is not None and not maintenance:
@@ -136,7 +144,7 @@ def snapshot(root: Path, compiled: policy.Policy | None = None, *, maintenance: 
                 raise BoundaryUnavailable()
             seen.add(binding)
             clients.append((binding, denied))
-        return Snapshot(hashlib.sha256(raw + compiled.fingerprint.encode()).hexdigest(), default, tuple(clients), capture_paths)
+        return Snapshot(hashlib.sha256(raw + compiled.fingerprint.encode()).hexdigest(), default, tuple(clients), capture_paths, vocabulary)
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise BoundaryUnavailable() from error
 
@@ -265,6 +273,10 @@ def verify_capture_namespaces(root: Path, current: Snapshot) -> None:
     """Establish the all-writer visibility invariant during stopped maintenance."""
     if not current.capture_paths:
         raise BoundaryUnavailable()
+    if current.vocabulary is not None:
+        from ..vocabulary import instances
+
+        instances.verify_legacy_assignment(root, current.vocabulary)
     compiled = policy.load(root)
     for folder in current.capture_paths:
         parent = Path(root)
@@ -376,10 +388,20 @@ def requirement_relative_path() -> str:
 def parse_requirement(raw: bytes) -> dict:
     try:
         data = json.loads(raw, object_pairs_hook=_object)
-        if (not isinstance(data, dict) or set(data) != {"version", "protected_scopes", "selectors_sha256", "capture_paths"}
-                or type(data["version"]) is not int or data["version"] != 1):
+        if not isinstance(data, dict) or type(data.get("version")) is not int:
             raise BoundaryUnavailable()
-        policy.compile_protective_scopes(data["protected_scopes"])
+        fields = {"version", "protected_scopes", "selectors_sha256", "capture_paths"}
+        if data["version"] == 2:
+            fields.add("vocabulary")
+        elif data["version"] != 1:
+            raise BoundaryUnavailable()
+        if set(data) != fields:
+            raise BoundaryUnavailable()
+        compiled = policy.compile_protective_scopes(data["protected_scopes"])
+        if data["version"] == 2:
+            from ..vocabulary import instances
+
+            instances.validate(data["vocabulary"], compiled)
         if list(_capture_paths(data["capture_paths"])) != data["capture_paths"] or not data["capture_paths"]:
             raise BoundaryUnavailable()
         if data["selectors_sha256"] != _selectors_fingerprint(data["protected_scopes"]):
@@ -412,9 +434,11 @@ def _selectors_fingerprint(documents: dict) -> str:
 
 def publish_requirement(root: Path, current: Snapshot) -> None:
     documents = policy.protective_scope_documents(policy.load(root), current.default_denied_scope_ids)
-    data = json.dumps({"version": 1, "protected_scopes": documents,
-                       "selectors_sha256": _selectors_fingerprint(documents), "capture_paths": list(current.capture_paths)},
-                      sort_keys=True, separators=(",", ":")).encode()
+    requirement = {"version": 1, "protected_scopes": documents,
+                   "selectors_sha256": _selectors_fingerprint(documents), "capture_paths": list(current.capture_paths)}
+    if current.vocabulary is not None:
+        requirement.update(version=2, vocabulary=current.vocabulary)
+    data = json.dumps(requirement, sort_keys=True, separators=(",", ":")).encode()
     with reserved_paths._subsystem_authority_scope("governance.connector_boundary"):
         reserved_paths._publish_owner_bytes(root, Path(root) / requirement_relative_path(), DESCRIPTOR_ID, data)
 

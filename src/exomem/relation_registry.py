@@ -230,7 +230,8 @@ def _blocking(registry: RelationRegistry) -> list[dict[str, str]]:
 
 
 def load_registry(
-    vault_root: Path | None = None, *, proposal: dict[str, Any] | None = None
+    vault_root: Path | None = None, *, proposal: dict[str, Any] | None = None,
+    registry_scope: str | None = None,
 ) -> RelationRegistry:
     """Load the saved registry, or parse a proposal.
 
@@ -249,7 +250,9 @@ def load_registry(
         )
     if vault_root is None:
         return core
-    return vocabulary_registry.load(SPEC, Path(vault_root)).typed
+    from .vocabulary import instances
+
+    return vocabulary_registry.load(instances.select(Path(vault_root), SPEC, registry_scope), Path(vault_root)).typed
 
 
 def clear_cache() -> None:

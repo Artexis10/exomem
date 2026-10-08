@@ -17,6 +17,37 @@ from exomem.semantic_units import canonicalize_category, parse_semantic_units
 STABLE_PARENT_REF = "exomem://memory/12345678-1234-5678-1234-567812345678"
 
 
+def test_neutral_units_keep_compact_fallback_before_private_heading_recognition() -> None:
+    source = (
+        "## Private procedure\n- category: Rule\n- category: invalid!\n"
+        "- id: private\n- relations: private_link: Bare target\n"
+        "- [rule] Nested observation ^nested\n"
+        "## Ordinary\n- [rule] Public observation ^public\n"
+    )
+    candidates = semantic_units.scan_semantic_units(source, path="example.md")
+    language = semantic_language_registry.load_registry(proposal={
+        "schema_version": 1, "categories": {},
+        "kinds": {"private_procedure": {
+            "description": "A private procedure", "scope": {"projects": ["alpha"]},
+        }},
+    })
+    public = parse_semantic_units(source, path="example.md")
+    private = parse_semantic_units(source, path="example.md", language_registry=language, project="alpha")
+    outside_project = parse_semantic_units(source, path="example.md", language_registry=language, project="beta")
+
+    assert [item.anchor for item in candidates.compact] == ["nested", "public"]
+    assert all(item.unit_ref is None and item.fingerprint is None for item in candidates.compact)
+    assert candidates.rich[0].category_raw == "invalid!"
+    assert candidates.rich[0].category_valid is False
+    assert candidates.rich[0].heading.metadata["id"] == "private"
+    assert candidates.rich[0].heading.relations[0].target == "Bare target"
+    assert [unit.anchor for unit in public.units] == ["nested", "public"]
+    assert public.errors == ()
+    assert [(unit.form, unit.anchor) for unit in private.units] == [("rich", "private"), ("compact", "public")]
+    assert "invalid_rich_category" in {error.code for error in private.errors}
+    assert [unit.anchor for unit in outside_project.units] == ["nested", "public"]
+
+
 def test_unicode_categories_preserve_raw_and_share_a_canonical_key() -> None:
     document = parse_semantic_units(
         "- [Äri Reegel] First\n- [äri-reegel] Second\n",

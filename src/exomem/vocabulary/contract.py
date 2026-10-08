@@ -23,7 +23,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import registry
+from . import instances, registry
 from .registry import Entry, RegistryError, RegistrySpec, Snapshot
 
 INSPECT_DEFAULT_LIMIT = 20
@@ -80,6 +80,18 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
 
     root = Path(vault_root)
     who = effective_principal()
+    if spec.binding_revision is not None:
+        document = instances.configuration(root)
+        if document is None or instances.revision(document) != spec.binding_revision:
+            return {"subject": spec.name, "available": False, "reason": "registry_binding_changed"}
+        # Admit both storage owners before any definition, digest or history read.
+        from .. import registry_history
+
+        paths = (spec.overlay(root), registry_history.history_dir(root, spec.stem))
+        if any(egress.release_level_for_path_only(root, path.relative_to(root).as_posix())
+               < egress.LEVEL_FULL for path in paths):
+            return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+        return None
     if is_owner(who) and restricted_reason(root) is None:
         return None
     path = spec.overlay(root).relative_to(root).as_posix()
@@ -113,6 +125,9 @@ def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | No
 def _usage(vault_root: Path, spec: RegistrySpec, snapshot: Snapshot) -> Any:
     from .usage import Usage
 
+    if spec.binding_revision is not None:
+        # Existing aggregate projections have no instance identity; never union their counts.
+        return Usage(available=False, reason="instance_projection_unavailable")
     if spec.usage is None:
         return Usage(available=False, reason="not_counted")
     return spec.usage(vault_root, snapshot)
@@ -152,6 +167,8 @@ def inspect(
     continuation: str | None = None,
 ) -> dict[str, Any]:
     """The live registry in the generic entry shape, paginated, with usage counts."""
+    if spec.binding_revision is None:
+        spec = instances.select(vault_root, spec)
     size = INSPECT_DEFAULT_LIMIT if limit is None else int(limit)
     if not 1 <= size <= INSPECT_MAX_LIMIT:
         raise RegistryError(f"INVALID_REGISTRY_ARGUMENT: limit must be 1 to {INSPECT_MAX_LIMIT}")
@@ -297,6 +314,8 @@ def _candidate(
 
 def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, Any]:
     """Read-only: what a save of `delta` would register, and what it resembles."""
+    if spec.binding_revision is None:
+        spec = instances.select(vault_root, spec)
     refusal = admission_refusal(vault_root, spec)
     if refusal is not None:
         return refusal
@@ -348,9 +367,11 @@ def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, An
 
 
 def _restore_route(spec: RegistrySpec, version: str) -> str:
+    selector = (f', registry_scope="{spec.instance_id}"'
+                if spec.instance_id != registry.PUBLIC_INSTANCE else "")
     return (
         f'schema_memory(subject="{spec.name}", operation="restore", version="{version}", '
-        "expected_hash, why)"
+        f"expected_hash, why{selector})"
     )
 
 
@@ -482,6 +503,8 @@ def save(
         )
     root = Path(vault_root)
     reason = queues_for_owner(root)
+    if spec.binding_revision is None:
+        spec = instances.select(root, spec)
     refusal = admission_refusal(root, spec)
     if refusal is not None:
         return refusal
@@ -540,6 +563,8 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
     from .. import registry_history
 
     root = Path(vault_root)
+    if spec.binding_revision is None:
+        spec = instances.select(root, spec)
     refusal = admission_refusal(root, spec) or history_refusal(root, spec)
     if refusal is not None:
         return refusal
@@ -547,7 +572,8 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
     return {
         "subject": spec.name,
         "content_hash": snapshot.content_hash,
-        **registry_history.history_view(root, stem=spec.stem),
+        **registry_history.history_view(root, stem=spec.stem,
+                                       instance_admitted=spec.binding_revision is not None),
     }
 
 
@@ -578,6 +604,8 @@ def restore(
 
     if not is_owner(effective_principal()):
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+    if spec.binding_revision is None:
+        spec = instances.select(root, spec)
     refusal = admission_refusal(root, spec) or history_refusal(root, spec)
     if refusal is not None:
         return refusal
@@ -595,6 +623,9 @@ def restore(
 
     removed_by_registry = {}
     for related in registry_specs().values():
+        if spec.binding_revision is not None:
+            related = instances.select(root, related,
+                                       None if spec.instance_id == registry.PUBLIC_INSTANCE else spec.instance_id)
         if related.overlay(root) != spec.overlay(root):
             continue
         before = related.adapter.entries(

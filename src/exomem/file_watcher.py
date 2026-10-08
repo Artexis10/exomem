@@ -1131,9 +1131,9 @@ class FileWatcher:
                 self._last_change = time.monotonic()
             self._wake.set()
             return
-        if rel is not None and rel.startswith(f"{kb_prefix()}_Schema/") and rel.endswith(".yaml"):
-            # A hand edit of a vocabulary overlay: drop the cached registry so
-            # the next read sees it even when its size and mtime look unchanged.
+        if rel is not None:
+            # Instance overlays can use configured paths; the cache owns the
+            # exact path match and drops only snapshots that read this file.
             from .vocabulary import invalidate as invalidate_vocabulary
 
             invalidate_vocabulary(self._vault_root, path=rel)
