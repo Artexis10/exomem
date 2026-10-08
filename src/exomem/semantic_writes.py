@@ -120,6 +120,9 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     """Pure canonical path-only rewrite shared by move staging and review carry.
 
     An origin carrier is recorded data, so a link inside one keeps its bytes.
+    The count covers only links whose bytes change. A bare-name link to a file
+    that keeps its basename resolves as before and keeps its bytes, so a page
+    holding only such links is neither rewritten nor, when append-only, refused.
     """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
@@ -135,8 +138,9 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
 
     def replace(match: re.Match[str]) -> str:
         nonlocal changed
+        original = match.group(0)
         if inside_carrier(match.start(), match.end()):
-            return match.group(0)
+            return original
         target = match.group(1).strip()
         alias = match.group(2) or ""
         target_path, marker, anchor = target.partition("#")
@@ -144,13 +148,19 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
         target_path = target_path.rstrip()
         target_no_ext = target_path.removesuffix(".md")
         if target_no_ext in {old_full, old_stripped}:
-            changed += 1
             replacement = new_full if target_path.startswith(prefix) else new_stripped
-            return f"[[{replacement}{anchor_suffix}{alias}]]"
-        if "/" not in target_no_ext and target_no_ext == old_basename:
+        elif (
+            "/" not in target_no_ext
+            and target_no_ext == old_basename
+            and new_basename != old_basename
+        ):
+            replacement = new_basename
+        else:
+            return original
+        rewritten = f"[[{replacement}{anchor_suffix}{alias}]]"
+        if rewritten != original:
             changed += 1
-            return f"[[{new_basename}{anchor_suffix}{alias}]]"
-        return match.group(0)
+        return rewritten
 
     return _MOVE_WIKILINK_PATTERN.sub(replace, text), changed
 

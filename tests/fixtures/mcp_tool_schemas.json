@@ -1950,7 +1950,7 @@
       "properties": {
         "operation": {
           "default": "list",
-          "description": "list, create, append, move, reclassify, propose-reclassification, delete, trash-list, or recover.",
+          "description": "list, create, append, move, reclassify, propose-reclassification, revert-reclassification, delete, trash-list, or recover.",
           "type": "string"
         },
         "path": {
@@ -2007,7 +2007,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "Required for reclassify."
+          "description": "Required for reclassify and revert-reclassification."
         },
         "update_wikilinks": {
           "default": true,
