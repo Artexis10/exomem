@@ -267,17 +267,21 @@ def failure() -> dict[str, Any] | None:
 
 
 def _run(vault_root: Path, stop_event: threading.Event) -> None:
+    from .governance.principal import library_scope
+
     clock = Clock()
-    while not stop_event.is_set():
-        try:
-            sleep = _loop_once(vault_root, clock, stop_event)
-        except Exception:  # noqa: BLE001 - the worker must outlive any one loop
-            log.warning("dreamer: loop failed", exc_info=True)
-            sleep = policy.POLL_SECONDS
-        if _wait(vault_root, clock, stop_event, sleep):
-            break
-    # What this process delivered since the last write outlives the thread.
-    _flush_deliveries(vault_root)
+    # An owner-local worker: no request principal crosses into this thread.
+    with library_scope():
+        while not stop_event.is_set():
+            try:
+                sleep = _loop_once(vault_root, clock, stop_event)
+            except Exception:  # noqa: BLE001 - the worker must outlive any one loop
+                log.warning("dreamer: loop failed", exc_info=True)
+                sleep = policy.POLL_SECONDS
+            if _wait(vault_root, clock, stop_event, sleep):
+                break
+        # What this process delivered since the last write outlives the thread.
+        _flush_deliveries(vault_root)
 
 
 def _wait(vault_root: Path, clock: Clock, stop_event: threading.Event, sleep: float) -> bool:
