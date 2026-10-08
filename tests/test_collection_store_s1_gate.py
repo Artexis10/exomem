@@ -977,11 +977,11 @@ def test_adopt_local_abandons_the_publication_a_divergence_interrupted(abc, monk
     path = replica.replica_path(abc.root)
     resolve = replica._Publisher.resolve
 
-    def foreign_write_lands(publisher, pending):
+    def foreign_write_lands(publisher, pending, **kwargs):
         if pending["phase"] == "ready":
             monkeypatch.setattr(replica._Publisher, "resolve", resolve)
             path.write_bytes(path.read_bytes() + b"\0")
-        return resolve(publisher, pending)
+        return resolve(publisher, pending, **kwargs)
 
     monkeypatch.setattr(replica._Publisher, "resolve", foreign_write_lands)
     assert abc.write_c(LATER, "Mid publication")["outcome"] == "committed"

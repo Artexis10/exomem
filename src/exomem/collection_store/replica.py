@@ -10,7 +10,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -414,7 +414,7 @@ class _Publisher:
                     raise _Retry("installed replica changed during flush")
                 self.record(leaf, current.identity)
 
-    def resolve(self, pending):
+    def resolve(self, pending, *, finish_staging=None):
         if self.workspace is None:
             self.open_workspace(pending)
         if pending["phase"] == "staging":
@@ -424,9 +424,11 @@ class _Publisher:
         predecessor, _ = self.published()
         aside_leaf = f".exomem-collection-replica-aside-{pending['token']}"
         target_leaf = connection.STORE_FILENAME
-        target = aside = stage = None
-        try:
+        aside = stage = None
+        with ExitStack() as readers:
             target = self.file(target_leaf)
+            if target is not None:
+                readers.enter_context(target)
             if self.workspace is not None:
                 if set(self.filesystem.iter_names(self.workspace)) - {
                     aside_leaf,
@@ -434,7 +436,11 @@ class _Publisher:
                 }:
                     raise _Retry("publication workspace contains unknown entries")
                 aside = self.file(aside_leaf, parent=self.workspace)
+                if aside is not None:
+                    readers.enter_context(aside)
                 stage = self.file(pending["stage_leaf"], parent=self.workspace)
+                if stage is not None:
+                    readers.enter_context(stage)
             target_digest = self.digest(target) if target is not None else None
             if aside is not None and (predecessor is None or self.digest(aside) != predecessor):
                 self.diverge(
@@ -464,6 +470,9 @@ class _Publisher:
                         self.rename(aside, target_leaf)
                         self.record(aside_leaf, None, parent=self.workspace)
                         self.flush_installed(predecessor)
+                    readers.close()
+                    if finish_staging is not None:
+                        finish_staging()
                     self.clean_workspace(pending)
                     self.bookkeeping({_PENDING: None})
                     return None
@@ -484,19 +493,18 @@ class _Publisher:
                 self.rename(stage, target_leaf)
                 self.record(pending["stage_leaf"], None, parent=self.workspace)
                 self.flush()
-            self.remove(pending["stage_leaf"], pending["sha256"])
-            if predecessor is not None:
-                self.remove(aside_leaf, predecessor)
-            self.clean_workspace(pending)
-            # A matching replacement after cleanup still needs its own file flush.
-            self.flush_installed(pending["sha256"])
-            head = {key: pending[key] for key in self.identity}
-            self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head), _PENDING: None})
-            return head
-        finally:
-            for file in (target, aside, stage):
-                if file is not None:
-                    file.close()
+        # Windows deletion completes only after every reader and snapshot owner closes.
+        if finish_staging is not None:
+            finish_staging()
+        self.remove(pending["stage_leaf"], pending["sha256"])
+        if predecessor is not None:
+            self.remove(aside_leaf, predecessor)
+        self.clean_workspace(pending)
+        # A matching replacement after cleanup still needs its own file flush.
+        self.flush_installed(pending["sha256"])
+        head = {key: pending[key] for key in self.identity}
+        self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head), _PENDING: None})
+        return head
 
     @contextmanager
     def bound(self):
@@ -574,14 +582,15 @@ class _Publisher:
                 return self.current(digest, head)
             while head is None or head["commit_seq"] < requested["commit_seq"]:
                 pending = self.begin()
-                with snapshot.staged_snapshot(
-                    self.root,
-                    directory=self.root / self.workspace_relative,
-                    deadline=self.deadline,
-                    cancelled=self._staging_cancelled,
-                    scratch_token=pending["token"],
-                ) as artifact:
-                    head = self.install(pending, artifact)
+                with ExitStack() as staging:
+                    artifact = staging.enter_context(snapshot.staged_snapshot(
+                        self.root,
+                        directory=self.root / self.workspace_relative,
+                        deadline=self.deadline,
+                        cancelled=self._staging_cancelled,
+                        scratch_token=pending["token"],
+                    ))
+                    head = self.install(pending, artifact, staging.close)
             return PublicationResult("published", head["commit_seq"], head["head_hash"])
 
     def prepare(self):
@@ -597,7 +606,7 @@ class _Publisher:
                 return self.current(digest, head)
             return self.begin()
 
-    def swap(self, pending, artifact):
+    def swap(self, pending, artifact, finish_staging):
         """Concurrent publication, second boundary step: verify the copy and swap it in.
 
         The intent must be the one ``prepare`` recorded and its workspace unchanged; the
@@ -611,7 +620,7 @@ class _Publisher:
             self.open_workspace(pending)
             if self.workspace is None:
                 raise _Retry("publication workspace disappeared")
-            head = self.install(pending, artifact)
+            head = self.install(pending, artifact, finish_staging)
             if head is None:
                 return PublicationResult("retry_pending", reason="publication stage disappeared")
             return PublicationResult("published", head["commit_seq"], head["head_hash"])
@@ -671,7 +680,7 @@ class _Publisher:
         self.open_workspace(pending, create=True)
         return pending
 
-    def install(self, pending, artifact):
+    def install(self, pending, artifact, finish_staging):
         """Verify a staged copy against this store and the intent, mark it ready and swap it in."""
         self.check()
         copied = {key: getattr(artifact, key) for key in self.identity}
@@ -692,7 +701,7 @@ class _Publisher:
         self.flush()
         pending.update(phase="ready", sha256=artifact.file_sha256, **copied)
         self.bookkeeping({_PENDING: _json(pending)})
-        return self.resolve(pending)
+        return self.resolve(pending, finish_staging=finish_staging)
 
     def _staging_cancelled(self):
         self.check()
@@ -802,15 +811,17 @@ def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, 
         if isinstance(pending, PublicationResult):
             return pending
         try:
-            with snapshot.staged_snapshot(
-                root,
-                directory=replica_path(root).parent / pending["workspace_leaf"],
-                deadline=deadline,
-                cancelled=stop,
-                scratch_token=pending["token"],
-            ) as artifact, step(patience, stop) as (writer, authority_check):
-                publisher = _publisher(root, writer, authority_check, deadline, None)
-                return _outcome(writer, lambda: publisher.swap(pending, artifact))
+            with ExitStack() as staging:
+                artifact = staging.enter_context(snapshot.staged_snapshot(
+                    root,
+                    directory=replica_path(root).parent / pending["workspace_leaf"],
+                    deadline=deadline,
+                    cancelled=stop,
+                    scratch_token=pending["token"],
+                ))
+                with step(patience, stop) as (writer, authority_check):
+                    publisher = _publisher(root, writer, authority_check, deadline, None)
+                    return _outcome(writer, lambda: publisher.swap(pending, artifact, staging.close))
         except connection.CollectionStoreError as error:
             if error.code not in {"COLLECTION_STORE_BUSY", "COLLECTION_STORE_LEASE_REQUIRED",
                                   "COLLECTION_STORE_CUSTODY_UNVERIFIED", "COLLECTION_SNAPSHOT_CANCELLED"}:

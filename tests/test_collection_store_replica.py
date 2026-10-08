@@ -104,6 +104,46 @@ def test_first_and_successive_publish_are_reopenable_business_snapshots(store):
         )
 
 
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_matching_installed_copy_retires_the_still_owned_redundant_stage(
+    store, monkeypatch, concurrent
+):
+    root, writer = store
+    target = replica.replica_path(root)
+    original = snapshot.staged_snapshot
+    workspace = None
+
+    @contextmanager
+    def matching_copy_arrives(*args, **kwargs):
+        nonlocal workspace
+        with original(*args, **kwargs) as artifact:
+            workspace = artifact.path.parent
+            target.write_bytes(artifact.path.read_bytes())
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", matching_copy_arrives)
+    if concurrent:
+        @contextmanager
+        def step(_patience, _cancelled):
+            yield writer, lambda: True
+
+        result = replica.publish_replica_concurrently(
+            root, step=step, deadline=time.monotonic() + 10
+        )
+    else:
+        result = _publish(root, writer)
+    assert result.status == "published", result
+    assert (result.commit_seq, result.head_hash) == (0, None)
+    assert not workspace.exists()
+    metadata = _metadata(writer)
+    assert schema.META_PENDING_REPLICA_PUBLICATION not in metadata
+    assert metadata[schema.META_LAST_PUBLISHED_REPLICA_SHA256] == hashlib.sha256(
+        target.read_bytes()
+    ).hexdigest()
+    with closing(connection.open_reader(target)) as reader:
+        assert reader.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
 def _filesystem_type(root):
     with held_fs.acquire(root).require() as filesystem:
         return type(filesystem)

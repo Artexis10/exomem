@@ -262,6 +262,12 @@ jobs:
           tests/test_mutation_concurrency.py
           tests/test_windows_path_alias_guard.py
           "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"
+          tests/test_collection_store_replica.py::test_first_and_successive_publish_are_reopenable_business_snapshots
+          tests/test_collection_store_replica.py::test_matching_installed_copy_retires_the_still_owned_redundant_stage
+          tests/test_collection_store_replica.py::test_install_crash_reopens_without_foreign_divergence
+          tests/test_collection_store_replica.py::test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes_new_head
+          tests/test_collection_store_replica.py::test_failed_foreign_stage_relocation_cannot_delete_changed_bytes_on_context_exit
+          tests/test_collection_store_replica.py::test_unresolved_staging_preserves_workspace_without_allocating_again
           --session-timeout=600
       - name: Native reserved-path compatibility gate
         env:
