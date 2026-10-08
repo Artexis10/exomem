@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.111.0](https://github.com/Artexis10/exomem/compare/v0.110.0...v0.111.0) (2026-10-08)
+
+
+### Features
+
+* **capture:** require meaningful source kinds for agent capture ([#1616](https://github.com/Artexis10/exomem/issues/1616)) ([b7188ca](https://github.com/Artexis10/exomem/commit/b7188ca60f2eff15db512691235c0ad431bd3d24))
+
+
+### Bug Fixes
+
+* **ci:** let the bounded latency suite complete ([#1619](https://github.com/Artexis10/exomem/issues/1619)) ([2f6a2a1](https://github.com/Artexis10/exomem/commit/2f6a2a10bda5cdec2f5e2fd2c22ba362546d9519))
+* **hooks:** restore readable citations after compaction ([#1617](https://github.com/Artexis10/exomem/issues/1617)) ([0323553](https://github.com/Artexis10/exomem/commit/0323553658ee1b4be6f8fd668e7076106a10f773))
+
 ## [0.110.0](https://github.com/Artexis10/exomem/compare/v0.109.0...v0.110.0) (2026-10-07)
 
 
