@@ -503,10 +503,10 @@ def save_registry(
         )
 
     path = registry_path(vault_root)
+    inspected = vocabulary_registry.load(CATEGORY_SPEC, Path(vault_root))
     current_hash: str | None = None
-    if path.exists():
-        current_raw = path.read_text(encoding="utf-8")
-        current_hash = _content_hash(current_raw)
+    if inspected.overlay_text is not None:
+        current_hash = inspected.content_hash
         if expected_hash is None:
             raise ValueError(
                 "SEMANTIC_LANGUAGE_REGISTRY_EXISTS: provide current expected_hash"
@@ -534,8 +534,9 @@ def save_registry(
         operation=operation,
         why=why,
         before_hash=current_hash or vocabulary_registry.NO_OVERLAY_HASH,
+        previous=inspected.overlay_text,
         added=vocabulary_registry.added_keys(
-            vocabulary_registry.load(CATEGORY_SPEC, Path(vault_root)).entries,
+            inspected.entries,
             CATEGORY_SPEC.adapter.entries(registry),
         ),
     )

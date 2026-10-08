@@ -39,7 +39,6 @@ import datetime as dt
 import hashlib
 import json
 import logging
-import os
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -79,35 +78,18 @@ def _one_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
-def _read_previous(root: Path, path: Path) -> str:
-    """Read the replaced override through the vault root, if it exists."""
-    empty_override = _NO_ROLES_OVERRIDE if path.name == "context-roles.yaml" else NO_OVERRIDE
-    relative = path.relative_to(root)
-    if not os.path.lexists(root):
-        # A vault this save is about to create holds no override to keep.
-        return empty_override
-    acquired = held_fs.acquire(root)
-    if not acquired.ok:
-        raise ValueError("UNSAFE_REGISTRY_OVERRIDE: held filesystem unavailable")
-    with acquired.require() as filesystem:
-        parent_result = filesystem.parent(relative.parent.as_posix())
-        if not parent_result.ok:
-            if parent_result.error and parent_result.error.code == "MISSING":
-                return empty_override
-            raise ValueError("UNSAFE_REGISTRY_OVERRIDE: override parent is unsafe")
-        with parent_result.require() as parent:
-            file_result = filesystem.file(parent, relative.name)
-            if not file_result.ok:
-                if file_result.error and file_result.error.code == "MISSING":
-                    return empty_override
-                raise ValueError("UNSAFE_REGISTRY_OVERRIDE: override file is unsafe")
-            with file_result.require() as file:
-                if file.identity.link_count != 1:
-                    raise ValueError("UNSAFE_REGISTRY_OVERRIDE: override file is aliased")
-                text = filesystem.read(file).require().decode("utf-8")
-                if not filesystem.validate_directory(parent).ok:
-                    raise ValueError("UNSAFE_REGISTRY_OVERRIDE: override parent changed")
-                return text
+def read_previous(root: Path, path: Path) -> tuple[str | None, vault_module.PathGuard | None]:
+    """Inspect the overlay without mutation; bind a guard when the root exists."""
+    try:
+        return vault_module.read_guarded_text(root, path)
+    except FileNotFoundError:
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            return None, None
+        return None, vault_module.PathGuard.capture(
+            root, path.relative_to(root).as_posix(), leaf_policy="absent"
+        )
 
 
 def commit(
@@ -120,10 +102,17 @@ def commit(
     why: str | None,
     before_hash: str,
     after_hash: str,
+    previous: str | None,
+    guard: vault_module.PathGuard | None = None,
     added: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     """Write `rendered` to `path` with its snapshot and log entry in one batch.
 
+    A missing root is prepared only here. Its first guard establishes identity;
+    an empty root can remain after a refusal.
+
+    `previous` and `guard` come from the same inspection. `before_hash` is
+    audit metadata and may describe an effective registry rather than raw bytes.
     `added` names the registry keys this save introduced, so the bootstrap can
     mark them as new without diffing kept versions.
 
@@ -131,7 +120,20 @@ def commit(
     warning when `log.md` is missing (the snapshot still records the reason).
     """
     root = Path(vault_root)
-    previous = _read_previous(root, path)
+    if guard is None:
+        # Owner-trusted bootstrap can create the root; the first guard binds it.
+        vault_module._create_parent_dirs_held(root, root, [])
+        guard = vault_module.PathGuard.capture(
+            root,
+            path.relative_to(root).as_posix(),
+            leaf_policy="absent" if previous is None else "content",
+            expected_content_hash=(
+                None if previous is None else hashlib.sha256(previous.encode("utf-8")).hexdigest()
+            ),
+        )
+    guard.recheck(root)
+    if previous is None:
+        previous = _NO_ROLES_OVERRIDE if path.name == "context-roles.yaml" else NO_OVERRIDE
     moment = dt.datetime.now(dt.UTC)
     version = version_id(moment, before_hash)
     reason = _one_line(why) if why else ""
@@ -150,19 +152,14 @@ def commit(
         separators=(",", ":"),
     )
     snapshot = history_dir(root, stem) / f"{version}.yaml"
-    override_write = vault_module.PlannedWrite(path=path, content=rendered)
-    # A save that creates the vault has no root to guard, and no v2 authority
-    # to seal for; the batch writer creates the directories as before.
-    guarded = os.path.isdir(root)
+    override_write = vault_module.PlannedWrite(path=path, content=rendered, guard=guard)
     snapshot_write = vault_module.PlannedWrite(
         path=snapshot,
         content=f"{_HEADER_PREFIX}{header}\n{previous}",
         create_only=True,
         guard=vault_module.PathGuard.capture(
             root, snapshot.relative_to(root).as_posix(), leaf_policy="absent"
-        )
-        if guarded
-        else None,
+        ),
     )
     writes = [override_write, snapshot_write]
     warning = None
@@ -181,17 +178,13 @@ def commit(
     writes.extend(log_plan.writes)
     from . import vocabulary_auxiliaries
 
-    manifest = (
-        vocabulary_auxiliaries.seal(
-            root,
-            primary=override_write,
-            derived=(
-                ("registry-history", snapshot_write),
-                *(("operation-log", write) for write in log_plan.writes),
-            ),
-        )
-        if guarded
-        else None
+    manifest = vocabulary_auxiliaries.seal(
+        root,
+        primary=override_write,
+        derived=(
+            ("registry-history", snapshot_write),
+            *(("operation-log", write) for write in log_plan.writes),
+        ),
     )
     vault_module.batch_atomic_write(writes, vault_root=root, _vocabulary_auxiliaries=manifest)
     _prune(root, stem)

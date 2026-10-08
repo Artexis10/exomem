@@ -552,7 +552,7 @@ def _parse_overlay_text(text: str | None) -> SourceTaxonomy:
     return taxonomy_from_data(data)
 
 
-def taxonomy_from_data(data: object) -> SourceTaxonomy:
+def taxonomy_from_data(data: object, *, governed: bool = False) -> SourceTaxonomy:
     findings: list[str] = []
     if not isinstance(data, dict):
         return SourceTaxonomy(
@@ -570,6 +570,16 @@ def taxonomy_from_data(data: object) -> SourceTaxonomy:
     )
     _report_segment_collisions("source_kind", kinds, findings)
     _report_segment_collisions("domain", domains, findings)
+    if governed:
+        for axis, definitions in (("source_kind", kinds), ("domain", domains)):
+            tokens = {key: key for key in definitions}
+            for definition in definitions.values():
+                for alias in definition.aliases:
+                    owner = tokens.setdefault(alias, definition.key)
+                    if owner != definition.key:
+                        findings.append(
+                            f"{axis} alias {alias!r} names both {owner!r} and {definition.key!r}"
+                        )
     return SourceTaxonomy(
         kinds=kinds,
         domains=domains,
@@ -968,7 +978,7 @@ class _Adapter:
         return _parse_overlay_text(text)
 
     def parse_document(self, document: Mapping[str, Any]) -> SourceTaxonomy:
-        return taxonomy_from_data(dict(document))
+        return taxonomy_from_data(dict(document), governed=True)
 
     def entries(self, typed: SourceTaxonomy) -> dict[str, vocabulary_registry.Entry]:
         out: dict[str, vocabulary_registry.Entry] = {}

@@ -705,3 +705,210 @@ def test_file_policy_withholds_private_registry_definitions(vault):
             "reason": "audience_restricted",
         }
     )
+
+
+@pytest.mark.usefixtures("owner_scope")
+@pytest.mark.parametrize(
+    "operation,boundary", [("save", "planning"), ("restore", "publication")]
+)
+def test_a_racing_edit_survives_save_or_restore_without_false_history(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, operation: str, boundary: str
+) -> None:
+    from exomem import vault as vault_module
+    from exomem.vocabulary import registry
+
+    first = commands.op_schema_memory(
+        vault, subject="entity-types", operation="save",
+        proposal={"upsert": {"venue": _VENUE}}, expected_hash="none", why="first entry",
+    )
+    path = entity_types.extension_registry_path(vault)
+    hand_edit = path.read_text() + "# concurrent owner edit\n"
+    before_history = registry_history.versions(vault, stem="entity-types")
+    owner = registry if boundary == "planning" else vault_module
+    function = "commit" if boundary == "planning" else "batch_atomic_write"
+    original = getattr(owner, function)
+
+    def edit_then_continue(*args, **kwargs):
+        path.write_text(hand_edit)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, function, edit_then_continue)
+    with pytest.raises(ValueError, match="PATH_GUARD|STALE"):
+        commands.op_schema_memory(
+            vault, subject="entity-types", operation=operation,
+            proposal={"upsert": {"arena": {
+                **_VENUE, "label": "Arena", "attributes": {"folder": "Arenas"},
+            }}} if operation == "save" else None,
+            version=first["saved"]["history"]["version"] if operation == "restore" else None,
+            expected_hash=first["saved"]["content_hash"], why="second change",
+        )
+    assert path.read_text() == hand_edit
+    assert registry_history.versions(vault, stem="entity-types") == before_history
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_racing_overlay_creation_survives_the_first_save(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.vocabulary import registry
+
+    path = entity_types.extension_registry_path(vault)
+    hand_edit = "schema_version: 1\n# concurrent first overlay\n"
+    original = registry.commit
+
+    def create_then_continue(*args, **kwargs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(hand_edit)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(registry, "commit", create_then_continue)
+    with pytest.raises(ValueError, match="PATH_GUARD|STALE"):
+        commands.op_schema_memory(
+            vault, subject="entity-types", operation="save",
+            proposal={"upsert": {"venue": _VENUE}}, expected_hash="none", why="first entry",
+        )
+    assert path.read_text() == hand_edit
+    assert registry_history.versions(vault, stem="entity-types") == []
+
+
+@pytest.mark.usefixtures("owner_scope")
+@pytest.mark.parametrize(
+    "subject,entries,token,canonical",
+    [
+        ("source-kinds", {"field-notebook": {"aliases": ["ＡＲＴＩＣＬＥ"]}}, "article", "article"),
+        ("source-kinds", {"field-notebook": {"aliases": ["articles"]}}, "articles", "article"),
+        ("domains", {"field-survey": {"aliases": ["outdoors"]},
+                     "field-work": {"aliases": ["OUTDOORS"]}}, "travel", "travel"),
+        ("source-kinds", {"field-notebook": {"aliases": ["survey"]},
+                          "survey": {}}, "article", "article"),
+    ],
+)
+def test_taxonomy_saves_cannot_redirect_registered_keys_or_aliases(
+    vault: Path, subject: str, entries: dict, token: str, canonical: str
+) -> None:
+    from exomem import source_taxonomy
+
+    before = commands.op_schema_memory(vault, subject=subject, operation="inspect")
+    proposal = {"upsert": entries}
+    proposed = commands.op_schema_memory(
+        vault, subject=subject, operation="propose", proposal=proposal
+    )
+    assert proposed["valid"] is False
+    saved = commands.op_schema_memory(
+        vault, subject=subject, operation="save", proposal=proposal,
+        expected_hash=before["content_hash"], why="add field vocabulary",
+    )
+    assert saved["valid"] is False
+    assert not saved.get("saved")
+    taxonomy = source_taxonomy.load_taxonomy(vault)
+    resolve = taxonomy.resolve_kind if subject == "source-kinds" else taxonomy.resolve_domain
+    assert resolve(token).key == canonical
+    assert registry_history.versions(vault, stem="source-taxonomy") == []
+
+
+def test_admitted_hosted_nonowners_cannot_read_owner_history_fields(vault: Path) -> None:
+    from exomem.governance.principal import (
+        HOSTED_GATEWAY_ISSUER_FAMILY,
+        RequestPrincipal,
+        library_scope,
+        request_scope,
+    )
+
+    with library_scope():
+        commands.op_schema_memory(
+            vault, subject="entity-types", operation="save",
+            proposal={"upsert": {"venue": _VENUE}}, expected_hash="none",
+            why="OWNER PRIVATE REASON",
+        )
+        owner = commands.op_schema_memory(vault, subject="entity-types", operation="history")
+    assert owner["versions"][0]["why"] == "OWNER PRIVATE REASON"
+    assert owner["versions"][0]["principal_kind"] == "owner"
+    assert owner["versions"][0]["principal"]
+    with request_scope(RequestPrincipal(
+        audience_id="tenant", surface="hosted", issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
+    )):
+        hosted = commands.op_schema_memory(vault, subject="entity-types", operation="history")
+    assert hosted["versions"][0]["version"] == owner["versions"][0]["version"]
+    assert not {"why", "principal", "principal_kind"} & hosted["versions"][0].keys()
+    assert hosted["withheld"]["reason"] == "audience_restricted"
+
+
+@pytest.mark.usefixtures("owner_scope")
+@pytest.mark.parametrize(
+    "delta",
+    [
+        {"deprecate": {"travel": "travel"}},
+        {"deprecate": {"travel": "health", "health": "travel"}},
+        {"upsert": {"travel": {"status": "deprecated", "replaced_by": "travel"}}},
+        {"upsert": {"travel": {"status": "deprecated", "replaced_by": "missing-domain"}}},
+        {"upsert": {"travel": {"status": "deprecated", "replaced_by": "health"},
+                    "health": {"status": "deprecated"}}},
+    ],
+)
+def test_replacement_chains_must_end_in_an_active_candidate(vault: Path, delta: dict) -> None:
+    from exomem import source_taxonomy
+
+    before = commands.op_schema_memory(vault, subject="domains", operation="inspect")
+    with pytest.raises(ValueError, match="INVALID_REPLACEMENT"):
+        commands.op_schema_memory(
+            vault, subject="domains", operation="save", proposal=delta,
+            expected_hash=before["content_hash"], why="retire domains",
+        )
+    assert source_taxonomy.load_taxonomy(vault).domains["travel"].status == "active"
+    assert registry_history.versions(vault, stem="source-taxonomy") == []
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_final_candidate_chains_and_optional_replacements_remain_writable(vault: Path) -> None:
+    from exomem import source_taxonomy
+
+    before = commands.op_schema_memory(vault, subject="domains", operation="inspect")
+    saved = commands.op_schema_memory(
+        vault, subject="domains", operation="save",
+        proposal={"upsert": {"field-survey": {"label": "Field survey"},
+                             "health": {"status": "deprecated", "replaced_by": "field-survey"}},
+                  "deprecate": {"travel": "health"}},
+        expected_hash=before["content_hash"], why="consolidate domains",
+    )
+    assert saved["saved"]
+    taxonomy = source_taxonomy.load_taxonomy(vault)
+    assert taxonomy.domains["travel"].replaced_by == "health"
+    assert taxonomy.domains["health"].replaced_by == "field-survey"
+    assert taxonomy.domains["field-survey"].status == "active"
+    saved = commands.op_schema_memory(
+        vault, subject="domains", operation="save",
+        proposal={"deprecate": {"finance": None}},
+        expected_hash=saved["saved"]["content_hash"], why="retire an unrelated domain",
+    )
+    assert saved["saved"]
+    assert source_taxonomy.load_taxonomy(vault).domains["finance"].replaced_by is None
+
+
+def test_a_first_relation_save_preserves_an_overlay_racing_root_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import relation_registry
+    from exomem import vault as vault_module
+
+    root = tmp_path / "new-vault"
+    relation_registry.load_registry(root)
+    assert not root.exists()
+    path = relation_registry.extension_registry_path(root)
+    hand_edit = "schema_version: 1\n# another writer created the first overlay\n"
+    prepare = vault_module._create_parent_dirs_held
+
+    def prepare_then_edit(*args, **kwargs):
+        prepare(*args, **kwargs)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(hand_edit)
+
+    monkeypatch.setattr(vault_module, "_create_parent_dirs_held", prepare_then_edit)
+    with pytest.raises(ValueError, match="PATH_GUARD"):
+        relation_registry.save_registry(root, {
+            "schema_version": 1,
+            "extensions": {"vault.applies_to": {
+                "parent": "relates_to", "description": "A rule applies to its target.",
+            }},
+        })
+    assert path.read_text() == hand_edit
+    assert registry_history.versions(root, stem=relation_registry.SPEC.stem) == []

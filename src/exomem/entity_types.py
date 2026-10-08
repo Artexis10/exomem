@@ -405,9 +405,10 @@ def save_registry(
             f"{removed}"
         )
     path = extension_registry_path(vault_root)
+    inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     current_hash: str | None = None
-    if path.exists():
-        current_hash = _content_hash(path.read_text(encoding="utf-8"))
+    if inspected.overlay_text is not None:
+        current_hash = inspected.content_hash
         if expected_hash is None:
             raise ValueError("REGISTRY_EXISTS: provide current expected_hash")
         if expected_hash != current_hash:
@@ -422,8 +423,9 @@ def save_registry(
         operation=operation,
         why=why,
         before_hash=current_hash or vocabulary_registry.NO_OVERLAY_HASH,
+        previous=inspected.overlay_text,
         added=vocabulary_registry.added_keys(
-            vocabulary_registry.load(SPEC, Path(vault_root)).entries,
+            inspected.entries,
             SPEC.adapter.entries(registry),
         ),
     )

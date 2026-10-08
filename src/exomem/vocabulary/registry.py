@@ -521,20 +521,6 @@ def apply_delta(
             raise RegistryError(
                 f"MISSING_REPLACEMENT: deprecating {key} needs an active replacement"
             )
-        if replacement:
-            survivor = working.get(replacement)
-            seen = {key}
-            while survivor is not None and survivor.status == "deprecated" and survivor.replaced_by:
-                if survivor.key in seen:
-                    survivor = None
-                    break
-                seen.add(survivor.key)
-                survivor = working.get(survivor.replaced_by or "")
-            if survivor is None or survivor.status != "active":
-                raise RegistryError(
-                    f"INVALID_REPLACEMENT: {key} must be replaced by a chain that ends in an "
-                    "active entry"
-                )
         if base.status == "deprecated":
             if base.replaced_by != (replacement or None):
                 raise RegistryError(
@@ -553,6 +539,30 @@ def apply_delta(
         working[key] = entry
         touched.append(key)
     return document, {key: working[key] for key in dict.fromkeys(touched)}
+
+
+def validate_replacements(spec: RegistrySpec, entries: Mapping[str, Entry]) -> None:
+    """Every explicit replacement chain must end in an active final entry."""
+    for entry in entries.values():
+        if entry.status != "deprecated":
+            continue
+        if not entry.replaced_by:
+            if spec.replacement_required:
+                raise RegistryError(
+                    f"MISSING_REPLACEMENT: deprecating {entry.key} needs an active replacement"
+                )
+            continue
+        survivor = entry
+        seen: set[str] = set()
+        while survivor.status == "deprecated":
+            replacement = survivor.replaced_by
+            if survivor.key in seen or replacement is None or replacement not in entries:
+                raise RegistryError(
+                    f"INVALID_REPLACEMENT: {entry.key} must be replaced by a chain that ends "
+                    "in an active entry"
+                )
+            seen.add(survivor.key)
+            survivor = entries[replacement]
 
 
 def added_keys(before: Mapping[str, Entry], after: Mapping[str, Entry]) -> tuple[str, ...]:
@@ -616,6 +626,7 @@ def commit(
     operation: str,
     why: str | None,
     before_hash: str,
+    previous: str | None,
     added: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
@@ -632,6 +643,7 @@ def commit(
             operation=operation,
             why=why,
             before_hash=before_hash,
+            previous=previous,
             after_hash=content_hash(rendered),
             added={spec.name: added},
         )

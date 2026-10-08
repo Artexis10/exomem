@@ -275,6 +275,7 @@ def _candidate(
     """The overlay document after a delta, its typed registry and blocking findings."""
     document, touched = registry.apply_delta(spec, snapshot, delta)
     candidate = spec.adapter.parse_document(document)
+    registry.validate_replacements(spec, spec.adapter.entries(candidate))
     blocking = registry.new_findings(snapshot, tuple(spec.adapter.findings(candidate)))
     continuity = getattr(spec.adapter, "continuity", None)
     if continuity is not None:
@@ -510,6 +511,7 @@ def save(
         operation="save",
         why=why.strip(),
         before_hash=snapshot.content_hash,
+        previous=snapshot.overlay_text,
         added=added,
     )
     _mark_committed()
@@ -544,8 +546,11 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
     snapshot = registry.load(spec, root)
     versions = registry_history.versions(root, stem=spec.stem)
     out: dict[str, Any] = {"subject": spec.name, "content_hash": snapshot.content_hash}
+    from ..governance.principal import effective_principal
+    from ..governance.raw_protection import is_owner
+
     reason = restricted_reason(root)
-    if reason is not None:
+    if reason is not None or not is_owner(effective_principal()):
         versions = [
             {
                 key: value
@@ -554,7 +559,10 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
             }
             for item in versions
         ]
-        out["withheld"] = {"fields": ["why", "principal"], "reason": reason}
+        out["withheld"] = {
+            "fields": ["why", "principal", "principal_kind"],
+            "reason": reason or "audience_restricted",
+        }
     out["versions"] = versions
     return out
 
@@ -625,6 +633,7 @@ def restore(
         operation="restore",
         why=why.strip(),
         before_hash=snapshot.content_hash,
+        previous=snapshot.overlay_text,
         added=added,
     )
     _mark_committed()
