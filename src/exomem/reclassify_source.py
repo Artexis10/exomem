@@ -59,6 +59,12 @@ RECORD_FIELDS = ("reclassified", "reclassified_from", "reclassified_reason")
 HISTORY_FIELD = "reclassified_from"
 
 _MAX_REASON_CHARS = 400
+#: The preview judges references and the destination, not the semantic
+#: contract of the pages a move rewrites, so it says so beside its refusals.
+_REFUSAL_SCOPE = (
+    "covers inbound references and the destination; the semantic contract of "
+    "rewritten pages is checked when the correction applies"
+)
 _FENCE_LINE = re.compile(r"---\r?\n")
 
 
@@ -113,6 +119,7 @@ class ReclassifyProposal:
                 },
             },
             "refusals": [dict(refusal) for refusal in self.refusals],
+            **({"refusal_scope": _REFUSAL_SCOPE} if self.destination is not None else {}),
         }
 
 

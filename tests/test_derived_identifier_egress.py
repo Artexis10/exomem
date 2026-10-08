@@ -3362,9 +3362,7 @@ def test_a_restricted_reclassification_preview_answers_as_if_no_withheld_page_li
         f"{KB}/Evidence/Harbor/tide-proof.md": _page(
             "Proof", "See [[2026-01-02-tide-table]].", type="evidence"
         ),
-        f"{NOTES}/tide-note.md": _page(
-            "Tide note", f"See [[{source.removesuffix('.md')}]].", type="insight"
-        ),
+        f"{INSIGHTS}/tide-note.md": _typed("Tide note", "See the table.", source[:-3]),
     }
     withheld = {
         f"{KB}/Evidence/Withheld/held.md": _page(
@@ -3387,6 +3385,6 @@ def test_a_restricted_reclassification_preview_answers_as_if_no_withheld_page_li
         f"{KB}/Evidence/Withheld/held.md"
     ]
     assert '"__error__"' not in answers["B"], answers["B"]
-    assert '"rewritten": ["Knowledge Base/Notes/tide-note.md"]' in answers["B"]
+    assert f'"rewritten": ["{INSIGHTS}/tide-note.md"]' in answers["B"]
     assert answers["A"] == answers["B"]
     assert answers["C"] == answers["B"]
