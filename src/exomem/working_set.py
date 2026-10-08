@@ -533,7 +533,10 @@ def build_packet(
     role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
     if conversation_inferred:
         used += working_set_conversation.budget_headers(
-            (*listed_anchors, *listed_ambiguity), material_limit - used, role_ids=role_ids,
+            (*listed_anchors, *listed_ambiguity),
+            material_limit - used,
+            role_ids=role_ids,
+            status_basis=status_basis,
         )
 
     state_entries: list[dict[str, Any]] = []
@@ -565,7 +568,9 @@ def build_packet(
             return
         pointer = _pointer(item, reason)
         cost = (
-            working_set_conversation.prose_chars(pointer, role_ids=role_ids)
+            working_set_conversation.prose_chars(
+                pointer, role_ids=role_ids, status_basis=status_basis
+            )
             if conversation_inferred else served_chars("pointers", pointer)
         )
         if used + cost > material_limit or item.promoted and promoted_used + cost > promoted_share:
@@ -610,7 +615,9 @@ def build_packet(
             for key in working_set_currency.INTERNAL_PROVENANCE:
                 entry.pop(key, None)
             cost = (
-                working_set_conversation.prose_chars(entry, role_ids=role_ids)
+                working_set_conversation.prose_chars(
+                    entry, role_ids=role_ids, status_basis=status_basis
+                )
                 if conversation_inferred else served_chars("current_state", entry)
             )
             if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
@@ -643,7 +650,9 @@ def build_packet(
                 continue
             unit = _served_unit(item)
             cost = (
-                working_set_conversation.prose_chars(unit, role_ids=role_ids)
+                working_set_conversation.prose_chars(
+                    unit, role_ids=role_ids, status_basis=status_basis
+                )
                 if conversation_inferred else served_chars("units", unit)
             )
             role_count = per_role.get(item.role, 0)
@@ -656,7 +665,8 @@ def build_packet(
             if used + cost > material_limit or not text:
                 _defer(item, "budget")
                 continue
-            if status_basis.classify(item.lifecycle).historical:
+            ordering = status_basis.ordering(item.lifecycle)
+            if ordering is not None and ordering.historical:
                 unit["history"] = True
             if promoted and promoted_used + cost > promoted_share:
                 _defer(item, "budget")
@@ -898,9 +908,9 @@ def _redundant_superseded(item: LaneItem, present_paths: frozenset[str] | set[st
     return any(target in present_paths for target in _superseded_targets(item))
 
 
-def _lifecycle_rank(lifecycle: str, *, status_basis: lifecycle_statuses.Basis | None = None) -> int:
-    status_basis = status_basis or lifecycle_statuses.Basis(None)
-    return 0 if status_basis.classify(lifecycle).require() == "live" else 1
+def _lifecycle_rank(lifecycle: str, *, status_basis: lifecycle_statuses.Basis) -> int:
+    ordering = status_basis.ordering(lifecycle)
+    return 0 if ordering is not None and ordering.live else 1
 
 
 def _date_rank(updated: str) -> int:

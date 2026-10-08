@@ -3383,12 +3383,14 @@ def guard_working_set(
                     if isinstance(entry, Mapping)
                 ),
             }
-    from .. import working_set_conversation
+    from .. import lifecycle_statuses, working_set_conversation
 
     if isinstance(guarded, working_set_conversation.InferredPacket):
         guarded["budget"]["used_chars"] = (
             sum(_recent_entry_chars(entry) for entry in guarded.get("recent_context", ()))
-            + working_set_conversation.subject_chars(guarded)
+            + working_set_conversation.subject_chars(
+                guarded, status_basis=lifecycle_statuses.Basis(vault_root)
+            )
         )
     return guarded
 

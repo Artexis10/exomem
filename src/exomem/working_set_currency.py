@@ -130,7 +130,9 @@ def annotate(
         return tuple(items)
     return tuple(
         replace(item, lifecycle=SUPERSEDED)
-        if index in superseded and status_basis.classify(item.lifecycle).require() == "live"
+        if index in superseded
+        and (ordering := status_basis.ordering(item.lifecycle)) is not None
+        and ordering.live
         else item
         for index, item in enumerate(items)
     )

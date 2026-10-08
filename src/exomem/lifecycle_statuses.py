@@ -227,6 +227,18 @@ class Basis:
             entry = snapshot.entries[entry.replaced_by]
         return Classification(str(entry.attributes["class"]))
 
+    def ordering(self, value: object) -> Classification | None:
+        """Classify a label for presentation order.
+
+        A rooted basis keeps the fail-closed refusal. A rootless basis has no
+        overlay to admit, so a label it cannot resolve has no class and orders
+        as neither live nor historical instead of refusing the result.
+        """
+        classification = self.classify(value)
+        if classification.lifecycle_class is None and self.root is None:
+            return None
+        return classification
+
     @property
     def dependency(self) -> tuple[str, str]:
         if self._attempted:
