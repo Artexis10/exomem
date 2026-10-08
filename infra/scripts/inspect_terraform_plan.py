@@ -62,7 +62,10 @@ def inspect(plan: dict[str, Any], approvals: set[str], *, state_only: bool = Fal
             continue
         address = item.get("address")
         change = item.get("change")
-        actions = change.get("actions") if isinstance(change, dict) else None
+        if not isinstance(change, dict):
+            errors.append("resource change has an invalid address/action shape")
+            continue
+        actions = change.get("actions")
         if not isinstance(address, str) or not isinstance(actions, list) or not all(
             isinstance(action, str) for action in actions
         ):
