@@ -249,6 +249,9 @@ jobs:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           EXOMEM_DISABLE_CLIP: "1"
+          # The service fixture must not start model loading or cache warmup.
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_WARMUP: "1"
           EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
@@ -258,6 +261,7 @@ jobs:
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
           tests/test_windows_path_alias_guard.py
+          "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"
           --session-timeout=600
       - name: Native reserved-path compatibility gate
         env:

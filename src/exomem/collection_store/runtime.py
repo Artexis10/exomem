@@ -690,6 +690,8 @@ def route(command, vault_root, arguments):
 
 def projection_route(vault_root, path):
     """Route only canonically owned paths; a view never substitutes for an unavailable store."""
+    import os
+
     from ..cli_ops import OpError
     from . import authority
     from .preview import bound_writer
@@ -697,7 +699,8 @@ def projection_route(vault_root, path):
     root = Path(vault_root)
     if bound_writer(root) is not None:
         return None
-    if root.is_symlink():
+    # Resolve Windows root junctions before no-follow anchoring.
+    if os.name == "nt" or root.is_symlink():
         root = root.resolve()
     raw = authority.read_marker(root)
     if raw is None:

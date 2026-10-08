@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -991,10 +992,20 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
     assert titles(service.root, CID) == ["Canonical"]
 
 
-def test_projection_admission_accepts_the_served_vault_through_a_root_alias(service, tmp_path):
+@pytest.mark.parametrize("alias_kind", [
+    "symlink", pytest.param("junction", marks=pytest.mark.skipif(
+        os.name != "nt", reason="requires native Windows junctions")),
+])
+def test_projection_admission_accepts_the_served_vault_through_a_root_alias(service, tmp_path, alias_kind):
     """A final-root alias must retain the real store's projection authority."""
     alias = tmp_path / "vault-alias"
-    alias.symlink_to(service.root, target_is_directory=True)
+    if alias_kind == "junction":
+        import subprocess
+
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(service.root)], check=True)
+        assert not alias.is_symlink()
+    else:
+        alias.symlink_to(service.root, target_is_directory=True)
     path = "Knowledge Base/Records/Work/Items/_summary.md"
     with request_scope(OWNER):
         assert egress.release_level_for_path_only(service.root, path) == 6
@@ -1004,8 +1015,6 @@ def test_projection_admission_accepts_the_served_vault_through_a_root_alias(serv
 @pytest.mark.parametrize("boundary", ["marker", "collections", "knowledge", "unreadable"])
 def test_unreadable_marker_ownership_never_admits_a_physical_projection(service, tmp_path, boundary):
     """Unreadable or symlinked ownership must not turn a C projection into an ordinary file."""
-    import os
-
     from exomem import held_fs
 
     service.stop()
