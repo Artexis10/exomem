@@ -68,6 +68,8 @@ Delivery A is the current implementation batch. Deliveries B and C remain requir
 - [ ] 7.2 Add registry and prospective page selection before lookup; recheck destinations and before/after bindings while preserving instance identity across consumers.
 - [ ] 7.3 Scope collisions, aliases, folders, usage, cache identity, and hashes to admitted instances; prove private edits cannot affect public outcomes.
 - [ ] 7.4 Preserve promotion, restore, and protected history without private shared-log entries; prove direct-read protection, ambiguous bindings, and legacy assignment.
+- [ ] 7.6 Serve core interpretation under unavailable definitions only when every ancestor heading is core-recognized; prove raw reads stay useful, other units report unavailable, and coverage is incomplete, not empty.
+- [ ] 7.7 Store per-parent structural coverage in the existing embedding metadata table with occurrence vectors; prove missing coverage reads as incomplete and hidden or suppressed candidates spend no result slot.
 - [ ] 7.5 Document domains and run paired acceptance, independent review, and ordinary release; record evidence before beginning managed-vault import.
 
 ## 8. Delivery C: offline managed-vault import and recovery

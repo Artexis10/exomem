@@ -54,6 +54,28 @@ Content producers SHALL admit contributors before decoding, candidate cuts, rank
 - **THEN** it cannot alter the restricted connector's returned structures or identifiers
 - **AND** the allowed object remains useful through its admitted contributors
 
+### Requirement: Unavailable definitions withhold only dependent semantics
+
+An operation without a page's selected extension definitions SHALL keep serving admitted raw reads of that page. It SHALL serve a core-interpreted unit only when every ancestor heading of that unit is core-recognized or absent. It SHALL report every other unit of that page as unavailable and the page's unit coverage as incomplete. Vector serving SHALL treat a parent without current structural coverage as incomplete, never as a non-matching parent.
+
+#### Scenario: A hidden custom heading encloses a core unit
+
+- **WHEN** a denied extension heading encloses a nested core heading and the caller can read the page
+- **THEN** the raw page read succeeds
+- **AND** the nested unit is unavailable rather than served from a core fallback
+
+#### Scenario: Vector coverage is missing for a parent
+
+- **WHEN** a vector query reaches a parent with no current structural coverage record
+- **THEN** the result reports incomplete coverage through the existing profile
+- **AND** the parent is not counted as available and non-matching
+
+#### Scenario: Suppressed and hidden candidates compete for results
+
+- **WHEN** hidden, suppressed, duplicate, or reference-less occurrences rank above admitted units
+- **THEN** they spend no result slot
+- **AND** the admitted units fill the requested limit
+
 ### Requirement: Every content exit and cache respects current admission
 
 Commands, raw reads, media, frames, resources, artifacts, and transfers SHALL apply the current ceiling. Release and summary caches SHALL distinguish client and configuration revision. Result and capability consumption SHALL recheck current configuration and originating authentication. Cached intermediate packets SHALL NOT bypass admission before observable derivation.
