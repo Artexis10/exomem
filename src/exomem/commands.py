@@ -1184,7 +1184,7 @@ def op_bootstrap(
         # The live wording is shorter to fund the `vocabulary` block; a released
         # profile keeps the wording it was published with.
         "consideration": (
-            "Agent decides from source evidence; no quota."
+            "Choose reuse/enrich/propose-new or generic/no-edge/defer from source evidence; no quota."
             if profile == "compact" and not frozen_profile else
             (
                 (
@@ -1200,8 +1200,10 @@ def op_bootstrap(
             )
         ),
         "cadence": (
-            "Follow workflow.loop. Anchor missing questions on source pages/entities; "
-            "relation_question reviews both current relation-queue candidate endpoints."
+            "At capture, review relevant pending vocabulary items with context. "
+            "Anchor a question on a source page/entity; "
+            "relation_question uses both current endpoints. Record a typed decision before "
+            "structural writes."
             if profile == "compact" and not frozen_profile else
             (
                 (
@@ -1779,8 +1781,7 @@ def op_bootstrap(
                 (
                     "Before saving: vocabulary_workflow (section vocabulary); resolve "
                     "recurring identities/relations, enrich entities. Add types only if "
-                    "current types distort evidence; skip incidental names. "
-                    "generic/no-edge/defer valid."
+                    "current types distort evidence; skip incidental names."
                     if profile == "compact" and not frozen_profile else
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
@@ -1788,8 +1789,7 @@ def op_bootstrap(
                     "incidental names unpromoted; generic/no-edge/defer remain valid."
                 ),
                 (
-                    "At durable capture boundaries, review relevant pending vocabulary items "
-                    "in context; record typed decisions before structural writes; bind via "
+                    "Follow vocabulary_workflow.cadence; bind writes through "
                     "vocabulary_workflow.application."
                     if profile == "compact" and not frozen_profile else
                     "follow vocabulary_workflow.cadence: review relevant pending work, "
