@@ -1810,11 +1810,18 @@ class _DecisionReadBatch:
     memo: dict[tuple, Decision] = field(default_factory=dict)
     observations: dict[str, reserved_paths.GenericReadObservation] = field(default_factory=dict)
     outcomes: list[tuple[Path, str, dict[str, Any]]] = field(default_factory=list)
+    tombstones: frozenset[str] | None = None
+    lifecycle_paths: set[str] = field(default_factory=set)
 
 
 @contextmanager
-def _decision_read_batch(vault_root: Path, paths: Iterable[str]):
+def _decision_read_batch(
+    vault_root: Path, paths: Iterable[str], *, tombstones: frozenset[str] | None = None,
+    lifecycle_paths: set[str] | None = None,
+):
     def publish() -> None:
+        if batch.tombstones is not None:
+            _validate_lifecycle_paths(vault_root, batch.tombstones, batch.lifecycle_paths)
         for key, decision in batch.memo.items():
             _DECISION_MEMO[key] = decision
             _DECISION_MEMO.move_to_end(key)
@@ -1824,7 +1831,10 @@ def _decision_read_batch(vault_root: Path, paths: Iterable[str]):
             _outcome_for_decision(root, path, **arguments, reread=False)
 
     with reserved_paths.generic_read_batch(vault_root, paths, publish=publish) as reader:
-        batch = _DecisionReadBatch(reader)
+        batch = _DecisionReadBatch(
+            reader, tombstones=tombstones,
+            lifecycle_paths=lifecycle_paths if lifecycle_paths is not None else set(),
+        )
         yield batch
 
 
@@ -1867,10 +1877,14 @@ def _decide_path_acquired(
     """Decide from acquired Markdown bytes; publish memo entries after validation."""
     markdown = _is_markdown_path(rel_path)
     observed = None
-    if batch is not None and markdown:
+    if batch is not None:
+        # Packet/page callers already require this read, including binary leaves.
         observed = batch.reader.read(rel_path)
         batch.observations[rel_path] = observed
         rel_path = observed.relative_path or rel_path
+    if batch is not None and batch.tombstones is not None:
+        tombstones = batch.tombstones
+        batch.lifecycle_paths.add(rel_path)
     if (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
             else lifecycle.is_tombstoned_in(tombstones, rel_path)):
         return None
@@ -1884,6 +1898,8 @@ def _decide_path_acquired(
         return Decision(DISCLOSURE_MIN)
     if _file_policy_empty(vault_root, policy):
         return Decision(DISCLOSURE_MAX)
+    if observed is not None and observed.snapshot is None:
+        return None
     full_path = vault_root / rel_path
     raw: bytes | None = None
     live_content_hash: str | None = None
@@ -2964,9 +2980,10 @@ class _PacketRelease:
     who: RequestPrincipal
     record: str
     policy_decides: bool
-    tombstoned: set[str]
     withheld: set[str]
     prose_resolved: dict[str, tuple[str, ...]]
+    tombstones: frozenset[str]
+    lifecycle_paths: set[str]
     decisions: dict[str, Decision | None] = field(default_factory=dict)
     invalid_refs: frozenset[str] = frozenset()
     frozen: frozenset[str] = frozenset()
@@ -2977,7 +2994,10 @@ class _PacketRelease:
         """Decide a packet path, staging its receipt until held mappings validate."""
         if batch is None:
             try:
-                with _decision_read_batch(self.vault_root, (rel_path,)) as scalar:
+                with _decision_read_batch(
+                    self.vault_root, (rel_path,), tombstones=self.tombstones,
+                    lifecycle_paths=self.lifecycle_paths,
+                ) as scalar:
                     self.decide(rel_path, scalar)
             except reserved_paths.ReservedPathLeafError:
                 self.decisions[rel_path] = None
@@ -2998,7 +3018,10 @@ class _PacketRelease:
             batch.observations[rel_path] = observed
         acquired_path = observed.relative_path or rel_path
         if (decision is not None and decision.level < RELEASE_FLOOR) or (
-            decision is None and (_floor_withholds(self.vault_root, acquired_path, self.who) or not observed.missing)
+            decision is None and (_floor_withholds(
+                self.vault_root, acquired_path, self.who, tombstones=self.tombstones,
+                lifecycle_paths=self.lifecycle_paths,
+            ) or not observed.missing)
         ):
             self.withheld.add(rel_path)
         outcome = "withheld" if rel_path in self.withheld else "released"
@@ -3022,12 +3045,34 @@ class _PacketRelease:
         decision = self.decisions.get(rel_path)
         return rel_path in self.withheld and decision is not None and decision.level > LEVEL_NONE
 
+    def noticed_paths(self) -> frozenset[str]:
+        """Current notice paths for one classification phase, before any relisting."""
+        return frozenset(path for path in self.withheld if self.noticed(path))
 
-def _floor_withholds(vault_root: Path, rel_path: str, who: RequestPrincipal) -> bool:
-    """Apply tombstone and RAW admission before any file-policy decision."""
-    return lifecycle.is_tombstoned(vault_root, rel_path) or not raw_protection.permits(
-        vault_root, rel_path, who
-    )
+
+def _validate_lifecycle_paths(
+    vault_root: Path, tombstones: frozenset[str], paths: set[str],
+) -> None:
+    if not paths:
+        return
+    current = lifecycle.tombstoned_paths(vault_root)
+    # Relevant churn costs one unavailable activation; unrelated edits do not.
+    # This is a fresh point-in-time check, not a lock against lifecycle writers.
+    if any(lifecycle.is_tombstoned_in(tombstones, path) != lifecycle.is_tombstoned_in(current, path)
+           for path in paths):
+        raise ReaderViewUnavailable("lifecycle membership changed during admission")
+
+
+def _floor_withholds(
+    vault_root: Path, rel_path: str, who: RequestPrincipal, *,
+    tombstones: frozenset[str] | None = None, lifecycle_paths: set[str] | None = None,
+) -> bool:
+    """Apply tombstone and live RAW admission before any file-policy decision."""
+    if lifecycle_paths is not None:
+        lifecycle_paths.add(rel_path)
+    tombstoned = (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
+                  else lifecycle.is_tombstoned_in(tombstones, rel_path))
+    return tombstoned or not raw_protection.permits(vault_root, rel_path, who)
 
 
 @canonical_read
@@ -3046,9 +3091,15 @@ def _packet_release(
     nothing to decide: no governance, no gate and nothing withheld."""
     who = principal
     named_paths, prose_names, interpretations, unresolvable = _working_set_paths(packet)
+    tombstones = lifecycle.tombstoned_paths(vault_root)
+    lifecycle_paths: set[str] = set()
+    policy_decides = not _file_policy_empty(vault_root, policy)
+    # Governed decisions consult the acquired spelling, never an alias first.
     tombstoned = {
-        path for path in named_paths if path and _floor_withholds(vault_root, path, who)
-    }
+        path for path in named_paths if path and _floor_withholds(
+            vault_root, path, who, tombstones=tombstones, lifecycle_paths=lifecycle_paths,
+        )
+    } if not policy_decides else set()
     withheld = set(release.withheld_paths) | tombstoned
     if not release_gate_active and policy.empty and not withheld:
         # Nothing to decide, so nothing to resolve. A vault that has opted into no
@@ -3061,6 +3112,7 @@ def _packet_release(
         # condition: an ungoverned vault has no release decision to withhold
         # from in the first place, so an ambiguous or malformed reference
         # here changes nothing.
+        _validate_lifecycle_paths(vault_root, tombstones, lifecycle_paths)
         return None
 
     # Prose resolution happens only now, when the decision loop below (or the
@@ -3071,18 +3123,21 @@ def _packet_release(
     withheld |= {
         path
         for path in resolved_paths
-        if path and _floor_withholds(vault_root, path, who)
-    }
+        if path and _floor_withholds(
+            vault_root, path, who, tombstones=tombstones, lifecycle_paths=lifecycle_paths,
+        )
+    } if not policy_decides else set()
 
     ctx = _PacketRelease(
         vault_root=vault_root,
         policy=policy,
         who=who,
         record=record,
-        policy_decides=not _file_policy_empty(vault_root, policy),
-        tombstoned=tombstoned,
+        policy_decides=policy_decides,
         withheld=withheld,
         prose_resolved=prose_resolved,
+        tombstones=tombstones,
+        lifecycle_paths=lifecycle_paths,
     )
     invalid_refs: set[str] = set(unresolvable)
     acquired_paths: dict[str, str] = {}
@@ -3091,7 +3146,9 @@ def _packet_release(
         ctx.declared_purpose = _declared_purpose(vault_root, who, purpose)
         paths = sorted(path for path in named_paths if path)
         try:
-            with _decision_read_batch(vault_root, paths) as batch:
+            with _decision_read_batch(
+                vault_root, paths, tombstones=tombstones, lifecycle_paths=lifecycle_paths,
+            ) as batch:
                 for rel_path in paths:
                     ctx.decide(rel_path, batch)
                 for candidate, readings in interpretations.items():
@@ -3104,7 +3161,10 @@ def _packet_release(
                             observed = batch.observations.get(reading)
                             if observed is None:
                                 observed = batch.reader.read(reading)
-                            if _floor_withholds(vault_root, observed.relative_path or reading, who) or not observed.missing:
+                            if _floor_withholds(
+                                vault_root, observed.relative_path or reading, who,
+                                tombstones=tombstones, lifecycle_paths=lifecycle_paths,
+                            ) or not observed.missing:
                                 existing_decisions.append(None)
                     if not existing_decisions or any(
                         d is None or d.level < RELEASE_FLOOR for d in existing_decisions
@@ -3116,6 +3176,8 @@ def _packet_release(
             ctx.decisions = dict.fromkeys(paths)
             ctx.withheld.update(paths)
             invalid_refs.update(interpretations)
+    if not ctx.policy_decides:
+        _validate_lifecycle_paths(vault_root, tombstones, lifecycle_paths)
     ctx.invalid_refs = frozenset(invalid_refs)
 
     # The match set is wider than the withheld PATH set on purpose. `_withheld_keys`
@@ -3143,7 +3205,7 @@ def _packet_release(
 
 
 def _unit_verdict(
-    unit: Mapping[str, Any], ctx: _PacketRelease
+    unit: Mapping[str, Any], ctx: _PacketRelease, noticed_paths: frozenset[str]
 ) -> tuple[dict[str, Any] | None, str]:
     """The unit as the caller may be served it, or `None`, and the verdict.
 
@@ -3153,6 +3215,8 @@ def _unit_verdict(
     kept = _guarded_unit(unit, ctx.frozen, ctx.decisions, ctx.invalid_refs)
     if kept is not None:
         return kept, UNIT_KEPT
+    if not noticed_paths:
+        return None, UNIT_WITHHELD_SILENTLY
     # Only what removes a unit can report its removal. Of its provenance, that
     # is `path` and `anchor`: `_guarded_unit` strips any other withheld field,
     # such as a `superseded_by` target, and keeps the unit.
@@ -3169,7 +3233,7 @@ def _unit_verdict(
     named_paths |= {
         path for name in prose_names for path in ctx.prose_resolved.get(name, ())
     }
-    if any(ctx.noticed(path) for path in named_paths):
+    if not named_paths.isdisjoint(noticed_paths):
         return None, UNIT_WITHHELD_NOTICED
     return None, UNIT_WITHHELD_SILENTLY
 
@@ -3206,7 +3270,8 @@ def classify_units(
     )
     if ctx is None:
         return [UNIT_KEPT] * len(units)
-    return [_unit_verdict(unit, ctx)[1] for unit in units]
+    noticed_paths = ctx.noticed_paths()
+    return [_unit_verdict(unit, ctx, noticed_paths)[1] for unit in units]
 
 
 def guard_working_set(
@@ -3310,8 +3375,9 @@ def guard_working_set(
     ]
     guarded["units"] = []
     lost_unit_pages: set[str] = set()
+    noticed_paths = ctx.noticed_paths()
     for item in original_units:
-        unit, _verdict = _unit_verdict(item, ctx)
+        unit, _verdict = _unit_verdict(item, ctx, noticed_paths)
         if unit is None:
             lost_unit_pages.add(str((item.get("provenance") or {}).get("path") or ""))
         else:
@@ -3340,10 +3406,15 @@ def guard_working_set(
             rel_path = str(entry.get("path") or "")
             if not rel_path or rel_path in decisions or rel_path in withheld:
                 continue
-            if _floor_withholds(vault_root, rel_path, who):
-                withheld.add(rel_path)
-            elif ctx.policy_decides:
+            if ctx.policy_decides:
                 ctx.decide(rel_path)
+            elif _floor_withholds(
+                vault_root, rel_path, who, tombstones=ctx.tombstones,
+                lifecycle_paths=ctx.lifecycle_paths,
+            ):
+                withheld.add(rel_path)
+        if not ctx.policy_decides:
+            _validate_lifecycle_paths(vault_root, ctx.tombstones, ctx.lifecycle_paths)
         guarded["anchors"] = [
             anchor
             for anchor in guarded["anchors"]
@@ -3401,7 +3472,14 @@ def guard_working_set(
     # empty blocks would state that the turn resolved and the vault had nothing,
     # which is a different and false claim. Everything downstream of an anchor
     # goes with it, since a unit's only warrant was the anchor it hung from.
-    if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
+    from .. import working_set_conversation
+
+    witness = packet.witness if isinstance(packet, working_set_conversation.InferredPacket) else None
+    witness_removed = witness is not None and witness not in guarded.get("units", ())
+    if (witness_removed or packet.get("anchors") and not guarded["anchors"]) and not guarded.get("abstained"):
+        if witness_removed:
+            guarded["anchors"] = []
+            guarded.get("generation", {}).pop("carried_by", None)
         guarded["abstained"] = True
         # At L0 the turn resolved nothing the caller may know of, which is
         # what `unresolved` says; `withheld` is for material released at a
@@ -3425,8 +3503,6 @@ def guard_working_set(
                     if isinstance(entry, Mapping)
                 ),
             }
-    from .. import working_set_conversation
-
     if isinstance(guarded, working_set_conversation.InferredPacket):
         guarded["budget"]["used_chars"] = (
             sum(_recent_entry_chars(entry) for entry in guarded.get("recent_context", ()))
@@ -3760,6 +3836,8 @@ def _working_set_paths(
             # references insufficient. `strict` fields (T1) never take this
             # branch: EVERY non-empty, non-exempt value in one is a
             # candidate, page-shaped or not.
+            return
+        if candidate in interpretations or candidate in unresolvable:
             return
         readings = _interpretations_for(candidate)
         if not readings:
@@ -6365,6 +6443,61 @@ def gate_artifact_references(
     return gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
 
 
+def _page_release_decision(
+    vault_root: Path, rel_path: str, *, policy: Policy, who: RequestPrincipal,
+    purpose: str | None, grants_hash: str, batch: _DecisionReadBatch | None = None,
+) -> bool:
+    """Share page decision inputs and receipt preparation across scalar and batch reads."""
+    arguments = dict(
+        policy=policy, principal=who, audience=who.audience_id, purpose=purpose,
+        grants_hash=grants_hash, authorization_session=who.authorization_session_id,
+        authorization_context=who.verified_authorization_session,
+    )
+    observed = None
+    acquired_paths: dict[str, str] = {}
+    if batch is None:
+        decision = _decide_path(vault_root, rel_path, acquired_paths=acquired_paths, **arguments)
+        acquired_path = acquired_paths.get(rel_path, rel_path)
+    else:
+        decision = _decide_path_acquired(vault_root, rel_path, batch=batch, **arguments)
+        observed = batch.observations.get(rel_path)
+        if observed is None:
+            observed = batch.reader.read(rel_path)
+            batch.observations[rel_path] = observed
+        if observed.code is not None and not observed.missing:
+            raise ReaderViewUnavailable("the release plane could not acquire a page")
+        acquired_path = observed.relative_path or rel_path
+    tombstones = batch.tombstones if batch is not None else None
+    if (lifecycle.is_tombstoned(vault_root, acquired_path) if tombstones is None
+            else lifecycle.is_tombstoned_in(tombstones, acquired_path)):
+        return False
+    if observed is not None and observed.missing and not _floor_withholds(
+        vault_root, acquired_path, who, tombstones=tombstones,
+        lifecycle_paths=batch.lifecycle_paths,
+    ):
+        return True
+    allowed = decision is not None and decision.level >= RELEASE_FLOOR
+    outcome = "released" if allowed else "withheld"
+    receipt = dict(
+        decision=decision, policy=policy, audience=who.audience_id,
+        outcome=outcome, purpose=purpose, purpose_is_bound=True,
+    )
+    if batch is None:
+        _outcome_for_decision(vault_root, acquired_path, **receipt)
+    elif _collector() is not None:
+        snapshot = observed.snapshot if allowed else None
+        receipt.update(
+            prepared_dimensions=_decision_receipt_dimensions(
+                vault_root, decision=decision, policy=policy, audience=who.audience_id,
+                outcome=outcome, purpose=purpose, purpose_is_bound=True,
+            ),
+            content_hash=hashlib.sha256(snapshot.data).hexdigest() if snapshot else None,
+            size=len(snapshot.data) if snapshot else None,
+        )
+        batch.outcomes.append((vault_root, acquired_path, receipt))
+    return allowed
+
+
 def release_walk_filter(
     vault_root: Path,
     *,
@@ -6418,25 +6551,9 @@ def release_walk_filter(
         cached = verdicts.get(rel_path)
         if cached is not None:
             return cached
-        decision = _decide_path(
-            vault_root,
-            rel_path,
-            policy=policy,
-            principal=who, audience=who.audience_id,
-            purpose=declared_purpose,
-            grants_hash=grants_hash,
-            authorization_session=who.authorization_session_id,
-            authorization_context=who.verified_authorization_session,
-        )
-        allowed = decision is not None and decision.level >= RELEASE_FLOOR
-        _outcome_for_decision(
-            vault_root,
-            rel_path,
-            decision=decision,
-            policy=policy,
-            audience=who.audience_id,
-            outcome="released" if allowed else "withheld",
-            purpose=declared_purpose,
+        allowed = _page_release_decision(
+            vault_root, rel_path, policy=policy, who=who,
+            purpose=declared_purpose, grants_hash=grants_hash,
         )
         verdicts[rel_path] = allowed
         return allowed
@@ -6610,6 +6727,52 @@ def visible_page_filter(
     return visible
 
 
+@contextmanager
+def _visible_page_batch(
+    vault_root: Path, *, principal: RequestPrincipal | None, purpose: str | None,
+):
+    """Publish native neighbourhood decisions only after their held paths validate."""
+    root = Path(vault_root)
+    policy = policy_module.load(root)
+    who = principal if principal is not None else effective_principal()
+    tombstones = lifecycle.tombstoned_paths(root)
+    if _file_policy_empty(root, policy) and not tombstones:
+        # Preserve ungoverned library/RAW semantics before unresolved-principal denial.
+        lifecycle_paths: set[str] = set()
+        yield lambda path: not _floor_withholds(
+            root, path, who, tombstones=tombstones, lifecycle_paths=lifecycle_paths,
+        )
+        _validate_lifecycle_paths(root, tombstones, lifecycle_paths)
+        return
+    if policy.blocked or not who.resolved:
+        _record_blocked_outcome(who.audience_id)
+        yield lambda _path: False
+        return
+    declared_purpose = _declared_purpose(root, who, purpose)
+    grants_hash = _grants_hash(policy)
+    try:
+        with _decision_read_batch(root, (), tombstones=tombstones) as batch:
+            verdicts: dict[str, bool] = {}
+
+            def keep(path: str) -> bool:
+                rel = str(path or "").strip()
+                if not rel:
+                    return True
+                if rel not in verdicts:
+                    try:
+                        verdicts[rel] = _page_release_decision(
+                            root, rel, policy=policy, who=who, purpose=declared_purpose,
+                            grants_hash=grants_hash, batch=batch,
+                        )
+                    except Exception as error:  # noqa: BLE001 - admission cannot become optional graph absence
+                        raise ReaderViewUnavailable("the release plane could not decide a page") from error
+                return verdicts[rel]
+
+            yield keep
+    except reserved_paths.ReservedPathLeafError as error:
+        raise ReaderViewUnavailable("the release plane could not validate the neighbourhood") from error
+
+
 class ReaderViewUnavailable(RuntimeError):
     """`ReaderView.units` could not decide a unit for this reader.
 
@@ -6639,15 +6802,26 @@ class ReaderView:
         *,
         principal: RequestPrincipal | None,
         purpose: str | None,
+        page_batch: Callable[[], Any] | None = None,
     ) -> None:
         self._root = Path(vault_root)
         self._pages = pages
+        self._page_batch = page_batch
         self._principal = principal
         self._purpose = purpose
         self._verdicts: dict[str, str] = {}
 
     def __call__(self, rel_path: str) -> bool:
         return self._pages(rel_path)
+
+    @contextmanager
+    def page_batch(self):
+        """Yield native tentative admission, or preserve a custom predicate exactly."""
+        if self._page_batch is None:
+            yield self._pages
+        else:
+            with self._page_batch() as keep:
+                yield keep
 
     def verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
         """`classify_units` for each unit, by everything but its `role`."""
@@ -6692,7 +6866,10 @@ def reader_view(
     pages = visible_page_filter(vault_root, principal=principal, purpose=purpose)
     if pages is None:
         return None
-    return ReaderView(vault_root, pages, principal=principal, purpose=purpose)
+    return ReaderView(
+        vault_root, pages, principal=principal, purpose=purpose,
+        page_batch=lambda: _visible_page_batch(vault_root, principal=principal, purpose=purpose),
+    )
 
 
 def release_allows_download(

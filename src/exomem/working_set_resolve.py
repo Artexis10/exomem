@@ -329,7 +329,7 @@ class TurnAnalysis:
     points_back: bool = False
     #: The turn's content words (`working_set_anaphora.content_words`). The
     #: conversation carry licenses every one against the subject's own title
-    #: or frozen task vocabulary, never against other earlier-turn words.
+    #: or one admitted semantic unit, never against other earlier-turn words.
     content_words: tuple[str, ...] = ()
     #: `points_back` with no content word at all: the verdict without a
     #: conversation to compare against.

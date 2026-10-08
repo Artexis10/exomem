@@ -129,21 +129,24 @@ class InternalStateDescriptor:
     leaf_patterns: tuple[re.Pattern[str], ...] = ()
     component_tree_patterns: tuple[re.Pattern[str], ...] = ()
 
-    def matches(self, parts: tuple[str, ...]) -> bool:
+    def matches(self, parts: tuple[str, ...], leaf_path: str | None = None) -> bool:
+        """`leaf_path`, when given, is `"/".join(parts)` shared across one classification."""
         if not parts:
             return False
-        leaf_path = "/".join(parts)
+        if leaf_path is None:
+            leaf_path = "/".join(parts)
         if leaf_path in self.exact:
             return True
-        if any(leaf_path == tree or leaf_path.startswith(f"{tree}/") for tree in self.trees):
+        # Descriptors set few families; skipping empty ones keeps per-path classification cheap.
+        if self.trees and any(leaf_path == tree or leaf_path.startswith(f"{tree}/") for tree in self.trees):
             return True
-        if len(parts) == 1 and any(pattern.fullmatch(parts[0]) for pattern in self.patterns):
+        if self.patterns and len(parts) == 1 and any(pattern.fullmatch(parts[0]) for pattern in self.patterns):
             return True
-        if any(pattern.fullmatch(parts[0]) for pattern in self.tree_patterns):
+        if self.tree_patterns and any(pattern.fullmatch(parts[0]) for pattern in self.tree_patterns):
             return True
-        if any(pattern.fullmatch(parts[-1]) for pattern in self.leaf_patterns):
+        if self.leaf_patterns and any(pattern.fullmatch(parts[-1]) for pattern in self.leaf_patterns):
             return True
-        return any(
+        return bool(self.component_tree_patterns) and any(
             pattern.fullmatch(part)
             for part in parts
             for pattern in self.component_tree_patterns
@@ -1207,6 +1210,15 @@ class _ReadParentObservation:
     ancestor: tuple[str, held_fs.StableIdentity] | None = None
 
 
+@dataclass(slots=True)
+class _ReadLeaf:
+    names: tuple[str, ...]
+    code: str | None
+    spelling: tuple[str, str] | None = None
+    relative: str | None = None
+    identity: held_fs.StableIdentity | None = None
+
+
 class GenericReadBatch:
     """Share name observations while acquiring fresh bytes with bounded handles."""
 
@@ -1216,7 +1228,13 @@ class GenericReadBatch:
         self.filesystem = filesystem
         self.identities = identities
         self.parents: dict[str, _ReadParentObservation] = {}
-        self.leaves: dict[str, tuple[tuple[str, ...], held_fs.StableIdentity | None, str | None]] = {}
+        self.leaves: dict[str, _ReadLeaf] = {}
+        # The classifier's frozen protocol registry leaves only the KB namespace dynamic.
+        self.knowledge_base = kb_dirname()
+
+    def _require_current_namespace(self) -> None:
+        if kb_dirname() != self.knowledge_base:
+            raise ReservedPathLeafError("IDENTITY_CHANGED")
 
     def _parent_observation(
         self, path: str, requested: dict[str, held_fs.StableIdentity] | None = None,
@@ -1265,33 +1283,36 @@ class GenericReadBatch:
             )
 
     def include(self, paths: Iterable[str]) -> None:
+        """Classify and map leaves without opening them; `read` acquires each one."""
+        self._require_current_namespace()
         for path in paths:
             if path in self.leaves:
                 continue
             try:
-                parent_path, leaf = _leaf_spelling(path)
+                spelling = _leaf_spelling(path)
             except ReservedPathLeafError as error:
-                self.leaves[path] = ((), None, error.code)
+                self.leaves[path] = _ReadLeaf((), error.code)
                 continue
+            parent_path, leaf = spelling
             if parent_path not in self.parents:
                 self.parents[parent_path] = self._parent_observation(parent_path)
             parent = self.parents[parent_path]
             names = parent.names.get(leaf, ())
             code = parent.code or ("MISSING" if not names else "AMBIGUOUS_PATH" if len(names) > 1 else None)
-            self.leaves[path] = (names, None, code)
-            if code is None:
-                self._acquire(path, read=False)
+            # Authorization uses the same physical spelling selected for acquisition.
+            relative = (Path(parent_path) / (names[0] if len(names) == 1 else leaf)).as_posix()
+            self.leaves[path] = _ReadLeaf(names, code, spelling, relative)
 
-    def _acquire(self, path: str, *, read: bool) -> GenericReadObservation:
-        names, expected, code = self.leaves[path]
-        try:
-            parent_path, leaf = _leaf_spelling(path)
-        except ReservedPathLeafError:
-            return GenericReadObservation(code=code)
-        # Authorization uses the same physical spelling selected for acquisition.
-        relative = (Path(parent_path) / (names[0] if len(names) == 1 else leaf)).as_posix()
-        if code is not None:
-            return GenericReadObservation(code=code, relative_path=relative)
+    def read(self, path: str) -> GenericReadObservation:
+        """Acquire one leaf for fresh bytes; a repeated read must find the same identity."""
+        self.include((path,))
+        entry = self.leaves[path]
+        if entry.spelling is None:
+            return GenericReadObservation(code=entry.code)
+        if entry.code is not None:
+            return GenericReadObservation(code=entry.code, relative_path=entry.relative)
+        parent_path = entry.spelling[0]
+        expected = entry.identity
         result = self.filesystem.parent(parent_path)
         if not result.ok:
             raise ReservedPathLeafError("IDENTITY_CHANGED")
@@ -1301,15 +1322,14 @@ class GenericReadBatch:
                 raise ReservedPathLeafError("IDENTITY_CHANGED")
             _require_current_generic_directory(self.filesystem, parent)
             _refuse_private_identity(parent.identity, self.identities)
-            result = self.filesystem.file(parent, names[0])
+            result = self.filesystem.file(parent, entry.names[0])
             if not result.ok:
                 if expected is not None:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 # A matching directory entry that cannot be acquired is not absence.
                 code = result.error.code if result.error else "IO_REFUSED"
-                code = "IO_REFUSED" if code == "MISSING" else code
-                self.leaves[path] = (names, None, code)
-                return GenericReadObservation(code=code, relative_path=relative)
+                entry.code = "IO_REFUSED" if code == "MISSING" else code
+                return GenericReadObservation(code=entry.code, relative_path=entry.relative)
             with result.require() as file:
                 if expected is not None and file.identity != expected:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
@@ -1318,11 +1338,9 @@ class GenericReadBatch:
                 except ReservedPathLeafError as error:
                     if expected is not None:
                         raise
-                    self.leaves[path] = (names, None, error.code)
-                    return GenericReadObservation(code=error.code, relative_path=relative)
-                self.leaves[path] = (names, file.identity, None)
-                if not read:
-                    return GenericReadObservation(relative_path=relative)
+                    entry.code = error.code
+                    return GenericReadObservation(code=error.code, relative_path=entry.relative)
+                entry.identity = file.identity
                 try:
                     data = self.filesystem.read(file).require()
                     mtime = os.fstat(file.descriptor).st_mtime
@@ -1330,19 +1348,16 @@ class GenericReadBatch:
                 except (held_fs.HeldFsError, OSError) as error:
                     raise ReservedPathLeafError("IO_REFUSED") from error
                 return GenericReadObservation(
-                    GenericFileSnapshot(data, file.identity, mtime), relative_path=relative,
+                    GenericFileSnapshot(data, file.identity, mtime), relative_path=entry.relative,
                 )
 
-    def read(self, path: str) -> GenericReadObservation:
-        self.include((path,))
-        return self._acquire(path, read=True)
-
     def validate(self) -> None:
+        self._require_current_namespace()
         requested: dict[str, dict[str, held_fs.StableIdentity]] = {}
-        for path, (names, identity, _code) in self.leaves.items():
-            if identity is not None:
-                parent, _leaf = _leaf_spelling(path)
-                requested.setdefault(parent, {})[names[0]] = identity
+        for entry in self.leaves.values():
+            if entry.identity is not None:
+                assert entry.spelling is not None
+                requested.setdefault(entry.spelling[0], {})[entry.names[0]] = entry.identity
         current = {
             path: self._parent_observation(path, requested.get(path))
             for path in self.parents
@@ -1360,13 +1375,13 @@ class GenericReadBatch:
             # A failed enumeration cannot validate a successful observation.
             if initial.code != final.code:
                 raise ReservedPathLeafError("IDENTITY_CHANGED")
-        for path, (names, _identity, _code) in self.leaves.items():
-            try:
-                parent, leaf = _leaf_spelling(path)
-            except ReservedPathLeafError:
+        for entry in self.leaves.values():
+            if entry.spelling is None:
                 continue
-            if names != current[parent].names.get(leaf, ()):
+            parent, leaf = entry.spelling
+            if entry.names != current[parent].names.get(leaf, ()):
                 raise ReservedPathLeafError("IDENTITY_CHANGED")
+        self._require_current_namespace()
 
 
 @contextmanager
@@ -2302,16 +2317,17 @@ def classify_logical(value: object) -> PathClassification:
     parts = _normalized_parts(value)
     if isinstance(parts, PathClassification):
         return parts
-    canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
+    leaf_path = "/".join(parts)
+    canonical = kb_dirname() if not parts else f"{kb_dirname()}/{leaf_path}"
     replica = _DESCRIPTOR_BY_ID["collection-replica"]
-    if replica.matches(parts):
+    if replica.matches(parts, leaf_path):
         return PathClassification(
             PathDisposition.RESERVED,
             descriptor_id=replica.id,
             canonical=canonical,
             reason="path is reserved for an owning subsystem",
         )
-    matches = tuple(descriptor for descriptor in _REGISTRY if descriptor.matches(parts))
+    matches = tuple(descriptor for descriptor in _REGISTRY if descriptor.matches(parts, leaf_path))
     if not matches:
         return PathClassification(PathDisposition.ORDINARY, canonical=canonical)
     if len(matches) != 1:

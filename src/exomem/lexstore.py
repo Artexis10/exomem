@@ -7852,13 +7852,16 @@ class LexicalStore:
         query_units: list | None = None,
         term_budget: QueryTermBudget | None = None,
         retained_query_units: list | None = None,
+        after_unit_ref: str | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
 
         `retained_query_units` receives the MATCH's selected units on the same
         read snapshot, for request-local allocation within the returned pool.
+        `after_unit_ref` pages query-independent candidates by stable reference;
+        callers apply admission before counting their semantic-unit bound.
         """
-        if not (categories or kinds or clauses or query_units):
+        if not (categories or kinds or clauses or query_units or after_unit_ref is not None):
             return CatalogQueryResult(
                 None, CatalogReadiness("unsupported", False, backend())
             )
@@ -7892,6 +7895,7 @@ class LexicalStore:
                 literal_tokens, dnf_clauses=clauses,
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
+                after_unit_ref=after_unit_ref,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -7918,10 +7922,14 @@ class LexicalStore:
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
+        after_unit_ref: str | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses = [f"u.{col} = 1"]
         params: list[object] = []
+        if after_unit_ref is not None:
+            clauses.append("u.unit_ref > ?")
+            params.append(after_unit_ref)
         if dnf_clauses is not None:
             # Branch-preserving DNF over the same semantic-unit row — identical
             # algebra to page-level parent recall. A row that fails every branch
@@ -7992,10 +8000,11 @@ class LexicalStore:
                 [match, *params, k],
             ).fetchall()
         else:
+            order = "u.unit_ref" if after_unit_ref is not None else "u.updated DESC, u.parent_path DESC, u.source_order"
             rows = conn.execute(
                 f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
                 + " AND ".join(clauses)
-                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
+                + f" ORDER BY {order} LIMIT ?",
                 [*params, k],
             ).fetchall()
         return [self._semantic_unit_hit(row) for row in rows]

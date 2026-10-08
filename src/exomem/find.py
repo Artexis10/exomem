@@ -21,7 +21,7 @@ from collections.abc import Set as AbstractSet
 from datetime import date
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     cli_ops,
@@ -46,6 +46,9 @@ from .find_types import (
     SemanticUnitHit,
 )
 from .kbdir import kb_dirname, kb_prefix
+
+if TYPE_CHECKING:
+    from .semantic_index import SemanticParentIndexState
 
 log = logging.getLogger(__name__)
 
@@ -2184,6 +2187,7 @@ def _hydrate_indexed_unit_records(
     *,
     plan: structured_filters.FilterPlan,
     stale_out: list[str] | None = None,
+    parent_states: dict[str, SemanticParentIndexState] | None = None,
 ) -> dict[str, tuple[ParsedPage, Any, int]]:
     """Hydrate only sidecar-selected parents, rejecting any generation race."""
     from . import semantic_index
@@ -2212,7 +2216,12 @@ def _hydrate_indexed_unit_records(
                 parents[hit.parent_path] = None
                 continue
             try:
-                state = semantic_index.current_parent_index_state(vault_root, hit.parent_path)
+                token = semantic_index.set_parent_states(parent_states) if parent_states is not None else None
+                try:
+                    state = semantic_index.current_parent_index_state(vault_root, hit.parent_path)
+                finally:
+                    if token is not None:
+                        semantic_index.reset_parent_states(token)
             except (OSError, UnicodeError, ValueError) as error:
                 log.warning(
                     "semantic-unit candidate hydration failed for %s: %s",
@@ -2228,19 +2237,30 @@ def _hydrate_indexed_unit_records(
                     stale_out.append(hit.unit_ref)
                 parents[hit.parent_path] = None
                 continue
+            if parent_states is not None:
+                # Keep one parsed parent; the existing owner rechecks source and registry hashes.
+                parent_states.clear()
+                parent_states[hit.parent_path] = state
             parent = (page, state, find_results.prose_units(vault_root, page, state.document.units))
             parents[hit.parent_path] = parent
         if parent is None:
             continue
         page, state, prose_units = parent
-        located = next(
-            (
-                (source_order, candidate)
-                for source_order, candidate in enumerate(state.document.units)
-                if candidate.unit_ref == hit.unit_ref
-            ),
-            None,
-        )
+        located = None
+        indexed_order = getattr(hit, "source_order", None)
+        if isinstance(indexed_order, int) and 0 <= indexed_order < len(state.document.units):
+            candidate = state.document.units[indexed_order]
+            if candidate.unit_ref == hit.unit_ref:
+                located = (indexed_order, candidate)
+        if located is None:
+            located = next(
+                (
+                    (source_order, candidate)
+                    for source_order, candidate in enumerate(state.document.units)
+                    if candidate.unit_ref == hit.unit_ref
+                ),
+                None,
+            )
         if located is None:
             if stale_out is not None:
                 stale_out.append(hit.unit_ref)

@@ -37,6 +37,9 @@ def test_unit_reference_refuses_unsafe_or_ambiguous_leaf(vault: Path, alias_kind
     units = [{"ref": relative, "text": "A useful fact.", "provenance": {"path": relative}}]
     with request_scope(_external()):
         assert egress.classify_units(vault, units) == [egress.UNIT_WITHHELD_SILENTLY]
+        reader = egress.reader_view(vault)
+        with pytest.raises(egress.ReaderViewUnavailable), reader.page_batch() as keep:
+            keep(relative)
 
 
 @pytest.mark.parametrize("change", ["leaf", "parent", "missing-parent"])
@@ -97,6 +100,40 @@ def test_repeated_held_read_uses_fresh_bytes(vault: Path) -> None:
         (vault / OPEN_PATH).write_bytes(replacement)
         after = batch.read(OPEN_PATH).snapshot
         assert after is not None and after.data == replacement
+
+
+def test_repeated_held_read_refuses_a_replaced_leaf(vault: Path) -> None:
+    # Final validation sees only the last identity, so earlier bytes need this refusal.
+    from exomem import reserved_paths
+
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+        with reserved_paths.generic_read_batch(vault, (OPEN_PATH,)) as batch:
+            assert batch.read(OPEN_PATH).snapshot is not None
+            target = vault / OPEN_PATH
+            replacement = target.with_name("replacement.md")
+            replacement.write_bytes(target.read_bytes())
+            replacement.replace(target)
+            batch.read(OPEN_PATH)
+    assert refused.value.code == "IDENTITY_CHANGED"
+
+
+@pytest.mark.parametrize("read_again", [False, True])
+def test_changed_kb_namespace_discards_pending_reads(vault: Path, monkeypatch, read_again: bool) -> None:
+    from exomem import reserved_paths
+
+    path = "Brain/_Governance/control.md"
+    target = vault / path
+    target.parent.mkdir(parents=True)
+    target.write_text("Ordinary content before the namespace changes.\n")
+    published = []
+    with pytest.raises(reserved_paths.ReservedPathLeafError):
+        with reserved_paths.generic_read_batch(vault, (path,), publish=lambda: published.append(path)) as batch:
+            assert batch.read(path).snapshot is not None
+            monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+            if read_again:
+                batch.read(path)
+                pytest.fail("a changed namespace must refuse the next read")
+    assert published == []
 
 
 def test_warm_unit_refuses_a_published_private_identity(
@@ -311,6 +348,8 @@ def test_compatibility_alias_cannot_bypass_resource_authority(
     assert not (vault / alias).exists()
     with request_scope(_external()):
         for requested in (path, alias, alias, path):
+            with egress.reader_view(vault).page_batch() as keep:
+                assert not keep(requested)
             units = [{"ref": requested, "text": "Private content.", "provenance": {"path": requested}}]
             assert egress.annotate_hits(vault, [_hit(requested)]).hits == []
             assert egress.classify_units(vault, units) == [egress.UNIT_WITHHELD_SILENTLY]
@@ -383,3 +422,139 @@ def test_logical_markdown_reference_still_requires_parseable_acquired_bytes(vaul
     with request_scope(_external()):
         assert egress.annotate_hits(vault, [_hit(logical)]).hits == []
         assert egress.classify_units(vault, units) == [egress.UNIT_WITHHELD_SILENTLY]
+
+
+def test_custom_reader_predicate_keeps_its_meaning_inside_a_page_batch(vault: Path) -> None:
+    from test_governance_egress import RESTRICTED_PATH
+
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    expected = {OPEN_PATH: False, RESTRICTED_PATH: True, "missing.md": True}
+    reader = egress.ReaderView(vault, expected.__getitem__, principal=_external(), purpose=None)
+    with reader.page_batch() as keep:
+        assert {path: keep(path) for path in expected} == expected
+    assert {path: reader(path) for path in expected} == expected
+
+
+def test_changed_neighbourhood_identity_discards_pending_claims_and_allows_retry(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    with request_scope(_external()), egress.disclosure_boundary(vault, "activate_context") as collector:
+        egress.record_direct_text_release("Earlier independent content.", stable_ref="earlier", representation="page_body")
+        prior_outcomes = list(collector.outcomes)
+        prior_claims = set(collector.path_outcomes)
+        prior_memo = dict(egress._DECISION_MEMO)
+        reader = egress.reader_view(vault)
+        with pytest.raises(egress.ReaderViewUnavailable), reader.page_batch() as keep:
+            assert keep("Knowledge Base/Notes/absent.md")
+            assert keep(OPEN_PATH)
+            target = vault / OPEN_PATH
+            replacement = target.with_name("replacement.md")
+            replacement.write_bytes(target.read_bytes())
+            replacement.replace(target)
+        assert collector.outcomes == prior_outcomes
+        assert collector.path_outcomes == prior_claims
+        assert dict(egress._DECISION_MEMO) == prior_memo
+        with reader.page_batch() as keep:
+            assert keep(OPEN_PATH)
+        assert collector.outcomes != prior_outcomes
+
+
+@pytest.mark.parametrize("change", ["added", "removed", "unrelated"])
+def test_neighbourhood_lifecycle_changes_validate_the_acquired_spelling(
+    vault: Path, change: str,
+) -> None:
+    from contextlib import nullcontext
+
+    from test_governance_egress import RESTRICTED_PATH
+
+    from exomem.governance import lifecycle
+
+    write_scope(vault, paths="Notes/**")
+    write_rule(vault, ceiling=5)
+    operation = None
+    if change == "removed":
+        operation = lifecycle.begin_deletion(vault, source_rel=OPEN_PATH, trash_rel="Knowledge Base/_trash/source.md")
+    alias = OPEN_PATH.replace("Notes", "Ｎotes")
+    try:
+        with request_scope(_external()), egress.disclosure_boundary(vault, "activate_context") as collector:
+            egress.record_direct_text_release("Earlier content.", stable_ref="earlier", representation="page_body")
+            prior_outcomes = list(collector.outcomes)
+            prior_memo = dict(egress._DECISION_MEMO)
+            reader = egress.reader_view(vault)
+            expected = pytest.raises(egress.ReaderViewUnavailable) if change != "unrelated" else nullcontext()
+            with expected, reader.page_batch() as keep:
+                assert keep(alias) is (change != "removed")
+                if change == "removed":
+                    lifecycle.abort_deletion(operation)
+                else:
+                    operation = lifecycle.begin_deletion(
+                        vault, source_rel=RESTRICTED_PATH if change == "unrelated" else OPEN_PATH,
+                        trash_rel="Knowledge Base/_trash/source.md",
+                    )
+            if change != "unrelated":
+                assert collector.outcomes == prior_outcomes
+                assert dict(egress._DECISION_MEMO) == prior_memo
+            else:
+                assert collector.outcomes != prior_outcomes
+            with reader.page_batch() as keep:
+                assert keep(alias) is (change != "added")
+                assert keep("Knowledge Base/Notes/absent.md")
+    finally:
+        if operation is not None:
+            lifecycle.abort_deletion(operation)
+
+
+def test_terminal_packet_lifecycle_change_publishes_no_pending_claims(vault: Path, monkeypatch) -> None:
+    from exomem.governance import lifecycle
+
+    write_scope(vault, paths="Notes/**")
+    write_rule(vault, ceiling=5)
+    alias = OPEN_PATH.replace("Notes", "Ｎotes")
+    units = [{"ref": alias, "text": "A useful fact.", "provenance": {"path": alias}}]
+    decide = egress._decide_path_acquired
+    operation = None
+
+    def delete_after_decision(root, path, **kwargs):
+        nonlocal operation
+        decision = decide(root, path, **kwargs)
+        if path == alias and operation is None:
+            operation = lifecycle.begin_deletion(vault, source_rel=OPEN_PATH, trash_rel="Knowledge Base/_trash/source.md")
+        return decision
+
+    try:
+        with request_scope(_external()), egress.disclosure_boundary(vault, "activate_context") as collector:
+            egress.record_direct_text_release("Earlier content.", stable_ref="earlier", representation="page_body")
+            prior_outcomes = list(collector.outcomes)
+            prior_claims = set(collector.path_outcomes)
+            prior_memo = dict(egress._DECISION_MEMO)
+            with monkeypatch.context() as changes:
+                changes.setattr(egress, "_decide_path_acquired", delete_after_decision)
+                with pytest.raises(egress.ReaderViewUnavailable):
+                    egress.guard_working_set(vault, {"units": units}, egress.AnnotatedHits(hits=[]))
+            assert collector.outcomes == prior_outcomes
+            assert collector.path_outcomes == prior_claims
+            assert dict(egress._DECISION_MEMO) == prior_memo
+            assert egress.classify_units(vault, units) == [egress.UNIT_WITHHELD_SILENTLY]
+    finally:
+        if operation is not None:
+            lifecycle.abort_deletion(operation)
+
+
+def test_ungoverned_page_admission_rechecks_a_new_lifecycle_floor(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    operation = None
+    try:
+        with request_scope(_external()):
+            reader = egress.reader_view(vault)
+            with pytest.raises(egress.ReaderViewUnavailable), reader.page_batch() as keep:
+                assert keep(OPEN_PATH)
+                write_scope(vault, paths="Notes/**")
+                write_rule(vault, ceiling=5)
+                operation = lifecycle.begin_deletion(vault, source_rel=OPEN_PATH, trash_rel="Knowledge Base/_trash/source.md")
+            with reader.page_batch() as keep:
+                assert not keep(OPEN_PATH)
+    finally:
+        if operation is not None:
+            lifecycle.abort_deletion(operation)
