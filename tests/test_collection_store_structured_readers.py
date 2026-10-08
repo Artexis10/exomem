@@ -4,19 +4,31 @@ import datetime as dt
 from dataclasses import replace
 
 import pytest
-
-from exomem import audit, due_state, plan_progress, record_governance, working_set_index
-from exomem import structured_collections as collections, working_set_state
-from exomem.collection_store.preview import preview_store
-from exomem.governance.principal import owner_principal, request_scope
 from lifecycle_fixtures import PLANNING_PATH, RECORDS_PATH, planning_manifest, records_manifest
-from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text, store as store
+from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text
+from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 from test_plan_progress_review import (
-    PLANNING_COLLECTION, RECORDS_COLLECTION, RECORDS_REF, _PLANNING_MANIFEST,
-    _committed, _records_manifest,
+    _PLANNING_MANIFEST,
+    PLANNING_COLLECTION,
+    RECORDS_COLLECTION,
+    RECORDS_REF,
+    _committed,
+    _records_manifest,
 )
 from test_working_set_state import _anchor
+
+from exomem import (
+    audit,
+    due_state,
+    plan_progress,
+    record_governance,
+    working_set_index,
+    working_set_state,
+)
+from exomem import structured_collections as collections
+from exomem.collection_store.preview import preview_store
+from exomem.governance.principal import owner_principal, request_scope
 
 
 def _log_manifest(text):
@@ -170,6 +182,8 @@ def test_claims_census_reads_canonical_rows_without_views(store):
 
 def test_occurrence_disposition_returns_runnable_canonical_guards_under_policy(store):
     from exomem import records_disposition
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
 
     text = manifest_text().replace("    count: {type: integer}",
                                   "    sources: {type: array, items: {type: string}}")
@@ -182,10 +196,43 @@ def test_occurrence_disposition_returns_runnable_canonical_guards_under_policy(s
         call = records_disposition._occurrence_call(store.root, manifest, manifest.path, KEY,
                                                   "exomem://memory/33333333-3333-4333-8333-333333333333",
                                                   "add occurrence")
-        result = store.update_record(call.pop("collection"), **{k: v for k, v in call.items() if k != "action"})
+        result = record_memory(store.root, **call)
         rows = record_governance.query_collection(store.root, CID).rows
+        with pytest.raises(OpError, match="STALE_RECORD"):
+            record_memory(store.root, **call)
     assert result["outcome"] == "committed"
     assert rows[0]["sources"] == ["exomem://memory/33333333-3333-4333-8333-333333333333"]
+
+
+@pytest.mark.parametrize("withheld", ["field", "held"])
+def test_occurrence_disposition_withholds_canonical_guards_for_partial_readers(store, withheld):
+    """Every current row can be visible while a protected field or held candidate still prevents full-state guards."""
+    from exomem import records_disposition
+
+    text = manifest_text().replace("    count:", "    sources: {type: array, items: {type: string}}\n    count:")
+    if withheld == "field":
+        text = text.replace("    count:", "    place: {type: string, classification: location}\n    count:")
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    store.append_record(CID, item={"title": "One", **({"place": "private"} if withheld == "field" else {})},
+                        item_key=KEY, why="observe")
+    hidden_path = "Unrelated/**"
+    if withheld == "held":
+        with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE") as error:
+            store.append_record(CID, item={"title": "Held", "count": "invalid"},
+                                item_key=OTHER, why="preserve candidate", hold=True)
+        hidden_path = error.value.details["held"]["path"].removeprefix("Knowledge Base/")
+    write_scope(store.root, paths=hidden_path)
+    write_rule(store.root, ceiling=0)
+    observation = "exomem://memory/33333333-3333-4333-8333-333333333333"
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        manifest = due_state._load_manifest(store.root, manifest_path())
+        visible = record_governance.query_collection(store.root, CID).rows
+        assert len(visible) == 1 and visible[0]["title"] == "One" and "place" not in visible[0]
+        assert records_disposition._occurrence_call(
+            store.root, manifest, manifest.path, KEY, observation, "add occurrence") is None
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert records_disposition._occurrence_call(
+            store.root, manifest, manifest.path, KEY, observation, "add occurrence") is not None
 
 
 def test_write_delta_keeps_hidden_log_rows_but_serve_matches_rows_absent(store):
@@ -266,9 +313,10 @@ def test_hidden_log_sibling_does_not_reopen_a_reflected_observation(store):
 
 def test_current_plan_state_uses_the_committed_row_and_withholds_its_stale_view(store):
     """A completed or hidden plan must not regain its old status from its view."""
+    from test_due_state_bulk_carriers import _command
+
     from exomem import writer_lease
     from exomem.plan_memory import plan_memory
-    from test_due_state_bulk_carriers import _command
 
     create(store, "planning")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):

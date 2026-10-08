@@ -900,13 +900,16 @@ class OperationAuthorization:
         subject = self.cache.point(identity)
         return subject if subject is not None and subject.collection_id == cid else None
 
+    def require_complete_fields(self, cid: str) -> None:
+        manifest = self.field_manifest(cid)
+        plan = self.field_plan(manifest)
+        # Partial field readers cannot guard full-state writes; a false refusal costs them a retry by the owner.
+        if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
+            self.refuse()
+
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
         if complete and self.mutation:
-            manifest = self.field_manifest(cid)
-            plan = self.field_plan(manifest)
-            # Partial field readers cannot guard full-state writes; a false refusal costs them a retry by the owner.
-            if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
-                self.refuse()
+            self.require_complete_fields(cid)
         try:
             head = self.summary_manifest(cid)
             if head is not None:
