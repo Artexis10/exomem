@@ -1608,11 +1608,12 @@ def test_stale_compute_blocked_sidecar_wakes_once_but_converged_sidecar_does_not
     store.enqueue(source)
     job = store.claim_next()
     assert job is not None
-    store.mark(job.id, media_jobs.BLOCKED, "ASRRuntimeRefusal: no CTranslate2 CUDA device")
+    error = "ASRRuntimeRefusal: no CTranslate2 CUDA device"
+    store.mark(job.id, media_jobs.BLOCKED, error)
     assert store.needs_worker() is True
     source.sidecar_path.write_text(
         "---\nprocessing_state: blocked\nprocessing_retryable: true\n"
-        "processing_error: ASRRuntimeRefusal: no CTranslate2 CUDA device\n"
+        f"processing_error: {vault_module.yaml_scalar(error)}\n"
         "processing_next_action: repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry\n---\n",
         encoding="utf-8",
     )

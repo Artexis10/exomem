@@ -534,6 +534,9 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
     events: list[tuple[str, object]] = []
 
     class Store:
+        def __init__(self, vault_root: Path) -> None:
+            self.path = media_worker.media_jobs.job_store_path(vault_root)
+
         def recover_interrupted(self) -> None:
             events.append(("recover", None))
 
@@ -562,7 +565,7 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
         def _process(self, _job) -> None:
             raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
 
-    monkeypatch.setattr(media_worker, "MediaJobStore", lambda _root: Store())
+    monkeypatch.setattr(media_worker, "MediaJobStore", Store)
     monkeypatch.setattr(media_worker, "MediaWorker", Worker)
     monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
     monkeypatch.setattr(media_worker, "_parent_alive", lambda _pid: True)

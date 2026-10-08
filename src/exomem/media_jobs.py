@@ -21,7 +21,7 @@ from typing import Any
 
 from . import held_fs, reserved_paths
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
-from .vault import _FM_PATTERN
+from .vault import parse_frontmatter
 
 PENDING = "pending"
 RUNNING = "running"
@@ -160,25 +160,13 @@ def is_compute_runtime_error(error: object) -> bool:
 
 def _blocked_presentation_is_current(content: str, error: object) -> bool:
     """Sidecar presentation is current only when it exactly mirrors ledger authority."""
-    match = _FM_PATTERN.match(content)
-    if match is None:
+    try:
+        fields, _body, _raw = parse_frontmatter(content, strict=True)
+    except Exception:  # noqa: BLE001 - safe YAML scalars raise mixed errors; malformed sidecars stay stale
         return False
-    fields: dict[str, str] = {}
-    for line in match.group(1).splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        if key in fields:
-            return False
-        raw = value.strip()
-        try:
-            fields[key] = json.loads(raw) if raw.startswith('"') else raw
-        except json.JSONDecodeError:
-            return False
     return (
         fields.get("processing_state") == BLOCKED
-        and fields.get("processing_retryable") == "true"
+        and fields.get("processing_retryable") is True
         and fields.get("processing_error") == str(error or "")
         and fields.get("processing_next_action") == _COMPUTE_RUNTIME_ACTION
     )

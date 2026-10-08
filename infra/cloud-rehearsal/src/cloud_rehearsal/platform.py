@@ -49,6 +49,9 @@ PLATFORM_NAMESPACE = "exomem-platform"
 EDGE_NAMESPACE = "exomem-edge"
 INGRESS_NODE_PORT = 30443
 TRUSTED_INGRESS_HEADER = "x-exomem-ingress-source"
+# These workload identities and the snapshot API are fixed by the platform chart.
+LOCAL_STORAGE_CONTROLLERS = ("exomem-platform-topolvm-controller", "snapshot-controller")
+SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
 
 
 @dataclass
@@ -61,12 +64,15 @@ class PlatformConfig:
     mcp_path: str
     trusted_ingress_source_value: str
     attachments_limit_fallback: int = 20
+    local_storage_coexistence: bool = False
 
 
 @dataclass
 class Platform:
     rendered: list[dict[str, Any]]
+    hetzner_class: str
     overlays: list[str] = field(default_factory=list)
+    storage_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[str, Any]:
@@ -85,7 +91,7 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
     }
 
 
-def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
+def _render(stack: Stack, config: PlatformConfig) -> Platform:
     pg_cidr = f"{stack.postgres.ip}/32"
     values = {
         "cellctl": cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository),
@@ -108,21 +114,28 @@ def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
         },
         "cloudIngress": {"enabled": False},
         "cert-manager": {"enabled": False},
-        # As production today: Hetzner-class cells only. values.validation.yaml
-        # enables local storage to render its templates, but P3 installs no
-        # TopoLVM; the local-storage drill rehearses that domain.
-        "cellStorage": {"local": {"enabled": False}},
+        # Both P3 configurations keep existing cells on the Hetzner domain.
+        "cellStorage": {"domain": "hetzner", "local": {"enabled": config.local_storage_coexistence}},
     }
     show_only = (
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
         "templates/namespaces.yaml",
     )
-    # cellctl's alert-delivery Role lives in the release namespace; of the
-    # chart's namespaces only that one is needed here.
-    return [
-        doc for source, doc in render_chart(stack, values, show_only=show_only)
-        if source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE
+    rendered = render_chart(
+        stack, values,
+        show_only=() if config.local_storage_coexistence else show_only,
+        dependencies=config.local_storage_coexistence,
+        api_versions=(SNAPSHOT_CLASS_API,) if config.local_storage_coexistence else (),
+    )
+    documents = [
+        doc for source, doc in rendered
+        if (source in show_only
+            or (config.local_storage_coexistence
+                and (source == "templates/cell-local-storage.yaml" or source.startswith("charts/topolvm/"))))
+        and (source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE)
     ]
+    hetzner = next(doc for source, doc in rendered if source == "templates/cloud-storage-class.yaml")
+    return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"])
 
 
 def render_chart(
@@ -222,10 +235,10 @@ def missing_gateway_env(container: dict[str, Any]) -> list[str]:
 
 def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, dict[str, str]],
           pki: tls.RehearsalPki, ingress_source_value: str, ingress_image: str) -> Platform:
-    documents = _render(stack, config)
-    platform = Platform(rendered=copy.deepcopy(documents))
+    platform = _render(stack, config)
+    documents = copy.deepcopy(platform.rendered)
 
-    storage = next(doc for doc in documents if doc["kind"] == "StorageClass")
+    storage = _find(documents, "StorageClass", platform.hetzner_class)
     storage["provisioner"] = "rancher.io/local-path"
     storage.pop("parameters", None)
     platform.overlays.append(
@@ -249,13 +262,41 @@ def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, di
              "ValidatingAdmissionPolicy": 5, "ValidatingAdmissionPolicyBinding": 6, "NetworkPolicy": 7,
              "Service": 8, "Deployment": 9}
     documents.sort(key=lambda doc: order.get(doc["kind"], 50))
-    workloads = [doc for doc in documents if doc["kind"] == "Deployment"]
-    others = [doc for doc in documents if doc["kind"] != "Deployment"]
+    crds = [doc for doc in documents if doc["kind"] == "CustomResourceDefinition"]
+    if crds:
+        _kubectl_apply(stack, crds)
+        stack.k3s.kubectl("wait", "--for=condition=Established", "crd", "--all", "--timeout=120s")
+    workloads = [doc for doc in documents if doc["kind"] in ("Deployment", "DaemonSet")]
+    others = [doc for doc in documents if doc not in workloads and doc not in crds]
     _kubectl_apply(stack, others)
 
     _kubectl_apply(stack, cellctl_secret_documents(stack, cellctl_secrets))
     _apply_ingress(stack, pki, ingress_source_value, ingress_image)
     _kubectl_apply(stack, workloads)
+    if config.local_storage_coexistence:
+        for deployment in LOCAL_STORAGE_CONTROLLERS:
+            wait_rollout(stack, PLATFORM_NAMESPACE, deployment, timeout=420)
+        observed = json.loads(stack.k3s.kubectl("get", "deployment", "cellctl", "-n", CLOUD_NAMESPACE, "-o", "json").stdout)
+        env = observed["spec"]["template"]["spec"]["containers"][0]["env"]
+        storage_config = json.loads(next(entry["value"] for entry in env if entry["name"] == "CELLCTL_CELL_STORAGE"))
+        if storage_config["domain"] != platform.hetzner_class or not storage_config.get("local"):
+            raise RuntimeError("coexistence requires local storage enabled with the Hetzner domain selected")
+        logical = json.loads(stack.k3s.kubectl("get", "logicalvolumes.topolvm.io", "-o", "json").stdout)
+        daemonsets = json.loads(stack.k3s.kubectl("get", "daemonsets", "-n", PLATFORM_NAMESPACE, "-o", "json").stdout)
+        platform.storage_evidence = {
+            "cellctl_storage": storage_config,
+            "logical_volume_api": logical["apiVersion"],
+            "logical_volume_count": len(logical["items"]),
+            "controllers": {
+                name: json.loads(stack.k3s.kubectl("get", "deployment", name, "-n", PLATFORM_NAMESPACE, "-o", "json").stdout)["status"]
+                for name in LOCAL_STORAGE_CONTROLLERS
+            },
+            "node_daemonsets": {
+                doc["metadata"]["name"]: doc["status"] for doc in daemonsets["items"]
+            },
+            "boundary": "no storage-labelled agent or local pool; Hetzner CSI and object storage retain their P3 doubles",
+        }
+        platform.overlays.append(f"rendered with --api-versions {SNAPSHOT_CLASS_API}, as the existing local-storage drill")
     return platform
 
 
