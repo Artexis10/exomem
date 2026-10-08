@@ -40,6 +40,7 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
+from .vocabulary import instances
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
 _DISPOSITION_KINDS = frozenset(
@@ -216,6 +217,11 @@ class SemanticPageState:
     # (target, line) for each deduped body wikilink not already on a typed
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
+    body: str = field(default="", repr=False)
+    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
+    definitions: instances.PageDefinitions | None = field(default=None, repr=False)
+    definitions_unavailable: bool = False
+    neutral_document: SemanticUnitDocument | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frontmatter", _freeze(dict(self.frontmatter)))
@@ -450,6 +456,7 @@ class RelationFact:
     authored: bool
     reviewer_accepted: bool
     target_status: str
+    registry_instance: str = "core"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authored_projects", tuple(sorted(set(self.authored_projects))))
@@ -480,6 +487,7 @@ class RelationFact:
             "authored": self.authored,
             "reviewer_accepted": self.reviewer_accepted,
             "target_status": self.target_status,
+            "registry_instance": self.registry_instance,
         }
 
 
@@ -1082,6 +1090,12 @@ class SemanticCorpusContext:
             ),
         )
 
+    def registry_for(self, path: str) -> relation_registry.RelationRegistry:
+        state = self.pages.get(path)
+        if state is not None and state.definitions is not None:
+            return state.definitions.snapshots["relations"].typed
+        return self.registry
+
     @property
     def status_dependencies(self) -> tuple[tuple[str, str], ...]:
         return tuple(
@@ -1160,13 +1174,14 @@ def build_page_state(
         vault_root,
         path,
         source,
-        relation_registry=relation_registry,
-        language_registry=language_registry,
+        relation_registry=globals()["relation_registry"].core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
         review_fingerprint=review_fingerprint,
         complete_authored_effects=complete_authored_effects,
     )
     return enrich_page_state(
-        Path(vault_root), state, status_basis or lifecycle_statuses.Basis(vault_root)
+        Path(vault_root), state, status_basis or lifecycle_statuses.Basis(vault_root),
+        relation_definitions=relation_registry, language=language_registry,
     )
 
 
@@ -1174,8 +1189,37 @@ def enrich_page_state(
     root: Path,
     state: SemanticPageState,
     status_basis: lifecycle_statuses.Basis,
+    *,
+    relation_definitions: relation_registry.RelationRegistry | None = None,
+    language: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticPageState:
-    """Apply one admitted lifecycle basis to detached structural facts."""
+    """Interpret detached facts with this page's admitted instance and lifecycle."""
+    definitions = None
+    unavailable = False
+    try:
+        definitions = instances.page_definitions(
+            root, state.path, dict(state.frontmatter), ("relations", "categories"),
+        )
+        if definitions.binding_revision is not None or relation_definitions is None:
+            relation_definitions = definitions.snapshots["relations"].typed
+        if definitions.binding_revision is not None or language is None:
+            language = definitions.snapshots["categories"].typed
+    except ValueError:
+        # Core meanings remain public; missing assignment never makes an overlay public.
+        unavailable = True
+        relation_definitions = relation_registry.core_registry()
+        language = semantic_language_registry.core_registry()
+    document = state.document
+    language_hash = f"{language.schema_version}:{language.content_hash}"
+    relation_hash = f"{relation_definitions.core_version}:{relation_definitions.extension_hash}"
+    if (state.language_registry_hash, state.relation_registry_hash) != (language_hash, relation_hash):
+        document = semantic_units.parse_semantic_units(
+            state.body, path=state.path, parent_ref=state.document.parent_ref,
+            candidates=state.candidates,
+            language_registry=semantic_language_registry.for_attached_projects(language, state.projects),
+            relation_registry=relation_definitions, include_legacy_relations=True,
+            retain_unknown_relations=True, page_type=state.page_type,
+        )
     parsed = find_module.ParsedPage(
         path=root / state.path,
         rel_path=state.path,
@@ -1183,6 +1227,7 @@ def enrich_page_state(
         body="",
         title=state.title,
         mtime=0.0,
+        vault_root=root,
     )
     governed = activation.structurally_eligible_for_types(
         root, parsed, page_types=activation._ELIGIBLE_TYPES
@@ -1197,13 +1242,18 @@ def enrich_page_state(
         tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
     )
     classification = (
-        status_basis.classify(state.frontmatter.get("status"))
+        status_basis.classify(state.frontmatter.get("status"), path=state.path, frontmatter=state.frontmatter)
         if governed or compiled or connectable
         else lifecycle_statuses.Classification(None)
     )
-    live = classification.live if governed or compiled or connectable else False
+    live = classification.lifecycle_class == "live"
     return replace(
         state,
+        document=document,
+        language_registry_hash=language_hash,
+        relation_registry_hash=relation_hash,
+        definitions=definitions,
+        definitions_unavailable=unavailable,
         eligible_governed=governed and live,
         eligible_compiled=compiled and live,
         connectable_target=connectable and live,
@@ -1241,8 +1291,10 @@ def _parse_page_state(
     # parsing, retaining positions and line numbers for the surrounding prose.
     for start, end in reversed(provenance.parse_owned_origin(body, owner_path=rel_path).spans):
         body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
+    candidates = semantic_units.scan_semantic_units(body, path=rel_path)
     document = semantic_units.parse_semantic_units(
         body,
+        candidates=candidates,
         path=rel_path,
         parent_ref=(memory_refs.memory_ref(normalized_id) if normalized_id is not None else None),
         validate=True,
@@ -1312,6 +1364,9 @@ def _parse_page_state(
         eligible_compiled=False,
         connectable_target=False,
         body_wikilinks=tuple(body_links),
+        body=body,
+        candidates=candidates,
+        neutral_document=document,
     )
 
 
@@ -1556,8 +1611,8 @@ def current_writer_resolver_entries(
 
     try:
         configuration = _config_census(root)
-        relation_definitions = relation_registry.load_registry(root)
-        language = semantic_language_registry.load_registry(root)
+        relation_definitions = relation_registry.core_registry()
+        language = semantic_language_registry.core_registry()
         membership = tuple(
             sorted(path.relative_to(root).as_posix() for path in vault.walk_vault_md(root))
         )
@@ -1867,8 +1922,6 @@ def _corpus_census(root: Path) -> tuple | None:
         loose_walk(root)
         for extra in (
             access.access_config_path(root),
-            relation_registry.extension_registry_path(root),
-            semantic_language_registry.registry_path(root),
         ):
             marker = str(extra.relative_to(root).as_posix())
             try:
@@ -2019,8 +2072,6 @@ def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
     try:
         for extra in (
             access.access_config_path(root),
-            relation_registry.extension_registry_path(root),
-            semantic_language_registry.registry_path(root),
         ):
             marker = extra.relative_to(root).as_posix()
             try:
@@ -2064,17 +2115,10 @@ def _registries_match_disk(
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> bool:
-    """Whether the supplied registries are content-identical to the on-disk ones.
-
-    The cache stores contexts derived from on-disk registry state (the
-    registry files are census entries). A caller-supplied registry object is
-    only compatible with that stored state when its content fingerprint equals
-    a fresh disk load — synthetic/proposal registries fail this and bypass the
-    cache entirely.
-    """
+    """Whether supplied inputs match the shared core-only structural producer."""
     try:
-        disk_registry = relation_registry.load_registry(root)
-        disk_language = semantic_language_registry.load_registry(root)
+        disk_registry = relation_registry.core_registry()
+        disk_language = semantic_language_registry.core_registry()
     except Exception:  # noqa: BLE001 — unreadable registry state: never cache
         return False
     return (disk_registry.core_version, disk_registry.extension_hash) == (
@@ -2473,8 +2517,8 @@ def _patch_corpus_files_changed_locked(
     reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
     if not reconcile_paths:
         return _CORPUS_PATCH_UNCHANGED
-    relation_definitions = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
+    relation_definitions = relation_registry.core_registry()
+    language = semantic_language_registry.core_registry()
     context = _reconcile_markdown_delta(
         root,
         entry[1],
@@ -2609,8 +2653,8 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
     from under -- but the caller has to tell a discard apart from a stamp to
     know whether retrying immediately would be productive.
     """
-    relation_definitions = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
+    relation_definitions = relation_registry.core_registry()
+    language = semantic_language_registry.core_registry()
     # L2/L3: the admission decision is made against this, captured before the
     # walk it has to vouch for.
     before = freshness.consumer_checkpoint(root, "vault")
@@ -2716,17 +2760,19 @@ def build_corpus_context_with_census(
     basis = status_basis or lifecycle_statuses.Basis(root)
     context, census = _build_corpus_context_with_census(
         root,
-        registry=registry,
-        language_registry=language_registry,
+        registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
     )
     visible = egress.release_walk_filter(root)
     states = {
-        path: enrich_page_state(root, state, basis) if visible is None or visible(path) else state
+        path: enrich_page_state(root, state, basis, relation_definitions=registry,
+                                language=language_registry)
+        if visible is None or visible(path) else state
         for path, state in context.pages.items()
     }
     # Candidate validation owns target admission and requires classification.
     if candidate is not None:
-        states[candidate.path] = enrich_page_state(root, candidate, basis)
+        states[candidate.path] = enrich_page_state(root, candidate, basis, relation_definitions=registry, language=language_registry)
     identity = (
         context.identity_census.with_page(candidate, casefold_paths=vault.vault_casefolds(root))
         if candidate is not None
@@ -2758,8 +2804,8 @@ def _build_corpus_context_with_census(
     its own fresh walk — same as before this existed.
     """
     root = Path(vault_root)
-    relation_definitions = registry or relation_registry.load_registry(root)
-    language = language_registry or semantic_language_registry.load_registry(root)
+    relation_definitions = registry or relation_registry.core_registry()
+    language = language_registry or semantic_language_registry.core_registry()
 
     census: tuple | None = None
     cache_key: tuple[str, str] | None = None
@@ -3544,6 +3590,8 @@ def _derive_relation_facts(
     facts: list[RelationFact] = []
     for raw in raw_facts:
         state = raw["authored"]
+        selected_registry = (state.definitions.snapshots["relations"].typed
+                             if state.definitions is not None else registry)
         target_status, resolved_target, target_anchor, target_alias = _resolve_target(
             root,
             raw["raw_target"],
@@ -3556,7 +3604,7 @@ def _derive_relation_facts(
         target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
         resolution = _registry_resolution(
-            registry,
+            selected_registry,
             raw["raw_relation"],
             projects=state.projects,
             page_type=state.page_type,
@@ -3592,6 +3640,10 @@ def _derive_relation_facts(
             "reverse": raw["reverse"],
             "occurrence": occurrences[occurrence_key],
         }
+        registry_instance = "core"
+        if resolution.canonical not in selected_registry.core:
+            registry_instance = state.definitions.instance_id if state.definitions is not None else instances.PUBLIC_INSTANCE
+            identity_payload["registry_instance"] = registry_instance
         facts.append(
             RelationFact(
                 identity=_fact_identity(identity_payload),
@@ -3616,6 +3668,7 @@ def _derive_relation_facts(
                 authored=True,
                 reviewer_accepted=False,
                 target_status=target_status,
+                registry_instance=registry_instance,
             )
         )
     return tuple(sorted(facts, key=lambda item: item.identity))
@@ -3930,7 +3983,7 @@ def _relation_disposition(
     rejected: list[RejectedRelationFact] = []
     qualifying: list[tuple[str, RelationFact]] = []
     for direction, fact in sorted(directional, key=lambda item: (item[0], item[1].identity)):
-        result = qualify_relation(fact, registry=corpus.registry, corpus=corpus)
+        result = qualify_relation(fact, registry=corpus.registry_for(fact.authored_path), corpus=corpus)
         if result.qualifies:
             qualifying.append((direction, fact))
         else:
@@ -3966,7 +4019,7 @@ def _relation_disposition(
     connectivity = [
         fact
         for fact in outbound
-        if qualify_connectivity(fact, registry=corpus.registry, corpus=corpus).qualifies
+        if qualify_connectivity(fact, registry=corpus.registry_for(fact.authored_path), corpus=corpus).qualifies
     ]
     if connectivity:
         return RelationDisposition(
@@ -4169,7 +4222,7 @@ def _registry_findings(
     corpus: SemanticCorpusContext,
 ) -> list[ContractFinding]:
     findings: list[ContractFinding] = []
-    for registry_finding in corpus.registry.findings:
+    for registry_finding in corpus.registry_for(page.path).findings:
         raw = str(registry_finding.get("path", "registry"))
         relation = registry_finding.get("relation")
         if relation is not None:
@@ -4194,6 +4247,9 @@ def _registry_findings(
     for fact in writer_authored_facts(page, corpus):
         code: str | None = None
         detail: str | None = None
+        if fact.canonical_relation is None and page.definitions_unavailable:
+            findings.append(_definitions_unavailable_finding(page))
+            continue
         if fact.canonical_relation is None:
             code = "unregistered_relation"
             detail = f"relation {fact.raw_relation!r} is not registered"
@@ -4221,6 +4277,16 @@ def _registry_findings(
             )
         )
     return findings
+
+
+def _definitions_unavailable_finding(page: SemanticPageState) -> ContractFinding:
+    return ContractFinding(
+        code="REGISTRY_UNAVAILABLE", severity="error", path=page.path, span=None,
+        detail="The selected vocabulary definitions required by this page are unavailable.",
+        remediation="Restore admitted definitions or assign vocabulary during stopped maintenance.",
+        governed_element_identity=("registry", "instance"),
+        resolved_rule=("registry", "instance", "admission"),
+    )
 
 
 def _observed_namespaces(
@@ -4514,7 +4580,7 @@ def _raw_findings(
     findings.extend(_diagnostic_findings(page))
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:
-        findings.append(minimum_finding)
+        findings.append(_definitions_unavailable_finding(page) if page.definitions_unavailable else minimum_finding)
     owners = corpus.identity_census.paths_by_identity.get(page.identity)
     if page.identity_kind == "exomem_id" and not identity_owners_match(
         owners, page.path, folds=vault.vault_casefolds(corpus.vault_root)

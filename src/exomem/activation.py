@@ -242,7 +242,7 @@ def _eligible_for_types(
     if not structurally_eligible_for_types(vault_root, page, page_types=page_types, tiers=tiers):
         return False
     basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    return basis.classify(page.frontmatter.get("status")).live
+    return basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live
 
 
 def structurally_eligible_for_types(
@@ -290,13 +290,32 @@ def _measure_page(
         page_type=page.page_type,
     )
 
+    return measure_document(
+        document, registry, project=project, page_type=page.page_type,
+        body_wikilinks=len(find_body_wikilinks(page.body)),
+        frontmatter_counts=frontmatter_link_counts(page.frontmatter),
+    )
+
+
+def frontmatter_link_counts(frontmatter: dict[str, Any]) -> dict[str, int]:
+    """Keep each fixed field separate so summaries preserve provenance counts."""
+    return {field: len(_frontmatter_links(frontmatter.get(field)))
+            for field in (*_FRONTMATTER_TYPED_FIELDS, "related")}
+
+
+def measure_document(
+    document: semantic_units.SemanticUnitDocument | semantic_units.SelectedStructure,
+    registry: relation_registry.RelationRegistry, *, project: str | None,
+    page_type: str | None, body_wikilinks: int, frontmatter_counts: dict[str, int],
+) -> dict[str, Any]:
+    """Reduce selected authored occurrences through one activation arithmetic owner."""
     registered: list[str] = []
     unregistered: list[dict[str, str | int]] = []
     for relation in document.note_relations:
         resolution = registry.resolve(
             relation.kind,
             project=project,
-            page_type=page.page_type,
+            page_type=page_type,
             source_kind="file",
             origin="semantic_relation",
         )
@@ -313,7 +332,7 @@ def _measure_page(
             resolution = registry.resolve(
                 raw,
                 project=project,
-                page_type=page.page_type,
+                page_type=page_type,
                 source_kind=unit.kind,
                 origin="semantic_relation",
             )
@@ -329,13 +348,12 @@ def _measure_page(
 
     frontmatter_links = 0
     for field, relation_kind in _FRONTMATTER_TYPED_FIELDS.items():
-        count = len(_frontmatter_links(page.frontmatter.get(field)))
+        count = frontmatter_counts.get(field, 0)
         frontmatter_links += count
         registered.extend([relation_kind] * count)
-    related_count = len(_frontmatter_links(page.frontmatter.get("related")))
+    related_count = frontmatter_counts.get("related", 0)
     frontmatter_links += related_count
 
-    body_wikilinks = sum(1 for _ in find_body_wikilinks(page.body))
     assertion_blocks = sum(
         1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
     )

@@ -2153,7 +2153,7 @@ def _eligible_unit_records(
         ):
             continue
         try:
-            state = semantic_index.current_parent_index_state(vault_root, page.path)
+            state = semantic_index.selected_parent_index_state(vault_root, page.path)
         except (OSError, UnicodeError, ValueError) as error:
             log.warning(
                 "semantic-unit retrieval parse failed for %s: %s",
@@ -2219,7 +2219,7 @@ def _hydrate_indexed_unit_records(
                 parents[hit.parent_path] = None
                 continue
             try:
-                state = semantic_index.current_parent_index_state(vault_root, hit.parent_path)
+                state = semantic_index.selected_parent_index_state(vault_root, hit.parent_path)
             except (OSError, UnicodeError, ValueError) as error:
                 log.warning(
                     "semantic-unit candidate hydration failed for %s: %s",
@@ -3028,7 +3028,7 @@ def _annotate_matched_units(
             hit.matched_units = []
             continue
         try:
-            state = semantic_index.current_parent_index_state(vault_root, page.rel_path)
+            state = semantic_index.selected_parent_index_state(vault_root, page.rel_path)
         except (OSError, UnicodeError, ValueError) as error:
             log.warning("matched-unit parse failed for %s: %s", hit.path, error)
             hit.matched_units = []
@@ -3117,7 +3117,7 @@ def _eligible_filter_paths(
                 try:
                     from . import semantic_index
 
-                    state = semantic_index.current_parent_index_state(vault_root, emitted.path)
+                    state = semantic_index.selected_parent_index_state(vault_root, emitted.path)
                     units = tuple(
                         structured_filters.unit_view(unit) for unit in state.document.units
                     )
@@ -3610,7 +3610,7 @@ def _managed_page_metadata(
                 source = (
                     "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n" + page.body
                 )
-                state = semantic_index.build_parent_index_state(vault_root, rel, source=source)
+                state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
                 units = tuple(structured_filters.unit_view(unit) for unit in state.document.units)
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
@@ -3812,7 +3812,7 @@ def _indexed_eligible_filter_paths(
             units: tuple[dict[str, Any], ...] = ()
             if plan.has_unit_predicate:
                 try:
-                    state = semantic_index.current_parent_index_state(vault_root, emitted.rel_path)
+                    state = semantic_index.selected_parent_index_state(vault_root, emitted.rel_path)
                     units = tuple(
                         structured_filters.unit_view(unit) for unit in state.document.units
                     )

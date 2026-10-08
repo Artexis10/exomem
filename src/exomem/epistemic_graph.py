@@ -8,6 +8,7 @@ sidecar, then exposes read-only context and propose-only relation suggestions.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from . import (
     access,
     call_spans,
     deferred_index,
+    entity_types,
     foreground_priority,
     freshness,
     graph_sync,
@@ -71,8 +73,8 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 12
-_DEPENDENCY_FORMAT = 1
+SCHEMA_VERSION = 13
+_DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -1841,12 +1843,14 @@ def _dependency_lookup_keys(raw_target: str) -> set[str]:
     return keys
 
 
-def _dependency_records(body: str) -> list[tuple[str, str]]:
+def _dependency_records(body: str, candidates: semantic_units.SemanticUnitCandidates) -> list[tuple[str, str]]:
     """Deduplicated authored body targets and their conservative lookup keys."""
     records: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for match in vault_module.find_body_wikilinks(body):
-        raw_target = match.group(0)[2:-2].strip()
+    targets = [match.group(0)[2:-2].strip() for match in vault_module.find_body_wikilinks(body)]
+    targets.extend(relation.target for item in candidates.rich for relation in item.heading.relations)
+    targets.extend(relation.target for relation in candidates.note_relations.candidates)
+    for raw_target in targets:
         if not raw_target or raw_target.endswith("/"):
             continue
         for lookup_key in sorted(_dependency_lookup_keys(raw_target)):
@@ -1903,9 +1907,9 @@ class EpistemicGraphIndex:
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self._prove_cold_snapshots = prove_cold_snapshots
-        self.registry = relation_registry.load_registry(self.vault_root)
-        self.entity_types = load_entity_types(self.vault_root)
-        self.language_registry = semantic_language_registry.load_registry(self.vault_root)
+        self.registry = relation_registry.core_registry()
+        self.entity_types = entity_types.core_registry()
+        self.language_registry = semantic_language_registry.core_registry()
         if mutation_coordinator is None:
             from .writer_lease import active_manager, get_manager
 
@@ -6985,6 +6989,7 @@ class EpistemicGraphIndex:
             document=document,
             registry=self.registry,
             entity_types=self.entity_types,
+            state=state,
         )
         unit_nodes = [
             _unit_node(page, unit, state) for unit in document.units if unit.unit_ref is not None
@@ -6998,7 +7003,7 @@ class EpistemicGraphIndex:
             parent_state=state,
             resolver=resolver,
         )
-        dependencies = _dependency_records(page.body)
+        dependencies = _dependency_records(state.body, state.candidates)
         with conn if commit else nullcontext():
             # Direct editors can replace a file while parsing/edge resolution is
             # in flight.  Rebind to the exact source immediately before the
@@ -7602,25 +7607,37 @@ class EpistemicGraphIndex:
                 "AND ids.exomem_id = n.exomem_id) END, n.page_type, n.lifecycle_status, "
                 "n.tags_json, n.activation_connected, n.activation_typed_relations, "
                 "n.activation_assertion_blocks, n.activation_provenance_relations, "
-                "n.activation_unregistered FROM graph_nodes n WHERE n.kind = 'file' "
-                "ORDER BY n.activation_priority, n.path"
+                "n.activation_unregistered, n.metadata FROM graph_nodes n WHERE n.kind = 'file' "
+                "ORDER BY n.path"
             )
             for row in rows:
                 path = str(row[0])
+                metadata = _json(row[-1])
+                document, definitions, frontmatter = semantic_index.interpret_structure(self.vault_root, path, metadata)
                 page = SimpleNamespace(
-                    path=self.vault_root / path,
-                    rel_path=path,
-                    page_type=row[6],
+                    path=self.vault_root / path, rel_path=path, page_type=row[6],
                     tags=json.loads(row[8]),
                 )
-                if (
-                    not activation.structurally_eligible_for_types(
-                        self.vault_root, page, page_types=activation._ELIGIBLE_TYPES
-                    )
-                    or not status_basis.classify(row[7]).live
+                if not activation.structurally_eligible_for_types(
+                    self.vault_root, page, page_types=activation._ELIGIBLE_TYPES
                 ):
                     continue
-                connected, typed, assertions, provenance, unregistered = row[9:]
+                if not metadata.get("structural_complete"):
+                    raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+                classification = status_basis.classify(frontmatter.get("status"), path=path, frontmatter=frontmatter)
+                if not classification.live:
+                    continue
+                measurement = activation.measure_document(
+                    document, definitions.snapshots["relations"].typed,
+                    project=activation._page_project(frontmatter), page_type=row[6],
+                    body_wikilinks=metadata["body_wikilinks"],
+                    frontmatter_counts=metadata["frontmatter_link_counts"],
+                )
+                connected = measurement["connected"]
+                typed = measurement["typed_relations"]
+                assertions = measurement["assertion_blocks"]
+                provenance = measurement["provenance_relations"]
+                unregistered = len(measurement["unregistered"])
                 coverage["eligible_pages"] += 1
                 coverage["connected_pages"] += bool(connected)
                 coverage["typed_relation_pages"] += typed > 0
@@ -7629,10 +7646,12 @@ class EpistemicGraphIndex:
                 coverage["provenance_candidate_pages"] += assertions > 0
                 coverage["provenance_linked_pages"] += assertions > 0 and provenance > 0
                 coverage["unregistered_relation_observations"] += unregistered
-                if len(source_rows) < source_cap + 1:
-                    source_rows.append(row[:6])
+                priority = (0 if unregistered else 1 if assertions and not provenance else
+                            2 if connected and not typed else 3 if not connected else 4)
+                source_rows.append((priority, path, row[:6]))
+                source_rows = heapq.nsmallest(source_cap + 1, source_rows)
             eligible_total = coverage["eligible_pages"]
-            selected_rows = source_rows[:source_cap]
+            selected_rows = [item[2] for item in source_rows[:source_cap]]
             selected = [str(row[0]) for row in selected_rows]
             if not selected or page_cap == 0 or item_cap == 0:
                 return {
@@ -7889,7 +7908,7 @@ class EpistemicGraphIndex:
                 "ORDER BY source_path, target_path, dst_key LIMIT ?",
                 (*selected, per_source_cap, branch_cap + 1),
             ).fetchall()
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
                 "status": "warming",
                 "groups": [],
@@ -8538,6 +8557,7 @@ def graph_context(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     keep: Callable[[str], bool] | None = None,
+    registry_scope: str | None = None,
 ) -> dict[str, Any]:
     """Return a bounded, read-only graph neighborhood for a path or query.
 
@@ -8550,24 +8570,45 @@ def graph_context(
     def _allowed(rel_path: str) -> bool:
         return _recall_path_allowed(vault_root, rel_path) and (keep is None or keep(rel_path))
 
+    from .vocabulary import instances, registry_spec
+    from .vocabulary import registry as vocabulary_registry
+
     idx = EpistemicGraphIndex(vault_root)
-    entity_type_registry = load_entity_types(vault_root)
-    profile_registry = traversal_profiles.load_profiles(vault_root, registry=idx.registry)
+    selector = registry_scope
+    if selector is None and path and _allowed(_with_md(path)):
+        page = find_module._parse_page(vault_root / _with_md(path), 0, vault_root)
+        if page is not None:
+            selector = instances.page_scope(vault_root, page.rel_path, page.frontmatter)
+    try:
+        query_definitions = {
+            subject: vocabulary_registry.load(instances.select(vault_root, registry_spec(subject), selector), vault_root)
+            for subject in ("relations", "categories", "entity-types")
+        }
+        query_registry = query_definitions["relations"].typed
+        query_language = query_definitions["categories"].typed
+        entity_type_registry = query_definitions["entity-types"].typed
+    except (ValueError, OSError):
+        if relation_types or categories or kinds or entity_type_families:
+            return {"available": False, "reason": "registry unavailable", "seeds": [], "nodes": [], "edges": [], "truncation": []}
+        query_registry = idx.registry
+        query_language = idx.language_registry
+        entity_type_registry = idx.entity_types
+    profile_registry = traversal_profiles.load_profiles(vault_root, registry=query_registry)
     profile = profile_registry.resolve(traversal_profile)
     depth = min(max(0, int(depth)), profile.max_depth, traversal_profiles.MAX_DEPTH)
     max_nodes = min(max(1, int(max_nodes)), profile.max_nodes, traversal_profiles.MAX_NODES)
     max_edges = min(max(0, int(max_edges)), profile.max_edges, traversal_profiles.MAX_EDGES)
     allowed = {
         definition.key
-        for definition in (*idx.registry.core.values(), *idx.registry.extensions.values())
+        for definition in (*query_registry.core.values(), *query_registry.extensions.values())
         if traversal_profiles.relation_allowed(profile, definition)
     }
     relation_plan = (
-        traversal_profiles.relation_query_plan(idx.registry, relation_types)
+        traversal_profiles.relation_query_plan(query_registry, relation_types, instance_id=selector or "public")
         if relation_types
         else None
     )
-    narrowed = traversal_profiles.narrow_relations(profile, relation_types, idx.registry)
+    narrowed = traversal_profiles.narrow_relations(profile, relation_types, query_registry)
     if narrowed is not None:
         allowed &= set(narrowed)
     conn = idx._open_read_snapshot()
@@ -8595,6 +8636,7 @@ def graph_context(
             unavailable["warnings"] = [_drift_warning({"graph_sidecar_unavailable": 1})]
         return unavailable
     try:
+        link_view = _VisibleLinkView(vault_root, conn, _allowed, idx.registry)
         drift_counts: dict[str, int] = {}
         freshness_cache: dict[tuple[str, str, str, int], bool] = {}
 
@@ -8630,9 +8672,9 @@ def graph_context(
             return accepted
 
         category_filter = _resolved_unit_filters(
-            idx.language_registry, categories, namespace="category"
+            query_language, categories, namespace="category"
         )
-        kind_filter = _resolved_unit_filters(idx.language_registry, kinds, namespace="kind")
+        kind_filter = _resolved_unit_filters(query_language, kinds, namespace="kind")
         unit_status: str | None = None
         unit_filter_status: str | None = None
         seed_cap_hit = False
@@ -8681,9 +8723,8 @@ def graph_context(
             ]
             for code, count in parent_drift_counts.items():
                 drift_counts[code] = max(drift_counts.get(code, 0), count)
-            current = [
-                seed for seed in current if str(seed.get("path") or "") in current_parent_paths
-            ]
+            current = [seed for seed in canonical_seeds
+                       if _current_unit_seed_has_graph_proof(conn, seed)]
             collision_candidate = (
                 resolved_status == "found"
                 and bool(indexed)
@@ -8820,10 +8861,7 @@ def graph_context(
                     }
             return {"matched_via": matched_via}
 
-        # A reader other than the owner walks its own view of link resolution.
-        link_view = (
-            None if keep is None else _VisibleLinkView(vault_root, conn, keep, idx.registry)
-        )
+        link_view._nodes.update((str(seed["node_key"]), seed) for seed in seeds)
         frontier = set(seen_nodes)
         for _ in range(max(0, depth)):
             if not frontier:
@@ -8842,7 +8880,7 @@ def graph_context(
                 )
             inspected_edges += len(rows)
             edge_inspection_cap_hit = edge_inspection_cap_hit or inspection_overflow
-            rows.sort(key=lambda edge: _edge_priority(edge, profile, idx.registry))
+            rows.sort(key=lambda edge: _edge_priority(edge, profile, link_view.registry_for(str(edge.get("source_path") or ""))))
             next_frontier: set[str] = set()
             for edge in rows:
                 if not _current_record(
@@ -8874,7 +8912,11 @@ def graph_context(
                 if status == "scope_violation":
                     excluded_scope += 1
                     continue
-                if edge.get("relation_type") not in allowed:
+                authored_registry = link_view.registry_for(str(edge.get("source_path") or ""))
+                definition = authored_registry.definition(str(edge.get("relation_type") or ""))
+                instance = str((edge.get("metadata") or {}).get("registry_instance") or "core")
+                if (definition is None or not traversal_profiles.relation_allowed(profile, definition)
+                        or relation_plan is not None and not relation_plan.matches(definition.key, definition.parent, instance)):
                     excluded_profile += 1
                     continue
                 if profile.direction == "outgoing" and edge["src_key"] not in frontier:
@@ -8894,7 +8936,7 @@ def graph_context(
                 for key in (edge["src_key"], edge["dst_key"]):
                     if key in seen_nodes:
                         continue
-                    node = _node_by_key(conn, key)
+                    node = link_view.node(key)
                     endpoint_nodes[key] = node
                     if node is not None and not _allowed(str(node.get("path") or "")):
                         endpoint_excluded = True
@@ -8941,7 +8983,8 @@ def graph_context(
             frontier = next_frontier
         nodes = [
             _entity_family_metadata(node, entity_type_registry)
-            for node in _nodes_by_keys(conn, seen_nodes)
+            for node in (link_view.node(key) for key in sorted(seen_nodes))
+            if node is not None
             if _current_record(node, parent_path=str(node.get("path") or ""))
             and _allowed(str(node.get("path") or ""))
         ]
@@ -10045,6 +10088,7 @@ def _file_node(
     document: semantic_units.SemanticUnitDocument,
     registry: relation_registry.RelationRegistry,
     entity_types: EntityTypeRegistry | None = None,
+    state: semantic_index.SemanticParentIndexState,
 ) -> GraphNode:
     from . import activation
 
@@ -10064,9 +10108,12 @@ def _file_node(
         activation_priority = 4
     metadata: dict[str, Any] = {
         "page_type": page.page_type,
-        "status": page.status,
+        "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else None,
         "scope": page.scope,
         "origin": "file",
+        **semantic_index.structural_metadata(state),
+        "frontmatter_link_counts": activation.frontmatter_link_counts(frontmatter),
+        "body_wikilinks": len(activation.find_body_wikilinks(state.body)),
     }
     if page.page_type == "entity" and entity_types is not None:
         definition = entity_types.resolve(str(frontmatter.get("entity_type") or ""))
@@ -10115,76 +10162,11 @@ def _activation_measurement_from_document(
     """Project activation counters without reparsing the indexed document."""
     from . import activation
 
-    project = activation._page_project(page.frontmatter)
-    registered: list[str] = []
-    unregistered: list[dict[str, str | int]] = []
-    for relation in document.note_relations:
-        resolution = registry.resolve(
-            relation.kind,
-            project=project,
-            page_type=page.page_type,
-            source_kind="file",
-            origin="semantic_relation",
-        )
-        if resolution.canonical is None:
-            unregistered.append(
-                {"label": relation.kind, "anchor": f"line-{relation.line}"}
-            )
-        else:
-            registered.append(resolution.canonical)
-
-    for unit in document.rich_units:
-        for relation in unit.relations:
-            raw = relation.raw.split(":", 1)[0].strip()
-            resolution = registry.resolve(
-                raw,
-                project=project,
-                page_type=page.page_type,
-                source_kind=unit.kind,
-                origin="semantic_relation",
-            )
-            if resolution.canonical is None:
-                unregistered.append(
-                    {
-                        "label": relation_registry.normalize_relation(raw),
-                        "anchor": unit.anchor or f"line-{relation.line}",
-                    }
-                )
-            else:
-                registered.append(resolution.canonical)
-
-    frontmatter_links = 0
-    for field, relation_kind in activation._FRONTMATTER_TYPED_FIELDS.items():
-        count = len(activation._frontmatter_links(page.frontmatter.get(field)))
-        frontmatter_links += count
-        registered.extend([relation_kind] * count)
-    related_count = len(activation._frontmatter_links(page.frontmatter.get("related")))
-    frontmatter_links += related_count
-
-    body_wikilinks = sum(1 for _ in activation.find_body_wikilinks(page.body))
-    assertion_blocks = sum(
-        1
-        for unit in document.rich_units
-        if unit.kind in activation._ASSERTION_BLOCK_TYPES
+    return activation.measure_document(
+        document, registry, project=activation._page_project(page.frontmatter),
+        page_type=page.page_type, body_wikilinks=len(activation.find_body_wikilinks(page.body)),
+        frontmatter_counts=activation.frontmatter_link_counts(page.frontmatter),
     )
-    provenance_relations = sum(
-        1 for kind in registered if kind in activation._PROVENANCE_RELATIONS
-    )
-    authored_relations = len(document.note_relations) + sum(
-        len(unit.relations) for unit in document.rich_units
-    )
-    unique_unknown = {
-        (str(item["label"]), str(item["anchor"])): item for item in unregistered
-    }
-    return {
-        "connected": bool(body_wikilinks or frontmatter_links or authored_relations),
-        "typed_relations": len(registered),
-        "body_wikilinks": body_wikilinks,
-        "frontmatter_links": frontmatter_links,
-        "assertion_blocks": assertion_blocks,
-        "provenance_relations": provenance_relations,
-        "unregistered": list(unique_unknown.values()),
-    }
 
 
 def _block_key(page, unit: semantic_units.SemanticUnit) -> str:
@@ -10265,6 +10247,9 @@ def _unit_generation_metadata(
         "parent_generation": state.parent_generation,
         "parent_source_hash": state.parent_source_hash,
         "parser_version": state.parser_version,
+        "candidate_line": unit.line,
+        "candidate_end_line": unit.end_line,
+        "candidate_source_hash": unit.source_hash,
     }
 
 
@@ -10317,6 +10302,7 @@ def _edges_for_page(
     parent_state: semantic_index.SemanticParentIndexState | None = None,
     resolver: vault_module.WikilinkResolver | None = None,
     visible: Callable[[str], bool] | None = None,
+    selected: bool = False,
 ) -> list[GraphEdge]:
     """Every edge `page` authors. `visible` resolves its links in a reader's view."""
     registry = registry or relation_registry.load_registry(vault_root)
@@ -10383,7 +10369,7 @@ def _edges_for_page(
             if not canonical:
                 continue
             dst_key, dst_page_key, fragment_metadata = _relation_destination(
-                vault_root, canonical, warning, fragment
+                vault_root, canonical, warning, fragment, selected=selected
             )
             edges.append(
                 page_edge(
@@ -10655,7 +10641,7 @@ def _split_target_fragment(raw: str) -> tuple[str, str]:
 
 
 def _relation_destination(
-    vault_root: Path, canonical: str, warning: str | None, fragment: str
+    vault_root: Path, canonical: str, warning: str | None, fragment: str, *, selected: bool = False
 ) -> tuple[str, str, dict[str, str]]:
     """Where a relation edge lands, and what the author should be told.
 
@@ -10670,6 +10656,7 @@ def _relation_destination(
         vault_root,
         _with_md(canonical),
         lambda document: document.resolve_fragment(fragment),
+        selected=selected,
     )
     metadata = {"target_fragment": fragment}
     if resolved.drift is None:
@@ -11179,6 +11166,7 @@ def _current_page_unit(
     resolve: Callable[[semantic_units.SemanticUnitDocument], semantic_units.SemanticUnitResolution],
     *,
     parent_ref: str | None = None,
+    selected: bool = True,
 ) -> _PageUnit:
     """Resolve a unit on `rel` from the page's current bytes, never from the sidecar.
 
@@ -11194,7 +11182,7 @@ def _current_page_unit(
     # The parent-ref sidecar may predate Records admission.  Suppress raw
     # Records by path before opening them, while missing ordinary paths
     # remain evidence for the stale-seed collision recovery below.
-    if _records_suppressed_path(vault_root, rel):
+    if _records_suppressed_path(vault_root, rel) or not _recall_path_allowed(vault_root, rel):
         return unanswered("missing", "suppressed_record_parent")
     try:
         source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
@@ -11205,7 +11193,8 @@ def _current_page_unit(
     if parent_ref is not None and memory_refs.ref_from_markdown(source) != parent_ref:
         return unanswered("missing", "parent_ref_mismatch")
     try:
-        state = semantic_index.current_parent_index_state(vault_root, path, source=source)
+        loader = semantic_index.selected_parent_index_state if selected else semantic_index.current_parent_index_state
+        state = loader(vault_root, path, source=source)
     except (TypeError, ValueError):
         return unanswered("missing", "invalid_current_parent")
     resolution = resolve(state.document)
@@ -11264,24 +11253,21 @@ def _current_unit_seed_has_graph_proof(conn: sqlite3.Connection, seed: dict[str,
     parent_path = str(seed.get("path") or "")
     if not node_key or not parent_path:
         return False
-    origin = "semantic_block" if metadata.get("form") == "rich" else "semantic_unit"
-    rows = conn.execute(
-        "SELECT metadata FROM graph_edges "
-        "WHERE src_key = ? AND dst_key = ? AND relation_type = 'derived_from' "
-        "AND origin = ? AND source_path = ? ORDER BY edge_key LIMIT 2",
-        (node_key, _file_key(parent_path), origin, parent_path),
-    ).fetchall()
-    generation_fields = (
-        "record_type",
-        "unit_ref",
-        "parent_generation",
-        "parent_source_hash",
-        "parser_version",
-    )
-    return any(
-        all(_json(row[0]).get(field) == metadata.get(field) for field in generation_fields)
-        for row in rows
-    )
+    row = conn.execute("SELECT metadata FROM graph_nodes WHERE node_key = ? AND kind = 'file'", (_file_key(parent_path),)).fetchone()
+    if row is None:
+        return False
+    parent = _json(row[0])
+    if (not parent.get("structural_complete")
+            or any(parent.get(key) != metadata.get(key) for key in
+                   ("parent_generation", "parent_source_hash", "parser_version"))):
+        return False
+    summary = parent.get("structure", {})
+    if summary.get("format") != semantic_units.STRUCTURAL_FORMAT:
+        return False
+    return any(item.get("line") == metadata.get("candidate_line")
+               and item.get("end_line") == metadata.get("candidate_end_line")
+               and item.get("source_hash") == metadata.get("candidate_source_hash")
+               for item in summary.get(metadata.get("form"), ()))
 
 
 def indexed_unit_parent_path_resolution(vault_root: Path, unit_ref: str) -> tuple[list[str], bool]:
@@ -11404,17 +11390,7 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
 
 
 class _VisibleLinkView:
-    """Wikilink resolution as a reader other than the owner would see it.
-
-    The graph resolves every link over the whole vault when it is built, so a
-    page the reader may not see can change how a visible page's link resolves:
-    a shared stem or title makes it ambiguous, a matching stem wins it. For
-    such a reader this view re-resolves, lazily and only for the pages a
-    request touches, exactly the links whose candidate set includes a page the
-    reader may not see, as the vault without those pages would resolve them.
-    Only those candidates are decided. The owner never builds one, so the
-    owner's reads and their cost are unchanged.
-    """
+    """Detached admitted page interpretations for one graph operation."""
 
     def __init__(
         self,
@@ -11431,6 +11407,21 @@ class _VisibleLinkView:
         self._changes: dict[str, bool] = {}
         self._edges: dict[str, list[dict[str, Any]] | None] = {}
         self._evidence: dict[str, dict[str, dict[str, Any]]] = {}
+        self._states: dict[str, semantic_index.SemanticParentIndexState] = {}
+        self._nodes: dict[str, dict[str, Any]] = {}
+        self.unavailable: set[str] = set()
+
+    def registry_for(self, path: str) -> relation_registry.RelationRegistry:
+        state = self._states.get(path)
+        return state.definitions.snapshots["relations"].typed if state and state.definitions else self.registry
+
+    def node(self, key: str) -> dict[str, Any] | None:
+        return self._nodes.get(key) or _node_by_key(self.conn, key)
+
+    def page_nodes(self, path: str) -> list[dict[str, Any]]:
+        self.page_edges(path)
+        return [node for node in self._nodes.values() if node["path"] == path]
+
 
     def _shared_resolver(self) -> vault_module.WikilinkResolver:
         """The recall resolver the graph itself is built with, read once per view."""
@@ -11453,19 +11444,7 @@ class _VisibleLinkView:
         """`rel_path`'s link edges in the reader's view, or `None` when unchanged."""
         if rel_path in self._edges:
             return self._edges[rel_path]
-        targets = [
-            str(row[0])
-            for row in self.conn.execute(
-                "SELECT DISTINCT raw_target FROM graph_dependencies WHERE source_path = ? "
-                "ORDER BY raw_target",
-                (rel_path,),
-            )
-        ]
-        edges = (
-            self._derive(rel_path)
-            if any(self.target_changes(target) for target in targets)
-            else None
-        )
+        edges = self._derive(rel_path) if self.keep(rel_path) else []
         self._edges[rel_path] = edges
         return edges
 
@@ -11485,25 +11464,54 @@ class _VisibleLinkView:
             return []
         if page is None:
             return []
-        state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
+        try:
+            state = semantic_index.selected_parent_index_state(self.vault_root, path, source=raw)
+        except (ValueError, OSError):
+            self.unavailable.add(rel_path)
+            return []
+        self._states[rel_path] = state
+        if state.definitions_unavailable:
+            self.unavailable.add(rel_path)
+        parent_node = _node_by_key(self.conn, _file_key(rel_path))
+        coverage = (parent_node or {}).get("metadata", {})
+        if (not coverage.get("structural_complete")
+                or coverage.get("parent_generation") != state.parent_generation
+                or coverage.get("parent_source_hash") != state.parent_source_hash
+                or coverage.get("parser_version") != state.parser_version):
+            # Current interpretation needs current complete candidate coverage.
+            self.unavailable.add(rel_path)
+            return []
+        self._nodes[parent_node["node_key"]] = parent_node
+        for unit in state.document.units:
+            if unit.unit_ref is not None:
+                node = _unit_node(page, unit, state).as_dict()
+                self._nodes[node["node_key"]] = node
         edges = _edges_for_page(
             self.vault_root,
             page,
             state.document,
-            registry=self.registry,
+            registry=self.registry_for(rel_path),
             source_hash=vault_module.content_hash(raw),
             parent_state=state,
             resolver=self._shared_resolver(),
             visible=self.keep,
+            selected=True,
         )
-        resolved = [edge for edge in edges if edge.origin in _RESOLVED_LINK_ORIGINS]
+        resolved = edges
         self._evidence[rel_path] = {
             edge.edge_key: json.loads(
                 json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True)
             )
             for edge in resolved
         }
-        return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in resolved]
+        rendered = [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in resolved]
+        for edge in rendered:
+            definition = self.registry_for(rel_path).definition(str(edge.get("relation_type") or ""))
+            edge["metadata"]["registry_instance"] = (
+                "core" if definition and definition.core else
+                state.definitions.instance_id if state.definitions else "public"
+            )
+        return rendered
 
     def inbound_sources(self, rel_path: str) -> set[str]:
         """Visible pages whose links to `rel_path`'s names resolve differently here."""
@@ -11513,42 +11521,21 @@ class _VisibleLinkView:
             for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
                 self.conn, keys
             )
-            if source != rel_path and self.target_changes(raw_target) and self.keep(source)
+            if source != rel_path and self.keep(source)
         }
 
     def neighbor_edges(
         self, frontier: set[str], *, limit: int
     ) -> tuple[list[dict[str, Any]], bool]:
         """`_neighbor_edges` with the reader's re-resolved link edges in place."""
-        rows, _overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
-        pages = {
-            path
-            for path in (_path_for_node_key(self.conn, key) for key in sorted(frontier))
-            if path
-        }
-        affected: set[str] = set()
-        for page in sorted(pages):
-            if self.page_edges(page) is not None:
-                affected.add(page)
-            for source in sorted(self.inbound_sources(page)):
-                if self.page_edges(source) is not None:
-                    affected.add(source)
-        if affected:
-            by_key = {
-                str(row["edge_key"]): row
-                for row in rows
-                if not (
-                    row.get("source_path") in affected
-                    and row.get("origin") in _RESOLVED_LINK_ORIGINS
-                )
-            }
-            for source in sorted(affected):
-                for edge in self.page_edges(source) or ():
-                    if edge["src_key"] in frontier or edge["dst_key"] in frontier:
-                        by_key.setdefault(str(edge["edge_key"]), edge)
-            rows = [by_key[key] for key in sorted(by_key)]
-        return rows[:limit], len(rows) > limit
-
+        pages = {path for key in frontier
+                 if (node := self.node(key)) is not None and (path := node.get("path"))}
+        sources = set(pages)
+        for page in pages:
+            sources.update(self.inbound_sources(page))
+        rows = [edge for source in sorted(sources) for edge in self.page_edges(source) or ()
+                if edge["src_key"] in frontier or edge["dst_key"] in frontier]
+        return rows, False
 
 #: Rows a reader's view reads before re-applying the caller's inspection cap.
 _VIEW_ROW_LIMIT = 100_000

@@ -7,14 +7,18 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
-from . import memory_refs, relation_registry, semantic_language_registry, semantic_units, vault
+import yaml
 
-PARSER_VERSION = 4
-_GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v4"
+from . import memory_refs, relation_registry, semantic_language_registry, semantic_units, vault
+from .vocabulary import instances
+
+PARSER_VERSION = 5
+_GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v5"
 _ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = ContextVar(
     "exomem_semantic_parent_states", default=None
 )
@@ -32,6 +36,18 @@ class SemanticParentIndexState:
     parent_generation: str
     parser_version: int
     document: semantic_units.SemanticUnitDocument
+    body: str = field(default="", repr=False)
+    frontmatter: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
+    definitions: instances.PageDefinitions | None = field(default=None, repr=False)
+    definitions_unavailable: bool = False
+
+    @property
+    def occurrences(self) -> tuple[semantic_units.StructuralOccurrence, ...]:
+        return semantic_units.structural_occurrences(self.candidates) if self.candidates else ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "frontmatter", MappingProxyType(dict(self.frontmatter)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,8 +178,8 @@ def validate_parent_record(
         return SemanticIndexFreshness(False, "parent_unavailable", parent_path)
     current_source_hash = vault.content_hash(source)
     current_ref = memory_refs.ref_from_markdown(source)
-    language = semantic_language_registry.load_registry(root)
-    relations = relation_registry.load_registry(root)
+    language = semantic_language_registry.core_registry()
+    relations = relation_registry.core_registry()
     language_hash, relation_hash = _registry_hashes(language, relations)
     current_generation = parent_generation(
         parent_path=parent_path,
@@ -211,23 +227,15 @@ def build_parent_index_state(
         source = source.replace("\r\n", "\n").replace("\r", "\n")
     frontmatter, body, _ = vault.parse_frontmatter(source)
     parent_ref = memory_refs.ref_from_markdown(source)
-    page_type = str(frontmatter["type"]) if frontmatter.get("type") else None
-    projects = _page_projects(frontmatter)
-    language = semantic_language_registry.load_registry(root)
-    relations = relation_registry.load_registry(root)
+    language = semantic_language_registry.core_registry()
+    relations = relation_registry.core_registry()
     language_hash, relation_hash = _registry_hashes(language, relations)
-    document = semantic_units.parse_semantic_units(
-        body,
-        path=rel_path,
-        parent_ref=parent_ref,
-        validate=True,
-        language_registry=semantic_language_registry.for_attached_projects(language, projects),
-        relation_registry=relations,
-        include_legacy_relations=True,
-        retain_unknown_relations=True,
-        project=None,
-        page_type=page_type,
-    )
+    # Reuse the contract owner's position-preserving provenance processing.
+    from . import semantic_contract
+
+    neutral = semantic_contract._parse_page_state(root, rel_path, source)
+    body, candidates = neutral.body, neutral.candidates
+    document = neutral.document
     source_hash = vault.content_hash(source)
     return SemanticParentIndexState(
         path=rel_path,
@@ -236,15 +244,47 @@ def build_parent_index_state(
         language_registry_hash=language_hash,
         relation_registry_hash=relation_hash,
         parent_generation=parent_generation(
-            parent_path=rel_path,
-            parent_ref=parent_ref,
-            parent_source_hash=source_hash,
-            language_registry_hash=language_hash,
-            relation_registry_hash=relation_hash,
+            parent_path=rel_path, parent_ref=parent_ref, parent_source_hash=source_hash,
+            language_registry_hash=language_hash, relation_registry_hash=relation_hash,
         ),
         parser_version=PARSER_VERSION,
-        document=document,
+        document=document, body=body, frontmatter=frontmatter, candidates=candidates,
     )
+
+
+def selected_parent_index_state(
+    vault_root: Path, path: Path | str, *, source: str | None = None,
+    state: SemanticParentIndexState | None = None,
+) -> SemanticParentIndexState:
+    """Interpret one admitted parent without publishing selected facts to sidecars."""
+    from .governance import egress
+
+    root = Path(vault_root)
+    candidate = Path(path)
+    rel_path = candidate.resolve().relative_to(root.resolve()).as_posix() if candidate.is_absolute() else candidate.as_posix()
+    # A stale sidecar is no authority to read a parent or its private definitions.
+    if not egress.quick_page_visible(root, rel_path):
+        raise ValueError("REGISTRY_UNAVAILABLE: parent is unavailable")
+    neutral = state or current_parent_index_state(root, path, source=source)
+    try:
+        definitions = instances.page_definitions(root, neutral.path, dict(neutral.frontmatter), ("categories", "relations"))
+    except (ValueError, OSError):
+        # Missing extension authority cannot disable admitted core units or raw reads.
+        return replace(neutral, definitions_unavailable=True)
+    language = definitions.snapshots["categories"].typed
+    relations = definitions.snapshots["relations"].typed
+    language_hash, relation_hash = _registry_hashes(language, relations)
+    if (language_hash, relation_hash) == (neutral.language_registry_hash, neutral.relation_registry_hash):
+        return replace(neutral, definitions=definitions)
+    document = semantic_units.parse_semantic_units(
+        neutral.body,
+        candidates=neutral.candidates,
+        path=neutral.path, parent_ref=neutral.parent_ref, validate=True,
+        language_registry=semantic_language_registry.for_attached_projects(language, _page_projects(neutral.frontmatter)),
+        relation_registry=relations, include_legacy_relations=True, retain_unknown_relations=True,
+        project=None, page_type=str(neutral.frontmatter.get("type") or "") or None,
+    )
+    return replace(neutral, document=document, definitions=definitions)
 
 
 def current_parent_index_state(
@@ -267,11 +307,13 @@ def current_parent_index_state(
         # page whose parse is already in hand.
         source = source.replace("\r\n", "\n").replace("\r", "\n")
     active = parent_state_for_path(root, path)
-    language = semantic_language_registry.load_registry(root)
-    relations = relation_registry.load_registry(root)
+    language = semantic_language_registry.core_registry()
+    relations = relation_registry.core_registry()
     language_hash, relation_hash = _registry_hashes(language, relations)
     if (
         active is not None
+        and active.definitions is None
+        and not active.definitions_unavailable
         and active.parent_source_hash == vault.content_hash(source)
         and active.parser_version == PARSER_VERSION
         and active.language_registry_hash == language_hash
@@ -288,22 +330,61 @@ def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
     parent_ref = (
         memory_refs.memory_ref(str(state.identity)) if state.identity_kind == "exomem_id" else None
     )
+    language_hash, relation_hash = _registry_hashes(semantic_language_registry.core_registry(), relation_registry.core_registry())
     return SemanticParentIndexState(
         path=path,
         parent_ref=parent_ref,
         parent_source_hash=source_hash,
-        language_registry_hash=str(state.language_registry_hash),
-        relation_registry_hash=str(state.relation_registry_hash),
+        language_registry_hash=language_hash,
+        relation_registry_hash=relation_hash,
         parent_generation=parent_generation(
             parent_path=path,
             parent_ref=parent_ref,
             parent_source_hash=source_hash,
-            language_registry_hash=str(state.language_registry_hash),
-            relation_registry_hash=str(state.relation_registry_hash),
+            language_registry_hash=language_hash,
+            relation_registry_hash=relation_hash,
         ),
         parser_version=PARSER_VERSION,
-        document=state.document,
+        document=state.neutral_document or state.document,
+        body=state.body, frontmatter=state.frontmatter, candidates=state.candidates,
     )
+
+
+def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
+    """Portable parser coverage and inputs for body-free selected interpretation."""
+    if state.candidates is None:
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    # These fields are the canonical membership and interpretation input protocol.
+    frontmatter = {key: value for key, value in state.frontmatter.items() if key in {
+        "type", "status", "project", "projects", "entity_type", "registry_scope",
+        "tags", "classes", memory_refs.ID_FIELD,
+    }}
+    return {
+        "structure": semantic_units.structural_summary(state.candidates),
+        "frontmatter_yaml": yaml.safe_dump(dict(frontmatter)),
+        "parent_ref": state.parent_ref,
+        "parent_generation": state.parent_generation,
+        "parent_source_hash": state.parent_source_hash,
+        "parser_version": state.parser_version,
+        "structural_complete": True,
+    }
+
+
+def interpret_structure(
+    root: Path, path: str, metadata: Mapping[str, Any],
+) -> tuple[semantic_units.SelectedStructure, instances.PageDefinitions, dict[str, Any]]:
+    """Admit metadata's canonical instance and apply the existing summary parser."""
+    if not metadata.get("structural_complete") or metadata.get("parser_version") != PARSER_VERSION:
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    frontmatter = yaml.safe_load(metadata["frontmatter_yaml"])
+    definitions = instances.page_definitions(root, path, frontmatter, ("categories", "relations"))
+    language = semantic_language_registry.for_attached_projects(definitions.snapshots["categories"].typed, _page_projects(frontmatter))
+    document = semantic_units.interpret_structural_summary(
+        metadata["structure"], language_registry=language,
+        relation_registry=definitions.snapshots["relations"].typed,
+        page_type=str(frontmatter.get("type") or "") or None,
+    )
+    return document, definitions, frontmatter
 
 
 def _registry_hashes(
@@ -319,8 +400,8 @@ def _registry_hashes(
 def current_registry_identity(vault_root: Path) -> tuple[int, str, str]:
     """Current parser and registry stamps, without reading or parsing a parent."""
     hashes = _registry_hashes(
-        semantic_language_registry.load_registry(vault_root),
-        relation_registry.load_registry(vault_root),
+        semantic_language_registry.core_registry(),
+        relation_registry.core_registry(),
     )
     return (PARSER_VERSION, *hashes)
 

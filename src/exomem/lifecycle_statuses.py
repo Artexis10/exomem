@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -181,10 +182,13 @@ class Basis:
     """One operation's lazy, admitted registry; canonical labels need only the pack."""
 
     root: Path | None
-    _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
-    _attempted: bool = field(default=False, init=False, repr=False)
+    _snapshots: dict[tuple[str, str | None], registry.Snapshot] = field(default_factory=dict, init=False, repr=False)
+    _unavailable: bool = field(default=False, init=False, repr=False)
 
-    def classify(self, value: object) -> Classification:
+    def classify(
+        self, value: object, *, path: str | None = None,
+        frontmatter: Mapping[str, Any] | None = None,
+    ) -> Classification:
         if value is None or (isinstance(value, str) and not value.strip()):
             return Classification("live")
         if not isinstance(value, str):
@@ -195,14 +199,33 @@ class Basis:
         canonical = public.entries.get(key)
         if canonical is not None:
             return Classification(str(canonical.attributes["class"]))
-        if not self._attempted:
-            from .vocabulary.contract import admission_refusal
+        from .vocabulary import instances
+        from .vocabulary.contract import admission_refusal
 
-            self._attempted = True
-            if self.root is not None and admission_refusal(self.root, SPEC) is None:
-                self._snapshot = registry.load(SPEC, self.root)
-        snapshot = self._snapshot
-        if snapshot is None or snapshot.findings:
+        try:
+            if self.root is None:
+                raise registry.RegistryError("REGISTRY_UNAVAILABLE")
+            if path is not None and frontmatter is None:
+                from . import find_corpus
+                from .governance import egress
+
+                if not egress.quick_page_visible(self.root, path):
+                    raise registry.RegistryError("REGISTRY_UNAVAILABLE")
+                page = find_corpus.parse_page(self.root / path, 0, self.root)
+                if page is None:
+                    raise registry.RegistryError("REGISTRY_UNAVAILABLE")
+                frontmatter = page.frontmatter
+            scope = instances.page_scope(self.root, path, dict(frontmatter or {})) if path is not None else None
+            spec = instances.select(self.root, SPEC, scope)
+            if admission_refusal(self.root, spec) is not None:
+                raise registry.RegistryError("REGISTRY_UNAVAILABLE")
+            snapshot = registry.load(spec, self.root)
+            self._snapshots[(spec.instance_id, spec.binding_revision)] = snapshot
+        except (ValueError, OSError):
+            self._unavailable = True
+            return Classification(None)
+        if snapshot.findings:
+            self._unavailable = True
             return Classification(None)
         entry = next(
             (
@@ -225,22 +248,33 @@ class Basis:
 
     @property
     def dependency(self) -> tuple[str, str]:
-        if self._attempted:
-            return (
-                ("effective", self._snapshot.effective_digest)
-                if self._snapshot
-                else ("unavailable", "")
-            )
-        return ("public", registry.load(SPEC, None).effective_digest)
+        if self._unavailable:
+            return ("unavailable", "")
+        if not self._snapshots:
+            return ("public", registry.load(SPEC, None).effective_digest)
+        # This closed dependency format binds operation-local instance witnesses, not authority.
+        rows = sorted((instance, revision, snapshot.effective_digest)
+                      for (instance, revision), snapshot in self._snapshots.items())
+        return ("instances:v1", json.dumps(rows, separators=(",", ":")))
 
     def matches(self, dependency: tuple[str, str]) -> bool:
-        """Re-admit before comparing a cached result's private dependency."""
+        """Re-admit each selected instance before reusing a lifecycle result."""
         if dependency[0] == "public":
             return dependency == ("public", registry.load(SPEC, None).effective_digest)
+        if self.root is None or dependency[0] != "instances:v1":
+            return False
+        from .vocabulary import instances
         from .vocabulary.contract import admission_refusal
 
-        if self.root is None or admission_refusal(self.root, SPEC) is not None:
+        try:
+            for instance, revision, digest in json.loads(dependency[1]):
+                spec = instances.select(self.root, SPEC, instance)
+                if spec.binding_revision != revision or admission_refusal(self.root, spec) is not None:
+                    return False
+                snapshot = registry.load(spec, self.root)
+                if snapshot.findings or snapshot.effective_digest != digest:
+                    return False
+                self._snapshots[(instance, revision)] = snapshot
+        except (ValueError, TypeError, OSError):
             return False
-        self._attempted = True
-        self._snapshot = registry.load(SPEC, self.root)
-        return not self._snapshot.findings and dependency == self.dependency
+        return True

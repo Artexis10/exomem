@@ -4,11 +4,59 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
-from .registry import PUBLIC_INSTANCE, RegistryError, RegistrySpec
+from .registry import PUBLIC_INSTANCE, RegistryError, RegistrySpec, Snapshot
+
+
+@dataclass(frozen=True)
+class PageDefinitions:
+    """Admitted operation inputs; never published into the shared corpus cache."""
+
+    instance_id: str
+    binding_revision: str | None
+    snapshots: Mapping[str, Snapshot]
+    path: str
+    frontmatter: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "snapshots", MappingProxyType(dict(self.snapshots)))
+        object.__setattr__(self, "frontmatter", MappingProxyType(dict(self.frontmatter)))
+
+    def current(self, root: Path) -> bool:
+        from . import registry, registry_spec
+
+        try:
+            if (page_scope(root, self.path, dict(self.frontmatter)) or PUBLIC_INSTANCE) != self.instance_id:
+                return False
+            for subject, previous in self.snapshots.items():
+                spec = select(root, registry_spec(subject), self.instance_id)
+                if spec.binding_revision != self.binding_revision:
+                    return False
+                fresh = registry.load(spec, root)
+                if (fresh.content_hash, fresh.effective_digest) != (previous.content_hash, previous.effective_digest):
+                    return False
+        except (ValueError, OSError):
+            return False
+        return True
+
+
+def page_definitions(root: Path, path: str, frontmatter: dict, subjects: tuple[str, ...]) -> PageDefinitions:
+    """Select once from canonical membership, then admit only requested subjects."""
+    from . import registry, registry_spec
+
+    scope = page_scope(root, path, frontmatter)
+    snapshots = {}
+    binding = None
+    for subject in subjects:
+        spec = select(root, registry_spec(subject), scope)
+        snapshots[subject] = registry.load(spec, root)
+        binding = spec.binding_revision
+    return PageDefinitions(scope or PUBLIC_INSTANCE, binding, snapshots, path, frontmatter)
 
 
 def _path(value: object) -> str:
@@ -173,6 +221,10 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     from .. import find_types
     from ..governance import membership, policy
 
+    if registry_scope is None:
+        registry_scope = frontmatter.get("registry_scope")
+    if registry_scope is not None and not isinstance(registry_scope, str):
+        raise RegistryError("REGISTRY_UNAVAILABLE: invalid page instance selector")
     document = configuration(root)
     if document is None:
         if registry_scope not in (None, PUBLIC_INSTANCE):

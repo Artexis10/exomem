@@ -43,6 +43,8 @@ _RICH_METADATA_RE = re.compile(
 )
 _TASK_LABELS = frozenset({"", " ", "x", "X", "-"})
 _IDENTITY_SCHEMA = "exomem.semantic-unit.identity.v1"
+# This version describes retained parser facts, independently of selected vocabulary.
+STRUCTURAL_FORMAT = 1
 
 #: The one closed vocabulary for how a claim about the world turned out.
 #:
@@ -425,6 +427,161 @@ class SemanticUnitCandidates:
     note_relations: markdown_relations.MarkdownRelationCandidates
 
 
+@dataclass(frozen=True, slots=True)
+class StructuralOccurrence:
+    """An internal source occurrence; it has no selected public unit identity."""
+
+    key: str
+    form: str
+    span: SourceSpan
+    source_hash: str
+    content: str
+    category_raw: str | None
+    category_key: str | None
+    kind_raw: str | None
+    anchor: str | None
+    metadata: Mapping[str, Any]
+
+
+def occurrence_key(form: str, span: SourceSpan, source_hash: str) -> str:
+    """Bind an internal occurrence to parser-owned coordinates and exact source."""
+    # This closed protocol distinguishes candidate identity from public unit refs.
+    payload = [STRUCTURAL_FORMAT, form, span.start_offset, span.end_offset, source_hash]
+    return "occurrence:" + hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
+def structural_occurrences(candidates: SemanticUnitCandidates) -> tuple[StructuralOccurrence, ...]:
+    """Project possible units once for the existing lexical, graph and vector owners."""
+    rich = (
+        StructuralOccurrence(
+            occurrence_key("rich", item.span, item.source_hash), "rich", item.span,
+            item.source_hash, item.heading.body, item.category_raw, item.category_key,
+            item.heading.title, item.heading.metadata.get("id"), item.heading.metadata,
+        ) for item in candidates.rich
+        # The parser never emits a level-one or non-substantive rich unit.
+        if item.heading.level > 1 and item.heading.substantive_body
+    )
+    compact = (
+        StructuralOccurrence(
+            occurrence_key(item.form, item.span, item.source_hash), item.form, item.span,
+            item.source_hash, item.content, item.category_raw, item.category_key,
+            item.kind_raw, item.anchor, item.metadata,
+        ) for item in candidates.compact
+    )
+    return tuple(sorted((*rich, *compact), key=lambda item: (item.span.start_offset, item.form)))
+
+
+@dataclass(frozen=True, slots=True)
+class UnitStructure:
+    """Selected summary facts; source text and public unit identity are absent."""
+
+    form: str
+    kind: str
+    category: str
+    anchor: str | None
+    line: int
+    end_line: int
+    source_hash: str
+    relations: tuple[SemanticRelation, ...] = ()
+    occurrence_key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedStructure:
+    units: tuple[UnitStructure, ...]
+    note_relations: tuple[markdown_relations.MarkdownRelation, ...]
+
+    @property
+    def rich_units(self) -> tuple[UnitStructure, ...]:
+        return tuple(unit for unit in self.units if unit.form == "rich")
+
+
+def structural_summary(candidates: SemanticUnitCandidates) -> dict[str, Any]:
+    """Serialize parser facts, without copying the parent body into metadata."""
+    # These fields are the closed structural-summary protocol, not authored vocabulary.
+    return {
+        "format": STRUCTURAL_FORMAT,
+        "rich": [
+            {
+                "key": occurrence_key("rich", item.span, item.source_hash),
+                "title": item.heading.title, "level": item.heading.level,
+                "line": item.heading.line, "end_line": item.heading.end_line,
+                "ancestor_line": item.heading.ancestor_line,
+                "metadata": dict(item.heading.metadata),
+                "substantive_body": item.heading.substantive_body,
+                "relations": [vars(relation) for relation in item.heading.relations],
+                "source_hash": item.source_hash,
+                "start_offset": item.span.start_offset, "end_offset": item.span.end_offset,
+            }
+            for item in candidates.rich
+        ],
+        "compact": [
+            {"key": occurrence_key(item.form, item.span, item.source_hash),
+             "category_raw": item.category_raw, "category_key": item.category_key,
+             "anchor": item.anchor, "line": item.line, "end_line": item.end_line,
+             "source_hash": item.source_hash,
+             "start_offset": item.span.start_offset, "end_offset": item.span.end_offset}
+            for item in candidates.compact
+        ],
+        "notes": [vars(item) for item in candidates.note_relations.candidates],
+        "canonical_section_present": candidates.note_relations.canonical_section_present,
+        "canonical_bullet_count": candidates.note_relations.canonical_bullet_count,
+    }
+
+
+def interpret_structural_summary(
+    summary: Mapping[str, Any], *,
+    language_registry: semantic_language_registry.LanguageRegistryView,
+    relation_registry: RelationRegistry,
+    project: str | None = None, page_type: str | None = None,
+) -> SelectedStructure:
+    """Apply the selected parsers' control flow without reading Markdown bodies."""
+    if summary.get("format") != STRUCTURAL_FORMAT:
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    headings = tuple(semantic_blocks.SemanticBlockCandidate(
+        title=item["title"], level=item["level"], line=item["line"], end_line=item["end_line"],
+        ancestor_line=item["ancestor_line"], metadata=item["metadata"], body="",
+        substantive_body=item["substantive_body"],
+        relations=tuple(semantic_blocks.SemanticRelationCandidate(**row) for row in item["relations"]),
+    ) for item in summary["rich"])
+    rich = semantic_blocks.interpret_semantic_blocks(
+        headings, validate=False, registry=relation_registry,
+        kind_resolver=lambda title: language_registry.resolve_heading(
+            title, project=project, page_type=page_type,
+        ).resolved,
+    )
+    rich_rows = {item["line"]: item for item in summary["rich"]}
+    units: list[UnitStructure] = []
+    for block in rich.blocks:
+        raw, key, _ = _rich_category(block, path="", line_by_number={})
+        category, _ = _selected_category(
+            raw, key, form="rich", kind=block.type, explicit="category" in block.metadata,
+            language=language_registry, project=project, page_type=page_type,
+        )
+        units.append(UnitStructure("rich", block.type, category, block.id,
+                                   block.line, block.end_line, rich_rows[block.line]["source_hash"], tuple(block.relations), rich_rows[block.line]["key"]))
+    ranges = tuple((block.line, block.end_line) for block in rich.blocks)
+    index = 0
+    for item in summary["compact"]:
+        while index < len(ranges) and item["line"] > ranges[index][1]:
+            index += 1
+        if index < len(ranges) and item["line"] >= ranges[index][0]:
+            continue
+        category, _ = _selected_category(
+            item["category_raw"], item["category_key"], form="compact", kind="observation",
+            explicit=True, language=language_registry, project=project, page_type=page_type,
+        )
+        units.append(UnitStructure("compact", "observation", category, item["anchor"],
+                                   item["line"], item["end_line"], item["source_hash"], occurrence_key=item["key"]))
+    notes = markdown_relations.interpret_markdown_relations(
+        markdown_relations.MarkdownRelationCandidates(
+            tuple(markdown_relations.MarkdownRelationCandidate(**item) for item in summary["notes"]),
+            summary["canonical_section_present"], summary["canonical_bullet_count"],
+        ), relation_types=relation_registry.keys | frozenset(relation_registry.aliases), retain_unknown=True,
+    )
+    return SelectedStructure(tuple(sorted(units, key=lambda item: item.line)), tuple(notes.relations))
+
+
 def scan_semantic_units(
     markdown: str, *, path: str = "", include_legacy_relations: bool = True,
 ) -> SemanticUnitCandidates:
@@ -507,6 +664,7 @@ def parse_semantic_units(
     retain_unknown_relations: bool = False,
     project: str | None = None,
     page_type: str | None = None,
+    candidates: SemanticUnitCandidates | None = None,
 ) -> SemanticUnitDocument:
     """Parse compact observations and rich semantic blocks exactly once each."""
     source = markdown or ""
@@ -514,9 +672,10 @@ def parse_semantic_units(
     effective_parent_ref = _effective_parent_ref(parent_ref, source_path)
     lines = _source_lines(source)
     line_by_number = {line.number: line for line in lines}
-    candidates = scan_semantic_units(
-        source, path=source_path, include_legacy_relations=include_legacy_relations,
-    )
+    if candidates is None:
+        candidates = scan_semantic_units(
+            source, path=source_path, include_legacy_relations=include_legacy_relations,
+        )
     units: list[SemanticUnit] = []
     errors: list[SemanticUnitDiagnostic] = []
     warnings: list[SemanticUnitDiagnostic] = []
@@ -681,18 +840,11 @@ def parse_semantic_units(
     if language_registry is not None:
         resolved_units: list[SemanticUnit] = []
         for unit in units:
-            resolution = language_registry.resolve_category(
-                unit.category_raw,
-                project=project,
-                page_type=page_type,
+            resolved_category, resolution = _selected_category(
+                unit.category_raw, unit.category_key, form=unit.form, kind=unit.kind,
+                explicit="category" in unit.metadata, language=language_registry,
+                project=project, page_type=page_type,
             )
-            resolved_category = resolution.resolved or unit.category_key
-            if (
-                unit.form == "rich"
-                and "category" not in unit.metadata
-                and resolution.status in {"unregistered", "registry_invalid"}
-            ):
-                resolved_category = unit.kind
             resolved_units.append(replace(unit, category=resolved_category))
             if validate and resolution.status != "registry_invalid":
                 for finding in resolution.findings:
@@ -735,6 +887,14 @@ def parse_semantic_units(
         canonical_section_present=note_relation_document.canonical_section_present,
         canonical_bullet_count=note_relation_document.canonical_bullet_count,
     )
+
+
+def _selected_category(raw, key, *, form, kind, explicit, language, project, page_type):
+    resolution = language.resolve_category(raw, project=project, page_type=page_type)
+    category = resolution.resolved or key
+    if form == "rich" and not explicit and resolution.status in {"unregistered", "registry_invalid"}:
+        category = kind
+    return category, resolution
 
 
 def _registry_diagnostic(

@@ -3581,6 +3581,7 @@ def op_graph_context(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     purpose: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Return a bounded typed-graph neighborhood for a page or query. Read-only.
 
@@ -3643,6 +3644,7 @@ def op_graph_context(
         max_nodes=max_nodes,
         max_edges=max_edges,
         traversal_profile=traversal_profile,
+        registry_scope=registry_scope,
         keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a

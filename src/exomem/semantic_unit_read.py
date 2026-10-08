@@ -106,7 +106,7 @@ def read_semantic_unit(
     Prior-binding disclosure disables lifecycle disposition: `found` then means
     the exact retained unit resolves, not that its parent is currently live.
     """
-    state = semantic_index.current_parent_index_state(
+    state = semantic_index.selected_parent_index_state(
         vault_root,
         page.path,
         source=page.content,
@@ -127,7 +127,7 @@ def read_semantic_unit(
         )
     if resolution.unit is None:
         return SemanticUnitReadResponse(
-            status=resolution.status,
+            status="unavailable" if state.definitions_unavailable else resolution.status,
             unit_ref=resolution.unit_ref,
             parent=parent,
             expected_fingerprint=resolution.expected_fingerprint,
@@ -138,7 +138,7 @@ def read_semantic_unit(
         "superseded"
         if lifecycle_disposition
         and (status_basis or lifecycle_statuses.Basis(vault_root))
-        .classify(parsed_frontmatter.get("status"))
+        .classify(parsed_frontmatter.get("status"), path=page.path, frontmatter=parsed_frontmatter)
         .require()
         == "superseded"
         else "found"

@@ -89,11 +89,21 @@ class RelationQueryPlan:
     parent_keys: frozenset[str]
     replacements: dict[str, tuple[str | None, str | None]]
     findings: tuple[dict[str, str], ...] = ()
+    instance_id: str = "public"
+    core_keys: frozenset[str] = frozenset()
+
+    def matches(self, key: str, parent: str | None, instance_id: str) -> bool:
+        """Keep query meaning separate from the instance that authored the edge."""
+        direct = key in self.exact_keys or key in self.replacement_keys
+        same_identity = key in self.core_keys or instance_id == self.instance_id
+        family = parent in self.parent_keys and (parent in self.core_keys or instance_id == self.instance_id)
+        return bool(direct and same_identity or family)
 
 
 def relation_query_plan(
     registry: relation_registry.RelationRegistry,
     requested: list[str] | tuple[str, ...],
+    *, instance_id: str = "public",
 ) -> RelationQueryPlan:
     """Resolve aliases and survivor-directed history without successor overreach."""
     raw_values = tuple(dict.fromkeys(str(item) for item in requested if item))
@@ -137,6 +147,8 @@ def relation_query_plan(
         parent_keys=frozenset(parents),
         replacements=replacement_metadata,
         findings=tuple(findings),
+        instance_id=instance_id,
+        core_keys=frozenset(registry.core),
     )
 
 

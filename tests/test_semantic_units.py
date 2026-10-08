@@ -48,6 +48,51 @@ def test_neutral_units_keep_compact_fallback_before_private_heading_recognition(
     assert [unit.anchor for unit in outside_project.units] == ["nested", "public"]
 
 
+@pytest.mark.parametrize("project", ["alpha", "beta"])
+def test_structural_summary_matches_selected_parser_and_activation_without_body(project) -> None:
+    from exomem import activation
+
+    source = (
+        "## Background\n### Private procedure\n- category: invalid!\n"
+        "- relations: cites: Bare source\n- [rule] Retained compact\n"
+        "## Claim\n### Finding\n- id: empty\n"
+        "## Private procedure\nSubstantive.\n"
+        "## Ordinary\n- [rule] Independent observation\n"
+        "- private_link [[Without colon]]\n- private_link: [[With colon]]\n"
+        "## Relations\n- cites [[Canonical source]]\n"
+    )
+    language = semantic_language_registry.load_registry(proposal={
+        "schema_version": 1, "categories": {},
+        "kinds": {"private_procedure": {
+            "description": "A private procedure", "scope": {"projects": ["alpha"]},
+        }},
+    })
+    relations = relation_registry.core_registry()
+    document = parse_semantic_units(
+        source, language_registry=language, relation_registry=relations,
+        include_legacy_relations=True, retain_unknown_relations=True, project=project,
+    )
+    summary = semantic_units.structural_summary(semantic_units.scan_semantic_units(source))
+    selected = semantic_units.interpret_structural_summary(
+        json.loads(json.dumps(summary)), language_registry=language,
+        relation_registry=relations, project=project,
+    )
+    assert [(unit.form, unit.kind, unit.category, unit.line, unit.end_line) for unit in selected.units] == [
+        (unit.form, unit.kind, unit.category, unit.line, unit.end_line) for unit in document.units
+    ]
+    counts = activation.frontmatter_link_counts({"sources": ["First", "Second"], "related": "Other"})
+    expected = activation.measure_document(
+        document, relations, project=project, page_type=None,
+        body_wikilinks=3, frontmatter_counts=counts,
+    )
+    actual = activation.measure_document(
+        selected, relations, project=project, page_type=None,
+        body_wikilinks=3, frontmatter_counts=counts,
+    )
+    assert actual == expected
+    assert actual["provenance_relations"] >= 3
+
+
 def test_unicode_categories_preserve_raw_and_share_a_canonical_key() -> None:
     document = parse_semantic_units(
         "- [Äri Reegel] First\n- [äri-reegel] Second\n",

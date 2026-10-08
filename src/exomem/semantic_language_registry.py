@@ -138,6 +138,42 @@ class LanguageRegistryView(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class UnitQueryPlan:
+    """Resolved unit axes with shared core and instance-qualified extension identity."""
+
+    categories: frozenset[str] | None
+    kinds: frozenset[str] | None
+    instance_id: str
+    core_categories: frozenset[str]
+    core_kinds: frozenset[str]
+
+    def matches(self, category: str, kind: str, instance_id: str) -> bool:
+        return (
+            (self.categories is None or category in self.categories
+             and (category in self.core_categories or instance_id == self.instance_id))
+            and (self.kinds is None or kind in self.kinds
+                 and (kind in self.core_kinds or instance_id == self.instance_id))
+        )
+
+
+def unit_query_plan(
+    registry: SemanticLanguageRegistry, *, categories=None, kinds=None,
+    instance_id: str = "public",
+) -> UnitQueryPlan:
+    """Use the typed adapter's aliases and canonical keys for every unit query owner."""
+    def resolve(values, resolver):
+        if values is None:
+            return None
+        return frozenset((result.resolved or result.key) for value in values
+                         for result in (resolver(value),))
+
+    return UnitQueryPlan(
+        resolve(categories, registry.resolve_category), resolve(kinds, registry.resolve_kind),
+        instance_id, frozenset(registry.core_categories), frozenset(registry.core_kinds),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticLanguageRegistry:
     schema_version: int
     content_hash: str

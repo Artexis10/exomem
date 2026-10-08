@@ -256,3 +256,37 @@ def test_private_history_preserves_reason_without_touching_shared_logs(vault: Pa
     assert history["versions"][0]["before_hash"] == content_hash(previous)
     assert history["versions"][0]["after_hash"] == content_hash(rendered)
     assert shared_log.read_bytes() == b"\xff public log awaiting repair\n"
+
+
+def test_private_heading_read_uses_its_instance_without_publishing_that_meaning(private_instances, vault):
+    from exomem import commands, epistemic_graph, freshness, semantic_contract, semantic_index
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    path = "Knowledge Base/Notes/Insights/private-interpretation.md"
+    source = (
+        "---\ntype: insight\nproject: private-project\n"
+        "exomem_id: 44444444-4444-4444-8444-444444444444\n---\n"
+        "# Private interpretation\n\n## Container\n\n### Protocol\n"
+        "- id: local-protocol\n\nPrivate procedure with a stable address.\n"
+    )
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(source)
+    with principal.request_scope(private_instances("full")):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert semantic_index.build_parent_index_state(vault, path).document.units == ()
+        selected = semantic_contract.build_page_state(vault, path, source)
+        assert [unit.kind for unit in selected.document.units] == ["protocol"]
+        assert semantic_index.from_semantic_page_state(selected).document.units == ()
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        context = commands.op_graph_context(vault, path=path, depth=1)
+        assert any(node["kind"] == "protocol" for node in context["nodes"]), context
+        unit_ref = selected.document.units[0].unit_ref
+        exact = commands.op_graph_context(vault, unit_ref=unit_ref, depth=0)
+        assert exact["unit_status"] == "found"
+        assert exact["seeds"][0]["metadata"]["unit_ref"] == unit_ref
+    with principal.request_scope(private_instances("limited")):
+        assert commands.op_graph_context(vault, path=path)["nodes"] == []

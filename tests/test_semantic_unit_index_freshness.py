@@ -9,7 +9,6 @@ from exomem import (
     freshness,
     index_sync,
     lexstore,
-    reconcile,
     semantic_contract,
     semantic_index,
     semantic_language_registry,
@@ -158,7 +157,7 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
             scope="kb",
             freshness=old_freshness,
         )
-        == []
+        is None
     )
     stale_context = epistemic_graph.graph_context(tmp_path, path=_REL, depth=1)
     assert not any(
@@ -182,7 +181,7 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
     )
 
 
-def test_registry_change_rejects_semantically_stale_units_without_markdown_change(
+def test_registry_change_updates_selected_units_without_rebuilding_structural_rows(
     tmp_path: Path, monkeypatch
 ) -> None:
     _write_language_registry(tmp_path, alias="local_setting", canonical="config")
@@ -206,8 +205,7 @@ def test_registry_change_rejects_semantically_stale_units_without_markdown_chang
     scheduled: list[Path] = []
     monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
 
-    # The old projection is incomplete under the new registry identity; it must
-    # warm/rebuild, never authoritatively false-empty.
+    # Definition changes reinterpret the unchanged structural projection immediately.
     assert lexstore.search_semantic_units(
         tmp_path,
         "registry-bound",
@@ -215,13 +213,9 @@ def test_registry_change_rejects_semantically_stale_units_without_markdown_chang
         categories=["config"],
         scope="kb",
         freshness=current_triple,
-    ) is None
-    assert scheduled == [tmp_path]
+    ) == []
+    assert scheduled == []
 
-    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    report = reconcile.reconcile(tmp_path)
-
-    assert report.semantic_unit_indexes_status == "repaired"
     repaired = lexstore.search_semantic_units(
         tmp_path,
         "registry-bound",
@@ -270,7 +264,7 @@ def test_rebuild_and_writer_preflight_share_all_attached_project_scopes(
         source,
         language_registry=language,
     )
-    rebuilt = semantic_index.build_parent_index_state(tmp_path, path)
+    rebuilt = semantic_index.selected_parent_index_state(tmp_path, path)
 
     assert [unit.category for unit in preflight.document.units] == ["config"]
     assert rebuilt.document == preflight.document

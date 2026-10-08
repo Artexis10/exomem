@@ -4131,18 +4131,14 @@ def _evaluate_structural(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(root)
     source = _place_origin_source(destination, source)
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
     before, before_census = semantic_contract.build_corpus_context_with_census(
-        root, registry=registry, language_registry=language, status_basis=status_basis
+        root, status_basis=status_basis
     )
     candidate = semantic_contract.build_page_state(
         root,
         destination,
         source,
-        relation_registry=registry,
-        language_registry=language,
         status_basis=status_basis,
     )
     normalized_source = _normalize_origin_source(
@@ -4154,10 +4150,10 @@ def _evaluate_structural(
             root,
             destination,
             source,
-            relation_registry=registry,
-            language_registry=language,
             status_basis=status_basis,
         )
+    language = (candidate.definitions.snapshots["categories"].typed if candidate.definitions is not None
+                else semantic_language_registry.core_registry())
     resolved = memory_schema.resolve_contracts(
         contracts,
         projects=candidate.projects,

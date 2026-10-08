@@ -537,7 +537,7 @@ def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, li
 #: rebuilt by the existing background rebuild.
 #: 12: transactional frequency revisions and page/FTS-content mutation triggers.
 #: A v11 catalogue is rebuilt before revision-bound counts can be cached.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -1038,38 +1038,10 @@ _REGISTRY_ABSENT_MARKER = "absent"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
-    """Return the content-addressed identity of parsed semantic-catalog rows.
-
-    The identity is a compound of the components that make an already-built
-    catalog's parsed rows correct for a given corpus, so any of them changing
-    invalidates those rows even when no note Markdown changed:
-
-    * this slice's catalog/schema version (``SCHEMA_VERSION``);
-    * the semantic-unit ``semantic_index.PARSER_VERSION``;
-    * the canonical semantic-authoring contract id/version/content digest — the
-      current core category/authoring identity seam;
-    * the exact content hash of the extension semantic-language registry at
-      ``semantic_language_registry.registry_path`` (an explicit stable marker
-      when the registry is absent).
-
-    Recall policy and access membership deliberately do not participate here:
-    ``RecallFreshnessCheckpoint`` attests that independent projection boundary.
-    Serialization is a canonical, sorted, separator-fixed JSON payload hashed
-    with SHA-256. No Markdown corpus is walked, no YAML is interpreted, and no
-    file is mutated; the registry is read only to hash its bytes, so neither
-    personal vocabulary nor raw registry bytes appear in the returned identity.
-    """
-    from . import semantic_authoring, semantic_index, semantic_language_registry
+    """Identify structural catalog rows independently of selected extension definitions."""
+    from . import semantic_authoring, semantic_index
 
     contract = semantic_authoring.get_semantic_authoring_contract()
-    registry_file = semantic_language_registry.registry_path(Path(vault_root))
-    try:
-        registry_bytes = registry_file.read_bytes()
-    except (FileNotFoundError, IsADirectoryError):
-        registry_marker = _REGISTRY_ABSENT_MARKER
-    else:
-        registry_marker = f"sha256:{hashlib.sha256(registry_bytes).hexdigest()}"
-
     payload = {
         "schema": _CATALOG_IDENTITY_SCHEMA,
         "catalog_schema_version": SCHEMA_VERSION,
@@ -1077,7 +1049,6 @@ def catalog_semantic_identity(vault_root: Path) -> str:
         "authoring_contract_id": contract.contract_id,
         "authoring_contract_version": contract.version,
         "authoring_contract_digest": contract.content_digest,
-        "extension_registry_hash": registry_marker,
     }
     canonical = json.dumps(
         payload,
@@ -4058,7 +4029,7 @@ class LexicalStore:
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
     _CURRENT_PAGES_COLUMNS = frozenset(
-        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json"}
+        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json", "structure_json"}
     ) | frozenset(_ELIGIBILITY_COLUMNS)
     #: The eligibility sentinels on `semantic_units`. A catalog missing any of
     #: them cannot answer a governed unit filter, so it is a legacy shape.
@@ -4141,7 +4112,7 @@ class LexicalStore:
             " updated_day TEXT,"
             " updated_json TEXT,"
             " eligibility_view_json TEXT,"
-            " content_hash TEXT)"
+            " content_hash TEXT, structure_json TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
         # (repr'd) — the cross-process "nothing changed while we were down"
@@ -4154,7 +4125,7 @@ class LexicalStore:
         self._create_frequency_revision_triggers(conn, "pages")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
-            " record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),"
+            " record_type TEXT NOT NULL CHECK(record_type = 'structural_occurrence'),"
             " unit_ref TEXT NOT NULL,"
             " parent_path TEXT NOT NULL,"
             " parent_ref TEXT,"
@@ -4951,15 +4922,15 @@ class LexicalStore:
         in_vault: bool,
     ) -> None:
         from . import bm25 as bm25_module
-        from .semantic_index import current_parent_index_state
+        from .semantic_index import current_parent_index_state, structural_metadata
 
         try:
             state = current_parent_index_state(self.vault_root, path)
         except (OSError, UnicodeError, ValueError):
             return
-        for source_order, unit in enumerate(state.document.units):
-            if unit.unit_ref is None:
-                continue
+        conn.execute("UPDATE pages SET structure_json = ? WHERE path = ?",
+                     (json.dumps(structural_metadata(state), sort_keys=True), state.path))
+        for source_order, unit in enumerate(state.occurrences):
             cur = conn.execute(
                 "INSERT INTO semantic_units("
                 "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
@@ -4967,33 +4938,33 @@ class LexicalStore:
                 "category, kind, content, tags_json, context, unit_source_hash, anchor, "
                 "line, end_line, fingerprint, source_order, updated, in_kb, in_vault, "
                 "verdict, check_by_day, check_by_json, tags_canonical_json) "
-                "VALUES('semantic_unit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "VALUES('structural_occurrence', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    unit.unit_ref,
+                    unit.key,
                     state.path,
                     state.parent_ref,
                     state.parent_generation,
                     state.parent_source_hash,
                     state.parser_version,
                     unit.form,
-                    unit.category_raw,
-                    unit.category_key,
-                    unit.category,
-                    unit.kind,
+                    unit.category_raw or "",
+                    unit.category_key or "",
+                    unit.category_key or "",
+                    unit.kind_raw or "",
                     unit.content,
-                    json.dumps(list(unit.tags), ensure_ascii=False, separators=(",", ":")),
-                    unit.context,
+                    "[]",
+                    None,
                     unit.source_hash,
                     unit.anchor,
-                    unit.line,
-                    unit.end_line,
-                    unit.fingerprint,
+                    unit.span.start_line,
+                    unit.span.end_line,
+                    None,
                     source_order,
                     updated,
                     int(in_kb),
                     int(in_vault),
-                    *_unit_eligibility_columns(unit),
+                    None, None, None, None,
                 ),
             )
             if fts5_available():
@@ -7791,6 +7762,7 @@ class LexicalStore:
         replacement N-1. Returns `query_fn`'s result, or None to defer.
         """
         from . import freshness as freshness_module
+        from .vocabulary.registry import RegistryError
 
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
@@ -7833,6 +7805,8 @@ class LexicalStore:
                 return CatalogQueryResult(query_fn(conn), readiness)
             finally:
                 conn.close()
+        except RegistryError:
+            return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, readiness.backend))
         except sqlite3.Error as e:
             verdict = self._catalog_readiness_error(e, readiness.backend)
             if verdict.status == "transient_failure":
@@ -7891,6 +7865,8 @@ class LexicalStore:
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
     ) -> list[SemanticUnitLexicalHit] | None:
+        from .vocabulary.registry import RegistryError
+
         if categories or kinds or clauses:
             # Exact category/kind selection (flat axes or a branch-preserving DNF
             # clause set) consults the readiness seam first and never touches
@@ -7933,6 +7909,8 @@ class LexicalStore:
                     allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 ),
             )
+        except RegistryError:
+            return None
         except sqlite3.Error as e:
             self._note_query_failure(
                 e,
@@ -8027,86 +8005,86 @@ class LexicalStore:
         admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
     ) -> list[SemanticUnitLexicalHit]:
-        col = "in_vault" if scope == "vault" else "in_kb"
-        clauses = [f"u.{col} = 1"]
-        params: list[object] = []
-        if dnf_clauses is not None:
-            # Branch-preserving DNF over the same semantic-unit row — identical
-            # algebra to page-level parent recall. A row that fails every branch
-            # (a category/kind cross-product) is never selected or hydrated.
-            predicate, dnf_params = self._clause_predicate(dnf_clauses)
-            clauses.append(f"({predicate})")
-            params.extend(dnf_params)
-        if categories:
-            placeholders = ",".join("?" for _ in categories)
-            clauses.append(f"u.category IN ({placeholders})")
-            params.extend(categories)
-        if kinds:
-            placeholders = ",".join("?" for _ in kinds)
-            clauses.append(f"u.kind IN ({placeholders})")
-            params.extend(kinds)
-        if allowed_unit_refs is not None:
-            clauses.append("u.unit_ref IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(sorted(allowed_unit_refs), ensure_ascii=False))
-        if allowed_parent_paths is not None:
-            clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(sorted(allowed_parent_paths), ensure_ascii=False))
-        if excluded_categories_by_parent is not None:
-            clauses.append(
-                "NOT EXISTS (SELECT 1 FROM json_each(?) AS parent "
-                "JOIN json_each(parent.value) AS category "
-                "WHERE parent.key = u.parent_path AND category.value = u.category)"
-            )
-            params.append(json.dumps(excluded_categories_by_parent, ensure_ascii=False))
-        columns = (
-            "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
-            "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "
-            "u.category_raw, u.category_key, u.category, u.kind, u.content, "
-            "u.tags_json, u.context, u.unit_source_hash, u.anchor, u.line, "
-            "u.end_line, u.fingerprint, u.source_order"
-        )
-        if literal_tokens:
-            literal_clauses = ["instr(lower(u.content), ?) > 0" for _ in literal_tokens]
-            rows = conn.execute(
-                f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
-                + " AND ".join([*clauses, *literal_clauses])
-                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
-                [*params, *literal_tokens, k],
-            ).fetchall()
-        elif tokens and admitted_parent_paths is not None:
-            from . import bm25 as bm25_module
+        from . import bm25 as bm25_module
+        from . import semantic_index, semantic_language_registry, semantic_units
+        from .governance import egress
+        from .vocabulary.registry import RegistryError
 
-            corpus = {
-                ref: stemmed.split() for ref, stemmed in conn.execute(
-                    "SELECT u.unit_ref, unit_fts.stemmed FROM semantic_units u "
-                    "JOIN unit_fts ON unit_fts.rowid = u.rowid "
-                    f"WHERE u.{col} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(admitted_parent_paths), ensure_ascii=False),),
-                )
-            }
-            candidates = {row[1]: row for row in conn.execute(
-                f"SELECT {columns} FROM semantic_units u WHERE " + " AND ".join(clauses), params,
-            )}
-            scored = bm25_module.score_token_corpus(corpus, tokens, k, allowed_paths=set(candidates))
-            rows = [(*candidates[ref], score) for ref, score in scored]
-        elif tokens:
-            match = " OR ".join(f'"{token}"' for token in tokens)
-            rows = conn.execute(
-                f"SELECT {columns}, -bm25(unit_fts) AS lexical_score "
-                "FROM unit_fts JOIN semantic_units u ON u.rowid = unit_fts.rowid "
-                "WHERE unit_fts MATCH ? AND "
-                + " AND ".join(clauses)
-                + " ORDER BY bm25(unit_fts), u.parent_path, u.source_order LIMIT ?",
-                [match, *params, k],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
-                + " AND ".join(clauses)
-                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
-                [*params, k],
-            ).fetchall()
-        return [self._semantic_unit_hit(row) for row in rows]
+        col = "in_vault" if scope == "vault" else "in_kb"
+        keep = egress.page_release_filter(self.vault_root)
+        try:
+            query_language = semantic_language_registry.load_registry(self.vault_root) if categories or kinds or dnf_clauses else semantic_language_registry.core_registry()
+            plans = ([semantic_language_registry.unit_query_plan(
+                query_language, categories=clause.category_seeds, kinds=clause.kind_seeds,
+            ) for clause in dnf_clauses] if dnf_clauses is not None else [
+                semantic_language_registry.unit_query_plan(query_language, categories=categories or None, kinds=kinds or None)
+            ])
+            selected = {}
+            for path, raw_metadata in conn.execute(f"SELECT path, structure_json FROM pages WHERE {col} = 1 ORDER BY path"):
+                if (allowed_parent_paths is not None and path not in allowed_parent_paths
+                        or admitted_parent_paths is not None and path not in admitted_parent_paths
+                        or keep is not None and not keep(path)):
+                    continue
+                if raw_metadata is None:
+                    raise RegistryError("REGISTRY_UNAVAILABLE: structural coverage is incomplete")
+                metadata = json.loads(raw_metadata)
+                document, definitions, _frontmatter = semantic_index.interpret_structure(self.vault_root, path, metadata)
+                selected[path] = ({unit.occurrence_key: unit for unit in document.units}, definitions, metadata)
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            # Missing definitions cannot be reported as an exact empty semantic result.
+            raise RegistryError("REGISTRY_UNAVAILABLE: selected unit interpretation is unavailable") from error
+        candidates = {}
+        corpus = {}
+        for row in conn.execute(
+            f"SELECT unit_ref, parent_path, content, source_order, updated FROM semantic_units WHERE {col} = 1 ORDER BY updated DESC, parent_path DESC, source_order"
+        ):
+            key, path, content, order, updated = row
+            if path not in selected:
+                continue
+            units, definitions, _metadata = selected[path]
+            unit = units.get(key)
+            if unit is None:
+                continue
+            token_key = json.dumps((path, key))
+            corpus[token_key] = bm25_module.tokenize(content)
+            if (not any(plan.matches(unit.category, unit.kind, definitions.instance_id) for plan in plans)
+                    or excluded_categories_by_parent is not None and unit.category in excluded_categories_by_parent.get(path, ())
+                    or any(token not in content.lower() for token in literal_tokens)):
+                continue
+            candidates[token_key] = row
+        ranked = (bm25_module.score_token_corpus(corpus, tokens, len(candidates), allowed_paths=set(candidates))
+                  if tokens else [(key, None) for key in candidates])
+        states = {}
+        hits = []
+        for key, score in ranked:
+            occurrence, path, _content, order, _updated = candidates[key]
+            if path not in states:
+                state = semantic_index.selected_parent_index_state(self.vault_root, path)
+                metadata = selected[path][2]
+                if (state.definitions_unavailable or state.parent_generation != metadata["parent_generation"]
+                        or state.parent_source_hash != metadata["parent_source_hash"]):
+                    raise RegistryError("REGISTRY_UNAVAILABLE: unit source or definitions changed")
+                states[path] = (state, {semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash): unit
+                                       for unit in state.document.units if unit.unit_ref is not None})
+            state, units = states[path]
+            unit = units.get(occurrence)
+            if unit is None or allowed_unit_refs is not None and unit.unit_ref not in allowed_unit_refs:
+                continue
+            hits.append(SemanticUnitLexicalHit(
+                record_type="semantic_unit", unit_ref=unit.unit_ref, parent_path=path,
+                parent_ref=state.parent_ref, parent_generation=state.parent_generation,
+                parent_source_hash=state.parent_source_hash, parser_version=state.parser_version,
+                form=unit.form, category_raw=unit.category_raw or "", category_key=unit.category_key or "",
+                category=unit.category, kind=unit.kind, content=unit.content, tags=unit.tags,
+                context=unit.context, source_hash=unit.source_hash, anchor=unit.anchor,
+                line=unit.line, end_line=unit.end_line, fingerprint=unit.fingerprint,
+                source_order=order, lexical_score=score,
+            ))
+            if len(hits) >= k:
+                break
+        if any(not definitions.current(self.vault_root) for _units, definitions, _metadata in selected.values()):
+            raise RegistryError("REGISTRY_UNAVAILABLE: selected definitions changed")
+        return hits
 
     @staticmethod
     def _semantic_unit_hit(row: tuple) -> SemanticUnitLexicalHit:
