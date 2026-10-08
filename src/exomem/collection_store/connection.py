@@ -24,6 +24,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.pool import NullPool
+
 from . import schema
 
 STORE_FILENAME = "collections.sqlite"
@@ -114,6 +119,26 @@ def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _writer_engine(database: str):
+    engine = create_engine("sqlite+pysqlite://", creator=lambda: _connect(database), poolclass=NullPool)
+
+    @event.listens_for(engine, "begin")
+    def begin(conn):
+        # Explicit SQLite transaction control also makes DDL atomic.
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+    return engine
+
+
+def rollback(conn: Connection) -> None:
+    """Clear both transaction states after an unsuccessful mutation."""
+    conn.rollback()
+    raw = conn.connection.driver_connection
+    # A deferred-constraint COMMIT failure deactivates Core before SQLite rolls back.
+    if raw.in_transaction:
+        raw.rollback()
+
+
 def _require_lease(lease_check: Callable[[], bool]) -> None:
     if not lease_check():
         raise CollectionStoreError(
@@ -142,10 +167,11 @@ class WriterConnection:
     """The one write connection to a store."""
 
     def __init__(
-        self, path: Path, conn: sqlite3.Connection, lease_check: Callable[[], bool]
+        self, path: Path, conn: Connection, lease_check: Callable[[], bool]
     ) -> None:
         self.path = path
-        self.connection = conn
+        self.core = conn
+        self.connection = conn.connection.driver_connection
         self._lease_check = lease_check
         self._owner_thread = threading.get_ident()
         self._closed = False
@@ -199,23 +225,38 @@ class WriterConnection:
         self.require_write_authority(allow_diverged=resolve_divergence)
         cache = self.release_cache
         cache.check()
-        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.core.begin()
+        except DBAPIError as error:
+            raise error.orig from error
         cache.begin()
         try:
             yield self.connection
             cache.prepare()
-            self.connection.execute("COMMIT")
+            self.core.commit()
             cache.finish(True)
-        except BaseException:
-            if self.connection.in_transaction:
-                self.connection.execute("ROLLBACK")
+        except BaseException as error:
+            rollback(self.core)
             cache.finish(False)
+            if isinstance(error, DBAPIError):
+                raise error.orig from error
             raise
+
+    def execute(self, statement, parameters=None):
+        """Execute Core statements only within this handle's mutation scope."""
+        self.require_owner_thread()
+        if not self.core.in_transaction() or not self.connection.in_transaction:
+            raise RuntimeError("Core writes require the writer transaction")
+        try:
+            return self.core.execute(statement, parameters)
+        except DBAPIError as error:
+            raise error.orig from error
 
     def close(self) -> None:
         if not self._closed:
             self._release_cache = None
-            self.connection.close()
+            self.core.close()
+            self.core.engine.dispose()
             self._closed = True
             with _WRITERS_GUARD:
                 _WRITER_PATHS.remove(self.path)
@@ -250,21 +291,29 @@ def open_writer(
             )
         _WRITER_PATHS.add(target)
     conn = None
+    engine = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        conn = _connect(str(target))
-        _apply_writer_pragmas(conn)
+        engine = _writer_engine(str(target))
+        conn = engine.connect()
+        _apply_writer_pragmas(conn.connection.driver_connection)
         _require_lease(check)
         try:
             schema.ensure_schema(conn)
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
+        except schema.SchemaMetadataError as error:
+            raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
         return WriterConnection(target, conn, check)
-    except BaseException:
+    except BaseException as error:
         if conn is not None:
             conn.close()
+        if engine is not None:
+            engine.dispose()
         with _WRITERS_GUARD:
             _WRITER_PATHS.remove(target)
+        if isinstance(error, DBAPIError):
+            raise error.orig from error
         raise
 
 
@@ -284,12 +333,12 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA foreign_keys=ON")
-        found = schema.schema_version(conn)
-        if found > schema.SCHEMA_VERSION:
-            raise CollectionStoreError(
-                "COLLECTION_STORE_SCHEMA_NEWER",
-                f"collection store schema {found} is newer than this release supports",
-            )
+        try:
+            found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+        except schema.SchemaMetadataError as error:
+            raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
+        except schema.SchemaVersionError as error:
+            raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
         if found < schema.SCHEMA_VERSION:
             raise CollectionStoreError(
                 "COLLECTION_STORE_SCHEMA_PENDING",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -245,6 +246,26 @@ def test_sqlite_integrity_does_not_make_malformed_store_identity_valid(genesis, 
     with pytest.raises(connection.CollectionStoreError, match="COLLECTION_SNAPSHOT_INVALID"):
         with snapshot.staged_snapshot(root, directory=stage, deadline=time.monotonic() + 10):
             pytest.fail("invalid identity was yielded")
+    assert list(stage.iterdir()) == []
+
+
+@pytest.mark.parametrize("mutation", [
+    "DELETE FROM alembic_version",
+    "UPDATE alembic_version SET version_num='unknown'",
+    "UPDATE alembic_version SET version_num='7'",
+    "ALTER TABLE alembic_version RENAME COLUMN version_num TO invalid_column",
+])
+def test_snapshot_rejects_contradictory_installation_revision(genesis, mutation, tmp_path):
+    root, stage, writer = genesis
+    with snapshot.staged_snapshot(root, directory=stage, deadline=time.monotonic() + 10) as artifact:
+        restored = tmp_path / "restored.sqlite"
+        shutil.copyfile(artifact.path, restored)
+        with closing(sqlite3.connect(restored, isolation_level=None)) as conn:
+            conn.execute(mutation)
+            assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            with pytest.raises(connection.CollectionStoreError, match="COLLECTION_SNAPSHOT_INVALID"):
+                snapshot._validate(conn, lambda: None)
+        assert schema.schema_version(writer.connection) == schema.SCHEMA_VERSION
     assert list(stage.iterdir()) == []
 
 

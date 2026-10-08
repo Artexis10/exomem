@@ -36,7 +36,17 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.schema import CreateTable
+
+from . import tables
 
 SCHEMA_VERSION = 8
 
@@ -690,11 +700,24 @@ def _migrate_to_8(conn: sqlite3.Connection) -> None:
     ) STRICT, WITHOUT ROWID""")
 
 
-#: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
-    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5,
-    6: _migrate_to_6, 7: _migrate_to_7, 8: _migrate_to_8,
-}
+_MIGRATION_PATH = Path(__file__).with_name("migrations")
+
+
+def _migration_config(conn: Connection | None = None) -> Config:
+    config = Config()
+    # ConfigParser requires literal percent signs in installation paths to be escaped.
+    config.set_main_option("script_location", str(_MIGRATION_PATH).replace("%", "%%"))
+    config.attributes["connection"] = conn
+    return config
+
+
+@lru_cache(maxsize=1)
+def _revisions(path: Path) -> frozenset[str]:
+    return frozenset(revision.revision for revision in ScriptDirectory(str(path)).walk_revisions())
+
+
+class SchemaMetadataError(ValueError):
+    """Installation revision metadata does not identify one compatible schema."""
 
 
 class SchemaVersionError(RuntimeError):
@@ -708,62 +731,71 @@ class SchemaVersionError(RuntimeError):
         self.supported = supported
 
 
-def schema_version(conn: sqlite3.Connection) -> int:
+def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> int:
     """The recorded schema version, or 0 for an empty database."""
     present = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_meta'"
     ).fetchone()
-    if present is None:
-        return 0
-    row = conn.execute(
+    row = None if present is None else conn.execute(
         "SELECT value FROM store_meta WHERE key = ?", (META_SCHEMA_VERSION,)
     ).fetchone()
-    if row is None:
-        return 0
-    return int(row[0])
+    version = 0 if row is None else int(row[0])
+    if ceiling is not None and version > ceiling:
+        raise SchemaVersionError(version, ceiling)
+    revision_table = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name='alembic_version'"
+    ).fetchone()
+    if revision_table is not None:
+        # Contradictory metadata risks a wrong migration; refuse this store for repair.
+        columns = conn.execute("PRAGMA table_xinfo(alembic_version)").fetchall()
+        strict = conn.execute("SELECT strict FROM pragma_table_list WHERE schema='main' AND name='alembic_version'").fetchone()
+        if (revision_table != ("table",) or strict != (1,) or len(columns) != 1 or columns[0][1] != "version_num"
+                or columns[0][2].upper() != "TEXT" or columns[0][5] != 1):
+            raise SchemaMetadataError("malformed installation revision table")
+        revisions = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+        if len(revisions) != 1 or revisions[0][0] not in _revisions(_MIGRATION_PATH):
+            raise SchemaMetadataError("unknown or missing installation revision")
+        if revisions[0][0] != str(version):
+            raise SchemaMetadataError("installation revision disagrees with compatibility version")
+    return version
 
 
-def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Bring the store up to :data:`SCHEMA_VERSION` in one immediate transaction.
+def ensure_schema(conn: Connection) -> int:
+    """Apply packaged revisions in one writer-owned immediate transaction."""
+    from .connection import rollback
 
-    Every missing step runs in order, then the version is recorded, all or
-    nothing. A store newer than this release refuses rather than downgrading.
-    Migrations run with foreign keys off, as SQLite's table-rebuild procedure
-    requires, and commit only after a full foreign-key check.
-    """
+    raw = conn.connection.driver_connection
     target = SCHEMA_VERSION
-    migrating = schema_version(conn) < target
-    enforced = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    current = schema_version(raw, ceiling=target)
+    migrating = current < target
+    enforced = raw.execute("PRAGMA foreign_keys").fetchone()[0]
     if migrating and enforced:
-        conn.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("PRAGMA foreign_keys=OFF")
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.begin()
         try:
-            current = schema_version(conn)
-            if current > target:
-                raise SchemaVersionError(current, target)
-            for version in range(current + 1, target + 1):
-                MIGRATIONS[version](conn)
-            # Repair missing protections even when the recorded version is current.
+            config = _migration_config(conn)
+            conn.execute(CreateTable(tables.alembic_version, if_not_exists=True))
+            if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
+                command.stamp(config, str(current))
+            command.upgrade(config, str(target))
             for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ())):
-                conn.execute(statement)
+                raw.execute(statement)
             if target >= 5:
                 from . import typed_storage
 
-                typed_storage.repair_triggers(conn)
-            conn.execute(
-                "INSERT INTO store_meta(key, value) VALUES (?, ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (META_SCHEMA_VERSION, str(target)),
-            )
-            if migrating and conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                typed_storage.repair_triggers(raw)
+            revision = raw.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            conn.execute(tables.SET_META, {"key": META_SCHEMA_VERSION, "value": revision})
+            if migrating and raw.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise sqlite3.IntegrityError("FOREIGN KEY constraint failed during schema migration")
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
+            conn.commit()
+        except BaseException as error:
+            rollback(conn)
+            if isinstance(error, DBAPIError):
+                raise error.orig from error
             raise
     finally:
         if migrating and enforced:
-            conn.execute("PRAGMA foreign_keys=ON")
+            raw.execute("PRAGMA foreign_keys=ON")
     return target

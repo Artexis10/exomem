@@ -40,6 +40,7 @@ from . import (
     rollups,
     schema,
     summary,
+    tables,
     tokens,
     typed_storage,
     types,
@@ -206,8 +207,10 @@ class CollectionWriter:
     def _execute(self, statement, parameters=(), *, many=False):
         """Account only this writer statement, never intervening trusted SQL."""
         before = self.connection.total_changes
-        execute = self.connection.executemany if many else self.connection.execute
         try:
+            if not isinstance(statement, str):
+                return self.handle.execute(statement, parameters or None)
+            execute = self.connection.executemany if many else self.connection.execute
             return execute(statement, parameters)
         finally:
             self.handle.release_cache.account(self.connection.total_changes - before)
@@ -778,18 +781,15 @@ class CollectionWriter:
         if not valid:
             raise RuntimeError("writer constructed an invalid collection receipt")
         data = {**txn, "receipt_json": _json(receipt)}
-        names = list(data)
-        self._execute(
-            f"INSERT INTO txns ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
-            tuple(data.values()),
-        )
+        self._execute(tables.INSERT_TXN, data)
         if self._publication.deferred_create is None and txn["operation"] not in mutation_terminal.CONTROL_OPERATIONS:
             self._publication.bind(receipt)
 
     def _advance(self, txn: Mapping[str, Any]) -> str:
         self._execute(
-            "UPDATE collections SET generation = ?, audit_head = ?, updated_txn = ? WHERE collection_id = ?",
-            (txn["generation_after"], txn["event_hash"], txn["txn_id"], txn["collection_id"]),
+            tables.ADVANCE,
+            {"generation": txn["generation_after"], "audit_head": txn["event_hash"],
+             "updated_txn": txn["txn_id"], "target_collection_id": txn["collection_id"]},
         )
         return tokens.container_hash(
             txn["collection_id"], txn["generation_after"], txn["event_hash"]
@@ -806,12 +806,11 @@ class CollectionWriter:
                 "path": path, "collection_id": cid, "kind": kind, "row_id": row_id,
                 "pending_row_version": version, "pending_sha256": digest,
             }, self._publication.previous(path), manifest)
-        self._execute(
-            "INSERT INTO projection_state (path, collection_id, row_id, kind, pending_row_version, pending_sha256, state, install_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?) ON CONFLICT(path) DO UPDATE SET "
-            "pending_row_version = excluded.pending_row_version, pending_sha256 = excluded.pending_sha256, state = 'pending', install_json=excluded.install_json",
-            (path, cid, row_id, kind, version, digest, descriptor),
-        )
+        self._execute(tables.PENDING, {
+            "path": path, "collection_id": cid, "row_id": row_id, "kind": kind,
+            "pending_row_version": version, "pending_sha256": digest, "state": "pending",
+            "install_json": descriptor,
+        })
 
     def _render_view(self, projection, manifest):
         """Render indexed canonical rows using a context prepared before the filesystem phase."""
@@ -1663,38 +1662,25 @@ class CollectionWriter:
         # JSON, typed-v1 keeps ordinal typed columns and no JSON copy.
         encoding = typed_storage.collection_encoding(self.connection, manifest.collection_id)
         stored = _json(values) if encoding == typed_storage.JSON_V1 else None
+        changed = {"natural_key": natural_key, "row_version": version, "values_json": stored,
+                   "body": body, "payload_hash": payload, "updated_txn": txn["txn_id"],
+                   "governance_json": metadata}
         if before is None:
-            cursor = self._execute(
-                "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn,governance_json,encoding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    manifest.collection_id,
-                    key,
-                    natural_key,
-                    version,
-                    manifest.schema.version,
-                    stored,
-                    body,
-                    payload,
-                    path,
-                    txn["txn_id"],
-                    txn["txn_id"],
-                    metadata,
-                    encoding,
-                ),
-            )
+            cursor = self._execute(tables.INSERT_ITEM, {
+                **changed, "collection_id": manifest.collection_id, "item_key": key,
+                "schema_version": manifest.schema.version, "view_path": path,
+                "created_txn": txn["txn_id"], "encoding": encoding,
+            })
             row_id = cursor.lastrowid
         else:
             row_id = before["row_id"]
-            self._execute(
-                "UPDATE items SET natural_key = ?, row_version = ?, values_json = ?, body = ?, payload_hash = ?, updated_txn = ?,governance_json=? WHERE row_id = ?",
-                (natural_key, version, stored, body, payload, txn["txn_id"], metadata, row_id),
-            )
+            self._execute(tables.UPDATE_ITEM, {**changed, "target_row_id": row_id})
         if encoding == typed_storage.JSON_V1:
             # The JSON payload mints its json-v1 version_identity in the same statement.
-            self._execute(
-                "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
-                (row_id, version, stored, body, payload, txn["txn_id"]),
-            )
+            self._execute(tables.INSERT_VERSION, {
+                "row_id": row_id, "row_version": version, "values_json": stored, "body": body,
+                "payload_hash": payload, "txn_id": txn["txn_id"],
+            })
         else:
             typed_storage.write_version(
                 index_migrations.AccountedWriter(self.connection, self._execute),
@@ -1706,28 +1692,15 @@ class CollectionWriter:
                                        manifest.collection_id, row_id, key, version, values,
                                        previous=json.loads(before["values_json"]) if before else None)
         for source_ordinal, source in enumerate(sources):
-            self._execute(
-                "INSERT INTO item_sources VALUES (?, ?, ?, ?)", (row_id, version, source_ordinal, source)
-            )
-        self._execute(
-            "INSERT INTO audit_effects (txn_id, ordinal, row_id, item_key, effect, effect_label, version_before, version_after, hash_before, hash_after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                txn["txn_id"],
-                ordinal,
-                row_id,
-                key,
-                "resume" if resumed else "insert" if before is None else "update",
-                "replan"
-                if manifest.semantic_profile == "planning"
-                else "correction"
-                if before
-                else None,
-                None if before is None else before["row_version"],
-                version,
-                None if before is None else before["payload_hash"],
-                payload,
-            ),
-        )
+            self._execute(tables.INSERT_SOURCE, {"row_id": row_id, "row_version": version,
+                          "ordinal": source_ordinal, "source_ref": source})
+        self._execute(tables.INSERT_EFFECT, {
+            "txn_id": txn["txn_id"], "ordinal": ordinal, "row_id": row_id, "item_key": key,
+            "effect": "resume" if resumed else "insert" if before is None else "update",
+            "effect_label": "replan" if manifest.semantic_profile == "planning" else "correction" if before else None,
+            "version_before": None if before is None else before["row_version"], "version_after": version,
+            "hash_before": None if before is None else before["payload_hash"], "hash_after": payload,
+        })
         if _renders_rows(manifest):
             _, text = self._render_view({"kind": "item", "row_id": row_id}, manifest)
             self._pending(path, manifest.collection_id, "item", version, text, row_id, manifest=manifest)

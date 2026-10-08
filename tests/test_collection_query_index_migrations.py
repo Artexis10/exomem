@@ -38,7 +38,7 @@ def test_declared_index_tracks_correction_and_canonical_rollback(store):
     before = store.connection.execute(f"SELECT * FROM {plan.table_name}").fetchall()
     with pytest.raises(RuntimeError, match="interrupt"):
         with store.handle.transaction():
-            manager.maintain_item(store.connection, CID, 1, KEY, 99, {"count": 9})
+            manager.maintain_item(manager.AccountedWriter(store.connection, store._execute), CID, 1, KEY, 99, {"count": 9})
             raise RuntimeError("interrupt")
     assert store.connection.execute(f"SELECT * FROM {plan.table_name}").fetchall() == before
 
@@ -59,11 +59,20 @@ def test_bounded_rebuild_resumes_and_writes_catch_up_before_cutover(store):
     assert manager.ready_plan(store.connection, CID) == old
     store.append_record(CID, item={"title": "Two", "count": 2}, item_key=OTHER, why="observe")
     assert not store.backfill_query_indexes(CID, limit=1)
-    assert store.backfill_query_indexes(CID, limit=1)
-    published = manager.ready_plan(store.connection, CID)
-    assert published == replacement
-    assert store.connection.execute(f"SELECT item_key,row_version FROM {published.table_name} ORDER BY item_key").fetchall() == [(KEY, 1), (OTHER, 1)]
-    assert store.connection.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 4
+    from exomem.collection_store import connection
+    from exomem.collection_store.writer import CollectionWriter
+
+    path, root = store.handle.path, store.root
+    checkpoint = store.connection.execute("SELECT last_row_id FROM query_projection_mappings WHERE state='building'").fetchone()
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        reopened = CollectionWriter(root, handle)
+        assert reopened.connection.execute("SELECT last_row_id FROM query_projection_mappings WHERE state='building'").fetchone() == checkpoint
+        assert reopened.backfill_query_indexes(CID, limit=1)
+        published = manager.ready_plan(reopened.connection, CID)
+        assert published == replacement
+        assert reopened.connection.execute(f"SELECT item_key,row_version FROM {published.table_name} ORDER BY item_key").fetchall() == [(KEY, 1), (OTHER, 1)]
+        assert reopened.connection.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 4
 
 
 def test_failed_candidate_preserves_old_ready_values_and_audit(store):
@@ -79,7 +88,7 @@ def test_failed_candidate_preserves_old_ready_values_and_audit(store):
     generation = store.connection.execute("SELECT generation FROM query_projection_mappings WHERE state='building'").fetchone()[0]
     before = store.connection.execute("SELECT * FROM txns").fetchall()
     with store.handle.transaction():
-        assert not manager.backfill_batch(store.connection, CID, limit=1)
+        assert not manager.backfill_batch(manager.AccountedWriter(store.connection, store._execute), CID, limit=1)
     assert manager.ready_plan(store.connection, CID) == old
     assert store.connection.execute("SELECT state FROM query_projection_mappings WHERE generation=?", (generation,)).fetchone() == ("failed",)
     assert store.connection.execute("SELECT 1 FROM sqlite_master WHERE name=?", (f"cq_{CID.replace('-', '')}_{generation}",)).fetchone() is None
@@ -120,7 +129,7 @@ def test_reverting_declaration_cancels_the_obsolete_rebuild(store):
     pending = revise(store, original, changed, first["after_container_hash"])
     revise(store, changed, original, pending["after_container_hash"])
     with store.handle.transaction():
-        assert not manager.backfill_batch(store.connection, CID)
+        assert not manager.backfill_batch(manager.AccountedWriter(store.connection, store._execute), CID)
     assert manager.ready_plan(store.connection, CID) == old
     assert store.connection.execute("SELECT 1 FROM query_projection_mappings WHERE state='building'").fetchone() is None
 

@@ -121,7 +121,7 @@ def maintain_item(conn, collection_id, row_id, item_key, row_version, values: Ma
             _failed(conn, plan)
             conn.execute(f"DROP TABLE {plan.table_name}")
             continue
-        conn.execute(plan.upsert_sql, (row_id, item_key, row_version, keys))
+        conn.execute(plan.upsert, {"row_id": row_id, "item_key": item_key, "row_version": row_version, "keys_json": keys})
 
 
 def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
@@ -162,7 +162,7 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
     try:
         for row_id, key, version, values, size, _ in rows:
             if not reads:
-                conn.execute(plan.upsert_sql, (row_id, key, version, plan.encode({})))
+                conn.execute(plan.upsert, {"row_id": row_id, "item_key": key, "row_version": version, "keys_json": plan.encode({})})
                 last = row_id
                 continue
             if row_id in typed:
@@ -178,7 +178,7 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
             except (ScalarValueError, ValueError, TypeError, RecursionError):
                 _failed(conn, plan)
                 return False
-            conn.execute(plan.upsert_sql, (row_id, key, version, encoded))
+            conn.execute(plan.upsert, {"row_id": row_id, "item_key": key, "row_version": version, "keys_json": encoded})
             total += size
             last = row_id
     finally:

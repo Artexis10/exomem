@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import replace
@@ -18,7 +17,7 @@ from test_governance_egress import _external, write_rule, write_scope
 from exomem import held_fs, record_formats, records, vault
 from exomem import structured_collections as collections
 from exomem.collection_store import chain, legacy, legacy_import, schema
-from exomem.collection_store.connection import CollectionStoreError
+from exomem.collection_store.connection import CollectionStoreError, _writer_engine
 from exomem.governance.principal import request_scope
 
 CONTEXT = legacy_import.ImportContext("migration-test", "2026-10-02T10:00:00Z", "attempt-one")
@@ -49,11 +48,17 @@ def _capture(tmp_path, root, path):
         yield audit, legacy_import.capture_legacy_collection(root, path, audit=audit)
 
 
+@contextmanager
 def _connection():
-    conn = sqlite3.connect(":memory:", isolation_level=None)
-    conn.execute("PRAGMA foreign_keys=ON")
-    schema.ensure_schema(conn)
-    return conn
+    engine = _writer_engine(":memory:")
+    try:
+        with engine.connect() as core:
+            conn = core.connection.driver_connection
+            conn.execute("PRAGMA foreign_keys=ON")
+            schema.ensure_schema(core)
+            yield conn
+    finally:
+        engine.dispose()
 
 
 def _held(path, number, candidate, *, target_key=None):

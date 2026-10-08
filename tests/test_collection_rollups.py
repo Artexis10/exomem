@@ -233,12 +233,20 @@ def test_backfill_keeps_a_new_rollup_unavailable_until_every_row_is_built(store)
     assert store.backfill_rollups(CID, limit=10) is False
     load(store, [exercise(record) for record in records[30:]])
     assert reduce(store, request())["plan"]["strategy"] == "base"
-    while not store.backfill_rollups(CID, limit=10):
-        pass
-    ready = reduce(store, request())
-    daily, flagged = expected_daily(records, "metrics.calories")
-    assert ready["plan"]["strategy"] == "rollup" and by_bucket(ready) == daily
-    assert ready["flagged_rows"] == len(flagged)
+    from exomem.collection_store import connection
+    from exomem.collection_store.writer import CollectionWriter
+
+    path, root = store.handle.path, store.root
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        reopened = CollectionWriter(root, handle)
+        assert reduce(reopened, request())["plan"]["strategy"] == "base"
+        while not reopened.backfill_rollups(CID, limit=10):
+            pass
+        ready = reduce(reopened, request())
+        daily, flagged = expected_daily(records, "metrics.calories")
+        assert ready["plan"]["strategy"] == "rollup" and by_bucket(ready) == daily
+        assert ready["flagged_rows"] == len(flagged)
 
 
 def test_held_edits_and_refused_writes_never_reach_rollup_buckets(store):

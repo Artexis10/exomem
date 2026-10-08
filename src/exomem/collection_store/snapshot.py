@@ -77,7 +77,7 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
             raise ValueError("foreign key check failed")
         check()
         metadata = dict(conn.execute("SELECT key,value FROM store_meta"))
-        if metadata[schema.META_SCHEMA_VERSION] != str(schema.SCHEMA_VERSION):
+        if schema.schema_version(conn) != schema.SCHEMA_VERSION:
             raise ValueError("unsupported schema")
         _uuid(metadata[schema.META_STORE_ID])
         _uuid(metadata[schema.META_INSTANCE_ID])

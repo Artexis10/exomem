@@ -42,8 +42,28 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    MetaData,
+    Table,
+    Text,
+    and_,
+    case,
+    func,
+    literal,
+    or_,
+)
+from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.schema import CreateTable
+from sqlalchemy.types import UserDefinedType
+
 from .. import records
 from ..query_engine.scalars import scalar_key
+from . import tables
 
 JSON_V1 = "json-v1"
 TYPED_V1 = "typed-v1"
@@ -180,24 +200,53 @@ def decode_row(layout: Layout, columns) -> dict[str, Any]:
 # --- DDL: internal names only -------------------------------------------------
 
 
-def _field_check(ordinal: int) -> str:
-    t, v, k = (f"{part}{ordinal}" for part in "tvk")
-    return (f"CHECK(CASE {t} WHEN {MISSING} THEN {v} IS NULL AND {k} IS NULL "
-            f"WHEN {NULL} THEN {v} IS NULL AND {k} IS NULL "
-            f"WHEN {BOOLEAN} THEN typeof({v})='integer' AND {v} IN (0,1) AND {k} IS NULL "
-            f"WHEN {INT64} THEN typeof({v})='integer' AND {k} IS NULL "
-            f"WHEN {BIGINT} THEN typeof({v})='text' AND typeof({k})='text' "
-            f"WHEN {FLOAT} THEN typeof({v})='blob' AND length({v})=8 AND typeof({k})='real' "
-            f"WHEN {STRING} THEN typeof({v})='text' AND {k} IS NULL "
-            f"WHEN {JSON} THEN typeof({v})='text' AND json_valid({v}) AND {k} IS NULL ELSE 0 END)")
+class _AnyValue(UserDefinedType):
+    # SQLite STRICT ANY preserves the encoded scalar's exact DBAPI representation.
+    cache_ok = True
+
+    def get_col_spec(self, **kw):
+        return "ANY"
 
 
-def _columns(layout: Layout) -> list[str]:
-    columns = []
-    for ordinal in range(len(layout.fields)):
-        columns.extend((f"t{ordinal} INTEGER NOT NULL {_field_check(ordinal)}", f"v{ordinal} ANY", f"k{ordinal} ANY"))
-    columns.append("r TEXT CHECK(r IS NULL OR json_valid(r))")
-    return columns
+@functools.lru_cache(maxsize=64)
+def _declarations(layout: Layout):
+    metadata = MetaData()
+    items = tables.items.to_metadata(metadata)
+    identity = tables.version_identity.to_metadata(metadata)
+
+    def columns():
+        fields: list[Any] = []
+        for ordinal in range(len(layout.fields)):
+            t = Column(f"t{ordinal}", Integer, nullable=False)
+            v, k = Column(f"v{ordinal}", _AnyValue), Column(f"k{ordinal}", _AnyValue)
+            # The discriminator vocabulary is the typed-v1 wire encoding above.
+            fields.extend((t, v, k, CheckConstraint(case(
+                (t.in_((MISSING, NULL)), and_(v.is_(None), k.is_(None))),
+                (t == BOOLEAN, and_(func.typeof(v) == "integer", v.in_((literal(0), literal(1))), k.is_(None))),
+                (t == INT64, and_(func.typeof(v) == "integer", k.is_(None))),
+                (t == BIGINT, and_(func.typeof(v) == "text", func.typeof(k) == "text")),
+                (t == FLOAT, and_(func.typeof(v) == "blob", func.length(v) == 8, func.typeof(k) == "real")),
+                (t == STRING, and_(func.typeof(v) == "text", k.is_(None))),
+                (t == JSON, and_(func.typeof(v) == "text", func.json_valid(v), k.is_(None))),
+                else_=0,
+            ))))
+        residual = Column("r", Text)
+        fields.extend((residual, CheckConstraint(or_(residual.is_(None), func.json_valid(residual)))))
+        return fields
+
+    current = Table(layout.current_table, metadata,
+        Column("row_id", Integer, ForeignKey(items.c.row_id), primary_key=True),
+        Column("row_version", Integer, nullable=False), *columns(), sqlite_strict=True)
+    version = Table(layout.version_table, metadata,
+        Column("row_id", Integer, primary_key=True), Column("row_version", Integer, primary_key=True),
+        Column("body", Text, nullable=False), *columns(),
+        ForeignKeyConstraint(["row_id", "row_version"], [identity.c.row_id, identity.c.row_version],
+                             deferrable=True, initially="DEFERRED"),
+        sqlite_strict=True, sqlite_with_rowid=False)
+    upsert = insert(current)
+    upsert = upsert.on_conflict_do_update(index_elements=[current.c.row_id], set_={
+        name: upsert.excluded[name] for name in ("row_version", *layout.value_columns, "r")})
+    return current, version, upsert, version.insert()
 
 
 def _version_triggers(layout: Layout) -> tuple[str, ...]:
@@ -234,13 +283,9 @@ def _identity_trigger(layout: Layout) -> str:
 
 
 def _create_tables(conn, layout: Layout) -> None:
-    columns = _columns(layout)
-    conn.execute(f"CREATE TABLE {layout.current_table}(row_id INTEGER PRIMARY KEY REFERENCES items(row_id), "
-                 f"row_version INTEGER NOT NULL, {', '.join(columns)}) STRICT")
-    conn.execute(f"CREATE TABLE {layout.version_table}(row_id INTEGER NOT NULL, row_version INTEGER NOT NULL, "
-                 f"body TEXT NOT NULL, {', '.join(columns)}, PRIMARY KEY(row_id,row_version), "
-                 "FOREIGN KEY(row_id,row_version) REFERENCES version_identity(row_id,row_version) "
-                 "DEFERRABLE INITIALLY DEFERRED) STRICT, WITHOUT ROWID")
+    current, version, _, _ = _declarations(layout)
+    conn.execute(CreateTable(current))
+    conn.execute(CreateTable(version))
     for statement in _version_triggers(layout):
         conn.execute(statement)
 
@@ -406,11 +451,9 @@ def version_values(conn, row_id: int, row_version: int) -> tuple[dict[str, Any],
 
 
 def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded) -> None:
-    names = (*layout.value_columns, "r")
-    conn.execute(f"INSERT INTO {layout.current_table}(row_id,row_version,{','.join(names)}) "
-                 f"VALUES(?,?,{','.join('?' for _ in names)}) ON CONFLICT(row_id) DO UPDATE SET "
-                 + ",".join(f"{name}=excluded.{name}" for name in ("row_version", *names)),
-                 (row_id, row_version, *encoded))
+    _, _, upsert, _ = _declarations(layout)
+    conn.execute(upsert, {"row_id": row_id, "row_version": row_version,
+                        **dict(zip((*layout.value_columns, "r"), encoded, strict=True))})
 
 
 def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values: Mapping[str, Any],
@@ -418,12 +461,11 @@ def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values
     """Write typed current/version payloads and their identity in the caller's transaction."""
     encoded = encode_row(layout, values)
     _upsert_current(conn, layout, row_id, row_version, encoded)
-    names = ",".join(layout.value_columns)
-    marks = ",".join("?" for _ in range(len(encoded)))
-    conn.execute(f"INSERT INTO {layout.version_table}(row_id,row_version,body,{names},r) VALUES(?,?,?,{marks})",
-                 (row_id, row_version, body, *encoded))
-    conn.execute("INSERT INTO version_identity VALUES(?,?,?,?,?,?)",
-                 (row_id, row_version, TYPED_V1, payload_hash, txn_id, schema_version))
+    _, _, _, insert_version = _declarations(layout)
+    conn.execute(insert_version, {"row_id": row_id, "row_version": row_version, "body": body,
+                                 **dict(zip((*layout.value_columns, "r"), encoded, strict=True))})
+    conn.execute(tables.INSERT_IDENTITY, {"row_id": row_id, "row_version": row_version,
+        "encoding": TYPED_V1, "payload_hash": payload_hash, "txn_id": txn_id, "schema_version": schema_version})
 
 
 # --- forward migration --------------------------------------------------------

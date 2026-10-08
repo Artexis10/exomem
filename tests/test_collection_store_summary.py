@@ -148,7 +148,7 @@ def _seed(store, cid, count):
         if typed:
             ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
             for key, values in seeded:
-                typed_storage.write_version(tx, typed, row_id=ids[key], row_version=1, values=values, body="",
+                typed_storage.write_version(store.handle, typed, row_id=ids[key], row_version=1, values=values, body="",
                                             payload_hash=tokens.payload_hash(1, key, values, ""), txn_id=txn,
                                             schema_version=1)
 
