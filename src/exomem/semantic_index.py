@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -269,8 +269,13 @@ def selected_parent_index_state(
     try:
         definitions = instances.page_definitions(root, neutral.path, dict(neutral.frontmatter), ("categories", "relations"))
     except (ValueError, OSError):
-        # Missing extension authority cannot disable admitted core units or raw reads.
-        return replace(neutral, definitions_unavailable=True)
+        # Raw reads stay served; only units no hidden heading could change remain.
+        safe = semantic_units.core_safe_occurrences(neutral.candidates) if neutral.candidates else frozenset()
+        units = tuple(
+            unit for unit in neutral.document.units
+            if semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash) in safe
+        )
+        return replace(neutral, document=replace(neutral.document, units=units), definitions_unavailable=True)
     language = definitions.snapshots["categories"].typed
     relations = definitions.snapshots["relations"].typed
     language_hash, relation_hash = _registry_hashes(language, relations)
@@ -280,7 +285,7 @@ def selected_parent_index_state(
         neutral.body,
         candidates=neutral.candidates,
         path=neutral.path, parent_ref=neutral.parent_ref, validate=True,
-        language_registry=semantic_language_registry.for_attached_projects(language, _page_projects(neutral.frontmatter)),
+        language_registry=semantic_language_registry.for_attached_projects(language, page_projects(neutral.frontmatter)),
         relation_registry=relations, include_legacy_relations=True, retain_unknown_relations=True,
         project=None, page_type=str(neutral.frontmatter.get("type") or "") or None,
     )
@@ -370,21 +375,146 @@ def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
     }
 
 
-def interpret_structure(
-    root: Path, path: str, metadata: Mapping[str, Any],
-) -> tuple[semantic_units.SelectedStructure, instances.PageDefinitions, dict[str, Any]]:
-    """Admit metadata's canonical instance and apply the existing summary parser."""
-    if not metadata.get("structural_complete") or metadata.get("parser_version") != PARSER_VERSION:
-        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
-    frontmatter = yaml.safe_load(metadata["frontmatter_yaml"])
-    definitions = instances.page_definitions(root, path, frontmatter, ("categories", "relations"))
-    language = semantic_language_registry.for_attached_projects(definitions.snapshots["categories"].typed, _page_projects(frontmatter))
-    document = semantic_units.interpret_structural_summary(
-        metadata["structure"], language_registry=language,
-        relation_registry=definitions.snapshots["relations"].typed,
-        page_type=str(frontmatter.get("type") or "") or None,
-    )
-    return document, definitions, frontmatter
+#: Registry subjects one page interpretation admits together.
+INTERPRETATION_SUBJECTS = ("categories", "relations", "entity-types")
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedParent:
+    """One stored parent interpreted for one operation's admitted instance.
+
+    `definitions` is None when the page's selected instance is unavailable to
+    this operation; `structure` then holds only core-safe units and is marked
+    incomplete. Shared sidecars never store this object.
+    """
+
+    path: str
+    metadata: Mapping[str, Any]
+    frontmatter: Mapping[str, Any]
+    structure: semantic_units.SelectedStructure
+    definitions: instances.PageDefinitions | None
+
+    @property
+    def instance_id(self) -> str | None:
+        return self.definitions.instance_id if self.definitions is not None else None
+
+    @property
+    def relations(self) -> relation_registry.RelationRegistry:
+        if self.definitions is None:
+            return relation_registry.core_registry()
+        return self.definitions.snapshots["relations"].typed
+
+    @property
+    def language(self) -> semantic_language_registry.SemanticLanguageRegistry:
+        if self.definitions is None:
+            return semantic_language_registry.core_registry()
+        return self.definitions.snapshots["categories"].typed
+
+    @property
+    def entity_types(self):
+        from . import entity_types
+
+        if self.definitions is None:
+            return entity_types.core_registry()
+        return self.definitions.snapshots["entity-types"].typed
+
+    @property
+    def page_type(self) -> str | None:
+        return str(self.frontmatter.get("type") or "") or None
+
+
+class Interpretations:
+    """One operation's admitted page interpretations, keyed by stored source.
+
+    The operation owns this map and discards it with the request: admitted
+    snapshots are memoized per selected instance, and each parent summary is
+    interpreted at most once. No caller-independent cache retains a result.
+    """
+
+    def __init__(self, vault_root: Path) -> None:
+        self.root = Path(vault_root)
+        self._snapshots: dict[str | None, Mapping[str, Any] | None] = {}
+        self._parents: dict[tuple[str, str], SelectedParent] = {}
+
+    def snapshots(self, scope: str | None) -> Mapping[str, Any] | None:
+        """One instance's admitted snapshots, or None when this caller cannot use it."""
+        from .vocabulary import registry, registry_spec
+
+        scope = None if scope == instances.PUBLIC_INSTANCE else scope
+        if scope not in self._snapshots:
+            try:
+                specs = [instances.select(self.root, registry_spec(subject), scope)
+                         for subject in INTERPRETATION_SUBJECTS]
+                self._snapshots[scope] = {
+                    "binding": specs[-1].binding_revision,
+                    "snapshots": {spec.name: registry.load(spec, self.root) for spec in specs},
+                }
+            except (ValueError, OSError):
+                self._snapshots[scope] = None
+        return self._snapshots[scope]
+
+    def admitted_instances(self) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+        """Every configured instance this caller may interpret, public first.
+
+        Readers use it only to widen conservative candidate discovery for a
+        shared core meaning; each page still keeps its own selected meaning.
+        """
+        try:
+            document = instances.configuration(self.root)
+        except (ValueError, OSError):
+            return ()
+        scopes = [None, *sorted((document or {}).get("private", {}))]
+        return tuple(
+            (scope or instances.PUBLIC_INSTANCE, selected["snapshots"])
+            for scope in scopes
+            if (selected := self.snapshots(scope)) is not None
+        )
+
+    def definitions(self, path: str, frontmatter: Mapping[str, Any]) -> instances.PageDefinitions | None:
+        """The page's admitted definitions, or None when its instance is unavailable."""
+        try:
+            scope = instances.page_scope(self.root, path, dict(frontmatter))
+        except (ValueError, OSError):
+            return None
+        selected = self.snapshots(scope)
+        if selected is None:
+            return None
+        return instances.PageDefinitions(
+            scope or instances.PUBLIC_INSTANCE, selected["binding"], selected["snapshots"],
+            path, dict(frontmatter),
+        )
+
+    def parent(self, path: str, metadata: Mapping[str, Any]) -> SelectedParent:
+        """Interpret one stored parent summary; incomplete coverage raises ValueError."""
+        if not metadata.get("structural_complete") or metadata.get("parser_version") != PARSER_VERSION:
+            raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+        key = (path, str(metadata.get("parent_source_hash") or ""))
+        cached = self._parents.get(key)
+        if cached is not None:
+            return cached
+        frontmatter = yaml.safe_load(metadata["frontmatter_yaml"]) or {}
+        definitions = self.definitions(path, frontmatter)
+        language = (
+            definitions.snapshots["categories"].typed if definitions is not None
+            else semantic_language_registry.core_registry()
+        )
+        structure = semantic_units.interpret_structural_summary(
+            metadata["structure"],
+            language_registry=semantic_language_registry.for_attached_projects(
+                language, page_projects(frontmatter),
+            ),
+            relation_registry=(
+                definitions.snapshots["relations"].typed if definitions is not None
+                else relation_registry.core_registry()
+            ),
+            page_type=str(frontmatter.get("type") or "") or None,
+            parent_ref=metadata.get("parent_ref"),
+            path=path,
+            definitions_available=definitions is not None,
+        )
+        selected = SelectedParent(path, metadata, frontmatter, structure, definitions)
+        self._parents[key] = selected
+        return selected
 
 
 def _registry_hashes(
@@ -406,7 +536,7 @@ def current_registry_identity(vault_root: Path) -> tuple[int, str, str]:
     return (PARSER_VERSION, *hashes)
 
 
-def _page_projects(frontmatter: Mapping[Any, Any]) -> tuple[str, ...]:
+def page_projects(frontmatter: Mapping[Any, Any]) -> tuple[str, ...]:
     projects: set[str] = set()
     project = frontmatter.get("project")
     if project:
@@ -460,37 +590,41 @@ def _sqlite_unit_rows(path: Path, table: str) -> dict[str, _SidecarParentRows]:
 
 
 def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
+    """Stored structural occurrences per parent, keyed by occurrence key."""
+    from .epistemic_graph import CANDIDATE_KIND
+
     if not path.exists():
         return {}
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            node_rows = conn.execute("SELECT path, metadata FROM graph_nodes").fetchall()
+            node_rows = conn.execute(
+                "SELECT path, metadata FROM graph_nodes WHERE kind = ?", (CANDIDATE_KIND,)
+            ).fetchall()
             edge_rows = conn.execute(
-                "SELECT source_path, metadata FROM graph_edges WHERE relation_type = 'derived_from'"
+                "SELECT source_path, metadata FROM graph_edges "
+                "WHERE origin IN ('semantic_unit', 'semantic_block')"
             ).fetchall()
         finally:
             conn.close()
     except sqlite3.Error:
         return {}
     grouped: dict[str, dict[str, set[Any]]] = {}
+
+    def values_for(parent_path: Any) -> dict[str, set[Any]]:
+        return grouped.setdefault(
+            str(parent_path), {"keys": set(), "stamps": set(), "derived": set()}
+        )
+
     for parent_path, raw_metadata in node_rows:
         try:
             metadata = json.loads(raw_metadata)
         except (TypeError, ValueError):
             continue
-        if metadata.get("record_type") != "semantic_unit" or not metadata.get("unit_ref"):
+        if not isinstance(metadata, dict) or not metadata.get("occurrence_key"):
             continue
-        values = grouped.setdefault(
-            str(parent_path),
-            {
-                "unit_refs": set(),
-                "parent_refs": set(),
-                "stamps": set(),
-                "derived_refs": set(),
-            },
-        )
-        values["unit_refs"].add(str(metadata["unit_ref"]))
+        values = values_for(parent_path)
+        values["keys"].add(str(metadata["occurrence_key"]))
         values["stamps"].add(
             (
                 str(metadata.get("parent_generation") or ""),
@@ -503,27 +637,31 @@ def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
             metadata = json.loads(raw_metadata)
         except (TypeError, ValueError):
             continue
-        if metadata.get("record_type") != "semantic_unit" or not metadata.get("unit_ref"):
-            continue
-        values = grouped.setdefault(
-            str(parent_path),
-            {
-                "unit_refs": set(),
-                "parent_refs": set(),
-                "stamps": set(),
-                "derived_refs": set(),
-            },
-        )
-        values["derived_refs"].add(str(metadata["unit_ref"]))
+        if isinstance(metadata, dict) and metadata.get("occurrence_key"):
+            values_for(parent_path)["derived"].add(str(metadata["occurrence_key"]))
     return {
         parent_path: _SidecarParentRows(
-            frozenset(values["unit_refs"]),
+            frozenset(values["keys"]),
             frozenset(),
             frozenset(values["stamps"]),
-            frozenset(values["derived_refs"]),
+            frozenset(values["derived"]),
         )
         for parent_path, values in grouped.items()
     }
+
+
+def _unit_refs(state: SemanticParentIndexState) -> frozenset[str]:
+    return frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
+
+
+def _occurrence_keys(state: SemanticParentIndexState) -> frozenset[str]:
+    """Every structural occurrence a neutral sidecar stores for this parse."""
+    if state.candidates is None:
+        return frozenset()
+    return frozenset(
+        semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
+        for unit in semantic_units.candidate_units(state.candidates)
+    )
 
 
 def _trash_original_paths(vault_root: Path) -> frozenset[str]:
@@ -557,12 +695,21 @@ def audit_semantic_unit_sidecars(
     expected_by_ref = {
         state.parent_ref: path for path, state in expected.items() if state.parent_ref is not None
     }
-    sidecars: list[tuple[str, dict[str, _SidecarParentRows]]] = []
+    # Each sidecar with the keys it stores for one parse: selected unit refs, or
+    # the structural occurrences shared rows hold before any interpretation.
+    sidecars: list[
+        tuple[
+            str,
+            dict[str, _SidecarParentRows],
+            Callable[[SemanticParentIndexState], frozenset[str]],
+        ]
+    ] = []
     if include_lexical:
         sidecars.append(
             (
                 "lexical",
                 _sqlite_unit_rows(lexstore.lexical_path(vault_root), "semantic_units"),
+                _unit_refs,
             )
         )
     if include_vectors:
@@ -570,14 +717,17 @@ def audit_semantic_unit_sidecars(
             (
                 "vector",
                 _sqlite_unit_rows(index_paths.sidecar_path(vault_root), "semantic_unit_vectors"),
+                _unit_refs,
             )
         )
     if include_graph:
-        sidecars.append(("graph", _graph_unit_rows(epistemic_graph.sidecar_path(vault_root))))
+        sidecars.append(
+            ("graph", _graph_unit_rows(epistemic_graph.sidecar_path(vault_root)), _occurrence_keys)
+        )
     trashed = _trash_original_paths(vault_root)
     drift: list[SemanticUnitSidecarDrift] = []
     generations_by_parent: dict[str, dict[str, frozenset[str]]] = {}
-    for sidecar, actual_by_parent in sidecars:
+    for sidecar, actual_by_parent, expected_keys in sidecars:
         for parent_path in sorted(set(expected) | set(actual_by_parent)):
             state = expected.get(parent_path)
             actual = actual_by_parent.get(parent_path)
@@ -607,9 +757,7 @@ def audit_semantic_unit_sidecars(
                     )
                 )
                 continue
-            expected_refs = frozenset(
-                unit.unit_ref for unit in state.document.units if unit.unit_ref is not None
-            )
+            expected_refs = expected_keys(state)
             if actual is None:
                 if expected_refs:
                     drift.append(

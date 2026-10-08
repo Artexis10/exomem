@@ -3304,9 +3304,13 @@ def _resolve_relation_filter(
             f"relation_direction must be one of {list(_RELATION_DIRECTIONS)}, "
             f"got {relation_direction!r}",
         )
-    from . import epistemic_graph, relation_registry, traversal_profiles
+    from . import epistemic_graph, traversal_profiles
 
-    registry = relation_registry.load_registry(vault_root)
+    graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    # An anchored filter inherits its anchor page's instance; otherwise public.
+    registry = graph_index.relation_query_registry(anchor=relation_of)
+    if registry is None:
+        raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
     for raw in relations or ():
         resolution = registry.resolve(raw)
         if resolution.canonical is None or resolution.status == "unregistered":
@@ -3319,7 +3323,6 @@ def _resolve_relation_filter(
                 },
             )
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
-    graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     result = graph_index.relation_participants(
         relations or (), anchor=relation_of, direction=relation_direction
     )

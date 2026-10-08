@@ -8020,6 +8020,7 @@ class LexicalStore:
                 semantic_language_registry.unit_query_plan(query_language, categories=categories or None, kinds=kinds or None)
             ])
             selected = {}
+            interpretations = semantic_index.Interpretations(self.vault_root)
             for path, raw_metadata in conn.execute(f"SELECT path, structure_json FROM pages WHERE {col} = 1 ORDER BY path"):
                 if (allowed_parent_paths is not None and path not in allowed_parent_paths
                         or admitted_parent_paths is not None and path not in admitted_parent_paths
@@ -8028,8 +8029,10 @@ class LexicalStore:
                 if raw_metadata is None:
                     raise RegistryError("REGISTRY_UNAVAILABLE: structural coverage is incomplete")
                 metadata = json.loads(raw_metadata)
-                document, definitions, _frontmatter = semantic_index.interpret_structure(self.vault_root, path, metadata)
-                selected[path] = ({unit.occurrence_key: unit for unit in document.units}, definitions, metadata)
+                parent = interpretations.parent(path, metadata)
+                if parent.definitions is None:
+                    raise ValueError("REGISTRY_UNAVAILABLE: page definitions are unavailable")
+                selected[path] = ({unit.occurrence_key: unit for unit in parent.structure.units}, parent.definitions, metadata)
         except (ValueError, KeyError, TypeError, OSError) as error:
             # Missing definitions cannot be reported as an exact empty semantic result.
             raise RegistryError("REGISTRY_UNAVAILABLE: selected unit interpretation is unavailable") from error

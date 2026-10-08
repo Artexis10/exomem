@@ -77,6 +77,7 @@ class Context:
     _pages: dict[str, Any] = field(default_factory=dict)
     _review: dict[str, Any] = field(default_factory=dict)
     _graph: list[Any] = field(default_factory=list)
+    _graph_view: list[Any] = field(default_factory=list)
     _resolver: list[Any] = field(default_factory=list)
     _authored: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
     #: One tick's memo, shared by every page it processes (the category
@@ -112,7 +113,19 @@ class Context:
             self._graph.append(conn)
         return self._graph[0]
 
+    def graph_view(self) -> Any:
+        """This page's admitted reading of the snapshot: units and relations
+        take each authoring page's selected meaning before they are counted."""
+        if not self._graph_view:
+            from . import epistemic_graph
+
+            view = epistemic_graph.GraphView(self.vault_root, self.graph())
+            view.register_relation_functions()
+            self._graph_view.append(view)
+        return self._graph_view[0]
+
     def close(self) -> None:
+        self._graph_view.clear()
         while self._graph:
             self._graph.pop().close()
         while self._members:
@@ -599,11 +612,11 @@ _HYDRATION_TYPES = (
 )
 
 _ENTITY_TARGETS_SQL = (
-    "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
+    "SELECT d.path, {edge} FROM graph_edges e JOIN graph_nodes d "
     "ON d.node_key = e.dst_page_key "
     "WHERE e.source_path = ? AND d.page_type = 'entity' AND d.path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
-    "ORDER BY d.path LIMIT ?"
+    "ORDER BY d.path"
 )
 
 #: A graph file node `f` dated after the bound date, as `_date` reads its
@@ -614,8 +627,8 @@ _NEWER_THAN = (
 )
 
 _CONTRIBUTORS_SQL = (
-    "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id, "
-    "f.title, f.lifecycle_status "
+    "SELECT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id, "
+    "f.title, f.lifecycle_status, {edge} "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_page_key = ? AND e.source_path <> ? "
@@ -624,7 +637,7 @@ _CONTRIBUTORS_SQL = (
     f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
     "AND b.dst_page_key = ('file:' || e.source_path)) "
-    "ORDER BY e.source_path, e.src_key"
+    "ORDER BY e.source_path, e.src_key, e.rowid"
 )
 
 
@@ -646,17 +659,25 @@ def _date(updated: Any, origin: Any) -> str:
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
     """The entity pages this page is about: itself, and what it links (at most 8)."""
+    from . import epistemic_graph
+
     graph = ctx.graph()
+    view = ctx.graph_view()
     own = graph.execute(
         "SELECT page_type FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
         (f"file:{rel_path}",),
     ).fetchone()
-    linked = [
-        str(row[0])
-        for row in graph.execute(
-            _ENTITY_TARGETS_SQL, (rel_path, rel_path, _HYDRATION_ENTITIES_PER_PAGE)
-        )
-    ]
+    linked: list[str] = []
+    for path, *edge_row in graph.execute(
+        _ENTITY_TARGETS_SQL.format(edge=epistemic_graph.EDGE_COLUMNS), (rel_path, rel_path)
+    ):
+        # Only a link this page's selected meaning authors names an entity.
+        edge = view.edge_row(edge_row)
+        if edge is None or edge.get("relation_type") == "derived_from" or str(path) in linked:
+            continue
+        linked.append(str(path))
+        if len(linked) >= _HYDRATION_ENTITIES_PER_PAGE:
+            break
     entities = [rel_path] if own is not None and own[0] == "entity" else []
     return [*entities, *(path for path in linked if path not in entities)]
 
@@ -710,8 +731,11 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     if not ctx.live_status(node[1]):
         return None
     entity_date = _date(node[2], node[3])
+    from . import epistemic_graph
+
+    view = ctx.graph_view()
     rows = graph.execute(
-        _CONTRIBUTORS_SQL,
+        _CONTRIBUTORS_SQL.format(edge=epistemic_graph.EDGE_COLUMNS),
         (
             f"file:{entity}",
             entity,
@@ -722,8 +746,18 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     )
     contributors: dict[str, dict[str, Any]] = {}
     accepted = 0
-    for path, src_key, _updated, _origin, exomem_id, title, _status in rows:
+    seen: set[tuple[str, str]] = set()
+    for path, src_key, _updated, _origin, exomem_id, title, _status, *edge_row in rows:
         path = str(path)
+        # A candidate its page does not author spends no contributor slot.
+        edge = view.edge_row(edge_row)
+        if (
+            edge is None
+            or edge.get("relation_type") == "derived_from"
+            or (path, str(src_key)) in seen
+        ):
+            continue
+        seen.add((path, str(src_key)))
         if _governed(ctx, path, keep) is None:
             continue
         accepted += 1
@@ -734,23 +768,20 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
         if str(src_key) == f"file:{path}":
             entry["page_level"] = True
         else:
-            unit = graph.execute(
-                "SELECT unit_ref FROM graph_nodes WHERE node_key = ? AND unit_ref IS NOT NULL",
-                (str(src_key),),
-            ).fetchone()
-            if unit is not None:
-                entry["units"].add(str(unit[0]))
+            unit = view.node(str(src_key))
+            unit_ref = ((unit or {}).get("metadata") or {}).get("unit_ref")
+            if unit_ref:
+                entry["units"].add(str(unit_ref))
         if accepted >= _HYDRATION_ROW_LIMIT:
             break
     for path, entry in list(contributors.items()):
         if entry["page_level"]:
+            parent = view.parent(path)
             entry["units"].update(
-                str(row[0])
-                for row in graph.execute(
-                    "SELECT unit_ref FROM graph_nodes WHERE path = ? "
-                    "AND unit_ref IS NOT NULL ORDER BY unit_ref LIMIT ?",
-                    (path, _HYDRATION_UNITS_PER_PAGE),
-                )
+                sorted(
+                    unit.unit_ref for unit in (parent.structure.units if parent else ())
+                    if unit.unit_ref is not None
+                )[:_HYDRATION_UNITS_PER_PAGE]
             )
         if not entry["units"]:
             contributors.pop(path)
@@ -1512,18 +1543,22 @@ def _in_scope(registry: Any, key: str, projects: tuple[str, ...], page_type: str
 
 def _page_labels(ctx: Context, rel_path: str) -> list[str]:
     """A page's semantic-unit category labels as authored, at most 16, from the graph."""
-    import json
 
+    from . import epistemic_graph
+
+    view = ctx.graph_view()
     labels: list[str] = []
-    for (metadata,) in ctx.graph().execute(
-        "SELECT metadata FROM graph_nodes WHERE path = ? AND unit_ref IS NOT NULL "
+    for row in ctx.graph().execute(
+        f"{epistemic_graph.NODE_SELECT} WHERE path = ? AND kind = ? "
         "ORDER BY line_start, node_key",
-        (rel_path,),
+        (rel_path, epistemic_graph.CANDIDATE_KIND),
     ):
-        try:
-            label = (json.loads(metadata) or {}).get("category_raw")
-        except (TypeError, ValueError):
+        # Only units this page's selected meaning emits carry authored labels.
+        unit = view.node_row(row)
+        metadata = (unit or {}).get("metadata") or {}
+        if not metadata.get("unit_ref"):
             continue
+        label = metadata.get("category_raw")
         if isinstance(label, str) and label.strip() and label.strip() not in labels:
             labels.append(label.strip())
         if len(labels) >= PER_PAGE_TERMS:
@@ -1683,11 +1718,32 @@ _LINKED_SUBJECTS_PER_PAGE = PER_PAGE_TERMS
 #: Linking pages read per subject; on the request path, released ones only.
 _LINKER_ROW_LIMIT = 64
 
+def _live_edge(alias: str) -> str:
+    """An edge its authoring page's selected meaning keeps.
+
+    The SQL functions are registered by `Context.graph_view`.
+    """
+    from . import epistemic_graph
+
+    columns = epistemic_graph.edge_columns(alias)
+    return f"exomem_edge_status({columns}) IS NOT NULL"
+
+
+def _authored_link(alias: str) -> str:
+    """A kept page-to-page link other than a citation."""
+    from . import epistemic_graph
+
+    columns = epistemic_graph.edge_columns(alias)
+    return (
+        f"{_live_edge(alias)} AND COALESCE(exomem_edge_relation({columns}), '') <> 'derived_from'"
+    )
+
+
 _LINKED_SUBJECTS_SQL = (
     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
     "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
     "WHERE e.source_path = ? AND d.path <> ? "
-    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "AND {link} "
     "ORDER BY d.path"
 )
 
@@ -1698,10 +1754,10 @@ _RECAPS_SQL = (
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_page_key = ? AND substr(e.source_path, 1, ?) = ? "
-    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "AND {link} "
     f"AND {_NEWER_THAN} "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
-    "AND b.dst_page_key = ('file:' || e.source_path)) "
+    "AND b.dst_page_key = ('file:' || e.source_path) AND {back}) "
     "ORDER BY e.source_path"
 )
 
@@ -1710,7 +1766,7 @@ _REFERRERS_SQL = (
     "SELECT DISTINCT e.source_path FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_page_key = ? AND e.source_path <> ? "
-    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "AND {link} "
     "ORDER BY e.source_path"
 )
 
@@ -1762,12 +1818,14 @@ def subject_rows_touched(ctx: Context, paths: list[str]) -> set[str]:
     if paths:
         marks = ",".join("?" for _ in paths)
         try:
+            ctx.graph_view()
             linked = {
                 str(row[0])
                 for row in ctx.graph().execute(
                     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
                     "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
-                    f"WHERE e.source_path IN ({marks})",
+                    f"WHERE e.source_path IN ({marks}) "
+                    f"AND {_live_edge('e')}",
                     paths,
                 )
             }
@@ -1797,7 +1855,10 @@ def _linked_subjects(ctx: Context, rel_path: str) -> list[str]:
 
     keep = egress.release_walk_filter(ctx.vault_root)
     linked = []
-    for (path,) in ctx.graph().execute(_LINKED_SUBJECTS_SQL, (rel_path, rel_path)):
+    ctx.graph_view()
+    for (path,) in ctx.graph().execute(
+        _LINKED_SUBJECTS_SQL.format(link=_authored_link("e")), (rel_path, rel_path)
+    ):
         if _governed(ctx, str(path), keep) is not None:
             linked.append(str(path))
             if len(linked) >= _LINKED_SUBJECTS_PER_PAGE:
@@ -1824,8 +1885,8 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     rows = _released_rows(
         (
             row
-            for row in ctx.graph().execute(
-                _RECAPS_SQL,
+            for row in ctx.graph_view().conn.execute(
+                _RECAPS_SQL.format(link=_authored_link("e"), back=_live_edge("b")),
                 (
                     f"file:{subject}",
                     len(prefix),
@@ -1919,12 +1980,15 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     if page is None or _self_described(page):
         return None
     graph = ctx.graph()
+    ctx.graph_view()
     referrers = [
         str(row[0])
         for row in _released_rows(
             (
                 row
-                for row in graph.execute(_REFERRERS_SQL, (f"file:{subject}", subject))
+                for row in graph.execute(
+                    _REFERRERS_SQL.format(link=_authored_link("e")), (f"file:{subject}", subject)
+                )
                 if _governed(ctx, str(row[0]), keep) is not None
             ),
             keep,

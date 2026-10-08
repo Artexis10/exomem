@@ -677,7 +677,13 @@ def test_graph_schema_persists_resolution_context_and_review_inputs(tmp_path: Pa
         "review_eligible",
         "activation_signal_version",
     } <= node_columns
-    assert context == ("Project Alpha", "insight", "claim", "file", "semantic_relation")
+    # The unit's kind is a selected meaning: shared rows leave it to each reader.
+    assert context == ("Project Alpha", "insight", None, "file", "semantic_relation")
+    served = next(
+        edge for edge in index.edges() if edge["raw_relation"] == "applies_to"
+        and edge["origin"] == "semantic_relation"
+    )
+    assert served["resolver_source_kind"] == "claim"
     assert file_row[:-1] == (
         "insight",
         "active",

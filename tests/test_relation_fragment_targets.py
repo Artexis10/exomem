@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -130,10 +129,6 @@ def _built(tmp_path: Path) -> tuple[Path, epistemic_graph.EpistemicGraphIndex]:
     return root, index
 
 
-def _unit_key(unit_ref: str) -> str:
-    return "unit:" + hashlib.sha256(unit_ref.encode("utf-8")).hexdigest()
-
-
 def _node(index: epistemic_graph.EpistemicGraphIndex, path: str, anchor: str) -> dict:
     (node,) = [n for n in index.nodes(path=path) if n["anchor"] == anchor and n["kind"] != "file"]
     return node
@@ -155,7 +150,7 @@ def test_note_level_fragment_lands_on_the_unit_and_a_bare_target_stays_on_the_pa
 
     supports = _authored(index, origin="markdown_relation", relation_type="supports")
     compact = _node(index, TARGET, "compact-1")
-    assert supports["dst_key"] == compact["node_key"] == _unit_key(compact["metadata"]["unit_ref"])
+    assert supports["dst_key"] == compact["node_key"]
     assert supports["src_key"] == epistemic_graph._file_key(SOURCE)
     assert supports["source_anchor"].startswith("line-")
     assert supports["metadata"]["fragment_resolution"] == "unit"
@@ -248,7 +243,7 @@ def test_two_pages_answering_the_same_unit_name_the_page_not_the_unit_key(
     conn = sqlite3.connect(index.path)
     try:
         candidates = epistemic_graph._shared_resolution_target_candidates(
-            conn, SOURCE, epistemic_graph._file_key(SOURCE)
+            conn, epistemic_graph.GraphView(root, conn), SOURCE, epistemic_graph._file_key(SOURCE)
         )
     finally:
         conn.close()
@@ -293,23 +288,24 @@ def _consumer_vault(tmp_path: Path) -> tuple[Path, epistemic_graph.EpistemicGrap
 
 
 def _lift(conn, root) -> bool:
-    registry = epistemic_graph.EpistemicGraphIndex(root).registry
     found = epistemic_graph._unit_relation_lift_candidates(
-        conn, registry, SOURCE, epistemic_graph._file_key(SOURCE)
+        conn, epistemic_graph.GraphView(root, conn), SOURCE, epistemic_graph._file_key(SOURCE)
     )
     return [(c["to"], c["relation_type"]) for c in found] == [(ORG, "answers")]
 
 
 def _sensed(conn, root) -> bool:
-    facts = sensed_model.page_facts(conn, SOURCE)
+    view = epistemic_graph.GraphView(root, conn)
+    facts = sensed_model.page_facts(conn, SOURCE, view)
     return (
         facts.neighbours == {ORG}
         and facts.supersession == {ORG}
-        and SOURCE in sensed_model.page_facts(conn, ORG).neighbours
+        and SOURCE in sensed_model.page_facts(conn, ORG, view).neighbours
     )
 
 
 def _vocabulary(conn, root) -> bool:
+    epistemic_graph.GraphView(root, conn).register_relation_functions()
     anchor = vocabulary_projection._anchor(conn, SOURCE)
     rows = vocabulary_projection._candidate_rows(
         conn, SOURCE, ["insight", "entity"], anchor, ["", ""]

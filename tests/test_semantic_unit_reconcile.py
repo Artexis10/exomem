@@ -272,11 +272,11 @@ Parent conclusion.
         ).fetchall()
         for node_key, raw_metadata in rows:
             metadata = json.loads(raw_metadata)
-            if metadata.get("record_type") != "semantic_unit":
+            if not metadata.get("occurrence_key"):
                 continue
             metadata.update(
                 {
-                    "unit_ref": "old-overlap-ref",
+                    "occurrence_key": "old-overlap-occurrence",
                     "parent_generation": "pre-hierarchy",
                     "parser_version": semantic_index.PARSER_VERSION - 1,
                 }
@@ -287,14 +287,12 @@ Parent conclusion.
             )
         edge_rows = conn.execute(
             "SELECT edge_key, metadata FROM graph_edges "
-            "WHERE source_path = ? AND relation_type = 'derived_from'",
+            "WHERE source_path = ? AND origin IN ('semantic_unit', 'semantic_block')",
             (_REL,),
         ).fetchall()
         for edge_key, raw_metadata in edge_rows:
             metadata = json.loads(raw_metadata)
-            if metadata.get("record_type") != "semantic_unit":
-                continue
-            metadata["unit_ref"] = "old-overlap-ref"
+            metadata["occurrence_key"] = "old-overlap-occurrence"
             conn.execute(
                 "UPDATE graph_edges SET metadata = ? WHERE edge_key = ?",
                 (json.dumps(metadata, sort_keys=True), edge_key),
@@ -364,12 +362,11 @@ def test_sidecar_parity_classifies_missing_mixed_moved_and_graph_edge_drift(
     try:
         edge = conn.execute(
             "SELECT edge_key, metadata FROM graph_edges "
-            "WHERE source_path = ? AND relation_type = 'derived_from' LIMIT 1",
+            "WHERE source_path = ? AND origin IN ('semantic_unit', 'semantic_block') LIMIT 1",
             (_REL,),
         ).fetchone()
         assert edge is not None
-        metadata = json.loads(edge[1])
-        assert metadata["record_type"] == "semantic_unit"
+        assert json.loads(edge[1])["occurrence_key"]
         conn.execute("DELETE FROM graph_edges WHERE edge_key = ?", (edge[0],))
         conn.commit()
     finally:

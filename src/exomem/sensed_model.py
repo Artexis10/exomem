@@ -311,8 +311,14 @@ def _link_key(raw: str) -> str:
     return key
 
 
-def page_facts(graph: sqlite3.Connection, rel_path: str) -> PageFacts | None:
-    """What the projection needs from one page, from the graph alone. None when absent."""
+def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts | None:
+    """What the projection needs from one page, from the graph alone. None when absent.
+
+    `view` is the operation's `epistemic_graph.GraphView` over `graph`: units
+    and relations carry their page's selected meaning, never a stored guess.
+    """
+    from . import epistemic_graph
+
     node = graph.execute(
         "SELECT origin_date, updated_date, lifecycle_status, source_hash FROM graph_nodes "
         "WHERE path=? AND kind='file'",
@@ -324,42 +330,48 @@ def page_facts(graph: sqlite3.Connection, rel_path: str) -> PageFacts | None:
     lifecycle = str(node[2] or "").strip().casefold()
     scope = sensing.QUESTIONS[sensing.PAIR_RELATION].unit_scope
     units: dict[str, Unit] = {}
-    for unit_ref, kind, category, text in graph.execute(
-        "SELECT unit_ref, kind, unit_category, text FROM graph_nodes "
-        "WHERE path=? AND kind != 'file' AND unit_ref IS NOT NULL ORDER BY unit_ref",
-        (rel_path,),
+    for row in graph.execute(
+        f"{epistemic_graph.NODE_SELECT} WHERE path=? AND kind=?",
+        (rel_path, epistemic_graph.CANDIDATE_KIND),
     ):
-        if not scope.admits(kind=str(kind or ""), category=category):
+        unit = view.node_row(row)
+        metadata = (unit or {}).get("metadata") or {}
+        unit_ref = metadata.get("unit_ref")
+        if not unit_ref or not scope.admits(
+            kind=str(unit["kind"] or ""), category=metadata.get("category")
+        ):
             continue
-        fed = sensing.extract_text(text)
+        fed = sensing.extract_text(unit["text"])
         if not fed or len(fed) > scope.max_chars:
             continue
         units.setdefault(str(unit_ref), Unit(str(unit_ref), fed, sensing.text_sha256(fed)))
     neighbours: set[str] = set()
     supersession: set[str] = set()
-    for other, relation in graph.execute(
-        "SELECT n.path, e.relation_type FROM graph_edges e "
+    for other, *edge_row in graph.execute(
+        f"SELECT n.path, {epistemic_graph.EDGE_COLUMNS} FROM graph_edges e "
         "JOIN graph_nodes n ON n.node_key = e.dst_page_key "
         "WHERE e.source_path = ? AND n.kind = 'file'",
         (rel_path,),
     ):
+        edge = view.edge_row(edge_row)
         other = str(other)
-        if other and other != rel_path:
+        if edge is not None and other and other != rel_path:
             neighbours.add(other)
-            if relation == "supersedes":
+            if edge.get("relation_type") == "supersedes":
                 supersession.add(other)
     file_key = graph.execute(
         "SELECT node_key FROM graph_nodes WHERE path=? AND kind='file'", (rel_path,)
     ).fetchone()
     if file_key is not None:
-        for other, relation in graph.execute(
-            "SELECT e.source_path, e.relation_type FROM graph_edges e WHERE e.dst_page_key = ?",
+        for edge_row in graph.execute(
+            f"SELECT {epistemic_graph.EDGE_COLUMNS} FROM graph_edges e WHERE e.dst_page_key = ?",
             (file_key[0],),
         ):
-            other = str(other)
-            if other and other != rel_path:
+            edge = view.edge_row(edge_row)
+            other = str((edge or {}).get("source_path") or "")
+            if edge is not None and other and other != rel_path:
                 neighbours.add(other)
-                if relation == "supersedes":
+                if edge.get("relation_type") == "supersedes":
                     supersession.add(other)
     link_keys = {
         _link_key(raw)
@@ -1161,7 +1173,7 @@ def _follow_pages(
             except dreamer_families.Deferred:
                 report.stop = "graph_unavailable"
                 break
-            facts = page_facts(graph, rel)
+            facts = page_facts(graph, rel, ctx.graph_view())
             vectors = (
                 stored_unit_vectors(vault_root, rel, fingerprint) if facts and facts.units else {}
             )

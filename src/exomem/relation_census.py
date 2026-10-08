@@ -349,26 +349,27 @@ class _Row(NamedTuple):
         return self.src_page != self.source_path or self.dst_page != self.source_path
 
 
+# Edge rows are read whole and served through the census's graph view, so a
+# candidate row counts with the relation its authoring page selects.
 _ROWS_SQL = (
-    "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, registry_status, "
-    "origin, source_path, source_anchor, resolver_source_kind, resolver_target_kind, "
-    "CASE WHEN registry_status = 'unregistered' "
-    "THEN json_extract(metadata, '$.line') END, "
-    "json_extract(metadata, '$.fragment_resolution'), "
-    "json_extract(metadata, '$.target_fragment') "
-    "FROM graph_edges WHERE origin NOT IN (?, ?)"
+    "SELECT e.resolver_source_kind, e.resolver_target_kind, {columns} "
+    "FROM graph_edges AS e WHERE e.origin NOT IN (?, ?)"
 )
 
 # Typed edges between two admitted pages, authored on an eligible page: the
-# population the edge-and-its-reverse checks run over, grouped in SQL.
+# population the edge-and-its-reverse checks run over, grouped in SQL. The
+# relation and status are the served ones (`GraphView.register_relation_functions`).
 _POPULATION_SQL = (
-    "FROM graph_edges AS e {join}"
+    "FROM (SELECT e.src_key, e.dst_key, "
+    "exomem_edge_relation({columns}) AS relation_type, "
+    "exomem_edge_status({columns}) AS registry_status "
+    "FROM graph_edges AS e "
+    "WHERE e.origin NOT IN ('semantic_unit', 'semantic_block', 'wikilink') "
+    "AND exomem_census_eligible(e.source_path)) AS e {{join}}"
     "JOIN graph_nodes AS s ON s.node_key = e.src_key "
     "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
-    "WHERE e.origin NOT IN ('semantic_unit', 'semantic_block', 'wikilink') "
-    "AND e.registry_status != 'unregistered' AND e.relation_type IS NOT NULL "
+    "WHERE e.registry_status != 'unregistered' AND e.relation_type IS NOT NULL "
     "AND e.relation_type != 'links_to' AND s.path != d.path "
-    "AND exomem_census_eligible(e.source_path) "
     "AND exomem_census_admitted(s.path) AND exomem_census_admitted(d.path)"
 )
 
@@ -376,7 +377,9 @@ _POPULATION_SQL = (
 class _Reader:
     """One open snapshot: pages in memory, edge rows streamed."""
 
-    def __init__(self, connection: sqlite3.Connection, keep: Keep) -> None:
+    def __init__(self, vault_root: Path, connection: sqlite3.Connection, keep: Keep) -> None:
+        from .epistemic_graph import CANDIDATE_STATUS, EDGE_COLUMNS, NODE_SELECT, GraphView
+
         self.connection = connection
         self._keep = keep
         self._verdicts: dict[str, bool] = {}
@@ -399,16 +402,16 @@ class _Reader:
                 entity_type=(entity or scope) if page_type == "entity" else None,
                 admitted=tier != "excluded" and self._path_ok(path),
             )
-        # Unit and block nodes, keyed for endpoint lookups: (page, kind, anchor).
-        # File nodes need no entry, since their key is `file:` plus the path.
-        self._units: dict[str, tuple[str, str, str | None]] = {}
-        self.question_pages: set[str] = set()
-        for key, kind, path, anchor in connection.execute(
-            "SELECT node_key, kind, path, anchor FROM graph_nodes WHERE kind != 'file'"
-        ):
-            self._units[key] = (path, kind, anchor)
-            if kind in _QUESTION_KINDS:
-                self.question_pages.add(path)
+        # Units are the ones each admitted page's selected interpretation emits;
+        # the view never interprets a page this census does not admit.
+        self.view = GraphView(vault_root, connection, keep=self.admitted)
+        self.view.register_relation_functions()
+        self._columns = EDGE_COLUMNS
+        self._candidate = CANDIDATE_STATUS
+        self._node_select = NODE_SELECT
+        # Served unit endpoints as (page, kind, anchor); None when no unit here.
+        self._units: dict[str, tuple[str, str, str | None] | None] = {}
+        self._question_pages: dict[str, bool] = {}
 
     def _path_ok(self, path: str) -> bool:
         cached = self._verdicts.get(path)
@@ -432,54 +435,62 @@ class _Reader:
         if key.startswith("file:"):
             page = self.pages.get(key[5:])
             return (page.path, "file", None) if page is not None and page.admitted else None
-        unit = self._units.get(key)
+        if key not in self._units:
+            row = self.connection.execute(
+                f"{self._node_select} WHERE node_key = ?", (key,)
+            ).fetchone()
+            node = self.view.node_row(row) if row is not None else None
+            self._units[key] = (
+                (node["path"], node["kind"], node["anchor"]) if node is not None else None
+            )
+        unit = self._units[key]
         if unit is not None and self.admitted(unit[0]):
             return unit
         return None
 
+    def question_page(self, path: str) -> bool:
+        """True when the admitted page's selected interpretation emits a question unit."""
+        if path not in self._question_pages:
+            parent = self.view.parent(path) if self.admitted(path) else None
+            self._question_pages[path] = parent is not None and any(
+                unit.kind in _QUESTION_KINDS for unit in parent.structure.units
+            )
+        return self._question_pages[path]
+
     def rows(self) -> Iterator[_Row]:
         """Every non-structural edge authored on an admitted page, streamed."""
-        for (
-            edge_key,
-            src_key,
-            dst_key,
-            relation,
-            raw_relation,
-            status,
-            origin,
-            source_path,
-            source_anchor,
-            source_kind,
-            target_kind,
-            line,
-            fragment,
-            target_fragment,
-        ) in self.connection.execute(_ROWS_SQL, _STRUCTURAL_ORIGINS):
-            if not self.author_ok(source_path):
+        for stored_source_kind, target_kind, *row in self.connection.execute(
+            _ROWS_SQL.format(columns=self._columns), _STRUCTURAL_ORIGINS
+        ):
+            edge = self.view.edge_row(row) if self.author_ok(str(row[10])) else None
+            if edge is None:
                 continue
-            source_end = self._endpoint(src_key)
-            target_end = self._endpoint(dst_key) if source_end is not None else None
+            status = edge["registry_status"]
+            metadata = edge["metadata"]
+            source_path = edge["source_path"]
+            source_end = self._endpoint(edge["src_key"])
+            target_end = self._endpoint(edge["dst_key"]) if source_end is not None else None
             in_view = target_end is not None
             src_path = source_end[0] if in_view else None
             dst_path, dst_kind, dst_anchor = target_end if in_view else (None, None, None)
             yield _Row(
-                edge_key,
-                relation,
-                raw_relation,
+                edge["edge_key"],
+                edge["relation_type"],
+                edge["raw_relation"],
                 status,
-                origin,
+                edge["origin"],
                 source_path,
-                source_anchor,
-                source_kind,
+                edge["source_anchor"],
+                edge.get("resolver_source_kind", stored_source_kind),
                 target_kind,
-                line,
+                metadata.get("line") if status == "unregistered" else None,
                 in_view,
                 src_path,
                 dst_path,
                 dst_kind,
                 dst_anchor,
-                fragment,
-                target_fragment,
+                metadata.get("fragment_resolution"),
+                metadata.get("target_fragment"),
             )
 
     def pair_checks(
@@ -492,6 +503,7 @@ class _Reader:
         self.connection.create_function(
             "exomem_census_admitted", 1, self.admitted, deterministic=True
         )
+        population = _POPULATION_SQL.format(columns=self._columns)
         definitions = {**registry.core, **registry.extensions}
         directed = sorted(
             key for key, item in definitions.items() if item.direction == "directed"
@@ -501,7 +513,7 @@ class _Reader:
             "COALESCE(SUM(CASE WHEN forward > 0 AND backward > 0 THEN n ELSE 0 END), 0) "
             "FROM (SELECT COUNT(*) AS n, SUM(s.path < d.path) AS forward, "
             "SUM(s.path > d.path) AS backward "
-            f"{_POPULATION_SQL.format(join='')} "
+            f"{population.format(join='')} "
             "AND e.relation_type IN (SELECT value FROM json_each(?)) "
             "GROUP BY min(s.path, d.path), max(s.path, d.path), e.relation_type)",
             (json.dumps(directed),),
@@ -525,7 +537,7 @@ class _Reader:
             "oriented AS (SELECT inv.grp AS grp, inv.counted AS counted, "
             "CASE WHEN inv.self_inverse THEN s.path < d.path ELSE inv.rep END AS rep, "
             "s.path AS a, d.path AS b "
-            f"{_POPULATION_SQL.format(join='JOIN inv ON inv.r = e.relation_type ')}) "
+            f"{population.format(join='JOIN inv ON inv.r = e.relation_type ')}) "
             "SELECT COALESCE(SUM(n), 0), "
             "COALESCE(SUM(CASE WHEN reps > 0 AND others > 0 THEN 1 ELSE 0 END), 0) "
             "FROM (SELECT SUM(counted) AS n, SUM(rep) AS reps, SUM(1 - rep) AS others "
@@ -557,8 +569,11 @@ class _Reader:
             "SELECT s.path, d.path, e.source_path FROM graph_edges AS e "
             "JOIN graph_nodes AS s ON s.node_key = e.src_key "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
-            "WHERE e.relation_type = 'supersedes' AND e.registry_status != 'unregistered' "
-            "AND e.origin != 'wikilink'"
+            "WHERE e.origin != 'wikilink' "
+            "AND (e.relation_type = 'supersedes' OR e.registry_status = ?) "
+            f"AND exomem_edge_relation({self._columns}) = 'supersedes' "
+            f"AND exomem_edge_status({self._columns}) != 'unregistered'",
+            (self._candidate,),
         ):
             if (
                 src_path != dst_path
@@ -579,7 +594,7 @@ def _reader(vault_root: Path, keep: Keep) -> Iterator[_Reader | None]:
         yield None
         return
     try:
-        yield _Reader(connection, keep)
+        yield _Reader(vault_root, connection, keep)
     finally:
         connection.close()
 
@@ -674,7 +689,11 @@ def _census_payload(
                 if row.relation != _GENERIC:
                     specific_pages.add(source)
         if typed:
-            definition = registry.definition(row.relation or "")
+            # Core definitions are shared by every instance; any other key means
+            # what its authoring page's selected instance defines.
+            definition = (
+                registry if row.relation in registry.core else reader.view.registry_for(source)
+            ).definition(row.relation or "")
             if definition is not None and definition.family == "affiliation":
                 affiliated.add(source)
             _check_row(
@@ -898,7 +917,7 @@ def _check_row(
         record("evidence_target_not_evidential", not evidential)
     if row.relation == "answers":
         if row.dst_kind == "file":
-            answered = dst_page in reader.question_pages
+            answered = reader.question_page(dst_page)
         else:
             answered = row.dst_kind in _QUESTION_KINDS
         record("answers_without_question", not answered)

@@ -246,7 +246,6 @@ def test_graph_context_ignores_deleted_parent_ref_collision(
         and node["path"] == "Knowledge Base/Notes/Insights/second.md"
         for node in context["nodes"]
     )
-    assert context["warnings"][0]["reasons"]["current_graph_row_overwritten"] == 1
     with pytest.raises(ValueError, match="INVALID_CONTEXT.*unit_ref.*path"):
         commands.op_connect_memory(
             tmp_path,
@@ -462,19 +461,16 @@ def test_graph_context_unit_seed_queries_use_indexed_columns(tmp_path: Path) -> 
         unit_row = conn.execute(
             "SELECT unit_ref, unit_category, unit_kind FROM graph_nodes "
             "WHERE node_key = ?",
-            (epistemic_graph._compact_unit_key(compact),),
+            (epistemic_graph._unit_candidate_key(_SOURCE, compact),),
         ).fetchone()
         file_row = conn.execute(
             "SELECT unit_ref, unit_category, unit_kind FROM graph_nodes "
             "WHERE kind = 'file' LIMIT 1"
         ).fetchone()
-        assert unit_row == (compact.unit_ref, "config", "observation")
+        # Shared rows keep the authored label for discovery, never a selected ref.
+        assert unit_row == (None, "configuration", "observation")
         assert file_row == (None, None, None)
 
-        exact_plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT node_key FROM graph_nodes WHERE unit_ref = ?",
-            (compact.unit_ref,),
-        ).fetchall()
         filter_plan = conn.execute(
             "EXPLAIN QUERY PLAN SELECT node_key FROM graph_nodes "
             "WHERE unit_category = ? AND unit_kind = ?",
@@ -483,7 +479,6 @@ def test_graph_context_unit_seed_queries_use_indexed_columns(tmp_path: Path) -> 
     finally:
         conn.close()
 
-    assert any("idx_graph_nodes_unit_ref" in str(row[3]) for row in exact_plan)
     assert any("idx_graph_nodes_unit_category_kind" in str(row[3]) for row in filter_plan)
 
 
@@ -522,13 +517,13 @@ def test_graph_schema_v3_sidecar_rebuilds_with_queryable_unit_columns(
             row[1] for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()
         }
         row = conn.execute(
-            "SELECT unit_category, unit_kind FROM graph_nodes WHERE unit_ref = ?",
-            (compact.unit_ref,),
+            "SELECT unit_category, unit_kind FROM graph_nodes WHERE node_key = ?",
+            (epistemic_graph._unit_candidate_key(_SOURCE, compact),),
         ).fetchone()
     finally:
         conn.close()
     assert {"unit_ref", "unit_category", "unit_kind"} <= columns
-    assert row == ("config", "observation")
+    assert row == ("configuration", "observation")
 
 
 def test_graph_context_exact_unit_status_does_not_scan_the_vault(
@@ -702,14 +697,14 @@ Use the indexed semantic language.
     assert set(by_ref) == {compact.unit_ref, rich.unit_ref}
     assert by_ref[compact.unit_ref]["kind"] == "observation"
     assert by_ref[compact.unit_ref]["metadata"]["category"] == "config"
-    assert by_ref[rich.unit_ref]["node_key"] == epistemic_graph._block_key(page, rich)
+    assert by_ref[rich.unit_ref]["node_key"] == epistemic_graph._unit_candidate_key(_SOURCE, rich)
     assert by_ref[rich.unit_ref]["metadata"]["tags"] == [
         "reliability",
         "runtime/retry",
     ]
     assert by_ref[rich.unit_ref]["metadata"]["context"] == "Edge path"
     assert (
-        len([node for node in nodes if node["node_key"] == epistemic_graph._block_key(page, rich)])
+        len([node for node in nodes if node["node_key"] == epistemic_graph._unit_candidate_key(_SOURCE, rich)])
         == 1
     )
     for node in unit_nodes:

@@ -139,15 +139,25 @@ class LanguageRegistryView(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class UnitQueryPlan:
-    """Resolved unit axes with shared core and instance-qualified extension identity."""
+    """Resolved unit axes with shared core and instance-qualified extension identity.
+
+    The label sets are the finite raw labels, in this adapter's normalization
+    domain, that could interpret to a requested value in some admitted
+    instance: authored categories, headings whose kind a category falls back
+    to, and headings for requested kinds. They only propose candidates;
+    `matches` decides each one against the authoring page's own meaning.
+    """
 
     categories: frozenset[str] | None
     kinds: frozenset[str] | None
     instance_id: str
     core_categories: frozenset[str]
     core_kinds: frozenset[str]
+    category_labels: frozenset[str] = frozenset()
+    category_kind_labels: frozenset[str] = frozenset()
+    kind_labels: frozenset[str] = frozenset()
 
-    def matches(self, category: str, kind: str, instance_id: str) -> bool:
+    def matches(self, category: str, kind: str, instance_id: str | None) -> bool:
         return (
             (self.categories is None or category in self.categories
              and (category in self.core_categories or instance_id == self.instance_id))
@@ -156,20 +166,66 @@ class UnitQueryPlan:
         )
 
 
+def _heading_labels(registry: SemanticLanguageRegistry, kinds: frozenset[str]) -> set[str]:
+    """Raw heading labels this adapter can recognize as one of `kinds`.
+
+    Scope is ignored on purpose: applicability belongs to each page's own
+    interpretation, so discovery stays a superset.
+    """
+    core_aliases = _core_heading_aliases()
+    labels = set(kinds)
+    for label in (*registry.core_kinds, *core_aliases):
+        if core_aliases.get(label, label) in kinds and core_aliases.get(label, label) in registry.core_kinds:
+            labels.add(label)
+    for label in (*registry.kinds, *registry.heading_aliases):
+        if registry.heading_aliases.get(label, label) in kinds:
+            labels.add(label)
+    return labels
+
+
+def _category_labels(registry: SemanticLanguageRegistry, categories: frozenset[str]) -> set[str]:
+    labels = set(categories)
+    for aliases in (registry.core_category_aliases, registry.category_aliases):
+        labels.update(label for label, canonical in aliases.items() if canonical in categories)
+    return labels
+
+
 def unit_query_plan(
     registry: SemanticLanguageRegistry, *, categories=None, kinds=None,
-    instance_id: str = "public",
+    instance_id: str = "public", admitted: tuple[SemanticLanguageRegistry, ...] = (),
 ) -> UnitQueryPlan:
-    """Use the typed adapter's aliases and canonical keys for every unit query owner."""
+    """Use the typed adapter's aliases and canonical keys for every unit query owner.
+
+    `admitted` holds the other instances this caller may interpret: a shared
+    core value can be authored through their aliases too.
+    """
     def resolve(values, resolver):
         if values is None:
             return None
         return frozenset((result.resolved or result.key) for value in values
                          for result in (resolver(value),))
 
+    resolved_categories = resolve(categories, registry.resolve_category)
+    resolved_kinds = resolve(kinds, registry.resolve_kind)
+    core_categories = frozenset(registry.core_categories)
+    core_kinds = frozenset(registry.core_kinds)
+    category_labels: set[str] = set()
+    category_kind_labels: set[str] = set()
+    kind_labels: set[str] = set()
+    for adapter in (registry, *admitted):
+        own = adapter is registry
+        if resolved_categories is not None:
+            wanted = resolved_categories if own else resolved_categories & core_categories
+            category_labels |= _category_labels(adapter, wanted)
+            # A rich block without a recognized category falls back to its kind.
+            category_kind_labels |= _heading_labels(
+                adapter, resolved_categories if own else resolved_categories & core_kinds,
+            )
+        if resolved_kinds is not None:
+            kind_labels |= _heading_labels(adapter, resolved_kinds if own else resolved_kinds & core_kinds)
     return UnitQueryPlan(
-        resolve(categories, registry.resolve_category), resolve(kinds, registry.resolve_kind),
-        instance_id, frozenset(registry.core_categories), frozenset(registry.core_kinds),
+        resolved_categories, resolved_kinds, instance_id, core_categories, core_kinds,
+        frozenset(category_labels), frozenset(category_kind_labels), frozenset(kind_labels),
     )
 
 

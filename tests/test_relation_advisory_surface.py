@@ -396,11 +396,12 @@ def test_real_graph_spelling_variants_form_one_advisory_occurrence(vault) -> Non
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     with index._connect() as connection:
+        # Shared rows keep non-core labels as candidates for each reader to interpret.
         rows = connection.execute(
             "SELECT edge_key, raw_relation, dst_key FROM graph_edges "
-            "WHERE source_path = ? AND registry_status = 'unregistered' "
+            "WHERE source_path = ? AND registry_status = ? "
             "ORDER BY edge_key",
-            (source_relative,),
+            (source_relative, epistemic_graph.CANDIDATE_STATUS),
         ).fetchall()
         assert len(rows) == 5
         assert [raw_relation for _, raw_relation, _ in rows].count(

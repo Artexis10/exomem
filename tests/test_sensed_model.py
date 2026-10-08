@@ -337,15 +337,7 @@ def test_the_cosine_proposer_is_a_fixed_per_pair_threshold(tmp_path: Path, monke
     vecs = [base, near / np.linalg.norm(near), base, far]
 
     def table():
-        out = {}
-        conn = fx.epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
-        for path, vec in zip(paths, vecs, strict=True):
-            (ref, text) = conn.execute(
-                "SELECT unit_ref, text FROM graph_nodes WHERE path=? AND unit_ref IS NOT NULL", (path,)
-            ).fetchone()
-            out[path] = {ref: (sensing.text_sha256(sensing.extract_text(text)), vec)}
-        conn.close()
-        return out
+        return _vector_table(vault, paths, vecs)
 
     sf.enable(monkeypatch, vectors=table())
     sf.settle(vault)
@@ -515,13 +507,12 @@ def _cosine_vault(tmp_path: Path, count: int = 4):
 
 def _vector_table(vault: Path, paths: list[str], vectors: list) -> dict:
     out = {}
-    conn = fx.epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    index = fx.epistemic_graph.EpistemicGraphIndex(vault)
     for path, vec in zip(paths, vectors, strict=True):
-        ref, text = conn.execute(
-            "SELECT unit_ref, text FROM graph_nodes WHERE path=? AND unit_ref IS NOT NULL", (path,)
-        ).fetchone()
-        out[path] = {ref: (sensing.text_sha256(sensing.extract_text(text)), vec)}
-    conn.close()
+        (unit,) = [node for node in index.nodes(path=path) if node["metadata"].get("unit_ref")]
+        out[path] = {
+            unit["metadata"]["unit_ref"]: (sensing.text_sha256(sensing.extract_text(unit["text"])), vec)
+        }
     return out
 
 
@@ -619,16 +610,16 @@ def test_pages_in_one_tick_find_the_cosine_pairs_separate_ticks_find(
     vectors[0] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     vectors[2] = np.array([np.cos(angle), np.sin(angle), 0.0], dtype=np.float32)
     unit_vectors = iter(vectors)
-    conn = fx.epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    index = fx.epistemic_graph.EpistemicGraphIndex(vault)
     table: dict = {}
     for path in paths:
-        for ref, text in conn.execute(
-            "SELECT unit_ref, text FROM graph_nodes WHERE path=? AND unit_ref IS NOT NULL "
-            "ORDER BY unit_ref", (path,)
-        ):
+        units = sorted(
+            (node["metadata"]["unit_ref"], node["text"])
+            for node in index.nodes(path=path) if node["metadata"].get("unit_ref")
+        )
+        for ref, text in units:
             digest = sensing.text_sha256(sensing.extract_text(text))
             table.setdefault(path, {})[ref] = (digest, next(unit_vectors))
-    conn.close()
     sf.enable(monkeypatch, vectors=table)
 
     def cosine_pairs() -> list[tuple]:

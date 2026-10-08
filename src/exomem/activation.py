@@ -85,14 +85,14 @@ def scan(vault_root: Path) -> ActivationScan:
     Each page is admitted through RAW before it is counted, as the audit's
     page walk is, so a protected capture counts for the owner only.
     """
+    from . import semantic_index
     from .governance import egress
     from .governance.principal import effective_principal
 
     vault_root = Path(vault_root)
     who = effective_principal()
     status_basis = lifecycle_statuses.Basis(vault_root)
-    registry = relation_registry.load_registry(vault_root)
-    language_registry = semantic_language_registry.load_registry(vault_root)
+    interpretations = semantic_index.Interpretations(vault_root)
     findings: list[AuditFinding] = []
     coverage = {
         "eligible_pages": 0,
@@ -103,6 +103,7 @@ def scan(vault_root: Path) -> ActivationScan:
         "provenance_candidate_pages": 0,
         "provenance_linked_pages": 0,
         "unregistered_relation_observations": 0,
+        "definitions_unavailable_pages": 0,
     }
 
     kb = kb_root(vault_root)
@@ -122,7 +123,19 @@ def scan(vault_root: Path) -> ActivationScan:
             continue
 
         coverage["eligible_pages"] += 1
-        measurement = _measure_page(page, registry, language_registry=language_registry)
+        definitions = interpretations.definitions(page.rel_path, page.frontmatter)
+        if definitions is None:
+            # Its selected relations are unknown here: count, never measure.
+            coverage["definitions_unavailable_pages"] += 1
+            continue
+        measurement = _measure_page(
+            page,
+            definitions.snapshots["relations"].typed,
+            language_registry=semantic_language_registry.for_attached_projects(
+                definitions.snapshots["categories"].typed,
+                semantic_index.page_projects(page.frontmatter),
+            ),
+        )
         meta = {
             "signal_version": _signal_version(page),
             "typed_relations": measurement["typed_relations"],

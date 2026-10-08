@@ -154,33 +154,36 @@ def test_indexed_observations_use_canonical_unbounded_separator_normalization(
 
     connection = sqlite3.connect(":memory:")
     connection.execute(
-        "CREATE TABLE graph_edges ("
-        "registry_status TEXT, raw_relation TEXT, source_path TEXT, "
-        "source_anchor TEXT, metadata TEXT)"
+        "CREATE TABLE graph_edges (edge_key TEXT, src_key TEXT, dst_key TEXT, "
+        "relation_type TEXT, raw_relation TEXT, parent_relation TEXT, "
+        "registry_status TEXT, registry_version TEXT, registry_hash TEXT, origin TEXT, "
+        "source_path TEXT, source_anchor TEXT, metadata TEXT)"
     )
+    observed = [
+        ("applies-to", "b.md", "second", None),
+        ("applies-----to", "a.md", None, None),
+        ("applies to", "a.md", None, None),
+        ("applies_to", "c.md", "third", None),
+        ("applies_to", "d.md", None, None),
+        ("applies-to", "e.md", None, None),
+        ("applies to", "f.md", None, None),
+        (
+            "applies_____to",
+            "g.md",
+            None,
+            '{"line":"- applies-----to: [[target]]"}',
+        ),
+        (
+            "applies__to",
+            "h.md",
+            None,
+            '{"line":"- applies__to: [[target]]"}',
+        ),
+    ]
     connection.executemany(
-        "INSERT INTO graph_edges VALUES ('unregistered', ?, ?, ?, ?)",
-        [
-            ("applies-to", "b.md", "second", None),
-            ("applies-----to", "a.md", None, None),
-            ("applies to", "a.md", None, None),
-            ("applies_to", "c.md", "third", None),
-            ("applies_to", "d.md", None, None),
-            ("applies-to", "e.md", None, None),
-            ("applies to", "f.md", None, None),
-            (
-                "applies_____to",
-                "g.md",
-                None,
-                '{"line":"- applies-----to: [[target]]"}',
-            ),
-            (
-                "applies__to",
-                "h.md",
-                None,
-                '{"line":"- applies__to: [[target]]"}',
-            ),
-        ],
+        "INSERT INTO graph_edges (edge_key, registry_status, raw_relation, source_path, "
+        "source_anchor, metadata) VALUES (?, 'unregistered', ?, ?, ?, ?)",
+        [(f"edge:{number}", *row) for number, row in enumerate(observed)],
     )
     registrations: list[tuple[str, int, object, bool]] = []
     statements: list[str] = []
@@ -244,8 +247,9 @@ def test_indexed_observations_use_canonical_unbounded_separator_normalization(
     assert double_underscore["total"] == 1
     assert double_underscore["items"][0]["raw_relation"] == "applies__to"
     assert double_underscore["items"][0]["count"] == 1
-    assert len(registrations) == 2
-    name, num_params, normalizer, deterministic = registrations[0]
+    normalizers = [item for item in registrations if item[0] == "exomem_normalize_relation"]
+    assert len(normalizers) == 2
+    name, num_params, normalizer, deterministic = normalizers[0]
     assert (name, num_params, deterministic) == (
         "exomem_normalize_relation",
         2,

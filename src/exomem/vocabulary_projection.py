@@ -159,7 +159,8 @@ def _note_pairs(connection, path, known_types, after):
         return connection.execute(
             "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
             "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_page_key "
-            "WHERE e.source_path=? AND e.relation_type IN ('links_to', 'relates_to') AND t.kind='file' "
+            "WHERE e.source_path=? AND t.kind='file' "
+            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) IN ('links_to', 'relates_to') "
             f"AND t.page_type IN ({placeholders}) AND t.path {comparison} ? "
             "ORDER BY t.path LIMIT ?",
             (epistemic_graph._with_md(path), *known_types, boundary, limit),
@@ -199,8 +200,8 @@ def _candidate_rows(connection, path, known_types, anchor, after):
             "t.path, t.source_hash, t.exomem_id, t.page_type "
             "FROM graph_edges e JOIN graph_nodes s ON s.node_key=e.src_key "
             "JOIN graph_nodes t ON t.node_key=e.dst_page_key "
-            "WHERE e.source_path=? AND e.relation_type='relates_to' "
-            "AND s.kind='file' AND t.kind='file' "
+            "WHERE e.source_path=? AND s.kind='file' AND t.kind='file' "
+            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) = 'relates_to' "
             "AND (s.path, t.path) > (?, ?) "
             "GROUP BY s.node_key, t.node_key ORDER BY s.path, t.path LIMIT ?",
             (epistemic_graph._with_md(path), *after, EDGE_PAGE + 1),
@@ -231,6 +232,8 @@ def proven_empty_for_write(vault_root: Path, *, path: str) -> bool:
         connection = epistemic_graph.EpistemicGraphIndex(vault_root)._open_read_snapshot()
         if connection is None:
             return False
+        # Page relations carry their authoring page's selected meaning.
+        epistemic_graph.GraphView(vault_root, connection).register_relation_functions()
         generation = _generation(connection)
         anchor = _anchor(connection, path)
         if anchor is None:
@@ -282,6 +285,8 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
             "signals": [],
         }
     try:
+        # Page relations carry their authoring page's selected meaning.
+        epistemic_graph.GraphView(vault_root, connection).register_relation_functions()
         generation = _generation(connection)
         registry = entity_types.load_entity_types(vault_root)
         known_types = sorted(registry.active_ids)

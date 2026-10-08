@@ -55,6 +55,7 @@ def test_structural_summary_matches_selected_parser_and_activation_without_body(
     source = (
         "## Background\n### Private procedure\n- category: invalid!\n"
         "- relations: cites: Bare source\n- [rule] Retained compact\n"
+        "- [rule] Independent observation\n"
         "## Claim\n### Finding\n- id: empty\n"
         "## Private procedure\nSubstantive.\n"
         "## Ordinary\n- [rule] Independent observation\n"
@@ -71,14 +72,20 @@ def test_structural_summary_matches_selected_parser_and_activation_without_body(
     document = parse_semantic_units(
         source, language_registry=language, relation_registry=relations,
         include_legacy_relations=True, retain_unknown_relations=True, project=project,
+        parent_ref=STABLE_PARENT_REF,
     )
     summary = semantic_units.structural_summary(semantic_units.scan_semantic_units(source))
     selected = semantic_units.interpret_structural_summary(
         json.loads(json.dumps(summary)), language_registry=language,
-        relation_registry=relations, project=project,
+        relation_registry=relations, project=project, parent_ref=STABLE_PARENT_REF,
     )
-    assert [(unit.form, unit.kind, unit.category, unit.line, unit.end_line) for unit in selected.units] == [
-        (unit.form, unit.kind, unit.category, unit.line, unit.end_line) for unit in document.units
+    # The repeated anonymous observation binds a different public ref per project.
+    assert [
+        (unit.form, unit.kind, unit.category, unit.line, unit.end_line, unit.unit_ref, unit.fingerprint)
+        for unit in selected.units
+    ] == [
+        (unit.form, unit.kind, unit.category, unit.line, unit.end_line, unit.unit_ref, unit.fingerprint)
+        for unit in document.units
     ]
     counts = activation.frontmatter_link_counts({"sources": ["First", "Second"], "related": "Other"})
     expected = activation.measure_document(
@@ -91,6 +98,31 @@ def test_structural_summary_matches_selected_parser_and_activation_without_body(
     )
     assert actual == expected
     assert actual["provenance_relations"] >= 3
+
+
+def test_unavailable_definitions_serve_only_units_no_custom_heading_encloses() -> None:
+    source = (
+        "- [rule] Top observation ^top\n"
+        "## Decision\nWe decided.\n"
+        "## Custom section\n### Claim\nNested core claim.\n- [rule] Nested ^top\n"
+        "- [rule] Shared text\n"
+        "# Appendix\n- [rule] Shared text\n- [rule] Plain appendix note\n"
+    )
+    candidates = semantic_units.scan_semantic_units(source)
+    selected = semantic_units.interpret_structural_summary(
+        semantic_units.structural_summary(candidates),
+        language_registry=semantic_language_registry.core_registry(),
+        relation_registry=relation_registry.core_registry(),
+        parent_ref=STABLE_PARENT_REF, definitions_available=False,
+    )
+
+    # A custom heading could become a hidden block that suppresses the nested
+    # claim, owns the duplicate anchor, or shifts the anonymous occurrence.
+    assert [(unit.kind, unit.line) for unit in selected.units] == [("decision", 2), ("observation", 11)]
+    assert selected.complete is False
+    assert semantic_units.core_safe_occurrences(candidates) == {
+        unit.occurrence_key for unit in selected.units
+    }
 
 
 def test_unicode_categories_preserve_raw_and_share_a_canonical_key() -> None:

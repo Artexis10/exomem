@@ -900,7 +900,6 @@ def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
         "source_hash": epistemic_graph.vault_module.content_hash(
             source.read_bytes().decode("utf-8")
         ),
-        "parent_state": state,
     }
 
     fallback = epistemic_graph._edges_for_page(vault, page, state.document, **kwargs)
@@ -1592,7 +1591,7 @@ def test_incremental_refresh_retries_when_path_changes_during_indexing(
     source, _target = _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    real_edges_for_page = epistemic_graph._edges_for_page
+    real_edges_for_page = epistemic_graph._structural_edges_for_page
     real_snapshot = find_module.recall_resolver_snapshot
     acquisitions: list[Path] = []
     raced = False
@@ -1608,7 +1607,7 @@ def test_incremental_refresh_retries_when_path_changes_during_indexing(
         acquisitions.append(root)
         return real_snapshot(root, **kwargs)
 
-    monkeypatch.setattr(epistemic_graph, "_edges_for_page", edges_for_page)
+    monkeypatch.setattr(epistemic_graph, "_structural_edges_for_page", edges_for_page)
     monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
 
     report = index.refresh_paths([source])

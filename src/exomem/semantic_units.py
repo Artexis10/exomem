@@ -473,7 +473,7 @@ def structural_occurrences(candidates: SemanticUnitCandidates) -> tuple[Structur
 
 @dataclass(frozen=True, slots=True)
 class UnitStructure:
-    """Selected summary facts; source text and public unit identity are absent."""
+    """Selected summary facts and public identity; source text is absent."""
 
     form: str
     kind: str
@@ -484,26 +484,99 @@ class UnitStructure:
     source_hash: str
     relations: tuple[SemanticRelation, ...] = ()
     occurrence_key: str = ""
+    start_offset: int = 0
+    unit_ref: str | None = None
+    fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SelectedStructure:
+    """One page's selected interpretation of its stored structural candidates.
+
+    `complete` is False when the page's selected definitions were unavailable:
+    only units whose every ancestor heading is core-recognized remain, so a
+    reader reports dependent coverage as incomplete, never as exact.
+    """
+
     units: tuple[UnitStructure, ...]
     note_relations: tuple[markdown_relations.MarkdownRelation, ...]
+    parent_ref: str | None = None
+    complete: bool = True
 
     @property
     def rich_units(self) -> tuple[UnitStructure, ...]:
         return tuple(unit for unit in self.units if unit.form == "rich")
 
+    def unit(self, key: str) -> UnitStructure | None:
+        return next((unit for unit in self.units if unit.occurrence_key == key), None)
+
+
+def _candidate_rich_unit(item: RichUnitCandidate) -> SemanticUnit:
+    """The unit a recognized candidate would emit, for selection-free identity facts."""
+    relations, _ = semantic_blocks._parse_relations(item.heading.relations, _core_relations())
+    block = semantic_blocks.SemanticBlock(
+        type="", title=item.heading.title, level=item.heading.level, line=item.heading.line,
+        end_line=item.heading.end_line, body=item.heading.body,
+        metadata=dict(item.heading.metadata), relations=relations,
+    )
+    unit, _ = _rich_unit(block, span=item.span, path="", line_by_number={})
+    return unit
+
+
+def candidate_units(candidates: SemanticUnitCandidates) -> tuple[SemanticUnit, ...]:
+    """Every unit some selected interpretation could emit, unbound and kind-free.
+
+    Rich candidates carry an empty kind: only selected recognition names it.
+    """
+    rich = [
+        _candidate_rich_unit(item) for item in candidates.rich
+        # The parser never emits a level-one or non-substantive rich unit.
+        if item.heading.level > 1 and item.heading.substantive_body
+    ]
+    return tuple(sorted((*rich, *candidates.compact), key=lambda unit: (unit.span.start_offset, unit.form)))
+
+
+def _core_relations() -> RelationRegistry:
+    from . import relation_registry
+
+    return relation_registry.core_registry()
+
+
+def _identity_facts(units: list[SemanticUnit]) -> dict[str, dict[str, Any]]:
+    """Fingerprints for every occurrence number a selected interpretation can bind.
+
+    Unit fingerprints never depend on selected vocabulary; only which candidates
+    emit does. An anonymous candidate preceded by m emittable candidates with an
+    identical signature binds occurrence 1..m+1, so storing those fingerprints
+    lets the shared binder reproduce the parser's public refs from metadata.
+    """
+    facts: dict[str, dict[str, Any]] = {}
+    seen: dict[str, int] = {}
+    for unit in sorted(units, key=lambda item: (item.span.start_offset, item.form)):
+        signature = hashlib.sha256(
+            _stable_json(_semantic_unit_signature(unit)).encode("utf-8")
+        ).hexdigest()
+        earlier = seen.get(signature, 0)
+        seen[signature] = earlier + 1
+        fingerprints = (
+            [fingerprint_semantic_unit(unit)] if unit.anchor else
+            [fingerprint_semantic_unit(unit, occurrence=number) for number in range(1, earlier + 2)]
+        )
+        facts[occurrence_key(unit.form, unit.span, unit.source_hash)] = {
+            "signature": signature, "fingerprints": fingerprints,
+        }
+    return facts
+
 
 def structural_summary(candidates: SemanticUnitCandidates) -> dict[str, Any]:
     """Serialize parser facts, without copying the parent body into metadata."""
+    identity = _identity_facts(list(candidate_units(candidates)))
     # These fields are the closed structural-summary protocol, not authored vocabulary.
     return {
         "format": STRUCTURAL_FORMAT,
         "rich": [
             {
-                "key": occurrence_key("rich", item.span, item.source_hash),
+                "key": (key := occurrence_key("rich", item.span, item.source_hash)),
                 "title": item.heading.title, "level": item.heading.level,
                 "line": item.heading.line, "end_line": item.heading.end_line,
                 "ancestor_line": item.heading.ancestor_line,
@@ -512,15 +585,17 @@ def structural_summary(candidates: SemanticUnitCandidates) -> dict[str, Any]:
                 "relations": [vars(relation) for relation in item.heading.relations],
                 "source_hash": item.source_hash,
                 "start_offset": item.span.start_offset, "end_offset": item.span.end_offset,
+                "identity": identity.get(key),
             }
             for item in candidates.rich
         ],
         "compact": [
-            {"key": occurrence_key(item.form, item.span, item.source_hash),
+            {"key": (key := occurrence_key(item.form, item.span, item.source_hash)),
              "category_raw": item.category_raw, "category_key": item.category_key,
              "anchor": item.anchor, "line": item.line, "end_line": item.end_line,
              "source_hash": item.source_hash,
-             "start_offset": item.span.start_offset, "end_offset": item.span.end_offset}
+             "start_offset": item.span.start_offset, "end_offset": item.span.end_offset,
+             "identity": identity[key]}
             for item in candidates.compact
         ],
         "notes": [vars(item) for item in candidates.note_relations.candidates],
@@ -534,10 +609,16 @@ def interpret_structural_summary(
     language_registry: semantic_language_registry.LanguageRegistryView,
     relation_registry: RelationRegistry,
     project: str | None = None, page_type: str | None = None,
+    parent_ref: str | None = None, path: str = "", definitions_available: bool = True,
 ) -> SelectedStructure:
-    """Apply the selected parsers' control flow without reading Markdown bodies."""
+    """Apply the selected parsers' control flow without reading Markdown bodies.
+
+    Without the page's selected definitions the caller passes the core
+    adapters and `definitions_available=False`; only core-safe units remain.
+    """
     if summary.get("format") != STRUCTURAL_FORMAT:
         raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    parent_ref = _effective_parent_ref(parent_ref, path)
     headings = tuple(semantic_blocks.SemanticBlockCandidate(
         title=item["title"], level=item["level"], line=item["line"], end_line=item["end_line"],
         ancestor_line=item["ancestor_line"], metadata=item["metadata"], body="",
@@ -551,35 +632,129 @@ def interpret_structural_summary(
         ).resolved,
     )
     rich_rows = {item["line"]: item for item in summary["rich"]}
-    units: list[UnitStructure] = []
+    emitted: list[tuple[Mapping[str, Any], str, str, str | None, tuple[SemanticRelation, ...]]] = []
     for block in rich.blocks:
         raw, key, _ = _rich_category(block, path="", line_by_number={})
         category, _ = _selected_category(
             raw, key, form="rich", kind=block.type, explicit="category" in block.metadata,
             language=language_registry, project=project, page_type=page_type,
         )
-        units.append(UnitStructure("rich", block.type, category, block.id,
-                                   block.line, block.end_line, rich_rows[block.line]["source_hash"], tuple(block.relations), rich_rows[block.line]["key"]))
+        emitted.append((rich_rows[block.line], "rich", block.type, category, tuple(block.relations)))
     ranges = tuple((block.line, block.end_line) for block in rich.blocks)
-    index = 0
-    for item in summary["compact"]:
-        while index < len(ranges) and item["line"] > ranges[index][1]:
-            index += 1
-        if index < len(ranges) and item["line"] >= ranges[index][0]:
-            continue
+    for item in _outside_rich_ranges(summary["compact"], ranges, line=lambda row: row["line"]):
         category, _ = _selected_category(
             item["category_raw"], item["category_key"], form="compact", kind="observation",
             explicit=True, language=language_registry, project=project, page_type=page_type,
         )
-        units.append(UnitStructure("compact", "observation", category, item["anchor"],
-                                   item["line"], item["end_line"], item["source_hash"], occurrence_key=item["key"]))
+        emitted.append((item, "compact", "observation", category, ()))
+    emitted.sort(key=lambda entry: (entry[0]["start_offset"], entry[1]))
+    if not definitions_available:
+        safe = _core_safe_keys(summary, emitted)
+        emitted = [entry for entry in emitted if entry[0]["key"] in safe]
+    bindings = _bind_identities(
+        [
+            (
+                row.get("anchor") if form == "compact" else row["metadata"].get("id"),
+                row["identity"]["signature"],
+                _stored_fingerprint(row["identity"]["fingerprints"]),
+            )
+            for row, form, *_ in emitted
+        ],
+        parent_ref=parent_ref,
+    )
+    units = tuple(
+        UnitStructure(
+            form, kind, category,
+            row.get("anchor") if form == "compact" else row["metadata"].get("id"),
+            row["line"], row["end_line"], row["source_hash"], relations, row["key"],
+            row["start_offset"], unit_ref, fingerprint,
+        )
+        for (row, form, kind, category, relations), (unit_ref, fingerprint, _) in zip(
+            emitted, bindings, strict=True,
+        )
+    )
     notes = markdown_relations.interpret_markdown_relations(
         markdown_relations.MarkdownRelationCandidates(
             tuple(markdown_relations.MarkdownRelationCandidate(**item) for item in summary["notes"]),
             summary["canonical_section_present"], summary["canonical_bullet_count"],
-        ), relation_types=relation_registry.keys | frozenset(relation_registry.aliases), retain_unknown=True,
+        ),
+        relation_types=relation_registry.keys | frozenset(relation_registry.aliases),
+        # Without selected definitions only core relation meanings are known.
+        retain_unknown=definitions_available,
     )
-    return SelectedStructure(tuple(sorted(units, key=lambda item: item.line)), tuple(notes.relations))
+    return SelectedStructure(units, tuple(notes.relations), parent_ref, definitions_available)
+
+
+def _stored_fingerprint(fingerprints: list[str]):
+    def fingerprint_for(occurrence: int | None) -> str:
+        index = 0 if occurrence is None else occurrence - 1
+        if not 0 <= index < len(fingerprints):
+            raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+        return fingerprints[index]
+
+    return fingerprint_for
+
+
+def _core_safe_keys(summary: Mapping[str, Any], emitted: list[tuple]) -> frozenset[str]:
+    """Core-emitted units that no extension block could suppress or re-identify.
+
+    Extensions cannot redefine core, so only a heading that core does not
+    recognize could become an extension block around a unit. Level-one headings
+    never open a block in any instance. A unit sharing an anchor or an earlier
+    identical signature with another candidate could bind a different public
+    ref once that candidate's meaning is known, so it is withheld as well.
+    """
+    core = semantic_language_registry.core_registry()
+    unknown_lines = {
+        row["line"] for row in summary["rich"]
+        if row["level"] > 1 and semantic_blocks._resolve_block_type(
+            row["title"], resolver=lambda title: core.resolve_heading(title).resolved,
+        )[0] is None
+    }
+    rows = {row["line"]: row for row in summary["rich"]}
+
+    def enclosed_by_unknown(row: Mapping[str, Any], form: str) -> bool:
+        if form == "compact":
+            return any(
+                heading["line"] < row["line"] <= heading["end_line"] and heading["line"] in unknown_lines
+                for heading in summary["rich"]
+            )
+        ancestor = row["ancestor_line"]
+        while ancestor is not None:
+            if ancestor in unknown_lines:
+                return True
+            ancestor = rows[ancestor]["ancestor_line"]
+        return False
+
+    safe = {row["key"] for row, form, *_ in emitted if not enclosed_by_unknown(row, form)}
+    candidates = [
+        (row, "rich", row["metadata"].get("id")) for row in summary["rich"] if row.get("identity")
+    ] + [(row, "compact", row.get("anchor")) for row in summary["compact"]]
+    candidates.sort(key=lambda entry: (entry[0]["start_offset"], entry[1]))
+    withheld: set[str] = set()
+    for index, (row, _form, anchor) in enumerate(candidates):
+        if row["key"] not in safe:
+            continue
+        others = [other for other in candidates if other[0]["key"] != row["key"]]
+        if anchor and any(other_anchor == anchor and other[0]["key"] not in safe
+                          for other in others for other_anchor in (other[2],)):
+            withheld.add(row["key"])
+        signature = row["identity"]["signature"]
+        if not anchor and any(other[0]["key"] not in safe and not other[2]
+                              and other[0]["identity"]["signature"] == signature
+                              for other in candidates[:index]):
+            withheld.add(row["key"])
+    return frozenset(safe - withheld)
+
+
+def core_safe_occurrences(candidates: SemanticUnitCandidates) -> frozenset[str]:
+    """Occurrence keys served from a core parse while selected definitions are unavailable."""
+    core = semantic_language_registry.core_registry()
+    selected = interpret_structural_summary(
+        structural_summary(candidates), language_registry=core,
+        relation_registry=_core_relations(), definitions_available=False,
+    )
+    return frozenset(unit.occurrence_key for unit in selected.units)
 
 
 def scan_semantic_units(
@@ -746,73 +921,15 @@ def parse_semantic_units(
         retain_unknown=retain_unknown_relations,
     )
     for block in rich_document.blocks:
-        span = _span_for_line_range(source, line_by_number, block.line, block.end_line)
-        category_raw, category_key, category_error = _rich_category(
+        unit, unit_errors = _rich_unit(
             block,
-            path=source_path,
-            line_by_number=line_by_number,
-        )
-        if validate and category_error is not None:
-            errors.append(category_error)
-        rich_tags, tags_error = _rich_tags(
-            block,
-            path=source_path,
-            line_by_number=line_by_number,
-        )
-        rich_context, context_error = _rich_context(
-            block,
-            path=source_path,
-            line_by_number=line_by_number,
-        )
-        rich_verdict, verdict_error = _rich_verdict(
-            block,
-            path=source_path,
-            line_by_number=line_by_number,
-        )
-        rich_check_by, check_by_error = _rich_check_by(
-            block,
+            span=_span_for_line_range(source, line_by_number, block.line, block.end_line),
             path=source_path,
             line_by_number=line_by_number,
         )
         if validate:
-            errors.extend(
-                error
-                for error in (
-                    tags_error,
-                    context_error,
-                    verdict_error,
-                    check_by_error,
-                )
-                if error is not None
-            )
-        units.append(
-            SemanticUnit(
-                form="rich",
-                kind=block.type,
-                kind_raw=block.title,
-                kind_key=semantic_language_registry.normalize_label(block.title),
-                category_raw=category_raw,
-                category_key=category_key,
-                category=(
-                    category_key
-                    if "category" in block.metadata and category_error is None
-                    else block.type
-                ),
-                content=block.body,
-                tags=rich_tags,
-                context=rich_context,
-                relations=tuple(block.relations),
-                metadata=block.metadata,
-                anchor=block.id,
-                span=span,
-                source_hash=_source_hash(span.text),
-                title=block.title,
-                level=block.level,
-                body=block.body,
-                verdict=rich_verdict,
-                check_by=rich_check_by,
-            )
-        )
+            errors.extend(unit_errors)
+        units.append(unit)
 
     if validate:
         errors.extend(
@@ -887,6 +1004,56 @@ def parse_semantic_units(
         canonical_section_present=note_relation_document.canonical_section_present,
         canonical_bullet_count=note_relation_document.canonical_bullet_count,
     )
+
+
+def _rich_unit(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    span: SourceSpan,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> tuple[SemanticUnit, list[SemanticUnitDiagnostic]]:
+    """One rich unit from a recognized block; parsing and summaries share it."""
+    category_raw, category_key, category_error = _rich_category(
+        block, path=path, line_by_number=line_by_number,
+    )
+    rich_tags, tags_error = _rich_tags(block, path=path, line_by_number=line_by_number)
+    rich_context, context_error = _rich_context(block, path=path, line_by_number=line_by_number)
+    rich_verdict, verdict_error = _rich_verdict(block, path=path, line_by_number=line_by_number)
+    rich_check_by, check_by_error = _rich_check_by(
+        block, path=path, line_by_number=line_by_number,
+    )
+    unit = SemanticUnit(
+        form="rich",
+        kind=block.type,
+        kind_raw=block.title,
+        kind_key=semantic_language_registry.normalize_label(block.title),
+        category_raw=category_raw,
+        category_key=category_key,
+        category=(
+            category_key
+            if "category" in block.metadata and category_error is None
+            else block.type
+        ),
+        content=block.body,
+        tags=rich_tags,
+        context=rich_context,
+        relations=tuple(block.relations),
+        metadata=block.metadata,
+        anchor=block.id,
+        span=span,
+        source_hash=_source_hash(span.text),
+        title=block.title,
+        level=block.level,
+        body=block.body,
+        verdict=rich_verdict,
+        check_by=rich_check_by,
+    )
+    return unit, [
+        error
+        for error in (category_error, tags_error, context_error, verdict_error, check_by_error)
+        if error is not None
+    ]
 
 
 def _selected_category(raw, key, *, form, kind, explicit, language, project, page_type):
@@ -971,6 +1138,40 @@ def _effective_parent_ref(parent_ref: str | None, path: str) -> str | None:
     return memory_refs.memory_ref(parsed)
 
 
+def _bind_identities(
+    items: list[tuple[str | None, str, Any]], *, parent_ref: str | None,
+) -> list[tuple[str | None, str, int | None]]:
+    """The one public-identity rule for parsed documents and structural summaries.
+
+    Each item is `(anchor, signature_key, fingerprint_for)`. Anchors bind
+    directly unless another emitted unit shares them; anonymous units count
+    identical signatures in source order.
+    """
+    anchors: dict[str, int] = {}
+    for anchor, _signature, _fingerprint in items:
+        if anchor:
+            anchors[anchor] = anchors.get(anchor, 0) + 1
+    occurrences: dict[str, int] = {}
+    bound: list[tuple[str | None, str, int | None]] = []
+    for anchor, signature, fingerprint_for in items:
+        if anchor:
+            unit_ref = (
+                None
+                if parent_ref is None or anchors[anchor] > 1
+                else _anchored_unit_ref(parent_ref, anchor)
+            )
+            bound.append((unit_ref, fingerprint_for(None), None))
+            continue
+        occurrence = occurrences.get(signature, 0) + 1
+        occurrences[signature] = occurrence
+        fingerprint = fingerprint_for(occurrence)
+        bound.append(
+            (f"{parent_ref}#unit-{fingerprint}" if parent_ref is not None else None,
+             fingerprint, occurrence)
+        )
+    return bound
+
+
 def _bind_unit_identities(
     units: list[SemanticUnit],
     *,
@@ -982,40 +1183,22 @@ def _bind_unit_identities(
     for unit in units:
         if unit.anchor:
             anchor_groups.setdefault(unit.anchor, []).append(unit)
-    duplicate_anchors = {
-        anchor for anchor, members in anchor_groups.items() if len(members) > 1
-    }
-
-    occurrences: dict[str, int] = {}
-    bound: list[SemanticUnit] = []
-    for unit in units:
-        if unit.anchor:
-            fingerprint = fingerprint_semantic_unit(unit)
-            unit_ref = (
-                None
-                if parent_ref is None or unit.anchor in duplicate_anchors
-                else _anchored_unit_ref(parent_ref, unit.anchor)
+    bindings = _bind_identities(
+        [
+            (
+                unit.anchor,
+                _stable_json(_semantic_unit_signature(unit)),
+                lambda occurrence, unit=unit: fingerprint_semantic_unit(unit, occurrence=occurrence),
             )
-            occurrence = None
-        else:
-            signature_key = _stable_json(_semantic_unit_signature(unit))
-            occurrence = occurrences.get(signature_key, 0) + 1
-            occurrences[signature_key] = occurrence
-            fingerprint = fingerprint_semantic_unit(unit, occurrence=occurrence)
-            unit_ref = (
-                f"{parent_ref}#unit-{fingerprint}"
-                if parent_ref is not None
-                else None
-            )
-        bound.append(
-            replace(
-                unit,
-                parent_ref=parent_ref,
-                unit_ref=unit_ref,
-                fingerprint=fingerprint,
-                occurrence=occurrence,
-            )
-        )
+            for unit in units
+        ],
+        parent_ref=parent_ref,
+    )
+    bound = [
+        replace(unit, parent_ref=parent_ref, unit_ref=unit_ref, fingerprint=fingerprint,
+                occurrence=occurrence)
+        for unit, (unit_ref, fingerprint, occurrence) in zip(units, bindings, strict=True)
+    ]
 
     errors: list[SemanticUnitDiagnostic] = []
     if validate:
@@ -1199,13 +1382,13 @@ def _parse_compact_units(
         )
 
 
-def _outside_rich_ranges(items, ranges: tuple[tuple[int, int], ...]):
+def _outside_rich_ranges(items, ranges: tuple[tuple[int, int], ...], *, line=lambda item: item.line):
     """Keep ordered compact records only outside emitted rich ranges."""
     index = 0
     for item in items:
-        while index < len(ranges) and item.line > ranges[index][1]:
+        while index < len(ranges) and line(item) > ranges[index][1]:
             index += 1
-        if index == len(ranges) or item.line < ranges[index][0]:
+        if index == len(ranges) or line(item) < ranges[index][0]:
             yield item
 
 
