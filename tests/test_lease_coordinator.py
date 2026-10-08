@@ -605,3 +605,40 @@ async def test_non_ascii_bearer_is_refused_not_a_server_error(tmp_path: Path, pa
         )
 
     assert response.status_code in (401, 403), response.text
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux descriptor accounting")
+def test_coordinator_operations_keep_bounded_descriptors_and_rollback(tmp_path):
+    """Coordinator traffic must not consume descriptors until cyclic GC happens."""
+    import resource
+
+    from exomem.lease_coordinator import SQLiteStateStore
+
+    leases = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    now = [0.0]
+    state = SQLiteStateStore(tmp_path / "state.sqlite", clock=lambda: now[0])
+    corrupt = tmp_path / "corrupt.sqlite"
+    corrupt.write_bytes(b"not a SQLite database")
+    before = len(list(Path("/proc/self/fd").iterdir()))
+    limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(limits[0], before + 64), limits[1]))
+        for index in range(128):
+            acquired = leases.acquire("vault", "writer", 30)
+            assert acquired["granted"]
+            assert leases.status("vault")["holder"] == "writer"
+            leases.release("vault", "writer", acquired["fencing_token"])
+            state.put("tenant", "tokens", "key", {"index": index}, 1)
+            assert state.get("tenant", "tokens", "key")[0] == {"index": index}
+            now[0] += 2
+            # Deleting an expired token then failing serialization must roll back both changes.
+            with pytest.raises(TypeError):
+                state.put_if_absent("tenant", "tokens", "key", {"invalid": set()}, None)
+            now[0] -= 2
+            assert state.get("tenant", "tokens", "key")[0] == {"index": index}
+            for constructor in (SQLiteLeaseStore, SQLiteStateStore):
+                with pytest.raises(sqlite3.DatabaseError):
+                    constructor(corrupt)
+            assert len(list(Path("/proc/self/fd").iterdir())) <= before + 4
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, limits)

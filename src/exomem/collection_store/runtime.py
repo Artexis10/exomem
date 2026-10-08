@@ -884,12 +884,17 @@ class StoreServer:
 
     def call(self, work):
         """Run ``work`` on the store thread and return its result or raise its error."""
+        from ..cli_ops import OpError
+        from ..writer_lease import acknowledgement_budget_deadline
+
+        entry = time.monotonic()
+        completion_deadline = acknowledgement_budget_deadline(entry)
+        deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
         request = _Call(work)
         with self._condition:
             if not self._closed:
                 self._requests.append(request)
                 self._condition.notify_all()
-            deadline = time.monotonic() + self.manager._mutation_timeout_seconds
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -898,7 +903,15 @@ class StoreServer:
                     raise connection.busy(
                         "the collection store did not take this request within the mutation timeout")
                 self._condition.wait(remaining)
-        request.done.wait()
+        if not request.done.wait(max(0.0, completion_deadline - time.monotonic())):
+            # Accepted work survives the wait deadline so its outcome and replay remain owned.
+            raise OpError(
+                "MUTATION_ACKNOWLEDGEMENT_PENDING",
+                "the accepted collection-store operation is still executing and may still commit",
+                "Do not change the payload or use a new identity. Retry only with the original "
+                "replay identity; if none exists, reconcile the outcome before submitting again.",
+                details={"status": "uncertain", "committed": None},
+            )
         if request.error is not None:
             raise request.error
         return request.result

@@ -880,3 +880,112 @@ def test_pending_create_cannot_publish_over_an_arriving_file_declaration(service
     assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Recovered C row"},
                 item_key=LATER, why="recovered publication")["outcome"] == "committed"
     assert titles(root, late_id) == ["File during interruption"]
+
+
+def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service, monkeypatch):
+    """A lost acknowledgement must neither abandon the live mutation nor replay its leaf."""
+    import threading
+
+    from exomem import request_budget
+    from exomem.collection_store.writer import CollectionWriter
+
+    entered, release = threading.Event(), threading.Event()
+    append = CollectionWriter.append_record
+
+    def delayed(writer, *args, **kwargs):
+        entered.set()
+        assert release.wait(5), "test did not release the accepted mutation"
+        return append(writer, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "append_record", delayed)
+    arguments = dict(action="append", collection=CID, item={"title": "Late committed"},
+                     item_key=LATER, why="late acknowledgement", idempotency_key="late-commit")
+    token = request_budget.set_current(request_budget.RequestBudget(
+        seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.3))
+    try:
+        with pytest.raises(OpError) as pending:
+            call(service.root, "record_memory", **arguments)
+        assert entered.is_set()
+        assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+        assert pending.value.as_public_dict()["status"] == "uncertain"
+        assert pending.value.as_public_dict()["committed"] is None
+        assert "Late committed" not in str(pending.value.as_public_dict())
+    finally:
+        request_budget.reset_current(token)
+        release.set()
+    first = call(service.root, "record_memory", **arguments)
+    assert first["outcome"] == "committed"
+    assert call(service.root, "record_memory", **arguments) == first
+    assert titles(service.root, CID) == ["Canonical", "Late committed"]
+
+
+def test_queued_mutation_timeout_never_executes(service, monkeypatch):
+    """A request refused before acceptance must leave no later row behind."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    server = runtime._SERVERS[service.root]
+    entered, release = threading.Event(), threading.Event()
+
+    def occupy():
+        entered.set()
+        assert release.wait(5)
+
+    with monkeypatch.context() as queue_timeout, ThreadPoolExecutor(max_workers=1) as executor:
+        queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+        occupied = executor.submit(server.call, occupy)
+        try:
+            assert entered.wait(2)
+            with pytest.raises(OpError) as busy:
+                call(service.root, "record_memory", action="append", collection=CID,
+                     item={"title": "Never accepted"}, item_key=LATER, why="queue timeout")
+            assert busy.value.code == "COLLECTION_STORE_BUSY"
+            assert busy.value.details["status"] == "retryable"
+            assert busy.value.details["committed"] is False
+        finally:
+            release.set()
+        occupied.result(timeout=5)
+    assert titles(service.root, CID) == ["Canonical"]
+
+
+def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypatch):
+    """Waiting for acceptance must not reset the caller's completion deadline."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+
+    server = runtime._SERVERS[service.root]
+    entered, release, reading, finish = (threading.Event() for _ in range(4))
+
+    def occupy():
+        entered.set()
+        assert release.wait(5)
+
+    def read():
+        reading.set()
+        assert finish.wait(5)
+        return titles(service.root, CID)
+
+    with monkeypatch.context() as queue_timeout, ThreadPoolExecutor(max_workers=1) as executor:
+        queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.7)
+        occupied = executor.submit(server.call, occupy)
+        assert entered.wait(2)
+        timer = threading.Timer(0.5, release.set)
+        timer.start()
+        entry = time.monotonic()
+        token = request_budget.set_current(request_budget.RequestBudget(
+            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.8, entry=entry))
+        try:
+            with pytest.raises(OpError) as pending:
+                server.call(read)
+            assert reading.is_set()
+            assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+            assert 0.75 <= time.monotonic() - entry < 1.15
+        finally:
+            request_budget.reset_current(token)
+            release.set()
+            finish.set()
+            timer.join(2)
+        occupied.result(timeout=5)
+    assert titles(service.root, CID) == ["Canonical"]

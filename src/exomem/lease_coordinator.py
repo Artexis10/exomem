@@ -24,7 +24,18 @@ from .writer_lease import (
     COLLECTION_STORE_CAPABILITY,
     CollectionStoreFenceState,
     CollectionStoreHead,
+    _ClosingConnection,
 )
+
+
+def _connection(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=10, isolation_level=None, factory=_ClosingConnection)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
 
 
 class SQLiteLeaseStore:
@@ -52,9 +63,7 @@ class SQLiteLeaseStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        return _connection(self.path)
 
     @staticmethod
     def _record(row, *, granted: bool = False, fence=None, store_fence=None) -> dict:  # noqa: ANN001
@@ -446,9 +455,7 @@ class SQLiteStateStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        return _connection(self.path)
 
     @staticmethod
     def _collection(value: object) -> str:
