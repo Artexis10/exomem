@@ -69,9 +69,9 @@ The shared semantic cache SHALL retain neutral parsed structure and complete sta
 A request SHALL admit each page before enriching its lifecycle facts and SHALL NOT publish those facts into the shared cache.
 A stored manifest exemption SHALL require admitted target eligibility and complete identity uniqueness evidence.
 Explicit request paths SHALL NOT infer an activation census from missing identity evidence.
-An absent activation manifest SHALL require existing complete-view aggregate authority and independent status-registry admission before its complete census is built.
-A restricted first write SHALL refuse uniformly until ordinary canonical or administrative preparation establishes the manifest.
-The refusal SHALL add no human queue and SHALL NOT disable otherwise valid writes against an existing manifest.
+The activation census SHALL come from the complete structural corpus, independent of the caller, and SHALL record each eligible page's raw status label without classifying it. It SHALL NOT be served.
+A write against an absent manifest SHALL NOT be refused for lack of complete-view authority; its result SHALL depend only on the admitted target.
+A grandfathering exemption SHALL classify the target's recorded label with the caller's admitted basis.
 Validity-token reuse SHALL require fresh complete-view admission and current status dependencies; otherwise existing preflight revalidation SHALL run.
 
 #### Scenario: Hidden status cannot poison a shared semantic cache
@@ -79,10 +79,10 @@ Validity-token reuse SHALL require fresh complete-view admission and current sta
 - **THEN** the hidden label is not classified and no caller-derived lifecycle fact enters the shared cache
 - **AND** the complete identity census retains its existing uniqueness obligations
 
-#### Scenario: Restricted first write cannot create a partial activation boundary
-- **WHEN** a restricted writer validates a page while the activation manifest is absent
-- **THEN** the request reports the same unavailable outcome with or without hidden pages
-- **AND** canonical or administrative preparation can establish the complete manifest for later permitted writes
+#### Scenario: Restricted first write uses the complete neutral census
+- **WHEN** a restricted writer validates an admitted page while the activation manifest is absent
+- **THEN** the write's outcome is the same with or without hidden pages
+- **AND** the prepared manifest describes the complete corpus, not the writer's view
 
 #### Scenario: Hidden duplicate identity cannot inherit grandfathering
 - **WHEN** an admitted target shares its stable identity with another canonical page in the complete identity census

@@ -103,12 +103,12 @@ Duplicate identities anywhere in that complete census cannot inherit a stable-id
 Explicit request paths never replace missing identity evidence with an implicit activation scan.
 
 Activation snapshots remain separate complete evidence.
-Before an absent manifest can be planned, existing whole-vault aggregate authority and independent status-registry admission must both succeed.
-The existing complete builder then supplies the census; a filtered request view cannot supply it.
-Restricted first writes refuse uniformly until ordinary canonical or administrative maintenance prepares the manifest; no human approval queue is added.
-This prevents a partial view from permanently grandfathering the wrong corpus.
-Its false-refusal cost is the caller's first write until manifest preparation; existing stored-manifest writes remain available.
-Commit preparation never interprets a missing census as permission to discover the whole corpus.
+The activation census is lifecycle-neutral and caller-independent: the shared corpus walk records each structurally eligible compiled page and its raw status label, without classifying it.
+A filtered request view never supplies the census, so a partial view cannot grandfather the wrong corpus, and the census is never served.
+A write prepares an absent manifest from that complete neutral census, whoever the caller is; its response depends only on the admitted target.
+A grandfathering exemption classifies the target's recorded label with the caller's admitted basis; an unadmitted label on the target makes the exemption unavailable.
+Commit preparation never interprets a missing census as permission to discover the whole corpus; the shared walk supplies it.
+The shipped pack holds every status label the product itself writes, so canonical product labels never depend on vault definitions.
 Fast validity-token reuse requires fresh complete-view authority and current status dependencies; other callers use existing warm preflight revalidation.
 
 Dreamer queries keep their graph snapshot, ordering and existing 64-row contributor limits.
