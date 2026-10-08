@@ -7,11 +7,11 @@
 
 ## 2. Shared source and administration
 
-- [ ] 2.1 Create `substrate-systems/substrate-infra` with proportional OpenSpec contracts, extracted pinned management roots and guarded `substrate-control-foundation` / `substrate-control-durability` workspaces; verify state locking, version history, explicit execution, no automatic apply and no global state sharing before initialization.
-- [ ] 2.2 Extract PostgreSQL/TLS/backup configuration and one shared base-role dependency, preserving source contracts and encrypted custody versions; preserve the exact backup bucket name independently of the source shared random suffix, retire application-key secret-output dependencies in favour of existing BWS/SOPS custody, and verify isolated convergence without credential rotation.
+- [x] 2.1 Create `substrate-systems/substrate-infra` with proportional OpenSpec contracts, extracted pinned management roots and guarded `substrate-control-foundation` / `substrate-control-durability` workspaces; verify state locking, version history, explicit execution, no automatic apply and no global state sharing before initialization.
+- [x] 2.2 Extract PostgreSQL/TLS/backup configuration and one shared base-role dependency, preserving source contracts and encrypted custody versions; preserve the exact backup bucket name independently of the source shared random suffix, retire application-key secret-output dependencies in favour of existing BWS/SOPS custody, and verify isolated convergence without credential rotation.
 - [x] 2.3 Replace the unshipped Tailscale role with the shared pinned NetBird role and restricted peer-group administration policy, correcting the company account's default allow-all policy. Verify exact account/peer enrollment, effective configuration, authorised managed SSH, unauthorised-port denial and reboot recovery without subnet advertisement, enrollment-side DNS changes or provider SSH interception. Prove desktop coexistence and mobile tunnel switching during migration; supply opt-in mobile DNS separately and verify replacement phone/workstation/Moshi service paths under separate groups. Retire Tailscale dependencies only after those replacements pass.
 - [x] 2.4 Make base-role validation transport-aware and explicitly remove obsolete managed UFW allowances while preserving unrelated rules; adopt control-host tailnet administration and update the managed profile through its source deployment path, verifying console recovery and allowed/denied access before restriction plus effective guest/provider ingress and a fresh managed connection afterward.
-- [ ] 2.5 Publish the versioned non-secret dependency contract and update Exomem to consume it; verify incompatible/missing versions refuse deployment and selected endpoints/transport remain identical without target state sharing or shared apply permission.
+- [x] 2.5 Publish the versioned non-secret dependency contract and update Exomem to consume it; verify incompatible/missing versions refuse deployment and selected endpoints/transport remain identical without target state sharing or shared apply permission.
 
 Task 2.3 adoption checkpoint: the shared NetBird source is merged in Substrate-infra #4/#5; Exomem, Q, TU/n8n and control managed SSH worked from both workstations at adoption. Yadm #568 completes the source-managed peer wiring. Substrate-infra #6 adds phone-only DNS; #7 converges company workstation instances to IPv4 and clears the pinned client's stale SOCKS listener by restarting only their user services. Fresh authenticated SSH works in both directions after that correction, and independent verification preserves desktop POLLY's enrollment, process and package. The owner Android peer is identity-verified in `owner_devices` and the separate DNS group. Desktop Moshi connects. The laptop error 111 was the saved Moshi target: the native peer did not serve port 2222. The owner confirmed laptop SSH after selecting the isolated company endpoint. Terraform now excludes that native peer from owner services; the phone sees only the two serving endpoints. Substrate-infra #8 imports the two existing serving peer IDs and gives them endpoint-specific names, `laptop-wsl` and `desktop-wsl`, without changing enrollment, flags or access grants; its post-apply plan is empty. Reserve separate Windows names for separately enrolled and verified Windows services. The operator confirmed named phone SSH to both workstation endpoints on 2026-10-04. Disposable reboot recovery passed on 2026-10-05: a cx23 enrolled through the shared role, with public inbound closed at both the provider firewall and UFW, resumed managed NetBird SSH after a soft reboot (12.5 s) and a hard reset (35 s), stayed publicly unreachable and could request a provider console; every resource was deleted afterwards. Tailscale stays on owner devices as the operator's chosen fallback rather than being retired, so task 2.3 is complete. tu-n8n's public SSH UFW rules were removed the same day, and its bootstrap no longer reopens them.
 
@@ -21,8 +21,8 @@ Desktop and future laptop coexistence in task 2.3 requires concurrent POLLY and 
 
 - [x] 3.1 Extend the existing inspector with state-only plans and manifest-bound snapshot comparison. Rehearse native forward, inverse and interrupted state transfer in explicit local replicas with pinned providers and read-only provider access; prove preserved IDs, resource contents, independent BWS/SOPS recovery and no duplicate active owners.
 - [x] 3.2 Restore a selected recent backup into an isolated environment with production consumers and external effects blocked; verify lineage, selected integrity checks and retained encryption/retention contracts without exposing data.
-- [ ] 3.3 Freeze Terraform and Ansible source/target writers in both lifecycle domains. Retain private state-version IDs and manifests; independently review exact snapshot hashes, configuration revisions and saved state-only plans. Verify workspace identities immediately before each push.
-- [ ] 3.4 Transfer foundation and durability ownership one domain at a time with native moves and source-before-target pushes. Reconcile remote state after each checkpoint; prove one target owner per ID and no source ownership. Keep writers frozen until source retirement and live checks pass.
+- [x] 3.3 Freeze Terraform and Ansible source/target writers in both lifecycle domains. Retain private state-version IDs and manifests; independently review exact snapshot hashes, configuration revisions and saved state-only plans. Verify workspace identities immediately before each push.
+- [x] 3.4 Transfer foundation and durability ownership one domain at a time with native moves and source-before-target pushes. Reconcile remote state after each checkpoint; prove one target owner per ID and no source ownership. Keep writers frozen until source retirement and live checks pass.
 
 ## 4. Integrated closure
 
@@ -45,8 +45,38 @@ was removed. Private receipt: `restore-retry-receipt.json` in the operator's
 protected handover evidence. The earlier attempt rejected an unsupported flag
 before restoring data; its cleanup passed. Ownership transfer remains pending.
 
-- [ ] 4.1 Independently verify preserved DNS/IP/private attachment, managed tailnet SSH, database TLS/role boundaries, backup/WAL continuity and representative Substrate/Exomem consumer health; keep any failed check explicitly open.
-- [ ] 4.2 Retire transferred product management code and old control-node targeting, deliver repository dependency updates, and verify no recreation/configuration paths from actual merged delivery revisions before releasing writer freezes; move shared contracts into their owning repository through strict OpenSpec closure before archiving this change.
+Shared ownership checkpoint for tasks 2.1, 2.2 and 2.5 (2026-10-08):
+Substrate-infra #12 (merge `496676d`) and Exomem #1629 (squash `57b432e`)
+merged with independent approvals. Substrate-infra now holds the guarded
+`substrate-control-*` roots, the extracted base and PostgreSQL roles, and the
+shared contracts. Exomem consumes the typed `shared_control` dependency.
+
+Live handover checkpoint for tasks 3.3, 3.4, 4.1 and 4.2 (2026-10-08):
+1. The operator froze all four HCP workspaces before the merges.
+2. Native moves from fresh frozen pulls produced the candidates. An
+   independent reviewer approved the candidates and the push driver.
+3. Pushes ran one domain at a time, source removal before target adoption.
+   Each pushed state matched its reviewed candidate.
+4. Reviewed output-only plans reconciled the outputs. No provider resource
+   changed.
+5. Fresh ordinary plans in all four workspaces reported no changes.
+6. Final HCP reads gave each of the six provider IDs exactly one owner, in
+   its `substrate-control-*` workspace, and none in Exomem.
+
+Live checks against the pre-handover baselines:
+- PostgreSQL and PgBouncer PIDs, the certificate, roles and the system
+  identifier were unchanged.
+- WAL archiving advanced, and the read-only verify-full application
+  connection was unchanged.
+- DNS, the address and the private attachment were unchanged.
+- The Exomem Cloud pods were unchanged.
+
+An independent verifier accepted the full evidence before the operator lifted
+the freeze. The private receipts are under the operator's protected handover
+evidence. Physical project relocation (section 5) remains open.
+
+- [x] 4.1 Independently verify preserved DNS/IP/private attachment, managed tailnet SSH, database TLS/role boundaries, backup/WAL continuity and representative Substrate/Exomem consumer health; keep any failed check explicitly open.
+- [x] 4.2 Retire transferred product management code and old control-node targeting, deliver repository dependency updates, and verify no recreation/configuration paths from actual merged delivery revisions before releasing writer freezes; move shared contracts into their owning repository through strict OpenSpec closure before archiving this change.
 - [ ] 4.3 Inventory the remaining organisation-owned server consumers and deliver the shared administration standard in governed rollout batches; verify each host's authorised/denied connectivity and recovery receipt before recording adoption, excluding client systems without their own authority.
 
 Task 2.4/4.3 cutover checkpoint (2026-10-05): all four known organisation servers now drop public SSH and is administered over the company NetBird. Exomem #1588 closed alpha and the control host: `site.yml --tags admin_ssh` over NetBird retired the managed rules, the operator removed the remaining uncommented public 22 rules, and a targeted foundation plan removed only the SSH rule from the alpha, control and agent firewalls. Q #1032 did the same for q-k3s-01 through its own IaC, and tu-n8n's public UFW rules were removed by hand with its bootstrap fixed in tu-n8n #54. Fresh managed NetBird SSH works on all four, and public 22 times out. Console recovery was proven before the restriction on a disposable server in the Exomem Hetzner project; the per-host console requests for alpha, control and q-k3s-01 succeeded after the cutover. The operator's foundation input now carries an empty `admin_ssh_cidrs`, so a routine plan keeps SSH closed. A read-only listing of every server in the Exomem and Q Hetzner projects on 2026-10-06 found three (exomem-alpha-01, exomem-control-db-01, q-k3s-01), all adopted and with no provider SSH rule. Still open under 4.3: tu-n8n's Hetzner project, which can't be listed or console-checked because its credential is not in operator custody. The #1513 control-host rename is not applied live: an untargeted foundation plan renames the server, firewall and primary IP and recomputes the primary IP's assignment, so it needs its own reviewed plan.

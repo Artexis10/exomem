@@ -26,10 +26,10 @@ effectors, not a release checklist; do not edit their release values by hand.
 Hosts have no public SSH. Operators and Ansible reach them over the company
 NetBird with the existing key and host pin; the shared NetBird role admits
 22/tcp on `wt0`. Keep a private JSON file outside the repository that maps each
-inventory host name (`exomem-alpha`, `substrate-control-01`,
-`exomem-agent-<key>`) to its NetBird IP, and pass it to the inventory generator
-with `--admin-addresses`. Hosts it omits keep their public IPv4, which is
-closed. The base role refuses to run with no public SSH CIDR unless the host
+inventory host name (`exomem-alpha`, `exomem-agent-<key>`) to its NetBird IP,
+and pass it to the inventory generator with `--admin-addresses`. Hosts it omits
+keep their public IPv4, which is closed. The shared control host is
+administered from `substrate-systems/substrate-infra`, not this inventory. The base role refuses to run with no public SSH CIDR unless the host
 has `wt0` and UFW admits 22/tcp on it.
 
 Ansible uses plain OpenSSH, not `harness ssh`. Route only the NetBird
