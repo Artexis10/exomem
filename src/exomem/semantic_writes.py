@@ -716,6 +716,7 @@ def evaluate_posthoc_batch(
                 census=corpus.activation_census,
                 identity_census=corpus.identity_census,
                 eligible_compiled=state.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         result = semantic_contract.evaluate(
@@ -2095,10 +2096,6 @@ def _preflight_existing(
         )
 
     manifest = activation_manifest.load_manifest(root)
-    if manifest is None:
-        before_corpus = replace(
-            before_corpus, activation_census=activation_manifest.build_census(root)
-        )
     boundary = activation_manifest.plan_activation_boundary(
         before_corpus.activation_census, manifest=manifest
     )
@@ -2111,6 +2108,7 @@ def _preflight_existing(
         census=before_corpus.activation_census,
         identity_census=before_corpus.identity_census,
         eligible_compiled=before.eligible_compiled,
+        status_basis=status_basis,
     )
     with mutation_timing_span(timings, "preflight.contract_eval"):
         result = semantic_contract.evaluate(
@@ -2171,6 +2169,7 @@ def _reevaluate_existing(
     preflight: ExistingPreflight,
     *,
     manifest: activation_manifest.ActivationManifest,
+    status_basis: lifecycle_statuses.Basis,
 ) -> tuple[semantic_contract.SemanticContractResult, bool]:
     grandfathered = activation_manifest.is_grandfathered(
         preflight.before_corpus.vault_root,
@@ -2183,6 +2182,7 @@ def _reevaluate_existing(
         census=preflight.activation_census,
         identity_census=preflight.before_corpus.identity_census,
         eligible_compiled=preflight.before.eligible_compiled,
+        status_basis=status_basis,
     )
     result = semantic_contract.evaluate(
         before=preflight.before,
@@ -2938,7 +2938,9 @@ def _commit_existing(
                 winner = activation_manifest.ensure_manifest(
                     root, census=preflight.activation_census, commit_point=False
                 )
-                result, _ = _reevaluate_existing(preflight, manifest=winner)
+                result, _ = _reevaluate_existing(
+                    preflight, manifest=winner, status_basis=status_basis
+                )
                 if result.should_block:
                     raise SemanticWriteError(
                         "SEMANTIC_CONTRACT_BLOCKED",
@@ -3330,10 +3332,6 @@ def preflight_move(
         status_basis=status_basis,
     )
     manifest = activation_manifest.load_manifest(root)
-    if manifest is None:
-        before_corpus = replace(
-            before_corpus, activation_census=activation_manifest.build_census(root)
-        )
     boundary = activation_manifest.plan_activation_boundary(
         before_corpus.activation_census, manifest=manifest
     )
@@ -3427,6 +3425,7 @@ def preflight_move(
                 census=before_corpus.activation_census,
                 identity_census=before_corpus.identity_census,
                 eligible_compiled=before.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         result = semantic_contract.evaluate(
@@ -3774,6 +3773,7 @@ def preflight_recovery(
                 census=after_corpus.activation_census,
                 identity_census=after_corpus.identity_census,
                 eligible_compiled=after.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         baseline_result = semantic_contract.evaluate(

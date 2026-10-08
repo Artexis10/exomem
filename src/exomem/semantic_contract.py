@@ -210,6 +210,9 @@ class SemanticPageState:
     # (admits append-only Sources) and deliberately tracked separately, because
     # `eligible_governed_paths` gates the empty-corpus bootstrap disposition.
     connectable_target: bool = False
+    # Compiled-page eligibility without the lifecycle class: neutral parsed
+    # structure, shared by every caller and the source of the activation census.
+    structurally_compiled: bool = False
     status_class: str | None = None
     status_unregistered: bool = False
     status_dependency: tuple[str, str] | None = None
@@ -982,7 +985,7 @@ class SemanticCorpusContext:
     connectable_target_paths: frozenset[str]
     inbound: Mapping[str, tuple[RelationFact, ...]]
     outbound: Mapping[str, tuple[RelationFact, ...]]
-    activation_census: activation_manifest.ActivationCensus | None
+    activation_census: activation_manifest.ActivationCensus
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
 
@@ -1187,9 +1190,7 @@ def enrich_page_state(
     governed = activation.structurally_eligible_for_types(
         root, parsed, page_types=activation._ELIGIBLE_TYPES
     )
-    compiled = activation.structurally_eligible_for_types(
-        root, parsed, page_types=activation._COMPILED_PAGE_TYPES
-    )
+    compiled = state.structurally_compiled
     connectable = activation.structurally_eligible_for_types(
         root,
         parsed,
@@ -1292,6 +1293,14 @@ def _parse_page_state(
         )
     elif review_fingerprint is not None and type(review_fingerprint) is not str:
         raise ValueError("review_fingerprint must be a string or None")
+    parsed = find_module.ParsedPage(
+        path=root / rel_path,
+        rel_path=rel_path,
+        frontmatter=frontmatter,
+        body="",
+        title=title,
+        mtime=0.0,
+    )
     return SemanticPageState(
         path=rel_path,
         identity_kind=identity_kind,
@@ -1311,6 +1320,9 @@ def _parse_page_state(
         eligible_governed=False,
         eligible_compiled=False,
         connectable_target=False,
+        structurally_compiled=activation.structurally_eligible_for_types(
+            root, parsed, page_types=activation._COMPILED_PAGE_TYPES
+        ),
         body_wikilinks=tuple(body_links),
     )
 
@@ -2701,6 +2713,11 @@ def build_corpus_context(
     return context
 
 
+def warm_corpus_context(vault_root: Path) -> None:
+    """Fill the shared structural corpus cache without classifying for any caller."""
+    _build_corpus_context_with_census(Path(vault_root))
+
+
 def build_corpus_context_with_census(
     vault_root: Path,
     *,
@@ -2709,7 +2726,12 @@ def build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
-    """Enrich admitted pages without publishing caller facts into the shared cache."""
+    """Enrich admitted pages without publishing caller facts into the shared cache.
+
+    The owner and an unbound library call admit every page without a per-page
+    decision. A restricted caller's admissions are collected in their own
+    disclosure boundary: they shape this context, not the caller's receipt.
+    """
     from .governance import egress
 
     root = Path(vault_root)
@@ -2719,11 +2741,16 @@ def build_corpus_context_with_census(
         registry=registry,
         language_registry=language_registry,
     )
-    visible = egress.release_walk_filter(root)
-    states = {
-        path: enrich_page_state(root, state, basis) if visible is None or visible(path) else state
-        for path, state in context.pages.items()
-    }
+    with egress.disclosure_boundary(root, "semantic_corpus_admission"):
+        visible = egress.restricted_release_filter(root)
+        states = {
+            path: (
+                enrich_page_state(root, state, basis)
+                if visible is None or visible(path)
+                else state
+            )
+            for path, state in context.pages.items()
+        }
     # Candidate validation owns target admission and requires classification.
     if candidate is not None:
         states[candidate.path] = enrich_page_state(root, candidate, basis)
@@ -3299,6 +3326,18 @@ def _context_from_resolved_state(
         if fact.logical_target_path in ordered_pages:
             inbound.setdefault(fact.logical_target_path, []).append(fact)
     full_paths, kb_stripped, stems, titles = _resolver_snapshot(resolver)
+    # The census is structural and records raw labels unclassified, so it is the
+    # same for every caller and may live in the shared cache.
+    census = activation_manifest.ActivationCensus.from_candidates(
+        activation_manifest.ActivationCandidate(
+            state.path,
+            state.source_hash,
+            state.identity if state.identity_kind == "exomem_id" else None,
+            activation_manifest.recorded_status(state.frontmatter.get("status")),
+        )
+        for state in ordered_pages.values()
+        if state.structurally_compiled
+    )
     return SemanticCorpusContext(
         vault_root=root,
         pages=MappingProxyType(ordered_pages),
@@ -3332,7 +3371,7 @@ def _context_from_resolved_state(
                 for key, values in outbound.items()
             }
         ),
-        activation_census=None,
+        activation_census=census,
         identity_census=identity_census,
         registry=registry,
     )

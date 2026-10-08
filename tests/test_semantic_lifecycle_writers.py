@@ -4367,7 +4367,10 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
         'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
     )
     _reset_caches()
-    refusals = []
+    # Spec: a restricted first write uses the complete neutral census. Its outcome
+    # is the same with or without hidden pages, and the prepared manifest
+    # describes the complete corpus, not the writer's view.
+    outcomes = []
     for hidden in (False, True):
         if hidden:
             _write(
@@ -4376,14 +4379,17 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
                 _source("Private prose.", page_id=_OTHER_ID, status="private-review"),
             )
         with request_scope(_external()):
-            with pytest.raises(activation_manifest.ActivationManifestError) as unavailable:
-                semantic_writes.preflight_existing(
-                    tmp_path, path=_PAGE, after_source=after, operation="edit"
-                )
-            refusals.append((unavailable.value.code, str(unavailable.value)))
+            first = semantic_writes.preflight_existing(
+                tmp_path, path=_PAGE, after_source=after, operation="edit"
+            )
+        outcomes.append((first.grandfathered, first.contract_result.as_dict()))
+        assert first.manifest_install_required
         assert not activation_manifest.manifest_path(tmp_path).exists()
         assert page.read_text() == before
-    assert refusals[0] == refusals[1]
+    assert outcomes[0] == outcomes[1]
+    prepared = {item.path_at_activation: item for item in first.prospective_manifest.pages}
+    assert set(prepared) == {_PAGE, "Knowledge Base/Notes/Withheld/private.md"}
+    assert prepared["Knowledge Base/Notes/Withheld/private.md"].status == "private-review"
     with library_scope():
         inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
         commands.op_schema_memory(
