@@ -2740,7 +2740,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
         )
         # Its own module: the wheel is built once above, and this journey restarts the
         # service, rewrites one installed file and imports a large export.
-        print("product-e2e: S1 Records summary journey (dark, released, import, fields, copy, restore, rollback)")
+        print(
+            "product-e2e: S1 Records summary journey "
+            "(dark, released, import, fields, copy, restore, rollback)"
+        )
         s1_journey = _run(
             [
                 str(python),
@@ -2789,7 +2792,9 @@ def main() -> int:
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--executable", default="")
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", ""))
+    parser.add_argument(
+        "--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
+    )
     parser.add_argument("--http-server", default="")
     parser.add_argument("--vault", default="")
     parser.add_argument("--work", default="")
