@@ -22,14 +22,12 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
-
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Connection
-from sqlalchemy.exc import DBAPIError
-from sqlalchemy.pool import NullPool
+from typing import TYPE_CHECKING, Any
 
 from . import schema
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
 
 STORE_FILENAME = "collections.sqlite"
 MINIMUM_SQLITE_VERSION = (3, 38, 0)
@@ -120,6 +118,10 @@ def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
 
 
 def _writer_engine(database: str):
+    # Store libraries load with the first store, not with every CLI import.
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.pool import NullPool
+
     engine = create_engine("sqlite+pysqlite://", creator=lambda: _connect(database), poolclass=NullPool)
 
     @event.listens_for(engine, "begin")
@@ -222,6 +224,8 @@ class WriterConnection:
     @contextmanager
     def transaction(self, *, resolve_divergence: bool = False) -> Iterator[sqlite3.Connection]:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
+        from sqlalchemy.exc import DBAPIError
+
         self.require_write_authority(allow_diverged=resolve_divergence)
         cache = self.release_cache
         cache.check()
@@ -244,6 +248,8 @@ class WriterConnection:
 
     def execute(self, statement, parameters=None):
         """Execute Core statements only within this handle's mutation scope."""
+        from sqlalchemy.exc import DBAPIError
+
         self.require_owner_thread()
         if not self.core.in_transaction() or not self.connection.in_transaction:
             raise RuntimeError("Core writes require the writer transaction")
@@ -280,6 +286,8 @@ def open_writer(
     ``lease_check`` is a trusted adapter/test seam: its caller must supply the
     exact store's scoped authority, never the process-wide scheduler predicate.
     """
+    from sqlalchemy.exc import DBAPIError
+
     check_sqlite_version()
     target = Path(path).resolve()
     check = lease_check if lease_check is not None else _vault_lease_check(target, vault_root)

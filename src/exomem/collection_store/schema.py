@@ -39,15 +39,11 @@ import threading
 import uuid
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from alembic import command
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-from sqlalchemy.engine import Connection
-from sqlalchemy.exc import DBAPIError
-from sqlalchemy.schema import CreateTable
-
-from . import tables
+if TYPE_CHECKING:
+    from alembic.config import Config
+    from sqlalchemy.engine import Connection
 
 SCHEMA_VERSION = 8
 
@@ -707,6 +703,8 @@ _ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
 
 
 def _migration_config(conn: Connection | None = None) -> Config:
+    from alembic.config import Config
+
     config = Config()
     # ConfigParser requires literal percent signs in installation paths to be escaped.
     config.set_main_option("script_location", str(_MIGRATION_PATH).replace("%", "%%"))
@@ -716,6 +714,8 @@ def _migration_config(conn: Connection | None = None) -> Config:
 
 @lru_cache(maxsize=1)
 def _revisions(path: Path) -> frozenset[str]:
+    from alembic.script import ScriptDirectory
+
     return frozenset(revision.revision for revision in ScriptDirectory(str(path)).walk_revisions())
 
 
@@ -765,6 +765,12 @@ def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> i
 
 def ensure_schema(conn: Connection) -> int:
     """Apply packaged revisions in one writer-owned immediate transaction."""
+    # Store libraries load with the first store, not with every CLI import.
+    from alembic import command
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.schema import CreateTable
+
+    from . import tables
     from .connection import rollback
 
     raw = conn.connection.driver_connection
