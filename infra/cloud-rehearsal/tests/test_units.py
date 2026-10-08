@@ -14,6 +14,58 @@ from cloud_rehearsal import build, platform, report, substrate, tls
 from cloud_rehearsal.mcp_client import _HiddenInputs
 
 
+def test_upgrade_gate_excludes_pre_release_diagnostics(monkeypatch) -> None:
+    """Slow log collection must not falsely fail a timely cell upgrade."""
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import scenarios
+
+    clock = [0.0]
+    snapshots = []
+    monkeypatch.setattr(scenarios.time, "monotonic", lambda: clock[0])
+
+    def snapshot(_ctx):
+        snapshots.append(True)
+        clock[0] += 8.0
+
+    monkeypatch.setattr(scenarios, "snapshot_logs", snapshot)
+
+    async def cell(_cell_id):
+        return {"observed_image": "image-v1"}
+
+    async def release(_body):
+        clock[0] += 2.0
+
+    async def wait_cell(_cell_id, predicate, **_kwargs):
+        clock[0] += 3.0
+        row = {"observed_image": "image-v2", "observed_state": "running", "ready": True}
+        assert predicate(row)
+        return row
+
+    async def rollout():
+        return {"last_good_image": "image-v2"}
+
+    async def recall(*_args):
+        return SimpleNamespace(text=lambda: "preserved finding")
+
+    @asynccontextmanager
+    async def mcp():
+        yield SimpleNamespace(call=recall)
+
+    run = report.Report(run_id="timing-boundary")
+    ctx = SimpleNamespace(
+        a=SimpleNamespace(client=SimpleNamespace(mcp=mcp), cell_id="a", phrase="preserved finding"),
+        images=SimpleNamespace(cell_v1="image-v1", cell_v2="image-v2"),
+        cell=cell, admin_release=release, wait_cell=wait_cell, rollout=rollout, report=run,
+    )
+    record = report.StepRecord(number=7, name="upgrade_and_recall")
+    asyncio.run(scenarios.step_7_upgrade(ctx, record))
+    assert snapshots, "the upgrade still needs its pre-replacement log snapshot"
+    assert run.single["upgrade_seconds_per_cell"] == 5.0
+
+
 def test_percentile_is_nearest_rank() -> None:
     assert report.percentile([], 0.95) is None
     assert report.percentile([0.1] * 19 + [5.0], 0.95) == 0.1

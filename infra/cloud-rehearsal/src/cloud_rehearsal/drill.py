@@ -83,7 +83,6 @@ FIXTURES = images.REPO_ROOT / "infra/cellctl/tests/fixtures"
 # Migration 0056 references exomem_tenants(id), which an earlier Substrate
 # migration owns; cellctl's conftest creates the same stand-in.
 TENANTS_STANDIN_SQL = "CREATE TABLE exomem_tenants (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), status text NOT NULL DEFAULT 'active')"
-SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
 CELL_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 # docs/runbooks/cloud-node-loss.md, "After restoring etcd" steps 2 and 4.4.
 LOCAL_ROWS_SQL = (
@@ -1138,7 +1137,7 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
         "cells": {"jobEgressExcept": [infra.K3S_POD_CIDR, infra.K3S_SERVICE_CIDR]},
         "cellStorage": {"domain": "local", "local": {"enabled": True, "maxCellGib": DRILL_MAX_CELL_GIB}},
     }
-    rendered = platform.render_chart(stack, values, dependencies=True, api_versions=(SNAPSHOT_CLASS_API,))
+    rendered = platform.render_chart(stack, values, dependencies=True, api_versions=(platform.SNAPSHOT_CLASS_API,))
     documents = [
         doc for source, doc in rendered
         if source in ("templates/cellctl.yaml", "templates/cell-local-storage.yaml")
@@ -1148,7 +1147,7 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
     ]
     report.overlays.append(platform.overlay_cellctl(documents))
     report.adaptations.append(
-        f"the chart is rendered with --api-versions {SNAPSHOT_CLASS_API}, standing in for the second upgrade "
+        f"the chart is rendered with --api-versions {platform.SNAPSHOT_CLASS_API}, standing in for the second upgrade "
         "after which its VolumeSnapshotClass renders"
     )
     lvmd = next(doc for doc in documents if doc["kind"] == "DaemonSet" and doc["metadata"]["name"].endswith("-lvmd-0"))
@@ -1169,8 +1168,7 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
     report.stages["platform"]["applied"] = sorted({f"{doc['kind']}/{doc['metadata']['name']}" for doc in documents})
     for namespace, deployment in (
         (platform.CLOUD_NAMESPACE, "cellctl"),
-        (platform.PLATFORM_NAMESPACE, "exomem-platform-topolvm-controller"),
-        (platform.PLATFORM_NAMESPACE, "snapshot-controller"),
+        *((platform.PLATFORM_NAMESPACE, name) for name in platform.LOCAL_STORAGE_CONTROLLERS),
     ):
         platform.wait_rollout(stack, namespace, deployment, timeout=420)
     return f"{key}={value}"
