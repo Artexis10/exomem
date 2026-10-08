@@ -39,8 +39,8 @@ SCHEMA_VERSION = 1
 CONTRACT_VERSION = 1
 _MANIFEST_NAME = "semantic-activation.yaml"
 _PAGE_KEYS = frozenset({"identity_kind", "identity", "path_at_activation", "source_hash"})
-# The manifest schema fixes one optional page field: the authored label a live-classified
-# entry needs at check time. Absent means live, as every earlier manifest recorded only live pages.
+# Absent means live: every earlier manifest recorded only live pages.
+# nosemgrep: ep-word-set -- The manifest schema fixes this optional page field name.
 _OPTIONAL_PAGE_KEYS = frozenset({"status"})
 _ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
