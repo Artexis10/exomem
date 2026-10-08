@@ -46,7 +46,8 @@ import yaml
 PACK_SCHEMA_VERSION = 1
 NO_OVERLAY_HASH = "none"
 #: The generic entry fields a delta may name. A spec narrows them.
-ENTRY_FIELDS = frozenset(  # nosemgrep: ep-word-set -- The generic registry entry schema defines these field names.
+ENTRY_FIELDS = frozenset(
+    # nosemgrep: ep-word-set -- The generic registry entry schema defines these field names.
     {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
 )
 _DELTA_VERBS = frozenset({"upsert", "alias", "deprecate"})
