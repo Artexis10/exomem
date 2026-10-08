@@ -560,7 +560,7 @@ def _legacy_dated_child_resolution(
     outside the KB, mirroring the read-only-paths fallback in
     `references/write-scope.md`. `link` names the legacy page so the
     suggested child is discoverable from it via the existing `part_of`
-    relation (`core-relations.yaml`).
+    relation (`vocabulary/packs/core/relations.yaml`).
 
     `suggested_path` is de-collided with `vault.unique_path` — the same
     helper `note.py`'s creation path uses to pick a filename — so the advised

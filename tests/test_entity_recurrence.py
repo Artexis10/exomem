@@ -1005,7 +1005,7 @@ def test_the_sweep_opens_only_the_files_it_can_name(tmp_path: Path, monkeypatch)
 
     The whole cost argument is that recurrence is counted over bodies the audit
     has already parsed. So the honest pin is not "zero I/O" — it is that every
-    open is one this design can name. There is exactly one: the digest-cached
+    open is one this design can name. At most one reads the digest-cached
     entity-type registry. No page, no `Entities/` glob, no second corpus read.
     """
     root = tmp_path / "v"
@@ -1015,7 +1015,7 @@ def test_the_sweep_opens_only_the_files_it_can_name(tmp_path: Path, monkeypatch)
 
     opened = _sweep_opens(tmp_path, monkeypatch, root)
 
-    assert [Path(path).name for path in opened] == ["entity-types.yaml"], opened
+    assert [Path(path).name for path in opened] in ([], ["entity-types.yaml"]), opened
 
 
 def test_a_dotted_candidate_costs_one_existence_probe_and_no_read(
@@ -1044,7 +1044,7 @@ def test_a_dotted_candidate_costs_one_existence_probe_and_no_read(
     monkeypatch.setattr(audit_module, "_ordinary_file_exists", counting)
     opened = _sweep_opens(tmp_path, monkeypatch, root)
 
-    assert [Path(path).name for path in opened] == ["entity-types.yaml"], opened
+    assert [Path(path).name for path in opened] in ([], ["entity-types.yaml"]), opened
     # Two spellings probed for the ONE dotted identity; the plain name costs none.
     assert [Path(path).name for path in probed] == ["Node.js", "Node.js"], probed
 

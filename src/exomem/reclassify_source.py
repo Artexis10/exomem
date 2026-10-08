@@ -101,6 +101,8 @@ class ReclassifyResult:
     relocated: bool = False
     references_updated: int = 0
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    # One line per source kind or domain this correction registered on first use.
+    vocabulary_receipt: tuple[str, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -114,6 +116,8 @@ class ReclassifyResult:
         }
         if self.warnings:
             value["warnings"] = list(self.warnings)
+        if self.vocabulary_receipt:
+            value["vocabulary_receipt"] = list(self.vocabulary_receipt)
         return value
 
 
@@ -569,4 +573,5 @@ def reclassify(
         relocated=relocating,
         references_updated=references_updated,
         warnings=_introduction_warnings(plan),
+        vocabulary_receipt=tuple(plan.receipt()),
     )

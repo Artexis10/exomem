@@ -20,7 +20,7 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
-from exomem import epistemic_graph, server
+from exomem import epistemic_graph, graph_sync, server
 from exomem.__main__ import main as cli_main
 from exomem.governance.principal import owner_principal, request_scope
 
@@ -147,10 +147,14 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
     )
     assert registered["state"] == "committed", registered
     assert (vault / "Knowledge Base/_Schema/entity-types.yaml").is_file()
+    # The save's batch carries its `log.md` entry, so the graph converges on the
+    # new types in the background; let it finish before each door builds a server.
+    assert graph_sync.drain_active_rebuilds(timeout=60)
 
     # Every door serves the same registry, with vault-rooted families and no
-    # organization classification forced onto a site or a machine.
-    for door, payload in doors.all("bootstrap", {"profile": "compact", "section": "entities"}).items():
+    # organization classification forced onto a site or a machine. The compact
+    # bootstrap lists types by use; the full profile carries each definition.
+    for door, payload in doors.all("bootstrap", {"profile": "full"}).items():
         types = {item["id"]: item for item in payload["entity_registry"]["types"]}
         assert types["site"]["family"] == "site", door
         assert types["site"]["facets"] == {"region": "single text"}, door
@@ -206,7 +210,11 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
         # Publication is reported as it stands: durable, graph still pending.
         assert receipt["graph_sync"] in {"pending", "completed"}, (door, receipt)
         if receipt["graph_sync"] == "pending":
-            assert receipt["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS", door
+            # A rebuild in flight or a queued repair: both are durable-and-behind.
+            assert receipt["graph_sync_code"] in {
+                "GRAPH_SYNC_REBUILD_IN_PROGRESS",
+                "GRAPH_SYNC_REPAIR_QUEUED",
+            }, door
     site_page = yaml.safe_load(
         (vault / expected_paths["mcp"]).read_text(encoding="utf-8").split("---")[1]
     )

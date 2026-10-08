@@ -410,6 +410,7 @@ def build_world_in_process(root: Path, spec: PreCapture) -> dict[str, str]:
     import datetime as dt
 
     from exomem import commands, link
+    from exomem.governance.principal import library_scope
     from exomem.init import init_vault
 
     root = Path(root)
@@ -430,12 +431,13 @@ def build_world_in_process(root: Path, spec: PreCapture) -> dict[str, str]:
                 for seed in spec.types
             },
         }
-        saved = commands.op_schema_memory(
-            root,
-            operation="save-entity-types",
-            proposal=proposal,
-            why="register the fixture's governed entity types",
-        )
+        with library_scope():
+            saved = commands.op_schema_memory(
+                root,
+                operation="save-entity-types",
+                proposal=proposal,
+                why="register the fixture's governed entity types",
+            )
         if saved.get("valid") is not True:
             raise FixtureError(f"entity type registration was refused: {saved}")
     for seed in spec.entities:
@@ -499,24 +501,25 @@ def build_world_in_process(root: Path, spec: PreCapture) -> dict[str, str]:
     if spec.relation_types:
         from exomem import relation_registry
 
-        commands.op_schema_memory(
-            root,
-            subject="relations",
-            operation="save-relations",
-            proposal={
-                "upsert": {
-                    seed.relation: {
-                        "parent": seed.parent,
-                        "description": seed.description,
-                        "direction": seed.direction,
-                        "aliases": [],
+        with library_scope():
+            commands.op_schema_memory(
+                root,
+                subject="relations",
+                operation="save-relations",
+                proposal={
+                    "upsert": {
+                        seed.relation: {
+                            "parent": seed.parent,
+                            "description": seed.description,
+                            "direction": seed.direction,
+                            "aliases": [],
+                        }
+                        for seed in spec.relation_types
                     }
-                    for seed in spec.relation_types
-                }
-            },
-            expected_hash=relation_registry.load_registry(root).extension_hash,
-            why="register the fixture's governed relation meanings",
-        )
+                },
+                expected_hash=relation_registry.load_registry(root).extension_hash,
+                why="register the fixture's governed relation meanings",
+            )
     for seed in spec.relations:
         _add_relation(root, key_to_path[seed.source], seed.relation, Path(key_to_path[seed.target]).stem)
     return key_to_path

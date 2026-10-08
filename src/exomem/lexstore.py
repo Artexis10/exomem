@@ -7567,6 +7567,35 @@ class LexicalStore:
                 out.append((str(path), [item for item in decoded if isinstance(item, str)]))
         return out
 
+    def page_axis_counts(self, column: str) -> dict[str, int] | None:
+        """Knowledge Base pages per stored value of one scalar page axis.
+
+        `column` is `source_kind` or `domain`, the canonicalized scalar columns
+        a vocabulary registry counts its keys over. None when the catalogue is
+        absent or stale, so a caller reports the counts unavailable rather than
+        reading an unbuilt sidecar as zero use.
+        """
+        if column not in {"source_kind", "domain"}:
+            raise ValueError(f"page_axis_counts: unsupported column {column!r}")
+        from . import freshness as freshness_module
+
+        checkpoint = freshness_module.live_recall_checkpoint(self.vault_root, "kb")
+        if checkpoint is None:
+            return None
+
+        def read(conn: sqlite3.Connection) -> dict[str, int]:
+            rows = conn.execute(
+                f"SELECT {column}, COUNT(*) FROM pages "  # noqa: S608 — closed column set above
+                f"WHERE in_kb = 1 AND {column} IS NOT NULL GROUP BY {column}"
+            ).fetchall()
+            return {str(value): int(count) for value, count in rows}
+
+        result = self._serve_from_ready_catalog_result(
+            "kb", checkpoint.triple, read, "lexical axis-count probe declined (%s)",
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        return result.value if result.readiness.complete else None
+
     def tag_usage_aggregate(
         self, excluded_dirs: Iterable[str], whitespace: str
     ) -> tuple[dict[str, int], dict[str, int]] | None:

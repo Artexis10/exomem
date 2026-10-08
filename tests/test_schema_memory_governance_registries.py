@@ -151,7 +151,7 @@ def test_save_roles_writes_the_override_and_its_snapshot_through_the_canonical_b
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
 
-    def batch(writes, *, vault_root: Path):  # noqa: ANN001
+    def batch(writes, *, vault_root: Path, **_sealed):  # noqa: ANN001, ANN003
         calls.append(list(writes))
         return [write.path for write in writes]
 
@@ -185,7 +185,7 @@ def test_save_conventions_writes_the_override_and_its_snapshot_through_the_canon
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
 
-    def batch(writes, *, vault_root: Path):  # noqa: ANN001
+    def batch(writes, *, vault_root: Path, **_sealed):  # noqa: ANN001, ANN003
         calls.append(list(writes))
         return [write.path for write in writes]
 
@@ -501,7 +501,10 @@ def _governed_save(root: Path, subject: str, value: str, why: str) -> dict:
 
 
 def _history(root: Path, subject: str) -> list[dict]:
-    return commands.op_schema_memory(root, subject=subject, operation="history")["versions"]
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        return commands.op_schema_memory(root, subject=subject, operation="history")["versions"]
 
 
 @pytest.mark.parametrize("subject", sorted(_SUBJECTS))
@@ -714,3 +717,24 @@ def test_save_does_not_prune_a_replaced_external_history_tree(
     _governed_save(bare_vault, subject, "firstword", "first")
 
     assert len(list(outside.glob("*.yaml"))) == registry_history.HISTORY_KEEP + 1
+
+
+@pytest.mark.parametrize("subject", sorted(_SUBJECTS))
+def test_effective_registry_hash_does_not_erase_a_racing_overlay_comment(
+    bare_vault: Path, monkeypatch: pytest.MonkeyPatch, subject: str
+) -> None:
+    first = _governed_save(bare_vault, subject, "firstword", "first")
+    path = bare_vault / first["saved"]["path"]
+    hand_edit = path.read_text() + "# concurrent owner edit\n"
+    before_history = _history(bare_vault, subject)
+    commit = registry_history.commit
+
+    def edit_then_commit(*args, **kwargs):
+        path.write_text(hand_edit)
+        return commit(*args, **kwargs)
+
+    monkeypatch.setattr(registry_history, "commit", edit_then_commit)
+    with pytest.raises(ValueError, match="PATH_GUARD_CONTENT"):
+        _governed_save(bare_vault, subject, "secondword", "second")
+    assert path.read_text() == hand_edit
+    assert _history(bare_vault, subject) == before_history

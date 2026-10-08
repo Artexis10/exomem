@@ -1,21 +1,27 @@
-"""Versioned core relations and optional vault-owned relation refinements."""
+"""Versioned core relations and optional vault-owned relation refinements.
+
+The core relations ship in `vocabulary/packs/core/relations.yaml`. The vault
+overlay `_Schema/relation-registry.yaml` keeps its grammar and is read and
+cached through the generic vocabulary loader (`SPEC`); this module is the
+registry's adapter and keeps its public API and meaning rules.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Container, Iterable
+from collections.abc import Container, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import lru_cache
-from importlib.resources import files
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
 
-from . import vault
 from .kbdir import kb_dirname
+from .vocabulary import registry as vocabulary_registry
 
 EXTENSION_SCHEMA_VERSION = 1
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
@@ -195,8 +201,7 @@ def extension_registry_path(vault_root: Path) -> Path:
 
 @lru_cache(maxsize=1)
 def core_registry() -> RelationRegistry:
-    raw = files("exomem").joinpath("core-relations.yaml").read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
+    data = yaml.safe_load(vocabulary_registry.pack_text("relations.yaml"))
     version = int(data["schema_version"])
     definitions: dict[str, RelationDefinition] = {}
     for key, value in data["relations"].items():
@@ -210,9 +215,6 @@ def core_registry() -> RelationRegistry:
             core=True,
         )
     return RelationRegistry(version, "none", definitions)
-
-
-_CACHE: dict[Path, tuple[str, RelationRegistry]] = {}
 
 
 class _EveryKey:
@@ -247,28 +249,28 @@ def load_registry(
         )
     if vault_root is None:
         return core
-    path = extension_registry_path(vault_root)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    return vocabulary_registry.load(SPEC, Path(vault_root)).typed
+
+
+def clear_cache() -> None:
+    """Drop every vault's cached relation-registry snapshot."""
+    vocabulary_registry.invalidate_registry(SPEC.name)
+
+
+def _parse_overlay_text(raw: str | None, digest: str) -> RelationRegistry:
+    core = core_registry()
+    if raw is None:
         return core
-    digest = _content_hash(raw)
-    cached = _CACHE.get(path)
-    if cached and cached[0] == digest:
-        return cached[1]
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        registry = RelationRegistry(
+        return RelationRegistry(
             core.core_version,
             digest,
             core.core,
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
         )
-    else:
-        registry = _parse_extension_data(data, digest, core, grandfathered=_EveryKey())
-    _CACHE[path] = (digest, registry)
-    return registry
+    return _parse_extension_data(data, digest, core, grandfathered=_EveryKey())
 
 
 def _unchanged_saved_extensions(vault_root: Path, proposal: dict[str, Any]) -> frozenset[str]:
@@ -581,7 +583,10 @@ def save_registry(
     *,
     expected_hash: str | None = None,
     observed_keys: Iterable[str] = (),
+    why: str | None = None,
+    operation: str = "save-relations",
 ) -> dict[str, Any]:
+    """Replace the overlay with one reviewed document, keeping history."""
     registry = load_registry(vault_root, proposal=proposal)
     if _blocking(registry):
         raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
@@ -590,10 +595,10 @@ def save_registry(
     if removed:
         raise ValueError(f"OBSERVED_RELATION_DELETION: deprecate observed keys instead: {removed}")
     path = extension_registry_path(vault_root)
+    inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     current_hash: str | None = None
-    if path.exists():
-        current = path.read_text(encoding="utf-8")
-        current_hash = _content_hash(current)
+    if inspected.overlay_text is not None:
+        current_hash = inspected.content_hash
         if expected_hash is None:
             raise ValueError("REGISTRY_EXISTS: provide current expected_hash")
         if expected_hash != current_hash:
@@ -603,15 +608,25 @@ def save_registry(
         if continuity:
             raise ValueError(f"IMMUTABLE_RELATION_MEANING: {continuity!r}")
     rendered = yaml.safe_dump(proposal, sort_keys=False, allow_unicode=True)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(path=path, content=rendered)], vault_root=vault_root
+    history = vocabulary_registry.commit(
+        SPEC,
+        Path(vault_root),
+        rendered,
+        operation=operation,
+        why=why,
+        before_hash=current_hash or vocabulary_registry.NO_OVERLAY_HASH,
+        previous=inspected.overlay_text,
+        added=vocabulary_registry.added_keys(
+            inspected.entries,
+            SPEC.adapter.entries(registry),
+        ),
     )
-    _CACHE.pop(path, None)
     return {
         "path": path.relative_to(vault_root).as_posix(),
         "content_hash": _content_hash(rendered),
         "previous_hash": current_hash,
         "created": current_hash is None,
+        "history": history,
     }
 
 
@@ -1069,3 +1084,158 @@ def _replacement_closure(
             item for item in chain if item != terminal_key
         )
     return terminals, {key: frozenset(value) for key, value in predecessors.items()}, findings
+
+
+# --------------------------------------------------------------------------- #
+# The registry adapter (`add-vocabulary-registries`)
+# --------------------------------------------------------------------------- #
+
+#: Generic attributes a relation entry carries, in overlay field order.
+_ATTRIBUTE_FIELDS = ("family", "direction", "inverse", "origins", "source_kinds", "target_kinds")
+
+
+class _Adapter:
+    """`_Schema/relation-registry.yaml` in its own grammar, as generic entries."""
+
+    def parse(self, text: str | None, digest: str) -> RelationRegistry:
+        return _parse_overlay_text(text, digest)
+
+    def parse_document(self, document: Mapping[str, Any]) -> RelationRegistry:
+        rendered = self.render(document)
+        return _parse_extension_data(
+            dict(document), _content_hash(rendered), core_registry(), grandfathered=()
+        )
+
+    def entries(self, typed: RelationRegistry) -> dict[str, vocabulary_registry.Entry]:
+        out: dict[str, vocabulary_registry.Entry] = {}
+        for definition in (*typed.core.values(), *typed.extensions.values()):
+            attributes: dict[str, Any] = {
+                "family": definition.family,
+                "direction": definition.direction,
+                "origins": sorted(definition.origins),
+            }
+            if definition.inverse:
+                attributes["inverse"] = definition.inverse
+            for name in ("source_kinds", "target_kinds"):
+                if getattr(definition, name):
+                    attributes[name] = sorted(getattr(definition, name))
+            scope = {
+                name: sorted(getattr(definition, name))
+                for name in ("projects", "page_types")
+                if getattr(definition, name)
+            }
+            if scope:
+                attributes["scope"] = scope
+            out[definition.key] = vocabulary_registry.Entry(
+                key=definition.key,
+                description=definition.description,
+                aliases=definition.aliases,
+                status=definition.status,
+                replaced_by=definition.replaced_by,
+                parent=definition.parent,
+                attributes=MappingProxyType(attributes),
+                origin="pack" if definition.core else "vault",
+            )
+        return out
+
+    def findings(self, typed: RelationRegistry) -> tuple[dict[str, str], ...]:
+        return typed.findings
+
+    def document(self, text: str | None) -> dict[str, Any]:
+        if text is None:
+            return empty_proposal()
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise vocabulary_registry.RegistryError(
+                "INVALID_REGISTRY_OVERLAY: relation-registry.yaml does not parse; fix it or "
+                f"restore a kept version ({exc})"
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("extensions") or {}, dict):
+            raise vocabulary_registry.RegistryError(
+                "INVALID_REGISTRY_OVERLAY: relation-registry.yaml is not a registry document; "
+                "fix it or restore a kept version"
+            )
+        data.setdefault("schema_version", EXTENSION_SCHEMA_VERSION)
+        data["extensions"] = dict(data.get("extensions") or {})
+        return data
+
+    def put(
+        self,
+        document: dict[str, Any],
+        key: str,
+        entry: vocabulary_registry.Entry,
+        *,
+        existing: bool,
+    ) -> None:
+        if key in core_registry().core:
+            raise vocabulary_registry.RegistryError(
+                f"PACK_ENTRY_FIXED: {key!r} is a portable core relation; extend it with a "
+                "namespaced key whose parent it is"
+            )
+        extensions = document["extensions"]
+        raw = extensions.get(key)
+        if existing and isinstance(raw, dict):
+            # Meaning fields were checked unchanged; only the mutable ones move,
+            # so the rest of the row keeps its bytes.
+            raw["aliases"] = list(
+                dict.fromkeys(normalize_relation(alias) for alias in entry.aliases)
+            )
+            raw["status"] = entry.status
+            if entry.replaced_by:
+                raw["replaced_by"] = entry.replaced_by
+            return
+        row: dict[str, Any] = {"parent": entry.parent, "description": entry.description}
+        attributes = entry.attributes
+        for name in _ATTRIBUTE_FIELDS:
+            if name in attributes and attributes[name] not in (None, "", []):
+                value = attributes[name]
+                row[name] = list(value) if isinstance(value, (list, tuple)) else value
+        if "scope" in attributes:
+            row["scope"] = dict(attributes["scope"])
+        row["aliases"] = list(dict.fromkeys(normalize_relation(alias) for alias in entry.aliases))
+        row["status"] = entry.status
+        if entry.replaced_by:
+            row["replaced_by"] = entry.replaced_by
+        extensions[key] = row
+
+    def render(self, document: Mapping[str, Any]) -> str:
+        return yaml.safe_dump(dict(document), sort_keys=False, allow_unicode=True)
+
+    def normalize_key(self, raw: str) -> str:
+        key = normalize_relation(raw)
+        if not _KEY_RE.fullmatch(key):
+            raise vocabulary_registry.RegistryError(
+                f"INVALID_REGISTRY_KEY: {raw!r} is not a namespaced relation key; use "
+                f"{extension_key_for_label(key)!r}"
+            )
+        return key
+
+    def continuity(
+        self, before: RelationRegistry, after: RelationRegistry
+    ) -> list[dict[str, str]]:
+        return _semantic_continuity_findings(before, after)
+
+
+def _usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.relations(vault_root, snapshot)
+
+
+SPEC = vocabulary_registry.RegistrySpec(
+    name="relations",
+    stem="relation-registry",
+    overlay=extension_registry_path,
+    adapter=_Adapter(),
+    fields=frozenset({"description", "aliases", "status", "replaced_by", "parent", "attributes"}),
+    attributes=frozenset({*_ATTRIBUTE_FIELDS, "scope"}),
+    # Relations keep their meaning fixed in place; a new meaning is a new key.
+    immutable=frozenset(
+        {"parent", "description", *(f"attributes.{name}" for name in (*_ATTRIBUTE_FIELDS, "scope"))}
+    ),
+    replacement_required=True,
+    family="relation-type/v1",
+    cap=512,
+    usage=_usage,
+)

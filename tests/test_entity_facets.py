@@ -151,11 +151,11 @@ def test_bootstrap_names_declared_facets_only_where_declared(vault: Path) -> Non
     _write_registry(vault)
 
     compact = commands.op_bootstrap(vault, profile="compact", section="all")
-    types = {item["id"]: item for item in compact["entity_registry"]["types"]}
+    facets = compact["entity_registry"]["facets"]
 
-    assert types["organization"]["facets"] == {"roles": "multi text"}
-    assert types["site"]["facets"] == {
+    assert facets["organization"] == {"roles": "multi text"}
+    assert facets["site"] == {
         "operator": "single wikilink",
         "established": "single date",
     }
-    assert "facets" not in types["person"]
+    assert "person" not in facets

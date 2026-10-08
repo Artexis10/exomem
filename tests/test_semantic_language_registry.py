@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from exomem import semantic_language_registry as language_registry
+from exomem import vault as vault_module
 from exomem.semantic_units import parse_semantic_units
 
 
@@ -384,18 +385,18 @@ def test_reviewed_registry_save_round_trips_complete_document_and_hash_guards(
         },
         kinds=proposal["kinds"],
     )
-    atomic_writer = language_registry.vault.batch_atomic_write
+    atomic_writer = vault_module.batch_atomic_write
 
     def fail_atomic_write(*args, **kwargs):
         raise OSError("simulated atomic write failure")
 
-    monkeypatch.setattr(language_registry.vault, "batch_atomic_write", fail_atomic_write)
+    monkeypatch.setattr(vault_module, "batch_atomic_write", fail_atomic_write)
     with pytest.raises(OSError, match="simulated atomic write failure"):
         language_registry.save_registry(
             tmp_path, updated, expected_hash=created["content_hash"]
         )
     assert path.read_text(encoding="utf-8") == original
-    monkeypatch.setattr(language_registry.vault, "batch_atomic_write", atomic_writer)
+    monkeypatch.setattr(vault_module, "batch_atomic_write", atomic_writer)
 
     overwritten = language_registry.save_registry(
         tmp_path, updated, expected_hash=created["content_hash"]

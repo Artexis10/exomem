@@ -3537,12 +3537,12 @@
     }
   },
   "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nContracts describe recurring fields, units and relations; write validation\nstays unchanged. Inference is read-only unless save=true; overwrite needs\nthe current hash.\nOperations: references/operation-routing.md.",
+    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nContracts describe recurring fields, units and relations; write validation\nstays unchanged. Inference is read-only unless save=true; overwrite needs\nthe current hash. For entity-types, relations, source-kinds, domains and\ncategories: inspect lists the live vocabulary and usage; propose previews\na delta; save applies upsert, alias or deprecate with expected_hash and why;\nhistory lists kept versions; restore reverts one without rewriting pages.\nOperations: references/operation-routing.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "Subject-specific operation. Saves need `why` and, when updating, `expected_hash`; relations: propose-relation, save-relations, census; entity-types: resolve-entity-type, save-entity-types; workflow-contracts: inventory, inspect, validate, resolve, preview, save, refresh; context-roles and activation-conventions: validate, diff, save-roles or save-conventions, history, restore (infer is refused).",
+          "description": "Operation for the subject; see references/operation-routing.md.",
           "type": "string"
         },
         "name": {
@@ -3551,7 +3551,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "contract, categories, entity-types, relations, traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+          "description": "contract, categories, entity-types, relations, source-kinds, domains, traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
           "type": "string"
         },
         "project": {

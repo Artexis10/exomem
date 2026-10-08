@@ -16,6 +16,7 @@ from exomem import (
     state_paths,
 )
 from exomem.__main__ import main
+from exomem.governance.principal import library_scope
 
 
 def _seed_pages(vault: Path, count: int = 5) -> list[Path]:
@@ -444,17 +445,18 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
     assert {page: page.read_bytes() for page in pages} == before
     assert not registry_path.exists()
 
-    with pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
+    with library_scope(), pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
         commands.op_schema_memory(vault, operation="infer", subject="relations", save=True)
     # Unregistered observations are not vocabulary a save can delete, so they
     # no longer block the reviewed proposal; promotion stays an explicit step.
-    saved = commands.op_schema_memory(
-        vault,
-        operation="infer",
-        subject="relations",
-        save=True,
-        proposal=inferred["proposal"],
-    )["saved"]
+    with library_scope():
+        saved = commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="relations",
+            save=True,
+            proposal=inferred["proposal"],
+        )["saved"]
     assert saved["created"] is True
     assert relation_registry.load_registry(vault).extensions == {}
     assert {page: page.read_bytes() for page in pages} == before
@@ -972,19 +974,20 @@ def test_reviewed_relation_proposal_saves_and_observed_deletion_is_refused(tmp_p
             }
         },
     }
-    saved = commands.op_schema_memory(
-        vault,
-        operation="infer",
-        subject="relations",
-        save=True,
-        proposal=reviewed,
-    )["saved"]
+    with library_scope():
+        saved = commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="relations",
+            save=True,
+            proposal=reviewed,
+        )["saved"]
     validation = commands.op_schema_memory(
         vault, operation="validate", subject="relations", strict=True
     )
     assert validation["valid"] is True
 
-    with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
+    with library_scope(), pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
         commands.op_schema_memory(
             vault,
             operation="infer",
@@ -1032,14 +1035,15 @@ def test_infer_save_ignores_unregistered_and_capitalised_observed_labels(
     inferred = commands.op_schema_memory(vault, operation="infer", subject="relations")
     assert "vault.applies_to" in inferred["proposal"]["extensions"]
 
-    saved = commands.op_schema_memory(
-        vault,
-        operation="infer",
-        subject="relations",
-        save=True,
-        expected_hash=content_hash,
-        proposal=inferred["proposal"],
-    )["saved"]
+    with library_scope():
+        saved = commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="relations",
+            save=True,
+            expected_hash=content_hash,
+            proposal=inferred["proposal"],
+        )["saved"]
 
     assert saved["previous_hash"] == content_hash
     assert set(relation_registry.load_registry(vault).extensions) == {"vault.applies_to"}
@@ -1057,7 +1061,7 @@ def test_infer_save_still_refuses_dropping_a_used_extension(tmp_path: Path) -> N
         )
         before = relation_registry.extension_registry_path(vault).read_bytes()
 
-        with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
+        with library_scope(), pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
             commands.op_schema_memory(
                 vault,
                 operation="infer",
@@ -1348,7 +1352,7 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
 
     inferred = commands.op_schema_memory(vault, operation="infer", subject="categories")
     assert inferred["proposal"]["kinds"] == current["kinds"]
-    with pytest.raises(ValueError, match="INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL"):
+    with library_scope(), pytest.raises(ValueError, match="INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL"):
         commands.op_schema_memory(
             vault,
             operation="infer",
@@ -1357,7 +1361,7 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
             proposal={"schema_version": 1, "categories": reviewed["categories"]},
             expected_hash=created["content_hash"],
         )
-    with pytest.raises(ValueError, match="CATEGORY_SAVE_KIND_CHANGE"):
+    with library_scope(), pytest.raises(ValueError, match="CATEGORY_SAVE_KIND_CHANGE"):
         commands.op_schema_memory(
             vault,
             operation="infer",
@@ -1366,7 +1370,7 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
             proposal={**reviewed, "kinds": {}},
             expected_hash=created["content_hash"],
         )
-    with pytest.raises(ValueError, match="INVALID_SCHEMA_OPERATION"):
+    with library_scope(), pytest.raises(ValueError, match="INVALID_SCHEMA_OPERATION"):
         commands.op_schema_memory(
             vault,
             operation="validate",
@@ -1375,14 +1379,15 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
             proposal=reviewed,
         )
 
-    saved = commands.op_schema_memory(
-        vault,
-        operation="infer",
-        subject="categories",
-        save=True,
-        proposal=reviewed,
-        expected_hash=created["content_hash"],
-    )["saved"]
+    with library_scope():
+        saved = commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="categories",
+            save=True,
+            proposal=reviewed,
+            expected_hash=created["content_hash"],
+        )["saved"]
     assert saved["created"] is False
     loaded = semantic_language_registry.load_registry(vault)
     assert "protocol" in loaded.kinds

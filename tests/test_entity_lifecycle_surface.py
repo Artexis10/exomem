@@ -808,7 +808,7 @@ def test_open_registry_projection_reports_leaf_folder_and_family(tmp_path: Path)
 
     community = next(
         item
-        for item in commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["types"]
+        for item in commands.op_bootstrap(tmp_path, profile="full")["entity_registry"]["types"]
         if item["id"] == "community"
     )
 

@@ -64,6 +64,7 @@ def test_schema_memory_entity_type_save_dispatches_as_a_mutation_while_inventory
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import commands
+    from exomem.governance.principal import library_scope
     from exomem.init import init_vault
     from exomem.writer_lease import invoke_command, reset_managers_for_tests
 
@@ -86,14 +87,15 @@ def test_schema_memory_entity_type_save_dispatches_as_a_mutation_while_inventory
         finally:
             reset_managers_for_tests()
 
-    saved = invoke_command(
-        command,
-        tmp_path,
-        operation="save-entity-types",
-        proposal={"schema_version": 1, "entity_types": {}},
-        why="Exercise the registered mutation selector.",
-        idempotency_key="schema-memory-entity-types",
-    )
+    with library_scope():
+        saved = invoke_command(
+            command,
+            tmp_path,
+            operation="save-entity-types",
+            proposal={"schema_version": 1, "entity_types": {}},
+            why="Exercise the registered mutation selector.",
+            idempotency_key="schema-memory-entity-types",
+        )
 
     assert saved["state"] == "committed"
     assert (tmp_path / "Knowledge Base" / "_Schema" / "entity-types.yaml").is_file()

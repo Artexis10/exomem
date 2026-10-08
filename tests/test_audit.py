@@ -15,6 +15,7 @@ from exomem import audit as audit_module
 from exomem import commands, index_paths
 from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
+from exomem.governance.principal import library_scope
 
 
 def test_a_guest_is_refused_the_audit_before_and_after_a_raw_source_lands(vault: Path) -> None:
@@ -77,13 +78,14 @@ def _save_proposal(
     *,
     expected_hash: str | None = None,
 ) -> None:
-    result = commands.op_schema_memory(
-        vault,
-        operation="save-entity-types",
-        proposal=proposal,
-        why="Register the synthetic type offered by attention.",
-        expected_hash=expected_hash,
-    )
+    with library_scope():
+        result = commands.op_schema_memory(
+            vault,
+            operation="save-entity-types",
+            proposal=proposal,
+            why="Register the synthetic type offered by attention.",
+            expected_hash=expected_hash,
+        )
     assert result["valid"] is True
 
 

@@ -97,6 +97,10 @@ Add pure protocol/state tests before adapters, then end-to-end cases for real en
 
 Run a small, reviewed ordinary-domain acceptance cohort without vocabulary hints. Preserve input, delivered considerations, agent decisions, tool traces and retrieval/traversal results. Include negative cases and compare against the current generic-only/missed-enrichment behaviour. Success is the supported outcome per case; counts of new labels or edges are descriptive, not a pass criterion. Live KB writes require explicit scope approval or a valid live grant; never seed private registries to manufacture a success metric.
 
+### 7. Amendment: immediate v1 saves, revert and the nudge channel (2026-10-07)
+
+The owner ruled that agents promote and humans revert. Under v1 a saved entity type or relation takes effect at once and no approval gate applies to the owner's vault. `add-vocabulary-registries` owns revert (history and restore for every registry) and the generic registry contract. The queue and family descriptors in decision 1 are the channel its nudges use; a restricted principal's save under a governed policy is recorded here as a pending item for the owner, never applied.
+
 ## Risks / Trade-offs
 
 - Advisory saturation → fingerprinted decisions, resolution from actual state, one compact item per write and explicit pagination.
