@@ -245,9 +245,9 @@ traefik:
 
 cloudDatabase:
   # Optional private route for the certificate hostname that both DSNs keep.
-  # Leave both values empty to resolve that hostname through public DNS to the
-  # shared database's public listener, which admits the Exomem roles only from
-  # the K3s server's /32 (separate-shared-substrate-control-infrastructure
+  # Leave both values empty to resolve that hostname through public DNS to
+  # PostgreSQL on 5432 at the public address, which admits the Exomem roles only
+  # from the K3s server's /32 (separate-shared-substrate-control-infrastructure
   # decision 10). The private alias stays supported until the control host
   # leaves the shared private network.
   hostname: ""
@@ -291,7 +291,8 @@ cellctl:
   # databaseEgressCidrs pattern.
   databaseEgressCidrs: []
   # Database admission allowlists the K3s server node's public /32, so cellctl
-  # must egress from that node. K3s labels every server node control-plane=true.
+  # must egress from that node. K3s labels every server node control-plane=true,
+  # so this selects "the server node" only while the foundation has exactly one.
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
   # memoryLimit is 3Gi because the first index build over a large restored vault
@@ -385,7 +386,8 @@ cloudGateway:
   # database on 5432 -- explicit addresses, matching gateway.databaseEgressCidrs.
   databaseEgressCidrs: []
   # Database admission allowlists the K3s server node's public /32, so the
-  # gateway must egress from that node, as cellctl does.
+  # gateway must egress from that node, as cellctl does. The selector means
+  # "the server node" only while the foundation has exactly one.
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
 

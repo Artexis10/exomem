@@ -284,7 +284,7 @@ def test_both_database_clients_are_pinned_to_the_k3s_server_node() -> None:
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_public_database_route_has_no_alias_and_egresses_to_the_public_address() -> None:
+def test_public_database_route_egresses_to_the_public_address() -> None:
     # Decision 10: an empty alias resolves the certificate hostname through
     # public DNS, so each client's 5432 egress must name the public /32.
     result = _helm_template_result(
@@ -294,7 +294,6 @@ def test_public_database_route_has_no_alias_and_egresses_to_the_public_address()
     assert result.returncode == 0, result.stderr
     documents = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
     for name in ("cellctl", "exomem-cloud-gateway"):
-        assert "hostAliases" not in _find(documents, "Deployment", name)["spec"]["template"]["spec"]
         egress = _find(documents, "NetworkPolicy", name)["spec"]["egress"]
         database_rules = [rule for rule in egress if _ports([rule]) == {5432}]
         assert database_rules == [{

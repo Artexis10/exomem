@@ -10,5 +10,6 @@ Substrate-infra owns the shared control host, address, firewall and database
 DNS record. This root consumes its versioned `shared_control` input and publishes
 the existing network and bootstrap key through `fleet_dependency`. Schema 2 also
 publishes the K3s server's public IPv4 as `database_client_ipv4_cidr`. The shared
-database admits direct PostgreSQL only from that `/32`, so a replacement server
-node is a new contract version.
+database admits direct PostgreSQL only from that `/32`. Only a new Primary IP
+changes it: `hcloud_primary_ip.node` has `prevent_destroy` and
+`auto_delete = false`, so replacing the server keeps the address.

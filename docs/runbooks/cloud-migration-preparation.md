@@ -120,8 +120,8 @@ the database admits the gateway and cellctl roles on two routes. Design
 decision 10 of `separate-shared-substrate-control-infrastructure` defines them.
 
 - **Public route:** leave both `cloudDatabase` values empty. The hostname then
-  resolves through public DNS to the database's public listener. That listener
-  admits these roles only from the K3s server's `/32`. The chart pins the
+  resolves through public DNS to PostgreSQL on 5432 at the public address. That
+  port admits these roles only from the K3s server's `/32`. The chart pins the
   gateway and cellctl to the server node, so their egress leaves from that address.
 - **Private route, kept during the transition:** set the paired
   `cloudDatabase.hostname` and `cloudDatabase.privateIp` values. They resolve
