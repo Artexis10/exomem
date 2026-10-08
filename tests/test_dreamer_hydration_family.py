@@ -2,8 +2,8 @@
 
 Newer facts about an entity live on other compiled pages that link it, from at
 least two independent origins, and the entity's own page neither links nor
-cites them. Detection is SQL over the published graph snapshot: it reads no
-Markdown. The route is a curation work item over explicit paths, never a
+cites them. Detection uses the published graph and freshly admitted page
+eligibility. The route is a curation work item over explicit paths, never a
 `review_ref` (whose binding runs a whole-vault audit).
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 import dreamer_fixture as fx
 import pytest
 
-from exomem import dreamer, dreamer_families, dreamer_store, find_corpus, freshness
+from exomem import dreamer, dreamer_families, dreamer_store, freshness
 
 
 @pytest.fixture(autouse=True)
@@ -247,46 +247,53 @@ def test_route_uses_explicit_paths_never_review_ref(tmp_path: Path) -> None:
     assert len(paths) <= 8
 
 
-def test_detection_reads_no_markdown(tmp_path: Path, monkeypatch) -> None:
-    vault = fx.build(tmp_path)
-    monkeypatch.setattr(dreamer_families, "REGISTRY", [dreamer_families.HYDRATION])
-    reads: list[str] = []
-    real_get = find_corpus.CACHE.get
-    monkeypatch.setattr(
-        find_corpus.CACHE,
-        "get",
-        lambda path, root: (reads.append(str(path)), real_get(path, root))[1],
-    )
-    _quiet(vault)
-    assert _candidate(vault) is not None
-    assert reads == []
+def test_hidden_retired_and_unfamiliar_contributors_do_not_spend_hydration_cap(
+    tmp_path: Path,
+) -> None:
+    from urllib.parse import quote
 
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
 
-def test_revalidate_reads_only_the_candidate_pages(tmp_path: Path, monkeypatch) -> None:
+    from exomem import commands, upkeep
+    from exomem.governance.principal import library_scope, request_scope
+
     vault = fx.build(tmp_path)
-    _quiet(vault)
-    row = _candidate(vault)
-    allowed = {fx.ENTITY, *(item["path"] for item in row["evidence"])}
-    looked_up: list[str] = []
-    real_signature = freshness.live_signature
-    monkeypatch.setattr(
-        freshness,
-        "live_signature",
-        lambda root, scope, path: (
-            looked_up.append(Path(path).relative_to(vault).as_posix()),
-            real_signature(root, scope, path),
-        )[1],
+    with library_scope():
+        _quiet(vault)
+    ref = upkeep.upkeep_ref(_candidate(vault)["id"])
+    write_scope(vault, paths="Notes/Withheld/**", name="Private contributors")
+    write_rule(vault, ceiling=0)
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes/statuses.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\npaths: ["_Schema/statuses.yaml"]\n'
     )
-    monkeypatch.setattr(
-        find_corpus.CACHE, "get", lambda *_a: pytest.fail("revalidation read Markdown")
+    (governance / "rules/statuses.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
     )
-    store = dreamer_store.DreamerStore(vault)
-    conn = store.connect()
-    ctx = dreamer_families.Context(vault_root=vault, store=store, conn=conn, now=1.0)
-    with store.write(conn):
-        dreamer_families.HYDRATION.revalidate(ctx, row)
-    ctx.close()
-    conn.close()
-    assert looked_up
-    assert set(looked_up) <= allowed
-    assert _candidate(vault)["fingerprint"] == row["fingerprint"]
+    _reset_caches()
+    fx.seed(vault)
+    with request_scope(_external()):
+        absent = commands.op_review_memory(vault, mode="item", ref=ref)["item"]
+    for index in range(70):
+        fx.write(
+            vault,
+            f"Knowledge Base/Notes/Withheld/a-private-{index:02d}.md",
+            fx.insight(
+                f"Private observation {index}",
+                sources=["field-report-three"],
+                updated="2026-05-03",
+                links="See [[Notes/Entities/orbit-pump]].",
+                status="private-review" if index % 2 else "archived",
+            ),
+        )
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    with request_scope(_external()):
+        present = commands.op_review_memory(vault, mode="item", ref=ref)["item"]
+    assert present["evidence"] == absent["evidence"]
+    assert present["fingerprint"] == absent["fingerprint"]
+    assert {entry["ref"] for entry in present["evidence"]} == {
+        f"exomem://vault/{quote(fx.CAVITATION)}",
+        f"exomem://vault/{quote(fx.SEAL_WEAR)}",
+    }

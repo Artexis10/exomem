@@ -106,7 +106,8 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d
 
 def prose_chars(value: Any, *, field: str = "", role_ids: frozenset[str] = frozenset()) -> int:
     """Inclusive inferred prose; only references and validated categories/dates are free."""
-    if field in _REFERENCE_FIELDS:
+    # Lifecycle is authored metadata, like a reference; its labels are vault-defined.
+    if field in _REFERENCE_FIELDS or field == "lifecycle":
         return 0
     if isinstance(value, Mapping):
         return sum(prose_chars(item, field=key, role_ids=role_ids) for key, item in value.items())
@@ -121,7 +122,6 @@ def prose_chars(value: Any, *, field: str = "", role_ids: frozenset[str] = froze
         "status": frozenset(working_set_resolve.ANCHOR_STATUSES),
         "evidence": frozenset(working_set_resolve.EVIDENCE_KINDS),
         "origin": {ORIGIN_TURN, ORIGIN_FOCUS, ORIGIN_BOTH, ORIGIN_CONVERSATION},
-        "lifecycle": {"active", "archived", "draft", "dropped", "planned", "superseded"},
         "level": {"unit", "page"},
         "source": {"profile", "records", "planning", "graph", "evidence"},
         "reason": {"budget", "role_cap"},

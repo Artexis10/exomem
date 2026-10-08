@@ -206,7 +206,6 @@ def detect(
     if (
         not page.eligible_compiled
         or page.page_type != "experiment"
-        or page.status not in {None, "", "active", "ongoing"}
     ):
         return Detection((), coverage)
     all_units = page.document.units

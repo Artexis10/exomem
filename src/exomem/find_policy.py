@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any, NamedTuple
 
+from . import lifecycle_statuses
 from .find_types import Hit
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 
@@ -202,12 +203,17 @@ def apply_status_demotion(
     fused: list[tuple[str, float]],
     page_of: PageOf,
     config: RankingConfig = DEFAULT_RANKING,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[tuple[str, float]]:
     """Re-sort fused `(path, score)` pairs after demoting superseded pages."""
+    status_basis = status_basis or lifecycle_statuses.Basis(None)
     adjusted: list[tuple[str, float]] = []
     for path, score in fused:
         page = page_of(path)
-        mult = status_multiplier(getattr(page, "status", None), config)
+        mult = status_multiplier(
+            status_basis.classify(getattr(page, "status", None)).require(), config
+        )
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted
@@ -258,6 +264,7 @@ def apply_post_rrf_multipliers(
     prefer_active: bool,
     temporal: bool,
     page_of: PageOf,
+    status_basis: lifecycle_statuses.Basis | None = None,
     usage_map: dict[str, float] | None = None,
     evidence_out: dict[str, list[dict[str, float | str]]] | None = None,
     top_n: int | None = None,
@@ -281,6 +288,7 @@ def apply_post_rrf_multipliers(
     since by construction nothing there can enter the top. Pass `top_n=None`
     (the default) for the full pass — every existing caller keeps its behaviour.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(None)
     temporal_active = temporal and config.temporal_boost != 1.0 and is_temporal_query(query)
     usage_active = bool(usage_map)
     if not (prefer_compiled or prefer_active or temporal_active or usage_active):
@@ -341,7 +349,9 @@ def apply_post_rrf_multipliers(
                     }
                 )
         if prefer_active:
-            factor = status_multiplier(getattr(page, "status", None), config)
+            factor = status_multiplier(
+                status_basis.classify(getattr(page, "status", None)).require(), config
+            )
             if chain is None:
                 score *= factor
             else:

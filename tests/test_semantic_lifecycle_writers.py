@@ -161,28 +161,6 @@ def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
     assert path.read_bytes() == before_bytes
 
 
-def test_existing_preflight_census_token_matches_fresh_token_on_stable_tree(
-    tmp_path: Path,
-) -> None:
-    before = _source("Legacy prose without semantic units.")
-    after = before.replace("Legacy prose", "Updated legacy prose")
-    _write(tmp_path, _PAGE, before)
-
-    preflight = semantic_writes.preflight_existing(
-        tmp_path,
-        path=_PAGE,
-        after_source=after,
-        operation="edit",
-    )
-
-    assert preflight.census_token is not None
-    sc_token, generation = preflight.census_token
-    assert sc_token == semantic_contract.corpus_validity_token(tmp_path)
-    from exomem import writer_lease
-
-    assert generation == writer_lease.read_commit_generation(tmp_path)
-
-
 def test_existing_preflight_census_token_is_none_when_generation_unreadable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4366,3 +4344,76 @@ def test_prepared_currentness_is_pure_and_never_treats_pending_as_review() -> No
             ),
         ),
     )
+
+
+def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_facts(
+    tmp_path: Path,
+) -> None:
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem.governance.principal import library_scope, request_scope
+
+    before = _source(_semantic_body("Keep retries bounded."))
+    after = before.replace("Keep retries bounded.", "Keep retries bounded to five.")
+    page = _write(tmp_path, _PAGE, before)
+    write_scope(tmp_path, paths="Notes/Withheld/**", name="Private lifecycle pages")
+    write_rule(tmp_path, ceiling=0)
+    governance = tmp_path / "Knowledge Base/_Governance"
+    (governance / "scopes/statuses.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\npaths: ["_Schema/statuses.yaml"]\n'
+    )
+    (governance / "rules/statuses.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
+    )
+    _reset_caches()
+    refusals = []
+    for hidden in (False, True):
+        if hidden:
+            _write(
+                tmp_path,
+                "Knowledge Base/Notes/Withheld/private.md",
+                _source("Private prose.", page_id=_OTHER_ID, status="private-review"),
+            )
+        with request_scope(_external()):
+            with pytest.raises(activation_manifest.ActivationManifestError) as unavailable:
+                semantic_writes.preflight_existing(
+                    tmp_path, path=_PAGE, after_source=after, operation="edit"
+                )
+            refusals.append((unavailable.value.code, str(unavailable.value)))
+        assert not activation_manifest.manifest_path(tmp_path).exists()
+        assert page.read_text() == before
+    assert refusals[0] == refusals[1]
+    with library_scope():
+        inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
+        commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"private-review": {"attributes": {"class": "pending"}}}},
+            expected_hash=inspected["content_hash"],
+            why="define the private draft lifecycle",
+        )
+        activation_manifest.ensure_manifest(tmp_path)
+        # Warm the shared corpus as the owner before a restricted caller writes.
+        semantic_writes.preflight_existing(
+            tmp_path, path=_PAGE, after_source=after, operation="edit"
+        )
+    with request_scope(_external()):
+        allowed = semantic_writes.preflight_existing(
+            tmp_path, path=_PAGE, after_source=after, operation="edit"
+        )
+        assert not allowed.contract_result.should_block
+        assert semantic_writes.commit_existing(tmp_path, preflight=allowed).mutated
+        blocked = semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=_source("Only structural prose remains."),
+            operation="edit",
+        )
+        assert "missing_semantic_unit" in {
+            finding.code for finding in blocked.contract_result.blocking_findings
+        }
+        with pytest.raises(semantic_writes.SemanticWriteError):
+            semantic_writes.commit_existing(tmp_path, preflight=blocked)
+    assert page.read_text() == after

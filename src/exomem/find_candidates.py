@@ -208,6 +208,7 @@ def collect_candidates(
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
     shadow: Callable[[list[str]], list[str]] | None = None,
+    status_basis: Any = None,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them.
 
@@ -932,6 +933,7 @@ def collect_candidates(
             config,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
+            status_basis=status_basis,
             temporal=temporal,
             page_of=page_of,
             usage_map=usage_map,

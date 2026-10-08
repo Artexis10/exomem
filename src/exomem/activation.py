@@ -15,6 +15,7 @@ import yaml
 
 from . import (
     access,
+    lifecycle_statuses,
     relation_registry,
     semantic_language_registry,
     semantic_units,
@@ -57,7 +58,6 @@ _COMPILED_PAGE_TYPES = frozenset(
 # folding `source` into that set would let one captured Source destroy the
 # carve-out for a user's very first compiled note.
 _CONNECTABLE_TYPES = _ELIGIBLE_TYPES | {"source"}
-_INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "planned", "dropped"})
 _SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _SKIP_TAGS = frozenset({"hub", "snapshot"})
 _ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
@@ -90,6 +90,7 @@ def scan(vault_root: Path) -> ActivationScan:
 
     vault_root = Path(vault_root)
     who = effective_principal()
+    status_basis = lifecycle_statuses.Basis(vault_root)
     registry = relation_registry.load_registry(vault_root)
     language_registry = semantic_language_registry.load_registry(vault_root)
     findings: list[AuditFinding] = []
@@ -115,7 +116,9 @@ def scan(vault_root: Path) -> ActivationScan:
             page = find_module._parse_page(path, path.stat().st_mtime, vault_root)
         except OSError:
             continue
-        if page is None or not _eligible(vault_root, page):
+        if page is None or not is_eligible_governed_page(
+            vault_root, page, status_basis=status_basis
+        ):
             continue
 
         coverage["eligible_pages"] += 1
@@ -166,22 +169,32 @@ def _eligible(vault_root: Path, page: Any) -> bool:
     return is_eligible_governed_page(vault_root, page)
 
 
-def is_eligible_governed_page(vault_root: Path, page: Any) -> bool:
+def is_eligible_governed_page(
+    vault_root: Path, page: Any, *, status_basis: lifecycle_statuses.Basis | None = None
+) -> bool:
     """Return whether ``page`` is an active governed graph endpoint."""
-    return _eligible_for_types(vault_root, page, page_types=_ELIGIBLE_TYPES)
+    return _eligible_for_types(
+        vault_root, page, page_types=_ELIGIBLE_TYPES, status_basis=status_basis
+    )
 
 
-def is_eligible_compiled_page(vault_root: Path, page: Any) -> bool:
+def is_eligible_compiled_page(
+    vault_root: Path, page: Any, *, status_basis: lifecycle_statuses.Basis | None = None
+) -> bool:
     """Return whether ``page`` belongs to the writable compiled-page domain.
 
     Activation coverage historically includes entities.  The semantic contract
     applies to the six compiled conclusion types only, while sharing every
     other activation eligibility rule.
     """
-    return _eligible_for_types(vault_root, page, page_types=_COMPILED_PAGE_TYPES)
+    return _eligible_for_types(
+        vault_root, page, page_types=_COMPILED_PAGE_TYPES, status_basis=status_basis
+    )
 
 
-def is_connectable_target(vault_root: Path, page: Any) -> bool:
+def is_connectable_target(
+    vault_root: Path, page: Any, *, status_basis: lifecycle_statuses.Basis | None = None
+) -> bool:
     """Return whether ``page`` may be the *target* of a connectivity signal.
 
     Shares every eligibility rule with :func:`is_eligible_governed_page` except
@@ -193,6 +206,7 @@ def is_connectable_target(vault_root: Path, page: Any) -> bool:
         vault_root,
         page,
         page_types=_CONNECTABLE_TYPES,
+        status_basis=status_basis,
         tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
     )
 
@@ -223,6 +237,20 @@ def _eligible_for_types(
     *,
     page_types: frozenset[str],
     tiers: frozenset[str] = frozenset({access.TIER_READ_WRITE}),
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> bool:
+    if not structurally_eligible_for_types(vault_root, page, page_types=page_types, tiers=tiers):
+        return False
+    basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    return basis.classify(page.frontmatter.get("status")).live
+
+
+def structurally_eligible_for_types(
+    vault_root: Path,
+    page: Any,
+    *,
+    page_types: frozenset[str],
+    tiers: frozenset[str] = frozenset({access.TIER_READ_WRITE}),
 ) -> bool:
     if not is_managed_governed_path(vault_root, page.path):
         return False
@@ -230,11 +258,6 @@ def _eligible_for_types(
     if normalized_type not in page_types:
         return False
     if page.path.name.casefold() in {"index.md", "log.md"}:
-        return False
-    normalized_status = (
-        page.status.strip().casefold() if isinstance(page.status, str) else None
-    )
-    if normalized_status in _INACTIVE_STATUSES:
         return False
     if access.access_tier(vault_root, page.rel_path) not in tiers:
         return False
@@ -244,7 +267,9 @@ def _eligible_for_types(
     normalized_tags = {
         str(tag).strip().casefold().lstrip("#") for tag in page.tags
     }
-    return not bool(_SKIP_TAGS & normalized_tags)
+    if _SKIP_TAGS & normalized_tags:
+        return False
+    return True
 
 
 def _measure_page(

@@ -25,6 +25,7 @@ from . import (
     activation_manifest,
     call_spans,
     freshness,
+    lifecycle_statuses,
     memory_refs,
     memory_schema,
     metrics,
@@ -88,7 +89,6 @@ _COMPILED_ROOT_TYPES = MappingProxyType(
         for page_type, destination in COMPILED_DESTINATIONS.items()
     }
 )
-_INACTIVE_STATUSES = frozenset({"archived", "draft", "dropped", "planned", "superseded"})
 _SEMANTIC_UNIT_EXEMPT_PARTS = frozenset(
     {"sources", "evidence", "_trash", "trash", "_schema", "templates", "data"}
 )
@@ -210,6 +210,9 @@ class SemanticPageState:
     # (admits append-only Sources) and deliberately tracked separately, because
     # `eligible_governed_paths` gates the empty-corpus bootstrap disposition.
     connectable_target: bool = False
+    status_class: str | None = None
+    status_unregistered: bool = False
+    status_dependency: tuple[str, str] | None = None
     # (target, line) for each deduped body wikilink not already on a typed
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
@@ -901,7 +904,7 @@ def _missing_semantic_unit_finding(page: SemanticPageState) -> ContractFinding |
     if page.document.units or not compiled_structure_matches(page):
         return None
     active_required = requires_semantic_unit(page)
-    inactive = normalized_compiled_type(page.status) in _INACTIVE_STATUSES
+    inactive = page.status_class is not None and page.status_class != "live"
     if not active_required and not inactive:
         return None
     finding = semantic_authoring.AUTHORING_CONTRACT.findings["missing_semantic_unit"]
@@ -979,7 +982,7 @@ class SemanticCorpusContext:
     connectable_target_paths: frozenset[str]
     inbound: Mapping[str, tuple[RelationFact, ...]]
     outbound: Mapping[str, tuple[RelationFact, ...]]
-    activation_census: activation_manifest.ActivationCensus
+    activation_census: activation_manifest.ActivationCensus | None
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
 
@@ -1079,6 +1082,18 @@ class SemanticCorpusContext:
             ),
         )
 
+    @property
+    def status_dependencies(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            sorted(
+                {
+                    page.status_dependency
+                    for page in self.pages.values()
+                    if page.status_dependency is not None
+                }
+            )
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "pages": [self.pages[path].as_dict() for path in sorted(self.pages)],
@@ -1130,6 +1145,75 @@ def _page_projects(frontmatter: Mapping[Any, Any]) -> tuple[str, ...]:
 
 
 def build_page_state(
+    vault_root: Path,
+    path: Path | str,
+    source: str,
+    *,
+    relation_registry: relation_registry.RelationRegistry | None = None,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
+    complete_authored_effects: bool = False,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> SemanticPageState:
+    """Parse and classify a target before evaluating lifecycle-dependent obligations."""
+    state = _parse_page_state(
+        vault_root,
+        path,
+        source,
+        relation_registry=relation_registry,
+        language_registry=language_registry,
+        review_fingerprint=review_fingerprint,
+        complete_authored_effects=complete_authored_effects,
+    )
+    return enrich_page_state(
+        Path(vault_root), state, status_basis or lifecycle_statuses.Basis(vault_root)
+    )
+
+
+def enrich_page_state(
+    root: Path,
+    state: SemanticPageState,
+    status_basis: lifecycle_statuses.Basis,
+) -> SemanticPageState:
+    """Apply one admitted lifecycle basis to detached structural facts."""
+    parsed = find_module.ParsedPage(
+        path=root / state.path,
+        rel_path=state.path,
+        frontmatter=dict(state.frontmatter),
+        body="",
+        title=state.title,
+        mtime=0.0,
+    )
+    governed = activation.structurally_eligible_for_types(
+        root, parsed, page_types=activation._ELIGIBLE_TYPES
+    )
+    compiled = activation.structurally_eligible_for_types(
+        root, parsed, page_types=activation._COMPILED_PAGE_TYPES
+    )
+    connectable = activation.structurally_eligible_for_types(
+        root,
+        parsed,
+        page_types=activation._CONNECTABLE_TYPES,
+        tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
+    )
+    classification = (
+        status_basis.classify(state.frontmatter.get("status"))
+        if governed or compiled or connectable
+        else lifecycle_statuses.Classification(None)
+    )
+    live = classification.live if governed or compiled or connectable else False
+    return replace(
+        state,
+        eligible_governed=governed and live,
+        eligible_compiled=compiled and live,
+        connectable_target=connectable and live,
+        status_class=classification.lifecycle_class,
+        status_unregistered=classification.unregistered,
+        status_dependency=status_basis.dependency,
+    )
+
+
+def _parse_page_state(
     vault_root: Path,
     path: Path | str,
     source: str,
@@ -1197,14 +1281,6 @@ def build_page_state(
             continue
         seen_link_targets.add(key)
         body_links.append((target, line))
-    parsed = find_module.ParsedPage(
-        path=root / rel_path,
-        rel_path=rel_path,
-        frontmatter=frontmatter,
-        body=body,
-        title=title,
-        mtime=0.0,
-    )
     identity_kind = "exomem_id" if normalized_id is not None else "path"
     identity = normalized_id or rel_path
     resolved_review_fingerprint = review_fingerprint
@@ -1232,9 +1308,9 @@ def build_page_state(
         status=str(frontmatter["status"]) if frontmatter.get("status") else None,
         title=title,
         document=document,
-        eligible_governed=activation.is_eligible_governed_page(root, parsed),
-        eligible_compiled=activation.is_eligible_compiled_page(root, parsed),
-        connectable_target=activation.is_connectable_target(root, parsed),
+        eligible_governed=False,
+        eligible_compiled=False,
+        connectable_target=False,
         body_wikilinks=tuple(body_links),
     )
 
@@ -1852,7 +1928,12 @@ def _relation_review_census(root: Path) -> tuple | None:
     return tuple(sorted(entries))
 
 
-def corpus_validity_token(root: Path, *, corpus_census: tuple | None = None) -> tuple | None:
+def corpus_validity_token(
+    root: Path,
+    *,
+    corpus_census: tuple | None = None,
+    status_dependencies: tuple[tuple[str, str], ...] | None = None,
+) -> tuple | None:
     """Stable identity for narrow-boundary preflight reuse.
 
     Combines ``_corpus_census`` (every corpus/config input
@@ -1867,6 +1948,13 @@ def corpus_validity_token(root: Path, *, corpus_census: tuple | None = None) -> 
     a second stat-walk — at thousands of pages the walk dominates write
     latency, and the CI write-latency gate holds preflight to one walk total.
     """
+    from .governance import egress
+
+    if status_dependencies is None or egress.owner_only_aggregate(root) is not None:
+        return None
+    basis = lifecycle_statuses.Basis(root)
+    if not all(basis.matches(dependency) for dependency in status_dependencies):
+        return None
     corpus = (
         corpus_census
         if corpus_census is not None
@@ -1877,7 +1965,7 @@ def corpus_validity_token(root: Path, *, corpus_census: tuple | None = None) -> 
     review = _relation_review_census(root)
     if review is None:
         return None
-    return (corpus, review)
+    return (corpus, review, status_dependencies)
 
 
 def cached_corpus_census(root: Path) -> tuple | None:
@@ -1909,12 +1997,17 @@ def validity_stamp_current(
     the same protections the wide boundary relied on (path guards,
     ``create_only``, target freshness) still apply at write time.
     """
-    if stamp is None or commit_generation is None:
+    from .governance import egress
+
+    if stamp is None or commit_generation is None or egress.owner_only_aggregate(root) is not None:
         return False
     sc_token, captured_generation = stamp
-    if sc_token is None or captured_generation is None:
+    if sc_token is None or len(sc_token) != 3 or captured_generation is None:
         return False
     if commit_generation != captured_generation:
+        return False
+    basis = lifecycle_statuses.Basis(root)
+    if not all(basis.matches(dependency) for dependency in sc_token[2]):
         return False
     fresh_review = _relation_review_census(root)
     return fresh_review is not None and fresh_review == sc_token[1]
@@ -2141,7 +2234,7 @@ def _reconcile_markdown_delta(
             identities.pop(rel_path, None)
             continue
 
-        state = build_page_state(
+        state = _parse_page_state(
             root,
             rel_path,
             source,
@@ -2588,6 +2681,7 @@ def build_corpus_context(
     candidate: SemanticPageState | None = None,
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> SemanticCorpusContext:
     """Read and parse the corpus once, then resolve every fact in memory.
 
@@ -2602,11 +2696,46 @@ def build_corpus_context(
         candidate=candidate,
         registry=registry,
         language_registry=language_registry,
+        status_basis=status_basis,
     )
     return context
 
 
 def build_corpus_context_with_census(
+    vault_root: Path,
+    *,
+    candidate: SemanticPageState | None = None,
+    registry: relation_registry.RelationRegistry | None = None,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> tuple[SemanticCorpusContext, tuple | None]:
+    """Enrich admitted pages without publishing caller facts into the shared cache."""
+    from .governance import egress
+
+    root = Path(vault_root)
+    basis = status_basis or lifecycle_statuses.Basis(root)
+    context, census = _build_corpus_context_with_census(
+        root,
+        registry=registry,
+        language_registry=language_registry,
+    )
+    visible = egress.release_walk_filter(root)
+    states = {
+        path: enrich_page_state(root, state, basis) if visible is None or visible(path) else state
+        for path, state in context.pages.items()
+    }
+    # Candidate validation owns target admission and requires classification.
+    if candidate is not None:
+        states[candidate.path] = enrich_page_state(root, candidate, basis)
+    identity = (
+        context.identity_census.with_page(candidate, casefold_paths=vault.vault_casefolds(root))
+        if candidate is not None
+        else context.identity_census
+    )
+    return _context_from_state_map(root, states, context.registry, identity), census
+
+
+def _build_corpus_context_with_census(
     vault_root: Path,
     *,
     candidate: SemanticPageState | None = None,
@@ -2781,7 +2910,7 @@ def build_corpus_context_with_census(
                     },
                 )
             if not same_inputs:
-                return build_corpus_context_with_census(
+                return _build_corpus_context_with_census(
                     root,
                     candidate=candidate,
                     registry=registry,
@@ -2897,7 +3026,7 @@ def _build_corpus_context_uncached(
 
     def consume(rel_path: str, source: str) -> None:
         if rel_path in eligible:
-            states[rel_path] = build_page_state(
+            states[rel_path] = _parse_page_state(
                 root,
                 rel_path,
                 source,
@@ -3169,15 +3298,6 @@ def _context_from_resolved_state(
             outbound.setdefault(fact.logical_source_path, []).append(fact)
         if fact.logical_target_path in ordered_pages:
             inbound.setdefault(fact.logical_target_path, []).append(fact)
-    candidates = tuple(
-        activation_manifest.ActivationCandidate(
-            state.path,
-            state.source_hash,
-            state.identity if state.identity_kind == "exomem_id" else None,
-        )
-        for state in ordered_pages.values()
-        if state.eligible_compiled
-    )
     full_paths, kb_stripped, stems, titles = _resolver_snapshot(resolver)
     return SemanticCorpusContext(
         vault_root=root,
@@ -3212,7 +3332,7 @@ def _context_from_resolved_state(
                 for key, values in outbound.items()
             }
         ),
-        activation_census=activation_manifest.ActivationCensus.from_candidates(candidates),
+        activation_census=None,
         identity_census=identity_census,
         registry=registry,
     )
@@ -3529,7 +3649,7 @@ def _structural_relation_reasons(
         definition is not None
         and definition.family == "supersession"
         and target_page is not None
-        and target_page.status == "superseded"
+        and target_page.status_class == "superseded"
         and any(
             _dependency_key(raw) == expected_successor
             for raw in _frontmatter_targets(target_page.frontmatter.get("superseded_by"))
