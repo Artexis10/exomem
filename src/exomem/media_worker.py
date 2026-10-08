@@ -145,7 +145,7 @@ _SUPERVISE_FORCED_RECHECK_MAX_SECONDS = 60.0
 #: checkpointed, so a freshness signature that reads only the database file
 #: would miss every enqueue it exists to catch.
 _JOB_STORE_SUFFIXES = ("", "-wal", "-shm", "-journal")
-#: The supervisor's clock; a seam for tests.
+#: The polling clock; a seam for tests.
 _clock = time.monotonic
 
 
@@ -1112,11 +1112,28 @@ class MediaWorker:
             while not self._stop_event.is_set():
                 child = self._child
                 if child is not None:
-                    self._drain_parent_results()
+                    signature = _job_store_signature(self._store)
+                    settled = (
+                        idle_signature is not None
+                        and signature is not None
+                        and signature == idle_signature
+                        and _clock() < forced_recheck_at
+                    )
+                    if not settled:
+                        if self._store.has_parent_work():
+                            # A retained result may make no write; retry next pass.
+                            idle_signature = None
+                            self._drain_parent_results()
+                        else:
+                            # Capture after close; the check can change the WAL.
+                            idle_signature = _job_store_signature(self._store)
+                            # Sidecar-only edits and folded writes need a fixed backstop.
+                            forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
                 if child is not None and child.poll() is not None:
                     returncode = child.returncode
                     child_pid = child.pid
                     self._child = None
+                    idle_signature = None
                     owns_runtime = self._store.worker_pid() == child_pid
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
@@ -1640,7 +1657,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.
     worker = MediaWorker(vault_root, execution_mode="process", idle_seconds=idle_seconds)
-    last_work = time.monotonic()
+    last_work = _clock()
+    idle_signature: tuple[object, ...] | None = None
+    forced_recheck_at = 0.0
     try:
         if extract.asr_prewarm_enabled():
             prewarm_error = extract.prewarm()
@@ -1648,14 +1667,28 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 worker._asr_runtime_failure = f"{type(prewarm_error).__name__}: {prewarm_error}"
         extract.log_diarization_readiness(vault_root)
         while _parent_alive(parent_pid):
-            job = store.claim_next()
+            now = _clock()
+            signature = _job_store_signature(store)
+            settled = (
+                idle_signature is not None
+                and signature is not None
+                and signature == idle_signature
+                and now < forced_recheck_at
+                # Check for eligible work once more before the idle exit.
+                and now - last_work < idle_seconds
+            )
+            job = None if settled else store.claim_next()
             if job is None:
-                if time.monotonic() - last_work >= idle_seconds:
+                if not settled:
+                    idle_signature = _job_store_signature(store)
+                    forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                if not settled and _clock() - last_work >= idle_seconds:
                     log.info("media worker: idle deadline reached; child exiting")
                     return 0
                 time.sleep(min(0.25, idle_seconds))
                 continue
-            last_work = time.monotonic()
+            idle_signature = None
+            last_work = _clock()
             try:
                 outcome = worker._process(job)
             except runtime_resources.ModelBusyError:

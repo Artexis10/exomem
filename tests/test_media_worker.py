@@ -3822,8 +3822,20 @@ def _run_supervisor_for(worker, seconds: float) -> None:
     assert not thread.is_alive(), "supervisor thread did not stop"
 
 
+class _LivingChild:
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout):
+        pass
+
+
+@pytest.mark.parametrize("child_alive", [False, True])
 def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
-    vault, monkeypatch: pytest.MonkeyPatch
+    vault, monkeypatch: pytest.MonkeyPatch, child_alive: bool
 ) -> None:
     """An empty store must not be re-opened on every 0.5s pass.
 
@@ -3832,6 +3844,8 @@ def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
     read once and the freshness signature answers every later pass for free.
     """
     worker = media_worker.MediaWorker(vault, execution_mode="process")
+    if child_alive:
+        worker._child = _LivingChild()
     assert worker._store is not None
     assert worker._store.counts().get(media_jobs.PENDING, 0) == 0
     monkeypatch.setattr(
@@ -3846,6 +3860,263 @@ def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
         f"an idle supervisor took the mutation boundary {len(boundary)} times in "
         f"two seconds ({boundary}); this is the log flood"
     )
+
+
+@pytest.mark.parametrize("parent_dies", [False, True])
+def test_idle_child_stops_reopening_the_store_until_exit(
+    vault, monkeypatch: pytest.MonkeyPatch, parent_dies: bool
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    taken = _count_reserved_identity_holds(monkeypatch)
+    claim_holds = []
+    original = media_jobs.MediaJobStore.claim_next
+
+    def claim_next(store):
+        before = len(taken)
+        job = original(store)
+        claim_holds.extend(taken[before:])
+        return job
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "claim_next", claim_next)
+    started = time.monotonic()
+    if parent_dies:
+        monkeypatch.setattr(
+            media_worker, "_parent_alive", lambda _pid: time.monotonic() - started < 0.5
+        )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=1.0) == 0
+
+    assert len(claim_holds) == (2 if parent_dies else 4), (
+        "an empty child must take the boundary only for its initial and final claims; "
+        f"got {claim_holds}"
+    )
+    if parent_dies:
+        assert time.monotonic() - started < 1.0, "parent death waited for the store backstop"
+
+
+@pytest.mark.parametrize(
+    ("signature_mode", "idle_seconds", "pickup_at"),
+    [("real", 10.0, 0.5), ("folded", 10.0, 5.0), ("blind", 1.0, 1.0),
+     ("deadline", 1.0, 1.25),
+     ("unknown", 10.0, 0.5)],
+)
+def test_idle_child_claims_unwoken_work_and_hands_off_the_whole_burst(
+    vault, monkeypatch: pytest.MonkeyPatch, signature_mode, idle_seconds, pickup_at
+) -> None:
+    """A missed write still drains at the backstop or final claim, without losing custody."""
+    results = [_preserve_media_stub(vault, filename=f"burst-{i}.mp3") for i in range(2)]
+    store = media_jobs.MediaJobStore(vault)
+    now = [0.0]
+    enqueued = False
+    processed = []
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_parent_alive", lambda _pid: now[0] < 30.0)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda *_a, **_kw: extract.ExtractResult(
+            text="burst transcript", media_type="audio", engine="test"
+        ),
+    )
+    if signature_mode in {"blind", "deadline"}:
+        def blind_signature(_store):
+            # The idle deadline can pass during a poll that already chose to skip.
+            if signature_mode == "deadline" and now[0] == 0.75:
+                now[0] = 1.0
+            return ("frozen",)
+
+        monkeypatch.setattr(media_worker, "_job_store_signature", blind_signature)
+    elif signature_mode == "unknown":
+        monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: None)
+
+    def enqueue():
+        nonlocal enqueued
+        enqueued = True
+        for result in results:
+            store.enqueue(media_jobs.MediaJob(
+                binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path,
+                media_type="audio", do_clip=False, do_reembed=False,
+            ))
+
+    original_claim = media_jobs.MediaJobStore.claim_next
+
+    def claim_next(ledger):
+        job = original_claim(ledger)
+        if signature_mode == "folded" and not enqueued:
+            assert job is None
+            # A concurrent commit lands after the empty read, before its signature.
+            enqueue()
+        return job
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "claim_next", claim_next)
+
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] >= 0.5 and not enqueued:
+            enqueue()
+
+    monkeypatch.setattr(media_worker.time, "sleep", sleep)
+    original_process = media_worker.MediaWorker._process
+
+    def process(worker, job):
+        processed.append(now[0])
+        return original_process(worker, job)
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_process", process)
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=idle_seconds) == 0
+    assert processed == [pickup_at, pickup_at], "a handoff delayed the next queued job"
+    assert now[0] == pickup_at + idle_seconds
+    assert store.pending_result_count() == 2
+    parent = media_worker.MediaWorker(vault, execution_mode="process")
+    parent._drain_parent_results()
+    assert store.pending_result_count() == 0
+    for result in results:
+        assert "burst transcript" in (vault / result.sidecar_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("signature_mode", ["real", "folded", "unknown"])
+def test_living_child_parent_notices_results_and_retries_retained_publication(
+    vault, monkeypatch: pytest.MonkeyPatch, signature_mode
+) -> None:
+    result = _preserve_media_stub(vault, filename="idle-handoff.mp3")
+    sidecar = vault / result.sidecar_path
+    parent = media_worker.MediaWorker(vault, execution_mode="process")
+    parent._child = _LivingChild()
+    store = parent._store
+    assert store is not None
+    now = [0.0]
+    published = []
+    recorded = False
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    if signature_mode == "unknown":
+        monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: None)
+
+    def record_result():
+        nonlocal recorded
+        recorded = True
+        store.enqueue(media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio",
+            do_clip=False, do_reembed=False,
+        ))
+        job = store.claim_next()
+        assert job is not None
+        identity = media_worker._binary_identity(job.binary_path)
+        assert identity is not None
+        assert store.record_result(
+            job, kind="extraction", sidecar_before_hash=media_worker._content_digest(sidecar),
+            binary_identity=media_worker._result_binary_identity(identity),
+            payload={"text": "unwoken parent transcript", "engine": "test"},
+        )
+
+    original_check = store.has_parent_work
+
+    def has_parent_work():
+        work = original_check()
+        if signature_mode == "folded" and not recorded:
+            assert not work
+            record_result()
+        return work
+
+    monkeypatch.setattr(store, "has_parent_work", has_parent_work)
+    original_publish = parent._publish_parent_result
+
+    def publish(packet):
+        published.append(now[0])
+        if len(published) == 1:
+            raise OSError("publication temporarily unavailable")
+        original_publish(packet)
+        parent._stop_event.set()
+
+    monkeypatch.setattr(parent, "_publish_parent_result", publish)
+
+    def wait(seconds):
+        now[0] += seconds
+        if not recorded:
+            record_result()
+        if now[0] > 6.0:
+            parent._stop_event.set()
+        return False
+
+    monkeypatch.setattr(parent._wake, "wait", wait)
+    parent._supervise()
+
+    first = 5.0 if signature_mode == "folded" else 0.5
+    assert published == [first, first + 0.5]
+    assert store.pending_result_count() == 0
+    assert "unwoken parent transcript" in sidecar.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("current_field", "stale_field"),
+    [("processing_state: blocked", "processing_state: pending"),
+     ("processing_retryable: true", 'processing_retryable: "true"'),
+     ("processing_state: blocked", "processing_state: pending\nreview_date: 2026-99-99"),
+     ("processing_state: blocked", "processing_state: pending\nreview_date: !!timestamp invalid"),
+     ("processing_state: blocked", "processing_state: pending\nreview_date: !!bool invalid")],
+)
+def test_living_child_parent_rechecks_external_blocked_sidecar_edits(
+    vault, monkeypatch: pytest.MonkeyPatch, current_field, stale_field
+) -> None:
+    result = _preserve_media_stub(vault, filename="external-blocked.mp3")
+    sidecar = vault / result.sidecar_path
+    parent = media_worker.MediaWorker(vault, execution_mode="process")
+    store = parent._store
+    assert store is not None
+    store.enqueue(media_jobs.MediaJob(
+        binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio",
+    ))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job, media_jobs.BLOCKED, "RuntimeError: cuBLAS failed")
+    sidecar.write_text(preserve.render_sidecar_processing_failure(
+        sidecar.read_text(encoding="utf-8"), state=media_jobs.BLOCKED, attempts=1,
+        error="RuntimeError: cuBLAS failed", retryable=True,
+        next_action=media_worker._COMPUTE_RUNTIME_ACTION,
+    ), encoding="utf-8")
+    assert not store.has_parent_work()
+    assert _parsed_frontmatter(sidecar)["processing_state"] == "blocked"
+    monkeypatch.setattr(extract, "extract_text", lambda *_a, **_kw: pytest.fail("no ASR"))
+    now = [0.0]
+    published = []
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    parent._child = _LivingChild()
+    original_publish = parent._publish_parent_result
+
+    def publish(packet):
+        original_publish(packet)
+        published.append(now[0])
+        parent._stop_event.set()
+
+    monkeypatch.setattr(parent, "_publish_parent_result", publish)
+
+    def wait(seconds):
+        now[0] += seconds
+        if now[0] == 15.5:
+            signature = media_worker._job_store_signature(store)
+            sidecar.write_text(
+                sidecar.read_text(encoding="utf-8").replace(
+                    current_field, stale_field
+                ), encoding="utf-8",
+            )
+            assert media_worker._job_store_signature(store) == signature
+        if now[0] > 21.0:
+            parent._stop_event.set()
+        return False
+
+    monkeypatch.setattr(parent._wake, "wait", wait)
+    parent._supervise()
+
+    assert published == [20.0], "living-child checks backed off past five seconds"
+    # Inspect YAML nodes without constructing the deliberately invalid timestamp.
+    frontmatter = next(yaml.compose_all(sidecar.read_text(encoding="utf-8")))
+    fields = {key.value: value for key, value in frontmatter.value}
+    assert fields["processing_state"].value == "blocked"
+    assert fields["processing_retryable"].tag == "tag:yaml.org,2002:bool"
+    assert fields["processing_retryable"].value == "true"
+    assert store.get(job.id).state == media_jobs.BLOCKED
 
 
 def test_a_store_write_is_still_seen_within_one_poll(
