@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "exomem-cloud",
-  "version": "0.110.0",
+  "version": "0.111.0",
   "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
   "author": {
     "name": "Substrate Systems OÜ",
