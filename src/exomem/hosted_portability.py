@@ -13,13 +13,14 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import struct
 import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -1448,18 +1449,18 @@ def prepare_restore(
         _extract_verified_archive(verified.archive_path, records, temporary)
         _verify_staged_files(temporary, verified.manifest)
         from . import structured_collections as collections
-        from .collection_store import authority
+        from .collection_store import authority, chain, connection, replica
 
-        raw_marker = authority.read_marker(temporary)
-        marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
-        if marker is not None:
-            from contextlib import closing
-
-            from .collection_store import chain, connection, replica
-
-            with closing(connection.open_reader(replica.replica_path(temporary))) as reader:
-                chain.verify_store_chain(reader)
-                authority.require_marker(reader, marker, root=temporary)
+        try:
+            raw_marker = authority.read_marker(temporary)
+            marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
+            if marker is not None:
+                with closing(connection.open_reader(replica.replica_path(temporary))) as reader:
+                    chain.verify_store_chain(reader)
+                    authority.require_marker(reader, marker, root=temporary)
+        except (connection.CollectionStoreError, sqlite3.Error, chain.StoreChainError,
+                collections.CollectionError, ValueError):
+            _fail("INVALID_ARCHIVE", "collection store structure is invalid")
         for record in records:
             relative = record["path"]
             # The manifest filename and storage strategy are fixed by structured-collections.
