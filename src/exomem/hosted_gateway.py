@@ -17,7 +17,13 @@ from typing import Any, NamedTuple
 from fastmcp.tools import FunctionTool
 from fastmcp.utilities import json_schema
 
-from . import __version__, capabilities, command_surface, hosted_legacy_schemas
+from . import (
+    __version__,
+    capabilities,
+    command_surface,
+    hosted_legacy_schemas,
+    registry_history,
+)
 from . import commands as commands_module
 from .governance import authorization_sessions, authorization_transport
 from .hosted_runtime import (
@@ -26,6 +32,7 @@ from .hosted_runtime import (
     HostedCellConfig,
 )
 from .kbdir import kb_dirname, kb_page_relative_form, kb_page_target, kb_relative_form
+from .vocabulary import registry_specs
 
 CONTRACT_SCHEMA_VERSION = 1
 TRANSFER_GRANT_VERSION = 1
@@ -203,8 +210,8 @@ PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
 #:
 #: It is nonetheless not a hole, and the distinction is the one the requirement
 #: now draws: the *location* is fixed by the system, never caller-supplied.
-#: The open source taxonomy and project-key registries are the same kind of
-#: fixed-placement side effect: a caller can introduce vocabulary through the
+#: Registry specs declare fixed overlay and history paths; project keys have
+#: the same fixed-placement side effect. A caller can introduce vocabulary through the
 #: owning command, but cannot choose where the registry lives. They remain
 #: user-owned per-vault configuration; "system-managed" describes only the
 #: write path, not ownership of the bytes.
@@ -214,10 +221,18 @@ PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
 #: that owns it and can never name the same file as an edit or replacement
 #: target. The enumeration exists so success-path assertions can exclude these
 #: paths by name while checking every other protected byte and directory entry.
-SYSTEM_MANAGED_PROTECTED_PATHS: tuple[str, ...] = (
-    "_Schema/project-keys.yaml",
-    "_Schema/relation-reviews",
-    "_Schema/source-taxonomy.yaml",
+SYSTEM_MANAGED_PROTECTED_PATHS: tuple[str, ...] = tuple(
+    sorted(
+        {
+            "_Schema/project-keys.yaml",
+            "_Schema/relation-reviews",
+            *(
+                path.relative_to(kb_dirname()).as_posix()
+                for spec in registry_specs().values()
+                for path in (spec.overlay(Path()), registry_history.history_dir(Path(), spec.stem))
+            ),
+        }
+    )
 )
 
 

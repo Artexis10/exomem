@@ -28,7 +28,6 @@ the file watcher drops it on a `_Schema/` event.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -47,7 +46,7 @@ import yaml
 PACK_SCHEMA_VERSION = 1
 NO_OVERLAY_HASH = "none"
 #: The generic entry fields a delta may name. A spec narrows them.
-ENTRY_FIELDS = frozenset(
+ENTRY_FIELDS = frozenset(  # nosemgrep: ep-word-set -- The generic registry entry schema defines these field names.
     {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
 )
 _DELTA_VERBS = frozenset({"upsert", "alias", "deprecate"})
@@ -610,10 +609,6 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
     return value
-
-
-def deep_copy(document: Mapping[str, Any]) -> dict[str, Any]:
-    return copy.deepcopy(dict(document))
 
 
 # --------------------------------------------------------------------------- #

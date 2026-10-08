@@ -192,8 +192,16 @@ def _protected_tree_state(
         tree = Path(vault_root) / kb / name
         for entry in sorted(tree.rglob("*")):
             key = entry.relative_to(vault_root).as_posix()
-            if not include_system_managed and gateway.is_system_managed_protected_path(
-                key.removeprefix(f"{kb}/")
+            relative = key.removeprefix(f"{kb}/")
+            if not include_system_managed and (
+                gateway.is_system_managed_protected_path(relative)
+                or (
+                    entry.is_dir()
+                    and any(
+                        owned.startswith(f"{relative}/")
+                        for owned in gateway.SYSTEM_MANAGED_PROTECTED_PATHS
+                    )
+                )
             ):
                 continue
             state[key] = (

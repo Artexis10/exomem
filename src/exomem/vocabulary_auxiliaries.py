@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-_ROLES = frozenset(
+_ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer manifest defines these code-owned output roles.
     {
         "relation-review",
         "lifecycle-review",

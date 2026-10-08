@@ -490,25 +490,27 @@ def _save_relation(
     root: Path, relation: str, description: str, parent: str = "relates_to", **declared: str
 ) -> None:
     from exomem import commands, relation_registry
+    from exomem.governance.principal import library_scope
 
-    commands.op_schema_memory(
-        root,
-        subject="relations",
-        operation="save-relations",
-        proposal={
-            "upsert": {
-                relation: {
-                    "parent": parent,
-                    "description": description,
-                    "direction": "directed",
-                    "aliases": [],
-                    **declared,
+    with library_scope():
+        commands.op_schema_memory(
+            root,
+            subject="relations",
+            operation="save-relations",
+            proposal={
+                "upsert": {
+                    relation: {
+                        "parent": parent,
+                        "description": description,
+                        "direction": "directed",
+                        "aliases": [],
+                        **declared,
+                    }
                 }
-            }
-        },
-        expected_hash=relation_registry.load_registry(root).extension_hash,
-        why="scripted fixture capture",
-    )
+            },
+            expected_hash=relation_registry.load_registry(root).extension_hash,
+            why="scripted fixture capture",
+        )
 
 
 def _replace_body(root: Path, path: str, new_body: str) -> None:

@@ -1150,10 +1150,16 @@ def op_bootstrap(
         "extension_count": len(relation_registry.extensions),
         "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
-            "resolve: specific truthful, relates_to generic/no edge. "
-            "propose-relation only for durable recurring meaning; explicit question is "
-            "consideration, never automatic type. Hash guard save-relations; new canonical "
-            "key deprecates old"
+            "Resolve truthfully: specific, relates_to or no edge. Propose durable recurring "
+            "meaning, never automatically from questions. Hash-guard saves. New meaning uses a "
+            "new canonical key; deprecate replaced key."
+            if profile == "compact" and not frozen_profile else
+            (
+                "resolve: specific truthful, relates_to generic/no edge. "
+                "propose-relation only for durable recurring meaning; explicit question is "
+                "consideration, never automatic type. Hash guard save-relations; new canonical "
+                "key deprecates old"
+            )
         ),
     }
     from .vocabulary import bootstrap as vocabulary_bootstrap_module
@@ -1178,31 +1184,40 @@ def op_bootstrap(
         # The live wording is shorter to fund the `vocabulary` block; a released
         # profile keeps the wording it was published with.
         "consideration": (
+            "Agent decides from source evidence; no quota."
+            if profile == "compact" and not frozen_profile else
             (
-                "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
-                "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
-                "choice and any new definition to the active agent."
-            )
-            if frozen_profile
-            else (
-                "Choose reuse, enrich or propose-new from source evidence; generic, "
-                "no-edge and defer stay valid. No quota; the active agent decides."
+                (
+                    "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
+                    "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
+                    "choice and any new definition to the active agent."
+                )
+                if frozen_profile
+                else (
+                    "Choose reuse, enrich or propose-new from source evidence; generic, "
+                    "no-edge and defer stay valid. No quota; the active agent decides."
+                )
             )
         ),
         "cadence": (
+            "Follow workflow.loop. Anchor missing questions on source pages/entities; "
+            "relation_question reviews both current relation-queue candidate endpoints."
+            if profile == "compact" and not frozen_profile else
             (
-                "At a durable capture boundary, use the available review route and inspect "
-                "relevant items with context. If a useful identity or meaning question is "
-                "missing, use a source-page or existing-entity anchor. For a selected edge, "
-                "use relation_question with the current relation-queue candidate so both "
-                "endpoints are reviewed. Record the typed decision before its structural write."
-            )
-            if frozen_profile
-            else (
-                "At a capture boundary, review items with context; anchor a missing identity "
-                "or meaning question on a source page or entity, and an edge question on the "
-                "current relation-queue candidate (relation_question). Record the typed "
-                "decision before its structural write."
+                (
+                    "At a durable capture boundary, use the available review route and inspect "
+                    "relevant items with context. If a useful identity or meaning question is "
+                    "missing, use a source-page or existing-entity anchor. For a selected edge, "
+                    "use relation_question with the current relation-queue candidate so both "
+                    "endpoints are reviewed. Record the typed decision before its structural write."
+                )
+                if frozen_profile
+                else (
+                    "At a capture boundary, review items with context; anchor a missing identity "
+                    "or meaning question on a source page or entity, and an edge question on the "
+                    "current relation-queue candidate (relation_question). Record the typed "
+                    "decision before its structural write."
+                )
             )
         ),
         "review_route": {"default_limit": 4, **vocabulary_operation("review_memory", {"mode": "vocabulary"})},
@@ -1253,18 +1268,23 @@ def op_bootstrap(
         "application": {
             "correlation_fields": ["vocabulary_ref", "vocabulary_fingerprint"],
             "rule": (
+                "Bind ref/fingerprint via supported writers; keep retry identity (REST: "
+                "Idempotency-Key); read receipts. Types do not apply proposed entities/edges."
+                if profile == "compact" and not frozen_profile else
                 (
-                    "On a supported canonical writer, pass the reviewed ref and fingerprint "
-                    "to bind the result to its decision. Use one stable transport idempotency "
-                    "identity for the operation (REST: Idempotency-Key header), retain it on "
-                    "retry, and inspect the canonical receipt. A saved type alone does not "
-                    "complete a separately proposed entity or edge."
-                )
-                if frozen_profile
-                else (
-                    "Pass the reviewed ref and fingerprint to a supported writer; reuse one "
-                    "idempotency identity (REST: Idempotency-Key) across retries and read the "
-                    "receipt. A saved type does not complete a separately proposed entity or edge."
+                    (
+                        "On a supported canonical writer, pass the reviewed ref and fingerprint "
+                        "to bind the result to its decision. Use one stable transport idempotency "
+                        "identity for the operation (REST: Idempotency-Key header), retain it on "
+                        "retry, and inspect the canonical receipt. A saved type alone does not "
+                        "complete a separately proposed entity or edge."
+                    )
+                    if frozen_profile
+                    else (
+                        "Pass the reviewed ref and fingerprint to a supported writer; reuse one "
+                        "idempotency identity (REST: Idempotency-Key) across retries and read the "
+                        "receipt. A saved type does not complete a separately proposed entity or edge."
+                    )
                 )
             ),
         },
@@ -1757,23 +1777,38 @@ def op_bootstrap(
                 MEMORY_CITATION_GUIDANCE,
                 "reason in the agent",
                 (
+                    "Before saving: vocabulary_workflow (section vocabulary); resolve "
+                    "recurring identities/relations, enrich entities. Add types only if "
+                    "current types distort evidence; skip incidental names. "
+                    "generic/no-edge/defer valid."
+                    if profile == "compact" and not frozen_profile else
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
                     "a missing type when existing types would distort the evidence. Keep "
                     "incidental names unpromoted; generic/no-edge/defer remain valid."
                 ),
                 (
+                    "At durable capture boundaries, review relevant pending vocabulary items "
+                    "in context; record typed decisions before structural writes; bind via "
+                    "vocabulary_workflow.application."
+                    if profile == "compact" and not frozen_profile else
                     "follow vocabulary_workflow.cadence: review relevant pending work, "
                     "anchor a missing meaning question, record the typed decision, then "
                     "bind its supported canonical write through vocabulary_workflow.application"
                 ),
                 (
+                    "Address post-write link/duplicate warnings. write_feedback needs "
+                    "response_detail='full'; suggestions need remember(suggestions=true)."
+                    if profile == "compact" and not frozen_profile else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
                     "remember(suggestions=true)"
                 ),
                 (
+                    "Inspect vocabulary_sync; if warming/unavailable, use its recovery route "
+                    "once; preserve writes/retry identity; never repeat writes."
+                    if profile == "compact" and not frozen_profile else
                     "also inspect vocabulary_sync: if guidance is warming or unavailable, "
                     "follow its recovery route for one bounded review pass. Preserve the "
                     "committed write and its retry identity; recovery does not repeat it."
@@ -10453,10 +10488,30 @@ def op_schema_memory(
     from .vocabulary import contract as vocabulary_contract
     from .vocabulary import registry_spec
 
+    if subject in {"categories", "relations", "contract"} and (
+        operation == "infer"
+        or (
+            operation == "diff"
+            and proposal is None
+            and not (subject == "contract" and compare_to)
+        )
+    ):
+        # Inferring from the corpus (directly, or as the other side of a
+        # diff) reduces every page; it is the owner's under a governed policy.
+        # Its page selection admits each page through RAW
+        # (`memory_schema._select_pages`), so with no policy it is served.
+        refusal = egress_module.owner_only_aggregate(vault_root, raw_admitted=True)
+        if refusal is not None:
+            return {"subject": subject, **refusal}
     registry_subject = "entity-types" if operation == "save-entity-types" else subject
-    if registry_subject in _registry_subjects() and operation not in _REGISTRY_OPERATIONS:
+    # Census owns its audience-first refusal before consulting registry state.
+    if (
+        registry_subject in _registry_subjects()
+        and operation not in _REGISTRY_OPERATIONS
+        and not (subject == "relations" and operation == "census")
+    ):
         spec = registry_spec(registry_subject)
-        if operation in {"save", "save-entity-types", "save-relations"} or save:
+        if operation in {"save", "save-entity-types", "save-relations"} or save:  # nosemgrep: ep-word-membership -- schema_memory defines these mutation operation tokens.
             queued = vocabulary_contract.queues_for_owner(vault_root)
             if queued is not None and spec.family is None:
                 return {"subject": registry_subject, "available": False, "reason": queued}
@@ -10501,21 +10556,6 @@ def op_schema_memory(
         supported=operation == "save-entity-types"
         or (subject == "relations" and operation == "save-relations"),
     )
-    if subject in {"categories", "relations", "contract"} and (
-        operation == "infer"
-        or (
-            operation == "diff"
-            and proposal is None
-            and not (subject == "contract" and compare_to)
-        )
-    ):
-        # Inferring from the corpus (directly, or as the other side of a
-        # diff) reduces every page; it is the owner's under a governed policy.
-        # Its page selection admits each page through RAW
-        # (`memory_schema._select_pages`), so with no policy it is served.
-        refusal = egress_module.owner_only_aggregate(vault_root, raw_admitted=True)
-        if refusal is not None:
-            return {"subject": subject, **refusal}
     if subject == "entity-types" and operation == "resolve-entity-type":
         if (
             any(
@@ -11171,7 +11211,7 @@ def _changed_entries(before: Any, after: Any) -> tuple[str, ...]:
 
 #: The generic registry contract (`add-vocabulary-registries`). A registry
 #: subject routes these here; its older operation names keep their handlers.
-_REGISTRY_OPERATIONS = frozenset({"inspect", "propose", "save", "history", "restore"})
+_REGISTRY_OPERATIONS = frozenset({"inspect", "propose", "save", "history", "restore"})  # nosemgrep: ep-word-set -- add-vocabulary-registries defines these generic operation tokens.
 
 
 def _registry_subjects() -> frozenset[str]:

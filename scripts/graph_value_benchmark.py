@@ -1924,6 +1924,7 @@ def _lifecycle_propose_and_save(
     root: Path, *, label: str, description: str, parent: str = "relates_to"
 ) -> str:
     from exomem import commands
+    from exomem.governance.principal import library_scope
 
     proposal = commands.op_schema_memory(
         root,
@@ -1938,14 +1939,15 @@ def _lifecycle_propose_and_save(
     )
     if not proposal["valid"]:
         raise ValueError(f"synthetic relation proposal failed: {proposal['findings']}")
-    commands.op_schema_memory(
-        root,
-        subject="relations",
-        operation="save-relations",
-        proposal=proposal["delta"],
-        expected_hash=proposal["content_hash"],
-        why="Synthetic graph-value lifecycle relation review.",
-    )
+    with library_scope():
+        commands.op_schema_memory(
+            root,
+            subject="relations",
+            operation="save-relations",
+            proposal=proposal["delta"],
+            expected_hash=proposal["content_hash"],
+            why="Synthetic graph-value lifecycle relation review.",
+        )
     return f"vault.{label}"
 
 
@@ -2134,6 +2136,7 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
     """
     from exomem import commands, relation_registry
     from exomem.cli_ops import OpError
+    from exomem.governance.principal import library_scope
 
     required_cases = {
         "policy-applicability-extension",
@@ -2220,14 +2223,15 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
         description="A synthetic organisation policy applies to a specific employee case.",
     )
     current = relation_registry.load_registry(primary)
-    commands.op_schema_memory(
-        primary,
-        subject="relations",
-        operation="save-relations",
-        proposal={"upsert": {canonical_applicability: {"aliases": ["policy_applies"]}}},
-        expected_hash=current.extension_hash,
-        why="Synthetic lifecycle adds a distinct clean authoring alias.",
-    )
+    with library_scope():
+        commands.op_schema_memory(
+            primary,
+            subject="relations",
+            operation="save-relations",
+            proposal={"upsert": {canonical_applicability: {"aliases": ["policy_applies"]}}},
+            expected_hash=current.extension_hash,
+            why="Synthetic lifecycle adds a distinct clean authoring alias.",
+        )
     policy_edges = _graph_relation_types(
         primary,
         policy,
@@ -2369,14 +2373,15 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
     )
     _scripted_author_relation(primary, predecessor, employee_case, "applicable_to")
     current = relation_registry.load_registry(primary)
-    commands.op_schema_memory(
-        primary,
-        subject="relations",
-        operation="save-relations",
-        proposal={"deprecate": {old_applicability: canonical_applicability}},
-        expected_hash=current.extension_hash,
-        why="Synthetic lifecycle migration to the surviving applicability relation.",
-    )
+    with library_scope():
+        commands.op_schema_memory(
+            primary,
+            subject="relations",
+            operation="save-relations",
+            proposal={"deprecate": {old_applicability: canonical_applicability}},
+            expected_hash=current.extension_hash,
+            why="Synthetic lifecycle migration to the surviving applicability relation.",
+        )
     replacement_edges = _graph_relation_types(
         primary,
         predecessor,
