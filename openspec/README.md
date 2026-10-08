@@ -11,13 +11,14 @@ A checked task needs implementation, verification and merge evidence.
 | RAW originals | [Collection query engine](changes/add-collection-query-engine/tasks.md), S1.5b | Admit protected originals before ranking or reporting. Ship before the first SQLite owner slice. |
 | Compiler follow-up | [Memory loop](changes/close-memory-loop/tasks.md) and [thread-aware compilation](changes/archive/2026-10-06-add-thread-aware-compilation/tasks.md) | Integrate RAW admission. Preserve truthful withheld results and useful context without repeated classification. |
 | Release | [Plain Cloud cells](changes/adopt-exomem-cloud-plain-cells/tasks.md) | Release 0.110 follows merged RAW and compiler corrections, with the Cloud storage and runtime changes. |
-| Source-kind retirement | `retire-other-source-kind` on its delivery branch | Follow RAW and compiler. Require meaningful agent classification and teach the migration through every bootstrap profile. |
+| Source-kind retirement | [Source capture migration](changes/archive/2026-10-07-retire-other-source-kind/tasks.md) | Follow RAW and compiler. Require meaningful agent classification and teach the migration through every bootstrap profile. |
 | Vocabulary registries | `add-vocabulary-registries` on its delivery branch | Follow source-kind retirement. Replace customer vocabulary constants with vault-owned registries. |
 | First SQLite collection | [Collection query engine](changes/add-collection-query-engine/tasks.md), S1, and [SQLite collections](changes/move-structured-collections-to-sqlite/tasks.md) | Follow RAW. Prove startup compatibility, location admission, import, publication and the owner workflow. |
 | Graph follow-on | [Graph intelligence](changes/add-graph-intelligence/tasks.md) and [graph traversal](changes/add-graph-traversal-queries/tasks.md) | Follow the first SQLite collection. Preserve authored relation semantics and prove request-time utility. |
 
-The source-kind and vocabulary changes remain local delivery branches until
-integration. Their task files become links here when those branches merge.
+Source-kind retirement is merged and its contract is archived above.
+The vocabulary change remains on its delivery branch until integration.
+Its task file becomes a link here when that branch merges.
 The first SQLite delivery does not complete every query or storage phase.
 
 ## Dynamic vocabulary programme

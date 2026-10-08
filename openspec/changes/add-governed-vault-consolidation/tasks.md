@@ -4,7 +4,7 @@ Delivery A is the current implementation batch. Deliveries B and C remain requir
 
 ## 1. Reconcile the contract and establish the proof boundary
 
-- [ ] 1.1 Reconcile the proposal, design, and all seven deltas; verify strict OpenSpec validation and preserve every unique import guarantee.
+- [ ] 1.1 Reconcile the proposal, design, and all capability deltas; verify strict OpenSpec validation and preserve every unique import guarantee.
 - [ ] 1.2 Confirm merged RAW and compiler seams, current registry behavior, and authentication propagation; record the exact implementation base and scoped proof commands.
 - [ ] 1.3 Create one reusable authenticated twin-vault fixture; demonstrate the owner-client bypass before changing branching admission logic.
 
