@@ -659,12 +659,17 @@ def route(command, vault_root, arguments):
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
     """
     from ..cli_ops import OpError
-    from . import admission, authority, capability
     from .preview import bound_writer
 
     root = Path(vault_root).resolve()
     if command not in _STORE_COMMANDS or bound_writer(root) is not None:
         return None
+    # Only store commands pay for the store libraries that admission imports.
+    from . import connection
+
+    connection.load_store_libraries()
+    from . import admission, authority, capability
+
     selector = arguments.get("collection", arguments.get("manifest_path"))
     raw = authority.read_marker(root)
     if command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments):

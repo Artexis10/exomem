@@ -39,8 +39,8 @@ assert "exomem.video_frames" not in sys.modules
 
 
 def test_commands_import_does_not_load_store_libraries() -> None:
-    # Every CLI call, including a hook's time-boxed recall, imports commands
-    # without opening a collection store; SQLAlchemy and Alembic cost it ~120 ms.
+    # Every CLI call imports commands without opening a collection store;
+    # SQLAlchemy and Alembic cost each such cold start about 120 ms.
     result = _run_import_probe(
         """
 import sys

@@ -41,6 +41,20 @@ _CONNECTION_FACTORY: type[sqlite3.Connection] = sqlite3.Connection
 # cross-process authority. Reserve before opening, release on failure or close.
 _WRITERS_GUARD = threading.Lock()
 _WRITER_PATHS: set[Path] = set()
+_LIBRARIES_LOCK = threading.Lock()
+
+
+def load_store_libraries() -> None:
+    """Import SQLAlchemy and Alembic whole, one thread at a time, before store work.
+
+    The CLI imports this module without them. Two threads importing their submodules
+    for the first time at once can see a partially initialised module, so every store
+    entry loads them here first.
+    """
+    with _LIBRARIES_LOCK:
+        import alembic.command  # noqa: F401
+        import alembic.script  # noqa: F401
+        import sqlalchemy  # noqa: F401
 
 
 class CollectionStoreUnavailable(RuntimeError):
@@ -286,9 +300,10 @@ def open_writer(
     ``lease_check`` is a trusted adapter/test seam: its caller must supply the
     exact store's scoped authority, never the process-wide scheduler predicate.
     """
+    check_sqlite_version()
+    load_store_libraries()
     from sqlalchemy.exc import DBAPIError
 
-    check_sqlite_version()
     target = Path(path).resolve()
     check = lease_check if lease_check is not None else _vault_lease_check(target, vault_root)
     _require_lease(check)
@@ -330,6 +345,7 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms must be a non-negative integer")
     check_sqlite_version()
+    load_store_libraries()
     target = Path(path)
     if not target.is_file():
         raise CollectionStoreError("COLLECTION_STORE_ABSENT", "the collection store does not exist")
