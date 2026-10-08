@@ -57,7 +57,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-ROLE_DIR = ROOT / "infra/ansible/roles/postgres"
 
 RUN_LIVE = os.environ.get("RUN_CONTROL_DB_ROLE_TEST") == "1"
 DOCKER = shutil.which("docker")
@@ -91,6 +90,9 @@ MINIO_CONTAINER = f"exomem-ctl-role-minio-{TAG}"
 PRIVATE_PROBER = f"exomem-ctl-role-priv-prober-{TAG}"
 PUBLIC_PROBER = f"exomem-ctl-role-pub-prober-{TAG}"
 HOSTNAME = "db.control-role-test.internal"
+# The isolated runner can supply its locally built fixture when upstream images are unavailable.
+MINIO_IMAGE = os.environ.get("CONTROL_DB_TEST_MINIO_IMAGE", "quay.io/minio/minio:latest")
+MINIO_MC_IMAGE = os.environ.get("CONTROL_DB_TEST_MC_IMAGE", "quay.io/minio/mc:latest")
 # Matches roles/postgres/defaults/main.yml's postgres_pgbackrest_stanza
 # default; host_vars below never overrides it.
 PGBACKREST_STANZA = "control"
@@ -209,7 +211,7 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
             "--network-alias", "minio",
             "-e", "MINIO_ROOT_USER=minioadmin", "-e", "MINIO_ROOT_PASSWORD=minioadmin123",
             "--entrypoint", "sleep",
-            "quay.io/minio/minio:latest", "infinity",
+            MINIO_IMAGE, "infinity",
         )
         _docker("exec", MINIO_CONTAINER, "mkdir", "-p", "/root/.minio/certs")
         _docker("cp", str(minio_certs_dir / "private.key"), f"{MINIO_CONTAINER}:/root/.minio/certs/private.key")
@@ -220,7 +222,7 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
         )
         _docker(
             "run", "--rm", "--network", PRIVATE_NETWORK, "--entrypoint", "sh",
-            "quay.io/minio/mc:latest", "-c",
+            MINIO_MC_IMAGE, "-c",
             "for i in $(seq 1 30); do "
             "mc alias set --insecure ctl https://minio:9000 minioadmin minioadmin123 >/dev/null 2>&1 && break; "
             "sleep 1; done; "
@@ -385,7 +387,7 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
                   become: true
                   gather_facts: true
                   roles:
-                    - postgres
+                    - substrate.infrastructure.postgres
                 """
             )
         )
@@ -484,12 +486,14 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
             # exomem_tenants is a pre-existing table 0056 only references by FK
             # -- its stub, and one seed cell row the privilege probes act on,
             # live in this test-setup SQL only, never in the fixture files.
+            # Substrate migration 0017 defines status; the real gateway grants require it.
             schema_fixture = (ROOT / "infra/cellctl/tests/fixtures/exomem_cloud_schema.sql").read_text()
             grants_fixture = (ROOT / "infra/cellctl/tests/fixtures/exomem_cloud_grants.sql").read_text()
             migration_sql = work / "c1-migration.sql"
             migration_sql.write_text(
                 "-- Test-setup-only stub and seed row; never part of the fixture files.\n"
-                "CREATE TABLE IF NOT EXISTS exomem_tenants (id uuid PRIMARY KEY);\n"
+                "CREATE TABLE IF NOT EXISTS exomem_tenants "
+                "(id uuid PRIMARY KEY, status text NOT NULL DEFAULT 'provisioning');\n"
                 "INSERT INTO exomem_tenants (id) VALUES ('11111111-1111-1111-1111-111111111111');\n"
                 + schema_fixture
                 + "\nINSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "

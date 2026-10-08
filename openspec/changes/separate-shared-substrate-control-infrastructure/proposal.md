@@ -16,10 +16,12 @@ The production PostgreSQL host serves Substrate authentication, billing and mult
 
 ## Capabilities
 
-### New Capabilities
+### Shared Capabilities
 
-- `shared-control-infrastructure-ownership`: Single-owner management and reversible state handover for shared control infrastructure, with preserved consumers and secret custody.
-- `tailnet-server-administration`: One shared enrollment and access policy, preserving managed SSH identities and preventing firewall lockout during adoption.
+The shared owner now holds `shared-control-infrastructure-ownership` and
+`tailnet-server-administration` in [Substrate infrastructure OpenSpec](https://github.com/substrate-systems/substrate-infra/tree/main/openspec/specs).
+The requirements moved intact. This change retains the coordinated migration
+plan and Exomem’s product deltas until the remaining work closes.
 
 ### Modified Capabilities
 
