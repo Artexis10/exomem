@@ -5585,9 +5585,15 @@ class LeaseManager:
             scope=implicit_idempotency_scope or idempotency_principal_scope,
             targets=[str(mutation_subject)],
         )
+        # Reclassify and its revert relocate through `move_file`, so they rewrite
+        # the same withheld linking pages a move does.
         if receipt_vault_root is not None and (
             command.name == "move_file"
-            or (command.name == "manage_memory_file" and kwargs.get("operation") == "move")
+            or (
+                command.name == "manage_memory_file"
+                and kwargs.get("operation")
+                in {"move", "reclassify", "revert-reclassification"}
+            )
         ):
             from . import move_file as move_file_module
 

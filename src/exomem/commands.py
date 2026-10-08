@@ -11801,7 +11801,7 @@ def op_manage_memory_file(
     """Manage files through one governed file operation.
 
     For structures typed tools do not fit. Destructive operations need explicit
-    flags. validate_only/review apply to Markdown create/append.
+    flags.
 
     Args:
         operation: list, create, append, move, reclassify,
