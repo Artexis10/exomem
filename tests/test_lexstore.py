@@ -1911,3 +1911,31 @@ def test_the_in_process_rung_counts_no_query_term_twice(tmp_path, monkeypatch):
         "Knowledge Base/accented.md",
         "Knowledge Base/plain.md",
     }
+
+
+def test_vocabulary_axis_counts_refuse_a_stale_catalog(tmp_path):
+    """Counts must not claim the old total after a page changes before catalogue repair."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    page = _write_page(tmp_path, "Knowledge Base/a.md", "catalogue fixture")
+    page.write_text(page.read_text().replace("type: insight", "type: source\nsource_type: article"))
+    freshness.clear()
+    try:
+        freshness.seed(
+            tmp_path, "kb",
+            ((str(p), freshness.stat_signature(p))
+             for p in find_module._walk_md(tmp_path / "Knowledge Base")),
+        )
+        freshness.seed(
+            tmp_path, "vault",
+            ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(tmp_path)),
+        )
+        store = lexstore.get_store(tmp_path)
+        assert store.rebuild_atomic()
+        assert store.page_axis_counts("source_kind") == {"article": 1}
+        page.write_text(page.read_text().replace("source_type: article", "source_type: interview"))
+        freshness.on_files_changed(tmp_path, changed=[page])
+        assert store.page_axis_counts("source_kind") is None
+    finally:
+        freshness.clear()

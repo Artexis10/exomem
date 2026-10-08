@@ -382,6 +382,10 @@ def save_conventions(
     `why` and both hashes are one batch (`registry_history.commit`);
     `rendered` is a restore's verbatim version bytes.
     """
+    from . import registry_history
+
+    path = override_path(vault_root)
+    previous, guard = registry_history.read_previous(Path(vault_root), path)
     current = load_conventions(vault_root)
     if current.content_hash != expected_hash:
         raise ValueError(
@@ -392,11 +396,8 @@ def save_conventions(
         raise ValueError(
             f"INVALID_ACTIVATION_CONVENTIONS_REGISTRY: {[dict(item) for item in candidate.findings]!r}"
         )
-    path = override_path(vault_root)
     if rendered is None:
         rendered = yaml.safe_dump(proposal, sort_keys=True, allow_unicode=True)
-    from . import registry_history
-
     history = registry_history.commit(
         Path(vault_root),
         path=path,
@@ -404,6 +405,8 @@ def save_conventions(
         rendered=rendered,
         operation=operation,
         why=why,
+        previous=previous,
+        guard=guard,
         before_hash=current.content_hash,
         after_hash=candidate.content_hash,
     )

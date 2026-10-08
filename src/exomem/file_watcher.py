@@ -1131,6 +1131,12 @@ class FileWatcher:
                 self._last_change = time.monotonic()
             self._wake.set()
             return
+        if rel is not None and rel.startswith(f"{kb_prefix()}_Schema/") and rel.endswith(".yaml"):
+            # A hand edit of a vocabulary overlay: drop the cached registry so
+            # the next read sees it even when its size and mtime look unchanged.
+            from .vocabulary import invalidate as invalidate_vocabulary
+
+            invalidate_vocabulary(self._vault_root, path=rel)
         if rel is not None and in_excluded_scan_dir(rel):
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds

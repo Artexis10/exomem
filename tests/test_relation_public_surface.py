@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 from exomem import commands, hosted_gateway, hosted_plugins, relation_queue, server, writer_lease
 from exomem.__main__ import main
 from exomem.governance import egress
+from exomem.governance.principal import library_scope
 
 
 def _product_command(name: str):
@@ -333,7 +334,7 @@ def test_relation_schema_selectors_reject_cross_mode_arguments(
     kwargs: dict[str, object],
     code: str,
 ) -> None:
-    with pytest.raises(ValueError, match=code):
+    with library_scope(), pytest.raises(ValueError, match=code):
         commands.op_schema_memory(
             tmp_path / "vault", subject="relations", operation=operation, **kwargs
         )

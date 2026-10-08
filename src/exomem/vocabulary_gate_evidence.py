@@ -95,7 +95,14 @@ def classify(
             binding.registry_digests[key] = _hash({"present": raw is not None, "hash": (
                 hashlib.sha256(raw).hexdigest() if raw is not None else None
             )})
-        markdown = [image for image in images if image.path.endswith(".md")]
+        # A sealed derived auxiliary (a registry save's `log.md` entry) carries
+        # code-owned bytes and no authored effect, so it needs no identity
+        # evidence; classification excludes it the same way.
+        markdown = [
+            image
+            for image in images
+            if image.path.endswith(".md") and image.path not in (derived_roles or {})
+        ]
         if not markdown:
             binding.classification = vocabulary_effects.classify_additive_effects(
                 root, images, derived_roles=derived_roles or {}

@@ -1,0 +1,44 @@
+# The core entity types Exomem ships. A vault extends or deprecates them in
+# `_Schema/entity-types.yaml`; it never edits this pack.
+schema_version: 1
+registry: entity-types
+entries:
+  person:
+    label: Person
+    aliases: [people, individual, individuals, human, humans]
+    guidance: A stable person identity with reusable facts, history, or relations.
+    attributes:
+      folder: People
+      optional_frontmatter: [affiliation, relationship]
+      cue_nouns: [person, people, individual, individuals, human, humans]
+  organization:
+    label: Organization
+    aliases: [organizations, organisation, organisations, company, companies, institution, institutions]
+    guidance: A stable organization identity with reusable facts, history, or relations.
+    attributes:
+      folder: Organizations
+      cue_nouns: [organization, organizations, organisation, organisations, company, companies, institution, institutions]
+  concept:
+    label: Concept
+    aliases: [concepts, idea, ideas]
+    guidance: A reusable concept that anchors conclusions across sources.
+    attributes:
+      folder: Concepts
+      optional_frontmatter: [domain]
+      cue_nouns: [concept, concepts, idea, ideas]
+  library:
+    label: Library
+    aliases: [libraries, software-library, software-libraries, package, packages]
+    guidance: A reusable software library or package with durable project context.
+    attributes:
+      folder: Libraries
+      optional_frontmatter: [language, repo, license, used_in]
+      cue_nouns: [library, libraries, software-library, software-libraries, package, packages]
+  decision:
+    label: Decision
+    aliases: [decisions, adr, adrs]
+    guidance: A durable decision whose identity is useful as a graph node.
+    attributes:
+      folder: Decisions
+      optional_frontmatter: [decided, project, decision_status]
+      cue_nouns: [decision, decisions, adr, adrs]

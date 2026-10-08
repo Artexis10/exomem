@@ -5354,6 +5354,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "propose-relation": "structure",
         "save-relations": "mutation",
         "census": "structure",
+        # The vocabulary registry contract's read-only proposal.
+        "propose": "structure",
         "save-roles": "mutation",
         "save-conventions": "mutation",
         "history": "structure",

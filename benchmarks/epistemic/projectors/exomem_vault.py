@@ -167,12 +167,12 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="contradicts",
         status="declared",
-        evidence="src/exomem/core-relations.yaml:4",
+        evidence="src/exomem/vocabulary/packs/core/relations.yaml:4",
     ),
     FieldDeclaration(
         field="supports",
         status="declared",
-        evidence="src/exomem/core-relations.yaml:3",
+        evidence="src/exomem/vocabulary/packs/core/relations.yaml:3",
     ),
     FieldDeclaration(
         field="authored_by",
