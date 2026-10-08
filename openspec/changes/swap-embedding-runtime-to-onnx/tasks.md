@@ -29,9 +29,15 @@
   and `BGE_GUARD` assume a torch object and a torch cache; give the seam an explicit
   release hook instead.
 
-- [ ] 2.6 Record an embedding runtime fingerprint in the sidecar so a future model change
+- [x] 2.6 Record an embedding runtime fingerprint in the sidecar so a future model change
   is detected rather than silently mixing vector spaces. Prove that substituting the
   backend alone does not change the fingerprint and triggers no rebuild.
+  - Shipped proof: [#1620](https://github.com/Artexis10/exomem/pull/1620), merge `a9dbf068cf18a067f88ba844dc084536a1cc6acb`.
+    The BGE case creates a real persisted sidecar with Torch, switches to ONNX, reconciles it, and runs an admitted query.
+    Its fingerprint stays equal, its stored vectors remain usable, and passage encoding is not called during substitution.
+    A forced rebuild fails the new assertion; the opt-in BGE proof passed before delivery.
+    The broader embedding scope passed 97 cases with two opt-in cases skipped.
+    E5's existing control-character cosine assertion still fails on unchanged main at 0.923750579; this does not establish E5 equivalence.
 
 ## 3. Make readiness backend-aware
 
