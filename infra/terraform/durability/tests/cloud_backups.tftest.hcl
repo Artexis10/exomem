@@ -36,8 +36,7 @@ run "disabled_by_default_preserves_legacy_storage" {
       b2_bucket.recovery.bucket_name == "exomem-private-alpha-recovery-1a2b3c4d" &&
       b2_bucket.user_export.bucket_name == "exomem-private-alpha-export-1a2b3c4d" &&
       b2_bucket.database_backup.bucket_name == "exomem-private-alpha-database-1a2b3c4d" &&
-      b2_bucket.etcd_snapshot.bucket_name == "exomem-private-alpha-etcd-1a2b3c4d" &&
-      b2_bucket.control_db_pgbackrest.bucket_name == "exomem-private-alpha-control-db-1a2b3c4d"
+      b2_bucket.etcd_snapshot.bucket_name == "exomem-private-alpha-etcd-1a2b3c4d"
     )
     error_message = "Existing durability bucket addresses and names must stay unchanged."
   }

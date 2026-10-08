@@ -56,14 +56,15 @@ for root in foundation durability bootstrap hcp-bootstrap; do
 done
 
 # add-cloud-node-provisioning: the agent pool module has its own lock and
-# mocked-provider test suite; the foundation root carries a mocked wiring
-# test. Neither suite needs credentials or reaches a provider API.
+# mocked-provider test suite; the foundation and durability roots carry mocked
+# tests. No suite needs credentials or reaches a provider API.
 agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
 "${terraform_bin}" -chdir="${agent_module}" init -backend=false -input=false
 "${terraform_bin}" -chdir="${agent_module}" validate
 "${tflint_bin}" --chdir="${agent_module}" --format=compact
 "${terraform_bin}" -chdir="${agent_module}" test
 "${terraform_bin}" -chdir="${infra_dir}/terraform/foundation" test
+"${terraform_bin}" -chdir="${infra_dir}/terraform/durability" test
 
 "${checkov_bin}" --directory "${infra_dir}/terraform" --framework terraform --quiet --compact
 

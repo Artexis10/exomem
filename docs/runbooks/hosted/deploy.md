@@ -26,11 +26,12 @@ effectors, not a release checklist; do not edit their release values by hand.
 Hosts have no public SSH. Operators and Ansible reach them over the company
 NetBird with the existing key and host pin; the shared NetBird role admits
 22/tcp on `wt0`. Keep a private JSON file outside the repository that maps each
-inventory host name (`exomem-alpha`, `substrate-control-01`,
-`exomem-agent-<key>`) to its NetBird IP, and pass it to the inventory generator
-with `--admin-addresses`. Hosts it omits keep their public IPv4, which is
-closed. The base role refuses to run with no public SSH CIDR unless the host
-has `wt0` and UFW admits 22/tcp on it.
+inventory host name (`exomem-alpha`, `exomem-agent-<key>`) to its NetBird IP,
+and pass it to the inventory generator with `--admin-addresses`. Hosts it omits
+keep their public IPv4, which is closed. The shared control host is not in
+this inventory; `substrate-systems/substrate-infra` administers it. The base
+role refuses to run with no public SSH CIDR unless the host has `wt0` and UFW
+admits 22/tcp on it.
 
 Ansible uses plain OpenSSH, not `harness ssh`. Route only the NetBird
 addresses through the workstation's NetBird SOCKS listener (the workstation
@@ -76,11 +77,10 @@ cd infra/ansible
 ansible-playbook --inventory inventory.yml site.yml --tags admin_ssh --limit <host>
 ```
 
-The tag runs fact gathering and the SSH access tasks only (on the control host
-also the Postgres role's read-only service-mode assert); no package upgrades,
-K3s or Postgres changes. Next, set `admin_ssh_cidrs = []`, review the saved
-foundation plan (in-place rule removal on the alpha, control and agent
-firewalls only), and apply it.
+The tag runs fact gathering and the SSH access tasks only; no package upgrades
+or K3s changes. Next, set `admin_ssh_cidrs = []`, review the saved foundation
+plan (in-place rule removal on the alpha and agent firewalls only), and apply
+it. `substrate-systems/substrate-infra` administers the shared control host.
 
 Finally, run `sudo ufw status numbered` on every host and remove any public
 22/tcp rule that remains with `sudo ufw delete <n>`, listing again after each
@@ -214,8 +214,8 @@ Generate non-sensitive inventory and run the governed two-pass convergence gate.
 The gate converges the whole K3s fleet: the server, every Terraform agent and
 every dedicated host. `site.yml` converges the inter-node firewall, the private
 link and Tang to the inventory, so a run over part of the fleet would remove
-the missing nodes' rules on every node it reaches. The control database keeps
-its own play and is left out here.
+the missing nodes' rules on every node it reaches. The shared control database
+is not in this inventory; substrate-infra converges it.
 
 ```bash
 set -euo pipefail
