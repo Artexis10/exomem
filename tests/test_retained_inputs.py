@@ -122,3 +122,49 @@ def test_final_input_checkpoint_refreshes_verified_session_status(
         assert failure.value.code == "RETAINED_INPUT_UNAVAILABLE"
     finally:
         connection.close()
+
+
+def test_private_status_blocks_new_binding_but_not_retained_unit_disclosure(vault: Path) -> None:
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import library_scope
+
+    path = "Knowledge Base/Notes/Insights/retained-harbour.md"
+    reference = "exomem://memory/12345678-1234-5678-1234-567812345678#exact"
+    page = vault / path
+    page.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "---\ntype: insight\nexomem_id: 12345678-1234-5678-1234-567812345678\n"
+        "status: closed-locally\n---\n\n## Observations\n\n- [finding] The harbour closes at dusk. ^exact\n"
+    )
+    page.write_text(original)
+    with library_scope():
+        prior = retained_inputs.resolve_retained_input(vault, reference, committed_path=path)
+        assert prior.unit.unit_ref == reference
+        inspected = commands.op_schema_memory(vault, subject="statuses", operation="inspect")
+        commands.op_schema_memory(
+            vault,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"closed-locally": {"attributes": {"class": "superseded"}}}},
+            expected_hash=inspected["content_hash"],
+            why="the input is superseded",
+        )
+        with pytest.raises(retained_inputs.RetainedInputError):
+            retained_inputs.resolve_retained_input(vault, reference, committed_path=path)
+    write_scope(vault, paths="_Schema/statuses.yaml", name="Private statuses")
+    write_rule(vault, ceiling=0)
+    _reset_caches()
+    with request_scope(_external()):
+        with pytest.raises(retained_inputs.RetainedInputError):
+            retained_inputs.resolve_retained_input(vault, reference, committed_path=path)
+        disclosed = retained_inputs.resolve_retained_input(
+            vault, reference, committed_path=path, disclosure=True
+        )
+        assert disclosed.unit.unit_ref == reference
+        assert disclosed.unit.span.text == "- [finding] The harbour closes at dusk. ^exact"
+        retained_inputs.recheck_retained_inputs(
+            vault, ((disclosed, "The harbour closes at dusk."),), disclosure=True
+        )
+    assert page.read_text() == original

@@ -668,13 +668,13 @@ def route(command, vault_root, arguments):
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
     raw = authority.read_marker(root)
-    creating = command == "record_memory" and arguments.get("action") == "create"
-    if raw is not None or creating:
-        # Only a vault with a store, or a create that may enrol one, pays for the store libraries.
+    summary = command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments)
+    if raw is not None or summary:
+        # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
 
         connection.load_store_libraries()
-    if creating and summary_create(root, arguments):
+    if summary:
         if raw is None:
             from . import admission, capability
 

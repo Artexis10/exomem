@@ -1171,7 +1171,7 @@ def _walk_page_entries(
                 "ref": _page_ref(frontmatter),
                 "title": title,
                 "kind": kind,
-                "lifecycle": normalize(frontmatter.get("status") or "active") or "active",
+                "lifecycle": normalize(page.status or "active") or "active",
                 "aliases": aliases,
                 "sections": sections,
                 "tags": tags,

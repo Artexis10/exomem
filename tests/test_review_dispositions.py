@@ -799,7 +799,7 @@ def test_compact_bootstrap_names_the_family_route_and_its_three_actions(
 
 def test_compact_bootstrap_says_a_quiet_family_is_not_a_clean_one(vault: Path) -> None:
     text = _post_write(vault)["family_disposition_reading"]
-    assert "silent, not clean" in text
+    assert "omission never proves nothing is due" in text
     assert "dispositions" in text
 
 

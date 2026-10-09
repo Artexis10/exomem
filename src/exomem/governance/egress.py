@@ -3398,12 +3398,14 @@ def guard_working_set(
                     if isinstance(entry, Mapping)
                 ),
             }
-    from .. import working_set_conversation
+    from .. import lifecycle_statuses, working_set_conversation
 
     if isinstance(guarded, working_set_conversation.InferredPacket):
         guarded["budget"]["used_chars"] = (
             sum(_recent_entry_chars(entry) for entry in guarded.get("recent_context", ()))
-            + working_set_conversation.subject_chars(guarded)
+            + working_set_conversation.subject_chars(
+                guarded, status_basis=lifecycle_statuses.Basis(vault_root)
+            )
         )
     return guarded
 
@@ -6427,7 +6429,43 @@ def release_walk_filter(
         verdicts[rel_path] = allowed
         return allowed
 
+    owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
+    if owned is not None and raw_protection.has_unrestricted_access(vault_root, who):
+        # The empty policy missed its shortcut only because a collection-store marker
+        # exists. Ordinary files keep the empty-policy answer, as `annotate_page` reads
+        # them, and only marker-owned paths take the per-path decision.
+        return lambda rel_path: keep(rel_path) if owned(rel_path) else True
     return keep
+
+
+def _marker_owned_paths(vault_root: Path, policy: Policy) -> Callable[[str], bool] | None:
+    """The paths a collection-store marker owns, read once, when it alone blocks the shortcut.
+
+    None when the policy is not empty, a writer is bound, or no marker can be read: each of
+    those keeps the per-path decision for every path. A path the marker cannot place
+    counts as owned, so it keeps that decision too.
+    """
+    from .. import held_fs
+    from ..collection_store import authority
+    from ..collection_store.connection import CollectionStoreError
+
+    if not policy.empty or bound_writer(vault_root) is not None:
+        return None
+    try:
+        raw = authority.read_marker(vault_root)
+        marker = None if raw is None else authority.parse_marker(vault_root, raw)
+    except (held_fs.HeldFsError, CollectionStoreError):
+        return None
+    if marker is None:
+        return None
+
+    def owned(rel_path: str) -> bool:
+        try:
+            return authority.owned_entry(vault_root, marker, rel_path) is not None
+        except CollectionStoreError:
+            return True
+
+    return owned
 
 
 def restricted_release_filter(

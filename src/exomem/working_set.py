@@ -37,6 +37,7 @@ from . import (
     activation_conventions,
     context_intents,
     context_roles,
+    lifecycle_statuses,
     request_budget,
     source_taxonomy,
     working_set_conversation,
@@ -451,8 +452,10 @@ def build_packet(
     recent_context: Sequence[Mapping[str, Any]] = (),
     conversation_inferred: bool = False,
     promoted_paths: frozenset[str] = frozenset(),
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
+    status_basis = status_basis or lifecycle_statuses.Basis(None)
     limit = clamp_budget(max_chars)
     promoted_share = limit // PROMOTED_SHARE_DIVISOR
     promoted_used = 0
@@ -483,7 +486,7 @@ def build_packet(
             item.relevance_order,
             0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
-            _lifecycle_rank(item.lifecycle),
+            _lifecycle_rank(item.lifecycle, status_basis=status_basis),
             -_date_rank(item.updated),
             # Most units author no time of their own; their page's time orders
             # them rather than their ref's spelling.
@@ -505,7 +508,9 @@ def build_packet(
     # specific lens that asked. A `level`-less or ref-less item is left
     # alone: its identity is not its ref.
     ordered = _without_lede_repeats(
-        _deduplicated(sorted(working_set_currency.annotate(items), key=_sort_key))
+        _deduplicated(
+            sorted(working_set_currency.annotate(items, status_basis=status_basis), key=_sort_key)
+        )
     )
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
@@ -528,7 +533,10 @@ def build_packet(
     role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
     if conversation_inferred:
         used += working_set_conversation.budget_headers(
-            (*listed_anchors, *listed_ambiguity), material_limit - used, role_ids=role_ids,
+            (*listed_anchors, *listed_ambiguity),
+            material_limit - used,
+            role_ids=role_ids,
+            status_basis=status_basis,
         )
 
     state_entries: list[dict[str, Any]] = []
@@ -560,7 +568,9 @@ def build_packet(
             return
         pointer = _pointer(item, reason)
         cost = (
-            working_set_conversation.prose_chars(pointer, role_ids=role_ids)
+            working_set_conversation.prose_chars(
+                pointer, role_ids=role_ids, status_basis=status_basis
+            )
             if conversation_inferred else served_chars("pointers", pointer)
         )
         if used + cost > material_limit or item.promoted and promoted_used + cost > promoted_share:
@@ -605,7 +615,9 @@ def build_packet(
             for key in working_set_currency.INTERNAL_PROVENANCE:
                 entry.pop(key, None)
             cost = (
-                working_set_conversation.prose_chars(entry, role_ids=role_ids)
+                working_set_conversation.prose_chars(
+                    entry, role_ids=role_ids, status_basis=status_basis
+                )
                 if conversation_inferred else served_chars("current_state", entry)
             )
             if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
@@ -638,7 +650,9 @@ def build_packet(
                 continue
             unit = _served_unit(item)
             cost = (
-                working_set_conversation.prose_chars(unit, role_ids=role_ids)
+                working_set_conversation.prose_chars(
+                    unit, role_ids=role_ids, status_basis=status_basis
+                )
                 if conversation_inferred else served_chars("units", unit)
             )
             role_count = per_role.get(item.role, 0)
@@ -651,7 +665,8 @@ def build_packet(
             if used + cost > material_limit or not text:
                 _defer(item, "budget")
                 continue
-            if item.lifecycle in working_set_currency.HISTORY_LIFECYCLES:
+            ordering = status_basis.ordering(item.lifecycle)
+            if ordering is not None and ordering.historical:
                 unit["history"] = True
             if promoted and promoted_used + cost > promoted_share:
                 _defer(item, "budget")
@@ -705,6 +720,7 @@ def abstained_packet(
     missing: Sequence[Mapping[str, Any]] = (),
     recent_context: Sequence[Mapping[str, Any]] = (),
     conversation_inferred: bool = False,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """The packet with no ANSWER in it — but still with working continuity.
 
@@ -715,12 +731,22 @@ def abstained_packet(
     of the session regardless of what this turn reached, and it is the one
     thing a fresh session opening on "ok continue" has to be told.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(None)
     limit = clamp_budget(max_chars)
     if conversation_inferred or generation.get("carried_by") == "conversation":
         return build_packet(
-            items=(), anchors=anchors, roles=(), current_state=(), ambiguity=ambiguity,
-            missing=missing, max_chars=limit, generation=generation, status=reason,
-            recent_context=recent_context, conversation_inferred=True,
+            items=(),
+            anchors=anchors,
+            roles=(),
+            current_state=(),
+            ambiguity=ambiguity,
+            missing=missing,
+            max_chars=limit,
+            generation=generation,
+            status=reason,
+            recent_context=recent_context,
+            conversation_inferred=True,
+            status_basis=status_basis,
         )
     recent_entries, used = _budgeted_recent(recent_context, limit)
     return {
@@ -882,8 +908,9 @@ def _redundant_superseded(item: LaneItem, present_paths: frozenset[str] | set[st
     return any(target in present_paths for target in _superseded_targets(item))
 
 
-def _lifecycle_rank(lifecycle: str) -> int:
-    return 0 if lifecycle == "active" else 1
+def _lifecycle_rank(lifecycle: str, *, status_basis: lifecycle_statuses.Basis) -> int:
+    ordering = status_basis.ordering(lifecycle)
+    return 0 if ordering is not None and ordering.live else 1
 
 
 def _date_rank(updated: str) -> int:
@@ -912,6 +939,7 @@ def run_lanes(
     analysis: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
     request_anchors: Sequence[Any] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
@@ -938,6 +966,7 @@ def run_lanes(
     it has no indexed neighbourhood to expand, and expanding it would spend
     graph work to widen a claim that rests on one recall score.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from .governance import egress
 
     root = Path(vault_root)
@@ -987,11 +1016,12 @@ def run_lanes(
                     material_scopes=material_scopes,
                     request_anchors=request_anchors,
                     visible=visible,
+                    status_basis=status_basis,
                 )
                 result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
                     result = _with_standing_units(result, standing_pages)
-            except egress.ReaderViewUnavailable:
+            except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
                 raise
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
@@ -1204,6 +1234,7 @@ def _lane(
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1215,17 +1246,31 @@ def _lane(
     turn scoring the wrong material highly. The neighbourhood and the category set
     are the selectors, and they are categorical.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if role.lane == "units":
         return _units_lane(
-            vault_root, role, neighbourhood=neighbourhood, freshness_snapshot=freshness_snapshot,
-            admit=admit, visible=visible,
+            vault_root,
+            role,
+            neighbourhood=neighbourhood,
+            freshness_snapshot=freshness_snapshot,
+            admit=admit,
+            visible=visible,
+            status_basis=status_basis,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
-            vault_root, role, anchors=anchors, neighbourhood=neighbourhood,
-            registry=registry, analysis=analysis, freshness_snapshot=freshness_snapshot,
-            admit=admit, material_scopes=material_scopes, request_anchors=request_anchors,
+            vault_root,
+            role,
+            anchors=anchors,
+            neighbourhood=neighbourhood,
+            registry=registry,
+            analysis=analysis,
+            freshness_snapshot=freshness_snapshot,
+            admit=admit,
+            material_scopes=material_scopes,
+            request_anchors=request_anchors,
             visible=visible,
+            status_basis=status_basis,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1248,12 +1293,14 @@ def _units_lane(
     freshness_snapshot: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
     visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
     Both category and parent-path constraints run in the maintained catalogue
     before its bounded read, so unrelated units cannot consume this role's cap.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if not role.categories or not neighbourhood:
         return LaneResult(())
     from . import find as find_module
@@ -1285,6 +1332,7 @@ def _units_lane(
             repair=False,
             max_catalog_candidates=size,
             truncated_out=capped,
+            status_basis=status_basis,
         )
         return found, bool(capped)
 
@@ -1324,7 +1372,9 @@ def _unit_items(
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
         superseded_by = list(getattr(hit, "parent_superseded_by", ()) or ())
-        lifecycle = "superseded" if superseded_by else "active"
+        lifecycle = (
+            "superseded" if superseded_by else str(getattr(hit, "parent_status", None) or "active")
+        )
         supersedes = working_set_currency.relation_targets(getattr(hit, "relations", None))
         out.append(
             LaneItem(
@@ -1367,8 +1417,10 @@ def _material_lane(
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import (
         bm25,
         find,
@@ -1516,7 +1568,7 @@ def _material_lane(
         page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
         if page is None or pointer_hashes.get(path) != page.snapshot_hash:
             raise RuntimeError("material page unavailable")
-        if not _is_current_page(vault_root, path):
+        if not _is_current_page(vault_root, path, status_basis=status_basis):
             continue
         document = semantic_units.parse_semantic_units(
             page.body, path=path, validate=False,
@@ -1890,29 +1942,12 @@ def signature_evidence(
 # --------------------------------------------------------------------------- #
 
 
-#: Statuses that RETIRE a page: the tree's OWN inactive vocabulary, less
-#: the two that mean pre-active rather than retired.
-#:
-#: Derived rather than written out, because a hand-written list was wrong in
-#: both directions — it invented `retired` and `deprecated`, which name no
-#: page status anywhere else here, and it missed `dropped`, so a page the
-#: author dropped was carried and its unit served as current memory.
-#: `draft` and `planned` are carved out deliberately: both mean authored and
-#: not yet active, which is a page a turn naming it wants, not one the vault
-#: has stopped standing behind.
-def _retired_page_statuses() -> frozenset[str]:
-    from . import activation
-
-    return frozenset(activation._INACTIVE_STATUSES) - {"draft", "planned"}
-
-
-RETIRED_PAGE_STATUSES: frozenset[str] = _retired_page_statuses()
-
-
-def _is_current_page(vault_root: Path, rel_path: str) -> bool:
+def _is_current_page(
+    vault_root: Path, rel_path: str, *, status_basis: lifecycle_statuses.Basis | None = None
+) -> bool:
     """Is `rel_path` a page the vault still stands behind?
 
-    A page the author retired — a `RETIRED_PAGE_STATUSES` status, or a
+    A page the author retired — a non-carryable lifecycle class, or a
     `superseded_by` pointing at its replacement — is not a page to answer a
     turn from. `draft` and `planned` are NOT retirement: both mean authored
     and not yet active, and a turn that names such a page wants it.
@@ -1929,6 +1964,7 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
     walk, and at most `RETRIEVAL_CARRY_LIMIT` of them. A page that cannot be
     read is not proven current, so it is not a candidate.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     text = str(rel_path or "")
     if not text.endswith(".md"):
         return False
@@ -1945,8 +1981,7 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
-    status = working_set_index.normalize(frontmatter.get("status") or "active")
-    return status not in RETIRED_PAGE_STATUSES
+    return status_basis.classify(frontmatter.get("status")).carryable
 
 
 def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
@@ -2003,7 +2038,9 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
     return text
 
 
-def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
+def _eligible_agent_page(
+    vault_root: Path, ref: str, *, status_basis: lifecycle_statuses.Basis | None = None
+) -> str | None:
     """The vault-relative page `ref` names, if `anchor` may carry a packet from
     it, else `None`.
 
@@ -2020,6 +2057,7 @@ def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
     `find_corpus.NAVIGATION_BASENAMES`), and current — existing, Markdown,
     not retired (`_is_current_page`, above).
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     path = _canonical_agent_page_ref(vault_root, ref)
     if path is None:
         return None
@@ -2029,7 +2067,7 @@ def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
         return None
     if working_set_runtime._is_navigation_page(path):
         return None
-    if not _is_current_page(vault_root, path):
+    if not _is_current_page(vault_root, path, status_basis=status_basis):
         return None
     return path
 
@@ -2040,10 +2078,11 @@ def discount_superseded_pages(
     paths_for: Callable[[Sequence[str], int], Mapping[str, Sequence[str]]],
     *,
     cap: int,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, int]:
     """`frequencies` with pages `_is_current_page` retires taken back out.
 
-    The catalogue already leaves out a retiring STATUS (`RETIRED_PAGE_STATUSES`);
+    The catalogue already leaves out non-carryable lifecycle classes;
     a `superseded_by` pointer on an otherwise active page is not a catalogue
     column, so it is judged here, page by page, the way the carry judges its
     own candidates. Only for a stem that could still turn out distinctive —
@@ -2054,6 +2093,7 @@ def discount_superseded_pages(
     only by `superseded_by` still blocks the carry.
     `paths_for(stems, limit)` lists the pages behind each count.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     out = {stem: int(count) for stem, count in frequencies.items()}
     near = [stem for stem, count in out.items() if cap < count <= cap + RETRIEVAL_CARRY_FETCH]
     if not near:
@@ -2061,7 +2101,11 @@ def discount_superseded_pages(
     limit = cap + RETRIEVAL_CARRY_FETCH
     listed = paths_for(near, limit)
     for stem in near:
-        retired = sum(1 for path in listed.get(stem, ()) if not _is_current_page(vault_root, path))
+        retired = sum(
+            1
+            for path in listed.get(stem, ())
+            if not _is_current_page(vault_root, path, status_basis=status_basis)
+        )
         out[stem] = max(0, out[stem] - retired)
     return out
 
@@ -2132,6 +2176,7 @@ def _carry_by_retrieval(
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
     visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[str, float], ...]:
     """The pages this turn NAMED, scored, current, and not raw material.
 
@@ -2155,6 +2200,7 @@ def _carry_by_retrieval(
     before the carry existed; letting it start and run out mid-flight
     abstains `unavailable`, which renders nothing and reads as a fault.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if budget_exhausted(
         "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
@@ -2176,6 +2222,8 @@ def _carry_by_retrieval(
             turn,
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
+            status_basis=status_basis,
+            visible=visible,
         )
     if state != "available":
         return ()
@@ -2200,6 +2248,7 @@ def _carry_groups_by_retrieval(
     skip_terms: str = "",
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[tuple[str, float], ...], ...]:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
@@ -2207,6 +2256,7 @@ def _carry_groups_by_retrieval(
     the words a resolved anchor already consumed, so a turn that resolved one
     thing only asks about what else it said.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if budget_exhausted(
         "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
@@ -2230,6 +2280,8 @@ def _carry_groups_by_retrieval(
             recall_checkpoint=recall_checkpoint,
             skip_terms=skip_terms,
             contacts=contacts,
+            status_basis=status_basis,
+            visible=visible,
         )
     if state != "available":
         return ()
@@ -2521,6 +2573,7 @@ def _carried_packet(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     unresolved_anchors: Sequence[Mapping[str, Any]] = (),
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """One packet compiled from a single dominant page, marked as carried.
 
@@ -2578,6 +2631,7 @@ def _carried_packet(
     even branched on, and every exit from `compile_packet` carries the same
     block.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     paths = tuple(dict.fromkeys(str(item[0]) for item in (pages or (page,))))
     carried_anchors, items, missing, current_state, roles = _carried_material(
         vault_root,
@@ -2593,6 +2647,7 @@ def _carried_packet(
         evidence=evidence,
         visible=visible,
         contacts=contacts,
+        status_basis=status_basis,
     )
     if carried_anchors:
         generation = {**generation, "carried_by": carried_by}
@@ -2609,9 +2664,8 @@ def _carried_packet(
         def build(listed: Sequence[working_set_resolve.ResolvedAnchor] = ()) -> dict[str, Any]:
             return build_packet(
                 items=items,
-                anchors=tuple(anchor.as_dict() for anchor in (*carried_anchors, *listed)) or (
-                    tuple(unresolved_anchors) if not items else ()
-                ),
+                anchors=tuple(anchor.as_dict() for anchor in (*carried_anchors, *listed))
+                or (tuple(unresolved_anchors) if not items else ()),
                 roles=roles,
                 current_state=current_state,
                 ambiguity=(),
@@ -2620,6 +2674,7 @@ def _carried_packet(
                 generation=generation,
                 status="resolved" if items else "unresolved",
                 recent_context=recent_context,
+                status_basis=status_basis,
             )
 
         packet = build()
@@ -2748,6 +2803,7 @@ def _carried_material(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     selected_roles: Sequence[Mapping[str, str]] = (),
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
     tuple[LaneItem, ...],
@@ -2764,6 +2820,7 @@ def _carried_material(
     none of them read anything. Titles and lifecycles are taken as
     `_carried_packet` documents.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     anchors: list[working_set_resolve.ResolvedAnchor] = []
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
@@ -2847,6 +2904,7 @@ def _carried_material(
                 index_generation=index_token[1],
                 index_token=index_token,
                 visible=visible,
+                status_basis=status_basis,
             )
         got, gaps = run_lanes(
             vault_root,
@@ -2860,6 +2918,7 @@ def _carried_material(
             visible=visible,
             analysis=analysis,
             admit=admit,
+            status_basis=status_basis,
         )
         for item in got:
             if item.path == path:
@@ -3045,6 +3104,7 @@ def _follow_up_packet(
     visible: Callable[[str], bool] | None = None,
     row: Any = None,
     carried_by: str = "follow_up",
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """The packet for a follow-up carried from the caller's own thread, or (with
     `carried_by="conversation"`) from the newest earlier user turn that named
@@ -3056,6 +3116,7 @@ def _follow_up_packet(
     kind; an ordinary page through the page carry (`_carried_packet`). Where
     neither reads anything, the turn abstains `unresolved` with that anchor
     listed, so the agent still learns which page the conversation was on."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if row is None:
         row = next((item for item in rows if item.path == page), None)
     if row is None:
@@ -3076,6 +3137,7 @@ def _follow_up_packet(
             evidence=evidence,
             carried_by=carried_by,
             visible=visible,
+            status_basis=status_basis,
         )
         listed = {
             "ref": page,
@@ -3124,6 +3186,7 @@ def _follow_up_packet(
                 index_token=index_token,
                 state_fields=conventions.state_fields,
                 date_fields=conventions.date_fields,
+                status_basis=status_basis,
             )
         items, missing = run_lanes(
             vault_root,
@@ -3135,6 +3198,7 @@ def _follow_up_packet(
             freshness_snapshot=freshness_snapshot,
             visible=visible,
             analysis=analysis,
+            status_basis=status_basis,
         )
         missing = (*missing, *({"role": role, "reason": "role_limit"} for role in omitted))
         packet = None
@@ -3155,6 +3219,7 @@ def _follow_up_packet(
                     # `_carried_packet`: the anchor's own status says partial.
                     status="resolved",
                     recent_context=recent_context,
+                    status_basis=status_basis,
                 )
     if packet is not None:
         return packet
@@ -3165,6 +3230,7 @@ def _follow_up_packet(
         anchors=(listed,),
         recent_context=recent_context,
         conversation_inferred=carried_by == "conversation",
+        status_basis=status_basis,
     )
 
 
@@ -3221,15 +3287,18 @@ def _mark_promoted(
     ), promoted_paths
 
 
-def compile_packet(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+def compile_packet(
+    vault_root: Path, *, status_basis: lifecycle_statuses.Basis | None = None, **kwargs: Any
+) -> dict[str, Any]:
     """Resolve, select, retrieve and budget: the whole compiler in one call.
 
     `_compile_packet` below documents every argument. This wrapper only adds
     the `origin` label every served anchor carries, which whichever branch
     built the packet, the turn's own words are by default.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     origins: dict[str, str] = {}
-    packet = _compile_packet(vault_root, _origins=origins, **kwargs)
+    packet = _compile_packet(vault_root, _origins=origins, **kwargs, status_basis=status_basis)
     _label_origins(packet, origins)
     return packet
 
@@ -3284,6 +3353,7 @@ def _compile_packet(
     heat_profile: working_set_heat.HeatProfile | None = None,
     attribution: working_set_heat.Attribution | None = None,
     marks: Mapping[str, working_set_heat.SessionMark] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -3300,6 +3370,7 @@ def _compile_packet(
     workspace keys (ruling S5-1) and `marks` the served threads the caller may
     see, both for the ranking only.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
@@ -3451,6 +3522,7 @@ def _compile_packet(
                         profile=heat,
                         attribution=attribution,
                         marks=marks,
+                        status_basis=status_basis,
                     )
                     if analysis.referential
                     else HotSet()
@@ -3557,7 +3629,12 @@ def _compile_packet(
         # including unmentioned Planning item refs. Reuse that same view for
         # recent reservations instead of deciding its page paths a second time.
         recent: tuple[dict[str, Any], ...] = _recent_context(
-            root, rows=rows, profile=heat, attribution=attribution, marks=marks
+            root,
+            rows=rows,
+            profile=heat,
+            attribution=attribution,
+            marks=marks,
+            status_basis=status_basis,
         )
 
     # Design D3, and ONLY here: the turn reached no anchor at all. An
@@ -3611,6 +3688,7 @@ def _compile_packet(
                 evidence=("continuity", "recency") if hot.from_token else ("recency",),
                 carried_by="continuity" if hot.from_token else "recency",
                 visible=visible,
+                status_basis=status_basis,
             )
             if packet is not None:
                 return packet
@@ -3622,6 +3700,7 @@ def _compile_packet(
                 anchors=(),
                 ambiguity=_hot_ambiguity(root, hot, rows),
                 recent_context=recent,
+                status_basis=status_basis,
             )
 
     # A short follow-up ("what about the second one?", "and the results?")
@@ -3654,6 +3733,7 @@ def _compile_packet(
             profile=heat,
             attribution=attribution,
             marks=marks,
+            status_basis=status_basis,
         )
         if len(pages) == 1:
             return _follow_up_packet(
@@ -3667,14 +3747,13 @@ def _compile_packet(
                 limit=limit,
                 purpose=purpose,
                 timings=timings,
-                generation=(
-                    {**generation, "continuity": "applied"} if from_token else generation
-                ),
+                generation=({**generation, "continuity": "applied"} if from_token else generation),
                 index_token=index_token,
                 freshness_snapshot=freshness_snapshot,
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                status_basis=status_basis,
             )
         if pages:
             return abstained_packet(
@@ -3684,6 +3763,7 @@ def _compile_packet(
                 anchors=(),
                 ambiguity=_hot_ambiguity(root, HotSet(members=frozenset(pages)), rows),
                 recent_context=recent,
+                status_basis=status_basis,
             )
 
     # The band yields to the carry. A turn the band resolved (its page on
@@ -3712,6 +3792,7 @@ def _compile_packet(
                 freshness_snapshot=freshness_snapshot,
                 lexical_seconds=lexical_seconds,
                 visible=visible,
+                status_basis=status_basis,
             )
         )
         if rival is not None and rival[0] not in band_paths:
@@ -3729,6 +3810,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                status_basis=status_basis,
             )
             if not packet["abstained"] and any(
                 packet[key] for key in ("units", "pointers", "current_state")
@@ -3790,6 +3872,7 @@ def _compile_packet(
                 recent_context=recent,
                 visible=visible,
                 carried_by="conversation",
+                status_basis=status_basis,
             )
         if verdict.status == "ambiguous" and licensed:
             return abstained_packet(
@@ -3809,6 +3892,7 @@ def _compile_packet(
                 ),
                 recent_context=recent,
                 conversation_inferred=True,
+                status_basis=status_basis,
             )
 
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
@@ -3821,6 +3905,7 @@ def _compile_packet(
             lexical_seconds=lexical_seconds,
             contacts=contacts,
             visible=visible,
+            status_basis=status_basis,
         )
         domains, _contested = named_domains(groups)
         every: dict[str, float] = {}
@@ -3844,6 +3929,7 @@ def _compile_packet(
                 anchors=_named_anchors(root, named, index=index),
                 ambiguity=resolution.ambiguity,
                 recent_context=recent,
+                status_basis=status_basis,
             )
         if domains:
             # Every phrase that named exactly one page is a domain the turn
@@ -3866,6 +3952,7 @@ def _compile_packet(
                 visible=visible,
                 contacts=contacts,
                 unresolved_anchors=tuple(item.as_dict() for item in resolution.anchors),
+                status_basis=status_basis,
             )
             if packet is not None:
                 return packet
@@ -3899,6 +3986,7 @@ def _compile_packet(
             profile=heat,
             attribution=attribution,
             marks=marks,
+            status_basis=status_basis,
         )
         overlapping = tuple(
             page
@@ -3919,14 +4007,13 @@ def _compile_packet(
                 limit=limit,
                 purpose=purpose,
                 timings=timings,
-                generation=(
-                    {**generation, "continuity": "applied"} if from_token else generation
-                ),
+                generation=({**generation, "continuity": "applied"} if from_token else generation),
                 index_token=index_token,
                 freshness_snapshot=freshness_snapshot,
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                status_basis=status_basis,
             )
         if overlapping:
             return abstained_packet(
@@ -3936,6 +4023,7 @@ def _compile_packet(
                 anchors=(),
                 ambiguity=_hot_ambiguity(root, HotSet(members=frozenset(overlapping)), rows),
                 recent_context=recent,
+                status_basis=status_basis,
             )
 
     # The agent-pick fallback: `anchor` named no row in the activation index
@@ -3948,7 +4036,7 @@ def _compile_packet(
     # `retrieval_carried` one: the agent named this page, recall did not
     # merely surface it.
     if anchor and resolution.status == "unresolved":
-        agent_page = _eligible_agent_page(root, anchor)
+        agent_page = _eligible_agent_page(root, anchor, status_basis=status_basis)
         if agent_page is not None:
             packet = _carried_packet(
                 root,
@@ -3967,6 +4055,7 @@ def _compile_packet(
                 evidence=("agent_choice",),
                 carried_by="agent_choice",
                 visible=visible,
+                status_basis=status_basis,
             )
             if packet is not None:
                 return packet
@@ -3978,8 +4067,11 @@ def _compile_packet(
             generation=generation,
             anchors=tuple(anchor.as_dict() for anchor in resolution.anchors),
             ambiguity=resolution.ambiguity,
-            missing=({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else (),
+            missing=({"role": "anchors", "reason": "lane_truncated"},)
+            if resolution.truncated
+            else (),
             recent_context=recent,
+            status_basis=status_basis,
         )
 
     if resolution.disambiguated_by:
@@ -4026,6 +4118,7 @@ def _compile_packet(
             index_token=index_token,
             state_fields=conventions.state_fields,
             date_fields=conventions.date_fields,
+            status_basis=status_basis,
         )
     reached: dict[str, set[str]] = {}
     for entry in current_state:
@@ -4040,13 +4133,19 @@ def _compile_packet(
         timings=timings,
         freshness_snapshot=freshness_snapshot,
         precedent_reach=lambda: reach_precedents(
-            root, resolved=lane_anchors, roles=roles, registry=registry, index=index,
-            visible=visible, reached=reached,
+            root,
+            resolved=lane_anchors,
+            roles=roles,
+            registry=registry,
+            index=index,
+            visible=visible,
+            reached=reached,
         ),
         visible=visible,
         reached=reached,
         analysis=analysis,
         request_anchors=resolution.anchors,
+        status_basis=status_basis,
     )
     missing = (
         *missing,
@@ -4073,6 +4172,7 @@ def _compile_packet(
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
             visible=visible,
+            status_basis=status_basis,
         )
         if beside_anchors:
             items = (*items, *beside_items)
@@ -4099,6 +4199,7 @@ def _compile_packet(
             status=resolution.status,
             recent_context=recent,
             promoted_paths=promoted_paths,
+            status_basis=status_basis,
         )
     return packet
 
@@ -4118,8 +4219,11 @@ def _named_beside(
     freshness_snapshot: Any,
     lexical_seconds: float,
     visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
-    tuple[dict[str, Any], ...], tuple[LaneItem, ...], tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[LaneItem, ...],
+    tuple[dict[str, Any], ...],
     tuple[dict[str, str], ...],
 ]:
     """The ordinary pages a turn named BESIDE the anchors it resolved.
@@ -4137,6 +4241,7 @@ def _named_beside(
     lanes read nothing off retains its coverage. Carry lenses use only the
     packet's remaining role slots.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     consumed: set[str] = set()
     exclude: set[str] = set()
     for anchor in resolved:
@@ -4156,6 +4261,7 @@ def _named_beside(
         skip_terms=" ".join(sorted(consumed)),
         contacts=contacts,
         visible=visible,
+        status_basis=status_basis,
     )
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:
@@ -4174,6 +4280,7 @@ def _named_beside(
             freshness_snapshot=freshness_snapshot,
             visible=visible,
             contacts=contacts,
+            status_basis=status_basis,
         )
     except BudgetExhausted:
         return (), (), (), tuple(dict(role) for role in selected_roles)
@@ -4294,6 +4401,7 @@ def hot_profile(
     profile: working_set_heat.HeatProfile | None = None,
     attribution: working_set_heat.Attribution | None = None,
     marks: Mapping[str, working_set_heat.SessionMark] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> HotSet:
     """The TOP of the heat projection's ranking — what a turn that names
     nothing is taken to be referring to (design §8, close-memory-loop 7.3).
@@ -4319,9 +4427,10 @@ def hot_profile(
     currency — `_is_current_page` for a row, `_eligible_agent_page` for a
     page — at most `limit` cached single-page reads, as before.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     heat = profile if profile is not None else working_set_heat.profile(root)
-    by_path, admissible, eligible = _referent_filters(root, rows, heat)
+    by_path, admissible, eligible = _referent_filters(root, rows, heat, status_basis=status_basis)
     passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
     token_paths = _token_paths(by_path, continuity_refs, admissible)
     leads = working_set_heat.leading(
@@ -4342,11 +4451,16 @@ def hot_profile(
 
 
 def _referent_filters(
-    root: Path, rows: Sequence[Any], heat: working_set_heat.HeatProfile
+    root: Path,
+    rows: Sequence[Any],
+    heat: working_set_heat.HeatProfile,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[dict[str, Any], Callable[[str], bool], Callable[[str], bool]]:
     """`(rows by path, admissible, eligible)`: the free string checks a heat
     referent must pass, and the bounded page read each member the walk
     reaches gets (`hot_profile`)."""
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
     by_path = {
         str(getattr(row, "path", "") or ""): row for row in rows if getattr(row, "path", "")
     }
@@ -4354,7 +4468,7 @@ def _referent_filters(
     retired = {
         path
         for path, row in by_path.items()
-        if str(getattr(row, "lifecycle", "active") or "active") in RETIRED_PAGE_STATUSES
+        if not status_basis.classify(getattr(row, "lifecycle", None)).carryable
     }
 
     def admissible(path: str) -> bool:
@@ -4362,8 +4476,8 @@ def _referent_filters(
 
     def eligible(path: str) -> bool:
         if path in by_path:
-            return _is_current_page(root, path)
-        return _eligible_agent_page(root, path) is not None
+            return _is_current_page(root, path, status_basis=status_basis)
+        return _eligible_agent_page(root, path, status_basis=status_basis) is not None
 
     return by_path, admissible, eligible
 
@@ -4406,14 +4520,18 @@ def follow_up_referents(
     attribution: working_set_heat.Attribution | None,
     marks: Mapping[str, working_set_heat.SessionMark] | None = None,
     limit: int = HOT_PROFILE_K,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[tuple[str, ...], bool]:
     """`(pages, from_token)`: what a short follow-up may point at, from the
     caller's OWN session tier only (`working_set_heat.own_referents`), under
     the same admissibility and currency checks as `hot_profile`. Empty for a
     caller with no session key or thread: another conversation's work is
     never what "the second one" refers to."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
-    by_path, admissible, eligible = _referent_filters(root, rows, profile)
+    by_path, admissible, eligible = _referent_filters(
+        root, rows, profile, status_basis=status_basis
+    )
     token_paths = _token_paths(by_path, continuity_refs, admissible)
     pages = working_set_heat.own_referents(
         profile,
@@ -4548,6 +4666,7 @@ def _recent_context(
     profile: working_set_heat.HeatProfile | None = None,
     attribution: working_set_heat.Attribution | None = None,
     marks: Mapping[str, working_set_heat.SessionMark] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """What was recently worked on — the block a turn that resolved nothing
     still carries.
@@ -4587,6 +4706,7 @@ def _recent_context(
     Best-effort by construction. Every source is optional and every failure
     costs the block its entries, never the packet.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     by_path: dict[str, Any] = {}
     for row in rows:
@@ -4644,7 +4764,7 @@ def _recent_context(
     offered = {
         rel: why
         for rel, why in offered.items()
-        if why == "captured" or _is_current_page(root, rel)
+        if why == "captured" or _is_current_page(root, rel, status_basis=status_basis)
     }
     unranked = len(contacts)
 
@@ -4722,7 +4842,7 @@ def _recent_context(
             # same one cached read every other entry gets.
             entry.update(_recent_episode_fields(root, entry["path"]))
             continue
-        statement = _recent_frontmatter_statement(root, entry["path"])
+        statement = _recent_frontmatter_statement(root, entry["path"], status_basis=status_basis)
         if statement:
             entry["statement"] = statement
     return _without_collection_echoes(entries, collections)
@@ -4927,17 +5047,9 @@ def _recent_episode_fields(vault_root: Path, rel: str) -> dict[str, str]:
     return fields
 
 
-def _lifecycle_statuses() -> frozenset[str]:
-    """Every page lifecycle status this tree defines: the per-type enums
-    `note` validates against, plus the inactive ones `activation` retires."""
-    from . import activation, note
-
-    return frozenset(
-        (*note.STATUS_BASIC, *note.STATUS_EXPERIMENT, *note.STATUS_PRODUCTION)
-    ) | frozenset(activation._INACTIVE_STATUSES)
-
-
-def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
+def _recent_frontmatter_statement(
+    vault_root: Path, rel: str, *, status_basis: lifecycle_statuses.Basis | None = None
+) -> str:
     """The page's authored `summary`, else a `status` that is not a
     lifecycle word, or `""`.
 
@@ -4949,6 +5061,7 @@ def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
     what it says: rendered as the statement, "status: active" stood in for
     the summary the author wrote beside it.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find_corpus
 
     try:
@@ -4963,8 +5076,11 @@ def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
         value = frontmatter.get(name)
         if not isinstance(value, (str, int, float)) or not str(value).strip():
             continue
-        if name == "status" and working_set_index.normalize(str(value)) in _lifecycle_statuses():
-            continue
+        if name == "status":
+            classification = status_basis.classify(value)
+            classification.require()
+            if not classification.unregistered:
+                continue
         return working_set_state.bounded_statement(f"{name}: {str(value).strip()}")
     return ""
 

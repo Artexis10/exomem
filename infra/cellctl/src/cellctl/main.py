@@ -15,6 +15,7 @@ from datetime import timedelta
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
+from .backup_window import parse_backup_window
 from .capacity import CapacityConfig, SharedWorkerPolicy
 from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig
 from .k8s_client import ClusterClient
@@ -77,8 +78,7 @@ def build_reconcile_config() -> ReconcileConfig:
         kwargs["init_deadline"] = timedelta(minutes=int(minutes_raw))
     window_raw = os.environ.get("CELLCTL_BACKUP_WINDOW")  # "2-5"
     if window_raw is not None:
-        start, end = window_raw.split("-")
-        kwargs["backup_window"] = (int(start), int(end))
+        kwargs["backup_window"] = parse_backup_window(window_raw)
     concurrency_raw = os.environ.get("CELLCTL_BACKUP_CONCURRENCY")
     if concurrency_raw is not None:
         kwargs["backup_concurrency"] = int(concurrency_raw)

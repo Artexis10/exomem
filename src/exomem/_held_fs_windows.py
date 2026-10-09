@@ -10,7 +10,7 @@ import ctypes
 import errno
 import os
 import secrets
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from ctypes import (
     POINTER,
     Structure,
@@ -1034,11 +1034,18 @@ class WindowsHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
+    def children(
+        self,
+        parent: HeldDirectory,
+        *,
+        name_filter: Callable[[str], bool] | None = None,
+    ) -> HeldResult[tuple[SagaRecord, ...]]:
         try:
             checked = self._check_directory(parent)
             records: list[SagaRecord] = []
             for name in sorted(self._entries(checked)):
+                if name_filter is not None and not name_filter(name):
+                    continue
                 try:
                     handle = _open_relative(
                         _native(checked.descriptor),

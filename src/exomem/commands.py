@@ -1315,6 +1315,10 @@ def op_bootstrap(
             "rule": "Decision not permission; v1 writers retain confirmation.",
         },
     }
+    if "schema_memory" in active_product_names:
+        vocabulary_workflow_projection["page_status"] = vocabulary_operation(
+            "schema_memory", {"subject": "statuses", "operation": "inspect"}
+        )
     from .vocabulary_authority import VocabularyAuthority
 
     authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
@@ -1627,7 +1631,7 @@ def op_bootstrap(
         ),
     }
     payload: dict = {
-        "contract_version": "2026-10-07.1",
+        "contract_version": "2026-10-08.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -1770,6 +1774,7 @@ def op_bootstrap(
             "lifecycle": entity_lifecycle,
         },
         "workflow": {
+            "page_status": semantic_authoring_module.STATUS_CLASSIFICATION_RULE,
             "requested": requested_workflow,
             "loop": [
                 "bootstrap",
@@ -1867,7 +1872,11 @@ def op_bootstrap(
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
                 "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
-                "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders",
+                "structure_suggestion": (
+                    "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
+                    if profile == "compact" and not frozen_profile
+                    else "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                ),
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
@@ -1891,8 +1900,16 @@ def op_bootstrap(
                 # naming a command the active surface cannot call, and these lines
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
-                "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
-                "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
+                "due_state": (
+                    "Advisory counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated references. They cover predictions past authored check dates, experiments past their window without results, long-unanswered questions and broken supersession chains. Absent when nothing is due."
+                    if profile == "compact" and not frozen_profile
+                    else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
+                ),
+                "due_state_handling": (
+                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    if profile == "compact" and not frozen_profile
+                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
                     "preserve exact source-unit provenance and history, and route observed "
@@ -1902,7 +1919,11 @@ def op_bootstrap(
                     "Handle visible role transitions before writing; "
                     "MCP cannot observe tool-free turns"
                 ),
-                "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
+                "due_state_authority": (
+                    "Advisory counts measure authored state. The runtime never judges, resolves, closes, archives or writes for them, or changes retrieval ordering."
+                    if profile == "compact" and not frozen_profile
+                    else "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering"
+                ),
                 # Command-free for the same reason as the due-state lines above,
                 # and it matters MOST here: the block arrives unasked on a
                 # hookless client's ordinary write response, and that client has
@@ -1910,10 +1931,18 @@ def op_bootstrap(
                 # The "worth keeping" bar is the same one `engagement.contract.capture`
                 # spells out in full (a later decision, lookup, repeated task,
                 # comparison or continuation); it is not repeated here.
-                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
+                "capture_sweep_handling": (
+                    "On the first durable write after a quiet interval, `capture_sweep` calls for one bounded pass over recent conversation. `consider` gives examples; `written_recently` prevents duplicates; `unpaged_mentions` names references without pages. Save what qualifies in the user's language; otherwise stay silent."
+                    if profile == "compact" and not frozen_profile
+                    else "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
+                ),
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
-                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                "family_disposition_reading": (
+                    "A quiet family stays reviewable and audited; omission never proves nothing is due. review_memory(mode='dispositions') lists registered families, quiet state, reasons and the delegation envelope."
+                    if profile == "compact" and not frozen_profile
+                    else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
+                ),
                 # Carried by EVERY profile. It was full-only while compact sat 24
                 # bytes under its ceiling; the queued compact-bootstrap trim has
                 # since paid for it out of redundancy elsewhere in the payload, and
@@ -2383,7 +2412,10 @@ def _session_bootstrap_projection(compact: dict) -> dict:
     session["knowledge_packs"] = {
         key: compact["knowledge_packs"][key] for key in ("selected", "selection_rule")
     }
-    session["workflow"] = {"requested": compact["workflow"]["requested"]}
+    session["workflow"] = {
+        "requested": compact["workflow"]["requested"],
+        "page_status": compact["workflow"]["page_status"],
+    }
     session["authoring_contract"] = {
         "post_write": {
             key: compact["authoring_contract"]["post_write"][key]
@@ -10480,19 +10512,18 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash. For entity-types, relations, source-kinds, domains,
-    categories and planning-values: inspect lists the live vocabulary and
-    usage; propose previews a delta; save applies upsert, alias or deprecate
-    with expected_hash and why; history lists kept versions; restore reverts
-    one without rewriting pages.
+    the current hash. For a vocabulary registry: inspect lists the live vocabulary
+    and usage; propose previews a delta; save applies upsert, alias or deprecate
+    with expected_hash and why; history lists kept versions; restore reverts one
+    without rewriting pages.
     Operations: references/operation-routing.md.
 
     Args:
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, source-kinds, domains,
-            planning-values, traversal-profiles, context-roles, activation-conventions, or
-            workflow-contracts.
+        subject: contract; a vocabulary registry (categories, entity-types, relations,
+            source-kinds, domains, statuses or planning-values); traversal-profiles,
+            context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.

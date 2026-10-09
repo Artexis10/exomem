@@ -42,6 +42,7 @@ from pathlib import Path
 from . import (
     corpus_aware,
     indexes,
+    lifecycle_statuses,
     reserved_paths,
     semantic_contract,
     semantic_writes,
@@ -621,7 +622,10 @@ def load_editable(
             reason=f"could not parse {rel_path} as markdown",
         )
 
-    if parsed.frontmatter.get("status") == "superseded":
+    if (
+        lifecycle_statuses.Basis(vault_root).classify(parsed.frontmatter.get("status")).require()
+        == "superseded"
+    ):
         raise EditError(
             code="ALREADY_SUPERSEDED",
             missing=["path"],

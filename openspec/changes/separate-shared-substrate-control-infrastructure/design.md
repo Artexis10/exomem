@@ -4,7 +4,7 @@
 
 See proposal.md for motivation. The deployed control host remains in Exomem's `infra/terraform/foundation`: `hcloud_server.control`, `hcloud_primary_ip.control_db`, `hcloud_firewall.control` and the database DNS record. Its private attachment references the foundation subnet and its creation references the foundation administrator key. `infra/ansible/site.yml` runs base and PostgreSQL roles against `control_nodes`; the shared base role also configures fleet nodes. Dedicated pgBackRest resources remain in the separate durability root. Provider locks pin Terraform 1.15.8, hcloud 1.66.0 and Cloudflare 5.22.0.
 
-PR1513 changed the intended host label to `substrate-control-01`; its live rename is pending. Coordinate with that delivery owner rather than folding a rename or Kimai migration into state extraction. The verified access failure is a stale guest SSH allowlist, with sshd running; complete managed SSH acceptance before host inventory or recovery work.
+PR1513 proposed the host label `substrate-control-01`. On 2026-10-09, after the relocation, the owner chose `substrate-control`, and the server, Primary IP, firewall and guest hostname now carry that name. The Kimai migration stays separate from state extraction. The verified access failure is a stale guest SSH allowlist, with sshd running; complete managed SSH acceptance before host inventory or recovery work.
 
 ## Goals / Non-Goals
 
