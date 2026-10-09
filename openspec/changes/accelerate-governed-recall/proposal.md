@@ -29,14 +29,17 @@ at or below 3 s in `cloud-service-resource-policy`) is fifteen times looser. A
 reproduction on a 6,500-page synthetic vault in a process pinned to two CPUs
 measured warm hybrid `ask_memory` at p50 363-700 ms and p95 636-1,799 ms over
 three runs, and the `mixed` result level at p50 871 ms and p95 2,460 ms
-(`baseline.md`). The cost is not the ranking arithmetic. It is per-request work
-that the catalogue generation already determines: a parent-hint query that scans
-the page table once per candidate, nine catalogue connections and six readiness
-proofs per request, 92 page hydrations and 126 Markdown file reads per request
-to rank 15 hits, and unit lanes that re-parse every candidate parent. No
-pull-request gate counts this work. The full CI latency jobs found the last
-linear-in-corpus regression, in the context compiler, only after merge (run
-37969875369 on 2026-10-09).
+(`baseline.md`). Those runs were on a loaded laptop, with the owner path
+obtained by patching the authority check. The cost is not the ranking
+arithmetic. It is per-request work that the catalogue generation already
+determines: a parent-hint query whose plan scans the candidate list once per KB
+page, nine catalogue connections and six readiness proofs per request, 92 page
+hydrations and 126 Markdown file reads per request to rank 15 hits, and unit
+lanes that re-parse every candidate parent. No pull-request gate counts this
+work. Full CI run 37969875369 on 2026-10-09 found two linear-in-corpus
+regressions only after merge, in `activate_context` carry ranking and in
+semantic validate. Neither was in `ask_memory`, but `activate_context` shares
+its read entry points.
 
 ## What Changes
 
@@ -70,22 +73,33 @@ linear-in-corpus regression, in the context compiler, only after merge (run
 - The latency contract tightens to warm search p95 at or below 200 ms, with a
   100 ms p50 target, on a two-CPU cell of at least 6,500 pages. It covers hybrid,
   keyword, filtered and `mixed`/`unit` requests, measured as the elapsed time of
-  the `ask_memory` call.
-- Each stage of the request gets a p95 budget, and the budgets sum below the
-  ceiling. The gate names a stage that exceeds twice its budget.
-- Search work stops growing with the corpus: ranking, temporal, graph-seed and
-  unit stages read metadata from the catalogue and sidecars of the current
-  generation, Markdown is read only to hydrate returned hits, and each derived
-  store opens one connection and runs one readiness proof per request.
+  the `ask_memory` call. Keyword recall keeps its 120 ms p50 ceiling, and the
+  empty-query browse stays outside the ceilings.
+- The measured principal is the real vault owner, with nothing patched. An
+  admitted non-owner series is reported apart and gates once the admission
+  candidate-sizing fix lands.
+- Each stage of the request gets a p95 budget, named by its timing span keys,
+  and the budgets sum below the ceiling. The gate names a stage that exceeds
+  twice its budget, and reports process CPU per stage. Query encode keeps the
+  bound that `multilingual-recall` already sets; its stage budget is a target.
+- Search work is bounded per candidate and per matched row. Catalogue queries
+  keyed by the candidate set do work that does not grow with the corpus for a
+  fixed candidate set. BM25 and keyword do bounded work per matched row.
+  Ranking, temporal, graph-seed and unit stages read metadata from the catalogue
+  and sidecars of the current generation. Markdown reads track the candidate
+  count plus a fixed overfetch, and each derived store opens one connection and
+  runs one readiness proof per scope per request.
 - Timing diagnostics cover the whole `ask_memory` request, including the
   due-state block that runs after retrieval, and an unreported duration is
   shown as unknown, never as 0 ms.
-- Two gates enforce it. A model-free structural gate in the pull-request tier
-  counts page reads, connections, readiness proofs and SQLite virtual-machine
-  steps on 1,600- and 6,500-page generated corpora. A wall-clock gate in the
-  scheduled and dispatched full CI checks the ceiling and the budgets on a
-  generated 6,500-page corpus with the served encoder, and release evidence
-  counts it.
+- Three instruments enforce it. A model-free structural gate in the
+  pull-request tier compares work per candidate and per matched row between
+  400- and 1,600-page generated corpora that hold the same candidates. In the
+  scheduled and dispatched full CI, a paired comparison runs head against the
+  last release tag on one runner and fails only when head is at least 10%
+  slower with 95% confidence. The absolute verdict on the ceilings and budgets
+  comes from a quiet workstation run and the live-cell series, and it is the
+  release evidence for those numbers.
 - Out of scope: the cold-start index build, explicitly requested or
   accelerator-driven reranking, and RAW admission candidate sizing for non-owner
   callers, which `fix/admission-candidate-sizing` owns.
@@ -94,9 +108,9 @@ linear-in-corpus regression, in the context compiler, only after merge (run
 
 ### New Capabilities
 - `recall-latency-contract`: the warm search latency ceilings and per-stage
-  budgets, the no-corpus-walk and no-corpus-growth read-path invariants, the
-  quiescence and attribution rules for measuring them, and the pull-request and
-  full-CI gates that enforce them.
+  budgets, the no-corpus-walk invariant and the per-candidate work bounds, the
+  reference corpus, the quiescence and attribution rules for measuring them,
+  and the pull-request, full-CI and release instruments that enforce them.
 
 ### Modified Capabilities
 - `structured-retrieval-filters`: `Governed Unit Metadata Is Filterable` gains the
@@ -139,7 +153,9 @@ linear-in-corpus regression, in the context compiler, only after merge (run
   catalogue columns, unit-lane hydration), `src/exomem/embedding_index.py` (chunk
   text after fusion, unit matrix per generation), `src/exomem/commands.py` and
   `src/exomem/due_state.py` (response blocks inside the timings),
-  `scripts/synth_vault.py` (realistic corpus), `scripts/recall_latency_gate.py`
-  and its test (new ceilings and budgets), a new pull-request structural test, and
-  `.github/workflows/ci.yml` (the `retrieval-latency` job). The tool surface does
-  not move.
+  `src/exomem/find_types.py` (`cpu_ms` per span), `src/exomem/runtime_resources.py`
+  and `src/exomem/embedding_backend.py` (the cell thread policy),
+  `scripts/synth_vault.py` (reference corpus), `scripts/recall_latency_gate.py`
+  and its test (new ceilings and budgets, the paired mode), a new pull-request
+  structural test, and `.github/workflows/ci.yml` (the `retrieval-latency`
+  job). The tool surface does not move.

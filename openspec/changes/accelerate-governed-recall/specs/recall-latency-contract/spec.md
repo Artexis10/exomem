@@ -1,25 +1,37 @@
 ## Purpose
 
 The recall latency contract states what a warm governed search may cost, gives
-each stage of the request a budget inside that cost, forbids corpus walks and
-corpus-proportional work on the read path, and defines how the numbers are
-measured so a contended box cannot be mistaken for a regression.
+each stage of the request a budget inside that cost, bounds the read path's work
+per candidate and per matched row, forbids corpus walks, and defines how the
+numbers are measured so a contended box cannot be mistaken for a regression.
 
 ## ADDED Requirements
 
 ### Requirement: Governed Recall Meets Fixed Latency Ceilings On A Quiescent Cell
 
-On a quiescent two-CPU cell or reference corpus of at least 6,500 governed pages
-with warm caches, every warm search request SHALL complete with p95 at or below
-200 ms. This covers hybrid recall (semantic, BM25, keyword, graph and fusion),
-keyword recall, hybrid recall with one supported structured filter, and the
-`mixed` and `unit` result levels. Warm hybrid p50 has a 100 ms target that every
-report shows beside the measured p50. The ceilings are the capability's
-contract, not calibrated from any runner, and a gate MUST NOT loosen them.
+On the reference corpus or the live cell, quiescent, with warm caches and in a
+process restricted to two CPUs, every warm search series SHALL have p95 at or
+below 200 ms. This covers hybrid recall (semantic, BM25, keyword, graph and
+fusion), keyword recall, hybrid recall with one supported structured filter, and
+the `mixed` and `unit` result levels. Every report shows each series' p50 beside
+a 100 ms target, and keyword recall keeps its p50 ceiling of 120 ms. The
+ceilings are the capability's contract, not calibrated from any runner, and a
+gate MUST NOT loosen them. The empty-query browse is outside these ceilings.
+
+The measured principal SHALL be the vault owner, identified through the
+product's owner-authority path with nothing patched. An admitted non-owner
+principal SHALL run the same series, reported separately. That series becomes
+gating when the admission candidate-sizing fix (`fix/admission-candidate-sizing`)
+lands.
+
+An index build is in progress while a full build or a repair of a derived store
+for the request's scope runs: the lexical catalogue, the embedding sidecar, the
+semantic-unit sidecar or the graph. Incremental indexing of the pages that one
+governed write changed is not an index build.
 
 #### Scenario: Warm hybrid search on the reference corpus
 
-- **WHEN** thirty or more novel, varied hybrid requests run back to back through `ask_memory` against a warm corpus of at least 6,500 pages, in a process restricted to two CPUs, with the load average at or below 2.0
+- **WHEN** thirty or more hybrid requests from the reference query mix run back to back through `ask_memory` as the vault owner, against the warm reference corpus, in a process restricted to two CPUs, after the quiescence check passed
 - **THEN** the p95 of the elapsed time of the `ask_memory` call is at or below 200 ms
 - **AND** the report shows the p50 beside the 100 ms target
 - **AND** no request in the series reports a corpus walk in any stage
@@ -28,7 +40,15 @@ contract, not calibrated from any runner, and a gate MUST NOT loosen them.
 
 - **WHEN** the series repeats as keyword recall, as hybrid recall with a `projects` filter that the index can answer, and at `result_level="mixed"`
 - **THEN** the p95 of each series is at or below 200 ms
+- **AND** the p50 of the keyword series is at or below 120 ms
 - **AND** the eligibility stage of the filtered series reports an index outcome within its stage budget
+
+#### Scenario: The owner is real and the admitted principal is reported apart
+
+- **WHEN** a gate measures a series
+- **THEN** the owner's identity comes from the product's owner-authority path, and no authority check is patched
+- **AND** the admitted non-owner series is reported with its own percentiles and count
+- **AND** the admitted series fails the gate only after the admission candidate-sizing fix lands
 
 #### Scenario: Requests outside the warm contract are reported apart
 
@@ -48,30 +68,44 @@ contract, not calibrated from any runner, and a gate MUST NOT loosen them.
 - **THEN** it waits a bounded time for quiescence and otherwise exits without a result, naming the load it observed
 - **AND** it never emits ceiling comparisons from samples taken under that load
 
+#### Scenario: Quiescence is checked once, before the series
+
+- **WHEN** the load average rises during a series that started quiescent
+- **THEN** the gate does not refuse the series, because the measured process's own load counts in the load average
+- **AND** it records the load beside every percentile
+
 ### Requirement: Warm Search Stages Stay Within Their Budgets
 
 Each stage of a warm search request SHALL have the fixed p95 budget below, and
-the budgets SHALL sum below the 200 ms ceiling. A stage that a request does not
-run is reported as not run and is excluded from that stage's percentiles. A gate
-SHALL report the p50 and p95 of every stage beside its budget, and SHALL fail a
-series in which a stage's p95 exceeds twice its budget. A budget changes only
-through this requirement.
+the budgets SHALL sum below the 200 ms ceiling. Each row names the timing span
+keys it counts. A row counts the own interval of each key it names, children
+included, and never adds again a child of a key it already counts. A stage that
+a request does not run is reported as not run and is excluded from that stage's
+percentiles. A gate SHALL report the p50 and p95 of each stage's wall time and
+of its process CPU time (`cpu_ms`) beside its budget.
 
-| Stage | p95 budget |
-|---|---|
-| Request setup: recall projection, freshness, pending visibility | 5 ms |
-| Admission and structured-filter eligibility | 15 ms |
-| Query encode | 40 ms |
-| Dense search, chunk text included | 15 ms |
-| BM25 lane | 10 ms |
-| Keyword lane | 10 ms |
-| Unit lanes (`mixed` and `unit` result levels) | 30 ms |
-| Parent hints | 2 ms |
-| Graph lane | 15 ms |
-| Temporal lane (temporal requests) | 5 ms |
-| Fusion and multipliers, lexical guard included | 10 ms |
-| Hydration: hit construction, excerpts, release gate, serialization, response blocks | 20 ms |
-| CLIP lane (where enabled) | 10 ms |
+A stage verdict SHALL need at least 20 samples that ran the stage. With fewer,
+the gate reports the stage as "insufficient samples", never as a pass or a
+fail. A gate SHALL fail a series in which a stage with enough samples has a p95
+above twice its budget. Query encode is a diagnostic target: its bound is the
+encode p95 of 250 ms in `multilingual-recall`, and the twice-budget rule does
+not apply to it. A budget changes only through this requirement.
+
+| Stage | Span keys | p95 budget |
+|---|---|---|
+| Request setup: recall projection, freshness, pending visibility | `recall_projection`, `pending_visibility`, `freshness`, `cache_lookup` | 5 ms |
+| Admission and structured-filter eligibility | `filter_eligibility` | 15 ms |
+| Query encode (diagnostic target) | `vector.embed` | 40 ms |
+| Dense search, chunk text included | `vector.index`, `vector.search` | 15 ms |
+| BM25 lane | `bm25` | 10 ms |
+| Keyword lane | `keyword` | 10 ms |
+| Unit lanes (`mixed` and `unit` result levels) | `semantic_units` | 30 ms |
+| Parent hints | `parent_hints`, inside `semantic.search` | 2 ms |
+| Graph lane | `graph`, with `graph.seeds`, `graph.resolver` and `graph.expand` inside it | 15 ms |
+| Temporal lane, when the temporal lane runs | `temporal` | 5 ms |
+| Fusion and multipliers, lexical guard included | `fusion`, `lexical_guard` | 10 ms |
+| Hydration: hit construction, excerpts, release gate, serialization, response blocks | `filter_hits`, `release_gate`, `serialize`, `recall.due_state` | 20 ms |
+| CLIP lane, where CLIP is enabled | `clip` | 10 ms |
 
 #### Scenario: A stage over its budget is named
 
@@ -84,54 +118,133 @@ through this requirement.
 - **THEN** the unit-lane stage is reported as not run for that request
 - **AND** it is excluded from the unit-lane percentiles instead of counted as 0 ms
 
-### Requirement: Warm Search Work Does Not Grow With The Corpus
+#### Scenario: A stage with too few samples gets no verdict
 
-For a warm search request, Markdown page reads, catalogue connections, catalogue
-readiness proofs and SQLite virtual-machine steps SHALL NOT grow with corpus
-size. Markdown page reads SHALL stay at or below twice the requested limit at
-every result level. Each derived store SHALL open at most one connection and run
-at most one readiness proof per request. Ranking, temporal, graph-seed and
-unit-lane stages SHALL read page and unit metadata from the maintained
-catalogue and sidecars for the current generation, not from Markdown.
+- **WHEN** the temporal lane runs in 12 requests of a series
+- **THEN** the gate reports the temporal stage's percentiles as "insufficient samples"
+- **AND** that stage neither passes nor fails the series
 
-#### Scenario: Corpus growth cannot hide per-request work
+#### Scenario: A nested span is counted once
 
-- **WHEN** the same warm request series runs on generated corpora of 1,600 and 6,500 pages
-- **THEN** page reads, connections and readiness proofs per request stay within their bounds at both sizes
-- **AND** the SQLite virtual-machine steps per request at 6,500 pages stay within 1.5 times the 1,600-page count plus a fixed slack
+- **WHEN** parent hints run inside `semantic.search`
+- **THEN** the parent-hints row counts the `parent_hints` interval
+- **AND** no other row counts that interval again
 
-#### Scenario: A per-candidate table scan fails the gate
+#### Scenario: Encode answers to its canonical bound
 
-- **WHEN** a catalogue query for the candidate set scans the page table once per candidate path
-- **THEN** its virtual-machine steps grow with corpus size and the structural gate fails
+- **WHEN** query encode p95 is above 80 ms and at or below 250 ms
+- **THEN** the gate reports encode over its 40 ms target
+- **AND** the encode stage does not fail the series
+
+### Requirement: Warm Search Work Is Bounded Per Candidate And Per Matched Row
+
+For a warm search request, each catalogue query keyed by the candidate set
+(parent hints, ranking metadata, eligibility, hydration and readiness) SHALL do
+work bounded by the candidate count. For a fixed candidate set, that work SHALL
+NOT grow with corpus size. A lane driven by a full-text match SHALL do bounded
+work per row that its match yields. Work that a gate cannot observe per row, in
+a full-text index's own match and in the exact dense scan, stays under the
+latency ceilings instead.
+
+Markdown page reads SHALL track the candidate count plus a fixed overfetch, as
+`Structural Scaling Is The CI Gate` states; the candidates are the hits that the
+response hydrates. Each derived store SHALL open at most one connection and run
+at most one readiness proof per scope per request. Ranking, temporal,
+graph-seed and unit-lane stages SHALL read page and unit metadata from the
+maintained catalogue and sidecars for the current generation, not from
+Markdown. A gate SHALL check the work bounds as ratios between two corpus sizes
+that hold the same candidate set, and SHALL NOT pin absolute work counts.
+
+#### Scenario: Corpus growth cannot hide per-candidate work
+
+- **WHEN** the same warm request series, with the same candidate set, runs on a generated corpus and on the same corpus grown four times larger
+- **THEN** the work of each candidate-keyed catalogue query at the larger size stays within 1.5 times its work at the smaller size
+- **AND** the work per matched row of each full-text lane stays within 1.5 times
+- **AND** Markdown page reads stay within the candidate count plus the fixed overfetch, and connections and readiness proofs within one per store and scope
+
+#### Scenario: A per-candidate scan fails the gate
+
+- **WHEN** a catalogue query for the candidate set scans every KB row for each candidate, or the candidate list once for each KB row
+- **THEN** its work grows with corpus size for the same candidates
+- **AND** the structural gate fails and names the stage of that query
+
+#### Scenario: Exact BM25 is judged per matched row
+
+- **WHEN** a query's terms match four times as many rows in a larger corpus
+- **THEN** the gate compares the BM25 lane's work per matched row, not per request
+- **AND** it passes while that work per matched row stays within the bound
 
 #### Scenario: The structural gate runs on every pull request
 
 - **WHEN** a pull request runs CI
 - **THEN** the structural gate runs in the pull-request tier, model-free, with no wall-clock threshold
+- **AND** it drives `ask_memory` and `activate_context` as the vault owner and as one admitted principal
+- **AND** the admitted principal's bounds fail the gate only after the admission candidate-sizing fix lands, and are reported until then
 
 ### Requirement: Search Latency Is Gated Before Release
 
-An in-process gate SHALL check the ceilings and the stage budgets on a
-deterministic generated corpus of at least 6,500 pages, in a process restricted
-to two CPUs, with the served query encoder. The corpus SHALL have realistic
-prose with a vocabulary of at least 5,000 terms, a median page of 2 to 3 KB,
-5 to 25 wikilinks per page, typed frontmatter, and semantic units on at least
-half of its pages. The gate SHALL run in the scheduled and dispatched full CI,
-and the release evidence check SHALL count it. After each release the same
-series SHALL run against the live cell through its served transport.
+Two instruments SHALL gate warm search latency, each with the served query
+encoder in a process restricted to two CPUs. The absolute verdict on the
+ceilings and the stage budgets SHALL come from a run on a quiet workstation and
+from the live-cell series after each release, through the live cell's served
+transport. That verdict is release evidence.
+
+In the scheduled and dispatched full CI, the `retrieval-latency` job SHALL
+compare head with the last release tag instead. Both arms run on the same
+runner, the same reference corpus and the same cases, back to back. The job
+SHALL compute each case's paired ratio of head to release. It SHALL fail a
+series only when the lower bound of the 95% confidence interval of those ratios
+is above 1.10, that is, head at least 10% slower than the release. A
+comparison SHALL need at least 20 paired cases; with fewer, it reports
+"insufficient samples". The job SHALL NOT apply an absolute latency threshold.
 
 #### Scenario: A constant-factor regression blocks the release
 
-- **WHEN** a merged change raises warm hybrid p95 on the generated corpus above 200 ms
-- **THEN** the next scheduled or dispatched full CI run fails the latency job and names the stages over budget
+- **WHEN** a merged change makes warm hybrid requests slower than the last release by more than 10%, with 95% confidence over the paired cases
+- **THEN** the next scheduled or dispatched full CI run fails the `retrieval-latency` job and names the series and the stages where the time moved
 - **AND** the release evidence check stays red until a full run passes
+
+#### Scenario: A slow shared runner is not a regression
+
+- **WHEN** a full CI run lands on a runner that is slower for both arms
+- **THEN** the verdict depends only on the paired ratios between head and the release
+- **AND** no absolute ceiling or stage budget is checked on the shared runner
+
+#### Scenario: The absolute verdict is workstation and live-cell evidence
+
+- **WHEN** a release is delivered
+- **THEN** a quiet workstation run and the live-cell series after the release record the ceiling and stage-budget verdicts
+- **AND** each verdict records its sample counts, its load and the principal it measured
 
 #### Scenario: An encoder that cannot load is not a fast encoder
 
 - **WHEN** the served query encoder cannot be loaded in the gate's environment
 - **THEN** the encode and dense stages are reported as unknown, never as 0 ms
 - **AND** the gate fails the series instead of passing it without those stages
+
+### Requirement: The Reference Corpus And Query Mix Are Fixed
+
+The workstation run and the full-CI paired comparison SHALL measure a
+deterministic generated reference corpus with:
+
+- at least 6,500 governed pages, with typed frontmatter and 5 to 25 wikilinks per page;
+- realistic prose with a vocabulary of at least 5,000 terms and a median page of 2 to 3 KB;
+- transcript pages for 5% of the pages, 10 to 30 KB each;
+- at least 45,000 chunks;
+- at least 9,500 semantic units, on at least half of the pages.
+
+The query list SHALL hold at least 40 queries per series. About a quarter have
+1 to 3 words, about half have 4 to 9 words, and about a quarter have 15 to 40
+words, written the way an agent asks. The list SHALL run the temporal, graph
+and unit lanes often enough for each of their stages to reach the minimum
+sample count. The live-cell series uses the owner's vault and reports its page,
+chunk and unit counts in buckets of 500.
+
+#### Scenario: A corpus below the profile is not the reference
+
+- **WHEN** a gate runs on a generated corpus with fewer pages, chunks or units than the profile names
+- **THEN** it reports the counts it measured
+- **AND** it gives no ceiling verdict for that corpus
 
 ### Requirement: The Read Path Never Walks The Corpus
 
@@ -160,9 +273,10 @@ reappears is visible without a benchmark.
 For a real recall with timing diagnostics enabled, the sum of stage durations
 plus `unattributed_ms` SHALL NOT exceed `total_ms`, and `unattributed_ms` SHALL
 NOT exceed fifteen percent of `total_ms`. Inside a parent stage, time that no
-child stage covers SHALL also stay within fifteen percent of the parent. Every
-stage that reports a duration SHALL be an interval registered with the timing
-merge, never a manual difference written into the table.
+child stage covers SHALL stay within the larger of fifteen percent of the
+parent and 10 ms. Every stage that reports a duration SHALL be an interval
+registered with the timing merge, never a manual difference written into the
+table.
 
 #### Scenario: A real recall satisfies the attribution bound
 
@@ -173,8 +287,13 @@ merge, never a manual difference written into the table.
 
 #### Scenario: A costly step cannot hide inside a parent stage
 
-- **WHEN** a sub-step inside `semantic.search` takes 85 ms and registers no interval of its own
+- **WHEN** a sub-step inside a 200 ms `semantic.search` takes 85 ms and registers no interval of its own
 - **THEN** the completeness check fails and names `semantic.search` with its uncovered time
+
+#### Scenario: Fixed overhead in a small parent is not a hidden step
+
+- **WHEN** a 20 ms parent stage has 4 ms that no child stage covers
+- **THEN** the completeness check passes, because 4 ms is under the 10 ms floor
 
 #### Scenario: A manual timing write fails the completeness check
 
