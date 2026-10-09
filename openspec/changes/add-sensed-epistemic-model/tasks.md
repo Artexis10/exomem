@@ -89,7 +89,7 @@
   - The relation writer cites the reading id (R2).
   - The audit's in-request NLI enrichment (`audit.py:6218-6268`) moves onto the ledger with extractor `page-claim-v1`, per the `contradiction-queue` delta.
 - [ ] 9.3 Slice 5:
-  - The Cloud plane: cells run the dreamer, an in-cluster shared sensing plane, and no third-party API by default. It is measured against the hosted-inference acceptance measures.
+  - The Cloud placement: cells run the dreamer, each cell senses with its own instruments on shared read-only weights, and no third-party API runs by default. It is measured against the hosted-inference acceptance measures, plus per-cell activation memory and CPU contention.
   - The per-vault and per-tenant API placement opt-in, with `unpinned_weights` identity and retirement migration (R7).
   - The ledger registered as a portable-derived external-state family for hosted export and restore (R3).
   - Update `tests/test_dreamer_hosted_boundary.py` and `tests/test_frozen_verifier_hosted_boundary.py` to the new contract.

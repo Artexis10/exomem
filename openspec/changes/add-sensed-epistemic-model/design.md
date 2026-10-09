@@ -17,7 +17,7 @@ LLMs are welcome as instruments. The matrix's deterministic measurements keep th
 - **R1 — Generative instruments are admitted.** An instrument uses a versioned template, with vault text only in delimited data slots. Its output is logits or probabilities over a closed label set plus abstain, never sampled text. This amends `openspec/specs/frozen-verifiers/spec.md:29`.
 - **R2 — Readings may originate sensed families.** They never suppress, reorder or alter structural families. They never enter canon except through a write the agent authors (the existing relation writer, citing the reading id). This replaces close-memory-loop `design.md:212` condition 4 and its scenario "Verifier labels do not reach upkeep" (`specs/adaptive-memory-maintenance/spec.md:250-253`).
 - **R3 — The ledger is durable.** It is an append-only, per-vault readings ledger in the state root. It is not in the vault and not in the disposable `dreamer.sqlite`, and it is included in backup and export.
-- **R4 — Cloud runs the dreamer.** The dreamer runs in cells, reversing close-memory-loop `design.md:208`, and sensing goes to an in-cluster shared plane. No third-party API sees vault text by default. `docs/hosted-inference-boundary.md` keeps its thresholds, rewritten as acceptance measures rather than permission gates. In the owner's words: "i dont see why we need to compromise". This slice specifies the Cloud plane and does not build it.
+- **R4 — Cloud runs the dreamer.** The dreamer runs in cells, reversing close-memory-loop `design.md:208`, and each cell senses with its own local instruments, which map one shared, read-only copy of the pinned weights. No third-party API sees vault text by default. `docs/hosted-inference-boundary.md` keeps its thresholds, rewritten as acceptance measures rather than permission gates. In the owner's words: "i dont see why we need to compromise". This slice specifies the Cloud plane and does not build it.
 - **R5 — Local GPU waits.** The LLM instrument senses on CPU at idle until `detect-co-tenant-gpu-pressure` ships. That change is not reordered.
 - **R6 — Authored pairs stay unlabelled.** "Asserted pairs carry no model label" (`openspec/specs/contradiction-queue/spec.md:343`) holds for v1.
 - **R7 — Local models are preferred.** Local models are the default. An API instrument is an allowed opt-in placement per vault. Its identity is provider + model id + version or snapshot date, and it is flagged `unpinned_weights`; a vendor retirement triggers the normal instrument-migration re-sense. Personal vaults opt in by the owner. Cloud tenants opt in explicitly per tenant, and are off by default. The same closed-label contract applies. In the owner's words: "i prefer using local models instead of api but whatever works. api can be very cheap … saves on resources".
@@ -233,11 +233,12 @@ What slice 1 serves (review of slice 1, 2026-09-28):
   - The template, closed label set, abstain and fixture admission are the same. Output is the provider's token log-probabilities over the label set, never text.
   - The request carries only the delimited slot texts. It never carries an instruction built from vault text.
   - A vendor's retirement of the model id is an instrument migration (D3).
-- **Cloud plane (slice 5).**
+- **Cloud placement (slice 5).**
   - Cells run the dreamer.
-  - Sensing is served by an in-cluster shared plane: a pool of pinned local instruments behind a request interface scoped to the cell.
+  - Each cell senses with its own local instruments, in the cell's own process. The cells share only the immutable, file-mapped model bytes, never a process, writable memory or a cache. One process therefore never holds two tenants' text.
+  - A shared inference process is rejected. A batching, logging or memory-safety bug in it would expose one tenant's text to another, and request-scoped buffers reduce that risk without removing it. Shared file-mapped weights already give the memory saving: the node holds bge-m3 once, about 509 MB, across 3 cells (measured 2026-10-09).
   - No third-party API sees vault text unless the tenant has opted in.
-  - The plane is measured against the acceptance measures in `docs/hosted-inference-boundary.md`: image size, cold and warm latency, peak RSS, cells per node, idle reclamation, failure isolation.
+  - The placement is measured against the acceptance measures in `docs/hosted-inference-boundary.md`: image size, cold and warm latency, peak RSS, cells per node, idle reclamation, failure isolation. Per-cell activation memory and CPU contention between cells are added to those measures.
   - The ledger joins hosted export and restore as a registered portable-derived family.
   - The cells' readings stay per vault.
 
@@ -263,7 +264,7 @@ What slice 1 serves (review of slice 1, 2026-09-28):
 2. `mention.same_referent` on an instruct model chosen by a fixture spike; the generative template runtime (R1); local GPU placement after co-tenant pressure detection ships (R5).
 3. Tensions through the upkeep block as sensed families (R2), with reading-id citation in the relation writer; the audit's NLI enrichment moves onto the ledger.
 4. `recap.covered_by`; supersession direction, relation typing, `term.same_meaning`; convergence and emerging-connection projections.
-5. The Cloud plane (R4), the API placement (R7) and the ledger's export and restore registration.
+5. The Cloud placement (R4), the API placement (R7) and the ledger's export and restore registration.
 
 ## Risks and trade-offs
 
