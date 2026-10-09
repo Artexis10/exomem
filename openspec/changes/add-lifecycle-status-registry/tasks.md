@@ -1,8 +1,9 @@
 # Tasks
 
 Delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/1630).
-[CI run 37884083275](https://github.com/Artexis10/exomem/actions/runs/37884083275) passed every test cited below on head `3808ea6ab2f67fe62c34c529eaaacfa4ee994ff4`.
-The core and harness shards of that run reported 29,164 test cases: no failures, no errors, 574 skipped.
+[CI run 37888048092](https://github.com/Artexis10/exomem/actions/runs/37888048092) passed every test cited below on head `7c37c37cd5c459ba83a5fef79b898f3dfd3dc82d`, with one exception.
+The lean core matrix skips `tests/test_vocabulary_registries.py::test_a_reverted_promotion_leaves_its_page_as_debt` because the `tui` extra is not installed there; that test passed in a local run with the extra installed.
+The core and harness shards of that run reported 29,168 test cases: no failures, no errors, 576 skipped.
 
 - 1.1 The head contains foundation merge `e844290a16b298fa30edfefea5e38d9951d54973` and the S2 reference `src/exomem/_scaffold/_Schema/references/vocabulary.md`. Tests: `tests/test_vocabulary_registries.py::test_a_reverted_promotion_leaves_its_page_as_debt`, `tests/test_workflow_skills.py::test_core_and_standalone_authoring_skills_embed_the_canonical_contract`.
 - 1.2 `tests/test_vocabulary_registries.py::test_each_overlay_adapter_restores_its_legacy_grammar[statuses-awaiting-review-entry4]`, `::test_canonical_status_meaning_cannot_be_shadowed_or_replaced`, `::test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes`, `::test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_aliases`.
