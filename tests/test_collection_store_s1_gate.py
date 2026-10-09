@@ -3,8 +3,8 @@
 Every case drives the real writer lease against a real coordinator database and
 the production producer session on a real vault path. Restarts and other hosts
 are spawned interpreters with their own state roots; older-reader cases run the
-actual older interpreter. Cases owned by a later slice are strict xfails naming
-it. No case may let C fall back to files, migrate A/B or expose a half-created C.
+actual older interpreter. No case may let C fall back to files, migrate A/B or
+expose a half-created C.
 """
 
 import functools
@@ -1170,7 +1170,7 @@ def test_reconcile_keeps_evidence_it_cannot_fully_hold_and_holds_each_item_once(
         "preview"]["sources"] == []
 
 
-# --- later slices: strict xfails naming the slice that turns them green -----------------
+# --- supported runtime, restore, rollback and marker ownership ---------------------------
 
 
 def test_supported_runtime_admits_a_fresh_root_copy_of_the_c_vault(abc, tmp_path, monkeypatch):
