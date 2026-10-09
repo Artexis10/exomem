@@ -478,3 +478,67 @@ def test_a_live_revocation_withholds_warm_private_units_but_keeps_the_page_reada
     assert "protocol" not in revoked["kinds"]
     # The withheld units make the lexical unit answer incomplete, never a proved miss.
     assert "semantic_units_lexical" in revoked["degraded"]
+
+
+def test_a_hidden_page_with_a_private_status_never_changes_a_limited_clients_find_consumers(
+    configured_boundary, vault, tmp_path, monkeypatch
+):
+    """Evolution, context and link suggestions rank only what their caller may see.
+
+    Both vaults carry the same private status definition; only the second has a
+    hidden page that uses it. Unadmitted, the hidden page's status refused the
+    limited client's evolution and context and emptied its suggestions.
+    """
+    import shutil
+
+    from exomem import commands, freshness, lexstore, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    config, authenticate = configured_boundary
+    data = json.loads(config.read_text())
+    data["vocabulary"] = {
+        "public": {"namespace": "Knowledge Base/_Schema/public", "history": "public", "overrides": {}},
+        "private": {SCOPE: {"namespace": "Knowledge Base/_Schema/private", "history": "private"}},
+        "destinations": {}, "selections": {},
+    }
+    data["capture_paths"] += ["Knowledge Base/_Schema/public", "Knowledge Base/_Schema/history/public"]
+    config.write_text(json.dumps(data))
+    public = "Knowledge Base/Notes/public.md"
+    (vault / public).write_text(
+        "---\nproject: public-project\ntype: insight\n"
+        "exomem_id: 11111111-1111-4111-8111-111111111111\n---\n# Public\n\n"
+        "- [decision] public information decision.\n\npublic information\n", encoding="utf-8")
+    twin = tmp_path / "twin"
+    shutil.copytree(vault, twin)
+    (twin / "Knowledge Base/Notes/private.md").write_text(
+        "---\ntype: insight\nproject: private-project\nstatus: secret-lifecycle\n"
+        "exomem_id: 99999999-9999-4999-8999-999999999999\n---\n# Hidden\n\n"
+        "- [decision] public information decision from the hidden page.\n\n"
+        "Links [[Notes/public]].\n" + "public information\n" * 20, encoding="utf-8")
+    observed = []
+    for root in (vault, twin):
+        monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+        stop = state_migration.assert_offline_migration_authority(source="hidden status twin")
+        state_migration.arm_connector_boundary_offline(root, authority=stop)
+        with principal.request_scope(authenticate("full")):
+            overlay = instances.select(root, registry_spec("statuses"), SCOPE).overlay(root)
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            overlay.write_text("schema_version: 1\nentries:\n  secret-lifecycle:\n    attributes: {class: live}\n")
+            freshness.rebaseline(root)
+            lexstore.ensure_fresh(root)
+        with principal.request_scope(authenticate("limited")):
+            context = commands.op_connect_memory(root, operation="context", query="public information")
+            observed.append({
+                "evolution": commands.op_evolution(root, query="public information"),
+                "review": commands.op_review_memory(root, mode="evolution", query="public information"),
+                "context": {key: context[key] for key in ("available", "claims")},
+                "suggestions": commands.op_connect_memory(
+                    root, operation="suggest-links",
+                    draft_title="public information", draft_body="public information decision",
+                ),
+            })
+
+    assert observed[0] == observed[1]
+    assert [item["path"] for item in observed[1]["suggestions"]] == [public]
+    assert list(observed[1]["context"]["claims"]) == [public]

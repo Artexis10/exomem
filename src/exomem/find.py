@@ -1059,6 +1059,21 @@ def _with_catalog_scope(function):
     return scoped
 
 
+def caller_admission(vault_root: Path) -> Callable[[str], bool] | None:
+    """The content floors of the current caller, or None when it may see every page.
+
+    `find` applies this whenever its caller hands in no predicate, so no consumer
+    can rank, classify or count a page withheld from its caller.
+    """
+    from .governance import egress
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+    if egress.unrestricted_content_access(vault_root, who):
+        return None
+    return lambda path: egress.content_permits(vault_root, path, who)
+
+
 @_with_catalog_scope
 def find(
     vault_root: Path,
@@ -1211,7 +1226,13 @@ def find(
     caller asks for. A managed reader serves it from the maintained catalogue
     over the index-resolved out-of-KB eligible set, and declines rather than
     scanning when the catalogue cannot answer.
+
+    `admit_path`: the caller's content floors, applied before any candidate is
+    ranked, classified or counted. Omitted, it is `caller_admission`, so a
+    restricted caller's find can never run unadmitted.
     """
+    if admit_path is None:
+        admit_path = caller_admission(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if catalog_proof_out is not None:
         catalog_proof_out.clear()

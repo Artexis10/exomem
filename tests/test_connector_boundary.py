@@ -573,3 +573,56 @@ def test_transfer_issuance_never_persists_a_retry_terminal(configured_boundary, 
             assert result["token"]
     with sqlite3.connect(writer_lease.get_manager().idempotency.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM mutations").fetchone()[0] == 0
+
+
+def test_a_limited_move_answers_the_same_whether_or_not_a_hidden_page_holds_or_links_the_name(
+    configured_boundary, vault, tmp_path, monkeypatch
+):
+    """A move admits its destination before any existence check and leaves hidden linkers alone.
+
+    The first vault's hidden page holds the destination name and links the moved
+    page; the second has no hidden page. Unadmitted, the move answered
+    DEST_EXISTS only when the hidden page existed, and refused or rewrote a move
+    into the capture namespace only when a hidden page linked the moved one.
+    """
+    import shutil
+
+    from exomem import commands, state_migration
+
+    _, authenticate = configured_boundary
+    hidden = "---\nproject: private-project\n---\nprotected canary [[Notes/public]] [[public]]\n"
+    (vault / PRIVATE).write_text(hidden, encoding="utf-8")
+    twin = tmp_path / "twin"
+    shutil.copytree(vault, twin)
+    (twin / PRIVATE).unlink()
+    observed = []
+    for root in (vault, twin):
+        monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+        stop = state_migration.assert_offline_migration_authority(source="hidden move twin")
+        state_migration.arm_connector_boundary_offline(root, authority=stop)
+        outcomes = []
+        with principal.request_scope(authenticate("limited")):
+            for destination in (PRIVATE, "Knowledge Base/Notes/elsewhere.md"):
+                with pytest.raises(ValueError) as refused:
+                    commands.op_move_file(root, old_path=PUBLIC, new_path=destination)
+                outcomes.append(str(refused.value))
+            moved = commands.op_move_file(root, old_path=PUBLIC, new_path="Knowledge Base/Capture/public.md")
+        outcomes.append({key: moved[key] for key in ("old_path", "new_path", "files_touched", "index")})
+        observed.append(outcomes)
+
+    assert observed[0] == observed[1]
+    assert observed[0][:2] == ["WRITE_REFUSED: target is unavailable"] * 2
+    assert observed[0][2]["files_touched"] == []
+    assert (vault / PRIVATE).read_text(encoding="utf-8") == hidden
+
+
+def test_no_writer_moves_protected_content_into_a_capture_namespace(configured_boundary, vault):
+    from exomem import commands, state_migration
+
+    authority = state_migration.assert_offline_migration_authority(source="isolated capture stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    with principal.request_scope(principal.owner_principal(surface="cli")):
+        with pytest.raises(ValueError, match="WRITE_REFUSED"):
+            commands.op_move_file(vault, old_path=PRIVATE, new_path="Knowledge Base/Capture/private.md")
+    assert (vault / PRIVATE).exists()
+    assert not (vault / "Knowledge Base/Capture/private.md").exists()

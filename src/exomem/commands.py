@@ -2908,11 +2908,7 @@ def op_find(
         )
         hits = release.hits
     else:
-        who = principal_module.effective_principal()
-        admit_path = (
-            (lambda path: egress_module.content_permits(vault_root, path, who))
-            if not egress_module.unrestricted_content_access(vault_root, who) else None
-        )
+        admit_path = find_module.caller_admission(vault_root)
         # Content admission precedes candidate selection; ordinary policy still
         # uses its existing annotation pool and final authorization below.
         _release_policy, _release_active = egress_module.gate_state(vault_root)

@@ -108,6 +108,34 @@ def _in_episode_folder(rel: str) -> bool:
     )
 
 
+def _admit_destination(vault_root: Path, rel: str) -> None:
+    """Admit a move destination before any existence check.
+
+    A limited caller may create only in a capture namespace, so a hidden page
+    holding the name cannot change its answer.
+    """
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, rel)
+    except ValueError:
+        raise MoveFileError("WRITE_REFUSED", "target is unavailable") from None
+
+
+def _admit_publication(vault_root: Path, rel: str, content: bytes | None) -> None:
+    """Admit the moved bytes at their destination, as the batch target check would.
+
+    The rename publishes outside that check, so the move asks here: every
+    writer keeps capture namespaces free of protected content.
+    """
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_write(vault_root, rel, content=content)
+    except ValueError:
+        raise MoveFileError("WRITE_REFUSED", "target is unavailable") from None
+
+
 def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
     try:
         # `old_rel` is always a source this call's caller has already resolved
@@ -378,6 +406,7 @@ def move_file(
     if raw_protection.marked(old_rel) and not raw_protection.marked(new_abs.name):
         new_abs = new_abs.with_name(raw_protection.PREFIX + new_abs.name)
         new_rel = new_abs.relative_to(vault_root).as_posix()
+    _admit_destination(vault_root, new_rel)
     if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
@@ -411,6 +440,8 @@ def move_file(
                 new_rel = f"{new_rel}.md"
                 new_abs = new_abs.with_name(new_abs.name + ".md")
             paired_binary = (binary_rel, new_binary)
+        _admit_destination(vault_root, new_rel)
+        _admit_destination(vault_root, paired_binary[1])
         if (vault_root / paired_binary[1]).exists():
             raise MoveFileError(
                 code="DEST_EXISTS",
@@ -545,6 +576,10 @@ def move_file(
     if moved_out_of_trash and not moved_into_trash:
         from . import recover_from_trash as recovery
 
+        _admit_publication(
+            vault_root, new_rel, old_abs.read_bytes() if new_rel.lower().endswith(".md") else None
+        )
+
         try:
             recovered = recovery.recover_from_trash(
                 vault_root,
@@ -565,19 +600,33 @@ def move_file(
             index=recovered.index,
         )
 
+    from .governance import connector_boundary, egress
+    from .governance.principal import effective_principal
+
+    visible = egress.restricted_release_filter(vault_root)
+    # A connector-limited mover never reads, rewrites or counts a page it cannot
+    # see, so its answer is the same with and without hidden linkers. A hidden
+    # linker keeps its old link; the owner's audit reports it as a broken
+    # reference (named debt in the vault-consolidation change).
+    limited_mover = visible is not None and not connector_boundary.unrestricted(
+        vault_root, effective_principal()
+    )
     # Scan inbound links BEFORE the move, while the old path still exists.
-    inbound = find_inbound_wikilinks(vault_root, old_rel) if update_wikilinks else []
+    inbound = (
+        find_inbound_wikilinks(vault_root, old_rel, visible=visible if limited_mover else None)
+        if update_wikilinks
+        else []
+    )
+    if limited_mover:
+        inbound = [hit for hit in inbound if visible(hit.path)]
 
     warnings: list[str] = []
     files_touched: list[str] = []
     wikilinks_updated = 0
-    # Every linking page is rewritten, including pages the mover may not see,
-    # so the vault stays consistent; the counts and paths reported to a mover
-    # other than the owner cover the pages it may see, by a policy or by RAW.
-    # The activity log keeps the full figures.
-    from .governance import egress
-
-    visible = egress.restricted_release_filter(vault_root)
+    # For any other mover, every linking page is rewritten, including pages the
+    # mover may not see, so the vault stays consistent; the counts and paths
+    # reported to a mover other than the owner cover the pages it may see, by a
+    # policy or by RAW. The activity log keeps the full figures.
     reported_touched: list[str] = []
     reported_updated = 0
     # For such a mover, a withheld linker the move cannot rewrite cleanly is
@@ -722,6 +771,7 @@ def move_file(
                     reported_updated += source_changes
             if content_transform is not None:
                 moved_source = content_transform(moved_source)
+            _admit_publication(vault_root, new_rel, moved_source.encode("utf-8"))
             log_rel_no_ext, log_body, log_plan = plan_activity_log()
             destination_guard = PathGuard.capture(
                 vault_root, new_rel, leaf_policy="absent"
@@ -938,6 +988,7 @@ def move_file(
                     ),
                 ) from error
     else:
+        _admit_publication(vault_root, new_rel, None)
         log_rel_no_ext, log_body, log_plan = plan_activity_log()
         if validate_only:
             try:
