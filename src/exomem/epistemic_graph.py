@@ -7490,15 +7490,15 @@ class EpistemicGraphIndex:
                 limit=branch_cap,
             )
             resolution_candidates = []
-            for match in _resolution_matches(
+            for resolution in _resolution_matches(
                 conn, view, selected, authored=authored_pages, unit_relations=unit_relations
             ):
-                source, other = match[0], match[1]
+                source, other = resolution[0], resolution[1]
                 exists, target_id, target_count = identity(other)
                 if not exists:
                     continue
                 resolution_candidates.append((
-                    *match, target_id, target_count,
+                    *resolution, target_id, target_count,
                     int((source, _file_key(other), "relates_to") in authored_raw),
                 ))
             resolution_rows = _ranked(
@@ -8377,6 +8377,7 @@ def _matched_rows(
         instance = str((edge.get("metadata") or {}).get("registry_instance") or "core")
         if not plan.matches(relation_type, parent, instance):
             continue
+        key: str | None
         if relation_type in plan.exact_keys:
             priority, via, key = 0, "relation_type", relation_type
         elif relation_type in plan.replacement_keys:
@@ -11417,7 +11418,7 @@ class GraphView:
         target = self.parent(target_path) if target_path else None
         outcome = str(metadata.get("fragment_resolution") or "")
         dst_key = page_key
-        if target is not None and target.structure.parent_ref:
+        if target_path and target is not None and target.structure.parent_ref:
             fragment = str(metadata["target_fragment"]).removeprefix("^")
             requested = f"{target.structure.parent_ref}#{quote(fragment, safe='')}"
             matches = [unit for unit in target.structure.units if unit.unit_ref == requested]
