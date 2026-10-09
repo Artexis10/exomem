@@ -2168,11 +2168,14 @@ def _upsert_after_write_status(
                 claims.upsert_claims_after_write(vault_root, published_paths)
             else:
                 pages = {md: (page, signature) for md, page, _chunks, _mtime, signature, _state in per_file}
-                claims.upsert_claims_after_write(vault_root, published_paths, pages=pages)
+                type_basis = claims.producer_basis(vault_root)
+                claims.upsert_claims_after_write(
+                    vault_root, published_paths, pages=pages, type_basis=type_basis
+                )
                 if publication is not None:
                     publication = replace(publication, claims_enabled=True,
                                           claim_checksum=claims.claim_checksum_for_page(
-                                              pages[published_paths[0]][0], vault_root=vault_root
+                                              pages[published_paths[0]][0], type_basis=type_basis
                                           ))
                     if not publication.current(vault_root, claims_required=True):
                         failure_code = failure_code or "embedding_auxiliary_failed"

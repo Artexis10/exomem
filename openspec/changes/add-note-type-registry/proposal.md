@@ -24,6 +24,7 @@ S4b, the write side and promotion:
 - Move the typed writer's folders, partitions, stems, required fields, statuses, sections and typed fields onto the registry. Create the index entry for a new folder.
 - Add one generic `fields` parameter to `remember` and `replace_memory` on the current tool surfaces, including hosted v5, and never on released profiles.
 - Remove the type-key debt that S4a leaves, and unify type normalisation as a deliberate, proven change.
+- Bind the claim store to the registry digest, and let statuses follow the note-type admission rule for callers who cannot admit the overlay.
 
 ## Capabilities
 

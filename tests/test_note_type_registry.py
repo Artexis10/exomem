@@ -180,6 +180,11 @@ def test_a_saved_type_keeps_its_role_folder_and_period(vault: Path) -> None:
             "INVALID_NOTE_TYPE_FOLDER",
         ),
         ({"memo": {"attributes": {"folder": "Notes/Memos"}}}, "INVALID_NOTE_TYPE_FOLDER"),
+        # The write gate never routes `data`, so no page of the type could be written.
+        (
+            {"data-note": {"attributes": {"role": "compiled", "folder": "Notes/Data"}}},
+            "NOTE_TYPE_FOLDER_RESERVED",
+        ),
         ({"memo": {"attributes": {"multiplier": 2.0}}}, "INVALID_REGISTRY_DELTA"),
         ({"insight": {"attributes": {"role": "entity"}}}, "IMMUTABLE_REGISTRY_MEANING"),
     ],
@@ -305,10 +310,52 @@ def test_shipped_types_classify_the_same_under_any_overlay(vault: Path) -> None:
     assert invalid_basis.dependency[0] == denied_basis.dependency[0] == "public"
 
 
+def test_an_invalid_overlay_refuses_a_vault_type_write_until_fixed(vault: Path) -> None:
+    from exomem import note_types
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import library_scope
+
+    overlay = note_types.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries: [meeting-note]\n", encoding="utf-8")
+
+    with library_scope(), pytest.raises(OpError) as refused:
+        _gate_codes(vault)
+
+    # The owner can fix the overlay, so the refusal points at its findings.
+    assert refused.value.code == "NOTE_TYPE_DEFINITION_UNAVAILABLE"
+    assert 'schema_memory(subject="note-types", operation="inspect")' in refused.value.remediation
+
+
+def test_an_invalid_overlay_never_refuses_a_move_for_a_page_it_only_relinks(vault: Path) -> None:
+    from exomem import note_types
+    from exomem.governance.principal import library_scope
+
+    target = vault / "Knowledge Base" / "Projects" / "tide-table.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\nstatus: active\n---\n\n# Tide table\n\nThe tides.\n", encoding="utf-8")
+    page = vault / MEETING_PAGE
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(MEETING_SOURCE + "\nSee [[tide-table]].\n", encoding="utf-8")
+    overlay = note_types.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries: [meeting-note]\n", encoding="utf-8")
+
+    with library_scope():
+        commands.op_manage_memory_file(
+            vault,
+            operation="move",
+            old_path="Knowledge Base/Projects/tide-table.md",
+            new_path="Knowledge Base/Projects/tide-schedule.md",
+        )
+
+    # The meeting page needs the broken overlay, but the move only rewrites its link.
+    assert "[[tide-schedule]]" in page.read_text(encoding="utf-8")
+
+
 def test_a_denied_caller_cannot_tell_a_private_type_from_an_unknown_one(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem.cli_ops import OpError
     from exomem.governance.principal import RequestPrincipal, request_scope
 
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
@@ -333,10 +380,10 @@ def test_a_denied_caller_cannot_tell_a_private_type_from_an_unknown_one(
                 (hit["path"], hit.get("score"))
                 for hit in commands.op_find(vault, query="quillwort", mode="hybrid", graph=False)
             ]
-            with pytest.raises(OpError) as refused:
-                _gate_codes(vault)
+            # The writer judges the page against the shipped pack: no type, no obligation.
+            codes = _gate_codes(vault)
             debt = _debt(vault)
-        observed.append((ranked, refused.value.code, str(refused.value), debt))
+        observed.append((ranked, codes, debt))
         assert "quillwort crew" in read["body"]
         assert [path for path, _score in ranked][:2] == [
             "Knowledge Base/Inbox/quillwort-twin.md",
@@ -344,8 +391,8 @@ def test_a_denied_caller_cannot_tell_a_private_type_from_an_unknown_one(
         ]
 
     assert observed[0] == observed[1]
-    assert observed[0][1] == "NOTE_TYPE_DEFINITION_UNAVAILABLE"
-    assert observed[0][3] == set()
+    assert "missing_semantic_unit" not in observed[0][1]
+    assert observed[0][2] == set()
 
 
 def test_note_type_usage_is_unavailable_without_a_graph(vault: Path) -> None:
@@ -357,7 +404,11 @@ def test_note_type_usage_is_unavailable_without_a_graph(vault: Path) -> None:
 
 
 def test_product_page_types_are_never_note_type_debt(vault: Path) -> None:
-    # Every `type:` value a product writer emits, and an untyped page.
+    from exomem import collection_profiles, records
+
+    # Every `type:` value a product writer emits, and an untyped page. Writers
+    # that hold their type in a constant are read from it, so a new collection
+    # profile or held-record type fails here until the pack defines it.
     product_types = (
         "research-note",
         "insight",
@@ -373,6 +424,8 @@ def test_product_page_types_are_never_note_type_debt(vault: Path) -> None:
         "dataset",
         "adoption-manifest",
         "adoption-run-manifest",
+        *(profile.item_type for profile in collection_profiles.PROFILES.values()),
+        records._HELD_TYPE,
         None,
     )
     folder = vault / "Knowledge Base" / "Projects" / "Typed"

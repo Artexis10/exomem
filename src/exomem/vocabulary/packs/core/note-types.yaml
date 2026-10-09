@@ -52,6 +52,15 @@ entries:
   collection-summary:
     label: Collection summary
     description: The generated summary page of a structured collection.
+  record:
+    label: Record
+    description: One item of a Records collection.
+  plan:
+    label: Plan
+    description: One item of a Planning collection.
+  held-record:
+    label: Held record
+    description: A collection candidate refused for its content and kept for review.
   dataset:
     label: Dataset card
     description: The searchable card that points at one data file.

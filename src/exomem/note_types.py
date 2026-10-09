@@ -166,6 +166,19 @@ def _check_attributes(entry: registry.Entry) -> None:
         )
 
 
+def _check_routable(entry: registry.Entry) -> None:
+    """Refuse a compiled folder that the semantic contract's router never selects."""
+    # semantic_contract imports this module, so this import waits for a save or load.
+    from .semantic_contract import compiled_route_exempt
+
+    folder = entry.attributes.get("folder")
+    if isinstance(folder, str) and compiled_route_exempt(folder):
+        raise registry.RegistryError(
+            f"NOTE_TYPE_FOLDER_RESERVED: the write gate never routes {folder}, so no "
+            f"{entry.key} page could be written there"
+        )
+
+
 def _index(entries: Mapping[str, registry.Entry]) -> tuple[dict[str, NoteType], dict[str, str]]:
     types: dict[str, NoteType] = {}
     folders: dict[str, str] = {}
@@ -250,7 +263,10 @@ class _Adapter:
             _check_attributes(entry)
             entries[raw_key] = entry
         registry.validate_replacements(SPEC, entries)
-        return _registry(entries)
+        typed = _registry(entries)
+        for key in document["entries"]:
+            _check_routable(entries[key])
+        return typed
 
     def entries(self, typed: NoteTypeRegistry) -> Mapping[str, registry.Entry]:
         return typed.entries
@@ -322,14 +338,15 @@ def shipped(predicate: Predicate | None = None) -> tuple[NoteType, ...]:
 
 
 class NoteTypeUnavailable(OpError):
-    """A dependent operation needs a note-type definition that no admitted entry supplies."""
+    """A write needs a note-type definition, and the admitted overlay is invalid."""
 
 
 def unavailable_error() -> NoteTypeUnavailable:
     return NoteTypeUnavailable(
         "NOTE_TYPE_DEFINITION_UNAVAILABLE",
-        "The note-type definition this operation needs is unavailable.",
-        "Use a shipped note type, or ask the owner to perform this operation.",
+        "The note-type overlay is invalid, so the definition this write needs is unavailable.",
+        'Fix the findings that schema_memory(subject="note-types", operation="inspect") '
+        "reports, or use a shipped note type.",
     )
 
 
@@ -342,7 +359,7 @@ class Resolution:
     unregistered: bool = False
 
     def require(self) -> NoteType | None:
-        """The definition, None when unregistered or untyped; raises when unavailable."""
+        """The definition, None when unregistered, untyped or withheld; raises when unavailable."""
         if not self.available:
             raise unavailable_error()
         return self.note_type
@@ -361,18 +378,23 @@ _UNREGISTERED = Resolution(unregistered=True)
 class Basis:
     """One operation's lazy, admitted registry; shipped types need only the pack.
 
-    A caller who may not read the overlay classifies against the shipped pack
-    only. Any other value is unavailable to it: read-side selection leaves such
-    a page out, ranking keeps it neutral, and a dependent write refuses.
+    A caller who may not read the overlay, and a library call that no surface
+    bound, classify against the shipped pack only. Any other value then has no
+    definition for them: selection leaves such a page out, ranking keeps it
+    neutral, and the write gate judges it as a page of no registered type. The
+    owner's audit reports what such a write skipped.
+
+    An admitted caller whose overlay is invalid cannot tell a vault type from an
+    unknown one, so a write that needs a non-shipped definition refuses until
+    the overlay is fixed.
 
     `owner_local` marks a producer of shared state that no caller reads except
     through a per-caller serve (the activation census, stored graph and
     artifact-role bits). It admits the overlay as the owner-local producer.
 
     `refuses` is False for a page the operation only reads or rewrites links in
-    (see `reading`): an unavailable value then has no definition, as on the read
-    side, instead of refusing. A library call that no surface bound never refuses
-    either; it classifies against the shipped pack.
+    (see `reading`): an invalid overlay then leaves the value without a
+    definition, as on the read side, instead of refusing.
     """
 
     root: Path | None
@@ -416,12 +438,11 @@ class Basis:
     def _withheld(self) -> Resolution:
         from .governance.principal import current_principal
 
-        # A library call that no surface bound has no audience to refuse for. As
-        # with the egress filters, it answers as before the registry: from the
-        # shipped pack, without reading the overlay.
-        if self.refuses and current_principal() is not None:
-            return _UNAVAILABLE
-        return _UNTYPED
+        # Without admission the value has no definition, as before the registry.
+        # A library call that no surface bound has no audience to refuse for.
+        if self._snapshot is None or not self.refuses or current_principal() is None:
+            return _UNTYPED
+        return _UNAVAILABLE
 
     def resolve(self, value: object) -> Resolution:
         if not isinstance(value, str) or not value:

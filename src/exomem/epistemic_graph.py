@@ -4588,6 +4588,7 @@ class EpistemicGraphIndex:
             # itself can share one transaction instead of fsyncing per file.
             indexed = 0
             kb = self.vault_root / kb_dirname()
+            type_basis = _producer_type_basis(self.vault_root)
             with conn:
                 if kb.is_dir():
                     for md in find_module._walk_md(kb):
@@ -4596,7 +4597,7 @@ class EpistemicGraphIndex:
                         # rebuild-owner claim a joining writer already waits on.
                         foreground_priority.yield_to_foreground()
                         if self._index_path(
-                            conn, md, resolver=resolver, commit=False
+                            conn, md, resolver=resolver, commit=False, type_basis=type_basis
                         ):
                             indexed += 1
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
@@ -6439,6 +6440,7 @@ class EpistemicGraphIndex:
     ) -> dict[str, int]:
         conn = self._connect()
         indexed = 0
+        type_basis = _producer_type_basis(self.vault_root)
         try:
             with conn:
                 for path in paths:
@@ -6448,6 +6450,7 @@ class EpistemicGraphIndex:
                         resolver=resolver,
                         commit=False,
                         indexed_versions=indexed_versions,
+                        type_basis=type_basis,
                     ):
                         indexed += 1
                 if resolver_fingerprint is not None:
@@ -6944,6 +6947,7 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         commit: bool = True,
         indexed_versions: dict[str, GraphSourceSignature] | None = None,
+        type_basis: note_types.Basis | None = None,
     ) -> bool:
         rel = _vault_rel(self.vault_root, path)
         if rel is None:
@@ -6986,6 +6990,7 @@ class EpistemicGraphIndex:
             document=document,
             registry=self.registry,
             entity_types=self.entity_types,
+            type_basis=type_basis or _producer_type_basis(self.vault_root),
         )
         unit_nodes = [
             _unit_node(page, unit, state) for unit in document.units if unit.unit_ref is not None
@@ -10042,6 +10047,11 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     return drift
 
 
+def _producer_type_basis(vault_root: Path) -> note_types.Basis:
+    """One indexing pass's note types: the stored bit is never served, so it reads the owner's view."""
+    return note_types.Basis(vault_root, owner_local=True)
+
+
 def _file_node(
     vault_root: Path,
     page,
@@ -10050,6 +10060,7 @@ def _file_node(
     document: semantic_units.SemanticUnitDocument,
     registry: relation_registry.RelationRegistry,
     entity_types: EntityTypeRegistry | None = None,
+    type_basis: note_types.Basis,
 ) -> GraphNode:
     from . import activation
 
@@ -10098,12 +10109,8 @@ def _file_node(
         origin_date=str(origin_date) if origin_date not in (None, "") else None,
         updated_date=str(updated) if updated not in (None, "") else None,
         access_tier=access.access_tier(vault_root, page.rel_path),
-        # The producer's stored bit is never served, so it reads the owner's view.
         review_eligible=activation.structurally_eligible(
-            vault_root,
-            page,
-            selects=note_types.governed_endpoint,
-            type_basis=note_types.Basis(vault_root, owner_local=True),
+            vault_root, page, selects=note_types.governed_endpoint, type_basis=type_basis
         ),
         activation_signal_version=activation._signal_version(page),
         exomem_id=memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),

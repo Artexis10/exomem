@@ -33,8 +33,10 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 - [ ] 2.11 Move the singular `project` finding for `pattern` onto the registry's typed fields; verify the frontmatter compliance finding unchanged.
 - [ ] 2.12 Move each single-key comparison on `entity`, `source`, `evidence` and `collection` to a role or attribute predicate. Verify the affected suites.
 - [ ] 2.13 Unify type normalisation across every predicate site and add its requirement here; verify the deliberate result for a mixed-case type at each site.
-- [ ] 2.14 Turn the task 4.3 proof green and run the full suite at the completion boundary.
-- [ ] 2.15 Obtain an exact independent review; pass full CI, merge and verify the ordinary release.
+- [ ] 2.14 Bind the claim store to the note-type registry's effective digest, and remove the S4a exception from the requirement. Verify that a save and a restore change claim scope at the next claim read, without a page write or rebuild.
+- [ ] 2.15 Align statuses with the note-type admission rule: a caller who cannot admit the status overlay, and an unbound library call, classify against the shipped pack instead of refusing. Add the `lifecycle-status-registry` delta; verify the denied-caller indistinguishability tests.
+- [ ] 2.16 Turn the task 4.3 proof green and run the full suite at the completion boundary.
+- [ ] 2.17 Obtain an exact independent review; pass full CI, merge and verify the ordinary release.
 
 ## 3. Closure
 

@@ -20,7 +20,7 @@ Registry operations SHALL NOT change page bytes.
 
 An entry MAY declare note-type role `compiled`, `entity`, `source` or `evidence`; an entry without a role SHALL match no role predicate.
 `time_bounded` SHALL be a boolean, and `sources` SHALL be `required` or `optional`.
-A compiled type SHALL declare one `Notes/<Name>` folder that no other compiled type holds.
+A compiled type SHALL declare one `Notes/<Name>` folder that no other compiled type holds, and that the write gate's compiled router does not exempt.
 A save SHALL refuse any other role or attribute value, and SHALL refuse to change `role`, `folder` or `time_bounded` on an existing entry.
 
 #### Scenario: An unknown role is refused
@@ -34,6 +34,10 @@ A save SHALL refuse any other role or attribute value, and SHALL refuse to chang
 #### Scenario: Two compiled types cannot share a folder
 - **WHEN** a save gives a new compiled type the folder of another compiled type
 - **THEN** the save is refused
+
+#### Scenario: A folder the router exempts is refused
+- **WHEN** a save gives a compiled type a folder whose name the write gate exempts from compiled routing, such as `Notes/Data`
+- **THEN** the save is refused with `NOTE_TYPE_FOLDER_RESERVED`
 
 ### Requirement: Shipped note types keep their meanings
 
@@ -95,17 +99,24 @@ Debt reporting SHALL NOT change page bytes.
 ### Requirement: Private note-type definitions require admission
 
 The system SHALL admit the overlay before it reads extension entries, attributes or identity.
-A caller who cannot admit it SHALL classify against the shipped pack only.
-An operation whose result depends on an unadmitted definition SHALL report that definition unavailable, never a guessed role or an unregistered claim.
-Ranking SHALL rank such a page neutral.
+A caller who cannot admit it, and a library call that no surface bound, SHALL classify every page against the shipped pack only, for reads and writes alike.
+For such a caller, a type or `Notes` folder outside the pack SHALL have no definition: it SHALL match no role predicate, rank neutral and never surface as unregistered debt.
+The write gate SHALL judge such a page as a page of no registered type, never refuse it for its type or folder.
+The owner's audit and activation review SHALL classify the page under the owner's registry, so they report an obligation that such a write skipped.
+When an admitted caller's overlay is invalid, a write whose page needs a definition outside the pack SHALL refuse with `NOTE_TYPE_DEFINITION_UNAVAILABLE`, and its remediation SHALL name the findings of `schema_memory(subject="note-types", operation="inspect")`.
 
-#### Scenario: A restricted write that needs a private type is unavailable
+#### Scenario: A restricted write applies the shipped meaning
 - **WHEN** a caller who cannot admit the overlay writes a page whose type or `Notes` folder is not in the shipped pack
-- **THEN** the semantic gate reports the note-type definition unavailable and refuses that write
-- **AND** an independently admitted read of an existing page still succeeds
+- **THEN** the write gate judges the page against the shipped pack and does not refuse the write for its type or folder
+- **AND** the page carries no semantic-unit obligation from a vault-defined type
 
-#### Scenario: A link rewrite needs no private definition
-- **WHEN** a restricted move rewrites links in a page whose type or `Notes` folder the caller cannot admit
+#### Scenario: An invalid overlay refuses a write that needs a vault type
+- **WHEN** the owner's overlay is invalid and the owner writes a page whose type or `Notes` folder is not in the shipped pack
+- **THEN** the write gate refuses with `NOTE_TYPE_DEFINITION_UNAVAILABLE`
+- **AND** the remediation names the findings of `schema_memory(subject="note-types", operation="inspect")`
+
+#### Scenario: A link rewrite needs no vault definition under an invalid overlay
+- **WHEN** the owner's overlay is invalid and a move rewrites links in a page whose type or `Notes` folder is not in the shipped pack
 - **THEN** the gate judges that page against the shipped pack and does not refuse the move
 
 #### Scenario: Ranking stays neutral without the definition
@@ -142,6 +153,7 @@ An adopted ranking configuration SHALL reach every type with the mapped role.
 
 A committed note-type save or restore SHALL change the next dependent operation without a restart, an index rebuild or a page edit.
 Reusable derived results that depend on note-type meaning SHALL bind to the registry's effective digest.
+The claim store is the one known exception until S4b binds it: its rows follow a save or restore only when their page is next written or the store is rebuilt.
 
 #### Scenario: Save and restore reach a running service
 - **WHEN** an owner saves a compiled type, then searches and writes in the same running service

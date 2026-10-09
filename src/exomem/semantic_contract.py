@@ -781,6 +781,11 @@ def _path_excluded_from_compiled_destination(path: str) -> bool:
     return name in {"hub.md", "index.md", "log.md"}
 
 
+def compiled_route_exempt(folder: str) -> bool:
+    """Whether the compiled router never selects pages under this folder."""
+    return _path_excluded_from_compiled_destination(folder)
+
+
 def _path_excluded_from_semantic_minimum(path: str) -> bool:
     if _path_excluded_from_compiled_destination(path):
         return True
@@ -798,7 +803,7 @@ def _route_name(path: str) -> str | None:
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), "notes"):
+    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), note_types.NOTES_FOLDER.casefold()):
         return None
     return parts[2]
 
@@ -810,8 +815,8 @@ def _type_basis(page: SemanticPageState) -> note_types.Basis:
 def read_side(page: SemanticPageState) -> SemanticPageState:
     """The page judged as a read or a link rewrite, not as the caller's own write.
 
-    Its folder and type then classify against the shipped pack when the caller
-    cannot admit their definition, instead of refusing the operation.
+    Its folder and type then have no definition when the admitted overlay is
+    invalid, instead of refusing the operation.
     """
     return replace(page, type_basis=_type_basis(page).reading())
 
@@ -820,7 +825,7 @@ def _route(page: SemanticPageState) -> note_types.NoteType | None:
     """The compiled type that owns this page's `Notes/<Name>` folder, if any.
 
     Raises `NOTE_TYPE_DEFINITION_UNAVAILABLE` when the folder needs a definition
-    the caller cannot admit.
+    from an admitted overlay that is invalid.
     """
     name = _route_name(page.path)
     return _type_basis(page).route(name).require() if name is not None else None
@@ -863,7 +868,7 @@ def compiled_intent(page: SemanticPageState) -> bool:
     """Apply the exact route-or-type compiled-intent definition.
 
     Raises `NOTE_TYPE_DEFINITION_UNAVAILABLE` when the route or the type needs a
-    definition the caller cannot admit.
+    definition from an admitted overlay that is invalid.
     """
     return bool(
         canonical_compiled_destination(page) is not None or _compiled_type(page) is not None

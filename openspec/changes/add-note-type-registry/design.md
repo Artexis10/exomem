@@ -20,7 +20,7 @@ An entry may declare a note-type role: `compiled`, `entity`, `source` or `eviden
 
 Two closed attributes join S4a, because the read-side audit sets need them. `time_bounded: bool` marks a compiled type whose pages record one bounded period. `sources: required | optional` marks a type whose pages must cite their sources. An entry that omits them takes `false` and `optional`.
 
-`folder` joins S4a as an immutable attribute of a compiled type. It names one `Notes/<Name>` folder, because the destination resolver matches that single segment. It is unique among compiled types, because the write gate maps each folder back to one type. The semantic contract reads its destinations from the registry in S4a, and the S4b writer uses the same attribute.
+`folder` joins S4a as an immutable attribute of a compiled type. It names one `Notes/<Name>` folder, because the destination resolver matches that single segment. It is unique among compiled types, because the write gate maps each folder back to one type. A save refuses a folder name that the write gate exempts from compiled routing, such as `Notes/Data`, because no page of the type could be written there; the check reads the semantic contract's exempt set, so the list lives in one place. The semantic contract reads its destinations from the registry in S4a, and the S4b writer uses the same attribute.
 
 Docs, refusals and guidance say "note-type role", because artifact, context and semantic roles already use the word "role".
 
@@ -54,11 +54,13 @@ Single-key comparisons on `entity`, `source`, `evidence` and `collection` outsid
 
 `role`, `folder` and `time_bounded` are immutable in place, because pages and derived rows already rely on them. In S4b, a promotion names a parent and inherits its role and flags.
 
-Admission follows S3 exactly. A caller who may not read the overlay classifies against the shipped pack only. So an overlay never shadows, removes, redirects or changes a shipped type, and an extension key never collides with a shipped key. An operation that depends on an unavailable definition reports unavailable rather than guessing. Ranking is a soft signal, so a type whose role is unavailable ranks neutral.
+Admission follows S3: a caller who may not read the overlay classifies against the shipped pack only. So an overlay never shadows, removes, redirects or changes a shipped type, and an extension key never collides with a shipped key. Ranking is a soft signal, so a type without an admitted definition ranks neutral.
 
-Read-side selection (eligibility, claim scope, contradiction candidates, audit sets) classifies against the shipped pack only for such a caller, so a withheld type matches no predicate there, exactly as an unknown type did before the registry. It never becomes unregistered debt for that caller. The semantic write gate, observe and Tier-2 identity checks need the definition to choose a finding, so they report `NOTE_TYPE_DEFINITION_UNAVAILABLE` and refuse. That refusal covers only the page the caller writes. A page that the operation only reads or rewrites links in, such as a posthoc pass or the inbound pages of a move, is judged on the read side. So a withheld page never changes the caller's answer. A library call that no surface bound has no audience to refuse for. As the egress filters stand aside for it, it classifies against the shipped pack and never reads the overlay, so it keeps the write it had before the registry.
+Such a caller, and a library call that no surface bound, apply the shipped meaning to reads and writes alike. A withheld type matches no predicate, exactly as an unknown type did before the registry, and never becomes unregistered debt for that caller. The write gate, observe and Tier-2 identity checks judge its page as a page of no registered type and do not refuse. This departs from S3, which refuses such callers: the refusal blocked common custom types, while all it prevented was one skipped semantic-unit obligation. The owner's audit and activation review classify the page under the owner's registry and report that gap. One rule then covers every caller that cannot admit the overlay. S4b aligns statuses with it.
 
-Shared state that no caller reads except through a per-caller serve reads the owner's view: the activation census, the stored graph and artifact-role eligibility bits, the claim store, bridge validation and the catalogue identity.
+An admitted caller whose overlay is invalid cannot tell a vault type from an unknown one, so a write whose page needs a non-shipped definition refuses with `NOTE_TYPE_DEFINITION_UNAVAILABLE`. Its remediation names the `schema_memory(subject="note-types", operation="inspect")` findings, because that caller can fix them. The refusal covers only the page the caller writes. A page that the operation only reads or rewrites links in, such as a posthoc pass or the inbound pages of a move, is judged against the shipped pack instead.
+
+Shared state that no caller reads except through a per-caller serve reads the owner's view: the activation census, the stored graph and artifact-role eligibility bits, the claim store, bridge validation and the catalogue identity. Each pass builds one owner-local basis and passes it down. The claim store does not yet bind its rows to the registry digest; S4b binds it.
 
 The pack holds every type that the product writes or reads, so a product page never becomes debt or depends on an overlay. After admitted resolution, a type that the registry does not define matches no predicate, as today. The audit reports its pages as unregistered debt.
 
@@ -109,7 +111,8 @@ S4b is a separate task group in this change, delivered later. It covers the writ
 - Graph and catalogue rows hold only the type key. → SQL consumers expand roles per query, and the catalogue identity includes the registry digest.
 - A per-entry multiplier makes the bounded ranking pass inexact. → Roles map only to the existing knobs.
 - A live type list would add bytes per type to the `authoring` and `routing` bootstrap sections, which have fixed ceilings. → Both list the shipped pack only, and `schema_memory` inspect serves the live set. The contract drops its duplicate `compiled_types` list, which pays for the two types search guidance gains, so the budget tests run unchanged.
-- A restricted writer cannot write a page that needs an unadmitted type or folder. → S3 accepts the same cost, and independently admitted operations stay available.
+- A restricted writer applies the shipped meaning, so its write can skip an obligation that a vault type adds, such as a semantic unit. → The owner's audit and activation review classify the page under the owner's registry and report the gap.
+- Claim rows follow a save or restore only when their page is next written or the store is rebuilt. → S4b binds the claim store to the registry digest.
 
 ## S4a / S4b split
 
