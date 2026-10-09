@@ -1087,7 +1087,8 @@ so an upgrade pauses and drains them together.
 The local listener refuses, before anything reaches the worker, any request
 that came through Cloudflare (`cf-ray` or `cf-connecting-ip`), any request with
 an `Origin` header, any `Host` other than literal `127.0.0.1` or `[::1]` (not
-`localhost`), and every path except `/mcp`, `/api/*`, `/upload` and `/health*`.
+`localhost`), and every path except `/mcp`, `/api/*`, `/upload`, `/upload/sessions*`
+and `/health*`.
 It accepts only local tokens: an OAuth session, the REST key and the upload
 token are all refused there, and a local token is refused on the public path.
 
@@ -1128,6 +1129,25 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
   public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
   file stays within the 100 MB that `preserve_artifacts` can fetch.
+- A file over that cap, or any file with `--resumable`, goes through a resumable
+  upload session. `exomem attach` keeps the session's address and secret in a
+  private file under your state directory. If the upload stops, run the same
+  command again: it continues from the last byte that the service holds.
+- `--archive members` keeps a zip as its members. The service stores each
+  distinct member once per Evidence family, owner-only, and writes a manifest
+  last, so a later export writes only the members that changed. An archive
+  that the family already records answers `already_stored`.
+
+Any tus 1.0 client can use the same sessions at `/upload/sessions` on either
+listener. Create a session with the credential that `/upload` takes on that
+listener. Put `filename`, `sha256` (of the whole file), `scope` and `category`
+in `Upload-Metadata`, and optionally `raw_protection` and `archive`. Send the
+`Exomem-Upload-Secret` value that creation returns as a header on every later
+request; it never goes in a URL. One request carries at most 64 MiB, and one
+session holds at most `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A
+session expires 24 hours after its last part. The service preserves the file
+only when its SHA-256 matches, and `GET` on the session returns its state and,
+after the commit, the receipt.
 
 The owner REST key and the static upload token keep working on the public path.
 Their use on a Cloudflare-transited request is logged as

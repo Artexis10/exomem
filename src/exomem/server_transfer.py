@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
 import secrets
 from dataclasses import dataclass
+from email.utils import formatdate
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -13,10 +16,10 @@ from urllib.parse import quote
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import cf_access, local_ingress, reserved_paths, upload_tokens
+from . import cf_access, local_ingress, reserved_paths, upload_sessions, upload_tokens
 from .governance import egress
 from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
@@ -28,6 +31,13 @@ DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 #: Multipart framing and form fields that ride with the file part.
 _FORM_OVERHEAD_BYTES = 1024 * 1024
+#: tus 1.0 (tus.io resumable-upload protocol): the version, and the extensions served.
+_TUS_VERSION = "1.0.0"
+_TUS_EXTENSIONS = "creation,expiration,termination"
+_TUS_PATCH_CONTENT_TYPE = "application/offset+octet-stream"
+#: The session secret travels only in this header, never in a URL.
+_SESSION_SECRET_HEADER = "Exomem-Upload-Secret"
+_SESSION_WRITE_BYTES = 1024 * 1024
 log = logging.getLogger(__name__)
 
 
@@ -501,6 +511,287 @@ def register_transfer_routes(
                 exc_info=True,
             )
         return JSONResponse(result.as_dict(), status_code=201)
+
+    def _credential_binding(request: Request) -> str:
+        """Which credential opened a session, for its per-binding quota; never the credential."""
+        grant = local_ingress.current_grant()
+        if grant is not None:
+            return f"mcp-local:{grant.session_id}"
+        if config.cf_jwks is not None:
+            claims = cf_access.verified_claims(
+                request.headers.get("cf-access-jwt-assertion"),
+                jwks_client=config.cf_jwks,
+                team_domain=config.cf_team,
+                audience=config.cf_aud,
+            )
+            if claims:
+                identity = str(claims.get("sub") or claims.get("email") or "")
+                return "cf-access:" + hashlib.sha256(identity.encode()).hexdigest()
+        header = request.headers.get("authorization", "")
+        return "bearer:" + hashlib.sha256(header.encode("utf-8", "replace")).hexdigest()
+
+    session_max_bytes = upload_sessions.max_bytes_from_env()
+
+    def _tus_headers(
+        session: upload_sessions.Session | None = None, **extra: str
+    ) -> dict[str, str]:
+        headers = {"Tus-Resumable": _TUS_VERSION, "Cache-Control": "no-store", **extra}
+        if session is not None:
+            headers["Upload-Expires"] = formatdate(session.expires, usegmt=True)
+        return headers
+
+    def _tus_refusal(code: str, reason: str, status: int, **extra: str) -> JSONResponse:
+        return JSONResponse(
+            {"code": code, "reason": reason}, status_code=status, headers=_tus_headers(**extra)
+        )
+
+    def _tus_options() -> Response:
+        return Response(
+            status_code=204,
+            headers=_tus_headers(
+                **{
+                    "Tus-Version": _TUS_VERSION,
+                    "Tus-Extension": _TUS_EXTENSIONS,
+                    "Tus-Max-Size": str(session_max_bytes),
+                }
+            ),
+        )
+
+    def _tus_version_refused(request: Request) -> JSONResponse | None:
+        if request.headers.get("tus-resumable") == _TUS_VERSION:
+            return None
+        return _tus_refusal(
+            "TUS_VERSION_UNSUPPORTED",
+            f"`Tus-Resumable: {_TUS_VERSION}` is required",
+            412,
+            **{"Tus-Version": _TUS_VERSION},
+        )
+
+    def _tus_metadata(header: str) -> dict[str, str] | None:
+        """`Upload-Metadata`: comma-separated `key base64(value)` pairs; None if malformed."""
+        pairs: dict[str, str] = {}
+        for item in header.split(","):
+            if not item.strip():
+                continue
+            key, _, encoded = item.strip().partition(" ")
+            if not key or key in pairs:
+                return None
+            try:
+                pairs[key] = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return None
+        return pairs
+
+    def _commit_session(part: Path, record: dict) -> dict:
+        """Preserve a verified session's bytes exactly as `/upload` would."""
+        from . import archive_members
+        from .cli_ops import OpError, error_dict
+        from .writer_lease import get_manager
+
+        preserve_module = _preserve_module()
+        target = record["target"]
+        manager = get_manager()
+        try:
+            with part.open("rb") as stream:
+                if target.get("archive") == "members":
+                    receipt, _stored = _preserve_members_under_guard(
+                        manager,
+                        vault_root,
+                        scope=target["scope"],
+                        category=target["category"],
+                        filename=target["filename"],
+                        stream=stream,
+                        max_bytes=int(record["length"]),
+                        verified="session",
+                        description=target.get("description"),
+                        sha256=record["sha256"],
+                    )
+                    return receipt
+                result = _preserve_under_guard(
+                    manager,
+                    vault_root,
+                    preserve_module.preserve_stream,
+                    scope=target["scope"],
+                    category=target["category"],
+                    filename=target["filename"],
+                    stream=stream,
+                    description=target.get("description"),
+                    max_bytes=int(record["length"]),
+                    raw_protection=bool(target.get("raw_protection")),
+                )
+        except (preserve_module.PreserveError, archive_members.ArchiveError) as exc:
+            raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+        except (OpError, ValueError) as exc:
+            error = error_dict(exc)
+            raise upload_sessions.CommitFailed(error["code"], error["message"]) from exc
+        try:
+            _reconcile_under_guard(manager, vault_root, vault_root / result.path)
+        except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
+            log.warning("media reconciliation failed for %s; evidence remains recoverable",
+                        result.path, exc_info=True)
+        return result.as_dict()
+
+    try:
+        # Service start: drop expired sessions; finish commits a stop interrupted.
+        for pending in upload_sessions.startup_sweep(vault_root):
+            upload_sessions.start_commit(pending, _commit_session)
+    except (OSError, ValueError):
+        log.warning("upload sessions could not be swept at start", exc_info=True)
+
+    @mcp_app.custom_route("/upload/sessions", methods=["POST", "OPTIONS"])
+    async def _create_upload_session(request: Request) -> Response:
+        if request.method == "OPTIONS":
+            return _tus_options()
+        if not config.enabled and local_ingress.current_grant() is None:
+            return _tus_refusal("UPLOAD_DISABLED", "uploads are off", 503)
+        if not _authorized(request):
+            return _tus_refusal("UNAUTHORIZED", "missing or invalid upload credential", 401)
+        if (refused := _tus_version_refused(request)) is not None:
+            return refused
+        declared = request.headers.get("upload-length", "")
+        metadata = _tus_metadata(request.headers.get("upload-metadata", ""))
+        if not (declared.isascii() and declared.isdigit()) or metadata is None:
+            return _tus_refusal(
+                "INVALID_UPLOAD", "`Upload-Length` and a well-formed `Upload-Metadata` are required", 400
+            )
+        preserve_module = _preserve_module()
+        raw_flag = metadata.get("raw_protection", "").strip()
+        target = {
+            "filename": metadata.get("filename", "").strip(),
+            "scope": metadata.get("scope", "").strip(),
+            "category": metadata.get("category", "").strip(),
+            "description": metadata.get("description", "").strip() or None,
+            "raw_protection": bool(raw_flag),
+            "archive": metadata.get("archive", "").strip() or None,
+        }
+        refusals = [
+            refusal
+            for refusal in (
+                preserve_module.destination_segment_refusal(target["scope"], field="scope"),
+                preserve_module.destination_segment_refusal(target["category"], field="category"),
+                None if target["filename"] else "`filename` is required",
+                None
+                if target["archive"] is None or target["archive"] == "members"
+                else "`archive` must be members",
+                # nosemgrep: ep-word-membership -- `/upload` fixes these flag spellings.
+                None if raw_flag in ("", "1", "true") else "`raw_protection` must be 1",
+                None
+                if _upload_lane(request) == "evidence"
+                else "an upload session preserves Evidence",
+            )
+            if refusal
+        ]
+        if refusals:
+            return _tus_refusal("INVALID_UPLOAD", "; ".join(refusals), 400)
+        try:
+            if target["raw_protection"] or target["archive"]:
+                preserve_module.validate_raw_capture(target["filename"], raw_protection=True)
+            session, secret = await run_in_threadpool(
+                upload_sessions.create,
+                vault_root,
+                binding=_credential_binding(request),
+                length=int(declared),
+                sha256=metadata.get("sha256", "").strip(),
+                target=target,
+                max_bytes=session_max_bytes,
+            )
+        except preserve_module.PreserveError as exc:
+            return _tus_refusal(exc.code, exc.reason, 400)
+        except upload_sessions.SessionError as exc:
+            return _tus_refusal(exc.code, exc.reason, exc.status)
+        upload_sessions.start_commit(session, _commit_session)
+        return Response(
+            status_code=201,
+            headers=_tus_headers(
+                session,
+                **{
+                    "Location": f"/upload/sessions/{session.id}",
+                    _SESSION_SECRET_HEADER: secret,
+                },
+            ),
+        )
+
+    @mcp_app.custom_route(
+        "/upload/sessions/{session_id}", methods=["HEAD", "PATCH", "DELETE", "GET", "OPTIONS"]
+    )
+    async def _upload_session(request: Request) -> Response:
+        if request.method == "OPTIONS":
+            return _tus_options()
+        if request.method != "GET" and (refused := _tus_version_refused(request)) is not None:
+            return refused
+        try:
+            session = await run_in_threadpool(
+                upload_sessions.open_session,
+                vault_root,
+                request.path_params["session_id"],
+                request.headers.get(_SESSION_SECRET_HEADER),
+            )
+        except upload_sessions.SessionError as exc:
+            return _tus_refusal(exc.code, exc.reason, exc.status)
+        # A commit that a stop interrupted resumes the next time its session is read.
+        upload_sessions.start_commit(session, _commit_session)
+        state = session.record["state"]
+        if request.method == "GET":
+            return JSONResponse(session.view(), headers=_tus_headers(session))
+        if request.method == "HEAD":
+            if state == upload_sessions.FAILED:
+                return Response(status_code=410, headers=_tus_headers(session))
+            try:
+                held = await run_in_threadpool(upload_sessions.held_offset, session)
+            except upload_sessions.SessionError as exc:
+                return _tus_refusal(exc.code, exc.reason, exc.status)
+            return Response(
+                status_code=200,
+                headers=_tus_headers(
+                    session, **{"Upload-Offset": str(held), "Upload-Length": str(session.length)}
+                ),
+            )
+        if request.method == "DELETE":
+            try:
+                await run_in_threadpool(upload_sessions.delete, session)
+            except upload_sessions.SessionError as exc:
+                return _tus_refusal(exc.code, exc.reason, exc.status)
+            return Response(status_code=204, headers=_tus_headers())
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() != _TUS_PATCH_CONTENT_TYPE:
+            return _tus_refusal(
+                "INVALID_UPLOAD", f"a part is sent as `{_TUS_PATCH_CONTENT_TYPE}`", 415
+            )
+        offset = request.headers.get("upload-offset", "")
+        length = request.headers.get("content-length", "")
+        if not (offset.isascii() and offset.isdigit()) or (length and not (length.isascii() and length.isdigit())):
+            return _tus_refusal("INVALID_UPLOAD", "`Upload-Offset` is required", 400)
+        try:
+            patch = await run_in_threadpool(
+                upload_sessions.Patch, session, int(offset), int(length) if length else None
+            )
+        except upload_sessions.SessionError as exc:
+            return _tus_refusal(exc.code, exc.reason, exc.status)
+        refusal: upload_sessions.SessionError | None = None
+        buffered = bytearray()
+        try:
+            try:
+                async for chunk in request.stream():
+                    buffered += chunk
+                    if len(buffered) >= _SESSION_WRITE_BYTES:
+                        await run_in_threadpool(patch.write, bytes(buffered))
+                        buffered.clear()
+            except ClientDisconnect:
+                pass  # keep what arrived: the client resumes from the offset it is told
+            if buffered:
+                await run_in_threadpool(patch.write, bytes(buffered))
+        except upload_sessions.SessionError as exc:
+            refusal = exc
+        finally:
+            new_offset, complete = await run_in_threadpool(patch.close)
+        if refusal is not None:
+            return _tus_refusal(
+                refusal.code, refusal.reason, refusal.status, **{"Upload-Offset": str(new_offset)}
+            )
+        if complete:
+            upload_sessions.start_commit(session, _commit_session)
+        return Response(
+            status_code=204, headers=_tus_headers(session, **{"Upload-Offset": str(new_offset)})
+        )
 
     @mcp_app.custom_route("/upload", methods=["GET"])
     async def _upload_form(request: Request) -> HTMLResponse:

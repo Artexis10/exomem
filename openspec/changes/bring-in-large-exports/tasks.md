@@ -9,9 +9,12 @@
 
 ## 2. Upload sessions (A, local and public listeners)
 
-- [ ] 2.1 `upload_sessions.py` and the `/upload/sessions` routes, with the listener allowlist change.
-- [ ] 2.2 `exomem attach` resumes through a session.
-- [ ] 2.3 Prove: an interrupted upload resumes through the real listener and worker; a hash mismatch, a wrong secret, cancel and expiry leave no bytes.
+- [x] 2.1 `upload_sessions.py` and the `/upload/sessions` routes, with the listener allowlist change.
+  Evidence: `test_local_ingress_e2e.py` turns red when the local allowlist drops `/upload/sessions/` or `HEAD` reports the declared length; `test_local_refusal_*` turn red when that prefix is dropped or widened to `/upload/`.
+- [x] 2.2 `exomem attach` resumes through a session.
+  Evidence: `test_attach_resumes_an_interrupted_archive_upload_on_its_next_run` turns red when the CLI ignores its saved session record or writes it group-readable.
+- [x] 2.3 Prove: an interrupted upload resumes through the real listener and worker; a hash mismatch, a wrong secret, cancel and expiry leave no bytes.
+  Evidence: the e2e turns red when the running digest restarts per part; `tests/test_upload_sessions.py` cases turn red when a mismatch keeps the `.part`, a wrong secret answers 403, or a cancel or an expiry keeps the `.part`.
 
 ## 3. Import grammar (C)
 
