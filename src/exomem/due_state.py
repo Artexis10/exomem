@@ -2109,7 +2109,8 @@ def apply_record_write_delta(
             snapshot = _unfiltered_snapshot(Path(vault_root), planning)
             if snapshot is None:
                 continue
-            planning_values = PlanningValues(Path(vault_root))
+            # Classified like the unfiltered snapshot: server-side, never by the writer's access.
+            planning_values = PlanningValues(Path(vault_root), server_side=True)
             for item in snapshot.records:
                 if not audit_module.open_plan_item(item.values, planning_values):
                     continue
@@ -2201,7 +2202,9 @@ def apply_plan_write_delta(
         pages = dict(categories.get(_OUTCOME_FAMILY) or {})
         if not rows:
             return _persist_delta(Path(vault_root), current, categories, today)
-        if not audit_module.open_plan_item(values, PlanningValues(Path(vault_root))):
+        if not audit_module.open_plan_item(
+            values, PlanningValues(Path(vault_root), server_side=True)
+        ):
             # Item-wide, and the only case that is: a closed item is not a
             # finding under ANY binding.
             _drop_item_entries(pages, str(path), str(key), today)

@@ -1439,8 +1439,9 @@ class CollectionWriter:
         if declared.validators and validate_graph:
             plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
             plans[key] = values
+            write = planning.HierarchyWrite(self.root, key, before)
             for name in declared.validators:
-                types.named_validator(name).validate(manifest, plans, self.root)
+                types.named_validator(name).validate(manifest, plans, write)
         return values
 
     def _held(self, cid: str, held: str | None):
@@ -2367,7 +2368,7 @@ class CollectionWriter:
                 for key, values in typed_storage.collection_values(self.connection, current.collection_id)
             }
             for name in declared.validators:
-                types.named_validator(name).validate(proposed, plans, self.root)
+                types.named_validator(name).validate(proposed, plans)
             retired_pages = summary.page_paths(current) if mode_change else ()
             self._preflight_views([current.path, *retired_pages, *(path for (path,) in self.connection.execute(
                 "SELECT view_path FROM items WHERE collection_id=? AND view_path IS NOT NULL UNION ALL "

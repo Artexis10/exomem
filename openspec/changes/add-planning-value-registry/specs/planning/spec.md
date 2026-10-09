@@ -3,7 +3,7 @@
 ### Requirement: Planning values are a governed vocabulary registry
 Planning SHALL read kind, status, priority, commitment, horizon, and health values from the `planning-values` registry: a shipped pack plus the vault overlay `_Schema/planning-values.yaml`, saved and restored through `schema_memory(subject="planning-values")`. Each entry key SHALL be `<field>.<value>`, and a Planning item SHALL store the bare value. Shipped entries SHALL NOT be overridden or deprecated. A status SHALL declare its planning `class` (`open`, `done`, or `dropped`); a kind SHALL declare `parents`, a list of registered kinds. Both SHALL be fixed once saved. Code SHALL branch on `class` and `parents`, never on a vault value.
 
-A value equal to the stored item's value SHALL stay readable after its definition is deprecated or removed. A new or changed value SHALL be an active registered value. A caller that cannot admit the overlay SHALL see only shipped values, and a write that depends on a vault value SHALL refuse with `PLANNING_VALUES_UNAVAILABLE`. A status with no readable class SHALL count as not settled for the open-item rule.
+A value equal to the stored item's value SHALL stay readable after its definition is deprecated or removed. A new or changed value SHALL be an active registered value. A caller that cannot admit the overlay SHALL see only shipped values, and a write that depends on a vault value SHALL refuse with `PLANNING_VALUES_UNAVAILABLE`. A status with no readable class SHALL count as not settled for the open-item rule. A write SHALL judge a kind's `parents` only for the item it changes, and only when that item's kind, parent, commitment, or lifecycle changes; every other item SHALL keep the shipped kind rules, so a read never depends on the registry.
 
 #### Scenario: A vault status is used and classified
 - **WHEN** the owner saves `status.waiting` with class `open` and triages a committed item to `waiting`
@@ -16,6 +16,14 @@ A value equal to the stored item's value SHALL stay readable after its definitio
 #### Scenario: A restore keeps stored items readable
 - **WHEN** the owner restores the registry version before the vault statuses were saved
 - **THEN** query still returns the items that use them, an edit that leaves the status alone succeeds, and a new use of a removed status refuses
+
+#### Scenario: A kind registered again with other parents keeps stored items readable
+- **WHEN** the owner restores the version before `kind.epic` and saves `kind.epic` again with different `parents`
+- **THEN** query and inspect still read the epics stored under the earlier parents
+
+#### Scenario: A caller without the vault definitions cannot re-parent a vault kind
+- **WHEN** a caller who cannot admit the overlay changes the parent of an item whose kind is a vault kind
+- **THEN** the write refuses with `PLANNING_VALUES_UNAVAILABLE` and changes nothing
 
 ## MODIFIED Requirements
 

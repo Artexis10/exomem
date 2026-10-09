@@ -145,7 +145,7 @@ def test_planning_views_are_the_six_scaffolded_horizons(tmp_path: Path) -> None:
     }
     text = _planning_manifest_text(fields)
     scaffolded = planning._with_default_scaffold(  # noqa: SLF001
-        text, _planning_manifest(tmp_path, text)
+        text, _planning_manifest(tmp_path, text), vault_root=None
     )
     expected = [
         {"name": name, "filters": _plain(view["query"]["filters"])}

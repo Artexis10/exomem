@@ -4,7 +4,8 @@ The owner saves two statuses through `schema_memory`; `plan_memory` accepts
 them, due-state and the audit read their planning class, and the archive rule
 admits only the settled one. Restoring the registry removes both, yet the
 items that use them still read and still take edits that leave the status
-alone. Only a write that introduces a removed status refuses.
+alone. Only a write that introduces a removed status refuses. A saved horizon
+that YAML would read as a boolean still gets its scaffolded view.
 """
 
 from __future__ import annotations
@@ -12,11 +13,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from lifecycle_fixtures import PLANNING_PATH, initiative_ref, report_event, seed_vault
-from test_vocabulary_registries import _served
+from lifecycle_fixtures import (
+    PLANNING_ID,
+    PLANNING_PATH,
+    initiative_ref,
+    planning_manifest,
+    report_event,
+    seed_vault,
+)
+from test_vocabulary_registries import _govern, _reset_governance, _served
 
 from exomem import audit as audit_module
 from exomem import due_state as due_state_module
+from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 
 FAMILY = "unreflected_outcomes"
 
@@ -96,15 +106,33 @@ def test_a_vault_status_is_used_classified_archived_and_reverted(
                 "upsert": {
                     "status.waiting": {"attributes": {"class": "open"}},
                     "status.parked": {"attributes": {"class": "dropped"}},
+                    "horizon.off": {},
                 }
             },
             "expected_hash": before["content_hash"],
-            "why": "work waits on others, and some is shelved rather than cancelled",
+            "why": "work waits on others, some is shelved, and some is off the plan",
         },
     )
     receipt = " ".join(saved["vocabulary_receipt"])
     assert "registered status.waiting" in receipt
     assert "registered status.parked" in receipt
+
+    # A new scaffolded collection gets a view for the saved horizon.
+    later = "Knowledge Base/Planning/Later/_collection.md"
+    created = call(
+        "plan_memory",
+        {
+            "action": "create",
+            "manifest_path": later,
+            "manifest_text": planning_manifest(
+                collection_id="7c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5"
+            ),
+            "why": "plans for later",
+        },
+    )
+    assert created.get("success") is not False, created
+    views = call("plan_memory", {"action": "inspect", "collection": later})["saved_views"]
+    assert "off" in {view["name"] for view in views}
 
     # plan_memory accepts the vault status; due-state and the audit read it as open.
     assert _add(call, vault, "Batch 1").get("success") is not False
@@ -138,7 +166,7 @@ def test_a_vault_status_is_used_classified_archived_and_reverted(
             "why": "the owner keeps the shipped statuses",
         },
     )
-    assert "removed status.parked, status.waiting" in restored["vocabulary_receipt"][0]
+    assert "removed horizon.off, status.parked, status.waiting" in restored["vocabulary_receipt"][0]
 
     # Stored items keep their removed statuses and still read.
     rows = call("plan_memory", {"action": "query", "collection": PLANNING_PATH, "lifecycle": "all"})
@@ -162,3 +190,94 @@ def test_a_vault_status_is_used_classified_archived_and_reverted(
     added = _add(call, vault, "Batch 3", status="waiting")
     assert added["success"] is False
     assert added["error"]["code"] == "INVALID_PLAN"
+
+
+def _save(call, upsert: dict, why: str) -> dict:
+    before = call("schema_memory", {"subject": "planning-values", "operation": "inspect"})
+    return call(
+        "schema_memory",
+        {
+            "subject": "planning-values",
+            "operation": "save",
+            "proposal": {"upsert": upsert},
+            "expected_hash": before["content_hash"],
+            "why": why,
+        },
+    )
+
+
+def test_a_kind_saved_again_with_other_parents_keeps_stored_items_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.plan_memory import plan_memory
+
+    vault, call = _served(tmp_path, monkeypatch)
+    seed_vault(vault)
+    _save(call, {"kind.epic": {"attributes": {"parents": ["outcome"]}}}, "epics sit under outcomes")
+    query = call("plan_memory", {"action": "query", "collection": PLANNING_PATH})
+    outcome = next(row["plan_id"] for row in query["rows"] if row["kind"] == "outcome")
+    added = _add(
+        call, vault, "Epic", kind="epic", parent=collections.plan_ref(PLANNING_ID, outcome)
+    )
+    assert added.get("success") is not False, added
+
+    # The owner removes the kind, then registers it again under other parents.
+    history = call("schema_memory", {"subject": "planning-values", "operation": "history"})
+    call(
+        "schema_memory",
+        {
+            "subject": "planning-values",
+            "operation": "restore",
+            "version": history["versions"][0]["version"],
+            "expected_hash": history["content_hash"],
+            "why": "drop epics",
+        },
+    )
+    _save(call, {"kind.epic": {"attributes": {"parents": ["initiative"]}}}, "epics again")
+
+    # The epic stored under the outcome still reads.
+    rows = call("plan_memory", {"action": "query", "collection": PLANNING_PATH, "lifecycle": "all"})
+    assert "Epic" in {row["title"] for row in rows["rows"]}
+    inspected = call("plan_memory", {"action": "inspect", "collection": PLANNING_PATH})
+    assert "INVALID_PLAN_RELATION" not in {item["code"] for item in inspected["diagnostics"]}
+
+    # A caller who cannot read the vault's definitions cannot re-parent the epic.
+    guards = _guards(call, "Epic")
+    _govern(vault, scope_path="_Schema/planning-values.yaml")
+    _reset_governance()
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with pytest.raises(OpError) as refused:
+            plan_memory(
+                vault,
+                "update",
+                **guards,
+                changes={"parent": initiative_ref(vault)},
+                why="move the epic",
+            )
+    assert refused.value.code == "PLANNING_VALUES_UNAVAILABLE"
+    assert _guards(call, "Epic") == guards
+
+
+def test_a_restricted_write_does_not_reopen_an_item_a_vault_status_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    vault, call = _served(tmp_path, monkeypatch)
+    seed_vault(vault)
+    _save(call, {"status.shipped": {"attributes": {"class": "done"}}}, "shipped work is done")
+    assert _add(call, vault, "Batch 1").get("success") is not False
+    assert _triage(call, "Batch 1", "shipped").get("success") is not False
+    due_state_module.reset_emission_state()
+    due_state_module.reconcile(vault)
+
+    # A caller who cannot read the vault's definitions reports an outcome on it.
+    _govern(vault, scope_path="_Schema/planning-values.yaml")
+    _reset_governance()
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        report_event(vault, "Batch 1")
+
+    # The stored projection still holds the owner's classification: settled.
+    with request_scope(owner_principal(surface="mcp")):
+        assert due_state_module.served_entries(vault) == []

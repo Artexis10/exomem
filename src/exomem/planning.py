@@ -11,6 +11,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Never
 
+import yaml
+
 from . import memory_refs, record_formats, record_governance, records
 from . import structured_collections as collections
 from .governance import egress
@@ -60,7 +62,7 @@ def motivation_is_governed(manifest: collections.CollectionManifest) -> bool:
 def normalize_item(
     item: Mapping[str, Any],
     *,
-    vault_root: Path | None = None,
+    vault_root: Path | None,
     stored: Mapping[str, Any] | None = None,
     apply_defaults: bool = True,
     validate_motivation: bool = True,
@@ -70,7 +72,7 @@ def normalize_item(
     `stored` is the item as the vault holds it, or None for a new item. A
     Planning value that equals its stored value stays readable after its
     definition is deprecated or removed; a new or changed value must be an
-    active registered value. Without `vault_root` only shipped values register.
+    active registered value. A None `vault_root` admits shipped values only.
     """
     if not isinstance(item, Mapping):
         _invalid("item must be an object")
@@ -90,17 +92,17 @@ def normalize_item(
     _bounded_string(values.get("title"), "title", 512)
     _governed(planning_values, values, stored, "kind")
     _enum(values.get("lifecycle"), _LIFECYCLES, "lifecycle")
-    if values["kind"] == "area":
-        if _AREA_FORBIDDEN & values.keys():
-            _invalid("areas cannot carry delivery state or hierarchy")
-        _validate_optional(
-            values, planning_values, stored, validate_motivation=validate_motivation
-        )
-        return values
-    for name in ("status", "priority", "commitment", "horizon"):
-        _governed(planning_values, values, stored, name)
-    _validate_lifecycle(values, planning_values, stored)
-    _validate_optional(values, planning_values, stored, validate_motivation=validate_motivation)
+    area = values["kind"] == "area"
+    if area and _AREA_FORBIDDEN & values.keys():
+        _invalid("areas cannot carry delivery state or hierarchy")
+    # The registry names the governed fields. A deliverable must declare each
+    # governed field an area may not carry; any other governed field is optional.
+    for name in planning_values.fields():
+        if name != "kind" and (name in values or (not area and name in _AREA_FORBIDDEN)):
+            _governed(planning_values, values, stored, name)
+    if not area:
+        _validate_lifecycle(values, planning_values, stored)
+    _validate_optional(values, validate_motivation=validate_motivation)
     return values
 
 
@@ -297,7 +299,7 @@ def _with_default_scaffold(
     manifest_text: str,
     manifest: collections.CollectionManifest,
     *,
-    vault_root: Path | None = None,
+    vault_root: Path | None,
 ) -> str:
     newline = "\r\n" if "\r\n" in manifest_text else "\n"
     closing = list(re.finditer(r"(?m)^---\r?$", manifest_text))
@@ -343,7 +345,8 @@ def _with_default_scaffold(
     if not manifest.views:
         # Kept explicit so the ordinary YAML remains obvious to a human editor.
         additions.append("views:")
-        for horizon in PlanningValues(vault_root).values("horizon"):
+        for value in PlanningValues(vault_root).values("horizon"):
+            horizon = _yaml_scalar(value)
             additions.extend(
                 (
                     f"  {horizon}:",
@@ -362,6 +365,15 @@ def _with_default_scaffold(
     insertion = newline.join(additions) + newline
     index = closing[1].start()
     return manifest_text[:index] + insertion + manifest_text[index:]
+
+
+def _yaml_scalar(value: str) -> str:
+    """A YAML scalar that reads back as `value`: plain when it does, else quoted.
+
+    A registered value such as `off` or `null` is a boolean or null to YAML.
+    A JSON string is a valid double-quoted YAML scalar.
+    """
+    return value if yaml.safe_load(value) == value else json.dumps(value)
 
 
 def add(
@@ -1628,28 +1640,66 @@ def _validate_relationships(
             validate_motivation=motivation_is_governed(manifest),
         )
         plans[record.identity.key] = values
+    write = None
     if plan_id is not None and candidate is not None:
         plans[plan_id] = dict(candidate)
-    validate_hierarchy(manifest, plans, vault_root=vault_root)
+        stored = next(
+            (record.values for record in records_in_snapshot if record.identity.key == plan_id),
+            None,
+        )
+        write = HierarchyWrite(vault_root, plan_id, stored)
+    validate_hierarchy(manifest, plans, write=write)
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchyWrite:
+    """The one item a write changes, and the vault whose registry judges it."""
+
+    vault_root: Path
+    plan_id: str
+    stored: Mapping[str, Any] | None
+
+
+def _kind_definition(write: HierarchyWrite | None, key: str, values: Mapping[str, Any]) -> Any:
+    """The kind definition whose `parents` judge one item's hierarchy.
+
+    Only the item a write changes, and only when its kind, parent, commitment
+    or lifecycle changes, reads the vault registry; a withheld definition then
+    refuses the write. Every other item keeps the shipped kind rules, which no
+    registry save or restore can move, so a stored hierarchy stays readable.
+    """
+    kind = values["kind"]
+    if write is None or write.plan_id != key or (
+        write.stored is not None
+        # The hierarchy rules read exactly these four fields.
+        and all(
+            write.stored.get(name) == values.get(name)
+            for name in ("kind", "parent", "commitment", "lifecycle")
+        )
+    ):
+        return PlanningValues(None).find("kind", kind)
+    definition = _registered(PlanningValues(write.vault_root), "kind", kind)
+    if definition is None:
+        _invalid("kind is not registered, so its parent rule is unknown")
+    return definition
 
 
 def validate_hierarchy(
     manifest: collections.CollectionManifest,
     plans: Mapping[str, Mapping[str, Any]],
     *,
-    vault_root: Path | None = None,
+    write: HierarchyWrite | None = None,
 ) -> None:
     """Planning's typed hierarchy over one complete set of plans, keyed by plan id.
 
-    Areas carry no parent; a kind's registered `parents` name the kinds its
-    parent may have, and a committed active item of a kind that has parents
-    needs one; active plans point only at active targets; a child's area
-    agrees with its parent's; there are no cycles; and nothing archived keeps
-    an active child. An item whose kind has no readable definition keeps every
-    rule but the kind rules. This is the named validator
-    ``planning.hierarchy.v1``.
+    Areas carry no parent; a kind's `parents` name the kinds its parent may
+    have, and a committed active item of a kind that has parents needs one;
+    active plans point only at active targets; a child's area agrees with its
+    parent's; there are no cycles; and nothing archived keeps an active child.
+    `_kind_definition` decides which definition judges each item; an item with
+    no definition keeps every rule but the kind rules. This is the named
+    validator ``planning.hierarchy.v1``.
     """
-    planning_values = PlanningValues(vault_root)
     parents: dict[str, str] = {}
     for key, values in plans.items():
         kind = values["kind"]
@@ -1668,10 +1718,7 @@ def validate_hierarchy(
                 or (active and target["lifecycle"] != "active")
             ):
                 _relation_error()
-        try:
-            definition = planning_values.find("kind", kind)
-        except Unavailable:
-            definition = None
+        definition = _kind_definition(write, key, values)
         allowed = None if definition is None else tuple(definition.attributes["parents"])
         required_parent = active and values["commitment"] == "committed" and bool(allowed)
         if allowed == ():
@@ -1785,15 +1832,7 @@ def _relation_error() -> Never:
     raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
 
 
-def _validate_optional(
-    values: Mapping[str, Any],
-    planning_values: PlanningValues,
-    stored: Mapping[str, Any] | None,
-    *,
-    validate_motivation: bool = True,
-) -> None:
-    if "health" in values:
-        _governed(planning_values, values, stored, "health")
+def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool = True) -> None:
     start = _date(values.get("window_start"), "window_start") if "window_start" in values else None
     end = _date(values.get("window_end"), "window_end") if "window_end" in values else None
     if start is not None and end is not None and start > end:

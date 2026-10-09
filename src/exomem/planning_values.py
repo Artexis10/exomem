@@ -187,9 +187,15 @@ class Unavailable(Exception):
 
 @dataclass
 class PlanningValues:
-    """One operation's Planning values: the pack, plus the overlay once admitted."""
+    """One operation's Planning values: the pack, plus the overlay once admitted.
+
+    `server_side` reads the overlay without the caller's admission. It is only
+    for derived server state whose disclosure is decided when it is served, so
+    that state does not depend on which caller wrote last.
+    """
 
     root: Path | None
+    server_side: bool = field(default=False, kw_only=True)
     _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
 
@@ -198,7 +204,9 @@ class PlanningValues:
             from .vocabulary.contract import admission_refusal
 
             self._attempted = True
-            if self.root is not None and admission_refusal(self.root, SPEC) is None:
+            if self.root is not None and (
+                self.server_side or admission_refusal(self.root, SPEC) is None
+            ):
                 snapshot = registry.load(SPEC, self.root)
                 self._snapshot = None if snapshot.findings else snapshot
         return self._snapshot
@@ -261,5 +269,6 @@ class PlanningValues:
         if dependency[0] == "public":
             return dependency == ("public", registry.load(SPEC, None).effective_digest)
         self._attempted = False
+        self._snapshot = None
         self._overlay()
         return dependency == self.dependency
