@@ -380,7 +380,7 @@ def rollback_slice(session, manager):
     mistaken rollback interrupts C until authorized resume; it never interrupts A/B.
     Publication remains available so backup and close can preserve the disabled store.
     """
-    _require_owner(session.root, "rollback")
+    require_owner(session.root, "rollback")
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     runtime = session.runtime(retire=False)
@@ -428,7 +428,7 @@ def rollback_slice(session, manager):
 
 def rollback_route(vault_root):
     """The offline owner's narrowing-only rollback; no route can enable the slice."""
-    _require_owner(vault_root, "rollback")
+    require_owner(vault_root, "rollback")
 
     def apply(session, manager, fence_client):
         _ProducerSession.bind(session, manager)
@@ -620,7 +620,7 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
     with the flushed head. ``acknowledge_skipped`` applies the reconcile step's owner
     acknowledgement of changes it cannot hold.
     """
-    _require_owner(vault_root, "adopt-local")
+    require_owner(vault_root, "adopt-local")
     root = Path(vault_root).resolve()
     step, sealed = _route_step(root)
     if acknowledge_skipped and step != "reconcile":
@@ -668,7 +668,7 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
     cut that enrols the vault; on an enrolled vault it adds the collection as the
     service's route does. It hands the lease back with the flushed head.
     """
-    _require_owner(vault_root, "create")
+    require_owner(vault_root, "create")
     capability.require_records_summary(vault_root)  # before any lease, fence or operator credential
     require_summary_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
     return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
@@ -719,7 +719,7 @@ def enrollment_required():
         f"enrolling this vault's collection store is the owner's offline step: run {ENROLLMENT_COMMAND}")
 
 
-def _require_owner(root, operation):
+def require_owner(root, operation):
     from ..governance import raw_protection
     from ..governance.principal import effective_principal
 
