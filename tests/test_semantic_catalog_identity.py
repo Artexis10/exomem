@@ -29,6 +29,7 @@ import pytest
 
 from exomem import cli_ops, freshness, lexstore, semantic_index
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -165,6 +166,7 @@ def test_exact_category_recall_without_fts5_avoids_a_corpus_walk(
 
 
 @needs_fts5
+@library_scope()
 def test_incomplete_catalog_raises_non_cacheable_warming_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,6 +228,7 @@ def test_incomplete_catalog_raises_non_cacheable_warming_outcome(
 
 
 @needs_fts5
+@library_scope()
 def test_projection_identity_mismatch_is_warming_not_stale_recall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -322,6 +325,7 @@ def test_complete_delta_at_cap_repairs_catalog_once_without_a_walk(
 
 
 @needs_fts5
+@library_scope()
 def test_delta_over_cap_returns_warming_and_schedules_one_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -27,6 +27,7 @@ def _count_semantic(monkeypatch: pytest.MonkeyPatch) -> dict:
     return calls
 
 
+@library_scope()
 def test_repeat_request_served_from_cache(vault: Path, monkeypatch) -> None:
     calls = _count_semantic(monkeypatch)
     first = find_module.find(vault, query="metabolism")
@@ -107,6 +108,7 @@ def test_preserved_mtime_replacement_invalidates_warmed_find(vault: Path) -> Non
 
 
 @pytest.mark.parametrize("sidecar_name", [".embeddings.sqlite", ".clip.sqlite"])
+@library_scope()
 def test_sidecar_generation_invalidates(vault: Path, monkeypatch, sidecar_name: str) -> None:
     """A gen-bumping write to a semantic sidecar invalidates the hot cache — keyed
     on the in-band (epoch, generation) token, NOT the sidecar file mtime (a WAL
@@ -150,6 +152,7 @@ def test_clear_cache_clears_hot_cache(vault: Path, monkeypatch) -> None:
     assert calls["n"] == 2
 
 
+@library_scope()
 def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
     """Freshness survives an unload -- and so, by default, does the page cache.
 
@@ -249,6 +252,7 @@ def test_the_graph_rebuild_unload_seam_leaves_receipt_covered_pages(
     assert find_module.cache_status()["pages"]["entries"] == resident
 
 
+@library_scope()
 def test_keyword_mode_also_cached(vault: Path, monkeypatch) -> None:
     calls = {"n": 0}
     orig = find_module._find_keyword

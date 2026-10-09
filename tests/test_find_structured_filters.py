@@ -7,6 +7,7 @@ import pytest
 
 from exomem import embeddings, freshness, lexstore
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 from exomem.structured_filters import FilterError, compile_filter
 
 
@@ -469,6 +470,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
     assert [hit.as_dict()["unit_ref"] for hit in second] == [first[0].as_dict()["unit_ref"]]
 
 
+@library_scope()
 def test_python_unit_ranking_breaks_zero_score_ties_toward_active_parent(
     filter_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
