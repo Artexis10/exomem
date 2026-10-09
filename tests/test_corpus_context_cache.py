@@ -482,69 +482,6 @@ def test_concurrent_cold_builds_share_one_uncached_result(
     assert results[0].pages[_PAGE_REL].title == "Current during flight"
 
 
-def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real_build = semantic_contract._build_corpus_context_uncached
-    real_census = semantic_contract._corpus_census
-    first_build_entered = threading.Event()
-    current_census_seen = threading.Event()
-    release_first_build = threading.Event()
-    calls_lock = threading.Lock()
-    calls = 0
-    active = 0
-    max_active = 0
-
-    def tracked_build(*args, **kwargs):
-        nonlocal active, calls, max_active
-        with calls_lock:
-            calls += 1
-            active += 1
-            max_active = max(max_active, active)
-            if calls == 1:
-                first_build_entered.set()
-        if calls == 1:
-            assert release_first_build.wait(timeout=_HOLD_SECONDS)
-        try:
-            return real_build(*args, **kwargs)
-        finally:
-            with calls_lock:
-                active -= 1
-
-    def observed_census(root: Path):
-        census = real_census(root)
-        if census is not None and any(
-            entry[0] == "Knowledge Base/_Schema/relation-registry.yaml" and entry[1] == "cfg"
-            for entry in census
-        ):
-            current_census_seen.set()
-        return census
-
-    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", tracked_build)
-    monkeypatch.setattr(semantic_contract, "_corpus_census", observed_census)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first_future = pool.submit(_shared_context, vault)
-        assert first_build_entered.wait(timeout=_OBSERVE_SECONDS)
-        registry_path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
-        registry_path.parent.mkdir(parents=True, exist_ok=True)
-        registry_path.write_text(
-            "schema_version: 1\nextensions:\n  science.replicates:\n"
-            "    parent: supports\n    description: Independent reproduction\n",
-            encoding="utf-8",
-        )
-        current_hash = relation_registry.load_registry(vault).extension_hash
-        second_future = pool.submit(_shared_context, vault)
-        assert current_census_seen.wait(timeout=_OBSERVE_SECONDS)
-        release_first_build.set()
-        first = first_future.result(timeout=10)
-        second = second_future.result(timeout=10)
-
-    assert calls == 2
-    assert max_active == 1
-    assert first.registry.extension_hash != current_hash
-    assert second.registry.extension_hash == current_hash
-
-
 def test_cold_cache_publication_serializes_with_file_events(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -819,9 +756,9 @@ def test_census_covers_non_markdown_inputs(vault: Path) -> None:
     census = semantic_contract._corpus_census(vault)
     assert census is not None
     markers = {entry[0] for entry in census if entry[1] in {"cfg", "absent"}}
+    # The shared structure is interpreted with core registries only; each operation
+    # reads its registry overlays itself, so they are not inputs of this cache.
     assert "Knowledge Base/_access.yaml" in markers
-    assert "Knowledge Base/_Schema/relation-registry.yaml" in markers
-    assert "Knowledge Base/_Schema/semantic-language-registry.yaml" in markers
 
 
 def test_candidate_build_bypasses_and_does_not_pollute_cache(vault: Path) -> None:

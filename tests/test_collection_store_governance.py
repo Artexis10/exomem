@@ -1025,7 +1025,12 @@ def test_hidden_row_allocation_cannot_change_limited_collection_observations(tmp
                 generated_at = dt.datetime.fromisoformat(rendered.pop("generated_at"))
                 assert observed_at <= generated_at <= dt.datetime.now(dt.UTC)
                 query["rendered"] = rendered
-                observations.append((query, writer.inspect_collection(CID)))
+                inspection = writer.inspect_collection(CID)
+                # Each twin is its own store, and the field release basis names that
+                # store's random identity; field admission derives it without reading rows.
+                for key in ("store_id", "classification_basis"):
+                    inspection["field_release_basis"].pop(key)
+                observations.append((query, inspection))
         monkeypatch.delenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG")
     assert observations[0] == observations[1] == observations[2]
     query, inspection = observations[0]

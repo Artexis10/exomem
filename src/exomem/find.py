@@ -2261,7 +2261,9 @@ def _hydrate_indexed_unit_records(
             unit=structured_filters.unit_view(unit, instance=state.instance_id),
         ):
             continue
-        records[hit.unit_ref] = (page, unit, getattr(hit, "source_order", source_order))
+        # The stored ordinal counts every structural occurrence; source order is
+        # the unit's place among this reader's selected units, as the Python rung reads it.
+        records[hit.unit_ref] = (page, unit, source_order)
     return records
 
 
