@@ -158,6 +158,7 @@ The accepted 2026-10-05 refinement adds the following work to the episode slice;
 - [ ] 6.17a.1 Share held-name discovery and snapshots; verify bounded handles, alias and authority changes, deferred receipts and memo publication; repeat resource profiles.
 - [ ] 6.17b Remove frozen task-word licensing; admit bounded subject units before matching and retain one useful witness without changing subject selection.
 - [ ] 6.17c Verify activation utility, ambiguity, local-material vetoes, budget and withheld/absent twins; compare support ablation on the frozen cases.
+  Recall record from the task-word removal: the disclosed fifth-set cases N13, N15, N29, N30, N36 and N37 changed from a content-free carry to a fall-through, at the licence seam and in the compiler. Their subjects' titles and admitted units support none of their content words. The other content-free cases (N11, N14, N26, N27, N33, N34, N45) still carry, and N50, N52 and N53 stay local quotations.
 - [ ] 6.17d Verify independent topic switches at five percent or less and paired latency within existing absolute and ten-percent relative bounds.
 - [ ] 6.17e Review exact content independently, run full completion CI, merge/release and synchronize this delivered delta; keep broader 6.17 acceptance open.
 

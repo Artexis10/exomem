@@ -127,8 +127,9 @@ The compiler SHALL budget `recent_context` exactly as for an unresolved turn, th
 
 #### Scenario: A rich follow-up keeps the conversation's subject
 
-- **WHEN** an earlier user entry resolved the invented entity "Ottilie Marsh", an admitted unit supports every content term, and the current turn is "Given everything above, how did her results compare with the spring round, and should we change anything before the next one?"
+- **WHEN** an earlier user entry resolved the invented entity "Ottilie Marsh", one of her admitted units supports every content term, and the current turn is "Given everything above, how did her figures look before the next one?"
 - **THEN** "Ottilie Marsh" is carried as a single `partial` anchor with evidence `[conversation]` and `generation.carried_by = "conversation"`
+- **AND** the packet serves the supporting unit
 - **AND** the same turn without `conversation` abstains `unresolved`
 
 #### Scenario: The newest subject wins over an older one
@@ -175,13 +176,15 @@ The compiler SHALL budget `recent_context` exactly as for an unresolved turn, th
 
 #### Scenario: A contracted anaphor is carried
 
-- **WHEN** an earlier user entry resolved "Ottilie Marsh", an admitted unit supplies literal support, and the turn is "it's still on track for the autumn?"
-- **THEN** "Ottilie Marsh" is carried with `generation.carried_by = "conversation"`
+- **WHEN** an earlier user entry resolved "Ottilie Marsh", and the turn is "it's still on for the autumn?"
+- **THEN** "it's" is read as "it is", which points back
+- **AND** "Ottilie Marsh" is carried with `generation.carried_by = "conversation"`
 
 #### Scenario: A governed pointer is an anaphor
 
 - **WHEN** a turn says "which one is cheaper?" or "the other one, please"
-- **THEN** the turn is anaphoric
+- **THEN** the turn points back
+- **AND** any content word it has still needs literal support before it can carry
 
 #### Scenario: A turn that names its own subject is not carried
 
