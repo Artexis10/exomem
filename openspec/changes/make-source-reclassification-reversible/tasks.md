@@ -9,6 +9,7 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 - 1.3: `test_a_revert_refuses_a_previous_location_another_page_now_occupies` and the round trip in the end-to-end test.
 - 1.4: `test_a_restricted_reclassification_preview_answers_as_if_no_withheld_page_linked_it` and `test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_linked_it`.
 - 2.1: `test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_operation`, run through the `manage_memory_file` dispatcher.
+- 2.2: PR #1632 merged as `762653a0c` with required CI green, and release 0.113.0 contains it. On 2026-10-09 `tests/test_reclassify_source.py` and `tests/test_derived_identifier_egress.py` from tag `v0.113.0` passed against the PyPI `exomem==0.113.0` wheel: 288 passed, and all 305 loaded `exomem` modules came from the installed package. The run used a 180-second per-test timeout, because one restricted-delete case takes about 43 seconds on the laptop under load.
 
 ## 1. Phase 1: safe, reversible reclassification
 
@@ -20,7 +21,7 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 ## 2. Phase 1 delivery
 
 - [x] 2.1 Run one end-to-end workflow: preview, reclassify and revert a Source cited by an Evidence page by stem and by a mutable Note.
-- [ ] 2.2 Obtain exact independent review, pass full CI and installed proof, merge, and verify the ordinary release.
+- [x] 2.2 Obtain exact independent review, pass full CI and installed proof, merge, and verify the ordinary release.
 
 ## 3. Separately authorized operation
 
