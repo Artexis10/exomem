@@ -21,7 +21,6 @@ run "published_dependency_preserves_consumer_coordinates" {
     condition = (
       output.control_db_server_id == "4242" &&
       output.control_db_server_ipv4 == "192.0.2.20" &&
-      output.control_db_private_ip == "10.50.1.20" &&
       output.database_hostname == "db.example.test"
     )
     error_message = "Exomem must use the published shared database coordinates."
@@ -36,18 +35,18 @@ run "published_fleet_dependency_carries_the_database_client_address" {
     values          = { ip_address = "198.51.100.7" }
   }
   assert {
-    condition = (
-      output.fleet_dependency.schema_version == 2 &&
-      output.fleet_dependency.database_client_ipv4_cidr == "198.51.100.7/32"
-    )
-    error_message = "Substrate-infra admits the database only from the published schema 2 server-node /32."
+    condition = output.fleet_dependency == {
+      schema_version            = 3
+      database_client_ipv4_cidr = "198.51.100.7/32"
+    }
+    error_message = "Substrate-infra consumes exactly the schema 3 server-node /32."
   }
 }
 
 run "incompatible_version_refuses_deployment" {
   command = plan
   variables {
-    shared_control = merge(var.shared_control, { schema_version = 2 })
+    shared_control = merge(var.shared_control, { schema_version = 1 })
   }
   expect_failures = [var.shared_control]
 }

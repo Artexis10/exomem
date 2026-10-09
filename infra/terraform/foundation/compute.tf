@@ -87,7 +87,7 @@ module "k3s_agents" {
   nodes                = var.k3s_agent_nodes
   subnet_id            = hcloud_network_subnet.alpha.id
   subnet_cidr          = var.private_subnet_cidr
-  reserved_private_ips = [var.private_node_ip, var.shared_control.private_ipv4]
+  reserved_private_ips = [var.private_node_ip]
   location             = var.server_location
   image                = var.server_image
   ssh_key_ids          = [hcloud_ssh_key.admin.id]

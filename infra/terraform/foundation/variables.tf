@@ -152,7 +152,6 @@ variable "shared_control" {
     owner          = string
     server_id      = string
     public_ipv4    = string
-    private_ipv4   = string
     hostname       = string
     direct_port    = number
     pooled_port    = number
@@ -161,24 +160,23 @@ variable "shared_control" {
   validation {
     # Version, owner and TLS mode are fixed by the shared-control dependency contract.
     condition = (
-      var.shared_control.schema_version == 1 &&
+      var.shared_control.schema_version == 2 &&
       var.shared_control.owner == "substrate-infra" &&
       var.shared_control.sslmode == "verify-full" &&
       var.shared_control.direct_port > 0 && var.shared_control.direct_port < 65536 &&
       var.shared_control.pooled_port > 0 && var.shared_control.pooled_port < 65536 &&
       can(cidrnetmask("${var.shared_control.public_ipv4}/32")) &&
-      can(cidrnetmask("${var.shared_control.private_ipv4}/32")) &&
       length(var.shared_control.hostname) > 0 &&
       length(var.shared_control.server_id) > 0
     )
-    error_message = "The shared-control dependency must be complete version 1 from substrate-infra with verify-full TLS."
+    error_message = "The shared-control dependency must be complete version 2 from substrate-infra with verify-full TLS."
   }
 }
 
 variable "k3s_agent_nodes" {
   # One entry is one K3s agent server (add-cloud-node-provisioning N1). Adding
   # or removing an entry is the whole Terraform change; the module validates
-  # addresses against the subnet and the two reserved node addresses. Run
+  # addresses against the subnet and the reserved fleet-server address. Run
   # infra/ansible/remove-agent.yml BEFORE removing an entry.
   description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type, optional dedicated_cell_id, optional shared_profile }."
   type = map(object({

@@ -1,9 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "owner": "substrate-infra",
   "server_id": "4242",
   "public_ipv4": "192.0.2.20",
-  "private_ipv4": "10.50.1.20",
   "hostname": "db.example.test",
   "direct_port": 5432,
   "pooled_port": 6432,
