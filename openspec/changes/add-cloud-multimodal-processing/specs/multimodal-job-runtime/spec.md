@@ -8,7 +8,9 @@ extraction is deterministic transduction and SHALL soft-fail without preventing 
 retrieval or service startup.
 
 A job blocked because the engine its stage needs was unavailable SHALL return to pending,
-without a caller's retry, when a supervisor starts with that engine available. A job blocked
+without a caller's retry, when a supervisor starts with that engine available. Two other
+blocked reasons recover by the rules of the `cloud-multimodal-processing` capability: a
+memory-blocked job, and a job that exceeds the deployment's processing budget. A job blocked
 for any other reason SHALL keep its existing behaviour.
 
 #### Scenario: Standard service starts idle
@@ -27,17 +29,22 @@ for any other reason SHALL keep its existing behaviour.
 - **AND** it is processed without creating a duplicate job
 
 #### Scenario: Other blocked jobs are not requeued
-- **WHEN** a job is blocked for a reason other than an unavailable engine, such as a compute-runtime failure or an ambiguous sidecar boundary
+- **WHEN** a job is blocked for a reason other than an unavailable engine, memory or the processing budget, such as a compute-runtime failure or an ambiguous sidecar boundary
 - **THEN** the job stays blocked until its own existing recovery or an explicit retry
+
+#### Scenario: Memory-blocked and over-budget jobs follow their own recovery
+- **WHEN** a job is memory-blocked, or blocked as exceeding the deployment's processing budget
+- **THEN** it returns to pending under the recovery rules of the `cloud-multimodal-processing` capability, not under this requirement's engine rule
 
 ### Requirement: Durable idempotent multimodal jobs
 Every extraction, CLIP, and post-processing operation SHALL be represented in a rebuildable
 SQLite ledger before execution. Enqueue MUST deduplicate equivalent pending work, claiming MUST
 be atomic, and interrupted running work MUST become eligible after recovery.
 
-Work that a memory stop interrupts SHALL return to pending. A memory stop is a stop for memory
-pressure, or an allocation failure under the worker's hard memory limit. The job SHALL NOT be
-recorded as an artifact failure, and SHALL NOT consume an artifact attempt.
+Work that a memory stop interrupts SHALL return to pending, except where the
+`cloud-multimodal-processing` capability blocks it after repeated stops. A memory stop is a stop
+for memory pressure, or an allocation failure under the worker's hard memory limit. The job SHALL
+NOT be recorded as an artifact failure, and SHALL NOT consume an artifact attempt.
 
 #### Scenario: Service crashes after claim
 - **WHEN** a service or child process exits while a media job is running

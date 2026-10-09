@@ -28,12 +28,12 @@ Invited friends write in Japanese and other languages, so these gaps are part of
   - Engines and their weights are pre-baked into the image and load offline.
   - Where the runtime allows it, weights are file-backed, so one node keeps one copy for all cells.
 - **Memory brakes keep search safe.** Media must never take the serving process down. The worker:
-  - claims a job only while the cell's anonymous memory leaves room for it, below `memory.high` and the profile's admission fraction;
+  - claims a job only while the cell's anonymous memory leaves room for the engine's anonymous-memory budget, below `memory.high` and the profile's admission fraction;
   - runs under a VmData limit, as a backstop against runaway allocation;
-  - stops when memory pressure rises.
+  - stops when the memory pressure stall average crosses its threshold.
 
-  A stopped job returns to pending. It is never recorded as an artifact failure. A job that keeps being stopped waits as memory-blocked, shows the tenant no action, and returns to pending by itself.
-- **Documents.** Cloud reads every type a personal install reads: PDF, Word, Excel, PowerPoint, HTML, plain text, email and calendar. Every install gains EPUB, OpenDocument (text, spreadsheet, presentation) and RTF.
+  A stopped job returns to pending. It is never recorded as an artifact failure. A job that keeps being stopped by contention waits as memory-blocked, shows the tenant no action, and returns to pending by itself. A file too large even for an idle cell is marked as exceeding this deployment's processing budget, and is tried again only when the cell limit or the engine budget changes.
+- **Documents.** Cloud reads every type a personal install reads: PDF, Word, Excel, PowerPoint, HTML, plain text, email and calendar. Every install gains EPUB, OpenDocument (text, spreadsheet, presentation) and RTF. Plain text, email and calendar files already extract on Cloud with the standard library, so they stay on; the documents switch covers only formats that need new dependencies.
 - **Images.**
   - OCR detects the script first, then reads with that script's model and the installed language packs for it. The installed set is deployment configuration. The first language packs are English, Japanese (horizontal and vertical) and Estonian.
   - Every install encodes images with one pinned image model at one precision, chosen by published benchmarks (design D5), so stored vectors are interchangeable across installs. A same-precision substitution that passes the 0.9999 parity bound keeps the vector space. The candidates are:
@@ -41,7 +41,8 @@ Invited friends write in Japanese and other languages, so these gaps are part of
     - a multilingual image–text model, which re-encodes stored image vectors once.
   - HEIC is decoded, subject to a licence check.
 - **Speech.** Audio and video get transcripts from the engine and model that the bake-off in design.md selects. The first required language set is Japanese, English and Estonian, and it is deployment configuration.
-- **Off until proven.** Each engine has a switch, off by default on Cloud. It turns on first in the owner's cell, which is the canary, for that engine's acceptance, and then in the other cells one at a time.
+- **Off until proven.** Each engine has a switch, off by default on Cloud. It turns on first in the owner's cell, which is the canary, for that engine's acceptance, and then in the other cells one at a time. Each switch change restarts that cell briefly, outside the backup window.
+  - Acceptance compares a labelled known-content subset with a personal install's extraction, and reads memory as anonymous plus non-reclaimable memory.
   - An engine that is off or not shipped is reported as disabled on runtime status and doctor.
   - It is never reported as degraded on each query, and never shown to a tenant as an install instruction.
 - **Backfill.** Media already in a cell is processed automatically once its engine is on, one cell at a time.

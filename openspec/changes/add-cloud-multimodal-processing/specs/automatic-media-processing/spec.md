@@ -59,7 +59,7 @@ On an Exomem Cloud cell, the next action SHALL NOT be an instruction to install 
 ## ADDED Requirements
 
 ### Requirement: Open and e-book document formats and HEIC images extract on every install
-Every install SHALL classify EPUB, OpenDocument text, spreadsheet and presentation (ODT, ODS and ODP) and RTF artifacts as documents through the canonical media registry, and SHALL extract their text through the same sidecar-and-job path as the existing document types. Every install SHALL decode HEIC images and process them as images. A format SHALL count as supported on a deployment only when a check on that deployment's image or install extracts a real sample of it. Doctor's media report SHALL list a format as supported only on that evidence.
+Every install SHALL classify EPUB, OpenDocument text, spreadsheet and presentation (ODT, ODS and ODP) and RTF artifacts as documents through the canonical media registry, and SHALL extract their text through the same sidecar-and-job path as the existing document types. Every install SHALL decode HEIC images and process them as images. On Cloud, the image-build gate that extracts a real sample of each format SHALL be the proof that Cloud supports the format, as the `cloud-multimodal-processing` capability states. On a personal install, a format whose extraction dependency is missing SHALL keep the existing blocked state with install guidance.
 
 #### Scenario: An EPUB is searchable
 - **WHEN** an EPUB book is added to the governed Knowledge Base
@@ -74,6 +74,6 @@ Every install SHALL classify EPUB, OpenDocument text, spreadsheet and presentati
 - **WHEN** a HEIC photo containing printed text is processed
 - **THEN** it is decoded as an image and its OCR text is extracted
 
-#### Scenario: A format without a real-sample check is not claimed
-- **WHEN** a deployment's checks extract no real sample of a format
-- **THEN** doctor's media report does not list that format as supported on that deployment
+#### Scenario: A personal install without the format's library keeps today's guidance
+- **WHEN** an EPUB is processed on a personal install that lacks the EPUB extractor's dependency
+- **THEN** the job is blocked and retryable, with install guidance, as for any missing media dependency today

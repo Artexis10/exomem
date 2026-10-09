@@ -44,27 +44,27 @@ Escalation: if acceptance shows starvation or memory aborts, move the engines in
 All three brakes are derived from the cell's own cgroup, never from constants. Each brake names the measure it reads, because the obvious one is wrong:
 
 - `memory.current` counts reclaimable page cache. It also counts shared model weights, charged to whichever cell faulted them first (change `ship-models-as-shared-onnx`, design Context). So it can block a cell that has room, or admit work into a cell that has none. Admission and the pressure stop never read it.
-- **Admission** reads anonymous memory (`memory.stat` anon). The worker claims a job only while anonymous memory plus the engine's measured resident budget stays below the lower of two values:
+- **Admission** reads anonymous memory (`memory.stat` anon). The worker claims a job only while anonymous memory plus the engine's measured anonymous-memory budget stays below the lower of two values. The budget is anonymous memory too, so the shared weight pages never count twice:
   - the cell's `memory.high`, when one is set;
   - the `service-v1` admission fraction of `memory.max`, which is the 80% cgroup peak gate in "Cloud outcome and capacity gates" (`add-cloud-service-resource-policy`). The spec references that gate rather than restating it.
 
   With kubelet MemoryQoS on, `memory.high` = request + 0.625 × (limit − request) (`memoryThrottlingFactor` in the K3s role). At a 1 GiB request and the 3 GiB limit that is 2.25 GiB, or 75%, which is below 80%. At cellctl's default 512 MiB request it is about 2.06 GiB. MemoryQoS is off by default (`k3s_memory_qos_enabled: false`), and then `memory.high` is `max`. The request in production was not checked for this design.
-- **Pressure stop** reads memory pressure stall information (`memory.pressure`) and anonymous memory. The supervisor stops the child when either crosses its high-water mark.
+- **Pressure stop** reads memory pressure stall information (`memory.pressure`). The supervisor stops the child when the `some` or `full` 10-second average (`avg10`) crosses a stall threshold set in deployment configuration. A stall threshold measures time lost to reclaim, so it does not depend on the cell's size. Where `memory.pressure` cannot be read, the fallback is anonymous memory against the lower of `memory.high` and `memory.max`.
 - **Hard limit** is a VmData budget (`RLIMIT_DATA`), and it is a backstop against runaway allocation, not the main brake.
   - ONNX Runtime maps `model.onnx.data` as `rw-p`: private and writable. VmData counts that mapping. The review reproduced it on ORT 1.27.0: a limit of VmData + 100 or 120 MiB failed the load with `std::bad_alloc`, and VmData + 140 MiB passed.
   - So the budget includes the mapped weights. Each engine's VmData budget is measured at acceptance and pinned with a margin.
   - The pages stay clean, because prepacking is off and nothing writes them. So they stay shared, and the Pss sharing evidence stands.
   - Tesseract and other native code inherit the limit.
 
-Each engine has two measured budgets: a resident budget for admission, and a VmData budget for the hard limit. Both are pinned in deployment configuration.
+Each engine has two measured budgets: an anonymous-memory budget for admission, and a VmData budget for the hard limit. Both are pinned in deployment configuration.
 
 **What a wrong firing costs.** A brake that fires wrongly delays media; it never takes search down. Delay is cheap only while it is visible and bounded, so:
 
 - A pressure stop, and an allocation failure under the hard limit (an ORT `bad_alloc`, a native allocation failure), are typed memory stops. The job returns to pending and is never an artifact failure.
-- After a bounded number of consecutive memory stops, the job becomes memory-blocked, so it cannot loop.
-- A memory-blocked job returns to pending automatically: when a supervisor starts, when the cell limit or an engine budget changes, and periodically with a bounded backoff while pressure is low. No human retry is needed. On Cloud none would be possible anyway, because `process_media` is excluded from the cell's tool surface.
-- A tenant sees the job only as waiting, with no action to take. The memory reason appears on operator surfaces only.
-- Starvation is caught before rollout: acceptance requires the owner-sized backlog to drain within a bound stated before the run, with no job left memory-blocked.
+- After a bounded number of consecutive memory stops, the job leaves the cycle in one of two typed states, so it cannot loop:
+  - **Exceeds this deployment's processing budget.** Each stop was an allocation failure under the hard limit, or came after a claim at which memory pressure was low. Admission always has headroom at a claim, so low pressure at the claim, and the job's own hard-limit failures, are what show that the file's own demand explains the stops. Examples are a huge panorama, or a corrupt header that asks for a giant buffer. The tenant sees that the file exceeds this deployment's processing budget, with no install and no "corrupt" wording. The job returns to pending only when the cell limit or that engine's budget changes, because nothing else can make it fit.
+  - **Memory-blocked**, in every other case: the stops came from contention. The job returns to pending automatically: when a supervisor starts, when the cell limit or an engine budget changes, and periodically with a bounded backoff while pressure is low. No human retry is needed. On Cloud none would be possible anyway, because `process_media` is excluded from the cell's tool surface. A tenant sees the job only as waiting, with no action to take, and the memory reason appears on operator surfaces only.
+- Starvation is caught before rollout: acceptance requires the owner-sized backlog to drain within a bound stated before the run, with no job left memory-blocked. Over-budget jobs are excluded from the drain and listed in the acceptance report with their file size and type.
 
 ### D3. Pre-baked engines and shared weights
 
@@ -86,7 +86,11 @@ Before writing any extractor for the new formats, implementation compares these 
 - a maintained converter that covers many formats (for example `markitdown`);
 - per-format libraries.
 
-Reuse wins where it fits. A format is "supported" only when a check in the Cloud image extracts a real sample of it.
+Reuse wins where it fits.
+
+**Support proof.** On Cloud, a format is supported only when the image build extracts a real sample of it; the build fails otherwise. No runtime surface lists formats. On a personal install, a format whose dependency is missing keeps today's blocked state with install guidance.
+
+**Plain text, email and calendar files work on Cloud today.** `extract._extract_textfile`, `_extract_eml` and `_extract_ics` use only the Python standard library. On 2026-10-09 I ran all three through `extract.extract_text` in a development environment, and no media module (torch, PIL, pytesseract, fitz, markitdown, faster_whisper) was imported. I did not run them inside the Cloud image, but nothing in the `cloud` stage blocks them. So the documents switch covers only the formats that need newly shipped dependencies. TXT, EML and ICS stay on, and nothing regresses.
 
 ### D5. Images
 
@@ -98,8 +102,8 @@ Reuse wins where it fits. A format is "supported" only when a check in the Cloud
   - When detection names no script, which happens on images with little text, OCR reads with the deployment's configured default language packs.
   - Today every install calls Tesseract without a language, so it reads English only (`extract._ocr_image` and `extract._ocr_pdf_page`).
   - The installed set is an image build parameter, which makes it deployment data, never a code list.
-  - The mapping from scripts to models and packs comes from Tesseract's published names: the `script/` models and the language pack codes. Whether that mapping can be read by machine, or needs a small table generated from Tesseract's published lists, is verified at implementation.
-  - A pack belongs to every script its language writes. Kanji-only Japanese may be detected as Han, so the Han route includes the deployment's Japanese packs.
+  - Each installed pack's script coverage is read from the pack's own data: the script property of its unicharset, or Tesseract's documented equivalent. Implementation verifies which one Tesseract exposes. If neither can be read at run time, the image build derives a coverage file from the installed packs; it is never hand-written.
+  - A pack belongs to every script its data covers. Kanji-only Japanese may be detected as Han, so the Han route includes the deployment's Japanese packs.
   - Acceptance records the image size the models add.
 - **Image search model.** It is chosen by published benchmarks, not by our own accuracy runs. The candidates are:
   - `clip-ViT-B-32`, today's model, English queries only, with the multilingual text encoder `clip-ViT-B-32-multilingual-v1` aligned to its image space;
@@ -112,6 +116,8 @@ Reuse wins where it fits. A format is "supported" only when a check in the Cloud
   If the model changes, every install switches together, and stored image vectors are re-encoded once by D8's backfill. Vectors from different spaces are never mixed.
   - **Precision.** The image model ships at its reference precision, as an fp32 ONNX build. No image relevance fixture exists, so nothing could gate an int8 build (`shared-model-runtime`; change `ship-models-as-shared-onnx`, design D3, explains why int8 cannot meet the 0.9999 bound). int8 waits until such a fixture exists.
   - **One rule for the space.** A same-precision substitution that passes cosine ≥ 0.9999 keeps the vector space, and its new artifact identity is recorded. So an fp32 ONNX build of today's `clip-ViT-B-32` keeps every stored vector of a personal install. Another model or another precision is another space.
+  - The record names the space, not the writer of each row. Rows that PyTorch wrote stay in the kept space on the strength of the substitution's parity proof.
+  - Values calibrated on a space carry across a space-keeping substitution; the image-tags threshold (`EXOMEM_IMAGE_TAGS_THRESHOLD`) is one. A space change voids them until they are calibrated again.
   - **Recorded space.** Today the image vector sidecar (`.clip.sqlite`) records no vector space: `clip_index` fixes the width at 512 and stores no model. This change extends the `multilingual-recall` space rule to that sidecar: it records model, width, precision and artifact identity. A legacy sidecar with rows and no record is read as `clip-ViT-B-32` at 512 dimensions and full precision.
 - **Image captions.** Optionally, a small pinned-weight, frozen captioner writes one descriptive sentence per image, chosen by the same benchmark-then-measure rule. The caption joins the image's OCR text in ordinary multilingual semantic search, so a full-sentence question in any language finds the photo, and the assistant can read what the photo shows.
   - The captioner is never an instruction-following model. The authority matrix in `openspec/config.yaml` admits pinned-weight frozen captioners as transducers, default-off because they emit prose. It puts an instruction-following generative model out of bounds in every modality pairing, except as an instrument.
@@ -131,7 +137,9 @@ Selection follows the general rule of the `shared-model-runtime` capability. The
 
 - **Metric per language.** WER for English and Estonian, which are written with spaces between words, and CER for Japanese, which is not.
 - **One benchmark.** Candidates are compared on the same published benchmark wherever one covers them all: the Open ASR Leaderboard, then FLEURS or Common Voice results from model cards and papers.
-- **Missing results.** A candidate with no published result in a required language is measured on that language's FLEURS test set (40 utterances), or excluded for that language. The owner's amendment to the bake-off allows this measurement. That amendment is not recorded in this repository.
+- **Missing results.** When any candidate lacks a published result in a required language, every candidate is measured for that language on the same FLEURS subset of 40 utterances. That language is then judged on those measurements only. A 40-utterance measurement is never compared with a published full-test-set number, because the two differ in sample, normalisation and decoding.
+  - Each difference from the best candidate is reported with its 95% bootstrap confidence interval, resampling the utterances. On a measured language, a candidate passes the 2.0-point bound only when the upper end of its interval is within 2.0 points. Forty utterances give a wide interval, so this rule favours exclusion over a false pass.
+  - The owner's amendment to the bake-off allows this measurement. That amendment is not recorded in this repository.
 - **Cost.** The int8 real-time factor at pinned CPU threads on the cell's CPU, peak memory, and whether the weights can be shared under D3.
 - **Sanity check.** Ten utterances per language catch a broken int8 or ONNX conversion.
 - **Pick.** The lowest-memory candidate whose error rate is within 2.0 points of the best in every required language. Shareable weights count once per node. Routing by language is allowed only if no single candidate passes, and only if the routed pair stays under 1.5 GB.
@@ -144,7 +152,11 @@ Each engine (documents, OCR, image search, captions, speech) has a switch.
 - **Cloud:** every switch defaults to off. The operator turns it on first in the owner's cell, the acceptance cell and canary, and runs that engine's acceptance there. A pass rolls the switch to the other cells one at a time. A miss turns it off again in the owner's cell, and it stays off elsewhere.
 - **Personal installs:** they keep today's defaults.
 
+**Restart cost.** Changing a cell's switch re-renders that cell and restarts its pod. A cell has one replica on a single-attach volume, so that is a brief outage. The canary and the rollout therefore change switches outside the cell backup window (`CELLCTL_BACKUP_WINDOW`).
+
 **Where the switch lives.** cellctl renders each cell's environment. Today it has one chart-level `model_env` map (`CELLCTL_CELL_MODEL_ENV`), which it renders into every cell after `check_model_env` refuses forbidden keys, prefixes and suffixes. A change to that map changes every cell's render digest at once, so it cannot hold a per-cell canary. cellctl selects cells per feature only through cell-ID lists, such as `CELLCTL_ARTIFACT_BROKER_CELL_IDS` and `CELLCTL_DEDICATED_CELL_IDS`. So this change adds a per-engine cell-ID selection to cellctl on that precedent. It renders the engine's switch variable into the selected cells only, and the variable passes the same `check_model_env` rules.
+
+The documents switch covers only the formats that need newly shipped dependencies; TXT, EML and ICS stay on (D4).
 
 On Cloud, an engine that the image does not ship is disabled by the deployment's configuration. On a personal install, an enabled engine that is missing keeps today's blocked state with install guidance, and D8 requeues its jobs once it appears.
 
@@ -167,20 +179,26 @@ Until images ship, the interim is configuration only: `EXOMEM_DISABLE_CLIP=1` in
 
 Run on the owner-sized cell with that engine's backlog active:
 
-- the existing service-v1 gates hold. They live in "Cloud outcome and capacity gates" of `add-cloud-service-resource-policy`, and the spec references them there:
-  - a cgroup peak of at most 80% of the limit;
-  - at least 20% node headroom;
-  - query p95 of 3 s or less;
-  - publication p95 of 5 s or less;
+- the service-v1 latency and freshness gates hold. They live in "Cloud outcome and capacity gates" of `add-cloud-service-resource-policy`, and the spec references them there: query p95 of 3 s or less, and publication p95 of 5 s or less;
+- the memory peak is read as anonymous plus non-reclaimable memory, and stays within the service profile's peak fraction (80% of the limit). The fields come from `memory.stat`: `anon`, `slab_unreclaimable`, `kernel_stack`, `pagetables`, `percpu` and `sock`, plus `shmem`, which cannot be reclaimed without swap. The final field list is fixed at implementation and recorded with each run.
+  - The service-v1 peak gate (`add-cloud-service-resource-policy` tasks, 2026-10-04) reads an inclusive cgroup peak that counts page cache. Large media reads can fill the cache up to `memory.max`, so that gate could fail on reclaimable cache alone. See Open Questions.
+- node headroom stays at 20% or more under the service-v1 rule;
 - there are no OOMs and no serving restarts, and `memory.oom.group` has been read and recorded;
-- the owner-sized backlog drains within a bound stated before the run, and no job is left memory-blocked;
-- each processed sidecar reaches a completed `processing_state`, with non-empty extracted text and an `extracted_by` engine marker (`+timed` for audio and video). Image vectors carry the recorded model, width and precision, and meet the parity bound;
+- the owner-sized backlog drains within a bound stated before the run, and no job is left memory-blocked. Jobs over the processing budget are excluded from the drain, and the report lists each with its file size and type;
+- a labelled known-content subset per format and engine agrees with a personal install's extraction of the same files, under an agreement bound stated before the run:
+  - documents and OCR images whose text is known;
+  - speech clips with reference transcripts;
+  - silent media, which must produce its marker: a video without audio gets the `no-audio` engine and "(no text detected)", and audio without speech gets "(no speech detected)".
+
+  This replaces a per-sidecar check. "Non-empty text" always passes, because "(no text detected)" is text, and a `+timed` check fails on silent video.
+- image vectors carry the recorded model, width and precision, and meet the parity bound;
 - shared weights are measured on the node: the cells' Pss for the weights file sums to about one copy;
-- the engine's resident and VmData budgets are recorded and pinned.
+- the engine's anonymous-memory and VmData budgets are recorded and pinned.
 
 ## Risks / Trade-offs
 
 - **The image grows by 0.6–1.5 GB.** That costs pull time on rollout only.
+- **Turning an engine on restarts the cell.** That is a brief outage per cell, outside the backup window.
 - **Fewer cells fit per node.** Acceptance measures the new warm peaks before admission counts them.
 - **A pressure stop can delay media for the largest vault.** The delay is visible on runtime status only. The escalation is D1's second container.
 
@@ -195,7 +213,9 @@ Run on the owner-sized cell with that engine's backlog active:
 
 - The speech engine: pending the bake-off (D6).
 - Whether `markitdown` or per-format libraries cover D4 at an acceptable size and licence.
-- The default OCR language packs used when script detection names no script, and how many consecutive memory stops block a job (D2). Both are deployment values that acceptance sets.
+- The default OCR language packs used when script detection names no script, how many consecutive memory stops end the cycle, and the pressure stall threshold (D2). All are deployment values that acceptance sets.
+- **Reconcile the memory gate before the first acceptance run.** The service-v1 peak gate counts page cache, and media acceptance reads anonymous plus non-reclaimable memory. The owner of `add-cloud-service-resource-policy` decides how the two measures agree. This change does not edit that change.
+- The agreement bounds for the known-content subsets and the drain-time bound are stated before each run.
 - Whether installing a new OCR pack re-extracts images whose OCR completed without it. The spec keeps completed text unless an explicit reprocessing mode asks, which is today's rule.
 - Whether the `process_media` and `read_media` Cloud exclusions lift when their engines turn on. Their recorded lift condition is "a media-capable cloud image ships" (`commands.CLOUD_SURFACE_EXCLUSIONS`). That requirement lives in the active change `adopt-exomem-cloud-plain-cells`, so an amendment belongs there.
 - Zero-shot image tags (`EXOMEM_IMAGE_TAGS`) reuse the loaded image model and score an English tag vocabulary. If D5 selects another image model, the tags follow it, and their threshold needs recalibration.
