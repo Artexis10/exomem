@@ -11,7 +11,7 @@
 - [x] 2.2 Verify the installed S1 import/query/correction/recovery/snapshot workflow on the integrated candidate.
 - [x] 2.3 Obtain exact independent review, a clean completion corpus, and green required CI for the integrated batch.
   PR #1624 record (issue comment 6062704248): round 18 independent review APPROVE on the exact merge head.
-  The serial completion corpus (29,340 items on 726c3a87a) had 39 failures, none attributable to the batch: 8 fail identically on base 704875f05 and 30 pass in isolation on base and HEAD.
+  The serial completion corpus (29,340 items on 726c3a87a) had 39 failures, none attributable to the batch: 7 fail identically on base 704875f05 and 31 pass in isolation on base and HEAD.
   The last one is a wall-clock bound in code that S1 does not change, and it passes 15/15 in isolation on HEAD.
   Required CI 37897615695 ran the full sharded suite green on the merged tree.
 - [x] 2.4 Merge the reviewed batch through its existing PR; verify main and notify the dependent owners.
