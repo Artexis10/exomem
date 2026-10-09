@@ -77,10 +77,9 @@ def test_foundation_adds_agents_from_one_map_variable_defaulting_to_empty() -> N
     assert "image                = var.server_image" in module
     assert "ssh_key_ids          = [hcloud_ssh_key.admin.id]" in module
     assert "admin_ssh_cidrs      = var.admin_ssh_cidrs" in module
-    # Both addresses already on the subnet are reserved against agents.
-    assert (
-        "reserved_private_ips = [var.private_node_ip, var.shared_control.private_ipv4]" in module
-    )
+    # The fleet server's address is reserved against agents; the control host
+    # is not on this subnet.
+    assert "reserved_private_ips = [var.private_node_ip]" in module
     assert compute.count('resource "hcloud_network"') == 1
     assert compute.count('resource "hcloud_network_subnet"') == 1
 

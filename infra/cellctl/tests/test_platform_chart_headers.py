@@ -155,124 +155,6 @@ def _helm_template_result(*extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-PRIVATE_DB_ARGS = (
-    "--set-string", "cloudDatabase.hostname=db.example.test",
-    "--set-string", "cloudDatabase.privateIp=10.0.1.5",
-)
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_database_alias_is_absent_by_default() -> None:
-    documents = _helm_template()
-    for name in ("cellctl", "exomem-cloud-gateway"):
-        deployment = _find(documents, "Deployment", name)
-        assert "hostAliases" not in deployment["spec"]["template"]["spec"]
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_database_alias_is_only_on_the_two_cloud_control_deployments() -> None:
-    result = _helm_template_result(
-        *PRIVATE_DB_ARGS,
-        "--set", "gateway.enabled=true",
-        "--set-string", "gateway.image=ghcr.io/substrate-systems/substrate-gateway@sha256:" + "a" * 64,
-        "--set-string", "gateway.originHostname=legacy.example.test",
-        "--set-string", "gateway.databaseEgressCidrs[0]=10.0.1.5/32",
-    )
-    assert result.returncode == 0, result.stderr
-    documents = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
-    aliases = {
-        doc["metadata"]["name"]: doc["spec"]["template"]["spec"]["hostAliases"]
-        for doc in documents
-        if doc.get("kind") == "Deployment" and "hostAliases" in doc["spec"]["template"]["spec"]
-    }
-    assert aliases == {
-        "cellctl": [{"ip": "10.0.1.5", "hostnames": ["db.example.test"]}],
-        "exomem-cloud-gateway": [{"ip": "10.0.1.5", "hostnames": ["db.example.test"]}],
-    }
-    assert "hostAliases" not in _find(documents, "Deployment", "exomem-gateway")["spec"]["template"]["spec"]
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_database_requires_both_hostname_and_private_ip() -> None:
-    for setting in PRIVATE_DB_ARGS[1::2]:
-        result = _helm_template_result("--set-string", setting)
-        assert result.returncode != 0, setting
-        assert "cloudDatabase" in result.stderr, result.stderr
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_database_rejects_malformed_hostname_and_private_ip() -> None:
-    for setting in (
-        "cloudDatabase.hostname=bad host",
-        "cloudDatabase.hostname=db..example.test",
-        "cloudDatabase.privateIp=999.0.0.1",
-        "cloudDatabase.privateIp=10.0.1.5/32",
-    ):
-        result = _helm_template_result(*PRIVATE_DB_ARGS, "--set-string", setting)
-        assert result.returncode != 0, setting
-        assert "cloudDatabase" in result.stderr, result.stderr
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-@pytest.mark.parametrize("address", ["8.8.8.8", "127.0.0.1", "169.254.1.1", "224.0.0.1", "100.64.0.1", "172.32.0.1"])
-def test_cloud_database_rejects_non_private_routes_even_with_matching_egress(address: str) -> None:
-    result = _helm_template_result(
-        *PRIVATE_DB_ARGS,
-        "--set-string", f"cloudDatabase.privateIp={address}",
-        "--set-string", f"cellctl.databaseEgressCidrs[0]={address}/32",
-        "--set-string", f"cloudGateway.databaseEgressCidrs[0]={address}/32",
-    )
-    assert result.returncode != 0, address
-    assert "cloudDatabase" in result.stderr, result.stderr
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_database_certificate_hostname_cannot_be_an_ip_literal() -> None:
-    result = _helm_template_result(*PRIVATE_DB_ARGS, "--set-string", "cloudDatabase.hostname=10.0.1.5")
-    assert result.returncode != 0
-    assert "cloudDatabase" in result.stderr, result.stderr
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-@pytest.mark.parametrize("address", ["10.50.1.20", "172.16.0.1", "172.31.255.254", "192.168.1.5"])
-def test_cloud_database_accepts_rfc1918_routes(address: str) -> None:
-    result = _helm_template_result(
-        *PRIVATE_DB_ARGS,
-        "--set-string", f"cloudDatabase.privateIp={address}",
-        "--set-string", f"cellctl.databaseEgressCidrs[0]={address}/32",
-        "--set-string", f"cloudGateway.databaseEgressCidrs[0]={address}/32",
-    )
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_private_database_ip_must_match_each_enabled_workloads_egress_policy() -> None:
-    for missing, allowed in (("cellctl", "cloudGateway"), ("cloudGateway", "cellctl")):
-        result = _helm_template_result(
-            "--set-string", "cloudDatabase.hostname=db.example.test",
-            "--set-string", "cloudDatabase.privateIp=10.0.1.6",
-            "--set-string", f"{allowed}.databaseEgressCidrs[0]=10.0.1.6/32",
-        )
-        assert result.returncode != 0, missing
-        assert f"{missing}.databaseEgressCidrs" in result.stderr, result.stderr
-
-
-@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_private_database_egress_check_skips_a_disabled_workload() -> None:
-    result = _helm_template_result(
-        *PRIVATE_DB_ARGS,
-        "--set", "cellctl.enabled=false",
-        "--set-string", "cellctl.databaseEgressCidrs[0]=10.0.1.6/32",
-    )
-    assert result.returncode == 0, result.stderr
-    documents = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
-    assert not any(doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "cellctl" for doc in documents)
-    gateway = _find(documents, "Deployment", "exomem-cloud-gateway")
-    assert gateway["spec"]["template"]["spec"]["hostAliases"] == [
-        {"ip": "10.0.1.5", "hostnames": ["db.example.test"]}
-    ]
-
-
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_both_database_clients_are_pinned_to_the_k3s_server_node() -> None:
     # Decision 10: the shared database admits the Exomem roles only from the
@@ -285,8 +167,8 @@ def test_both_database_clients_are_pinned_to_the_k3s_server_node() -> None:
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_public_database_route_egresses_to_the_public_address() -> None:
-    # Decision 10: an empty alias resolves the certificate hostname through
-    # public DNS, so each client's 5432 egress must name the public /32.
+    # Decision 10: the certificate hostname resolves through public DNS, so
+    # each client's 5432 egress must name the public /32.
     result = _helm_template_result(
         "--set-string", "cellctl.databaseEgressCidrs[0]=203.0.113.20/32",
         "--set-string", "cloudGateway.databaseEgressCidrs[0]=203.0.113.20/32",
