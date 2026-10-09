@@ -205,7 +205,6 @@ def test_inventory_generator_does_not_emit_the_shared_database_host(
                 "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
                 "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
                 "control_db_server_ipv4": {"sensitive": False, "value": "192.0.2.20"},
-                "control_db_private_ip": {"sensitive": False, "value": "10.50.1.20"},
             }
         ),
         encoding="utf-8",
@@ -245,7 +244,6 @@ def test_inventory_generator_addresses_hosts_by_their_administration_address(
                 "server_ipv4": {"sensitive": False, "value": "192.0.2.10"},
                 "private_node_ip": {"sensitive": False, "value": "10.50.1.10"},
                 "control_db_server_ipv4": {"sensitive": False, "value": "192.0.2.20"},
-                "control_db_private_ip": {"sensitive": False, "value": "10.50.1.20"},
             }
         ),
         encoding="utf-8",

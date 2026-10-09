@@ -38,6 +38,7 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
     env.update(
         {
             "HOME": str(home),
+            "FASTMCP_HOME": str(home / "fastmcp"),
             "EXOMEM_VAULT_PATH": str(vault),
             "EXOMEM_DISABLE_EMBEDDINGS": "1",
             "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
@@ -2737,6 +2738,36 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cwd=work,
             timeout=max(60.0, args.request_timeout * 8),
         )
+        # Its own module: the wheel is built once above, and this journey restarts the
+        # service, rewrites one installed file and imports a large export.
+        print(
+            "product-e2e: S1 Records summary journey "
+            "(dark, released, import, fields, copy, restore, rollback)"
+        )
+        s1_journey = _run(
+            [
+                str(python),
+                str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
+                "--python",
+                str(python),
+                "--executable",
+                str(executable),
+                "--older-python",
+                args.older_python,
+                "--vault",
+                str(tmp / "s1-vault"),
+                "--work",
+                str(work / "s1-journey"),
+                "--home",
+                str(home),
+                "--request-timeout",
+                str(args.request_timeout),
+            ],
+            env=env,
+            cwd=work,
+            timeout=max(180.0, args.request_timeout * 14),
+        )
+        print(s1_journey.stdout.strip().splitlines()[-1])
     elapsed = time.monotonic() - started
     if elapsed > args.budget_seconds:
         raise TimeoutError(
@@ -2761,6 +2792,9 @@ def main() -> int:
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--executable", default="")
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument(
+        "--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
+    )
     parser.add_argument("--http-server", default="")
     parser.add_argument("--vault", default="")
     parser.add_argument("--work", default="")

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,19 +40,38 @@ def _export(
     tmp_path: Path,
     *,
     portable_state: bool = False,
-    collection_marker: bytes | None = None,
+    collection_marker: bool = False,
 ) -> portability.ExportResult:
     source = tmp_path / "source"
     init_module.init_vault(source)
     note = source / "Knowledge Base/Notes/restore-proof.md"
     note.write_text("# Restore proof\n\ncanonical-sentinel\n", encoding="utf-8")
-    if collection_marker is not None:
-        from exomem.collection_store import authority, replica
+    if collection_marker:
+        from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
 
-        marker = authority.marker_path(source)
-        marker.parent.mkdir(parents=True)
-        marker.write_bytes(collection_marker)
-        replica.replica_path(source).write_bytes(b"published replica")
+        from exomem import structured_collections as collections
+        from exomem.collection_store import authority, connection, replica
+        from exomem.collection_store.writer import CollectionWriter
+        from exomem.governance.principal import library_scope
+
+        with connection.open_writer(connection.store_path(source), lease_check=lambda: True) as handle, library_scope():
+            writer = CollectionWriter(source, handle)
+            writer.create_collection(manifest_path(), manifest_text(), why="restore fixture")
+            writer.append_record(CID, item={"title": "Canonical restore row"}, item_key=KEY, why="capture")
+            sid = handle.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+            manifest = collections.parse_manifest_bytes(source, manifest_path(), manifest_text().encode())
+            marker = authority.marker_path(source)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps({
+                "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+                "authority_epoch": 1,
+                "collections": [authority.marker_entry(CID, manifest.path, sid, manifest.semantic_profile,
+                                                       manifest.storage.source, manifest.storage.strategy)],
+                "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+            }))
+            published = replica.publish_replica(source, handle, authority_check=lambda: True,
+                                                deadline=time.monotonic() + 10)
+            assert published.status == "published"
     if portable_state:
         review = state_paths.vault_state_dir(source) / ".review-state.json"
         review.write_text('{"restored":true}\n', encoding="utf-8")
@@ -518,25 +538,19 @@ def test_restore_candidate_rejects_unpinned_or_online_inputs_before_publication(
     assert not (tmp_path / "target-vault").exists()
 
 
-def test_restore_mixed_marker_refuses_before_publication_or_security_activation(tmp_path: Path) -> None:
+def test_restore_mixed_marker_refuses_before_publication_or_security_activation(tmp_path: Path, monkeypatch) -> None:
     from exomem.collection_store import authority, replica
 
-    sid = "123e4567-e89b-42d3-a456-426614174000"
-    marker = json.dumps({
-        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
-        "authority_epoch": 1,
-        "collections": [{"collection_id": "123e4567-e89b-42d3-a456-426614174001",
-                         "manifest_path": "Knowledge Base/Records/Work/_collection.md",
-                         "authority": "store", "store_id": sid}],
-        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
-    }).encode()
-    exported = _export(tmp_path, collection_marker=marker)
+    exported = _export(tmp_path, collection_marker=True)
+    marker = authority.read_marker(tmp_path / "source")
+    replica_bytes = replica.replica_path(tmp_path / "source").read_bytes()
     request = _request(tmp_path, exported)
     activations = []
     with zipfile.ZipFile(exported.archive_path) as archive:
         assert archive.read(authority.marker_path(Path()).as_posix()) == marker
-        assert archive.read(replica.replica_path(Path()).as_posix()) == b"published replica"
+        assert archive.read(replica.replica_path(Path()).as_posix()) == replica_bytes
 
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ())
     with pytest.raises(OperatorFailure) as error:
         restore_candidate(request, bootstrap_security=lambda **kwargs: activations.append(kwargs))
 
@@ -546,7 +560,74 @@ def test_restore_mixed_marker_refuses_before_publication_or_security_activation(
     assert activations == []
     staging, = tmp_path.glob(".target-vault.restore-*")
     assert authority.read_marker(staging) == marker
-    assert replica.replica_path(staging).read_bytes() == b"published replica"
+    assert replica.replica_path(staging).read_bytes() == replica_bytes
+    from contextlib import closing
+
+    from test_collection_store_writer import CID, KEY
+
+    from exomem.collection_store import connection
+
+    with closing(connection.open_reader(replica.replica_path(staging))) as reader:
+        assert reader.execute("SELECT collection_id,item_key FROM items").fetchall() == [(CID, KEY)]
+        assert json.loads(reader.execute("SELECT values_json FROM items").fetchone()[0])["title"] == "Canonical restore row"
+
+
+
+@pytest.mark.parametrize("corruption", ["database", "scalar", "chain", "manifest", "marker"])
+def test_restore_rejects_digest_valid_malformed_collection_store(tmp_path: Path, corruption) -> None:
+    """Archive digests cannot make a malformed canonical store safe to publish."""
+    import sqlite3
+    from contextlib import closing
+
+    from exomem.collection_store import authority, replica
+
+    exported = _export(tmp_path, collection_marker=True)
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    payloads = {info.filename: body for info, body in entries}
+    replica_path = replica.replica_path(Path()).as_posix()
+    changed_path = replica_path
+    if corruption == "database":
+        payloads[replica_path] = b"private malformed database sentinel"
+    elif corruption == "marker":
+        changed_path = authority.marker_path(Path()).as_posix()
+        payloads[changed_path] = b'{"private malformed marker":'
+    else:
+        database = tmp_path / "malformed.sqlite"
+        database.write_bytes(payloads[replica_path])
+        with closing(sqlite3.connect(database)) as conn, conn:
+            if corruption == "scalar":
+                conn.execute("UPDATE store_meta SET value='private invalid scalar' WHERE key='commit_seq'")
+            elif corruption == "chain":
+                conn.execute("UPDATE store_meta SET value=? WHERE key='store_head_hash'", ("0" * 64,))
+            else:
+                # Corrupt only the detached archive copy; the live store's append-only guard stays intact.
+                conn.execute("DROP TRIGGER collection_manifests_append_only_update")
+                conn.execute("UPDATE collection_manifests SET manifest_text='private invalid manifest'")
+        payloads[replica_path] = database.read_bytes()
+    manifest = json.loads(payloads[portability.MANIFEST_NAME])
+    record = next(record for record in manifest["files"] if record["path"] == changed_path)
+    record.update(size=len(payloads[changed_path]), sha256=hashlib.sha256(payloads[changed_path]).hexdigest())
+    manifest.pop("overall_digest")
+    manifest["overall_digest"] = {"algorithm": "sha256", "value": portability._manifest_digest(manifest)}
+    payloads[portability.MANIFEST_NAME] = json.dumps(manifest).encode()
+    malicious = tmp_path / "malformed.zip"
+    with zipfile.ZipFile(malicious, "w") as archive:
+        for info, _ in entries:
+            archive.writestr(info, payloads[info.filename])
+    # Every archive digest is valid; the refusal must come from canonical structure validation.
+    portability.verify_export_archive(malicious)
+    request = _request(tmp_path, exported, archive_path=str(malicious),
+                       expected_archive_sha256=hashlib.sha256(malicious.read_bytes()).hexdigest())
+    activations = []
+    with pytest.raises(OperatorFailure) as error:
+        restore_candidate(request, bootstrap_security=lambda **kwargs: activations.append(kwargs))
+    assert error.value.code == "HOSTED_ARCHIVE_INTEGRITY_FAILURE"
+    assert "private" not in str(error.value)
+    assert not (tmp_path / "target-vault").exists()
+    assert not (tmp_path / "target-state/vault-state").exists()
+    assert not list(tmp_path.glob(".target-vault.restore-*"))
+    assert activations == []
 
 
 def test_restore_candidate_requires_empty_target_and_exclusive_lifetime_lock(

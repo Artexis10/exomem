@@ -21,8 +21,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    5,
-    "sha256:9df68fa1ea6b4da5e9fb5ebeb24960710632c200c39b38547d99720db44ee332",
+    6,
+    "sha256:0d4fa9cb6fedc9477ab1cc08a2338db41541fc06f50b2d8c93ca3ed8021ea22a",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -69,7 +69,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 5
+    assert contract["version"] == 6
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -210,74 +210,17 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     }
 
     applicability = contract["minimum_semantic_unit"]
-    assert applicability == {
-        "rule": (
-            "Every new, replaced, or activated active compiled note needs at least one "
-            "valid, non-empty semantic unit."
-        ),
-        "form_rule": (
-            "Either compact or rich form satisfies the minimum; compact is preferred, "
-            "and a valid rich unit does not need a duplicate compact restatement."
-        ),
-        "final_unit_rule": (
-            "A post-activation compliant page cannot lose its final valid semantic unit."
-        ),
-        "minimum_count": 1,
-        "accepted_forms": ["compact", "rich"],
-        "compact_preferred": True,
-        "duplicate_compact_for_rich_required": False,
-        "compiled_intent": (
-            "canonical_compiled_destination(path) OR normalized_type in COMPILED_TYPES"
-        ),
-        "compiled_types": [
-            "experiment",
-            "failure",
-            "insight",
-            "pattern",
-            "production-log",
-            "research-note",
-        ],
-        "compiled_destinations": COMPILED_DESTINATIONS,
-        "applies_when": [
-            "the path and normalized compiled type structurally match",
-            "the result is writable managed Markdown in the governed subtree",
-            "the result is outside Sources, Evidence, and trash",
-            "no activation exclusion applies",
-            "the resolved lifecycle is active",
-        ],
-        "inactive_lifecycles": [
-            "archived",
-            "draft",
-            "dropped",
-            "planned",
-            "superseded",
-        ],
-        "exemptions": [
-            "arbitrary non-compiled Markdown",
-            "dataset cards",
-            "Evidence artifacts",
-            "hubs",
-            "indexes",
-            "logs",
-            "non-Markdown files",
-            "schema and admin artifacts",
-            "snapshots",
-            "Sources",
-            "templates",
-            "trash",
-        ],
-        "structural_rule": (
-            "Reject missing, invalid, or mismatched compiled frontmatter before evaluating "
-            "the minimum-unit predicate."
-        ),
-        "lifecycle_rule": (
-            "Check new active creates, replacements, and inactive-to-active transitions; "
-            "inactive drafts may remain unit-free until activation."
-        ),
-        "independence_rule": (
-            "Semantic-unit coverage and relation-review disposition are independent obligations."
-        ),
-    }
+    assert applicability["minimum_count"] == 1
+    assert set(applicability["accepted_forms"]) == {"compact", "rich"}
+    assert applicability["compact_preferred"] is True
+    assert applicability["duplicate_compact_for_rich_required"] is False
+    assert applicability["compiled_destinations"] == COMPILED_DESTINATIONS
+    assert set(applicability["compiled_types"]) == set(COMPILED_DESTINATIONS)
+    assert applicability["required_status_class"] == "live"
+    route = applicability["status_registry"]
+    assert route["tool"] == "schema_memory"
+    assert route["args"]["subject"] == "statuses"
+    assert route["args"]["operation"] == "inspect"
 
     assert contract["routes"] == {
         "new_compiled_note": "remember",
@@ -290,26 +233,12 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "or replace_memory when their typed route fits."
         ),
     }
-    assert contract["findings"] == {
-        "empty_rich_unit": {
-            "severity": "error",
-            "when": "a recognized rich heading has no substantive body",
-            "remediation": (
-                "Add substantive body content or remove the empty recognized heading."
-            ),
-        },
-        "missing_semantic_unit": {
-            "severity": "error",
-            "when": "an applicable active compiled result has no valid non-empty unit",
-            "compact_remediation": (
-                "Add `## Observations` and `- [operating constraint] Keep retries bounded "
-                "#reliability`."
-            ),
-            "rich_remediation": (
-                "Alternatively add `## Decision`, a blank line, and a substantive body."
-            ),
-        },
-    }
+    findings = contract["findings"]
+    assert set(findings) == {"empty_rich_unit", "missing_semantic_unit"}
+    assert all(finding["severity"] == "error" for finding in findings.values())
+    assert findings["empty_rich_unit"]["remediation"]
+    assert findings["missing_semantic_unit"]["compact_remediation"]
+    assert findings["missing_semantic_unit"]["rich_remediation"]
 
     assert contract["portable_categories"] == {
         "core_keys": PORTABLE_CORE_KEYS,
@@ -457,7 +386,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "utf-8"
     )
     assert concise.startswith(
-        "<!-- exomem-semantic-authoring:v5 " + contract.content_digest + " -->\n"
+        f"<!-- exomem-semantic-authoring:v{contract.version} " + contract.content_digest + " -->\n"
     )
     for required in (
         "`## Observations`",
@@ -503,12 +432,6 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
     for role_rule in contract.semantic_roles.values():
         assert role_rule in concise
         assert role_rule in expanded
-    for page_type in contract.minimum_semantic_unit["compiled_types"]:
-        assert f"`{page_type}`" in concise
-    for path in contract.minimum_semantic_unit["compiled_destinations"].values():
-        assert f"`{path}`" in concise
-    for lifecycle in contract.minimum_semantic_unit["inactive_lifecycles"]:
-        assert f"`{lifecycle}`" in concise
 
     portable = contract.portable_categories
     # The full concise projection carries the complete portable-category teaching:

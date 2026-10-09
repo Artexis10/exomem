@@ -8,10 +8,12 @@ import itertools
 import json
 import math
 import re
+import sqlite3
 import stat
 import unicodedata
 import uuid
 from collections.abc import Callable, Container, Iterable, Mapping
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -171,6 +173,12 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "items": {"$ref": "#/$defs/field"},
             "units": {"type": "array", "items": {"type": "string"}},
             "link_kind": {"type": "string"},
+            # The S1 specification fixes the location class; declarations never infer it from names.
+            "classification": {"enum": [None, "location"]},
+            "properties": {"type": "object", "maxProperties": _MAX_SCHEMA_FIELDS,
+                           "additionalProperties": {"$ref": "#/$defs/field"}},
+            "depends_on": {"type": "array", "maxItems": _MAX_SCHEMA_FIELDS,
+                           "items": {"type": "string"}},
         },
         "additionalProperties": True,
     }
@@ -813,6 +821,11 @@ class FieldSpec:
     items: FieldSpec | None = None
     units: tuple[str, ...] = ()
     link_kind: str | None = None
+    #: A datetime field's per-record UTC offset field: the source-local day basis (§3).
+    offset: str | None = None
+    classification: str | None = None
+    properties: Mapping[str, FieldSpec] = field(default_factory=lambda: MappingProxyType({}))
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -936,6 +949,8 @@ class CollectionManifest:
     claims: Mapping[str, tuple[str, ...]] | None = None
     #: `claims.match`: frontmatter predicates that declare membership outright.
     claim_match: Mapping[str, tuple[str, ...]] | None = None
+    #: `items` (default) renders a view per row; `summary` keeps rows store-only.
+    view_mode: str = "items"
 
 
 @dataclass(frozen=True, slots=True)
@@ -988,6 +1003,9 @@ class UnreadableManifest:
     path: str
     code: str
     message: str
+    #: A store-routed row's profile as its marker entry records it, so a profile-scoped
+    #: consumer skips another profile's row; None when unrecorded, which counts for all.
+    semantic_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1183,12 +1201,16 @@ def discover_collections_with_errors(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
-    from .collection_store import authority
+    from .collection_store import authority, connection
+    from .collection_store.connection import CollectionStoreError
     from .collection_store.preview import bound_writer
 
     writer = bound_writer(root)
-    marker = authority.routing_marker(writer) if writer is not None else None
+    marker_error = None
+    store_error = None
+    profiles_verified = False
     if writer is not None:
+        marker = authority.routing_marker(writer)
         stored, store_errors = writer.discover_collections(
             authorize_path=authorize_path, max_candidates=max_candidates,
             max_raw_candidates=max_raw_candidates,
@@ -1196,21 +1218,72 @@ def discover_collections_with_errors(
         if marker is None:
             return stored, store_errors
     else:
+        try:
+            raw = authority.read_marker(root)
+            marker = None if raw is None else authority.parse_marker(root, raw)
+        except CollectionStoreError as error:
+            # Which collections the store owns is unknown, so none can be read as a file.
+            marker, marker_error = None, error
+        if marker is not None and connection.store_path(root).exists():
+            try:
+                with closing(connection.open_reader(connection.store_path(root))) as reader:
+                    reader.execute("BEGIN")
+                    for entry in marker["collections"]:
+                        authority.require_selected(reader, marker, entry, root=root)
+                    profiles_verified = True
+            except CollectionStoreError as error:
+                store_error = error
+            except (sqlite3.Error, OSError, CollectionError):
+                store_error = CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "canonical collection store is unreadable")
         stored, store_errors = (), ()
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
     authorize = authorize_path or (lambda _path: True)
+    notice_owner = False
+    if writer is None and (marker is not None or marker_error is not None):
+        from .governance import raw_protection
+        from .governance.principal import effective_principal
+
+        who = effective_principal()
+        # An unavailable C must remain visible in its owner's inventory; this grants a notice, never view bytes.
+        notice_owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(root, who)
     manifests: list[CollectionManifest] = list(stored)
     unreadable: list[UnreadableManifest] = list(store_errors)
     candidates = []
     for candidate in kb.rglob("_collection.md"):
         safe = _safe_candidate_rel(root, candidate)
-        if (safe is None or (marker is not None and authority.selected_entry(root, marker, safe[1]) is not None)
-                or not authorize(safe[1])):
+        if safe is None:
+            continue
+        entry = None if marker is None else authority.selected_entry(root, marker, safe[1])
+        if marker_error is not None or entry is not None:
+            if writer is None and (notice_owner or authorize(safe[1])):
+                # A routed manifest is the store's generated view, never a file collection,
+                # and only the service that serves the store can read it. Its profile comes
+                # from a marker checked against canon, never from that editable view.
+                # Without canon, an unknown profile keeps every affected sweep partial.
+                if marker_error is None and store_error is None:
+                    code, message = "COLLECTION_STORE_UNAVAILABLE", (
+                        "this collection lives in the collection store, which only the running Exomem service serves")
+                elif marker_error is None:
+                    # A valid marker still separates A/B from C when C's canonical state is unavailable.
+                    code, message = store_error.code, str(store_error)
+                else:
+                    code, message = marker_error.code, (
+                        "the collection store's authority marker is unreadable, so no collection here can be "
+                        "told apart from one the store owns")
+                unreadable.append(UnreadableManifest(
+                    safe[1], code, message,
+                    entry.get("semantic_profile") if entry is not None and profiles_verified else None))
+                if len(stored) + len(unreadable) > max_raw_candidates:
+                    raise CollectionError(
+                        "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
+                    )
+            continue
+        if not authorize(safe[1]):
             continue
         candidates.append(candidate)
-        if len(candidates) + len(stored) + len(store_errors) > max_raw_candidates:
+        if len(candidates) + len(stored) + len(unreadable) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
@@ -1716,6 +1789,8 @@ def _manifest_from_frontmatter(
     links = _parse_links(frontmatter.get("links", {}), schema)
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
+    view_mode = _parse_view_mode(frontmatter.get("view_mode", "items"), profile, storage,
+                                 presentation or item_filename or item_presentation, links)
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1739,7 +1814,37 @@ def _manifest_from_frontmatter(
         item_presentation=item_presentation,
         claims=claims,
         claim_match=claim_match,
+        view_mode=view_mode,
     )
+
+
+def _parse_view_mode(
+    value: object, profile: str, storage: StorageSpec, per_item_recipe: object, links: CollectionLinks
+) -> str:
+    """`items` keeps a view per row; `summary` has no per-row view or recipe to render.
+
+    A summary collection carries no planning join: each joined write would load
+    every summary row to find its partners. Joins are designed after S1.
+    """
+    if value not in ("items", "summary"):
+        raise CollectionError(
+            "INVALID_VIEW_MODE", "view_mode must be items or summary",
+            {"field": "view_mode", "received": value, "allowed": ["items", "summary"],
+             "example": "view_mode: summary"},
+        )
+    if value == "summary" and (profile != "records" or storage.strategy != "markdown-items" or per_item_recipe):
+        raise CollectionError(
+            "UNSUPPORTED_VIEW_MODE",
+            "summary view mode needs a Records markdown-items collection without per-item presentation",
+            {"field": "view_mode", "received": value},
+        )
+    joined = next((index for index, plan in enumerate(links.plans) if plan.join), None)
+    if value == "summary" and joined is not None:
+        raise CollectionError(
+            "UNSUPPORTED_VIEW_MODE", "a summary collection cannot carry a planning join",
+            {"field": f"links.plans[{joined}].join", "received": value},
+        )
+    return value
 
 
 def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
@@ -2329,6 +2434,18 @@ def _parse_schema(version: int, value: object) -> ItemSchema:
                 "INVALID_ITEM_SCHEMA", "item schema contains an invalid field name"
             )
         fields[name] = _parse_field_spec(raw_spec)
+    def validate_dependencies(spec):
+        if any(name not in fields for name in spec.depends_on):
+            raise CollectionError("INVALID_ITEM_SCHEMA", "field dependencies must name declared fields")
+        for child in spec.properties.values():
+            validate_dependencies(child)
+        if spec.items is not None:
+            validate_dependencies(spec.items)
+
+    for spec in fields.values():
+        validate_dependencies(spec)
+        if spec.offset is not None and getattr(fields.get(spec.offset), "type", None) != "string":
+            raise CollectionError("INVALID_ITEM_SCHEMA", "a datetime offset must name a declared string field")
     natural_raw = schema.get("natural_key", ())
     if not isinstance(natural_raw, list) or not natural_raw:
         raise CollectionError("INVALID_NATURAL_KEY", "item schema requires a natural_key list")
@@ -2675,7 +2792,24 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     link_kind = raw.get("link_kind")
     if link_kind is not None and type(link_kind) is not str:
         raise CollectionError("INVALID_ITEM_SCHEMA", "link_kind must be a string")
-    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind)
+    offset = raw.get("offset")
+    if offset is not None and (kind != "datetime" or depth or type(offset) is not str):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "offset names a top-level datetime field's offset field")
+    classification = raw.get("classification")
+    # Location is the fixed S1 field-protection class, not an inferred customer vocabulary.
+    if classification not in (None, "location"):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "unsupported field classification")
+    properties = raw.get("properties", {})
+    if not isinstance(properties, dict) or (properties and kind != "object") or len(properties) > _MAX_SCHEMA_FIELDS:
+        raise CollectionError("INVALID_ITEM_SCHEMA", "properties must declare bounded object fields")
+    if any(not isinstance(name, str) or not name or len(name.encode()) > 128 for name in properties):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "invalid object property")
+    dependencies = raw.get("depends_on", [])
+    if not isinstance(dependencies, list) or len(dependencies) > _MAX_SCHEMA_FIELDS or any(not isinstance(name, str) or not name for name in dependencies):
+        raise CollectionError("INVALID_ITEM_SCHEMA", "depends_on must name declared fields")
+    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset, classification,
+                     MappingProxyType({name: _parse_field_spec(spec, depth + 1) for name, spec in properties.items()}),
+                     tuple(dependencies))
 
 
 def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:
@@ -2848,8 +2982,15 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         assert spec.items is not None
         for item in value:
             _validate_field_value(name, item, spec.items)
-    if spec.type == "object" and (not isinstance(value, Mapping) or not _is_json_value(value)):
-        raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
+    if spec.type == "object":
+        if not isinstance(value, Mapping) or not _is_json_value(value):
+            raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
+        for child, child_spec in spec.properties.items():
+            path = f"{name}.{child}"
+            if child_spec.required and child not in value:
+                raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {path}")
+            if child in value:
+                _validate_field_value(path, value[child], child_spec)
     if spec.type == "link" and type(value) is not str:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.enum and not any(

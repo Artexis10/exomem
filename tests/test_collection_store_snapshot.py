@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -248,6 +249,26 @@ def test_sqlite_integrity_does_not_make_malformed_store_identity_valid(genesis, 
     assert list(stage.iterdir()) == []
 
 
+@pytest.mark.parametrize("mutation", [
+    "DELETE FROM alembic_version",
+    "UPDATE alembic_version SET version_num='unknown'",
+    "UPDATE alembic_version SET version_num='7'",
+    "ALTER TABLE alembic_version RENAME COLUMN version_num TO invalid_column",
+])
+def test_snapshot_rejects_contradictory_installation_revision(genesis, mutation, tmp_path):
+    root, stage, writer = genesis
+    with snapshot.staged_snapshot(root, directory=stage, deadline=time.monotonic() + 10) as artifact:
+        restored = tmp_path / "restored.sqlite"
+        shutil.copyfile(artifact.path, restored)
+        with closing(sqlite3.connect(restored, isolation_level=None)) as conn:
+            conn.execute(mutation)
+            assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            with pytest.raises(connection.CollectionStoreError, match="COLLECTION_SNAPSHOT_INVALID"):
+                snapshot._validate(conn, lambda: None)
+        assert schema.schema_version(writer.connection) == schema.SCHEMA_VERSION
+    assert list(stage.iterdir()) == []
+
+
 def test_metadata_head_must_match_copied_transaction_tail(genesis) -> None:
     # An individually valid hash can still falsely claim a different commit.
     root, stage, writer = genesis
@@ -360,15 +381,22 @@ def test_validation_cancellation_is_reported_as_cancellation(genesis, monkeypatc
     # SQL progress-handler interruption must retain its cancellation cause.
     root, stage, writer = genesis
     _commit(writer, initial=True)
-    validating = False
+    validating = begun = False
+    interrupted = []
     original_connect = sqlite3.connect
+    monotonic = time.monotonic
 
     class ValidationConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):
-            nonlocal validating
+            nonlocal validating, begun
+            begun |= sql == "PRAGMA journal_mode=DELETE"  # the copy's validation has begun
             if sql == "PRAGMA integrity_check":
                 validating = True
-            return super().execute(sql, *args, **kwargs)
+            try:
+                return super().execute(sql, *args, **kwargs)
+            except sqlite3.OperationalError:
+                interrupted.append(sql)
+                raise
 
     def connect(*args, **kwargs):
         if not kwargs.get("uri"):
@@ -376,14 +404,31 @@ def test_validation_cancellation_is_reported_as_cancellation(genesis, monkeypatc
         return original_connect(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", connect)
+    # The integrity check outlasts one recheck interval, so the handler consults ``cancelled``.
+    monkeypatch.setattr(
+        time, "monotonic", lambda: monotonic() + (snapshot._RECHECK_SECONDS if validating else 0)
+    )
     with pytest.raises(connection.CollectionStoreError, match="COLLECTION_SNAPSHOT_CANCELLED"):
         with snapshot.staged_snapshot(
             root, directory=stage, deadline=time.monotonic() + 10, cancelled=lambda: validating
         ):
             pytest.fail("cancelled validation was yielded")
-    assert validating
+    assert interrupted == ["PRAGMA integrity_check"]
     assert list(stage.iterdir()) == []
     assert writer.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+    # A transient error from the caller's own check at a validation phase boundary, such as a
+    # locked store read, stays that error: it says nothing about the copy.
+    begun, locked = False, sqlite3.OperationalError("database is locked")
+
+    def transient():
+        if begun:
+            raise locked
+        return False
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        with snapshot.staged_snapshot(root, directory=stage, deadline=time.monotonic() + 10, cancelled=transient):
+            pytest.fail("validation that could not check its caller was yielded")
+    assert raised.value is locked
 
 
 def test_reader_timeout_override_preserves_default(genesis) -> None:

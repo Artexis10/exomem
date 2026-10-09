@@ -87,14 +87,15 @@ def test_connect_relation_resolution_has_one_invalid_argument_matrix(
 
 
 def test_relation_proposal_is_read_only_and_returns_a_complete_delta(tmp_path: Path) -> None:
-    result = commands.op_schema_memory(
-        tmp_path / "vault",
-        subject="relations",
-        operation="propose-relation",
-        proposal=_complete_relation_proposal(),
-        continuation=None,
-        limit=4,
-    )
+    with library_scope():
+        result = commands.op_schema_memory(
+            tmp_path / "vault",
+            subject="relations",
+            operation="propose-relation",
+            proposal=_complete_relation_proposal(),
+            continuation=None,
+            limit=4,
+        )
 
     assert result["valid"] is True
     assert result["delta"] == {

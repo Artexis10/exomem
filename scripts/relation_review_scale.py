@@ -38,7 +38,10 @@ from exomem import (
 )
 
 _KB = "Knowledge Base/Notes/Insights"
-_FIXED_INDEXED_QUERIES = 8
+# Statements per available queue request: one streaming read of file metadata,
+# then six bounded candidate-family queries. The statement count is fixed; the
+# rows the streaming read examines grow with the corpus.
+_FIXED_INDEXED_QUERIES = 7
 _POST_RECOVERY_READS = 1
 _QUEUE_STATUSES = frozenset({"available", "warming", "pending", "unavailable"})
 _SUBSTITUTE_KINDS = (
@@ -1242,7 +1245,7 @@ def _reference_samples() -> list[dict[str, Any]]:
                 "snapshot_generation": 42,
                 "snapshot_current": True,
                 "snapshots": 1,
-                "queries": 8,
+                "queries": _FIXED_INDEXED_QUERIES,
                 "markdown_reads": 0,
                 "markdown_parses": 0,
                 "markdown_walks": 0,
@@ -1322,11 +1325,11 @@ def reference_report() -> dict[str, Any]:
         "structural": {
             "requests_measured": 21,
             "snapshot_count": 20,
-            "indexed_query_count": 160,
+            "indexed_query_count": 20 * _FIXED_INDEXED_QUERIES,
             "max_snapshots_per_request": 1,
             "min_snapshots_per_available_request": 1,
-            "max_indexed_queries_per_request": 8,
-            "min_indexed_queries_per_available_request": 8,
+            "max_indexed_queries_per_request": _FIXED_INDEXED_QUERIES,
+            "min_indexed_queries_per_available_request": _FIXED_INDEXED_QUERIES,
             "markdown_reads": 0,
             "markdown_parses": 0,
             "markdown_walks": 0,

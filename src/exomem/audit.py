@@ -95,12 +95,11 @@ from typing import Any, Literal
 
 import yaml
 
-from .collection_store.preview import canonical_read, selected_writer
-
 from . import (
     access,
     contradiction_stance,
     indexes,
+    lifecycle_statuses,
     logging_config,
     relation_registry,
     reserved_paths,
@@ -114,6 +113,7 @@ from . import entity_types as entity_types_module
 from . import find as find_module
 from . import provenance as provenance_module
 from . import vault as vault_module
+from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     _mask_code_spans,
@@ -483,12 +483,14 @@ def audit(
     now: dt.datetime | None = None,
     semantic_detail: Literal["actionable", "full"] = "actionable",
     retain_reflected_observations: bool = False,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
     `categories` filters which checks to run (default: all). Read-only.
     `today` is dependency-injectable for tests (used by unprocessed-source aging).
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     selected = set(categories) if categories else set(ALL_CATEGORIES)
     valid_categories = set(ALL_CATEGORIES) | set(OPTIONAL_CATEGORIES)
     invalid = selected - valid_categories
@@ -513,7 +515,7 @@ def audit(
             authorize = (
                 egress.release_walk_filter(vault_root) if role_state["origins"] else None
             ) or (lambda _path: True)
-            role_findings, coverage = artifact_role_state.inspect(vault_root, role_state, authorize)
+            role_findings, coverage = artifact_role_state.inspect(vault_root, role_state, authorize, status_basis=status_basis)
             findings.extend(f for f in role_findings if f.category in role_families)
             metadata["coverage"] = {key: coverage[key] for key in sorted(role_families)}
         except Exception:  # noqa: BLE001 - measurement failure is explicit, never a write failure
@@ -533,7 +535,7 @@ def audit(
     if "tag_inconsistency" in selected:
         findings.extend(_check_tag_inconsistency(pages))
     if "frontmatter_compliance" in selected:
-        findings.extend(_check_frontmatter_compliance(pages, vault_root))
+        findings.extend(_check_frontmatter_compliance(pages, vault_root, status_basis=status_basis))
     if "entity_type_unregistered" in selected:
         findings.extend(_check_unregistered_entity_types(vault_root, pages))
     if "unregistered_project_key" in selected:
@@ -547,13 +549,21 @@ def audit(
     if "relevance_pairs_pending" in selected:
         findings.extend(_check_relevance_pairs_pending())
     if "stale_review" in selected:
-        findings.extend(_check_stale_review(vault_root, pages, today=today))
+        findings.extend(
+            _check_stale_review(vault_root, pages, today=today, status_basis=status_basis)
+        )
     if "unfinished_experiments" in selected:
-        findings.extend(_check_unfinished_experiments(vault_root, pages, today=today))
+        findings.extend(
+            _check_unfinished_experiments(vault_root, pages, today=today, status_basis=status_basis)
+        )
     if "prediction_window" in selected:
-        findings.extend(_check_prediction_window(vault_root, pages, today=today))
+        findings.extend(
+            _check_prediction_window(vault_root, pages, today=today, status_basis=status_basis)
+        )
     if "question_aging" in selected:
-        findings.extend(_check_question_aging(vault_root, pages, today=today))
+        findings.extend(
+            _check_question_aging(vault_root, pages, today=today, status_basis=status_basis)
+        )
     if "unreflected_outcomes" in selected:
         outcome_findings, outcome_metadata = _check_unreflected_outcomes(vault_root)
         findings.extend(outcome_findings)
@@ -567,26 +577,33 @@ def audit(
                 now=now,
                 retain_reflected=retain_reflected_observations,
                 cursors_out=backfill_cursors,
+                status_basis=status_basis,
             )
         )
     if "supersession_integrity" in selected:
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
-        findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
+        findings.extend(
+            _check_corpus_contradictions(vault_root, pages, today=today, status_basis=status_basis)
+        )
     if "scope_divergence_semantic" in selected:
-        findings.extend(_check_scope_divergence_semantic(vault_root, pages))
+        findings.extend(
+            _check_scope_divergence_semantic(vault_root, pages, status_basis=status_basis)
+        )
     if "entity_recurrence" in selected:
-        findings.extend(_check_entity_recurrence(vault_root, pages))
+        findings.extend(_check_entity_recurrence(vault_root, pages, status_basis=status_basis))
     if "collection_candidate" in selected:
-        findings.extend(_check_collection_candidate(vault_root, pages))
+        findings.extend(_check_collection_candidate(vault_root, pages, status_basis=status_basis))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
-        findings.extend(_check_relation_debt(vault_root, pages))
+        findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
     if "missing_sources" in selected:
-        findings.extend(_check_missing_sources(vault_root, pages))
+        findings.extend(_check_missing_sources(vault_root, pages, status_basis=status_basis))
     if "derivation_double_counting" in selected:
-        findings.extend(_check_derivation_double_counting(vault_root, pages))
+        findings.extend(
+            _check_derivation_double_counting(vault_root, pages, status_basis=status_basis)
+        )
     if "governance_receipts" in selected:
         findings.extend(_check_governance_receipts(vault_root))
     if "bridge_review" in selected:
@@ -1909,14 +1926,18 @@ def _complete_semantic_category_summary(
 
 
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
-    """Walk the KB once, parse every .md, return ParsedPage objects."""
-    from .governance import raw_protection
+    """Parse the admitted Markdown pages in the knowledge base."""
+    from .governance import egress, raw_protection
     from .governance.principal import effective_principal
 
     who = effective_principal()
+    admitted = egress.restricted_release_filter(vault_root)
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
-        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+        rel = path.relative_to(vault_root).as_posix()
+        if not raw_protection.permits(vault_root, rel, who):
+            continue
+        if admitted is not None and not admitted(rel):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -2799,6 +2820,8 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
 def _check_frontmatter_compliance(
     pages: list[find_module.ParsedPage],
     vault_root: Path,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface per-page-type frontmatter problems.
 
@@ -2810,8 +2833,10 @@ def _check_frontmatter_compliance(
       (the convention for cross-project patterns).
     """
     findings: list[AuditFinding] = []
+    from . import activation, lifecycle_statuses
     from . import project_keys as project_keys_module
 
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     tenant_scoped = project_keys_module.load_project_registry(vault_root).tenant_scoped
     for page in pages:
         fm = page.frontmatter
@@ -2865,6 +2890,19 @@ def _check_frontmatter_compliance(
                     path=page.rel_path,
                     detail=detail,
                     proposed_fix=proposed_fix,
+                    )
+                )
+        if activation.normalized_page_type(page_type) in activation._CONNECTABLE_TYPES:
+            classification = status_basis.classify(fm.get("status"))
+            if classification.unregistered:
+                findings.append(
+                    AuditFinding(
+                        category="frontmatter_compliance",
+                        severity="warn",
+                        path=page.rel_path,
+                        detail=f"Unregistered page status {fm.get('status')!r} currently has class live.",
+                        proposed_fix="Inspect the statuses registry; reuse a meaning or propose a justified definition.",
+                        meta={"code": "unregistered_status"},
                     )
                 )
         required = _REQUIRED_FIELDS_BY_TYPE.get(page_type)
@@ -3332,16 +3370,18 @@ def relation_debt_eligible(
     *,
     page_type: str | None,
     rel_path: str,
-    status: str | None,
+    status: object,
     tags: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> bool:
     """Whether one page participates in the shared relation-debt predicate."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if page_type not in _RELATION_DEBT_TYPES:
         return False
     path = PurePosixPath(str(rel_path).replace("\\", "/"))
     if path.name in ("index.md", "log.md"):
         return False
-    if status in ("superseded", "archived", "draft", "dropped"):
+    if not status_basis.classify(status).live:
         return False
     if access.access_tier(vault_root, path.as_posix()) != access.TIER_READ_WRITE:
         return False
@@ -3354,8 +3394,11 @@ def relation_debt_eligible(
 def _check_relation_debt(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface active compiled pages with no explicit outbound Markdown edges."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     findings: list[AuditFinding] = []
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
@@ -3364,8 +3407,9 @@ def _check_relation_debt(
             vault_root,
             page_type=page.page_type,
             rel_path=page.rel_path,
-            status=page.status,
+            status=page.frontmatter.get("status"),
             tags=page.tags,
+            status_basis=status_basis,
         ):
             continue
 
@@ -3422,15 +3466,18 @@ _SOURCES_REQUIRED_TYPES = frozenset({"research-note", "insight", "failure", "pat
 def _check_missing_sources(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface active compiled pages that should cite provenance and cite none."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     findings: list[AuditFinding] = []
     for page in pages:
         if page.page_type not in _SOURCES_REQUIRED_TYPES:
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if page.status in ("superseded", "archived", "draft", "dropped"):
+        if not status_basis.classify(page.frontmatter.get("status")).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -3675,6 +3722,8 @@ def _nearest_shared_roots(
 def _check_derivation_double_counting(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Walk `sources:` chains for support-collapse and circular derivation.
 
@@ -3684,6 +3733,7 @@ def _check_derivation_double_counting(
     support-collapse candidate (a review candidate, not a defect) — never
     `error`.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     direct_sources, raw_by_key = _derivation_direct_sources(pages)
     pages_by_canon = {_relevance_canon(page.rel_path): page for page in pages}
     max_depth, max_edges = _derivation_traversal_limits()
@@ -3755,7 +3805,7 @@ def _check_derivation_double_counting(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if page.status in ("superseded", "archived", "draft", "dropped"):
+        if not status_basis.classify(page.frontmatter.get("status")).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -3859,7 +3909,6 @@ def _check_derivation_double_counting(
 # The set matches what `_check_relation_debt`, `activation.py`, and
 # `semantic_contract.py` already treat as inactive; it previously claimed to
 # mirror that discipline while omitting `dropped` and `planned`.
-_EXPERIMENT_PARKED_STATUSES = frozenset({"archived", "superseded", "draft", "dropped", "planned"})
 
 # `duration:` is free text by contract ("30 days", "2 weeks", "ongoing"), so the
 # span parser is deliberately small and fails CLOSED: anything it does not
@@ -3904,6 +3953,7 @@ def _check_unfinished_experiments(
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface experiments whose declared window closed with no result recorded.
 
@@ -3922,6 +3972,7 @@ def _check_unfinished_experiments(
     `find` ordering is untouched. Ordered oldest-first, because the context
     needed to write a result up decays with time.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     today = today or dt.date.today()
     rows: list[tuple[int, str, AuditFinding]] = []
     for page in pages:
@@ -3929,7 +3980,7 @@ def _check_unfinished_experiments(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if (page.status or "") in _EXPERIMENT_PARKED_STATUSES:
+        if not status_basis.classify(page.frontmatter.get("status")).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -4005,7 +4056,6 @@ _CHECK_BY_PREFILTER = re.compile(r"check[\s_-]*by", re.IGNORECASE)
 # due prediction on a parked page is not outstanding work. Same inactive set the
 # rest of the codebase uses — `dropped` and `planned` included, because a
 # prediction on a note the author dropped is not an obligation anyone still owes.
-_PREDICTION_PARKED_STATUSES = frozenset({"superseded", "archived", "draft", "dropped", "planned"})
 
 
 def _check_prediction_window(
@@ -4013,6 +4063,7 @@ def _check_prediction_window(
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface authored `check_by` dates that came due with nothing recorded.
 
@@ -4046,6 +4097,7 @@ def _check_prediction_window(
     Measurement-only at `info`: never judges whether the prediction held, never
     writes a verdict, never touches `find` ordering.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     today = today or dt.date.today()
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
@@ -4054,7 +4106,7 @@ def _check_prediction_window(
     for page in pages:
         if page.path.name in ("index.md", "log.md"):
             continue
-        if (page.status or "") in _PREDICTION_PARKED_STATUSES:
+        if not status_basis.classify(page.frontmatter.get("status")).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -4226,6 +4278,7 @@ def _outcome_bindings(
     unevaluated: list[dict[str, Any]] = [
         {"collection": row.path, "reason": "unreadable_manifest", "error_code": row.code}
         for row in unreadable
+        if row.semantic_profile in (None, "records")  # only Records manifests declare bindings
     ]
     for manifest in manifests:
         if manifest.semantic_profile != "records":
@@ -4874,6 +4927,7 @@ def _check_unreflected_observations(
     now: dt.datetime | None = None,
     retain_reflected: bool = False,
     cursors_out: dict[str, str] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Claimed compiled/Evidence observations with no reflecting record.
 
@@ -4881,6 +4935,7 @@ def _check_unreflected_observations(
     resumes, keyed by its collection id and claims signal, for the recompute to
     persist.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import collection_claims, due_state, memory_refs, record_formats
 
     root = Path(vault_root)
@@ -4964,12 +5019,10 @@ def _check_unreflected_observations(
             or page.rel_path.startswith(f"{kb_prefix()}Evidence/")
         ):
             continue
-        if not authorize(page.rel_path) or (page.status or "active") in {
-            "archived",
-            "draft",
-            "dropped",
-            "superseded",
-        }:
+        if (
+            not authorize(page.rel_path)
+            or not status_basis.classify(page.frontmatter.get("status")).live
+        ):
             continue
         exomem_id = str(page.frontmatter.get("exomem_id") or "")
         observation_ref = memory_refs.memory_ref(exomem_id) if exomem_id else ""
@@ -5215,9 +5268,13 @@ def _collection_candidate_finding(
 
 
 def _check_collection_candidate(
-    vault_root: Path, pages: list[find_module.ParsedPage]
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Recurring longitudinal unit terms not covered by effective claims."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import collection_candidate, due_state, memory_refs, project_keys
 
     root = Path(vault_root)
@@ -5230,7 +5287,7 @@ def _check_collection_candidate(
             page.rel_path
         ):
             continue
-        if (page.status or "active") in {"archived", "draft", "dropped", "superseded"}:
+        if not status_basis.classify(page.frontmatter.get("status")).live:
             continue
         moment = temporal.parse(page.frontmatter.get("created") or page.frontmatter.get("updated"))
         if moment is None:
@@ -5425,7 +5482,6 @@ _QUESTION_PREFILTER = re.compile(r"question", re.IGNORECASE)
 
 #: A unit inherits its page's standing, so a question on a parked page is not
 #: outstanding work. Same inactive set the sibling lifecycle queues use.
-_QUESTION_PARKED_STATUSES = _PREDICTION_PARKED_STATUSES
 
 
 def _check_question_aging(
@@ -5433,6 +5489,7 @@ def _check_question_aging(
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface governed question units that have sat unanswered for a while.
 
@@ -5457,6 +5514,7 @@ def _check_question_aging(
     old as the page said it was, and a page with no parseable date is skipped
     rather than assigned an invented one.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     today = today or dt.date.today()
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
@@ -5465,7 +5523,7 @@ def _check_question_aging(
     for page in pages:
         if page.path.name in ("index.md", "log.md"):
             continue
-        if (page.status or "") in _QUESTION_PARKED_STATUSES:
+        if not status_basis.classify(page.frontmatter.get("status")).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -5965,6 +6023,7 @@ def _check_stale_review(
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Surface review candidates: active compiled conclusions that are old AND
     rarely surfaced in `find` AND low inbound-link degree.
@@ -5988,6 +6047,7 @@ def _check_stale_review(
     sorts to the top); falls back to oldest-first when the access signal is
     gated/absent. Activation is SORT-ONLY — it never changes who is flagged.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     today = today or dt.date.today()
     min_age_days, max_inbound, max_access = _stale_thresholds()
     degree = _inbound_degree(pages)
@@ -6001,7 +6061,7 @@ def _check_stale_review(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if page.status in ("superseded", "archived", "draft"):
+        if not status_basis.classify(page.frontmatter.get("status")).recurrence_evidence:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -6149,18 +6209,24 @@ def _pair_dormancy(
     return max(_one(rel_a), _one(rel_b))
 
 
-def _is_active_compiled_rw(vault_root: Path, page: find_module.ParsedPage) -> bool:
+def _is_active_compiled_rw(
+    vault_root: Path,
+    page: find_module.ParsedPage,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> bool:
     """An active, read-write, COMPILED conclusion — the only pages a contradiction
     can actually be reconciled against (edit/replace/supersede). Mirrors the scope
     of `corpus_aware.detect_contradictions` + `_check_stale_review`: a compiled type
     (`find._COMPILED_TYPES`), not an index/log hub, not superseded/archived/draft,
     and in a writeable (read-write) tree (auto-excludes readonly curated trees,
     append-only Sources/Evidence, and excluded subtrees)."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if page.page_type not in find_module._COMPILED_TYPES:
         return False
     if page.path.name in ("index.md", "log.md"):
         return False
-    if page.status in ("superseded", "archived", "draft"):
+    if not status_basis.classify(page.frontmatter.get("status")).recurrence_evidence:
         return False
     if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
         return False
@@ -6432,6 +6498,8 @@ def _scope_divergence_semantic_finding(
 def _check_scope_divergence_semantic(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Corpus sweep for pages whose unit GEOMETRY has outgrown their declared scope.
 
@@ -6446,10 +6514,13 @@ def _check_scope_divergence_semantic(
     sweep, never a per-page query. Pages with no stored vectors are skipped without
     being judged, because absence of evidence must never become advice.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return []
     eligible = {
-        page.rel_path: page for page in pages if _is_active_compiled_rw(vault_root, page)
+        page.rel_path: page
+        for page in pages
+        if _is_active_compiled_rw(vault_root, page, status_basis=status_basis)
     }
     if not eligible:
         return []
@@ -6748,6 +6819,8 @@ def _entity_recurrence_resolution_entries(
 def _check_entity_recurrence(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """Corpus sweep for identities the vault keeps reaching for and never wrote.
 
@@ -6760,8 +6833,8 @@ def _check_entity_recurrence(
     Cost is bounded by construction: EXACTLY ONE path-only vault walk per sweep
     for the existence set, one registry index built from those same parsed pages,
     and then one pass over the bodies. Nothing is embedded, no model is called,
-    and no `Entities/` glob runs per candidate. The sweep opens exactly one file —
-    the digest-cached entity-type registry — plus, for each identity that has
+    and no `Entities/` glob runs per candidate. The sweep reads the digest-cached entity-type registry and admits status
+    definitions only for unfamiliar evidence labels. For each identity that has
     ALREADY cleared spread and the registry and whose name carries a dot, one
     existence probe per distinct suffixed target. That probe is what stops the
     sensor deciding from punctuation that `Node.js` or `Dr. Ines Roth` is a file.
@@ -6798,6 +6871,7 @@ def _check_entity_recurrence(
             entity_types=entity_types,
             indexable=lambda rel_path: access.is_indexable(vault_root, rel_path),
             attachment_probe=attachment_probe,
+            status_basis=status_basis,
         )
     ]
 
@@ -6807,6 +6881,7 @@ def _check_corpus_contradictions(
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> list[AuditFinding]:
     """The contradiction queue: authored conflicts first, then measured proximity.
 
@@ -6820,6 +6895,7 @@ def _check_corpus_contradictions(
     authored edge is strictly the stronger signal, and two rows for one decision
     would double the pair's RRF vote in `attention`.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     pairs = contradiction_stance.asserted_pairs(vault_root)
     if not pairs and os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # Nothing authored and no sidecar lane to run: keep the pre-existing
@@ -6827,7 +6903,9 @@ def _check_corpus_contradictions(
         # the eligibility walk this category used to skip entirely.
         return []
     eligible: dict[str, find_module.ParsedPage] = {
-        page.rel_path: page for page in pages if _is_active_compiled_rw(vault_root, page)
+        page.rel_path: page
+        for page in pages
+        if _is_active_compiled_rw(vault_root, page, status_basis=status_basis)
     }
     asserted, asserted_keys = _asserted_contradictions(eligible, pairs)
     return asserted + _proximity_contradictions(

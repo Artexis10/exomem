@@ -530,7 +530,13 @@ def _eligible_page(source: str, page: Any, *, root: Path, identity: str) -> bool
         return False
     if identity_key(Path(source).stem) == identity:
         return False
-    return counts_as_evidence(page, indexable=access.is_indexable(root, source))
+    from . import lifecycle_statuses
+
+    return counts_as_evidence(
+        page,
+        indexable=access.is_indexable(root, source),
+        status_basis=lifecycle_statuses.Basis(root),
+    )
 
 
 def _linking_page_eligible(

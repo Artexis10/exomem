@@ -1308,26 +1308,6 @@ def test_a_hyphenated_name_pairs_on_both_of_its_stems() -> None:
     ) == (("brien", "o"),)
 
 
-def test_the_retired_vocabulary_is_the_trees_own() -> None:
-    """Retirement is not a word list this module gets to invent.
-
-    It did: `retired` and `deprecated` appear as a page status nowhere else
-    in the tree, while `dropped` — which `activation._INACTIVE_STATUSES`
-    has always carried — was missing, so a page the author dropped was
-    carried and its unit injected as current memory.
-
-    The set is now the tree's own inactive statuses minus the two that mean
-    pre-active rather than retired. Pinned as a relation so the two cannot
-    drift apart: a status added there arrives here without anyone noticing
-    it needed to.
-    """
-    from exomem import activation
-
-    assert working_set.RETIRED_PAGE_STATUSES == frozenset(
-        activation._INACTIVE_STATUSES
-    ) - {"draft", "planned"}
-    assert "dropped" in working_set.RETIRED_PAGE_STATUSES
-    assert working_set.RETIRED_PAGE_STATUSES == {"archived", "dropped", "superseded"}
 
 
 def test_a_draft_page_is_still_a_candidate(vault: Path) -> None:
@@ -1568,7 +1548,7 @@ def test_the_fetch_window_outgrows_the_rarity_cap(
     monkeypatch.setattr(
         working_set,
         "_is_current_page",
-        lambda _root, rel: "superseded-" not in rel,
+        lambda _root, rel, **_k: "superseded-" not in rel,
     )
     monkeypatch.setattr(working_set, "rare_document_cap", lambda _pages: 11)
 
@@ -2848,3 +2828,125 @@ def test_the_band_does_not_yield_to_a_page_the_carry_cannot_serve(
     assert any("400 kg" in unit["text"] for unit in packet["units"])
     assert {"role": "material", "reason": "lane_failed" if failed else "no_material"} in packet["missing"]
     assert not any(unit["provenance"]["path"] == CARRY_PAGE for unit in packet["units"])
+
+
+def test_status_save_and_restore_change_warm_carry_without_rewriting_pages(
+    carry_vault: Path,
+) -> None:
+    from exomem import commands, file_watcher, freshness
+    from exomem import find as find_module
+    from exomem.governance.principal import library_scope
+
+    page = carry_vault / CARRY_PAGE
+    page.write_text(page.read_text().replace("status: active", "status: paused-locally"))
+    original = page.read_bytes()
+    file_watcher.FileWatcher(carry_vault)._reconcile_once(seed=True)
+    assert lexstore.get_store(carry_vault).rebuild_atomic() is True
+    assert all(freshness.is_live(carry_vault, scope) for scope in freshness.SCOPES)
+    assert lexstore.runtime_retrieval_catalog_proof(carry_vault, schedule_repair=False) is not None
+    with library_scope():
+        assert find_module.find(carry_vault, query="quillon", mode="keyword", result_level="unit")
+        warm = commands.op_activate_context(carry_vault, turn=CARRY_TURN)
+        assert CARRY_PAGE in {anchor["path"] for anchor in warm["anchors"]}
+        inspected = commands.op_schema_memory(carry_vault, subject="statuses", operation="inspect")
+        saved = commands.op_schema_memory(
+            carry_vault,
+            subject="statuses",
+            operation="save",
+            proposal={
+                "upsert": {
+                    "paused-locally": {
+                        "label": "Paused locally",
+                        "attributes": {"class": "abandoned"},
+                    }
+                }
+            },
+            expected_hash=inspected["content_hash"],
+            why="the work has stopped",
+        )
+        assert saved["saved"]["content_hash"] != inspected["content_hash"]
+        stopped = commands.op_activate_context(carry_vault, turn=CARRY_TURN)
+        assert stopped["generation"]["lexical_evidence"] == "available"
+        assert CARRY_PAGE not in {anchor["path"] for anchor in stopped["anchors"]}
+        history = commands.op_schema_memory(carry_vault, subject="statuses", operation="history")
+        restored = commands.op_schema_memory(
+            carry_vault,
+            subject="statuses",
+            operation="restore",
+            version=history["versions"][0]["version"],
+            expected_hash=history["content_hash"],
+            why="the owner resumes the work",
+        )
+        assert restored["valid"] and restored["saved"]
+        resumed = commands.op_activate_context(carry_vault, turn=CARRY_TURN)
+        assert CARRY_PAGE in {anchor["path"] for anchor in resumed["anchors"]}, resumed
+        debt = commands.op_maintain_memory(
+            carry_vault,
+            mode="audit",
+            categories=["frontmatter_compliance"],
+        )
+        assert any(
+            finding["path"] == CARRY_PAGE
+            and finding.get("meta", {}).get("code") == "unregistered_status"
+            for finding in debt["findings"]
+        )
+    assert page.read_bytes() == original
+
+
+# Match the large-vault envelope for setup and required graph teardown.
+@pytest.mark.timeout(900)
+def test_hidden_status_contributors_do_not_change_public_carry_at_production_volume(
+    vault: Path,
+) -> None:
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+
+    _seed_prose_corpus(vault, bulk=2000)
+    _seed_carry_pages(vault)
+    write_scope(vault, paths="Notes/Withheld/**", name="Withheld contributors")
+    write_rule(vault, ceiling=0)
+    _reset_caches()
+    # This admitted unfamiliar status never matches either turn. It must not
+    # make rarity consult a withheld overlay just to count the denominator.
+    _write(
+        vault / "Knowledge Base/Notes/Research/unrelated-dossier.md",
+        "---\ntype: research-note\nstatus: awaiting-review\n---\n\nUnrelated dossier.\n",
+    )
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes/statuses.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\npaths: ["_Schema/statuses.yaml"]\n'
+    )
+    (governance / "rules/statuses.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
+    )
+    lexstore.ensure_fresh(vault)
+    _reset_caches()
+    with request_scope(_external()):
+        absent = commands.op_activate_context(vault, turn=GENUINE_TURN)
+    assert GENUINE_PAGE in {anchor["path"] for anchor in absent["anchors"]}
+    for index in range(70):
+        _write(
+            vault / f"Knowledge Base/Notes/Withheld/a-hidden-{index:03d}.md",
+            f"---\ntype: research-note\nstatus: {'private-retirement' if index % 2 else 'archived'}\n---\n\n"
+            + ("kelvane throughput ceiling " * 12 if index % 2 else "Unrelated private dossier."),
+        )
+    # Retired visible revisions match, but neither consume rarity nor replace
+    # the current conclusion. Their authored pointer remains independent.
+    for index in range(3):
+        _write(
+            vault / f"Knowledge Base/Notes/Research/a-kelvane-revision-{index}.md",
+            "---\ntype: research-note\nstatus: archived\n"
+            f"superseded_by: ['{GENUINE_PAGE}']\n---\n\nkelvane throughput ceiling\n",
+        )
+    lexstore.ensure_fresh(vault)
+    with request_scope(_external()):
+        present = commands.op_activate_context(vault, turn=GENUINE_TURN)
+        ambiguous = commands.op_activate_context(vault, turn=TIE_TURN)
+    assert present["anchors"] == absent["anchors"]
+    assert {(unit["provenance"]["path"], unit["text"]) for unit in present["units"]} == {
+        (unit["provenance"]["path"], unit["text"]) for unit in absent["units"]
+    }
+    assert not any(anchor.get("status") == "resolved" for anchor in ambiguous["anchors"])

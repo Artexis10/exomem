@@ -23,6 +23,7 @@ from typing import Any, Literal
 from . import (
     activation_manifest,
     freshness,
+    lifecycle_statuses,
     memory_schema,
     metrics,
     origin_bindings,
@@ -120,6 +121,9 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     """Pure canonical path-only rewrite shared by move staging and review carry.
 
     An origin carrier is recorded data, so a link inside one keeps its bytes.
+    The count covers only links whose bytes change. A bare-name link to a file
+    that keeps its basename resolves as before and keeps its bytes, so a page
+    holding only such links is neither rewritten nor, when append-only, refused.
     """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
@@ -135,8 +139,9 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
 
     def replace(match: re.Match[str]) -> str:
         nonlocal changed
+        original = match.group(0)
         if inside_carrier(match.start(), match.end()):
-            return match.group(0)
+            return original
         target = match.group(1).strip()
         alias = match.group(2) or ""
         target_path, marker, anchor = target.partition("#")
@@ -144,13 +149,19 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
         target_path = target_path.rstrip()
         target_no_ext = target_path.removesuffix(".md")
         if target_no_ext in {old_full, old_stripped}:
-            changed += 1
             replacement = new_full if target_path.startswith(prefix) else new_stripped
-            return f"[[{replacement}{anchor_suffix}{alias}]]"
-        if "/" not in target_no_ext and target_no_ext == old_basename:
+        elif (
+            "/" not in target_no_ext
+            and target_no_ext == old_basename
+            and new_basename != old_basename
+        ):
+            replacement = new_basename
+        else:
+            return original
+        rewritten = f"[[{replacement}{anchor_suffix}{alias}]]"
+        if rewritten != original:
             changed += 1
-            return f"[[{new_basename}{anchor_suffix}{alias}]]"
-        return match.group(0)
+        return rewritten
 
     return _MOVE_WIKILINK_PATTERN.sub(replace, text), changed
 
@@ -646,8 +657,10 @@ def evaluate_posthoc_batch(
     corpus: semantic_contract.SemanticCorpusContext | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     saved_contracts: tuple[memory_schema.LoadedMemoryContract, ...] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> PosthocBatch:
     """Evaluate current governed Markdown once without writing or repairing it."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if operation not in {"watcher", "audit", "reconcile"}:
         raise SemanticWriteError(
             "SEMANTIC_POSTHOC_INVALID_OPERATION",
@@ -659,9 +672,7 @@ def evaluate_posthoc_batch(
         language = semantic_language_registry.load_registry(root)
         resolved_saved_contracts = memory_schema.load_saved_contracts(root)
         corpus = semantic_contract.build_corpus_context(
-            root,
-            registry=registry,
-            language_registry=language,
+            root, registry=registry, language_registry=language, status_basis=status_basis
         )
     else:
         language = language_registry or semantic_language_registry.load_registry(root)
@@ -713,6 +724,9 @@ def evaluate_posthoc_batch(
                 exomem_id=(state.identity if state.identity_kind == "exomem_id" else None),
                 manifest=manifest,
                 census=corpus.activation_census,
+                identity_census=corpus.identity_census,
+                eligible_compiled=state.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         result = semantic_contract.evaluate(
@@ -1031,7 +1045,7 @@ class ExistingPreflight:
     before_review: semantic_contract.RelationReviewState | None
     after_review: semantic_contract.RelationReviewState | None
     requested_decision: relation_review.LifecycleDecision | None
-    activation_census: activation_manifest.ActivationCensus
+    activation_census: activation_manifest.ActivationCensus | None
     prospective_manifest: activation_manifest.ActivationManifest
     manifest_install_required: bool
     resolver_freshness: tuple[int, int, str] | None
@@ -1152,7 +1166,7 @@ class MovePreflight:
     evaluations: tuple[MovePageEvaluation, ...]
     before_corpus: semantic_contract.SemanticCorpusContext
     after_corpus: semantic_contract.SemanticCorpusContext
-    activation_census: activation_manifest.ActivationCensus
+    activation_census: activation_manifest.ActivationCensus | None
     prospective_manifest: activation_manifest.ActivationManifest
     manifest_install_required: bool
     source_guard: vault.PathGuard
@@ -1836,6 +1850,7 @@ def preflight_existing(
     stamp: str | None = None,
     validate_only: bool = False,
     timings: MutationTimings | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> ExistingPreflight:
     """Evaluate an existing-page transition without mutating any shared state.
 
@@ -1843,6 +1858,7 @@ def preflight_existing(
     per-stage spans, or omit it and nothing about the behaviour or the
     returned payload changes.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     with (
         _write_phase("preview" if validate_only else None),
         _write_metric("exomem_write_preflight_ms", str(operation)),
@@ -1860,6 +1876,7 @@ def preflight_existing(
             stamp=stamp,
             validate_only=validate_only,
             timings=timings,
+            status_basis=status_basis,
         )
 
 
@@ -1877,7 +1894,9 @@ def _preflight_existing(
     stamp: str | None = None,
     validate_only: bool = False,
     timings: MutationTimings | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> ExistingPreflight:
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
     if operation not in _EXISTING_OPERATIONS:
         raise SemanticWriteError(
@@ -1951,7 +1970,7 @@ def _preflight_existing(
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
         before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
-            root, registry=registry, language_registry=language
+            root, registry=registry, language_registry=language, status_basis=status_basis
         )
     resolver_freshness_after = freshness.triple(root, "vault")
     resolver_freshness = (
@@ -1964,6 +1983,7 @@ def _preflight_existing(
             before_source,
             relation_registry=registry,
             language_registry=language,
+            status_basis=status_basis,
         )
         if before_corpus.pages.get(path) != before:
             # The guarded read can observe a canonical or external replacement
@@ -1978,6 +1998,7 @@ def _preflight_existing(
             after_source,
             relation_registry=registry,
             language_registry=language,
+            status_basis=status_basis,
         )
         after_corpus = before_corpus.with_candidate(after)
         normalized_source = _normalize_origin_source(
@@ -1991,6 +2012,7 @@ def _preflight_existing(
                 after_source,
                 relation_registry=registry,
                 language_registry=language,
+                status_basis=status_basis,
             )
             after_corpus = before_corpus.with_candidate(after)
             origin_inputs = _prepare_origin_inputs(
@@ -2085,7 +2107,7 @@ def _preflight_existing(
 
     manifest = activation_manifest.load_manifest(root)
     boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest
+        before_corpus.activation_census, manifest=manifest, vault_root=root
     )
     grandfathered = activation_manifest.is_grandfathered(
         root,
@@ -2094,6 +2116,9 @@ def _preflight_existing(
         exomem_id=before.identity if before.identity_kind == "exomem_id" else None,
         manifest=boundary.manifest,
         census=before_corpus.activation_census,
+        identity_census=before_corpus.identity_census,
+        eligible_compiled=before.eligible_compiled,
+        status_basis=status_basis,
     )
     with mutation_timing_span(timings, "preflight.contract_eval"):
         result = semantic_contract.evaluate(
@@ -2113,7 +2138,10 @@ def _preflight_existing(
         )
     with mutation_timing_span(timings, "preflight.validity_token"):
         census_token = _capture_validity_stamp(
-            root, entry_generation, corpus_census=before_corpus_census
+            root,
+            entry_generation,
+            corpus_census=before_corpus_census,
+            status_dependencies=after_corpus.status_dependencies,
         )
     return ExistingPreflight(
         applicability,
@@ -2151,6 +2179,7 @@ def _reevaluate_existing(
     preflight: ExistingPreflight,
     *,
     manifest: activation_manifest.ActivationManifest,
+    status_basis: lifecycle_statuses.Basis,
 ) -> tuple[semantic_contract.SemanticContractResult, bool]:
     grandfathered = activation_manifest.is_grandfathered(
         preflight.before_corpus.vault_root,
@@ -2161,6 +2190,9 @@ def _reevaluate_existing(
         ),
         manifest=manifest,
         census=preflight.activation_census,
+        identity_census=preflight.before_corpus.identity_census,
+        eligible_compiled=preflight.before.eligible_compiled,
+        status_basis=status_basis,
     )
     result = semantic_contract.evaluate(
         before=preflight.before,
@@ -2391,7 +2423,10 @@ def _commit_existing_locked(
 
 
 def _revalidate_existing_preflight(
-    vault_root: Path, preflight: ExistingPreflight
+    vault_root: Path,
+    preflight: ExistingPreflight,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> ExistingPreflight:
     """Re-run ``preflight_existing`` warm when a pre-boundary census token has
     gone stale. Surfaces ``STALE_SEMANTIC_WRITE``/``SEMANTIC_CONTRACT_BLOCKED``
@@ -2405,6 +2440,7 @@ def _revalidate_existing_preflight(
     apart from the first attempt's by the ``revalidate`` write phase rather
     than by changing the call.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     relation_disposition: str | None = None
     relation_review_hash: str | None = None
     relation_review_reason: str | None = None
@@ -2423,6 +2459,7 @@ def _revalidate_existing_preflight(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            status_basis=status_basis,
         )
 
 
@@ -2749,6 +2786,7 @@ def commit_existing(
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> ExistingCommit:
     """Commit one preflighted existing-page transition, primary Markdown last.
 
@@ -2756,6 +2794,7 @@ def commit_existing(
     per-stage spans, or omit it and nothing about the behaviour or the
     returned payload changes.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     with _write_metric("exomem_write_commit_ms", str(preflight.operation)):
         committed = _commit_existing(
             vault_root,
@@ -2763,6 +2802,7 @@ def commit_existing(
             auxiliary_writes=auxiliary_writes,
             derived_auxiliary_writes=derived_auxiliary_writes,
             timings=timings,
+            status_basis=status_basis,
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
@@ -2800,7 +2840,9 @@ def _commit_existing(
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> ExistingCommit:
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     if preflight.contract_result.should_block:
         raise SemanticWriteError(
@@ -2859,6 +2901,8 @@ def _commit_existing(
         # existing cross-invocation replay path already does.
         from .writer_lease import read_commit_generation
 
+        if not preflight.manifest_install_required:
+            activation_manifest.ensure_manifest(root, commit_point=False)
         with mutation_timing_span(timings, "commit.stamp_check"):
             stamp_current = semantic_contract.validity_stamp_current(
                 root,
@@ -2871,7 +2915,9 @@ def _commit_existing(
                 _write_metric("exomem_write_revalidate_ms", operation_label),
                 mutation_timing_span(timings, "commit.revalidate"),
             ):
-                preflight = _revalidate_existing_preflight(root, preflight)
+                preflight = _revalidate_existing_preflight(
+                    root, preflight, status_basis=status_basis
+                )
             if preflight.contract_result.should_block:
                 raise SemanticWriteError(
                     "SEMANTIC_CONTRACT_BLOCKED",
@@ -2902,7 +2948,9 @@ def _commit_existing(
                 winner = activation_manifest.ensure_manifest(
                     root, census=preflight.activation_census, commit_point=False
                 )
-                result, _ = _reevaluate_existing(preflight, manifest=winner)
+                result, _ = _reevaluate_existing(
+                    preflight, manifest=winner, status_basis=status_basis
+                )
                 if result.should_block:
                     raise SemanticWriteError(
                         "SEMANTIC_CONTRACT_BLOCKED",
@@ -2974,10 +3022,12 @@ def _move_state_map(
     rewrites: tuple[vault.PlannedWrite, ...],
     registry: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     semantic_contract.SemanticCorpusContext,
     dict[str, semantic_contract.SemanticPageState],
 ]:
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
     states = dict(before_corpus.pages)
     states.pop(old_path, None)
     changed: dict[str, semantic_contract.SemanticPageState] = {}
@@ -2987,6 +3037,7 @@ def _move_state_map(
         moved_source,
         relation_registry=registry,
         language_registry=language,
+        status_basis=status_basis,
     )
     states[new_path] = moved
     changed[new_path] = moved
@@ -3004,6 +3055,7 @@ def _move_state_map(
             write.content,
             relation_registry=registry,
             language_registry=language,
+            status_basis=status_basis,
         )
         states[rel] = rewritten
         changed[rel] = rewritten
@@ -3189,6 +3241,7 @@ def preflight_move(
     destination_guard: vault.PathGuard,
     rewrites: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     content_transform: Callable[[str], str] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> MovePreflight:
     """Evaluate a move and all exact inbound rewrites against one final corpus.
 
@@ -3198,6 +3251,7 @@ def preflight_move(
     equal the declared derivation, so an arbitrary edit still cannot ride along,
     and a declared transform cannot be silently skipped either.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     rewrite_tuple = tuple(rewrites)
     if (
@@ -3233,7 +3287,7 @@ def preflight_move(
     language = semantic_language_registry.load_registry(root)
     loaded_contracts = memory_schema.load_saved_contracts(root)
     before_corpus = semantic_contract.build_corpus_context(
-        root, registry=registry, language_registry=language
+        root, registry=registry, language_registry=language, status_basis=status_basis
     )
     before_moved = before_corpus.pages.get(old_path)
     normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
@@ -3285,10 +3339,11 @@ def preflight_move(
         rewrites=rewrite_tuple,
         registry=registry,
         language=language,
+        status_basis=status_basis,
     )
     manifest = activation_manifest.load_manifest(root)
     boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest
+        before_corpus.activation_census, manifest=manifest, vault_root=root
     )
     evaluations: list[MovePageEvaluation] = []
     pairs = _move_evaluation_pairs(
@@ -3378,6 +3433,9 @@ def preflight_move(
                 exomem_id=before.identity,
                 manifest=boundary.manifest,
                 census=before_corpus.activation_census,
+                identity_census=before_corpus.identity_census,
+                eligible_compiled=before.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         result = semantic_contract.evaluate(
@@ -3515,6 +3573,8 @@ def commit_move(
                 for finding in item.contract_result.blocking_findings
             ),
         )
+    if not preflight.manifest_install_required:
+        activation_manifest.ensure_manifest(root, commit_point=False)
     if preflight.manifest_install_required:
         winner = activation_manifest.ensure_manifest(
             root, census=preflight.activation_census, commit_point=False
@@ -3578,8 +3638,10 @@ def preflight_recovery(
     catalog_content_paths: tuple[str, ...] = (),
     catalog_publication_now: int | None = None,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> RecoveryPreflight:
     """Evaluate exact trashed Markdown bytes at all final restore paths."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     review_mapping = relation_reviews or {}
     if not isinstance(review_mapping, Mapping) or len(review_mapping) > _RECOVERY_REVIEW_LIMIT:
@@ -3629,7 +3691,7 @@ def preflight_recovery(
     language = semantic_language_registry.load_registry(root)
     loaded_contracts = memory_schema.load_saved_contracts(root)
     before_corpus = semantic_contract.build_corpus_context(
-        root, registry=registry, language_registry=language
+        root, registry=registry, language_registry=language, status_basis=status_basis
     )
     prior_states: list[semantic_contract.SemanticPageState] = []
     after_states: list[semantic_contract.SemanticPageState] = []
@@ -3641,6 +3703,7 @@ def preflight_recovery(
                 item.source,
                 relation_registry=registry,
                 language_registry=language,
+                status_basis=status_basis,
             )
         )
         after_states.append(
@@ -3650,6 +3713,7 @@ def preflight_recovery(
                 item.source,
                 relation_registry=registry,
                 language_registry=language,
+                status_basis=status_basis,
             )
         )
     prior_corpus = _corpus_with_recovery_states(
@@ -3717,6 +3781,9 @@ def preflight_recovery(
                 exomem_id=after.identity,
                 manifest=manifest,
                 census=after_corpus.activation_census,
+                identity_census=after_corpus.identity_census,
+                eligible_compiled=after.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         baseline_result = semantic_contract.evaluate(
@@ -4053,6 +4120,7 @@ def _evaluate_structural(
     destination: str,
     source: str,
     operation: str,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     semantic_contract.SemanticContractResult,
     semantic_contract.SemanticPageState,
@@ -4071,12 +4139,13 @@ def _evaluate_structural(
     caller can retain it for advisory post-write analysis. It is the corpus as
     it stood before this write, which is what a destination lookup wants.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
     source = _place_origin_source(destination, source)
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
     before, before_census = semantic_contract.build_corpus_context_with_census(
-        root, registry=registry, language_registry=language
+        root, registry=registry, language_registry=language, status_basis=status_basis
     )
     candidate = semantic_contract.build_page_state(
         root,
@@ -4084,6 +4153,7 @@ def _evaluate_structural(
         source,
         relation_registry=registry,
         language_registry=language,
+        status_basis=status_basis,
     )
     normalized_source = _normalize_origin_source(
         source, state=candidate, corpus=before
@@ -4096,6 +4166,7 @@ def _evaluate_structural(
             source,
             relation_registry=registry,
             language_registry=language,
+            status_basis=status_basis,
         )
     resolved = memory_schema.resolve_contracts(
         contracts,
@@ -4137,7 +4208,9 @@ def preflight_creation(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     vocabulary_binding: Any | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> CreationPreflight:
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     origin_inputs = _prepare_origin_inputs(root, path, source)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
@@ -4171,7 +4244,7 @@ def preflight_creation(
         )
     entry_generation = _entry_commit_generation(root)
     result, state, corpus_census, before_corpus, source = _evaluate_structural(
-        root, destination=path, source=source, operation=operation
+        root, destination=path, source=source, operation=operation, status_basis=status_basis
     )
     origin_inputs = _prepare_origin_inputs(root, path, source)
     if semantic_contract.requires_semantic_unit(state):
@@ -4188,7 +4261,14 @@ def preflight_creation(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        census_token = _capture_validity_stamp(root, entry_generation, corpus_census=corpus_census)
+        census_token = _capture_validity_stamp(
+            root,
+            entry_generation,
+            corpus_census=corpus_census,
+            status_dependencies=tuple(
+                sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
+            ),
+        )
         return CreationPreflight(
             "full",
             path,
@@ -4214,7 +4294,14 @@ def preflight_creation(
         if state.page_type is not None or semantic_contract.compiled_intent(state)
         else "not_semantic"
     )
-    census_token = _capture_validity_stamp(root, entry_generation, corpus_census=corpus_census)
+    census_token = _capture_validity_stamp(
+        root,
+        entry_generation,
+        corpus_census=corpus_census,
+        status_dependencies=tuple(
+            sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
+        ),
+    )
     return CreationPreflight(
         applicability,
         path,
@@ -4251,6 +4338,7 @@ def _capture_validity_stamp(
     entry_generation,  # noqa: ANN001
     *,
     corpus_census: tuple | None = None,
+    status_dependencies: tuple[tuple[str, str], ...] | None = None,
 ) -> tuple | None:
     """Assemble the preflight validity stamp WITHOUT a second corpus walk.
 
@@ -4270,6 +4358,7 @@ def _capture_validity_stamp(
         return None
     sc_token = semantic_contract.corpus_validity_token(
         root,
+        status_dependencies=status_dependencies,
         corpus_census=(
             corpus_census
             if corpus_census is not None
@@ -4319,8 +4408,10 @@ def commit_creation(
     operation: str,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> CreationCommit:
     """Commit a page creation, then attach advisory structural feedback."""
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     committed = _commit_creation(
         vault_root,
         preflight=preflight,
@@ -4332,6 +4423,7 @@ def commit_creation(
         operation=operation,
         predecessor_path=predecessor_path,
         predecessor_content_hash=predecessor_content_hash,
+        status_basis=status_basis,
     )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)
@@ -4421,7 +4513,9 @@ def _commit_creation(
     operation: str,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> CreationCommit:
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     non_review_blockers = tuple(
         finding
@@ -4588,11 +4682,14 @@ def _commit_creation(
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, catalog_state, _fresh_census, catalog_corpus, _source = _evaluate_structural(
-                root,
-                destination=preflight.destination,
-                source=preflight.source,
-                operation=operation,
+            contract_result, catalog_state, _fresh_census, catalog_corpus, _source = (
+                _evaluate_structural(
+                    root,
+                    destination=preflight.destination,
+                    source=preflight.source,
+                    operation=operation,
+                    status_basis=status_basis,
+                )
             )
             if contract_result.should_block:
                 raise SemanticWriteError(

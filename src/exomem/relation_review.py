@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from . import (
     activation_manifest,
+    lifecycle_statuses,
     memory_schema,
     relation_registry,
     semantic_contract,
@@ -3007,6 +3008,7 @@ def _attempt(
     predecessor_content_hash: str | None = None,
     reuse: _PrevalidatedAttempt | None = None,
 ) -> _Attempt:
+    status_basis = lifecycle_statuses.Basis(root)
     if operation not in _OPERATIONS:
         raise RelationReviewError("INVALID_DRAFT_OPERATION", "unsupported creation operation")
     identity = _canonical_id(draft_id)
@@ -3072,7 +3074,7 @@ def _attempt(
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
         before, before_census = semantic_contract.build_corpus_context_with_census(
-            root, registry=registry, language_registry=language
+            root, registry=registry, language_registry=language, status_basis=status_basis
         )
         candidate = semantic_contract.build_page_state(
             root,
@@ -3080,6 +3082,7 @@ def _attempt(
             normalized,
             relation_registry=registry,
             language_registry=language,
+            status_basis=status_basis,
         )
     if not candidate.eligible_compiled:
         raise RelationReviewError(
@@ -3726,6 +3729,7 @@ def prepare_commit_creation_draft(
         sc_token = (
             semantic_contract.corpus_validity_token(
                 root,
+                status_dependencies=preliminary.after_corpus.status_dependencies,
                 corpus_census=(
                     preliminary.before_corpus_census
                     if preliminary.before_corpus_census is not None

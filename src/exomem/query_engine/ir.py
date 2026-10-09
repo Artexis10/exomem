@@ -64,6 +64,9 @@ class Join:
 class GroupKey:
     field: Field
     bucket: str | None = None
+    #: Inclusive source-local day window on a time bucket's basis (ISO dates).
+    window_from: str | None = None
+    window_to: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

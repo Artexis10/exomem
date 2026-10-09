@@ -17,6 +17,7 @@ All data is invented.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing
@@ -31,6 +32,7 @@ OTHER_COLLECTION_ID = "00000000-0000-4000-8000-000000000002"
 H = "a" * 64
 
 EXPECTED_TABLES = {
+    "alembic_version",
     "store_meta",
     "collection_types",
     "collection_type_versions",
@@ -45,6 +47,13 @@ EXPECTED_TABLES = {
     "projection_state",
     "query_projection_mappings",
     "query_cursor_state",
+    "version_identity",
+    "typed_encoding_mappings",
+    "import_jobs",
+    "import_rejections",
+    "rollup_definitions",
+    "rollup_buckets",
+    "rollup_members",
 }
 APPEND_ONLY = (
     "txns",
@@ -353,7 +362,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 4
+    assert schema.SCHEMA_VERSION == 8
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -400,31 +409,190 @@ def test_a_store_newer_than_this_release_refuses(tmp_path: Path) -> None:
     assert refused.value.code == "COLLECTION_STORE_SCHEMA_NEWER"
 
 
+@pytest.mark.parametrize("revision", [None, "unknown", "7"])
+def test_present_revision_metadata_cannot_masquerade_as_legacy(
+    store: connection.WriterConnection, revision: str | None,
+) -> None:
+    conn = store.connection
+    conn.execute("CREATE TABLE IF NOT EXISTS alembic_version(version_num TEXT PRIMARY KEY) STRICT")
+    conn.execute("DELETE FROM alembic_version")
+    if revision is not None:
+        conn.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
+    with pytest.raises(ValueError, match="revision"):
+        schema.schema_version(conn)
+    with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
+        connection.open_reader(store.path)
+    path = store.path
+    store.close()
+    with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
+        connection.open_writer(path, lease_check=_allow)
+
+
+@pytest.mark.parametrize("revision", ["8", "7"])
+def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
+    path = store.path
+    store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
+    store.connection.execute("ALTER TABLE intermediate_revision RENAME TO ALEMBIC_VERSION")
+    store.connection.execute("UPDATE ALEMBIC_VERSION SET version_num=?", (revision,))
+    if revision == "7":
+        with pytest.raises(ValueError, match="revision disagrees"):
+            schema.schema_version(store.connection)
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
+            connection.open_reader(path)
+        store.close()
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
+            connection.open_writer(path, lease_check=_allow)
+    else:
+        assert schema.schema_version(store.connection) == 8
+        store.close()
+        with closing(connection.open_reader(path)) as reader:
+            assert schema.schema_version(reader) == 8
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("8",)]
+
+
+def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    with connection.open_writer(path, lease_check=_allow) as writer:
+        _populated(writer)
+        writer.connection.execute("DROP TABLE alembic_version")
+        before = dict(writer.connection.execute("SELECT key,value FROM store_meta"))
+        rows = writer.connection.execute("SELECT * FROM items").fetchall()
+    with closing(connection.open_reader(path)) as reader:
+        assert reader.execute("SELECT * FROM items").fetchall() == rows
+    for _ in range(2):
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("8",)]
+            assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
+            assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
+
+
+def _next_revision(tmp_path, monkeypatch, statements):
+    migrations = tmp_path / "migrations%20"
+    if not migrations.exists():
+        shutil.copytree(schema._MIGRATION_PATH, migrations)
+    target = 9
+    script = migrations / "versions" / "9_probe.py"
+    script.write_text(
+        "from alembic import op\nrevision = '9'\ndown_revision = '8'\n"
+        "def upgrade():\n" + "".join(f"    op.get_bind().exec_driver_sql({sql!r})\n" for sql in statements)
+    )
+    monkeypatch.setattr(schema, "_MIGRATION_PATH", migrations)
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", target)
+    schema._revisions.cache_clear()
+    return target
+
+
 def test_forward_migrations_run_in_order_from_the_recorded_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "state" / "collections.sqlite"
     connection.open_writer(target, lease_check=_allow).close()
+    target_version = _next_revision(tmp_path, monkeypatch, ["CREATE TABLE migration_probe(x INTEGER) STRICT"])
+    with connection.open_writer(target, lease_check=_allow) as writer:
+        assert schema.schema_version(writer.connection) == target_version
+        writer.connection.execute("SELECT * FROM migration_probe")
+    # Earlier revisions cannot run again: their CREATE/ALTER statements would fail.
+    with connection.open_writer(target, lease_check=_allow) as writer:
+        assert schema.schema_version(writer.connection) == target_version
 
-    applied: list[int] = []
 
-    target_version = schema.SCHEMA_VERSION + 1
+@pytest.mark.parametrize("legacy, fail_first", [(False, False), (True, False), (False, True)])
+def test_concurrent_vault_installations_keep_data_separate_after_failure(
+    tmp_path, monkeypatch, legacy, fail_first,
+):
+    """Overlapping Alembic environments must not migrate another vault's connection."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
 
-    def migrate_next(conn: sqlite3.Connection) -> None:
-        applied.append(target_version)
-        conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
+    from alembic.script import ScriptDirectory
 
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", target_version)
-    monkeypatch.setitem(schema.MIGRATIONS, target_version, migrate_next)
-    writer = connection.open_writer(target, lease_check=_allow)
-    try:
-        version = writer.connection.execute(
-            "SELECT value FROM store_meta WHERE key='schema_version'"
-        ).fetchone()[0]
-    finally:
-        writer.close()
-    assert applied == [target_version], "only the missing step runs; earlier versions are not re-applied"
-    assert version == str(target_version)
+    paths = {name: tmp_path / f"{name}.sqlite" for name in ("left", "right")}
+    for name, path in paths.items():
+        if legacy:
+            with connection.open_writer(path, lease_check=_allow) as writer:
+                writer.connection.execute("DROP TABLE alembic_version")
+        with closing(sqlite3.connect(path, isolation_level=None)) as raw:
+            raw.execute("CREATE TABLE vault_probe(value TEXT NOT NULL) STRICT")
+            raw.execute("INSERT INTO vault_probe VALUES(?)", (name,))
+
+    local = threading.local()
+    left_environment, right_ready = threading.Event(), threading.Event()
+    right_environment, left_finished = threading.Event(), threading.Event()
+    original_config = schema._migration_config
+    original_env = ScriptDirectory.run_env
+    original_revision = schema._migrate_to_3
+
+    def config(conn=None):
+        if local.name == "right":
+            assert left_environment.wait(5), "first installation did not reach Alembic"
+            right_ready.set()
+        return original_config(conn)
+
+    def run_env(script):
+        # Reproduce the observed global-proxy overlap, while serializing actual SQL.
+        if local.name == "left" and not left_environment.is_set():
+            left_environment.set()
+            assert right_ready.wait(5), "second installation did not start"
+            right_environment.wait(0.5)
+            try:
+                return original_env(script)
+            finally:
+                left_finished.set()
+        if local.name == "right" and not right_environment.is_set():
+            right_environment.set()
+            assert left_finished.wait(5), "first installation did not finish its SQL"
+        return original_env(script)
+
+    def revision(raw):
+        original_revision(raw)
+        if fail_first and raw.execute("SELECT value FROM vault_probe").fetchone() == ("left",):
+            raise sqlite3.OperationalError("invented interrupted installation")
+
+    def install(name):
+        local.name = name
+        with connection.open_writer(paths[name], lease_check=_allow) as writer:
+            with writer.transaction() as raw:
+                raw.execute("INSERT INTO vault_probe VALUES(?)", (f"{name}-committed",))
+            return schema.schema_version(raw), dict(raw.execute("SELECT key,value FROM store_meta"))["store_id"]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(schema, "_migration_config", config)
+        patch.setattr(ScriptDirectory, "run_env", run_env)
+        patch.setattr(schema, "_migrate_to_3", revision)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            left = pool.submit(install, "left")
+            right = pool.submit(install, "right")
+            results = {name: future.exception(timeout=10) or future.result()
+                       for name, future in (("left", left), ("right", right))}
+
+    if fail_first:
+        assert isinstance(results["left"], sqlite3.OperationalError), results
+        assert str(results["left"]) == "invented interrupted installation"
+        with closing(sqlite3.connect(paths["left"])) as raw:
+            assert raw.execute("SELECT name FROM sqlite_master WHERE name IN ('store_meta','alembic_version')").fetchall() == []
+    else:
+        assert not isinstance(results["left"], Exception), results
+        assert results["left"][0] == schema.SCHEMA_VERSION
+    assert not isinstance(results["right"], Exception), results
+    assert results["right"][0] == schema.SCHEMA_VERSION
+    identities = []
+    for name, path in paths.items():
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            raw = writer.connection
+            assert schema.schema_version(raw) == schema.SCHEMA_VERSION
+            identities.append(dict(raw.execute("SELECT key,value FROM store_meta"))["store_id"])
+            expected = [(name,)] if fail_first and name == "left" else [(name,), (f"{name}-committed",)]
+            assert raw.execute("SELECT value FROM vault_probe ORDER BY rowid").fetchall() == expected
+            with writer.transaction() as raw:
+                raw.execute("INSERT INTO vault_probe VALUES(?)", (f"{name}-reused",))
+            assert raw.execute("SELECT value FROM vault_probe ORDER BY rowid DESC LIMIT 1").fetchone() == (f"{name}-reused",)
+    assert identities[0] != identities[1]
+
+
+def test_open_failure_preserves_the_sqlite_error_contract(tmp_path: Path) -> None:
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        connection.open_writer(tmp_path, lease_check=_allow)
 
 
 def test_writes_require_the_writer_lease(tmp_path: Path) -> None:
@@ -798,7 +966,7 @@ def test_schema_ensure_restores_protection_at_current_version(
     for name in triggers:
         conn.execute(f"DROP TRIGGER {name}")
     assert schema.schema_version(conn) == schema.SCHEMA_VERSION
-    schema.ensure_schema(conn)
+    schema.ensure_schema(store.core)
     restored = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
     expected = {
         f"{table}_append_only_{action}"
@@ -922,28 +1090,44 @@ def test_deferred_commit_failure_rolls_back_and_writer_can_be_reused(
     assert store.connection.execute("SELECT value FROM store_meta WHERE key='after-failed-commit'").fetchone() == ("ok",)
 
 
-def test_schema_deferred_commit_failure_rolls_back_and_connection_can_be_reused(
-    store: connection.WriterConnection, monkeypatch: pytest.MonkeyPatch,
+def test_schema_migration_failure_rolls_back_and_connection_can_be_reused(
+    store: connection.WriterConnection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    def failed_migration(conn: sqlite3.Connection) -> None:
-        conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
-        conn.execute("INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')")
-
     current_version = schema.SCHEMA_VERSION
-    target_version = current_version + 1
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", target_version)
-    monkeypatch.setitem(schema.MIGRATIONS, target_version, failed_migration)
+    target_version = _next_revision(tmp_path, monkeypatch, [
+        "CREATE TABLE migration_probe(x INTEGER) STRICT",
+        "INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')",
+    ])
     with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
-        schema.ensure_schema(store.connection)
+        schema.ensure_schema(store.core)
     assert not store.connection.in_transaction
+    assert not store.core.in_transaction()
     assert schema.schema_version(store.connection) == current_version
+    assert store.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [(str(current_version),)]
     assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
     assert store.connection.execute("SELECT name FROM sqlite_master WHERE name='migration_probe'").fetchone() is None
-    monkeypatch.setitem(schema.MIGRATIONS, target_version, lambda conn: conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT"))
-    assert schema.ensure_schema(store.connection) == target_version
+    _next_revision(tmp_path, monkeypatch, ["CREATE TABLE migration_probe(x INTEGER) STRICT"])
+    assert schema.ensure_schema(store.core) == target_version
     with store.transaction() as tx:
         tx.execute("INSERT INTO migration_probe VALUES (1)")
     assert store.connection.execute("SELECT x FROM migration_probe").fetchone() == (1,)
+
+
+def test_schema_deferred_commit_failure_rolls_back_and_connection_can_be_reused(
+    store: connection.WriterConnection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(schema, "_TRIGGERS_V1", (*schema._TRIGGERS_V1,
+            "INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')"))
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+            schema.ensure_schema(store.core)
+    assert not store.connection.in_transaction
+    assert not store.core.in_transaction()
+    assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
+    assert schema.ensure_schema(store.core) == schema.SCHEMA_VERSION
+    with store.transaction() as tx:
+        tx.execute("INSERT INTO store_meta VALUES ('after-schema-failed-commit', 'ok')")
+    assert store.connection.execute("SELECT value FROM store_meta WHERE key='after-schema-failed-commit'").fetchone() == ("ok",)
 
 
 @pytest.mark.parametrize(

@@ -877,7 +877,8 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
         request_id += 1
         observed_wire.append(projected_refusal.text)
         assert projected_refusal.json()["result"].get("isError") is True
-        assert "governed projected retrieval is unavailable" in projected_refusal.text
+        # Fixed completion may return a deadline refusal; neither refusal may
+        # expose the note through this unactivated route.
         assert NOTE_MARKER not in projected_refusal.text
 
         for label, tool_name, arguments, marker in routes:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from exomem import (
     deferred_index,
+    embedding_backend,
     embeddings,
     epistemic_graph,
     freshness,
@@ -100,6 +102,29 @@ def test_embedding_upsert_status_distinguishes_completed_and_degraded(
         lambda: (_ for _ in ()).throw(RuntimeError("private model detail")),
     )
     assert embeddings.upsert_after_write(tmp_path, [target]) is False
+
+
+def test_missing_model_files_keep_installed_runtime_indexing_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable model must not falsely complete vector freshness."""
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_MODEL", None)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setitem(sys.modules, "onnxruntime", ModuleType("onnxruntime"))
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
+
+    def unavailable_artifact(*_args):
+        raise embedding_backend.ModelFilesUnavailable("model files unavailable offline")
+
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", unavailable_artifact)
+    readiness.reset()
+    status = embeddings.upsert_after_write_status(tmp_path, [target])
+    assert status.status == "degraded"
+    assert status.code == "embedding_model_load_failed"
 
 
 def test_embedding_legacy_bool_ignores_claim_auxiliary_only_failure(

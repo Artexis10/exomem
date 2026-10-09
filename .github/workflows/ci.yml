@@ -13,6 +13,11 @@ concurrency:
   # New pushes supersede PR feedback, but main/release evidence must finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # The store-blind release the collection-store gate runs as an actual older
+  # interpreter (tests/test_collection_store_s1_gate.py fails without it).
+  EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
+
 jobs:
   # The PR suite runs as two independently sharded tiers so each job stays
   # under ~6 minutes of predicted execution while total PR job count stays
@@ -78,6 +83,12 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
+      - name: Install the pinned older reader for the collection-store gate
+        timeout-minutes: 5
+        run: |
+          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env:
           # The suite runs without the embeddings/media extras; these mirror the
@@ -238,6 +249,9 @@ jobs:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           EXOMEM_DISABLE_CLIP: "1"
+          # The service fixture must not start model loading or cache warmup.
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_WARMUP: "1"
           EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
@@ -247,6 +261,13 @@ jobs:
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
           tests/test_windows_path_alias_guard.py
+          "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"
+          tests/test_collection_store_replica.py::test_first_and_successive_publish_are_reopenable_business_snapshots
+          tests/test_collection_store_replica.py::test_matching_installed_copy_retires_the_still_owned_redundant_stage
+          tests/test_collection_store_replica.py::test_install_crash_reopens_without_foreign_divergence
+          tests/test_collection_store_replica.py::test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes_new_head
+          tests/test_collection_store_replica.py::test_failed_foreign_stage_relocation_cannot_delete_changed_bytes_on_context_exit
+          tests/test_collection_store_replica.py::test_unresolved_staging_preserves_workspace_without_allocating_again
           --session-timeout=600
       - name: Native reserved-path compatibility gate
         env:
@@ -301,7 +322,18 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Governed lifecycle, restart persistence, and transport shutdown
+      - name: Install the pinned older reader for the installed launcher proof
+        timeout-minutes: 5
+        run: |
+          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
+      # The one run also drives the S1 summary-collection journey
+      # (scripts/e2e_s1_summary_journey.py): dark and released phases on the same
+      # installed wheel, preserved-source import with a mid-job restart, daily queries
+      # against an independent reference, recipient field release/revocation,
+      # fresh copy/restore, old-reader refusal, rollback, and unchanged file collections.
+      - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
       # The harness prints the tail inline; this keeps the whole log for the
       # failures whose cause is older than the tail.

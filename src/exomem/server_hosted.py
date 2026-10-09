@@ -94,6 +94,8 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
 _HOSTED_MUTATION_ERROR_SHAPES = {
     "MAINTENANCE_REQUIRES_CLI": ("terminal", False),
     "MUTATION_BUSY": ("retryable", False),
+    # Collection-store contention uses the existing never-committed retry contract.
+    "COLLECTION_STORE_BUSY": ("retryable", False),
     "MUTATION_WARMING": ("retryable", False),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": ("committed", True),

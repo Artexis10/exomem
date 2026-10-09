@@ -22,6 +22,8 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
+from . import lifecycle_statuses
+
 if TYPE_CHECKING:  # pragma: no cover
     from .working_set import LaneItem
 
@@ -29,7 +31,6 @@ if TYPE_CHECKING:  # pragma: no cover
 SUPERSEDED = "superseded"
 #: Lifecycles that are history. Draft, planned and dropped material is not
 #: history: it has not been replaced, it has not happened yet.
-HISTORY_LIFECYCLES = frozenset({"superseded", "archived"})
 #: Provenance keys the compiler uses internally and never publishes.
 INTERNAL_PROVENANCE = frozenset({"page_updated", "supersedes_targets", "supersession"})
 
@@ -94,17 +95,20 @@ def _target_fragment(target: str, path: str) -> str:
     return fragment.strip().casefold()
 
 
-def _unit_fragment(item: "LaneItem") -> str:
+def _unit_fragment(item: LaneItem) -> str:
     _page, separator, fragment = item.ref.rpartition("#")
     return fragment.casefold() if separator else ""
 
 
-def annotate(items: Sequence["LaneItem"]) -> tuple["LaneItem", ...]:
+def annotate(
+    items: Sequence[LaneItem], *, status_basis: lifecycle_statuses.Basis | None = None
+) -> tuple[LaneItem, ...]:
     """Mark as superseded each unit a same-page `supersedes` relation names.
 
     Units only; pages, records and pointers pass through untouched. Pure and
     deterministic: the same items give the same marks.
     """
+    status_basis = status_basis or lifecycle_statuses.Basis(None)
     by_page: dict[str, list[int]] = {}
     for index, item in enumerate(items):
         if item.level == "unit" and item.path:
@@ -126,7 +130,9 @@ def annotate(items: Sequence["LaneItem"]) -> tuple["LaneItem", ...]:
         return tuple(items)
     return tuple(
         replace(item, lifecycle=SUPERSEDED)
-        if index in superseded and item.lifecycle == "active"
+        if index in superseded
+        and (ordering := status_basis.ordering(item.lifecycle)) is not None
+        and ordering.live
         else item
         for index, item in enumerate(items)
     )

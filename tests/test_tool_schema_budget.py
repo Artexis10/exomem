@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import re
 from pathlib import Path
 
 import pytest
@@ -109,16 +108,16 @@ def test_every_tool_stays_under_its_ceiling(server) -> None:
 
 
 def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) -> None:
-    marker = re.compile(r"Semantic authoring \[exomem\.semantic-authoring:v5 sha256:[0-9a-f]{64}\]")
+    from exomem.semantic_authoring import AUTHORING_CONTRACT, contract_identity
+
+    marker = f"Semantic authoring [{contract_identity()}]"
     for wire in _wires(server):
-        in_description = len(marker.findall(wire["description"]))
-        in_parameters = len(marker.findall(str(wire["inputSchema"])))
+        in_description = wire["description"].count(marker)
+        in_parameters = str(wire["inputSchema"]).count(marker)
         expected = 1 if wire["name"] in AUTHORING_TOOLS else 0
         assert in_description == expected, wire["name"]
         assert in_parameters == 0, f"{wire['name']} repeats the contract in a parameter"
         if wire["name"] in AUTHORING_TOOLS:
-            from exomem.semantic_authoring import AUTHORING_CONTRACT
-
             for code in AUTHORING_CONTRACT.findings:
                 assert code in wire["description"], (wire["name"], code)
 

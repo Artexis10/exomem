@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from exomem import held_fs, reserved_paths
+from exomem.cli_ops import OpError
 from exomem.collection_store import connection, replica, schema, snapshot, tokens
 from exomem.kbdir import kb_dirname
 
@@ -100,6 +102,46 @@ def test_first_and_successive_publish_are_reopenable_business_snapshots(store):
             target.with_name(target.name + suffix).exists()
             for suffix in ("-wal", "-shm", "-journal")
         )
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_matching_installed_copy_retires_the_still_owned_redundant_stage(
+    store, monkeypatch, concurrent
+):
+    root, writer = store
+    target = replica.replica_path(root)
+    original = snapshot.staged_snapshot
+    workspace = None
+
+    @contextmanager
+    def matching_copy_arrives(*args, **kwargs):
+        nonlocal workspace
+        with original(*args, **kwargs) as artifact:
+            workspace = artifact.path.parent
+            target.write_bytes(artifact.path.read_bytes())
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", matching_copy_arrives)
+    if concurrent:
+        @contextmanager
+        def step(_patience, _cancelled):
+            yield writer, lambda: True
+
+        result = replica.publish_replica_concurrently(
+            root, step=step, deadline=time.monotonic() + 10
+        )
+    else:
+        result = _publish(root, writer)
+    assert result.status == "published", result
+    assert (result.commit_seq, result.head_hash) == (0, None)
+    assert not workspace.exists()
+    metadata = _metadata(writer)
+    assert schema.META_PENDING_REPLICA_PUBLICATION not in metadata
+    assert metadata[schema.META_LAST_PUBLISHED_REPLICA_SHA256] == hashlib.sha256(
+        target.read_bytes()
+    ).hexdigest()
+    with closing(connection.open_reader(target)) as reader:
+        assert reader.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
 
 
 def _filesystem_type(root):
@@ -307,6 +349,112 @@ def test_interruption_after_intent_remains_retryable(store, monkeypatch, failure
     assert interrupted and result.status == "retry_pending"
     assert schema.META_PENDING_REPLICA_PUBLICATION in _metadata(writer)
     assert schema.META_REPLICA_DIVERGENCE not in _metadata(writer)
+    assert _publish(root, writer).status == "published"
+
+
+def _clock(injection):
+    """Move the monotonic clock forward; the snapshot and the publisher both read it."""
+    monotonic, offset = time.monotonic, [0.0]
+    injection.setattr(time, "monotonic", lambda: monotonic() + offset[0])
+
+    def advance(seconds):
+        offset[0] += seconds
+
+    return advance
+
+
+def _on_copied_integrity_check(injection, effect):
+    """Run ``effect`` as the copied store's integrity check starts.
+
+    Returns the statements SQLite interrupted: a stop inside the check, not at the
+    phase boundary after it, is what keeps a long validation bounded.
+    """
+    connect = sqlite3.connect
+    interrupted = []
+
+    class CopiedStore(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql == "PRAGMA integrity_check":
+                effect()
+            try:
+                return super().execute(sql, *args, **kwargs)
+            except sqlite3.OperationalError:
+                interrupted.append(sql)
+                raise
+
+    def copied(database, *args, **kwargs):
+        if Path(database).name.startswith(snapshot._PREFIX):
+            kwargs["factory"] = CopiedStore
+        return connect(database, *args, **kwargs)
+
+    injection.setattr(sqlite3, "connect", copied)
+    return interrupted
+
+
+def test_lost_custody_stops_the_copy_inside_its_integrity_check(store, monkeypatch):
+    # The custody recheck is paced by time, not by SQL work; it must still stop a long check.
+    root, writer = store
+    for _ in range(40):  # history the integrity check takes several progress-handler steps over
+        _commit(writer)
+    custody = [True]
+    with monkeypatch.context() as injection:
+        advance = _clock(injection)
+
+        def lose_custody():
+            custody[0] = False
+            advance(snapshot._RECHECK_SECONDS)
+
+        interrupted = _on_copied_integrity_check(injection, lose_custody)
+        result = replica.publish_replica(
+            root, writer, authority_check=lambda: custody[0], deadline=time.monotonic() + 10
+        )
+    assert interrupted == ["PRAGMA integrity_check"]
+    assert result.status == "retry_pending" and result.reason == "publication authority was lost"
+    assert not replica.replica_path(root).exists()
+    assert _publish(root, writer).status == "published"
+
+
+def test_changed_fencing_token_stops_the_copy_inside_its_integrity_check(store, monkeypatch):
+    # A fenced writer's lease check raises its own error; SQLite must not swallow it as corruption.
+    root, writer = store
+    for _ in range(40):  # history the integrity check takes several progress-handler steps over
+        _commit(writer)
+    fenced = [False]
+
+    def lease_check():
+        if fenced[0]:
+            raise OpError("WRITER_FENCED", "writer lease fencing token 1 is no longer current")
+        return True
+
+    with monkeypatch.context() as injection:
+        injection.setattr(writer, "_lease_check", lease_check)
+        advance = _clock(injection)
+
+        def fence():
+            fenced[0] = True
+            advance(snapshot._RECHECK_SECONDS)
+
+        interrupted = _on_copied_integrity_check(injection, fence)
+        with pytest.raises(OpError, match="WRITER_FENCED"):
+            _publish(root, writer)
+    assert interrupted == ["PRAGMA integrity_check"]
+    assert not replica.replica_path(root).exists()
+    assert _publish(root, writer).status == "published"
+
+
+def test_deadline_inside_the_copied_integrity_check_is_a_retryable_timeout(store, monkeypatch):
+    # Running out of time says nothing about the copy: never COLLECTION_SNAPSHOT_INVALID.
+    root, writer = store
+    for _ in range(40):  # history the integrity check takes several progress-handler steps over
+        _commit(writer)
+    with monkeypatch.context() as injection:
+        advance = _clock(injection)
+        interrupted = _on_copied_integrity_check(injection, lambda: advance(60))
+        result = _publish(root, writer)
+    assert interrupted == ["PRAGMA integrity_check"]
+    assert result.status == "retry_pending"
+    assert result.reason.startswith("COLLECTION_SNAPSHOT_DEADLINE")
+    assert schema.META_PENDING_REPLICA_PUBLICATION in _metadata(writer)
     assert _publish(root, writer).status == "published"
 
 

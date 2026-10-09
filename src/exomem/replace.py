@@ -29,6 +29,7 @@ from typing import Any
 from . import find as find_module
 from . import (
     indexes,
+    lifecycle_statuses,
     memory_refs,
     relation_review,
     reserved_paths,
@@ -184,7 +185,10 @@ def _legacy_replace(
     old_frontmatter, _old_body, _old_frontmatter_text = parse_frontmatter(old_text)
     old_expected_hash = content_hash(old_text)
 
-    if old_frontmatter.get("status") == "superseded":
+    if (
+        lifecycle_statuses.Basis(vault_root).classify(old_frontmatter.get("status")).require()
+        == "superseded"
+    ):
         raise ReplaceError(
             code="ALREADY_SUPERSEDED",
             missing=["old_path"],
@@ -575,6 +579,8 @@ def replace(
     if old_parsed is None:
         raise ReplaceError("UNREADABLE", ["old_path"], "old page is unreadable")
 
+    status_basis = lifecycle_statuses.Basis(root)
+    predecessor_class = status_basis.classify(old_parsed.frontmatter.get("status")).require()
     recovery_receipt = None
     predecessor_hash = hashlib.sha256(old_bytes).hexdigest()
     try:
@@ -587,7 +593,7 @@ def replace(
         )
     except PathGuardError as error:
         raise ReplaceError(error.code, ["old_path"], error.reason) from error
-    if old_parsed.frontmatter.get("status") == "superseded":
+    if predecessor_class == "superseded":
         if draft_id is not None and draft_token is not None:
             try:
                 token = semantic_writes.DraftToken.decode(draft_token)
@@ -696,7 +702,7 @@ def replace(
     rel_new_no_ext = prepared.destination.removesuffix(".md")
     new_link_target = render_wikilink_target(rel_new_no_ext, root)
     old_updated = _mark_superseded(old_text, new_link_target, stamp_iso)
-    if old_parsed.frontmatter.get("status") == "superseded" and recovery_receipt is not None:
+    if predecessor_class == "superseded" and recovery_receipt is not None:
         old_updated = old_text
     auxiliary = list(prepared.auxiliary_writes)
     log_file = root / "Knowledge Base" / "log.md"

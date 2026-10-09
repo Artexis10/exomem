@@ -8,8 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem.governance.principal import library_scope
-
 from exomem import (
     bm25,
     commands,
@@ -18,6 +16,7 @@ from exomem import (
     find_candidates,
     freshness,
     lexstore,
+    lifecycle_statuses,
     readiness,
     semantic_index,
 )
@@ -25,6 +24,7 @@ from exomem import (
     find as find_module,
 )
 from exomem.embedding_index import SemanticUnitVectorHit
+from exomem.governance.principal import library_scope
 from exomem.ranking_config import RankingConfig
 from exomem.retrieval_explain import RetrievalTrace, attach_hit_explanations
 
@@ -409,7 +409,7 @@ def test_unit_trace_uses_the_runtime_fused_score_without_recomputation() -> None
     trace.record_unit_ranked(
         records={
             unit_ref: (
-                SimpleNamespace(status="active", rel_path="unit-parent.md"),
+                SimpleNamespace(frontmatter={"status": "active"}, rel_path="unit-parent.md"),
                 SimpleNamespace(unit_ref=unit_ref),
                 0,
             )
@@ -425,6 +425,7 @@ def test_unit_trace_uses_the_runtime_fused_score_without_recomputation() -> None
         weights=(0.010001, 0.01),
         rrf_k=1,
         prefer_active=True,
+        status_basis=lifecycle_statuses.Basis(None),
         superseded_penalty=0.5,
         lexical_used=True,
         vector_used=True,

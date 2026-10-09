@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -93,10 +94,7 @@ def test_posix_source_and_destination_must_be_on_the_same_filesystem(tmp_path: P
                         ).require() as copied_file:
                             assert destination_filesystem.read(copied_file).require() == b"source"
     finally:
-        try:
-            alternate.rmdir()
-        except OSError:
-            pass
+        shutil.rmtree(alternate, ignore_errors=True)
 
 
 def test_linux_parent_opens_require_no_cross_mount_resolution() -> None:

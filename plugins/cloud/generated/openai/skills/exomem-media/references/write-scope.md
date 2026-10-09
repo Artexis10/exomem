@@ -160,15 +160,21 @@ source needs correction:
 - For typo or formatting: leave it. Sources reflect what was captured at capture-time.
 - For a wrong `source_type` or `domain`: correct it with
   `manage_memory_file(operation='reclassify', path=…, source_kind=…, domain=…, reason=…)`.
+- To undo the latest correction:
+  `manage_memory_file(operation='revert-reclassification', path=…, reason=…)`.
 
 The append-only rule governs **content, not location**, and not the capture-time
 classification. Relocating a source *within* `Sources/` — e.g. into a themed
 sub-folder — is allowed via `move_file`: the bytes are unchanged, only the path
 moves, and inbound wikilinks are rewritten. Reclassification is the governed form
 of the same thing: it derives the destination from the corrected classification
-rather than accepting one, requires a reason, records the previous path, and
-leaves the body byte-identical. Use `operation='propose-reclassification'` to see
-the destination and affected references first. Moving a file *out* of `Sources/`
+rather than accepting one, requires a reason, appends the previous path, kind
+and domain to `reclassified_from`, and leaves the body byte-identical. Use
+`operation='propose-reclassification'` to see the destination, the references it
+rewrites, and any refusal first. A link that names the source by bare name keeps
+resolving after the move; a path link in an append-only page would dangle, so the
+move is refused. Revert restores the latest recorded path, kind and domain; it
+refuses an entry that records only a path. Moving a file *out* of `Sources/`
 (or *into* it from elsewhere) remains forbidden.
 
 ## Index files are skill-managed

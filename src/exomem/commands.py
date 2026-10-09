@@ -1315,6 +1315,10 @@ def op_bootstrap(
             "rule": "Decision not permission; v1 writers retain confirmation.",
         },
     }
+    if "schema_memory" in active_product_names:
+        vocabulary_workflow_projection["page_status"] = vocabulary_operation(
+            "schema_memory", {"subject": "statuses", "operation": "inspect"}
+        )
     from .vocabulary_authority import VocabularyAuthority
 
     authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
@@ -1623,7 +1627,7 @@ def op_bootstrap(
         ),
     }
     payload: dict = {
-        "contract_version": "2026-10-07.1",
+        "contract_version": "2026-10-08.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -1766,6 +1770,7 @@ def op_bootstrap(
             "lifecycle": entity_lifecycle,
         },
         "workflow": {
+            "page_status": semantic_authoring_module.STATUS_CLASSIFICATION_RULE,
             "requested": requested_workflow,
             "loop": [
                 "bootstrap",
@@ -1863,7 +1868,11 @@ def op_bootstrap(
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
                 "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
-                "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders",
+                "structure_suggestion": (
+                    "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
+                    if profile == "compact" and not frozen_profile
+                    else "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                ),
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
@@ -1887,8 +1896,16 @@ def op_bootstrap(
                 # naming a command the active surface cannot call, and these lines
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
-                "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
-                "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
+                "due_state": (
+                    "Advisory counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated references. They cover predictions past authored check dates, experiments past their window without results, long-unanswered questions and broken supersession chains. Absent when nothing is due."
+                    if profile == "compact" and not frozen_profile
+                    else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
+                ),
+                "due_state_handling": (
+                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    if profile == "compact" and not frozen_profile
+                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
                     "preserve exact source-unit provenance and history, and route observed "
@@ -1898,7 +1915,11 @@ def op_bootstrap(
                     "Handle visible role transitions before writing; "
                     "MCP cannot observe tool-free turns"
                 ),
-                "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
+                "due_state_authority": (
+                    "Advisory counts measure authored state. The runtime never judges, resolves, closes, archives or writes for them, or changes retrieval ordering."
+                    if profile == "compact" and not frozen_profile
+                    else "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering"
+                ),
                 # Command-free for the same reason as the due-state lines above,
                 # and it matters MOST here: the block arrives unasked on a
                 # hookless client's ordinary write response, and that client has
@@ -1906,10 +1927,18 @@ def op_bootstrap(
                 # The "worth keeping" bar is the same one `engagement.contract.capture`
                 # spells out in full (a later decision, lookup, repeated task,
                 # comparison or continuation); it is not repeated here.
-                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
+                "capture_sweep_handling": (
+                    "On the first durable write after a quiet interval, `capture_sweep` calls for one bounded pass over recent conversation. `consider` gives examples; `written_recently` prevents duplicates; `unpaged_mentions` names references without pages. Save what qualifies in the user's language; otherwise stay silent."
+                    if profile == "compact" and not frozen_profile
+                    else "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
+                ),
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
-                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                "family_disposition_reading": (
+                    "A quiet family stays reviewable and audited; omission never proves nothing is due. review_memory(mode='dispositions') lists registered families, quiet state, reasons and the delegation envelope."
+                    if profile == "compact" and not frozen_profile
+                    else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
+                ),
                 # Carried by EVERY profile. It was full-only while compact sat 24
                 # bytes under its ceiling; the queued compact-bootstrap trim has
                 # since paid for it out of redundancy elsewhere in the payload, and
@@ -2379,7 +2408,10 @@ def _session_bootstrap_projection(compact: dict) -> dict:
     session["knowledge_packs"] = {
         key: compact["knowledge_packs"][key] for key in ("selected", "selection_rule")
     }
-    session["workflow"] = {"requested": compact["workflow"]["requested"]}
+    session["workflow"] = {
+        "requested": compact["workflow"]["requested"],
+        "page_status": compact["workflow"]["page_status"],
+    }
     session["authoring_contract"] = {
         "post_write": {
             key: compact["authoring_contract"]["post_write"][key]
@@ -10019,6 +10051,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "collections-store-adopt-local",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -10052,6 +10085,7 @@ def op_maintain_memory(
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
     exclude_groups: list[str] | None = None,
+    acknowledge_skipped: bool | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
@@ -10059,7 +10093,6 @@ def op_maintain_memory(
     Remote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.
     Run those writes with exomem maintain on the host; remote dry_run=true works.
 
-    structured-files and tag-variants apply needs the preview's `plan_id` and `why`.
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
 
@@ -10075,9 +10108,9 @@ def op_maintain_memory(
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
         collection: Planning or Records collection for structured-files.
         apply: Omit to preview; true applies the reviewed plan.
-        plan_id: Preview identity required to apply (structured-files, tag-variants).
+        plan_id: Preview identity required to apply.
         source_snapshot: Preview snapshot required to apply structured-files.
-        why: Audit reason required to apply structured-files or tag-variants.
+        why: Audit reason required to apply.
         curation_action: Curation step when mode is curation.
         run_id: Curation run identity.
         plan: Closed agent-authored plan for curation propose.
@@ -10089,6 +10122,7 @@ def op_maintain_memory(
         vocabulary_ref: Vocabulary decision for curation apply or resume.
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
+        acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10098,6 +10132,8 @@ def op_maintain_memory(
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if exclude_groups is not None and mode != "tag-variants":
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
+    if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
+        raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -10290,6 +10326,31 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "collections-store-adopt-local":
+        from .collection_store import admission as store_admission
+
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or (apply is None and (plan_id is not None or why is not None))
+            or (apply is not None and (apply is not True or plan_id is None or why is None))
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store-adopt-local previews without arguments; "
+                "apply needs true, plan_id and why"
+            )
+        if apply is None:
+            preview = store_admission.adopt_local_route(vault_root)
+            # This surface names the preview identity `plan_id`, as its other preview-first modes do.
+            preview["plan_id"] = preview.pop("preview_id")
+            return preview
+        return store_admission.adopt_local_route(vault_root, why=why, preview_id=plan_id,
+                                                 acknowledge_skipped=acknowledge_skipped is True)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10335,7 +10396,7 @@ def op_maintain_memory(
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, or tag-variants"
+        "backfill-ids, structured-files, curation, tag-variants, or collections-store-adopt-local"
     )
 
 
@@ -10447,7 +10508,7 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash. For entity-types, relations, source-kinds, domains and
+    the current hash. For entity-types, relations, source-kinds, domains, statuses and
     categories: inspect lists the live vocabulary and usage; propose previews
     a delta; save applies upsert, alias or deprecate with expected_hash and why;
     history lists kept versions; restore reverts one without rewriting pages.
@@ -10456,7 +10517,7 @@ def op_schema_memory(
     Args:
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, source-kinds, domains,
+        subject: contract, categories, entity-types, relations, source-kinds, domains, statuses,
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
@@ -10488,6 +10549,23 @@ def op_schema_memory(
     from .vocabulary import contract as vocabulary_contract
     from .vocabulary import registry_spec
 
+    if subject == "query-engine":
+        # The typed query grammar's bounded discovery chapters; no vault read or write.
+        from .query_engine import route as query_route
+
+        others = (project, page_type, expected_hash, compare_to, proposal, why, context, date_from,
+                  date_to, continuation, query, requested_type, vocabulary_ref, vocabulary_fingerprint, version,
+                  detail)
+        if operation != "inspect" or any(value is not None for value in others) or save or strict \
+                or include_model_suggestions or limit != 20:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: query-engine accepts operation inspect and name only")
+        from .cli_ops import OpError
+
+        try:
+            return query_route.chapter(name)
+        except query_route.QueryError as error:
+            refusal = query_route.details(error)
+            raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
     if subject in {"categories", "relations", "contract"} and (
         operation == "infer"
         or (
@@ -11678,7 +11756,8 @@ def op_reclassify_source(
     Classification is a judgement made at capture time, often before the answer
     is knowable. This is how it gets corrected: the source's kind, its domain, or
     both change, the file moves to the location those values project to, every
-    inbound reference follows it, and the previous path is recorded.
+    inbound reference follows it, and the previous path, kind and domain are
+    appended to the source's history so the correction can be reverted.
 
     The body is never touched. Only the classification fields and the fields
     recording the correction change, which is the same line `ingested_into:`
@@ -11717,8 +11796,9 @@ def op_propose_reclassification(
     """Report what correcting one source would do, without writing anything.
 
     Pass the kind and domain you have decided on to preview that correction: the
-    location it would project to and how many references would move. This is the
-    normal path — read the source, decide, preview, show the user, then apply.
+    location it would project to, the pages whose links it would rewrite, the
+    append-only pages it leaves unchanged, and any refusal with its cause. This is
+    the normal path — read the source, decide, preview, show the user, then apply.
 
     Called with no values, this reports only what is deterministically observable
     about the source: the domain segment already in its location, whether it
@@ -11736,6 +11816,29 @@ def op_propose_reclassification(
         ).as_dict()
     except reclassify_module.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
+
+
+def op_revert_reclassification(
+    vault_root: Path,
+    *,
+    path: str,
+    reason: str | None = None,
+) -> dict:
+    """Undo a source's latest reclassification.
+
+    The source returns to the location, kind and domain its latest history
+    entry records, every inbound reference follows it, and that entry is
+    removed. `reason` is required and recorded, as for a correction. A history
+    entry that records only a path, as a legacy one does, is refused rather
+    than guessed at.
+    """
+    from . import reclassify_source as reclassify_module
+
+    try:
+        result = reclassify_module.revert(vault_root, path=path, reason=reason)
+    except reclassify_module.ReclassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    return result.as_dict()
 
 
 def op_manage_memory_file(
@@ -11776,17 +11879,18 @@ def op_manage_memory_file(
     """Manage files through one governed file operation.
 
     For structures typed tools do not fit. Destructive operations need explicit
-    flags. validate_only/review apply to Markdown create/append.
+    flags.
 
     Args:
         operation: list, create, append, move, reclassify,
-            propose-reclassification, delete, trash-list, or recover.
+            propose-reclassification, revert-reclassification, delete,
+            trash-list, or recover.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
-        reason: Required for reclassify.
+        reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
         validate_only: Validate a Markdown create or append without writing.
@@ -11886,7 +11990,7 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             expected_dead_inbound=expected_dead_inbound,
         )
-    if operation in {"reclassify", "propose-reclassification"}:
+    if operation in {"reclassify", "propose-reclassification", "revert-reclassification"}:  # nosemgrep: ep-word-membership -- manage_memory_file defines these closed operation selectors.
         target = path or old_path
         if not target:
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
@@ -11894,6 +11998,8 @@ def op_manage_memory_file(
             return op_propose_reclassification(
                 vault_root, path=target, source_kind=source_kind, domain=domain
             )
+        if operation == "revert-reclassification":
+            return op_revert_reclassification(vault_root, path=target, reason=reason)
         return op_reclassify_source(
             vault_root,
             path=target,
@@ -11915,7 +12021,8 @@ def op_manage_memory_file(
         )
     raise ValueError(
         "INVALID_MODE: manage_memory_file operation must be list, create, append, "
-        "move, reclassify, propose-reclassification, delete, trash-list, or recover"
+        "move, reclassify, propose-reclassification, revert-reclassification, delete, "
+        "trash-list, or recover"
     )
 
 
@@ -11933,6 +12040,7 @@ def op_record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "import",
         "history",
     ],
     collection: str | None = None,
@@ -11970,30 +12078,32 @@ def op_record_memory(
     rows: list[dict[str, Any]] | None = None,
     source: str | None = None,
     on_reject: Literal["abort", "skip"] | None = None,
+    import_request: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Store observed state; Planning uses plan_memory, originals use Sources/Evidence.
 
-    Resolve one compatible collection; otherwise describe/propose before create.
+    Describe/propose before create.
 
     Args:
-        collection: Target collection; omit for describe, inventory, or new manifest validate/create.
+        collection: Target; omit for describe, inventory or new-manifest validate/create.
         manifest_text: Full manifest for validate/create/revise.
         expand_child: Exact declared child container.
         refresh_presentation: Guarded managed Markdown rebuild.
         item_key: Update UUID; append derives identity from natural key.
-        expected_container_hash: Current snapshot for append/bulk_upsert/update/revise/rebaseline.
+        expected_container_hash: Current container hash for guarded writes.
         expected_manifest_hash: Current manifest hash for revise/rebaseline.
         expected_item_version: Update item version.
         acknowledged_gap_codes: Inspect-reported rebaseline gaps.
-        why: Write audit reason.
+        why: Audit reason.
         delivery: Append receipt envelope; never sets values or creates collections.
-        held: Resume append/update with item/changes overrides; null removes a field.
-            Discard removes the held candidate.
+        held: Resume append/update (item/changes override; null removes a field); discard deletes it.
         hold: False refuses; otherwise invalid candidates are held.
         rows: bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.
             Outcomes: inserted/updated/unchanged/rejected.
         source: bulk_upsert default preserved Source/Evidence path.
-        on_reject: bulk_upsert: abort writes nothing on rejection; skip commits the rest.
+        on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
+        query: v1 query object; grammar via describe.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -12033,6 +12143,8 @@ def op_record_memory(
         rows=rows,
         source=source,
         on_reject=on_reject,
+        import_request=import_request,
+        query=query,
     )
 
 
@@ -12289,6 +12401,13 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "import-conditional":
+            from .collection_store.importer import READ_ONLY_MODES
+
+            request = kwargs.get("import_request")
+            mode = request.get("mode") if isinstance(request, dict) else None
+            # A malformed mode stays on the writer path, where the importer refuses it.
+            return isinstance(mode, str) and mode in READ_ONLY_MODES
         if adapter == "question-conditional":
             return not _review_question_submission(
                 kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")

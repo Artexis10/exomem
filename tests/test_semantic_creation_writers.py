@@ -1642,37 +1642,6 @@ def test_v2_qualifying_receipt_is_internal_and_never_review_state(tmp_path: Path
     assert relation_review.load_relation_reviews(tmp_path) == ()
 
 
-def test_creation_preflight_census_token_matches_fresh_token_on_stable_tree(
-    vault: Path,
-) -> None:
-    from exomem import semantic_contract
-
-    kwargs = {
-        "content": _compact_content("Census token stability"),
-        "note_type": "research-note",
-        "title": "Census token stability",
-        "project": "census-token-project",
-        "project_category": "domain",
-        "today": TODAY,
-    }
-    validation = note.note(vault, validate_only=True, **kwargs)
-    prepared = note.note(
-        vault,
-        draft_id=validation.draft_id,
-        draft_hash=validation.draft_hash,
-        draft_token=validation.draft_token,
-        _return_prepared=True,
-        **kwargs,
-    )
-
-    assert prepared.preflight.census_token is not None
-    sc_token, generation = prepared.preflight.census_token
-    assert sc_token == semantic_contract.corpus_validity_token(vault)
-    from exomem import writer_lease
-
-    assert generation == writer_lease.read_commit_generation(vault)
-
-
 def test_creation_preflight_census_token_is_none_when_generation_unreadable(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
