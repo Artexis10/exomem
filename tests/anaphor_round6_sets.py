@@ -3,7 +3,7 @@
 The fifth reviewer set stays private; these are its verbatim disclosed turns
 with newly authored contexts repeating their vocabulary. They are regressions,
 not a reproduction of the reviewer's complete 72/40 set.
-The 20 licence and 20 temporal variants are author probes, not independent data.
+The 10 licence and 20 temporal variants are author probes, not independent data.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def earlier(subject: str, turn: str) -> tuple[dict[str, str], ...]:
     """Name the subject and repeat all probe words in an earlier user entry."""
     return ({"role": "user", "text": f"Can we review the {subject}? Our team mentioned: {turn}"},)
 
-# Exactly 20 variants of rule 1: repeated off-subject content vs task words.
+# Ten variants of rule 1: repeated off-subject content never licenses a carry.
 LICENCE_NEGATIVES = (
     "can you fix its zipper",
     "is it crunchy enough",
@@ -91,18 +91,6 @@ LICENCE_NEGATIVES = (
     "is that origami ready",
     "can you review their handwriting",
     "is its antenna broken",
-)
-LICENCE_POSITIVES = (
-    "what is its latest update",
-    "who is handling that",
-    "can we revisit those decisions",
-    "should we compare its numbers",
-    "have they approved this version",
-    "can you summarise its outcome",
-    "how expensive is that",
-    "is this blocking them",
-    "can we push its deadline",
-    "what changed in its final draft",
 )
 
 # Exactly 20 variants of rule 3: bare complements vs preposition heads.

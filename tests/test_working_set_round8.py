@@ -198,7 +198,11 @@ def test_structural_local_material_abstains_at_both_public_paths(
     ),
 )
 def test_structural_assignment_boundaries_preserve_historical_requests(turn: str) -> None:
-    assert working_set_conversation.may_carry(working_set_resolve.analyze_turn(turn)), turn
+    # One admitted unit supports the request words, so only local material can veto.
+    support = "The plan's final reply is ready for review; its result is due."
+    assert working_set_conversation.may_carry(
+        working_set_resolve.analyze_turn(turn), supporting_text=support,
+    ), turn
 
 
 @pytest.mark.parametrize(
@@ -245,8 +249,10 @@ def test_local_material_never_attaches_a_historical_subject(cvault: Path, turn: 
     ),
 )
 def test_historical_controls_and_apostrophes_keep_their_licence(turn: str) -> None:
+    # The unit has no apostrophe, so a contraction or possessive must split to be licensed.
+    support = "Her results compare well: the final reply is ready for review, still on track, and the team handling it agrees."
     analysis = working_set_resolve.analyze_turn(turn)
-    assert working_set_conversation.may_carry(analysis, subject_title="owner plan"), turn
+    assert working_set_conversation.may_carry(analysis, subject_title="owner plan", supporting_text=support), turn
 
 
 @pytest.mark.parametrize(
@@ -458,7 +464,7 @@ def test_real_indexed_long_titles_are_bounded_including_no_material_fallback(
     if not material:
         monkeypatch.setattr(working_set, "run_lanes", lambda *a, **k: ([], []))
     packet = commands.op_activate_context(
-        cvault, turn="was that your final reply", conversation=THREAD, max_chars=1200
+        cvault, turn="what about the next one", conversation=THREAD, max_chars=1200
     )
     assert packet["anchors"][0]["title"] == ""
     assert packet["anchors"][0]["origin"] == "conversation"
@@ -481,7 +487,7 @@ def test_real_indexed_ambiguity_keeps_every_identity_with_budgeted_titles(cvault
     with request_scope(_external()):
         packet = commands.op_activate_context(
             cvault,
-            turn="was that your final reply",
+            turn="what about the next one",
             max_chars=1200,
             conversation={
                 "recent": [{"role": "user", "text": "Ottilie Marsh and Bram Quillfeather"}]
@@ -547,7 +553,7 @@ def test_command_leaf_preserves_inferred_marker_through_egress(
     monkeypatch.setattr(working_set, "run_lanes", lambda *a, **k: (items if material else (), []))
     with request_scope(_external()):
         packet = commands.op_activate_context(
-            cvault, turn="was that your final reply", conversation=THREAD
+            cvault, turn="what about the next one", conversation=THREAD
         )
     assert len(packet["units"]) == (1 if material else 0)
     if not material:
@@ -598,7 +604,7 @@ def test_additional_introductions_and_nominal_alternatives_stay_local(turn: str)
 
 def test_a_perfect_auxiliary_does_not_introduce_a_nominal() -> None:
     analysis = working_set_resolve.analyze_turn("i have decided to review it")
-    assert working_set_conversation.may_carry(analysis)
+    assert working_set_conversation.may_carry(analysis, supporting_text="We decided to review the plan.")
 
 
 def test_a_prepositional_bare_noun_keeps_its_local_relative() -> None:
@@ -626,7 +632,9 @@ def test_a_quantified_demonstrative_complement_keeps_its_local_noun() -> None:
     ),
 )
 def test_quantified_information_requests_keep_the_historical_relation(turn: str) -> None:
-    assert working_set_conversation.may_carry(working_set_resolve.analyze_turn(turn)), turn
+    assert working_set_conversation.may_carry(
+        working_set_resolve.analyze_turn(turn), supporting_text="The latest numbers are in.",
+    ), turn
 
 
 @pytest.mark.parametrize(
