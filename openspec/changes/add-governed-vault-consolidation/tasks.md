@@ -2,7 +2,7 @@
 
 Delivery A is the current implementation batch. Deliveries B and C remain required for T16 and precede real managed-vault consolidation. All checks use temporary state unless an operator authorizes a named live operation.
 
-Evidence for the checked Delivery A tasks. Each test passed in a scoped local run on head 9cbfe771a, and the pull request's CI runs the full corpus. Delivery A lands as commit 168922522 on base 8365f0e92 (#1614). The branch later merged main at 7b242bfa8 and also carries Delivery B. Tests that run the actual older runtime need an exomem 0.106.0 environment in `EXOMEM_TEST_OLDER_READER_PYTHON`, as CI installs it.
+Evidence for the checked Delivery A tasks. Each test passed in a scoped local run on head 9cbfe771a, and the pull request's CI runs the full corpus. Delivery A lands as commit 168922522 on base 8365f0e92 (#1614). The branch later merged main at 7b242bfa8 and also carries Delivery B. Commit dfa5870c3 followed and added two move tests and one find-consumer test. They passed with the first group's files (48 tests) and count under 3.5 and 4.3. Tests that run the actual older runtime need an exomem 0.106.0 environment in `EXOMEM_TEST_OLDER_READER_PYTHON`, as CI installs it.
 
 Scoped runs, each `python -m pytest -q -p no:cacheprovider` over the files named:
 - `tests/test_connector_principal.py`, `tests/test_connector_boundary.py`, `tests/test_connector_boundary_arming.py` and `tests/test_connector_boundary_e2e.py`: 45 passed.
@@ -58,7 +58,7 @@ Open: 3.2, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3, 4.4, 4.7, 5.6 and 6.1 are implemented w
 - [ ] 3.4 Protect configuration and protective Scope definitions; configure capture namespaces and prove allowed capture/edit plus identical hidden-present and absent creation refusals.
   Gap: tests prove allowed capture and edit and the identical refusals. No committed test shows a limited connector cannot write a protective Scope document through the file writer (`connector_boundary.require_write`). Only the `govern_memory` surface is tested; a scratch probe, not committed, confirmed the writer refuses the write.
 - [ ] 3.5 Enforce capture namespace visibility across all writers, moves, replacement, reclassification, imports/restores, and Scope/configuration changes; check old and proposed membership.
-  Gap: tests cover unrestricted writers, folder aliases, sidecar reclassification, proposed membership, arming and Scope changes at startup. No test covers a move, a replacement, a restore or import into a populated capture folder, or a `capture_paths` change.
+  Gap: tests cover unrestricted writers, folder aliases, sidecar reclassification, proposed membership, moves (`tests/test_connector_boundary.py::test_a_limited_move_answers_the_same_whether_or_not_a_hidden_page_holds_or_links_the_name`, `::test_no_writer_moves_protected_content_into_a_capture_namespace`), arming and Scope changes at startup. No test covers a replacement, a restore or import into a populated capture folder, or a `capture_paths` change.
 - [ ] 3.6 Document configuration, restricted defaults, and explicit administrator ingress; exercise the documented temporary setup without deploying it.
   Gap: `docs/connector-boundaries.md` covers configuration and restricted defaults. It does not state that explicit CLI, stdio and library ingress stays unrestricted. No test runs the document's own example; `test_maintenance_command_arms_the_configured_boundary` runs the same command on fixture configuration.
 
@@ -69,7 +69,7 @@ Open: 3.2, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3, 4.4, 4.7, 5.6 and 6.1 are implemented w
 - [ ] 4.2 Admit collection rows before values decoding, inspection seals, and summaries; prove hidden rows cannot alter counts, hashes, errors, or cache results.
   Gap: tests cover hidden-row counts, snapshots, guards, audit status and the live summary cache. No test shows that a hidden row cannot change an error, or that its values are never decoded.
 - [ ] 4.3 Filter retrieval, graph, context, working-set, canonical-state, continuity, history, alias, and citation contributors before derivation; verify paired observations.
-  Gap: the OAuth twin test covers retrieval, graph and history reads. No ceiling test covers working sets, canonical state, continuity, aliases or citations. FTS5 `bm25()` statistics still count hidden pages (7.8).
+  Gap: the OAuth twin test covers retrieval, graph and history reads, and `tests/test_private_vocabulary_instances.py::test_a_hidden_page_with_a_private_status_never_changes_a_limited_clients_find_consumers` covers evolution, context and link suggestions. No ceiling test covers working sets, canonical state, continuity, aliases or citations. FTS5 `bm25()` statistics still count hidden pages (7.8).
 - [ ] 4.4 Restrict bootstrap, whole-corpus aggregates, registries, provenance, and receipts to admitted inputs or existing unavailable outcomes; prove hidden canaries cannot affect responses.
   Gap: tests cover bootstrap, registries, whole-corpus aggregates and adoption resources. No ceiling test covers provenance or receipts.
 - [x] 4.5 Audit global registry uniqueness, aliases, folders, and hashes; preserve public-independent owner writes and prove hidden-dependent operations remain unavailable until Delivery B.
