@@ -240,12 +240,16 @@ be reported as "not comparable". The job SHALL NOT apply an absolute latency
 threshold. The job does not bound drift across releases: each release can be up
 to the margin slower than the release before it.
 
-A dispatched full run MAY carry an accept reason for a deliberate slowdown.
-With a reason, a series beyond the margin SHALL report "accepted" with that
-reason, its paired ratios and its stages, and SHALL NOT fail. The reason SHALL
-appear in the run summary that release evidence reads. It applies to that one
-run only; the release it admits becomes the next pairing base. A scheduled run
-SHALL NOT carry a reason.
+A deliberate slowdown SHALL be accepted only through a committed accept
+record, which a pull request adds and the normal independent review checks.
+The record SHALL name the release tag it accepts against, each series it
+covers, a maximum paired ratio for each, the reason and the pull request. The
+job SHALL read it on scheduled and dispatched runs alike. A covered series
+whose interval's lower bound stays at or below its maximum ratio SHALL report
+"accepted" with the reason and SHALL NOT fail. Any other series beyond the
+margin, and a covered series beyond its maximum ratio, SHALL fail. A record
+whose tag is not the most recent release tag SHALL be ignored and reported as
+expired. No run input SHALL waive the comparison.
 
 The absolute verdict on the ceilings and the stage budgets SHALL come from a
 run on a quiet workstation, on the reference corpus in a process restricted to
@@ -256,8 +260,9 @@ failed, refused or not measured, with its sample counts, its load, its
 contended samples and the principal it measured. A refused verdict holds no
 ceiling comparison, and the operator can repeat it on a quiet cell. The agent
 or operator who rolls a release onto the live cell SHALL run the live-cell
-series as a step of the release runbook and attach its content-free summary to
-that release's GitHub Release. A release with no attached summary SHALL show
+series as a step of the release runbook, validate its summary against the
+content-free summary schema, and attach it to that release's GitHub
+Release. A release with no attached summary SHALL show
 "not measured". A failed or refused live-cell state SHALL open follow-up work.
 
 #### Scenario: A constant-factor regression blocks the release
@@ -266,12 +271,22 @@ that release's GitHub Release. A release with no attached summary SHALL show
 - **THEN** the next scheduled or dispatched full CI run fails the `retrieval-latency` job and names the series and the stages where the time moved
 - **AND** the release evidence check stays red until a full run passes
 
-#### Scenario: A deliberate slowdown ships with a recorded reason
+#### Scenario: A deliberate slowdown ships through a reviewed accept record
 
 - **WHEN** a merged correctness fix makes warm hybrid requests 15% slower than the most recent release tag
-- **AND** the dispatched full run for the release carries an accept reason that names the fix
-- **THEN** the `retrieval-latency` job reports the series as accepted, with the reason and the paired ratios, and does not fail
-- **AND** the next full run, after that release is tagged, pairs with the new tag and carries no reason
+- **AND** a merged accept record names that tag, the hybrid series, a maximum ratio of 1.20 and the fix
+- **THEN** scheduled and dispatched runs report the hybrid series as accepted, with the reason and the paired ratios, and do not fail
+
+#### Scenario: An accept record does not cover another regression
+
+- **WHEN** an accept record covers the hybrid series up to 1.20
+- **AND** the keyword series is 30% slower, or the hybrid series is 3 times slower
+- **THEN** the `retrieval-latency` job fails and names the uncovered or exceeded series
+
+#### Scenario: An accept record expires with its tag
+
+- **WHEN** a new release is tagged after an accept record was merged
+- **THEN** the job pairs with the new tag, ignores the record and reports it as expired
 
 #### Scenario: A failed or refused live-cell verdict opens work and blocks nothing
 

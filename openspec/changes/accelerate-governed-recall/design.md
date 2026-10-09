@@ -478,13 +478,18 @@ Control justification:
   slower compound to about 54%. The absolute record on each release shows that
   drift against the fixed ceilings, and a failed record opens follow-up work.
 - *A deliberate slowdown* is a correct firing. A change that accepts more than
-  10% on purpose, such as a correctness fix, ships through one dispatched full
-  run that carries an accept reason (a `workflow_dispatch` input). That run
-  reports the series as accepted with the reason and the ratios, and the
-  release evidence shows the reason. The agent or operator who drives the
-  release writes the reason; nobody else approves it. The reason holds for
-  that run only, and the release it admits becomes the next pairing base, so
-  nothing carries forward. Scheduled runs carry no reason.
+  10% on purpose, such as a correctness fix, ships through a committed accept
+  record (`benchmarks/recall-latency/accept.json`, beside the gate's other
+  inputs, so archiving this change does not move it). The record names
+  the release tag it accepts against, the series, a maximum paired ratio per
+  series, the reason and the pull request. A pull request adds it, so the same
+  independent review that checks every change checks the waiver; no person
+  approves it separately. The job reads it on scheduled and dispatched runs
+  alike, so nightly runs stay green for the accepted series. It bounds the
+  waiver: an uncovered series, or a covered series beyond its maximum ratio,
+  still fails. It expires by itself when a newer tag exists. There is no run
+  input that waives the comparison, because a self-granted waiver at dispatch
+  time would be the only unreviewed decision in the release path.
 
 **Absolute record, workstation and live cell.** The ceilings and the stage
 budgets are judged on a quiet workstation and on the live cell after each
