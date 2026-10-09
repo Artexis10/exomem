@@ -371,7 +371,8 @@ class Basis:
 
     `refuses` is False for a page the operation only reads or rewrites links in
     (see `reading`): an unavailable value then has no definition, as on the read
-    side, instead of refusing.
+    side, instead of refusing. A library call that no surface bound never refuses
+    either; it classifies against the shipped pack.
     """
 
     root: Path | None
@@ -413,7 +414,14 @@ class Basis:
         return replace(self, refuses=False)
 
     def _withheld(self) -> Resolution:
-        return _UNAVAILABLE if self.refuses else _UNTYPED
+        from .governance.principal import current_principal
+
+        # A library call that no surface bound has no audience to refuse for. As
+        # with the egress filters, it answers as before the registry: from the
+        # shipped pack, without reading the overlay.
+        if self.refuses and current_principal() is not None:
+            return _UNAVAILABLE
+        return _UNTYPED
 
     def resolve(self, value: object) -> Resolution:
         if not isinstance(value, str) or not value:
