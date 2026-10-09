@@ -72,6 +72,7 @@ Explicit request paths SHALL NOT infer an activation census from missing identit
 The activation census SHALL come from the complete structural corpus, independent of the caller, and SHALL record each eligible page's raw status label without classifying it. It SHALL NOT be served.
 A write against an absent manifest SHALL NOT be refused for lack of complete-view authority; its result SHALL depend only on the admitted target.
 A grandfathering exemption SHALL classify the target's recorded label with the caller's admitted basis.
+Manifest preparation SHALL decide membership with the owner-local producer's status classes, independent of the caller, and SHALL exclude a page that is not live at preparation. A label with no available class at preparation SHALL be classified at check time.
 Validity-token reuse SHALL require fresh complete-view admission and current status dependencies; otherwise existing preflight revalidation SHALL run.
 
 #### Scenario: Hidden status cannot poison a shared semantic cache
@@ -83,6 +84,10 @@ Validity-token reuse SHALL require fresh complete-view admission and current sta
 - **WHEN** a restricted writer validates an admitted page while the activation manifest is absent
 - **THEN** the write's outcome is the same with or without hidden pages
 - **AND** the prepared manifest describes the complete corpus, not the writer's view
+
+#### Scenario: A later label redirect cannot grandfather a page that was pending at activation
+- **WHEN** a page carries a pending label when the manifest is prepared, and the owner later redirects that label to a live one
+- **THEN** the page is not grandfathered, and its next active edit needs a valid semantic unit
 
 #### Scenario: Hidden duplicate identity cannot inherit grandfathering
 - **WHEN** an admitted target shares its stable identity with another canonical page in the complete identity census
