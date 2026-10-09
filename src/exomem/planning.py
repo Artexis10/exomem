@@ -1660,23 +1660,38 @@ class HierarchyWrite:
     stored: Mapping[str, Any] | None
 
 
+def _committed(values: Mapping[str, Any]) -> bool:
+    # Old C4 debt: the required-parent rule names the shipped `committed` value.
+    return values.get("commitment") == "committed"
+
+
+def _tightens(stored: Mapping[str, Any] | None, values: Mapping[str, Any]) -> bool:
+    """Whether a write can tighten an item's registry `parents` rule.
+
+    A new item, a new kind or parent, a commitment that becomes committed, or a
+    lifecycle that becomes `active` can. Archiving, decommitting or editing other
+    fields cannot, so those keep working after the kind's definition is removed.
+    """
+    if stored is None:
+        return True
+    return (
+        stored.get("kind") != values.get("kind")
+        or stored.get("parent") != values.get("parent")
+        or (_committed(values) and not _committed(stored))
+        or (values.get("lifecycle") == "active" and stored.get("lifecycle") != "active")
+    )
+
+
 def _kind_definition(write: HierarchyWrite | None, key: str, values: Mapping[str, Any]) -> Any:
     """The kind definition whose `parents` judge one item's hierarchy.
 
-    Only the item a write changes, and only when its kind, parent, commitment
-    or lifecycle changes, reads the vault registry; a withheld definition then
-    refuses the write. Every other item keeps the shipped kind rules, which no
-    registry save or restore can move, so a stored hierarchy stays readable.
+    Only the item a write changes, and only when the write can tighten its
+    rule, reads the vault registry; a withheld definition then refuses the
+    write. Every other item keeps the shipped kind rules, which no registry
+    save or restore can move, so a stored hierarchy stays readable.
     """
     kind = values["kind"]
-    if write is None or write.plan_id != key or (
-        write.stored is not None
-        # The hierarchy rules read exactly these four fields.
-        and all(
-            write.stored.get(name) == values.get(name)
-            for name in ("kind", "parent", "commitment", "lifecycle")
-        )
-    ):
+    if write is None or write.plan_id != key or not _tightens(write.stored, values):
         return PlanningValues(None).find("kind", kind)
     definition = _registered(PlanningValues(write.vault_root), "kind", kind)
     if definition is None:
@@ -1684,11 +1699,37 @@ def _kind_definition(write: HierarchyWrite | None, key: str, values: Mapping[str
     return definition
 
 
+def _validate_children(
+    manifest: collections.CollectionManifest,
+    plans: Mapping[str, Mapping[str, Any]],
+    write: HierarchyWrite,
+) -> None:
+    """Refuse a kind change that breaks a direct child's registry `parents`.
+
+    `parents` constrains only the direct parent, so the direct children are
+    every item a kind change can affect. A withheld child definition refuses;
+    a removed one has no rule. Only a violation this write introduces refuses.
+    """
+    if write.stored is None or write.stored.get("kind") == plans[write.plan_id]["kind"]:
+        return
+    before, after = write.stored.get("kind"), plans[write.plan_id]["kind"]
+    planning_values = PlanningValues(write.vault_root)
+    for key, child in plans.items():
+        if key == write.plan_id or _relation_target(manifest, child.get("parent")) != write.plan_id:
+            continue
+        definition = _registered(planning_values, "kind", child["kind"])
+        if definition is None:
+            continue
+        allowed = tuple(definition.attributes["parents"])
+        if after not in allowed and before in allowed:
+            _relation_error()
+
+
 def validate_hierarchy(
     manifest: collections.CollectionManifest,
     plans: Mapping[str, Mapping[str, Any]],
     *,
-    write: HierarchyWrite | None = None,
+    write: HierarchyWrite | None,
 ) -> None:
     """Planning's typed hierarchy over one complete set of plans, keyed by plan id.
 
@@ -1696,10 +1737,14 @@ def validate_hierarchy(
     have, and a committed active item of a kind that has parents needs one;
     active plans point only at active targets; a child's area agrees with its
     parent's; there are no cycles; and nothing archived keeps an active child.
-    `_kind_definition` decides which definition judges each item; an item with
-    no definition keeps every rule but the kind rules. This is the named
-    validator ``planning.hierarchy.v1``.
+    `write` is the item a write changes, or None for a read. `_kind_definition`
+    decides which definition judges each item, and `_validate_children` guards
+    the direct children of a kind change; an item with no definition keeps
+    every rule but the kind rules. This is the named validator
+    ``planning.hierarchy.v1``.
     """
+    if write is not None:
+        _validate_children(manifest, plans, write)
     parents: dict[str, str] = {}
     for key, values in plans.items():
         kind = values["kind"]
@@ -1720,7 +1765,7 @@ def validate_hierarchy(
                 _relation_error()
         definition = _kind_definition(write, key, values)
         allowed = None if definition is None else tuple(definition.attributes["parents"])
-        required_parent = active and values["commitment"] == "committed" and bool(allowed)
+        required_parent = active and _committed(values) and bool(allowed)
         if allowed == ():
             if parent is not None:
                 _relation_error()

@@ -26,10 +26,14 @@ Entries take no aliases, because an item stores the exact value.
 A new or changed value must be an active registered value. A registry restore therefore never makes a collection unreadable.
 The archive rule also checks the class only when status or lifecycle changes, or when the status is shipped.
 
-Registry-derived rules judge only the item a write changes. The `parents` rule reads the vault registry only for that item, and only when its kind, parent, commitment or lifecycle changes.
-A withheld kind definition then refuses with `PLANNING_VALUES_UNAVAILABLE`, and an unregistered kind refuses as invalid.
+Registry-derived rules judge only the writes that depend on them:
+
+- The item a write changes reads its kind's registry `parents` only when the write can tighten them: a new item, a new kind or parent, a commitment that becomes committed, or a lifecycle that becomes `active`. A withheld definition refuses with `PLANNING_VALUES_UNAVAILABLE`; an unregistered kind refuses as invalid. Archiving, decommitting and other edits keep the shipped rules, so they work after a kind is removed.
+- A write that changes an item's kind also checks each direct child against that child's registry `parents`, because `parents` constrains only the direct parent. A withheld child definition refuses; a removed one has no rule; only a violation this write introduces refuses.
+
 Every other item keeps the shipped kind rules, which no save or restore can move; an item of a vault kind keeps only the structural rules (active targets, area agreement, cycles, archived parents).
 Reads therefore never depend on the registry, and a restore followed by a save with other `parents` leaves the collection readable.
+`validate_hierarchy` takes `write` as a required keyword: read, revise and import paths pass `write=None`, so a new write path cannot fall back to read rules unnoticed.
 
 ## Admission
 
@@ -46,7 +50,7 @@ These rules name shipped keys. Shipped values are fixed, so each still resolves,
 
 - the six `kind == "area"` branches (an area carries no delivery state, takes no parent and cannot cross the area boundary);
 - the status ladder for `candidate`, `planned`, `active`, `blocked` and `completed` against `commitment` and `horizon` values; a vault status takes only the class rule;
-- `commitment == "committed"` in the required-parent rule;
+- `commitment == "committed"` in the required-parent rule and in `_tightens`, both through `_committed`;
 - the capture defaults in `normalize_item` and their prose copy in the bootstrap `default_capture`;
 - the in-flight slice of `plan_progress` (`status == "active"`, `commitment == "committed"`);
 - the six horizon views in `_collection_types/planning.yaml`, until P4.

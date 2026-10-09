@@ -3,7 +3,7 @@
 ### Requirement: Planning values are a governed vocabulary registry
 Planning SHALL read kind, status, priority, commitment, horizon, and health values from the `planning-values` registry: a shipped pack plus the vault overlay `_Schema/planning-values.yaml`, saved and restored through `schema_memory(subject="planning-values")`. Each entry key SHALL be `<field>.<value>`, and a Planning item SHALL store the bare value. Shipped entries SHALL NOT be overridden or deprecated. A status SHALL declare its planning `class` (`open`, `done`, or `dropped`); a kind SHALL declare `parents`, a list of registered kinds. Both SHALL be fixed once saved. Code SHALL branch on `class` and `parents`, never on a vault value.
 
-A value equal to the stored item's value SHALL stay readable after its definition is deprecated or removed. A new or changed value SHALL be an active registered value. A caller that cannot admit the overlay SHALL see only shipped values, and a write that depends on a vault value SHALL refuse with `PLANNING_VALUES_UNAVAILABLE`. A status with no readable class SHALL count as not settled for the open-item rule. A write SHALL judge a kind's `parents` only for the item it changes, and only when that item's kind, parent, commitment, or lifecycle changes; every other item SHALL keep the shipped kind rules, so a read never depends on the registry.
+A value equal to the stored item's value SHALL stay readable after its definition is deprecated or removed. A new or changed value SHALL be an active registered value. A caller that cannot admit the overlay SHALL see only shipped values, and a write that depends on a vault value SHALL refuse with `PLANNING_VALUES_UNAVAILABLE`. A status with no readable class SHALL count as not settled for the open-item rule. A write SHALL enforce registry `parents` on the item it changes when the change can tighten them (a new item, a new kind or parent, a commitment that becomes `committed`, or a lifecycle that becomes `active`), and, when it changes an item's kind, on each direct child, refusing only a violation it introduces. Every other item SHALL keep the shipped kind rules, so a read never depends on the registry.
 
 #### Scenario: A vault status is used and classified
 - **WHEN** the owner saves `status.waiting` with class `open` and triages a committed item to `waiting`
@@ -24,6 +24,14 @@ A value equal to the stored item's value SHALL stay readable after its definitio
 #### Scenario: A caller without the vault definitions cannot re-parent a vault kind
 - **WHEN** a caller who cannot admit the overlay changes the parent of an item whose kind is a vault kind
 - **THEN** the write refuses with `PLANNING_VALUES_UNAVAILABLE` and changes nothing
+
+#### Scenario: Changing a parent's kind cannot strand its children
+- **WHEN** a write changes an epic's kind to one its stories' registered `parents` do not name
+- **THEN** the write refuses, and a caller who cannot read the stories' definitions gets `PLANNING_VALUES_UNAVAILABLE`
+
+#### Scenario: Cleanup works after a kind is removed
+- **WHEN** the owner decommits or archives an item whose kind the registry no longer holds
+- **THEN** the write succeeds, because it cannot tighten the item's parent rule
 
 ## MODIFIED Requirements
 
@@ -74,7 +82,7 @@ An area SHALL use lifecycle alone and MAY be archived directly. A candidate deli
 - **THEN** Planning status, health, commitment, and horizon remain exactly as authored
 
 ### Requirement: Outcomes above initiatives and work items
-Planning SHALL keep ongoing area membership separate from the desired-outcome hierarchy. A kind's registered `parents` SHALL name the kinds its parent may have; an empty list SHALL mean the kind takes no parent. Shipped outcomes SHALL take no parent, an initiative MAY name exactly one outcome parent, and a work item MAY name exactly one initiative parent. A committed item of a kind with parents must have a parent while active-lifecycle; archived deliverables MAY retain their last valid hierarchy. An area SHALL NOT have a parent and MAY be referenced by an outcome, initiative, or work item through the separate `area` property. Candidate and considering items MAY omit parent and area. Parent and area values SHALL be canonical same-collection `exomem://plan/<collection-uuid>/<plan-uuid>` references to authorized items of the required kind. An active-lifecycle source item SHALL reference only active-lifecycle targets; an archived source item MAY retain correctly typed links to active or archived targets. Missing, withheld, or structurally invalid targets SHALL refuse with the same bounded relation error. If child and parent both declare area, both references SHALL match; absent area SHALL remain absent rather than being copied or inferred.
+Planning SHALL keep ongoing area membership separate from the desired-outcome hierarchy. A kind's registered `parents` SHALL name the kinds its parent may have; an empty list SHALL mean the kind takes no parent. Writes SHALL enforce registered `parents` as the `planning-values` requirement states; stored items otherwise keep the shipped kind rules. Shipped outcomes SHALL take no parent, an initiative MAY name exactly one outcome parent, and a work item MAY name exactly one initiative parent. A committed item of a kind with parents must have a parent while active-lifecycle; archived deliverables MAY retain their last valid hierarchy. An area SHALL NOT have a parent and MAY be referenced by an outcome, initiative, or work item through the separate `area` property. Candidate and considering items MAY omit parent and area. Parent and area values SHALL be canonical same-collection `exomem://plan/<collection-uuid>/<plan-uuid>` references to authorized items of the required kind. An active-lifecycle source item SHALL reference only active-lifecycle targets; an archived source item MAY retain correctly typed links to active or archived targets. Missing, withheld, or structurally invalid targets SHALL refuse with the same bounded relation error. If child and parent both declare area, both references SHALL match; absent area SHALL remain absent rather than being copied or inferred.
 
 #### Scenario: Valid planning chain is queryable
 - **WHEN** an outcome contains an initiative that contains a work item and all three reference one area

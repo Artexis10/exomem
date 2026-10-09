@@ -531,7 +531,7 @@ def _map_current(conn, captured, checkpoint, checkpoint_hash):
         if manifest.storage.strategy == "markdown-items":
             _projection(conn, cid, path, "item", 1, sources[record.source.path], row_id)
     for name in declared.validators:
-        types.named_validator(name).validate(manifest, plans)
+        types.named_validator(name).validate(manifest, plans, write=None)
     if manifest.storage.strategy == "markdown-log":
         _projection(
             conn,

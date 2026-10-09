@@ -96,7 +96,7 @@ class NamedValidator:
     """One product-owned rule a declaration can opt into by name."""
 
     name: str
-    #: `(manifest, plans, write=None)`; `write` names the one item a write changes.
+    #: `(manifest, plans, *, write)`; `write` is the item a write changes, None for a read.
     validate: Callable[..., None]
 
 
@@ -126,7 +126,8 @@ class CollectionType:
 def _planning_hierarchy_v1(
     manifest: collections.CollectionManifest,
     plans: Mapping[str, Mapping[str, Any]],
-    write: HierarchyWrite | None = None,
+    *,
+    write: HierarchyWrite | None,
 ) -> None:
     from .. import planning
 

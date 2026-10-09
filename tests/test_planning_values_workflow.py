@@ -206,7 +206,28 @@ def _save(call, upsert: dict, why: str) -> dict:
     )
 
 
-def test_a_kind_saved_again_with_other_parents_keeps_stored_items_readable(
+def _restore_latest(call, why: str) -> dict:
+    history = call("schema_memory", {"subject": "planning-values", "operation": "history"})
+    return call(
+        "schema_memory",
+        {
+            "subject": "planning-values",
+            "operation": "restore",
+            "version": history["versions"][0]["version"],
+            "expected_hash": history["content_hash"],
+            "why": why,
+        },
+    )
+
+
+def _update(call, title: str, changes: dict) -> dict:
+    return call(
+        "plan_memory",
+        {"action": "update", **_guards(call, title), "changes": changes, "why": "edit"},
+    )
+
+
+def test_registry_parents_bind_only_the_writes_that_depend_on_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem.governance.principal import RequestPrincipal, request_scope
@@ -223,18 +244,15 @@ def test_a_kind_saved_again_with_other_parents_keeps_stored_items_readable(
     assert added.get("success") is not False, added
 
     # The owner removes the kind, then registers it again under other parents.
-    history = call("schema_memory", {"subject": "planning-values", "operation": "history"})
-    call(
-        "schema_memory",
+    _restore_latest(call, "drop epics")
+    _save(
+        call,
         {
-            "subject": "planning-values",
-            "operation": "restore",
-            "version": history["versions"][0]["version"],
-            "expected_hash": history["content_hash"],
-            "why": "drop epics",
+            "kind.epic": {"attributes": {"parents": ["initiative"]}},
+            "kind.story": {"attributes": {"parents": ["epic"]}},
         },
+        "epics again, with stories under them",
     )
-    _save(call, {"kind.epic": {"attributes": {"parents": ["initiative"]}}}, "epics again")
 
     # The epic stored under the outcome still reads.
     rows = call("plan_memory", {"action": "query", "collection": PLANNING_PATH, "lifecycle": "all"})
@@ -242,20 +260,26 @@ def test_a_kind_saved_again_with_other_parents_keeps_stored_items_readable(
     inspected = call("plan_memory", {"action": "inspect", "collection": PLANNING_PATH})
     assert "INVALID_PLAN_RELATION" not in {item["code"] for item in inspected["diagnostics"]}
 
-    # A caller who cannot read the vault's definitions cannot re-parent the epic.
+    # Changing the epic's kind would strand its story, so it refuses.
+    epic = collections.plan_ref(PLANNING_ID, _guards(call, "Epic")["plan_id"])
+    assert _add(call, vault, "Story", kind="story", parent=epic).get("success") is not False
+    rekinded = _update(call, "Epic", {"kind": "initiative"})
+    assert rekinded["success"] is False
+    assert rekinded["error"]["code"] == "INVALID_PLAN_RELATION"
+
+    # With both kinds removed, an edit that cannot tighten a parent rule still writes.
+    _restore_latest(call, "drop epics and stories")
+    assert _update(call, "Epic", {"commitment": "considering"}).get("success") is not False
+
+    # A caller who cannot read the vault's definitions cannot re-parent or re-kind.
     guards = _guards(call, "Epic")
     _govern(vault, scope_path="_Schema/planning-values.yaml")
     _reset_governance()
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
-        with pytest.raises(OpError) as refused:
-            plan_memory(
-                vault,
-                "update",
-                **guards,
-                changes={"parent": initiative_ref(vault)},
-                why="move the epic",
-            )
-    assert refused.value.code == "PLANNING_VALUES_UNAVAILABLE"
+        for changes in ({"parent": initiative_ref(vault)}, {"kind": "initiative"}):
+            with pytest.raises(OpError) as refused:
+                plan_memory(vault, "update", **guards, changes=changes, why="move the epic")
+            assert refused.value.code == "PLANNING_VALUES_UNAVAILABLE"
     assert _guards(call, "Epic") == guards
 
 
