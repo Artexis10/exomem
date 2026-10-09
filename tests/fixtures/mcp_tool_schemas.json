@@ -1944,13 +1944,13 @@
     }
   },
   "manage_memory_file": {
-    "description": "Manage files through one governed file operation.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags. validate_only/review apply to Markdown create/append.\n\nSemantic authoring [exomem.semantic-authoring:v5 sha256:9df68fa1ea6b4da5e9fb5ebeb24960710632c200c39b38547d99720db44ee332]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Manage files through one governed file operation.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags.\n\nSemantic authoring [exomem.semantic-authoring:v5 sha256:9df68fa1ea6b4da5e9fb5ebeb24960710632c200c39b38547d99720db44ee332]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
           "default": "list",
-          "description": "list, create, append, move, reclassify, propose-reclassification, delete, trash-list, or recover.",
+          "description": "list, create, append, move, reclassify, propose-reclassification, revert-reclassification, delete, trash-list, or recover.",
           "type": "string"
         },
         "path": {
@@ -2007,7 +2007,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "Required for reclassify."
+          "description": "Required for reclassify and revert-reclassification."
         },
         "update_wikilinks": {
           "default": true,

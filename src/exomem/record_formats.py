@@ -1419,46 +1419,56 @@ def _line_terminator(text: str, index: int) -> str:
     return "\r\n" if stop and text[stop - 1] == "\r" else "\n"
 
 
-def render_markdown_item_update(
-    source: str,
+class FrontmatterSpliceError(ValueError):
+    """A frontmatter block that a span splice cannot patch exactly."""
+
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(f"{code}: {reason}")
+        self.code = code
+        self.reason = reason
+
+
+def _final_line_ending(yaml_text: str, newline: str) -> str:
+    """The ending a field appended after the final frontmatter line takes.
+
+    Falling back to the document newline only matters for a frontmatter block
+    that is not newline-terminated at all.
+    """
+    return _span_terminator(yaml_text, (0, len(yaml_text))) or newline
+
+
+def splice_frontmatter_fields(
+    yaml_text: str,
     changes: Mapping[str, Any],
-    audit_correlation: str | None = None,
     *,
-    semantic_profile: str = "records",
     delete_fields: tuple[str, ...] = (),
-    body: str | None = None,
+    newline: str = "\n",
 ) -> str:
-    """Splice YAML nodes, preserving source key order and appending new keys in changes order."""
-    bom = "\ufeff" if source.startswith("\ufeff") else ""
-    text = source[len(bom) :]
-    newline = "\r\n" if "\r\n" in text else "\n"
-    opening = re.match(r"\A---\r?\n", text)
-    if opening is None:
-        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
-    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
-    if closing is None:
-        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
-    close_start = opening.end() + closing.start()
-    yaml_text = text[opening.end() : close_start]
+    """Patch top-level fields at the spans the YAML parser reports for them.
+
+    `yaml_text` is the block between the fences, its last line terminated.
+    Every byte outside a changed field's span is kept, existing keys keep their
+    order, and new keys are appended in `changes` order. A result that does not
+    hold exactly the requested field set is refused.
+    """
     try:
         document = vault.yaml.compose(yaml_text)
     except vault.yaml.YAMLError as error:
-        raise collections.CollectionError(
-            "INVALID_RECORD_ITEM", "item frontmatter is invalid"
-        ) from error
+        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
     if not isinstance(document, vault.yaml.nodes.MappingNode):
-        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
     spans: dict[str, tuple[int, int]] = {}
     for key_node, value_node in document.value:
         if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
-            raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+            raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
         if key_node.value in spans:
-            raise collections.CollectionError("DUPLICATE_FRONTMATTER_KEY", "item key is duplicated")
+            raise FrontmatterSpliceError(
+                "DUPLICATE_FRONTMATTER_KEY", "frontmatter key is duplicated"
+            )
         spans[key_node.value] = (key_node.start_mark.index, value_node.end_mark.index)
     # Everything appended below lands after the final frontmatter line, so it
-    # takes that line's ending. Falling back to the document newline only
-    # matters for a frontmatter block that is not newline-terminated at all.
-    trailing = _span_terminator(yaml_text, (0, len(yaml_text))) or newline
+    # takes that line's ending.
+    trailing = _final_line_ending(yaml_text, newline)
     replacements: list[tuple[int, int, str]] = []
     appended: list[str] = []
     for name in delete_fields:
@@ -1515,9 +1525,6 @@ def render_markdown_item_update(
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
         updated_yaml = updated_yaml[:start] + rendered + updated_yaml[end:]
-    profile = profile_for(semantic_profile)
-    marker = re.escape(profile.item_audit_marker)
-    updated_yaml = re.sub(rf"(?m)^# {marker}: [0-9a-f]{{24}}\r?\n?", "", updated_yaml)
     # Field-set fidelity, checked before the parse guard below because the
     # failure this closes leaves *valid* YAML: a deletion range that ran past
     # its own field takes the next one with it, and nothing downstream can tell
@@ -1527,22 +1534,83 @@ def render_markdown_item_update(
     try:
         spliced = vault.yaml.compose(updated_yaml)
     except vault.yaml.YAMLError as error:
-        raise collections.CollectionError(
-            "INVALID_RECORD_ITEM", "spliced item frontmatter is not valid YAML"
+        raise FrontmatterSpliceError(
+            "INVALID_FRONTMATTER", "spliced frontmatter is not valid YAML"
         ) from error
     if spliced is None:
         observed: list[str] = []
     elif isinstance(spliced, vault.yaml.nodes.MappingNode):
         observed = [node.value for node, _value in spliced.value]
     else:
-        raise collections.CollectionError(
-            "INVALID_RECORD_ITEM", "spliced item frontmatter is not a mapping"
+        raise FrontmatterSpliceError(
+            "INVALID_FRONTMATTER", "spliced frontmatter is not a mapping"
         )
     if observed != expected_keys:
-        raise collections.CollectionError(
-            "INVALID_RECORD_ITEM",
-            "spliced item frontmatter did not preserve the requested field set",
+        raise FrontmatterSpliceError(
+            "INVALID_FRONTMATTER",
+            "spliced frontmatter did not preserve the requested field set",
         )
+    return updated_yaml
+
+
+def splice_markdown_frontmatter(
+    text: str, changes: Mapping[str, Any], *, delete_fields: tuple[str, ...] = ()
+) -> str:
+    """Patch top-level frontmatter fields of a page and keep every other byte.
+
+    The block is the one `vault.parse_frontmatter` reads, so the body after the
+    closing fence is never inside the splice.
+    """
+    match = vault._FM_PATTERN.match(text)
+    if match is None:
+        raise FrontmatterSpliceError("NO_FRONTMATTER", "the page has no frontmatter block")
+    start = match.start(1)
+    # The pattern puts a line ending between the block and its closing fence;
+    # the splice reads the block with that final line terminated.
+    end = match.end(1) + (2 if text.startswith("\r\n", match.end(1)) else 1)
+    patched = splice_frontmatter_fields(
+        text[start:end],
+        changes,
+        delete_fields=delete_fields,
+        newline=vault.document_newline(text),
+    )
+    return text[:start] + patched + text[end:]
+
+
+def render_markdown_item_update(
+    source: str,
+    changes: Mapping[str, Any],
+    audit_correlation: str | None = None,
+    *,
+    semantic_profile: str = "records",
+    delete_fields: tuple[str, ...] = (),
+    body: str | None = None,
+) -> str:
+    """Splice YAML nodes, preserving source key order and appending new keys in changes order."""
+    bom = "\ufeff" if source.startswith("\ufeff") else ""
+    text = source[len(bom) :]
+    newline = "\r\n" if "\r\n" in text else "\n"
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+    close_start = opening.end() + closing.start()
+    yaml_text = text[opening.end() : close_start]
+    try:
+        updated_yaml = splice_frontmatter_fields(
+            yaml_text, changes, delete_fields=delete_fields, newline=newline
+        )
+    except FrontmatterSpliceError as error:
+        code = (
+            error.code if error.code == "DUPLICATE_FRONTMATTER_KEY" else "INVALID_RECORD_ITEM"
+        )
+        raise collections.CollectionError(code, f"item {error.reason}") from error
+    trailing = _final_line_ending(yaml_text, newline)
+    profile = profile_for(semantic_profile)
+    marker = re.escape(profile.item_audit_marker)
+    updated_yaml = re.sub(rf"(?m)^# {marker}: [0-9a-f]{{24}}\r?\n?", "", updated_yaml)
     audit_line = (
         f"# {profile.item_audit_marker}: {audit_correlation}{trailing}" if audit_correlation else ""
     )

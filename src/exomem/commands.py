@@ -11678,7 +11678,8 @@ def op_reclassify_source(
     Classification is a judgement made at capture time, often before the answer
     is knowable. This is how it gets corrected: the source's kind, its domain, or
     both change, the file moves to the location those values project to, every
-    inbound reference follows it, and the previous path is recorded.
+    inbound reference follows it, and the previous path, kind and domain are
+    appended to the source's history so the correction can be reverted.
 
     The body is never touched. Only the classification fields and the fields
     recording the correction change, which is the same line `ingested_into:`
@@ -11717,8 +11718,9 @@ def op_propose_reclassification(
     """Report what correcting one source would do, without writing anything.
 
     Pass the kind and domain you have decided on to preview that correction: the
-    location it would project to and how many references would move. This is the
-    normal path — read the source, decide, preview, show the user, then apply.
+    location it would project to, the pages whose links it would rewrite, the
+    append-only pages it leaves unchanged, and any refusal with its cause. This is
+    the normal path — read the source, decide, preview, show the user, then apply.
 
     Called with no values, this reports only what is deterministically observable
     about the source: the domain segment already in its location, whether it
@@ -11736,6 +11738,29 @@ def op_propose_reclassification(
         ).as_dict()
     except reclassify_module.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
+
+
+def op_revert_reclassification(
+    vault_root: Path,
+    *,
+    path: str,
+    reason: str | None = None,
+) -> dict:
+    """Undo a source's latest reclassification.
+
+    The source returns to the location, kind and domain its latest history
+    entry records, every inbound reference follows it, and that entry is
+    removed. `reason` is required and recorded, as for a correction. A history
+    entry that records only a path, as a legacy one does, is refused rather
+    than guessed at.
+    """
+    from . import reclassify_source as reclassify_module
+
+    try:
+        result = reclassify_module.revert(vault_root, path=path, reason=reason)
+    except reclassify_module.ReclassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    return result.as_dict()
 
 
 def op_manage_memory_file(
@@ -11776,17 +11801,18 @@ def op_manage_memory_file(
     """Manage files through one governed file operation.
 
     For structures typed tools do not fit. Destructive operations need explicit
-    flags. validate_only/review apply to Markdown create/append.
+    flags.
 
     Args:
         operation: list, create, append, move, reclassify,
-            propose-reclassification, delete, trash-list, or recover.
+            propose-reclassification, revert-reclassification, delete,
+            trash-list, or recover.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
-        reason: Required for reclassify.
+        reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
         validate_only: Validate a Markdown create or append without writing.
@@ -11886,7 +11912,7 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             expected_dead_inbound=expected_dead_inbound,
         )
-    if operation in {"reclassify", "propose-reclassification"}:
+    if operation in {"reclassify", "propose-reclassification", "revert-reclassification"}:  # nosemgrep: ep-word-membership -- manage_memory_file defines these closed operation selectors.
         target = path or old_path
         if not target:
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
@@ -11894,6 +11920,8 @@ def op_manage_memory_file(
             return op_propose_reclassification(
                 vault_root, path=target, source_kind=source_kind, domain=domain
             )
+        if operation == "revert-reclassification":
+            return op_revert_reclassification(vault_root, path=target, reason=reason)
         return op_reclassify_source(
             vault_root,
             path=target,
@@ -11915,7 +11943,8 @@ def op_manage_memory_file(
         )
     raise ValueError(
         "INVALID_MODE: manage_memory_file operation must be list, create, append, "
-        "move, reclassify, propose-reclassification, delete, trash-list, or recover"
+        "move, reclassify, propose-reclassification, revert-reclassification, delete, "
+        "trash-list, or recover"
     )
 
 
