@@ -1,3 +1,15 @@
+> **Note added 2026-10-09: #769 superseded the prediction this design describes.**
+> At six shards, measured Windows sessions ran 2184 s, 2250 s and 2644 s, and
+> three more were cut off at the 2700 s cap. The platform factor was 1.8 at four
+> shards and above 2.9 at six, so it is not a constant. #769 therefore kept six
+> shards, raised the cap to 3300 s, and pinned the cap at least 15% above the
+> worst measured session, not above a prediction. #1071 later corrected that
+> worst session to 2896 s and raised the cap to 3400 s. The decisions "Correct
+> the prediction, do not abandon it" and "The factor is 1.81", the 2700 s cap
+> under "Six shards, not a longer cap", and the 45-minute hang bound are history.
+> The folded-scalar decision still holds. The canonical rule is in
+> `openspec/specs/install-readiness/spec.md`.
+
 ## Context
 
 Two caps bound a matrix lane and they do different jobs. `--session-timeout`

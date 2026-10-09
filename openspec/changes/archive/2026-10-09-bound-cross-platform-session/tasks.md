@@ -3,18 +3,22 @@
 - [x] 1.1 Confirm the Windows failures contain no failing test: `2929 passed, 226 skipped, 0 failed in 45:02` then exit 1.
 - [x] 1.2 Measure the Windows pytest sessions on this lane (2481s, 2449s, 2595s) against the 2700s cap and the 60 minute job.
 - [x] 1.3 Compute the predicted busiest four-way shard from `.test_durations.json` (1385s) and derive the platform factor (1.81).
+  - Superseded within #769: the factor was above 2.9 at six shards, so no constant factor predicts this lane.
 - [x] 1.4 Check the corrected model against reality: predicted 2507s versus a measured mean of 2509s.
+  - Superseded within #769: the model held at four shards only; at six, against a predicted ~1672s, three shards ran 2184s to 2644s and three hit the 2700s cap.
 - [x] 1.5 Confirm the pull-request tiers need no change.
 
 ## 2. Fix
 
 - [x] 2.1 Split the lane six ways, updating the shard matrix, `--splits`, and the job name together.
 - [x] 2.2 Leave `--session-timeout` at 2700s, which the corrected prediction shows already holds 1.61x at six shards.
+  - Superseded within #769: three six-way shards were cut off at 2700s, so #769 raised the cap to 3300s.
 - [x] 2.3 Put the explanation above the step, not inside the folded scalar, and confirm with `yaml.safe_load` that the rendered command contains no `#`.
 
 ## 3. Pin
 
 - [x] 3.1 Assert the cap holds 1.5x the corrected prediction, stays inside the job deadline, and that the split count can hold the rule at all. Confirm it fails at four shards.
+  - Superseded within #769: `test_the_cross_platform_cap_clears_the_runtime_actually_measured` asserts the cap is at least 1.15x the worst measured session and inside the job deadline; it reads nothing from `.test_durations.json`.
 - [x] 3.2 Assert no folded `run:` scalar contains a `#`, reading the raw file rather than the parsed tree so literal `|` blocks are not flagged. Confirm it fails when the inline comment is reintroduced.
 
 ## 4. Verify
@@ -30,5 +34,5 @@
 
 ## Closure evidence (T10 audit, 2026-10-09)
 
-- 5.1: PR #769 merged as 940eb7d04 and shipped in v0.70.0. The lane still runs six shards, and `tests/test_ci_reliability_contract.py` still enforces the headroom rule. A later change raised the session cap to 3400 s under the same rule.
-- 5.2 stays open by design: the change files it separately.
+- 5.1: PR #769 merged as 940eb7d04 and shipped in v0.70.0. The lane still runs six shards. `tests/test_ci_reliability_contract.py` derives only the pull-request tier caps from `.test_durations.json`. For this lane, `test_the_cross_platform_cap_clears_the_runtime_actually_measured` holds the cap at least 15% above `MEASURED_WORST_CROSS_PLATFORM_SESSION` and inside the 60-minute job. #769 raised the cap to 3300 s under that measured rule, against a worst session of 2705 s. #1071 (9ee485df9) corrected the worst session to 2896 s and raised the cap to 3400 s.
+- 5.2 stays open and is now filed as #1655. The scheduled cross-platform run 37912250840 (2026-10-09) failed all six Windows shards at collection, before any test in `tests/test_governance_active_tuple.py` ran.

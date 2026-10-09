@@ -1,5 +1,8 @@
 # Proposal: bound-cross-platform-session
 
+> **Note added 2026-10-09:** #769 did not ship the prediction or the 2700 s cap
+> that this proposal describes. See the note at the top of `design.md`.
+
 ## Why
 
 The nightly cross-platform lane reported Windows failures containing no failing

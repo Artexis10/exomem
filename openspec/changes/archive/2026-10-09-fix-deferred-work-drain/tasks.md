@@ -101,3 +101,4 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
 
 - 9.1, 9.2: PR #456 merged as 47f56c8bc and shipped in v0.49.0. CI ran "lint + targeted types" and eight Linux test shards, all green.
 - 10.5: PRs #798 and #801 merged as ee0f3ab34 and 3ceda5860 and shipped in v0.62.0. CI on each ran lint, four Linux test shards, "package build" (privacy gate), "OpenSpec validation" and both latency jobs, all green.
+- The `windows-runtime-security` delta keeps only what the disclosure-evidence requirement "Governance Evidence Filesystem Safety And Critical Durability Are Cross-Platform" lacks. That requirement owns the fail-closed refusal with its path and remediation, and the separate service and user writer-state roots.

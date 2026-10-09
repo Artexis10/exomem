@@ -347,7 +347,10 @@ all chunks SHALL be committed under the existing file identity contract.
 
 ### Requirement: Deferred semantic work survives restart
 Deferred semantic paths SHALL be stored in a rebuildable per-vault SQLite sidecar, deduplicated,
-visible through resource status, and removed only after successful dispatch or explicit healing.
+visible through resource status, and removed only after successful dispatch, explicit healing,
+or a drain that finds the entry's work already satisfied. The last case is the requirement
+"Queued Entries Are Reconciled Against Index State", which the fix-deferred-work-drain change
+(#456) introduced.
 
 #### Scenario: Restart with deferred paths
 - **WHEN** the server restarts after an import was deferred

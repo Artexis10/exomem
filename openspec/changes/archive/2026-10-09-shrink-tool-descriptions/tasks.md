@@ -32,5 +32,5 @@ Installed ordinary-agent evidence covers all eight design shapes in an isolated 
 
 ## Closure evidence (T10 audit, 2026-10-09)
 
-- 3.1: PR #1458 merged as bf293c553 and shipped in v0.105.0. `deploy/chatgpt/personal-plugin-contract.json` keeps the external adapter pending (`refresh_required: true`, `rollout_state: awaiting-post-deploy-refresh`), as this task permits.
+- 3.1: PR #1458 merged as bf293c553 and shipped in v0.105.0. No release step attempted the ChatGPT adapter refresh. `deploy/chatgpt/personal-plugin-contract.json` records the adapter as last verified at 0.45.0. Its `refresh_required: true` tracks the rolling `pending_tool_surface_sha256`, not this change alone. This task permits the adapter to stay pending.
 - 3.2: Archived by the T10 audit, with strict validation before and after.

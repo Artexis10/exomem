@@ -14,7 +14,7 @@
       `{role, domain, breadth}` (full additionally `rich`).
 - [x] 1.4 Update the `v3 ` marker literals to `v4 ` in `tests/test_scaffold_no_leak.py`
       and `tests/test_workflow_skills.py`, and the rich-example wikilink target pin.
-- [ ] 1.5 Run the focused suite and confirm red.
+- [x] 1.5 Run the focused suite and confirm red.
 
 ## 2. Contract Content
 
@@ -56,5 +56,5 @@
 
 - PR #312 merged as 342f582f8 and shipped in v0.30.0. It changed every file these tasks name: the five test files, `semantic_authoring.py`, the scaffold and nine workflow skills, the plugin skills, `docs/semantic-language.md`, both schema fixtures, `docs/capabilities.md` and the ChatGPT contract (new sha pending).
 - An independent code review returned APPROVE. The focused suite passed (75), and Ruff was clean. CI was green on "tests (py3.11)", "tests (py3.13)" (full suite with the latency gate), "capabilities doc" and "OpenSpec validation".
-- 1.5 stays unticked: #312 does not record the red phase, and this audit runs no tests. Static check only: the base 342f582f8^ has no `breadth` key in `semantic_authoring.py` or in the teaching test.
+- 1.5: #312 does not record the red phase, so the review of PR #1653 reproduced it on 2026-10-09. It ran the teaching, contract, bootstrap and workflow-skills test files from 342f582f8 against the 342f582f8^ source. The result was 9 failed and 26 passed. The failures were on content: `KeyError: 'breadth'`, contract version `3 != 4`, and the `v3` marker. The same tests against the 342f582f8 source gave 35 passed.
 - Later work changed the carriers, not this requirement: the contract version is now 6, and #1077 moved the "One contract, every domain" subsection out of the scaffold SKILL.md.

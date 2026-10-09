@@ -23,5 +23,5 @@
 
 ## Closure evidence (T10 audit, 2026-10-09)
 
-- 3.2: Task 4.1 records the review round. It found the projection gap in the delegation envelope and in `schema_memory(subject="workflow-contracts")`, and the fix landed before merge with a test that both agree at every level. The PR records no separate verdict note.
+- 3.2: Branch commit 5f4217b7a on #1251 records the review round. Its message opens "Review found the unreadable-record floor half-landed" and adds "Two smaller review points ride along". It covers the three areas that 3.2 names: the floor's interaction with `capture_gate`, the `hook_cadence` gating for hookless surfaces, and the scope of the cadence route text. Task 4.1 records the projection fix from that round. No final review verdict is recorded on the PR.
 - 3.3: PR #1251 merged as df1dc1e49 with 27 CI checks green and shipped in v0.83.0.

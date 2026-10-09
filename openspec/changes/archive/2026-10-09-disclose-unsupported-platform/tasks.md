@@ -45,4 +45,4 @@
 ## Closure evidence (T10 audit, 2026-10-09)
 
 - 7.1: PR #768 merged as 39f115c9e with 23 CI checks green and shipped in v0.70.0. Strict validation ran before and after this archive.
-- 7.2 stays open by design: the change names it as a follow-up that is not filed here.
+- 7.2 stays open and is now filed as #1654. The scheduled cross-platform run 37912250840 (2026-10-09) failed all six macOS shards, and `macos-latest` is still in the matrix.

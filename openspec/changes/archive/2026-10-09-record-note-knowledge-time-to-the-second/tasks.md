@@ -86,4 +86,4 @@
 ## Closure evidence (T10 audit, 2026-10-09)
 
 - 7.2: PR #375 merged as 77ebc01eb and shipped in v0.39.0. Required CI ran the full suite on py3.11 and py3.13, both green. The PR body attributes its three local failures to CPU contention from a concurrent benchmark.
-- 7.3: `tests/test_latency_gate.py` runs inside those CI suites. The later "retrieval latency (2k synthetic vault)" and "semantic write latency (2k and 8k)" jobs pass over this code, for example on #798 and #801.
+- 7.3: #375's own "retrieval eval (golden gate, embeddings)" job passed (SUCCESS). In `ci.yml` at 77ebc01eb, that job runs both `tests/test_latency_gate.py` and `scripts/semantic_write_latency.py --check`.
