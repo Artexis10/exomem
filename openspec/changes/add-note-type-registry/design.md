@@ -72,7 +72,9 @@ Sites normalise the type value differently today. Activation casefolds and strip
 
 ### 5. Contract text and skills
 
-The semantic authoring contract states the role rule: `compiled_intent = canonical destination OR the type's note-type role is compiled`. It lists the shipped compiled types and their folders, which it renders from the pack at import, so the list has one source. It also says that a vault may register more types and that `bootstrap(section="vocabulary")` serves the live set. The contract stays vault-independent, because its digest addresses fixed content.
+The semantic authoring contract states the role rule: `compiled_intent = canonical destination OR the type's note-type role is compiled`. It lists the shipped compiled types and their folders, which it renders from the pack at import, so the list has one source. The skills rendered from it also say that a vault may register more types and that `schema_memory(subject="note-types", operation="inspect")` serves the live set. The contract stays vault-independent, because its digest addresses fixed content.
+
+The note-type registry sets `served_by="authoring"`, so the bootstrap `vocabulary` summary leaves it out. The authoring contract already serves the shipped compiled types and folders, and search guidance the ranking types; a summary row would repeat them in the budgeted reference payload.
 
 The skills lose the sentence "`COMPILED_TYPES` contains exactly". S4a owns that part of programme task 2.2. The contract version moves once more after S3, from 6 to 7. A one-off script or edit updates the 10 scaffold files that quote the concise contract. Then `package-skills --sync-plugin`, `cloud-plugin.py build` and `hosted-plugin.py regenerate` refresh the copies; the regeneration touches only v5.
 
@@ -106,7 +108,7 @@ S4b is a separate task group in this change, delivered later. It covers the writ
 - The write gate maps each folder to one type. → A compiled folder is one `Notes/<Name>` segment, unique among compiled types and immutable.
 - Graph and catalogue rows hold only the type key. → SQL consumers expand roles per query, and the catalogue identity includes the registry digest.
 - A per-entry multiplier makes the bounded ranking pass inexact. → Roles map only to the existing knobs.
-- A live type list would add bytes per type to the `authoring` and `routing` bootstrap sections, which have fixed ceilings. → Both list the shipped pack only, and the budgeted `vocabulary` section serves the live set. The budget tests run unchanged.
+- A live type list would add bytes per type to the `authoring` and `routing` bootstrap sections, which have fixed ceilings. → Both list the shipped pack only, and `schema_memory` inspect serves the live set. The contract drops its duplicate `compiled_types` list, which pays for the two types search guidance gains, so the budget tests run unchanged.
 - A restricted writer cannot write a page that needs an unadmitted type or folder. → S3 accepts the same cost, and independently admitted operations stay available.
 
 ## S4a / S4b split

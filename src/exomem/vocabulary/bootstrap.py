@@ -1,5 +1,8 @@
 """The bootstrap `vocabulary` block: the live registries, by use, with what is new.
 
+A registry whose values another bootstrap block already serves (its spec's
+`served_by`) is left out; `schema_memory` inspect serves its live set.
+
 For each registry the block lists at most `TOP_KEYS` active keys, ordered by
 use and carrying their counts, from a current projection. Without one there is
 no order by use: it lists active keys in registry order and names the reason
@@ -77,6 +80,8 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
 
     registries: dict[str, Any] = {}
     for name, spec in registry_specs().items():
+        if spec.served_by is not None:
+            continue
         refusal = admission_refusal(vault_root, spec)
         if refusal is not None:
             registries[name] = {"unavailable": refusal["reason"]}

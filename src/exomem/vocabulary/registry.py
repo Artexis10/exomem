@@ -158,6 +158,10 @@ class RegistrySpec:
     cap: int = 512
     #: How usage counts are read: `(vault_root, snapshot) -> Usage`.
     usage: Callable[[Path, Snapshot], Any] | None = None
+    #: The bootstrap block that already serves this registry's values. The
+    #: vocabulary summary leaves the registry out; `schema_memory` inspect
+    #: still serves the live set. None: the summary lists it.
+    served_by: str | None = None
 
 
 # --------------------------------------------------------------------------- #

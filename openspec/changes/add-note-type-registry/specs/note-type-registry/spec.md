@@ -151,14 +151,15 @@ Reusable derived results that depend on note-type meaning SHALL bind to the regi
 ### Requirement: Published guidance teaches the note-type role rule
 
 The current semantic authoring contract SHALL state that compiled intent is a canonical destination or a type with note-type role `compiled`.
-It SHALL list the shipped compiled types and folders from the pack and say that a vault may register more.
-It SHALL name `bootstrap(section="vocabulary")` as the source of the live set.
-It SHALL NOT claim that the shipped list is complete.
+It SHALL list the shipped compiled types and folders from the pack.
+The workflow skills SHALL say that a vault may register more and name `schema_memory(subject="note-types", operation="inspect")` as the source of the live set.
+The bootstrap vocabulary summary SHALL leave note types out, because the authoring contract and search guidance already serve the shipped types.
+No published guidance SHALL claim that the shipped list is complete.
 Released hosted profiles SHALL keep their frozen contracts and descriptors.
 
 #### Scenario: Current guidance points to the live set
-- **WHEN** a client reads the current authoring contract or a workflow skill
-- **THEN** it reads the role rule, the shipped list and the vocabulary route
+- **WHEN** a client reads the current authoring contract and a workflow skill
+- **THEN** the contract gives the role rule and the shipped list, and the skill also names the registry route
 - **AND** no sentence says that the compiled type list is exact
 
 #### Scenario: Released profiles keep their bytes

@@ -39,9 +39,7 @@ def _type_factor(vault: Path) -> float:
         explain=True,
     )
     [hit] = [hit for hit in explained["hits"] if hit["path"] == MEETING_PAGE]
-    [step] = [
-        step for step in hit["ranking_explanation"]["multipliers"] if step["name"] == "type"
-    ]
+    [step] = [step for step in hit["ranking_explanation"]["multipliers"] if step["name"] == "type"]
     return step["factor"]
 
 
@@ -262,8 +260,7 @@ def test_shipped_types_classify_the_same_under_any_overlay(vault: Path) -> None:
         absent = note_types.Basis(vault).resolve("insight")
     overlay.parent.mkdir(parents=True, exist_ok=True)
     overlay.write_text(
-        "schema_version: 1\nentries:\n  insight:\n"
-        "    attributes: {role: entity}\n",
+        "schema_version: 1\nentries:\n  insight:\n    attributes: {role: entity}\n",
         encoding="utf-8",
     )
     with library_scope():
@@ -284,7 +281,7 @@ def test_a_denied_caller_cannot_tell_a_private_type_from_an_unknown_one(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem.cli_ops import OpError
-    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+    from exomem.governance.principal import RequestPrincipal, request_scope
 
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     page = vault / MEETING_PAGE
@@ -334,9 +331,21 @@ def test_note_type_usage_is_unavailable_without_a_graph(vault: Path) -> None:
 def test_product_page_types_are_never_note_type_debt(vault: Path) -> None:
     # Every `type:` value a product writer emits, and an untyped page.
     product_types = (
-        "research-note", "insight", "failure", "pattern", "experiment", "production-log",
-        "entity", "source", "evidence", "collection", "collection-summary", "dataset",
-        "adoption-manifest", "adoption-run-manifest", None,
+        "research-note",
+        "insight",
+        "failure",
+        "pattern",
+        "experiment",
+        "production-log",
+        "entity",
+        "source",
+        "evidence",
+        "collection",
+        "collection-summary",
+        "dataset",
+        "adoption-manifest",
+        "adoption-run-manifest",
+        None,
     )
     folder = vault / "Knowledge Base" / "Projects" / "Typed"
     folder.mkdir(parents=True, exist_ok=True)

@@ -22,7 +22,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     7,
-    "sha256:d5037b3bc2046c385c780130a7228d21d917d208818671088c0067e0b8a8479a",
+    "sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -216,7 +216,6 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     assert applicability["duplicate_compact_for_rich_required"] is False
     assert applicability["compiled_destinations"] == COMPILED_DESTINATIONS
     assert "note-type role is compiled" in applicability["compiled_intent"]
-    assert 'bootstrap(section="vocabulary")' in applicability["compiled_destinations_rule"]
     assert applicability["required_status_class"] == "live"
     route = applicability["status_registry"]
     assert route["tool"] == "schema_memory"

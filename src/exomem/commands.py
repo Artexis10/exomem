@@ -10516,18 +10516,18 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash. For entity-types, relations, source-kinds, domains, statuses,
-    note-types and categories: inspect lists the live vocabulary and usage; propose previews
-    a delta; save applies upsert, alias or deprecate with expected_hash and why;
-    history lists kept versions; restore reverts one without rewriting pages.
+    the current hash. For a vocabulary registry: inspect lists the live vocabulary
+    and usage; propose previews a delta; save applies upsert, alias or deprecate
+    with expected_hash and why; history lists kept versions; restore reverts one
+    without rewriting pages.
     Operations: references/operation-routing.md.
 
     Args:
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, source-kinds, domains, statuses,
-            note-types, traversal-profiles, context-roles, activation-conventions, or
-            workflow-contracts.
+        subject: contract; a vocabulary registry (categories, entity-types, relations,
+            source-kinds, domains, statuses or note-types); traversal-profiles,
+            context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.

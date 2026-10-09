@@ -176,8 +176,7 @@ def _index(entries: Mapping[str, registry.Entry]) -> tuple[dict[str, NoteType], 
             name = _folder_name(note_type.folder, key)
             if name in folders:
                 raise registry.RegistryError(
-                    f"NOTE_TYPE_FOLDER_TAKEN: {note_type.folder} already belongs to "
-                    f"{folders[name]}"
+                    f"NOTE_TYPE_FOLDER_TAKEN: {note_type.folder} already belongs to {folders[name]}"
                 )
             folders[name] = key
     return types, folders
@@ -242,9 +241,7 @@ class _Adapter:
         entries = {entry.key: entry for entry in registry.pack_entries(PACK)}
         for raw_key, row in document["entries"].items():
             if not isinstance(raw_key, str) or self.normalize_key(raw_key) != raw_key:
-                raise registry.RegistryError(
-                    "INVALID_REGISTRY_KEY: note-type key is not canonical"
-                )
+                raise registry.RegistryError("INVALID_REGISTRY_KEY: note-type key is not canonical")
             if raw_key in entries:
                 raise registry.RegistryError(
                     "PACK_ENTRY_FIXED: shipped note types cannot be overridden"
@@ -265,9 +262,7 @@ class _Adapter:
         self, document: dict[str, Any], key: str, entry: registry.Entry, *, existing: bool
     ) -> None:
         if key in shipped_registry().entries:
-            raise registry.RegistryError(
-                "PACK_ENTRY_FIXED: shipped note types cannot be changed"
-            )
+            raise registry.RegistryError("PACK_ENTRY_FIXED: shipped note types cannot be changed")
         row = entry.as_dict()
         row.pop("key")
         row.pop("origin")
@@ -290,14 +285,17 @@ SPEC = registry.RegistrySpec(
     overlay=registry_path,
     adapter=_Adapter(),
     fields=frozenset({"label", "description", "status", "replaced_by", "attributes", "guidance"}),
-    # nosemgrep: ep-word-set -- The note-type registry schema fixes these attribute names.
+    # The note-type registry schema fixes these attribute names.
     attributes=frozenset({"role", "folder", "time_bounded", "sources"}),
     # Pages and derived rows already rely on a type's role, folder and period.
     immutable=frozenset(
-        # nosemgrep: ep-word-set -- The note-type registry schema fixes these attribute names.
+        # The note-type registry schema fixes these attribute names.
         {"attributes.role", "attributes.folder", "attributes.time_bounded"}
     ),
     usage=_usage,
+    # The authoring contract serves the shipped compiled types and folders, and
+    # search guidance the ranking types; `schema_memory` inspect serves the rest.
+    served_by="authoring",
 )
 
 
@@ -388,11 +386,19 @@ class Basis:
         with owner_local_producer(self.root, "note_type_definitions"):
             return _admitted(self.root)
 
+    def _load(self) -> None:
+        self._attempted = True
+        if self.root is not None and not self.root.is_dir():
+            # A vault that does not exist has no overlay to admit or read.
+            self._snapshot = registry.load(SPEC, None)
+        elif self._admitted():
+            self._snapshot = registry.load(SPEC, self.root)
+        else:
+            self._snapshot = None
+
     def _extension(self) -> NoteTypeRegistry | None:
         if not self._attempted:
-            self._attempted = True
-            if self._admitted():
-                self._snapshot = registry.load(SPEC, self.root)
+            self._load()
         snapshot = self._snapshot
         if snapshot is None or snapshot.findings:
             return None
@@ -449,11 +455,8 @@ class Basis:
         """Re-admit before comparing a cached result's private dependency."""
         if dependency[0] == "public":
             return dependency == ("public", registry.load(SPEC, None).effective_digest)
-        if not self._admitted():
-            return False
-        self._attempted = True
-        self._snapshot = registry.load(SPEC, self.root)
-        return dependency == self.dependency
+        self._load()
+        return self._snapshot is not None and dependency == self.dependency
 
 
 def _admitted(root: Path) -> bool:

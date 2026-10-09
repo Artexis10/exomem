@@ -347,10 +347,6 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             note_type.key: note_type.folder
             for note_type in note_types.shipped(note_types.compiled)
         },
-        "compiled_destinations_rule": (
-            'More compiled types may be registered; bootstrap(section="vocabulary") '
-            "serves the live set."
-        ),
         "applies_when": [
             "the path and normalized compiled type structurally match",
             "the result is writable managed Markdown in the governed subtree",
@@ -650,7 +646,8 @@ def render_concise(
         "If the exposed bootstrap schema lacks `section`, use "
         '`bootstrap(profile="full")` instead; released profiles reject section arguments. '
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
-        f"Shipped compiled types: {destinations}. {minimum['compiled_destinations_rule']} "
+        f"Shipped compiled types: {destinations}. More may be registered; "
+        '`schema_memory(subject="note-types", operation="inspect")` lists the live set. '
         f"{minimum['structural_rule']} The minimum predicate applies when "
         f"{applies}. "
         f"{minimum['lifecycle_rule']}\n"
