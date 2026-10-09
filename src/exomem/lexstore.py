@@ -831,14 +831,21 @@ class _SelectedUnits:
         from . import semantic_index
         from .governance import egress
 
-        keep = egress.page_release_filter(vault_root)
+        # Decided on the first parent touched: a query that proposes no row
+        # pays no release decision.
+        keep: list[Any] = []
+
+        def allowed(path: str) -> bool:
+            if admitted is not None and path not in admitted:
+                return False
+            if not keep:
+                keep.append(egress.page_release_filter(vault_root))
+            return keep[0] is None or bool(keep[0](path))
+
         self.conn = conn
         self.interpretations = semantic_index.Interpretations(vault_root)
         self.parents = semantic_index.AdmittedParents(
-            self._summaries,
-            allowed=lambda path: (keep is None or bool(keep(path)))
-            and (admitted is None or path in admitted),
-            interpretations=self.interpretations,
+            self._summaries, allowed=allowed, interpretations=self.interpretations,
         )
 
     def _summaries(self, paths: list[str]) -> dict[str, Any]:

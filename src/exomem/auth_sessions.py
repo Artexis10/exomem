@@ -1450,8 +1450,25 @@ class SessionAuthority:
         return sorted(records, key=lambda record: (record.issued_at, record.session_id))
 
 
+def _request_verifier(origin: Any) -> tuple[SessionAuthority, str] | None:
+    """The authority and bearer that verified this request's origin, if it carries them."""
+    from .governance.principal import _verified_access_token
+
+    token = _verified_access_token()
+    verifier = getattr(token, "_verifier", None)
+    if not isinstance(verifier, SessionAuthority) or getattr(token, "origin_session", None) != origin:
+        return None
+    return verifier, token.token
+
+
 async def origin_session_active(who: Any) -> bool:
-    """Revalidate bearer-free origin facts through the existing session authority."""
+    """Revalidate origin facts through the authority that verified them.
+
+    A live request revalidates its own bearer through the authority that
+    verified it, with that authority's stale-grace cache. A delegated
+    capability carries no bearer, so it rechecks the binding through the
+    configured authority.
+    """
     origin = who.origin_session
     if origin is None:
         return True
@@ -1461,6 +1478,16 @@ async def origin_session_active(who: Any) -> bool:
     from . import local_ingress, server_auth
 
     try:
+        verified = _request_verifier(origin)
+        if verified is not None:
+            authority, bearer = verified
+            record = await authority.validate(bearer)
+            return (
+                record is not None
+                and client.issuer == authority.issuer
+                and (record.session_id, record.generation, record.audience, record.client_id)
+                == (origin.session_id, origin.generation, origin.audience, client.client_id)
+            )
         if client.issuer == local_ingress.LOCAL_ISSUER:
             authority = server_auth.build_local_session_authority()
         else:

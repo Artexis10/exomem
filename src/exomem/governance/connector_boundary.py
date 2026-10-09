@@ -9,7 +9,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .. import activation_manifest, find_corpus, reserved_paths, state_migration
+from .. import activation_manifest, find_corpus, reserved_paths, state_migration, state_paths
 from .. import structured_collections as collections
 from ..kbdir import kb_dirname
 from . import companions, membership, policy
@@ -80,12 +80,83 @@ def _capture_paths(value: object) -> tuple[str, ...]:
     return tuple(sorted(value))
 
 
+_FileSignature = tuple[int, int, int, int, int] | None
+# Keyed by vault and maintenance mode, one entry per vault a process serves, as
+# policy's compile cache is. An entry is reused only while every input keeps its
+# stat signature: the configuration file, the requirement, the state manifest
+# and the compiled policy. A refusal is never cached; it is re-decided each call.
+_SNAPSHOTS: dict[tuple[str, bool], tuple[tuple, Snapshot | None]] = {}
+# Where the state manifest lives is placement: a function of the vault path and
+# the placement environment, both in the key. Only its contents are evidence,
+# and those are re-checked by stat signature on every call.
+_MANIFEST_PATHS: dict[tuple, Path] = {}
+
+
+def _file_signature(path: Path, *, follow: bool = True) -> _FileSignature:
+    try:
+        found = path.stat() if follow else path.lstat()
+    except FileNotFoundError:
+        return None
+    # Size, both times, device and inode: an atomic replace changes the inode,
+    # an in-place rewrite changes ctime, which no caller can set back.
+    return (found.st_mtime_ns, found.st_ctime_ns, found.st_size, found.st_dev, found.st_ino)
+
+
+def _manifest_location(root: Path) -> Path:
+    key = (str(root), state_paths._placement_environment())
+    found = _MANIFEST_PATHS.get(key)
+    if found is None:
+        found = state_migration._manifest_path(state_paths.vault_state_dir(root))
+        _MANIFEST_PATHS[key] = found
+    return found
+
+
+def _input_signature(root: Path, configured: str) -> tuple:
+    """Every input `_read_snapshot` decides from, without reading any of them."""
+    config = _file_signature(Path(configured)) if configured else None
+    requirement = _file_signature(Path(root) / requirement_relative_path(), follow=False)
+    manifest = _file_signature(_manifest_location(root))
+    fingerprint = policy.load(root).fingerprint if configured else None
+    return (configured, config, requirement, manifest, fingerprint)
+
+
 def snapshot(root: Path, compiled: policy.Policy | None = None, *, maintenance: bool = False) -> Snapshot | None:
     """Read current host configuration; never infer authority from vault content.
 
     Invalid security state withholds content until the host repairs it. This
     costs connector availability, rather than exposing the protected corpus.
+    Content admission asks once per path, so an unchanged answer is reused.
     """
+    configured = os.environ.get(CONFIG_ENV, "").strip()
+    try:
+        fingerprint, current = state_paths.request_memo(
+            "connector_boundary.snapshot", (str(root), maintenance, configured),
+            lambda: _current_snapshot(root, configured, maintenance),
+        )
+    except (OSError, ValueError) as error:
+        if isinstance(error, BoundaryUnavailable):
+            raise
+        return _read_snapshot(root, compiled, maintenance=maintenance)
+    if compiled is not None and configured and compiled.fingerprint != fingerprint:
+        raise BoundaryUnavailable()
+    return current
+
+
+def _current_snapshot(
+    root: Path, configured: str, maintenance: bool,
+) -> tuple[str | None, Snapshot | None]:
+    signature = _input_signature(root, configured)
+    key = (str(root), maintenance)
+    cached = _SNAPSHOTS.get(key)
+    if cached is None or cached[0] != signature:
+        cached = (signature, _read_snapshot(root, None, maintenance=maintenance))
+        _SNAPSHOTS[key] = cached
+    return signature[-1], cached[1]
+
+
+def _read_snapshot(
+    root: Path, compiled: policy.Policy | None, *, maintenance: bool,
+) -> Snapshot | None:
     configured = os.environ.get(CONFIG_ENV, "").strip()
     required = read_requirement(root)
     enrolled = COMPATIBILITY_ID in (state_migration.recorded_descriptor_ids(root) or ())
@@ -412,6 +483,14 @@ def parse_requirement(raw: bytes) -> dict:
 
 
 def read_requirement(root: Path) -> dict | None:
+    """The arming record; only a stopped host changes it, so a request reads it once."""
+    return state_paths.request_memo(
+        "connector_boundary.requirement", (str(root), requirement_relative_path()),
+        lambda: _read_requirement(root),
+    )
+
+
+def _read_requirement(root: Path) -> dict | None:
     target = Path(root) / requirement_relative_path()
     try:
         target.lstat()
@@ -450,6 +529,9 @@ def require_startup(root: Path, compatibility: frozenset[str]) -> None:
         configured = bool(os.environ.get(CONFIG_ENV, "").strip())
         enrolled = COMPATIBILITY_ID in compatibility
         if not (required is not None or configured or enrolled):
+            # Readiness has just verified the state manifest. Caching the
+            # answer here spares each request a read of machine-local state.
+            snapshot(root)
             return
         if required is None or not enrolled or snapshot(root) is None:
             raise BoundaryUnavailable()

@@ -22,6 +22,7 @@ from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
 from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from pydantic import PrivateAttr
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -54,6 +55,9 @@ class ExomemSessionAccessToken(AccessToken):
 
     EXOMEM_SESSION_PROVENANCE: ClassVar[bool] = True
     origin_session: OriginSessionBinding | None = None
+    # The authority that verified this bearer, so the request revalidates its
+    # origin through the same store and stale-grace cache. Never serialized.
+    _verifier: Any = PrivateAttr(default=None)
 
 
 class SessionStoreUnavailableMiddleware:
@@ -183,7 +187,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             logger.info("event=credential_presented outcome=rejected")
             return None
         logger.debug("event=credential_presented outcome=accepted")
-        return ExomemSessionAccessToken(
+        verified = ExomemSessionAccessToken(
             token=token,
             client_id=record.client_id,
             origin_session=OriginSessionBinding(
@@ -202,6 +206,8 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                 "aud": record.audience,
             },
         )
+        verified._verifier = self._session_authority
+        return verified
 
     @override
     async def load_refresh_token(

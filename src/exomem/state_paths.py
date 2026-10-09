@@ -102,7 +102,9 @@ def resolution_scope() -> Iterator[None]:
     What may be memoised inside a scope: the resolution of a configured path to
     its canonical form, and the placement decisions derived from it. Those are
     answers about configuration, and configuration does not change under a
-    request.
+    request. The host's connector ceiling is the one other such answer
+    (`request_memo`): only host action changes it, and every request boundary
+    re-reads it outside the scope before releasing a result.
 
     What may NOT, and is not: anything read as evidence. A tombstone's stat
     signature, a manifest's mtime, a lock file's state and the existence of a
@@ -152,6 +154,11 @@ def _memoized(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -> _
     value = compute()
     memo[key] = value
     return value
+
+
+def request_memo(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -> _T:
+    """`compute()` once per request scope for host configuration; see `resolution_scope`."""
+    return _memoized(name, parts, compute)
 
 
 def _placement_environment() -> tuple[str, ...]:
