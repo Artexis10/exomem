@@ -110,6 +110,7 @@ def test_provisioner_classifier_covers_every_reserved_descriptor_family(tmp_path
         "collection-publication": "Records/.exomem-collection-aside-" + "1" * 32 + "-0",
         "collection-snapshot": "_Collections/.exomem-collection-snapshot-" + "2" * 32 + ".sqlite",
         "collection-audit-spool": "Records/.exomem-collection-audit-" + "3" * 32 + ".sqlite",
+        "connector-boundary": ".connector-boundary.json",
     }
     assert set(samples) == {descriptor.id for descriptor in reserved_paths._REGISTRY}
     vault = tmp_path / "vault"
