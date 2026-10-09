@@ -35,11 +35,16 @@ The same stemmer is exposed to find.py for its stem-aware gates.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import unicodedata
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from . import find as find_module
@@ -366,6 +371,75 @@ def _unknown_error_streak(vault_root: Path, error_class: str | None) -> int:
         return streak
 
 
+@dataclass(frozen=True)
+class CorpusStatistics:
+    """One admitted corpus's Okapi figures, as `rank_bm25.BM25Okapi` derives them.
+
+    It keeps only what scoring a candidate needs, so a retained copy costs one
+    vocabulary-sized mapping rather than every document's term counts. The
+    document frequencies keep the library's first-seen order, so the idf floor's
+    average sums in the same order and every score matches it exactly.
+    """
+
+    pages: int
+    average_length: float
+    document_frequency: Mapping[str, int]
+    idf_floor: float
+    # rank_bm25's BM25Okapi defaults, which every admitted ranking has used.
+    k1: float = 1.5
+    b: float = 0.75
+
+    @classmethod
+    def of(cls, tokens_by_path: Mapping[str, Sequence[str]]) -> CorpusStatistics:
+        frequency: dict[str, int] = {}
+        length = 0
+        for path in sorted(tokens_by_path):
+            document = tokens_by_path[path]
+            length += len(document)
+            for word in dict.fromkeys(document):
+                frequency[word] = frequency.get(word, 0) + 1
+        pages = len(tokens_by_path)
+        idf_sum = 0
+        for count in frequency.values():
+            idf_sum += math.log(pages - count + 0.5) - math.log(count + 0.5)
+        return cls(
+            pages=pages,
+            average_length=length / pages if pages else 0.0,
+            document_frequency=MappingProxyType(frequency),
+            idf_floor=0.25 * (idf_sum / len(frequency)) if frequency else 0.0,
+        )
+
+    def _idf(self, word: str) -> float:
+        count = self.document_frequency.get(word)
+        if count is None:
+            return 0
+        idf = math.log(self.pages - count + 0.5) - math.log(count + 0.5)
+        return self.idf_floor if idf < 0 else idf
+
+    def score(
+        self,
+        candidates: Mapping[str, Sequence[str]],
+        query_tokens: Sequence[str],
+        k: int,
+    ) -> list[tuple[str, float]]:
+        """Rank candidates of this corpus that hold a query token, best first."""
+        if not query_tokens or not self.average_length:
+            return []
+        wanted = set(query_tokens)
+        scored = []
+        for path, document in candidates.items():
+            if not wanted.intersection(document):
+                continue
+            counts = Counter(document)
+            norm = self.k1 * (1 - self.b + self.b * len(document) / self.average_length)
+            total = 0.0
+            for word in query_tokens:
+                frequency = counts.get(word) or 0
+                total += (self._idf(word) or 0) * (frequency * (self.k1 + 1) / (frequency + norm))
+            scored.append((path, float(total)))
+        return sorted(scored, key=lambda item: (-item[1], item[0]))[:max(0, k)]
+
+
 def score_token_corpus(
     tokens_by_path: dict[str, list[str]],
     query_tokens: list[str],
@@ -374,15 +448,12 @@ def score_token_corpus(
     allowed_paths: set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Score one admitted corpus; candidate filters never change its statistics."""
-    if not query_tokens or not any(tokens_by_path.values()):
-        return []
-    ranker, paths = BM25Index._derive_bm25({path: tokens_by_path[path] for path in sorted(tokens_by_path)})
-    wanted = set(query_tokens)
-    return sorted(
-        ((path, float(score)) for path, score in zip(paths, ranker.get_scores(query_tokens), strict=True)
-         if (allowed_paths is None or path in allowed_paths) and wanted.intersection(tokens_by_path[path])),
-        key=lambda item: (-item[1], item[0]),
-    )[:max(0, k)]
+    candidates = (
+        tokens_by_path
+        if allowed_paths is None
+        else {path: tokens for path, tokens in tokens_by_path.items() if path in allowed_paths}
+    )
+    return CorpusStatistics.of(tokens_by_path).score(candidates, query_tokens, k)
 
 
 class BM25Index:

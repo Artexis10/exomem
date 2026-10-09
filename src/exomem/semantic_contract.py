@@ -210,9 +210,11 @@ class SemanticPageState:
     # (admits append-only Sources) and deliberately tracked separately, because
     # `eligible_governed_paths` gates the empty-corpus bootstrap disposition.
     connectable_target: bool = False
-    # Compiled-page eligibility without the lifecycle class: neutral parsed
-    # structure, shared by every caller and the source of the activation census.
+    # Eligibility without the lifecycle class: neutral parsed structure, shared by
+    # every caller. Compiled eligibility is also the source of the activation census.
     structurally_compiled: bool = False
+    structurally_governed: bool = False
+    structurally_connectable: bool = False
     status_class: str | None = None
     status_unregistered: bool = False
     status_dependency: tuple[str, str] | None = None
@@ -1179,24 +1181,9 @@ def enrich_page_state(
     status_basis: lifecycle_statuses.Basis,
 ) -> SemanticPageState:
     """Apply one admitted lifecycle basis to detached structural facts."""
-    parsed = find_module.ParsedPage(
-        path=root / state.path,
-        rel_path=state.path,
-        frontmatter=dict(state.frontmatter),
-        body="",
-        title=state.title,
-        mtime=0.0,
-    )
-    governed = activation.structurally_eligible_for_types(
-        root, parsed, page_types=activation._ELIGIBLE_TYPES
-    )
+    governed = state.structurally_governed
     compiled = state.structurally_compiled
-    connectable = activation.structurally_eligible_for_types(
-        root,
-        parsed,
-        page_types=activation._CONNECTABLE_TYPES,
-        tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
-    )
+    connectable = state.structurally_connectable
     classification = (
         status_basis.classify(state.frontmatter.get("status"))
         if governed or compiled or connectable
@@ -1323,6 +1310,15 @@ def _parse_page_state(
         structurally_compiled=activation.structurally_eligible_for_types(
             root, parsed, page_types=activation._COMPILED_PAGE_TYPES
         ),
+        structurally_governed=activation.structurally_eligible_for_types(
+            root, parsed, page_types=activation._ELIGIBLE_TYPES
+        ),
+        structurally_connectable=activation.structurally_eligible_for_types(
+            root,
+            parsed,
+            page_types=activation._CONNECTABLE_TYPES,
+            tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
+        ),
         body_wikilinks=tuple(body_links),
     )
 
@@ -1354,6 +1350,20 @@ _CORPUS_CONTEXT_EVENT_CHECKPOINTS: dict[
 ] = {}
 _CORPUS_CONTEXT_LANGUAGE_HASHES: dict[tuple[str, str], str] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
+# Enrichment for a caller who admits every page, per structural cache key:
+# (structural context, status dependency consulted, enriched context, enriched states).
+# A basis that re-admits to the same dependency reuses the whole context when the
+# structural object is unchanged, and otherwise reuses each page whose structural
+# state object is unchanged, so a write re-enriches only the pages it changed.
+_ENRICHED_CONTEXT_MEMO: dict[
+    tuple[str, str],
+    tuple[
+        SemanticCorpusContext,
+        tuple[str, str],
+        SemanticCorpusContext,
+        dict[str, SemanticPageState],
+    ],
+] = {}
 _CORPUS_CONTEXT_UPDATE_LOCK = threading.RLock()
 _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
 
@@ -1459,6 +1469,7 @@ def reset_corpus_context_cache() -> None:
         _CORPUS_CONTEXT_EVENT_TOKENS.clear()
         _CORPUS_CONTEXT_EVENT_CHECKPOINTS.clear()
         _CORPUS_CONTEXT_LANGUAGE_HASHES.clear()
+        _ENRICHED_CONTEXT_MEMO.clear()
 
 
 def evict_corpus_context(vault_root: Path) -> bool:
@@ -1468,6 +1479,7 @@ def evict_corpus_context(vault_root: Path) -> bool:
         removed = _CORPUS_CONTEXT_CACHE.pop(cache_key, None) is not None
         _drop_corpus_caption_locked(cache_key)
         _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+        _ENRICHED_CONTEXT_MEMO.pop(cache_key, None)
     return removed
 
 
@@ -2518,6 +2530,7 @@ def _trim_corpus_cache_locked(keep: tuple[str, str]) -> None:
                 del _CORPUS_CONTEXT_CACHE[stale_key]
                 _drop_corpus_caption_locked(stale_key)
                 _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(stale_key, None)
+                _ENRICHED_CONTEXT_MEMO.pop(stale_key, None)
                 break
         else:
             break
@@ -2741,11 +2754,30 @@ def build_corpus_context_with_census(
         registry=registry,
         language_registry=language_registry,
     )
+    memo_key = (
+        _corpus_cache_key(root)
+        if candidate is None and corpus_context_cache_enabled()
+        else None
+    )
     with egress.disclosure_boundary(root, "semantic_corpus_admission"):
         visible = egress.restricted_release_filter(root)
+        if visible is not None:
+            memo_key = None
+        memo = None
+        if memo_key is not None:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                memo = _ENRICHED_CONTEXT_MEMO.get(memo_key)
+            if memo is not None and not basis.matches(memo[1]):
+                memo = None
+            if memo is not None and memo[0] is context:
+                return memo[2], census
+        previous = memo[0].pages if memo is not None else {}
+        reused = memo[3] if memo is not None else {}
         states = {
             path: (
-                enrich_page_state(root, state, basis)
+                reused[path]
+                if previous.get(path) is state
+                else enrich_page_state(root, state, basis)
                 if visible is None or visible(path)
                 else state
             )
@@ -2759,7 +2791,16 @@ def build_corpus_context_with_census(
         if candidate is not None
         else context.identity_census
     )
-    return _context_from_state_map(root, states, context.registry, identity), census
+    enriched = (
+        _context_from_state_map(root, states, context.registry, identity)
+        if candidate is not None
+        else _context_with_enriched_pages(context, states)
+    )
+    if memo_key is not None:
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if memo_key in _CORPUS_CONTEXT_CACHE:
+                _ENRICHED_CONTEXT_MEMO[memo_key] = (context, basis.dependency, enriched, states)
+    return enriched, census
 
 
 def _build_corpus_context_with_census(
@@ -3275,6 +3316,31 @@ def _context_from_state_map(
         entries=entries,
         resolver=resolver,
         facts=facts,
+    )
+
+
+def _context_with_enriched_pages(
+    context: SemanticCorpusContext,
+    states: Mapping[str, SemanticPageState],
+) -> SemanticCorpusContext:
+    """Swap one caller's lifecycle facts into a structural context of the same pages.
+
+    Relation facts, the resolver and the activation census never read lifecycle
+    facts, so they stay shared; only the eligibility path sets follow the caller.
+    """
+    ordered = {path: states[path] for path in context.pages}
+    return replace(
+        context,
+        pages=MappingProxyType(ordered),
+        eligible_governed_paths=frozenset(
+            path for path, state in ordered.items() if state.eligible_governed
+        ),
+        eligible_compiled_paths=frozenset(
+            path for path, state in ordered.items() if state.eligible_compiled
+        ),
+        connectable_target_paths=frozenset(
+            path for path, state in ordered.items() if state.connectable_target
+        ),
     )
 
 
