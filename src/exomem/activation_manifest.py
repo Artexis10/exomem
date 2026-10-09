@@ -40,8 +40,8 @@ CONTRACT_VERSION = 1
 _MANIFEST_NAME = "semantic-activation.yaml"
 _PAGE_KEYS = frozenset({"identity_kind", "identity", "path_at_activation", "source_hash"})
 # Absent means live: every earlier manifest recorded only live pages.
-# nosemgrep: ep-word-set -- The manifest schema fixes this optional page field name.
-_OPTIONAL_PAGE_KEYS = frozenset({"status"})
+# nosemgrep: ep-word-set -- The manifest schema fixes these optional page field names.
+_OPTIONAL_PAGE_KEYS = frozenset({"status", "class_at_activation"})
 _ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _UNSET = object()
@@ -66,6 +66,7 @@ class ActivationPage:
     path_at_activation: str
     source_hash: str
     status: str | None = None
+    class_at_activation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -420,11 +421,16 @@ def is_grandfathered(
 def _recorded_live(
     vault_root: Path, page: ActivationPage, status_basis: lifecycle_statuses.Basis | None
 ) -> bool:
-    """Whether the label recorded at activation classifies live for this caller."""
+    """Whether the recorded label classifies live for this caller and was live at activation.
+
+    The caller's basis classifies the label first, so a caller that cannot
+    classify it is refused whatever class the owner recorded at activation.
+    """
     if page.status is None:
         return True
     basis = status_basis if status_basis is not None else lifecycle_statuses.Basis(vault_root)
-    return basis.classify(page.status).live
+    live = basis.classify(page.status).live
+    return live and (page.class_at_activation is None or page.class_at_activation == "live")
 
 
 def build_census(vault_root: Path) -> ActivationCensus:
@@ -437,12 +443,12 @@ def snapshot_from_census(
 ) -> ActivationManifest:
     """Build the immutable activation snapshot from a structural census.
 
-    The boundary holds the pages that are live at activation. Canonical labels
-    resolve from the shipped pack alone, so a canonical live label needs no
-    record. With ``vault_root``, other labels are classified as the vault's
-    owner defines them now; a page they leave non-live stays out, so a later
-    registry change cannot grandfather it. A label without an available class
-    is kept with its record for the checking caller's basis to classify.
+    Canonical labels resolve from the shipped pack alone: a canonical live
+    label needs no record and a canonical non-live page stays out. Any other
+    label is recorded. With ``vault_root``, the record also keeps the class
+    the vault's owner defines for it now, so a later registry change cannot
+    grandfather a page that was not live at activation. A label without an
+    available class is left for the checking caller's basis to classify.
     """
     if not isinstance(census, ActivationCensus):
         raise ActivationManifestError(
@@ -463,20 +469,20 @@ def snapshot_from_census(
         if vault_root is not None and unresolved
         else {}
     )
-    candidates = []
+    candidates: list[tuple[ActivationCandidate, str | None]] = []
     for candidate in census.candidates:
         canonical = public.classify(candidate.status).lifecycle_class
         if canonical == "live":
-            candidates.append(replace(candidate, status=None))
+            candidates.append((replace(candidate, status=None), None))
         elif canonical is None and candidate.status is not None:
-            owner_class = owner_classes.get(candidate.status)
-            if owner_class is None or owner_class == "live":
-                candidates.append(candidate)
+            candidates.append((candidate, owner_classes.get(candidate.status)))
     counts = Counter(
-        candidate.normalized_id for candidate in candidates if candidate.normalized_id is not None
+        candidate.normalized_id
+        for candidate, _ in candidates
+        if candidate.normalized_id is not None
     )
     pages = []
-    for candidate in candidates:
+    for candidate, class_at_activation in candidates:
         stable = candidate.normalized_id is not None and counts[candidate.normalized_id] == 1
         pages.append(
             ActivationPage(
@@ -485,6 +491,7 @@ def snapshot_from_census(
                 path_at_activation=candidate.rel_path,
                 source_hash=candidate.source_hash,
                 status=candidate.status,
+                class_at_activation=class_at_activation,
             )
         )
     return ActivationManifest(
@@ -582,6 +589,11 @@ def _serialize(manifest: ActivationManifest) -> str:
                 "path_at_activation": page.path_at_activation,
                 "source_hash": page.source_hash,
                 **({"status": page.status} if page.status is not None else {}),
+                **(
+                    {"class_at_activation": page.class_at_activation}
+                    if page.class_at_activation is not None
+                    else {}
+                ),
             }
             for page in manifest.pages
         ],
@@ -629,12 +641,25 @@ def _validate_manifest(value: Any, *, path: Path) -> ActivationManifest:
             or not _PAGE_KEYS <= set(raw_page)
             or set(raw_page) - _PAGE_KEYS - _OPTIONAL_PAGE_KEYS
         ):
-            _invalid(path, f"pages[{index}] must contain the four page fields and at most a status")
+            _invalid(
+                path,
+                f"pages[{index}] must contain the four page fields and at most a status "
+                "with its class at activation",
+            )
         if not all(isinstance(raw_page[key], str) for key in _PAGE_KEYS):
             _invalid(path, f"pages[{index}] fields must be strings")
         status = raw_page.get("status")
         if status is not None and recorded_status(status) != status:
             _invalid(path, f"pages[{index}].status must be a non-empty string")
+        class_at_activation = raw_page.get("class_at_activation")
+        if class_at_activation is not None and (
+            status is None
+            or not isinstance(class_at_activation, str)
+            or class_at_activation not in lifecycle_statuses.CLASSES
+        ):
+            _invalid(
+                path, f"pages[{index}].class_at_activation must be the class of a recorded status"
+            )
         kind = raw_page["identity_kind"]
         identity = raw_page["identity"]
         rel_path = raw_page["path_at_activation"]
@@ -661,7 +686,9 @@ def _validate_manifest(value: Any, *, path: Path) -> ActivationManifest:
         seen_paths.add(rel_path)
         seen_identities.add(identity_key)
         previous_path = rel_path
-        pages.append(ActivationPage(kind, identity, rel_path, source_hash, status))
+        pages.append(
+            ActivationPage(kind, identity, rel_path, source_hash, status, class_at_activation)
+        )
     return ActivationManifest(schema_version, contract_version, tuple(pages))
 
 

@@ -106,8 +106,9 @@ Activation snapshots remain separate complete evidence.
 The activation census is lifecycle-neutral and caller-independent: the shared corpus walk records each structurally eligible compiled page and its raw status label, without classifying it.
 A filtered request view never supplies the census, so a partial view cannot grandfather the wrong corpus, and the census is never served.
 A write prepares an absent manifest from that complete neutral census, whoever the caller is; its response depends only on the admitted target.
-Manifest preparation decides membership once, with the owner-local producer's status classes in its own boundary, so a page that is not live at activation stays out even if its label is redirected later.
-A label with no available class at preparation falls back to classification at check time.
+Manifest preparation records the owner's class at activation next to each recorded label, classified by the owner-local producer in its own boundary, so a page that is not live at activation is never grandfathered even if its label is redirected later.
+A grandfathering check classifies the recorded label with the caller's basis before it reads that class, so a caller without the owner's definitions gets the same unavailable result whatever class the owner recorded.
+A label with no available class at preparation is classified at check time only.
 The manifest records a page's status label only when the shipped pack cannot resolve it, so a vault that uses only pack labels keeps the previous release's manifest bytes; an older release cannot read a manifest that records a label.
 A grandfathering exemption classifies the target's recorded label with the caller's admitted basis; an unadmitted label on the target makes the exemption unavailable.
 Commit preparation never interprets a missing census as permission to discover the whole corpus; the shared walk supplies it.
