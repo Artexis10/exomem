@@ -360,7 +360,8 @@ def load_entity_types(
         return core
     from .vocabulary import instances
 
-    return vocabulary_registry.load(instances.select(Path(vault_root), SPEC, registry_scope), Path(vault_root)).typed
+    selected = instances.select(Path(vault_root), SPEC, registry_scope)
+    return vocabulary_registry.load(selected, Path(vault_root)).typed
 
 
 def clear_cache() -> None:

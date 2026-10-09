@@ -1831,12 +1831,16 @@ def _dependency_lookup_keys(raw_target: str) -> set[str]:
     return keys
 
 
-def _dependency_records(body: str, candidates: semantic_units.SemanticUnitCandidates) -> list[tuple[str, str]]:
+def _dependency_records(
+    body: str, candidates: semantic_units.SemanticUnitCandidates
+) -> list[tuple[str, str]]:
     """Deduplicated authored body targets and their conservative lookup keys."""
     records: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     targets = [match.group(0)[2:-2].strip() for match in vault_module.find_body_wikilinks(body)]
-    targets.extend(relation.target for item in candidates.rich for relation in item.heading.relations)
+    targets.extend(
+        relation.target for item in candidates.rich for relation in item.heading.relations
+    )
     targets.extend(relation.target for relation in candidates.note_relations.candidates)
     for raw_target in targets:
         if not raw_target or raw_target.endswith("/"):
@@ -6963,7 +6967,9 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot()
         if conn is None:
             try:
-                return relation_registry.load_registry(self.vault_root, registry_scope=registry_scope)
+                return relation_registry.load_registry(
+                    self.vault_root, registry_scope=registry_scope
+                )
             except (ValueError, OSError):
                 return None
         try:
@@ -7335,7 +7341,9 @@ class EpistemicGraphIndex:
                     # Missing structural coverage is incomplete, never zero.
                     raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
                 classification = status_basis.classify(
-                    parent.frontmatter.get("status"), path=path, frontmatter=dict(parent.frontmatter)
+                    parent.frontmatter.get("status"),
+                    path=path,
+                    frontmatter=dict(parent.frontmatter),
                 )
                 if not classification.live:
                     continue
@@ -8240,7 +8248,9 @@ EDGE_COLUMNS = edge_columns()
 def _relation_meaning(
     view: GraphView, *, anchor: str | None, registry_scope: str | None
 ) -> tuple[str, relation_registry.RelationRegistry] | None:
-    instance, snapshots = _query_meaning(view, registry_scope=registry_scope, path=anchor, unit_ref=None)
+    instance, snapshots = _query_meaning(
+        view, registry_scope=registry_scope, path=anchor, unit_ref=None
+    )
     return (instance, snapshots["relations"].typed) if snapshots is not None else None
 
 
@@ -8298,16 +8308,22 @@ def _relation_rows(
         if match_keys:
             branches.append(f"{select}WHERE e.{column} IN ({','.join('?' for _ in match_keys)})")
             params.extend(sorted(match_keys))
+    admitted = view.interpretations.admitted_instances()
     labels = sorted(_relation_labels(
         plan, registry,
-        (snapshots["relations"].typed for _instance, snapshots in view.interpretations.admitted_instances()),
+        (snapshots["relations"].typed for _instance, snapshots in admitted),
     ))
     if labels:
+        marks = ",".join("?" for _ in labels)
         branches.append(
-            f"{select}WHERE e.registry_status = ? AND e.raw_relation IN ({','.join('?' for _ in labels)})"
+            f"{select}WHERE e.registry_status = ? AND e.raw_relation IN ({marks})"
         )
         params.extend((CANDIDATE_STATUS, *labels))
-    raw_rows = conn.execute(" UNION ".join(branches) + " ORDER BY 3", params).fetchall() if branches else []
+    raw_rows = (
+        conn.execute(" UNION ".join(branches) + " ORDER BY 3", params).fetchall()
+        if branches
+        else []
+    )
     return _matched_rows(view, raw_rows, plan)
 
 
@@ -8352,7 +8368,11 @@ def _matched_rows(
         definition = authored.definition(relation_type)
         symmetric = definition is not None and definition.direction == "symmetric"
         if plan is None:
-            matched.append((0, int(rowid), (src_path, dst_path, relation_type, "relation_type", relation_type, symmetric)))
+            matched.append((
+                0,
+                int(rowid),
+                (src_path, dst_path, relation_type, "relation_type", relation_type, symmetric),
+            ))
             continue
         instance = str((edge.get("metadata") or {}).get("registry_instance") or "core")
         if not plan.matches(relation_type, parent, instance):
@@ -8363,7 +8383,9 @@ def _matched_rows(
             priority, via, key = 1, "replacement", relation_type
         else:
             priority, via, key = 2, "parent_relation", parent
-        matched.append((priority, int(rowid), (src_path, dst_path, relation_type, via, key, symmetric)))
+        matched.append(
+            (priority, int(rowid), (src_path, dst_path, relation_type, via, key, symmetric))
+        )
     matched.sort(key=lambda item: (item[0], item[1]))
     return [row for _priority, _rowid, row in matched]
 
@@ -8744,7 +8766,9 @@ def graph_context(
                     continue
                 if family_filter and any(
                     key not in seen_nodes
-                    and not view.family_matches(endpoint_nodes.get(key), family_filter, query_instance)
+                    and not view.family_matches(
+                        endpoint_nodes.get(key), family_filter, query_instance
+                    )
                     for key in (edge["src_key"], edge["dst_key"])
                 ):
                     continue
@@ -9930,7 +9954,11 @@ def _unit_candidate_key(rel_path: str, unit: semantic_units.SemanticUnit) -> str
 
 def _unit_anchor(unit: semantic_units.SemanticUnit) -> str | None:
     if unit.form == "rich":
-        return unit.anchor or semantic_blocks.normalize_label(unit.title or "") or f"line-{unit.line}"
+        return (
+            unit.anchor
+            or semantic_blocks.normalize_label(unit.title or "")
+            or f"line-{unit.line}"
+        )
     return unit.anchor
 
 
@@ -9964,7 +9992,9 @@ def _candidate_node(
         path=page.rel_path,
         anchor=_unit_anchor(unit),
         title=unit.title,
-        text=_node_text(page, unit.content if unit.form == "compact" else unit.body or unit.title or ""),
+        text=_node_text(
+            page, unit.content if unit.form == "compact" else unit.body or unit.title or ""
+        ),
         source_hash=state.parent_source_hash,
         line_start=unit.line,
         line_end=unit.end_line,
@@ -10017,7 +10047,9 @@ def _unit_node(
         path=page.rel_path,
         anchor=_unit_anchor(unit),
         title=unit.title,
-        text=_node_text(page, unit.content if unit.form == "compact" else unit.body or unit.title or ""),
+        text=_node_text(
+            page, unit.content if unit.form == "compact" else unit.body or unit.title or ""
+        ),
         source_hash=state.parent_source_hash,
         line_start=unit.line,
         line_end=unit.end_line,
@@ -10299,7 +10331,10 @@ def _edges_for_page(
                 source_path=rel, source_anchor=_unit_anchor(unit),
                 raw_relation=relation.raw.split(":", 1)[0].strip(),
                 dst_page_key=dst_page_key, source_kind=unit.kind, target_kind=target_kind,
-                metadata={"block_kind": unit.kind, "line": relation.line, "raw": relation.raw, **metadata},
+                metadata={
+                    "block_kind": unit.kind, "line": relation.line, "raw": relation.raw,
+                    **metadata,
+                },
             ))
     canonical_lines: set[int] = set()
     for relation in document.note_relations:
@@ -10949,7 +10984,11 @@ def _current_page_unit(
     if parent_ref is not None and memory_refs.ref_from_markdown(source) != parent_ref:
         return unanswered("missing", "parent_ref_mismatch")
     try:
-        loader = semantic_index.selected_parent_index_state if selected else semantic_index.current_parent_index_state
+        loader = (
+            semantic_index.selected_parent_index_state
+            if selected
+            else semantic_index.current_parent_index_state
+        )
         state = loader(vault_root, path, source=source)
     except (TypeError, ValueError):
         return unanswered("missing", "invalid_current_parent")
@@ -11239,7 +11278,9 @@ class GraphView:
             for unit in parent.structure.units if parent is not None else ():
                 if unit.unit_ref != unit_ref:
                     continue
-                row = _node_by_key(self.conn, _candidate_key(str(path), unit.occurrence_key, unit.form))
+                row = _node_by_key(
+                    self.conn, _candidate_key(str(path), unit.occurrence_key, unit.form)
+                )
                 if row is not None:
                     found.append(_served_candidate(row, unit))
         return found
@@ -11287,7 +11328,9 @@ class GraphView:
             self._nodes[key] = self.serve(row) if row is not None else None
         return self._nodes[key]
 
-    def family_matches(self, node: dict[str, Any] | None, families: set[str], query_instance: str) -> bool:
+    def family_matches(
+        self, node: dict[str, Any] | None, families: set[str], query_instance: str
+    ) -> bool:
         """Explicit family selector over each page's own entity-type meaning."""
         if not families:
             return True
@@ -12110,9 +12153,9 @@ def _resolution_labels(view: GraphView) -> frozenset[str]:
     """Raw labels any admitted instance resolves to a resolution relation."""
     core = relation_registry.core_registry()
     plan = traversal_profiles.relation_query_plan(core, list(_RESOLUTION_RELATION_TYPES))
+    admitted = view.interpretations.admitted_instances()
     return _relation_labels(
-        plan, core,
-        (snapshots["relations"].typed for _instance, snapshots in view.interpretations.admitted_instances()),
+        plan, core, (snapshots["relations"].typed for _instance, snapshots in admitted)
     )
 
 
@@ -12120,8 +12163,9 @@ def _question_label_clause(view: GraphView) -> tuple[str, list[str]]:
     """Conservative SQL discovery of question units over every admitted instance."""
     kind_labels: set[str] = set()
     category_labels: set[str] = set()
+    admitted = view.interpretations.admitted_instances()
     adapters = [semantic_language_registry.core_registry()] + [
-        snapshots["categories"].typed for _instance, snapshots in view.interpretations.admitted_instances()
+        snapshots["categories"].typed for _instance, snapshots in admitted
     ]
     for adapter in adapters:
         plan = semantic_language_registry.unit_query_plan(
@@ -12169,9 +12213,12 @@ def _question_units(
         node = view.serve(_node_row_to_dict(row[:10]))
         metadata = (node or {}).get("metadata") or {}
         if node is not None and (
-            metadata.get("kind") in _QUESTION_KINDS or metadata.get("category") in _QUESTION_CATEGORIES
+            metadata.get("kind") in _QUESTION_KINDS
+            or metadata.get("category") in _QUESTION_CATEGORIES
         ):
-            found.append((str(node["path"]), str(row[10]), metadata.get("unit_ref"), node.get("anchor")))
+            found.append(
+                (str(node["path"]), str(row[10]), metadata.get("unit_ref"), node.get("anchor"))
+            )
     return found
 
 

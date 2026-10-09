@@ -252,7 +252,8 @@ def load_registry(
         return core
     from .vocabulary import instances
 
-    return vocabulary_registry.load(instances.select(Path(vault_root), SPEC, registry_scope), Path(vault_root)).typed
+    selected = instances.select(Path(vault_root), SPEC, registry_scope)
+    return vocabulary_registry.load(selected, Path(vault_root)).typed
 
 
 def clear_cache() -> None:
@@ -595,7 +596,8 @@ def save_registry(
     path = extension_registry_path(vault_root)
     # Saved continuity is safe only when the whole extension registry is admitted.
     # Otherwise a collision or stale guard would expose a private definition.
-    if not connector_boundary.permits(vault_root, path.relative_to(vault_root).as_posix(), principal.effective_principal()):
+    rel = path.relative_to(vault_root).as_posix()
+    if not connector_boundary.permits(vault_root, rel, principal.effective_principal()):
         raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry is unavailable")
     registry = load_registry(vault_root, proposal=proposal)
     if _blocking(registry):

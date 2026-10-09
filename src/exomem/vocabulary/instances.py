@@ -94,7 +94,7 @@ def validate(document: object, compiled: Any) -> dict[str, Any]:
     from . import registry_specs
 
     # These field names form the closed portable binding protocol, not vocabulary.
-    fields = {"public", "private", "destinations", "selections"}
+    fields = {"public", "private", "destinations", "selections"}  # nosemgrep: ep-word-set -- the closed portable binding protocol fields
     if not isinstance(document, dict) or set(document) != fields:
         raise RegistryError("INVALID_REGISTRY_BINDING: explicit instance assignment required")
     private = document["private"]

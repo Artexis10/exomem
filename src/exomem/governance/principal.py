@@ -220,7 +220,7 @@ def owner_principal(*, surface: str = "cli", purpose: str | None = None) -> Requ
         resolved=True,
         issuer_family=_LOCAL_OWNER_ISSUER_FAMILIES.get(surface),
         # Closed ingress names identify actual local administration, not owner identity.
-        administrative_ingress=surface in {"cli", "mcp", "library"},
+        administrative_ingress=surface in {"cli", "mcp", "library"},  # nosemgrep: ep-word-membership -- closed local ingress surfaces, not a vocabulary
     )
 
 

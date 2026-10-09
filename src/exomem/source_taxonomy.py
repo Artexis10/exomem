@@ -520,7 +520,8 @@ def load_taxonomy(vault_root: Path, *, registry_scope: str | None = None) -> Sou
     try:
         from .vocabulary import instances
 
-        return vocabulary_registry.load(instances.select(Path(vault_root), KIND_SPEC, registry_scope), Path(vault_root)).typed
+        selected = instances.select(Path(vault_root), KIND_SPEC, registry_scope)
+        return vocabulary_registry.load(selected, Path(vault_root)).typed
     except OSError as exc:
         path = registry_path(vault_root)
         log.warning("%s unreadable (%s); using built-in source taxonomy", path, exc)
