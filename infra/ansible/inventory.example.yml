@@ -29,9 +29,3 @@ all:
                   dedicated_host_data_disks:
                     - /dev/disk/by-id/nvme-example-a-part4
                     - /dev/disk/by-id/nvme-example-b-part4
-    control_nodes:
-      hosts:
-        substrate-control-01:
-          ansible_host: 192.0.2.20
-          ansible_user: root
-          postgres_private_ip: 10.50.1.20

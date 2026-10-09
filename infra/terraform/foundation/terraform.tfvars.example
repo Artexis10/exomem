@@ -4,7 +4,17 @@ cloudflare_account_id = "opaque-account-id"
 cloudflare_zone_id    = "opaque-zone-id"
 control_hostname      = "control.example.com"
 transfer_hostname     = "transfer.example.com"
-database_hostname     = "db.example.com"
+shared_control = {
+  schema_version = 1
+  owner          = "substrate-infra"
+  server_id      = "verified-shared-server-id"
+  public_ipv4    = "192.0.2.20"
+  private_ipv4   = "10.50.1.20"
+  hostname       = "db.example.com"
+  direct_port    = 5432
+  pooled_port    = 6432
+  sslmode        = "verify-full"
+}
 # Administration runs over the company NetBird, so public SSH stays closed.
 # Break-glass only: set a CIDR for a temporary window, apply, then revert to []
 # and apply again. The Hetzner console and rescue system need neither.

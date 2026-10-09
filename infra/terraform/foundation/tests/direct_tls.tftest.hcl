@@ -11,6 +11,7 @@ override_resource {
 }
 
 variables {
+  shared_control        = jsondecode(file("tests/shared_control.fixture.json"))
   hcloud_token          = "mock-only"
   cloudflare_api_token  = "mock-only"
   cloudflare_account_id = "mock-account"
@@ -81,14 +82,6 @@ run "firewalls_admit_ssh_only_from_explicit_admin_cidrs" {
 
   assert {
     condition = length([
-      for rule in hcloud_firewall.control.rule : rule
-      if rule.port == "22" && toset(rule.source_ips) == toset(["192.0.2.10/32"])
-    ]) == 1
-    error_message = "A break-glass CIDR must open SSH on the control database server too."
-  }
-
-  assert {
-    condition = length([
       for rule in hcloud_firewall.alpha.rule : rule
       if rule.port == "443" && toset(rule.source_ips) == toset(["0.0.0.0/0", "::/0"])
     ]) == 1
@@ -106,19 +99,13 @@ run "empty_admin_cidrs_close_public_ssh" {
   }
 
   assert {
-    condition = (
-      length([for rule in hcloud_firewall.alpha.rule : rule if rule.port == "22"]) == 0 &&
-      length([for rule in hcloud_firewall.control.rule : rule if rule.port == "22"]) == 0
-    )
+    condition     = length([for rule in hcloud_firewall.alpha.rule : rule if rule.port == "22"]) == 0
     error_message = "An empty administrator CIDR set must leave no public SSH rule."
   }
 
   assert {
-    condition = (
-      length(hcloud_firewall.alpha.rule) == 1 &&
-      length(hcloud_firewall.control.rule) == 1
-    )
-    error_message = "Closing SSH must keep each firewall's public service rule."
+    condition     = length(hcloud_firewall.alpha.rule) == 1
+    error_message = "Closing SSH must keep the fleet firewall's public service rule."
   }
 }
 

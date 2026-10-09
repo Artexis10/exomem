@@ -7,6 +7,7 @@ mock_provider "random" {}
 mock_provider "local" {}
 
 variables {
+  shared_control        = jsondecode(file("tests/shared_control.fixture.json"))
   hcloud_token          = "mock-only"
   cloudflare_api_token  = "mock-only"
   cloudflare_account_id = "mock-account"
