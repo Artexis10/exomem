@@ -237,6 +237,11 @@ class SemanticUnitVectorRow(NamedTuple):
     parent_generation: str
 
 
+#: Paths per `file_mtimes` read: under SQLite's oldest default bound of 999
+#: parameters per statement.
+_PATHS_PER_READ = 900
+
+
 #: Rows per batch in the corpus-level unit-vector read. Bounds the result set a
 #: single SELECT materialises; it is not a limit on what the read returns.
 SEMANTIC_UNIT_READ_BATCH = 2_000
@@ -1992,20 +1997,32 @@ class EmbeddingIndex:
             self._vec_failed = True
             return None
 
-    def file_mtimes(self) -> dict[str, float]:
+    def file_mtimes(self, paths: AbstractSet[str] | None = None) -> dict[str, float]:
         """Map each indexed `file_path` → its max stored `file_mtime` (one query).
 
         The idempotency oracle for `index_incremental`: a file whose on-disk mtime
         does not exceed this value is already current in the sidecar and is skipped.
+        `paths` limits the read to those files, for a caller that checks a few.
         Empty dict when the sidecar has not been created yet.
         """
         if not self.path.exists():
             return {}
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
-            ).fetchall()
+            if paths is None:
+                rows = conn.execute(
+                    "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
+                ).fetchall()
+            else:
+                wanted = sorted(paths)
+                rows = []
+                for start in range(0, len(wanted), _PATHS_PER_READ):
+                    batch = wanted[start : start + _PATHS_PER_READ]
+                    rows += conn.execute(
+                        "SELECT file_path, MAX(file_mtime) FROM chunks "
+                        f"WHERE file_path IN ({','.join('?' * len(batch))}) GROUP BY file_path",
+                        batch,
+                    ).fetchall()
         finally:
             conn.close()
         return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}

@@ -2215,13 +2215,17 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     from . import recall_space
 
     recall = recall_space.recall_model()
-
-    def space(described: dict) -> tuple:
-        return (described.get("model"), described.get("fingerprint"), described.get("dim"))
-
-    # Live writes give an interrupted initial build's serving sidecar the build's
-    # own space; it still holds only those writes.
-    initial = serving is None or (building is not None and space(serving) == space(building))
+    job = recall_migration.status(vault_root)
+    if building and job.get("state") == "failed":
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"The dense index build for {recall} failed ({job.get('error')}) at "
+            f"{building['paths_done']}/{state.get('paths_total', 0)} pages; dense recall "
+            "covers only the built pages. A restart retries the build.",
+            details={**state, "job": job},
+        )
+    initial = serving is None or bool(building and building.get("same_space_as_serving"))
     if initial:
         if state.get("paths_total", 0) == 0:
             return _check(
@@ -2229,6 +2233,15 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
             )
         if state.get("reembed") == "off":
             return None
+        if serving is not None and not building.get("resumes"):
+            return _check(
+                "embeddings.reembed",
+                "warn",
+                f"{building['sidecar']} is left over from an initial dense index build that "
+                f"will not resume: {serving['sidecar']} covers the vault and serves recall, "
+                "and nothing reads the leftover sidecar.",
+                details=state,
+            )
         built = building["paths_done"] if building else 0
         phase = "in progress" if building else "pending"
         return _check(

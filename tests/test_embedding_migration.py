@@ -450,7 +450,7 @@ def test_an_initial_build_serves_its_sidecar_and_live_writes_while_marked_warmin
     # a live write gave the serving sidecar the same space, and no pointer
     # names the build yet. Serving only the live write would answer every
     # query with it.
-    vault, _log, _loads = preseeded_world
+    vault, log, _loads = preseeded_world
     _warm(vault)
     plan = recall_migration.plan(vault)
     assert plan is not None and plan.serving is None
@@ -470,12 +470,54 @@ def test_an_initial_build_serves_its_sidecar_and_live_writes_while_marked_warmin
 
     assert built["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
     assert live["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-new.md"
-    assert built["warming"]["components"] == ["embeddings"]
+    assert built["warming"] == {"components": ["embeddings"], "since_s": None}
+    log.clear()
+    find_module.clear_cache()
+    find_module.find(vault, query="retry backoff", mode="hybrid", result_level="mixed", scope="kb-only")
+    assert len(_query_encoders(log)) == 1  # the unit lane's vector fits the build
 
     recall_migration.cut_over(vault, plan)
     after = _recall(vault, "retry backoff")
     assert after["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
     assert "warming" not in after
+
+
+def test_a_page_rewritten_after_the_build_encoded_it_is_not_recalled_by_its_removed_text(
+    preseeded_world,
+) -> None:
+    # The build keeps a page's old chunks until its catch-up pass. Read as
+    # current, they answered with a sentence the page no longer holds.
+    from exomem import commands
+
+    vault, _log, _loads = preseeded_world
+    _warm(vault)
+    plan = recall_migration.plan(vault)
+    assert plan is not None and recall_migration.build(vault, plan) is True
+    page = vault / kb_dirname() / "Notes/page-0.md"
+    page.write_text(
+        "---\ntype: note\ntitle: Retry with backoff\nupdated: 2026-09-02\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000001\n---\n\n"
+        "# Retry with backoff\n\nRetries stop after five attempts and report the failure.\n",
+        encoding="utf-8",
+    )
+    stamp = page.stat().st_mtime + 5
+    os.utime(page, (stamp, stamp))
+    assert embeddings.upsert_after_write_status(vault, [page]).status == "completed"
+
+    def excerpts(query: str) -> dict[str, str]:
+        find_module.clear_cache()
+        result = commands.op_ask_memory(
+            vault, query=query, limit=5, mode="vector", scope="kb-only", graph=False, rerank=False,
+            detail="full",
+        )
+        hits = result if isinstance(result, list) else result["hits"]
+        return {hit["path"]: hit.get("excerpt", "") for hit in hits}
+
+    removed = excerpts("growing delay hammer")
+    current = excerpts("five attempts report the failure")
+
+    assert all("growing delay" not in excerpt for excerpt in removed.values())
+    assert "five attempts" in current[f"{kb_dirname()}/Notes/page-0.md"]
 
 
 def test_a_cell_reads_the_build_while_its_old_sidecar_is_refused(world, monkeypatch) -> None:
@@ -726,6 +768,28 @@ def test_doctor_reports_an_initial_build_a_live_write_reached(preseeded_world) -
     assert check.status == "warn"
     assert "initial dense index build" in check.message
     assert check.details["serving"]["model"] == check.details["building"]["model"] == NEW
+
+
+def test_doctor_reports_a_leftover_build_sidecar_once_the_serving_one_covers_the_vault(
+    preseeded_world,
+) -> None:
+    # An operator reconcile filled the serving sidecar, so the job never
+    # resumes the build: reporting it as in progress would warn forever.
+    from exomem import doctor
+
+    vault, log, _loads = preseeded_world
+    plan = recall_migration.plan(vault)
+    assert plan is not None
+    assert not recall_migration.build(vault, plan, should_stop=lambda: len(_passages_by(log, NEW)) >= 2)
+    embeddings.index_incremental(vault, log_fn=lambda _message: None)
+    recall_migration.reset_for_tests()
+    assert recall_migration.plan(vault) is None
+
+    check = doctor._check_recall_reembed(vault)
+
+    assert check.status == "warn"
+    assert "left over" in check.message
+    assert "in progress" not in check.message
 
 
 def test_doctor_keeps_missing_sidecar_warning_when_initial_build_is_disabled(
@@ -1140,3 +1204,4 @@ def test_doctor_reports_a_cells_refused_sidecar_as_dense_recall_off(world, monke
     check = doctor._check_recall_reembed(vault)
     assert check.status == "warn"
     assert "EXOMEM_RECALL_REEMBED=off keeps it off" in check.message
+
