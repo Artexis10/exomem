@@ -8,10 +8,11 @@ tree, so a restore applies what that release's cellctl would. It reaches the
 cluster through `kubectl --context CONTEXT`, takes the source Secret into
 process memory only and never prints it.
 
-    scratch       restore a snapshot into a new scratch namespace beside the cell
-    in-place      restore a snapshot onto the stopped cell's own volume
-    idle          exit 0 only when the cell runs no Job and carries no hold
-    backup-paths  print the paths a backup covers and a restore rewrites
+    scratch                restore a snapshot into a new scratch namespace beside the cell
+    in-place               restore a snapshot onto the stopped cell's own volume
+    idle                   exit 0 only when the cell runs no Job and carries no hold
+    outside-backup-window  exit 0 only outside the live cellctl's nightly backup window
+    backup-paths           print the paths a backup covers and a restore rewrites
 """
 
 from __future__ import annotations
@@ -33,6 +34,11 @@ from urllib.parse import urlparse
 # installed cellctl, so one reviewed commit fixes both.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cellctl" / "src"))
 
+from cellctl.backup_window import (  # noqa: E402
+    DEFAULT_BACKUP_WINDOW,
+    parse_backup_window,
+    within_backup_window,
+)
 from cellctl.manifests import (  # noqa: E402
     BACKUP_PATHS,
     HOLD_ANNOTATION,
@@ -178,9 +184,20 @@ def _cellctl(context: str) -> dict:
     return _get(context, "deployment", CELLCTL_DEPLOYMENT, CONTROL_NAMESPACE)
 
 
-def platform_settings(deployment: dict) -> PlatformSettings:
+def _cellctl_env(deployment: dict) -> dict[str, str]:
     container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env = {e["name"]: e["value"] for e in container["env"] if "value" in e}
+    return {e["name"]: e["value"] for e in container.get("env", []) if "value" in e}
+
+
+def backup_window_of(deployment: dict) -> tuple[int, int]:
+    """The window the live cellctl backs up in, as cellctl's main reads it."""
+
+    raw = _cellctl_env(deployment).get("CELLCTL_BACKUP_WINDOW")
+    return parse_backup_window(raw) if raw is not None else DEFAULT_BACKUP_WINDOW
+
+
+def platform_settings(deployment: dict) -> PlatformSettings:
+    env = _cellctl_env(deployment)
     bucket, endpoint = env["CELLCTL_B2_BUCKET_NAME"], env["CELLCTL_B2_ENDPOINT"]
     if not bucket or urlparse(endpoint).scheme != "https" or not urlparse(endpoint).hostname:
         raise ValueError("cellctl's object store settings are incomplete")
@@ -260,12 +277,20 @@ def check_idle(context: str, cell_id: str) -> None:
         raise ValueError("a Job is running in the cell namespace")
 
 
+def check_outside_backup_window(context: str) -> None:
+    start, end = backup_window_of(_cellctl(context))
+    if within_backup_window(dt.datetime.now(dt.UTC).hour, (start, end)):
+        raise ValueError(f"inside cellctl's backup window, {start:02d}:00-{end:02d}:00 UTC")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("scratch", "in-place", "idle"):
+    for name in ("scratch", "in-place", "idle", "outside-backup-window"):
         command = commands.add_parser(name)
         command.add_argument("--context", required=True)
+        if name == "outside-backup-window":
+            continue
         command.add_argument("--cell-id", required=True)
         if name != "idle":
             command.add_argument("--snapshot", required=True)
@@ -281,6 +306,8 @@ def main(argv: list[str]) -> int:
             apply_in_place(args.context, args.cell_id, args.snapshot, args.field_manager)
         elif args.command == "idle":
             check_idle(args.context, args.cell_id)
+        elif args.command == "outside-backup-window":
+            check_outside_backup_window(args.context)
         else:
             print(" ".join(BACKUP_PATHS))
     except (ValueError, RuntimeError, KeyError) as error:

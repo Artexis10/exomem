@@ -32,7 +32,7 @@ The renderer is `infra/scripts/cloud_restore_manifests.py`, which the [export ru
 
 Both tools refuse to start in these cases:
 
-- the time is between 02:00 and 05:00 UTC, when cellctl runs backups;
+- the time is inside the nightly backup window that the live cellctl Deployment is configured with (`cells.backupWindow`, 02:00-05:00 UTC by default);
 - the node has less than 2 GiB of memory available;
 - the cell's volume is not in the `exomem-cloud-encrypted` class.
 

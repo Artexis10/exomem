@@ -140,10 +140,9 @@ fresh_break_glass() {
   [ $((BG_EXPIRES - $(date -u +%s))) -gt 1200 ] || mint_break_glass
 }
 
+# cellctl backs up and stops cells in its nightly window (cells.backupWindow).
 check_window() {
-  local hour
-  hour=$(date -u +%H)
-  if [ "$hour" -ge 2 ] && [ "$hour" -lt 5 ]; then die 'inside the 02:00-05:00 UTC backup window; stop'; fi
+  py "$MANIFESTS" outside-backup-window --context break-glass
 }
 
 # The restore pods share the node with live cells; refuse without headroom.
@@ -300,9 +299,9 @@ run_drill() {
     live) ref_path=vault ;;
     *) ref_path=".restore-prior-${reference#prior:}/vault" ;;
   esac
-  check_window
   check_memory
   mint_break_glass
+  check_window
   # The reference is read through the live runtime's root, never through a
   # new pod on the cell's volume. File reads avoid atime updates.
   root=$(runtime_root) && [ -d "$root/$ref_path" ] || die 'reference vault not found through the live runtime'
@@ -424,9 +423,9 @@ ROLL_BACK='
 
 run_restore() {
   local root available paths path
-  check_window
   check_memory
   mint_break_glass
+  check_window
   paths=$(py "$MANIFESTS" backup-paths)
   read -r -a BACKUP_PATHS <<< "$paths"
   for path in "${BACKUP_PATHS[@]}"; do [[ "$path" =~ ^/data/[a-z]+$ ]] || die "unexpected backup path $path"; done
@@ -448,9 +447,9 @@ run_restore() {
   # 2. Stop the cell. Paused, cellctl cannot start a backup, upgrade or hold,
   # or bring the runtime back mid-restore.
   echo "== stop"
+  fresh_break_glass
   check_window
   check_memory
-  fresh_break_glass
   CELLCTL_REPLICAS=$(k -n exomem-cloud get deployment cellctl -o jsonpath='{.spec.replicas}')
   [[ "$CELLCTL_REPLICAS" =~ ^[1-9][0-9]*$ ]] || die 'cellctl is already paused; another procedure may own the pause'
   [ "$(k -n "$NS" get statefulset cell -o jsonpath='{.spec.replicas}')" = 1 ] || die 'the cell is not scaled to one'
