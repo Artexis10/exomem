@@ -240,6 +240,13 @@ be reported as "not comparable". The job SHALL NOT apply an absolute latency
 threshold. The job does not bound drift across releases: each release can be up
 to the margin slower than the release before it.
 
+A dispatched full run MAY carry an accept reason for a deliberate slowdown.
+With a reason, a series beyond the margin SHALL report "accepted" with that
+reason, its paired ratios and its stages, and SHALL NOT fail. The reason SHALL
+appear in the run summary that release evidence reads. It applies to that one
+run only; the release it admits becomes the next pairing base. A scheduled run
+SHALL NOT carry a reason.
+
 The absolute verdict on the ceilings and the stage budgets SHALL come from a
 run on a quiet workstation, on the reference corpus in a process restricted to
 two CPUs, and from the live-cell series after each release, through the live
@@ -258,6 +265,13 @@ that release's GitHub Release. A release with no attached summary SHALL show
 - **WHEN** a merged change makes warm hybrid requests slower than the most recent release tag by more than 10%, with 95% confidence over the paired cases
 - **THEN** the next scheduled or dispatched full CI run fails the `retrieval-latency` job and names the series and the stages where the time moved
 - **AND** the release evidence check stays red until a full run passes
+
+#### Scenario: A deliberate slowdown ships with a recorded reason
+
+- **WHEN** a merged correctness fix makes warm hybrid requests 15% slower than the most recent release tag
+- **AND** the dispatched full run for the release carries an accept reason that names the fix
+- **THEN** the `retrieval-latency` job reports the series as accepted, with the reason and the paired ratios, and does not fail
+- **AND** the next full run, after that release is tagged, pairs with the new tag and carries no reason
 
 #### Scenario: A failed or refused live-cell verdict opens work and blocks nothing
 

@@ -478,9 +478,13 @@ Control justification:
   slower compound to about 54%. The absolute record on each release shows that
   drift against the fixed ceilings, and a failed record opens follow-up work.
 - *A deliberate slowdown* is a correct firing. A change that accepts more than
-  10% on purpose, such as a correctness fix, holds releases until head is back
-  within the margin. This design names no accept path for it yet (Open
-  Questions).
+  10% on purpose, such as a correctness fix, ships through one dispatched full
+  run that carries an accept reason (a `workflow_dispatch` input). That run
+  reports the series as accepted with the reason and the ratios, and the
+  release evidence shows the reason. The agent or operator who drives the
+  release writes the reason; nobody else approves it. The reason holds for
+  that run only, and the release it admits becomes the next pairing base, so
+  nothing carries forward. Scheduled runs carry no reason.
 
 **Absolute record, workstation and live cell.** The ceilings and the stage
 budgets are judged on a quiet workstation and on the live cell after each
@@ -656,7 +660,3 @@ derived and rebuilds from the vault.
 - Whether `speakers` and file-type filters need the metadata table or can stay
   on the media sidecar they read today; decided by the lane that inventories
   the filter registry, without changing the specs.
-- How a deliberate slowdown of more than 10% gets accepted. The paired job
-  fires correctly on it and holds releases until head is within the margin.
-  One candidate is a `workflow_dispatch` input that names a later pairing base
-  for one full run, recorded in the run. The owner decides before 6.1 lands.
