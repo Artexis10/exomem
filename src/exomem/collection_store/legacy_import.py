@@ -231,6 +231,12 @@ def _recheck(captured):
         ) from error
 
 
+def importable(manifest: collections.CollectionManifest) -> bool:
+    """Whether the importer maps this collection's layout; a dataset keeps file authority."""
+    # nosemgrep: ep-word-membership -- The store schema's `collections.layout` fixes these two layouts.
+    return manifest.storage.strategy in {"markdown-items", "markdown-log"}
+
+
 def capture_legacy_collection(
     root, manifest_path, *, audit: LegacyAuditSpool
 ) -> CapturedLegacyCollection:
@@ -249,7 +255,7 @@ def capture_legacy_collection(
         root, relative, limit=collections._MAX_MANIFEST_BYTES
     )
     manifest = collections.parse_manifest_bytes(root, root / relative, data)
-    if manifest.storage.strategy not in {"markdown-items", "markdown-log"}:
+    if not importable(manifest):
         raise CollectionStoreError(
             "COLLECTION_LEGACY_IMPORT_UNSUPPORTED", "dataset import is unsupported"
         )

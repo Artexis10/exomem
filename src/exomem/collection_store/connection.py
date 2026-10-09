@@ -162,6 +162,7 @@ def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
     try:
         with engine.connect() as core:
             conn = core.connection.driver_connection
+            conn.execute("PRAGMA recursive_triggers=ON")
             conn.execute("PRAGMA foreign_keys=ON")
             schema.ensure_schema(core)
             yield conn

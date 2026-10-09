@@ -16,19 +16,23 @@ import time
 import uuid
 from pathlib import Path
 
-from .. import state_paths
+from .. import state_paths, vault
 from .. import structured_collections as collections
 from . import admission, authority, connection, legacy, legacy_import
-from .connection import CollectionStoreError
 
 #: Seconds for the whole preflight: one audit scan plus every collection's capture and proof.
 DEADLINE_SECONDS = 300
 _ACTOR = "collections-store-preflight"
+#: What capture, import and proof raise for one collection's unusable input: the spool's own
+#: declared input failures, a vault path guard and a collection refusal. Other errors are faults.
+_REFUSALS = (*legacy._INPUT_FAILURES, vault.PathGuardError, collections.CollectionError)
+_DEADLINE = {"code": "COLLECTION_PREFLIGHT_DEADLINE",
+             "reason": "the preflight deadline elapsed before this collection was checked"}
 
 
 def _blocker(error) -> dict:
-    found = {"code": getattr(error, "code", "COLLECTION_PREFLIGHT_DEADLINE"),
-             "reason": getattr(error, "reason", "the preflight deadline elapsed")}
+    found = {"code": getattr(error, "code", None) or type(error).__name__,
+             "reason": getattr(error, "reason", None) or getattr(error, "detail", None) or str(error)}
     if isinstance(error, legacy_import.LegacyProofError):
         found["check"] = error.check
     return found
@@ -48,36 +52,44 @@ def preflight(vault_root) -> dict:
     """Report, per file collection, its rows, legacy audit status, proof result and blockers.
 
     Owner-only, because it reads every collection with full authority. The report holds
-    counts, statuses, codes and paths, never row values. A dataset is skipped (it keeps
-    file authority), and a collection the vault's marker already routes to the store is
-    reported as ``store``. The vault is ``migratable`` only when no collection is blocked.
+    counts, statuses, codes and paths, never row values. A dataset is skipped, because it
+    keeps file authority. Collections the vault's marker routes to the store are counted, not
+    listed: their paths are store-owned. The vault is ``migratable`` only when no file
+    collection is blocked.
     """
     admission.require_owner(vault_root, "the collections-store preflight")
     root = Path(vault_root).resolve()
     raw = authority.read_marker(root)
-    routed = set() if raw is None else {
-        entry["manifest_path"] for entry in authority.parse_marker(root, raw)["collections"]}
+    marker = None if raw is None else authority.parse_marker(root, raw)
+
+    def routed(path):
+        return marker is not None and authority.selected_entry(root, marker, path) is not None
+
+    store_ids = set() if marker is None else {entry["collection_id"] for entry in marker["collections"]}
     # Duplicates come through so that every copy can be named as a blocker.
     manifests, unreadable = collections.discover_collections_with_errors(root, reject_duplicates=False)
-    rows = [_row(entry.path, status="store" if entry.path in routed else "blocked",
-                 blocker=None if entry.path in routed else {"code": entry.code, "reason": entry.message})
-            for entry in unreadable]
-    pending, shared = [], {}
-    for manifest in sorted(manifests, key=lambda found: found.path):
-        if manifest.path in routed:
-            rows.append(_row(manifest.path, manifest, status="store"))
-        else:
+    rows = [_row(entry.path, status="blocked", blocker={"code": entry.code, "reason": entry.message})
+            for entry in unreadable if not routed(entry.path)]
+    shared = {}
+    for manifest in manifests:
+        if not routed(manifest.path):
             shared.setdefault(manifest.collection_id, []).append(manifest)
-    for group in shared.values():
+    pending = []
+    for collection_id, group in shared.items():
         try:
-            collections._raise_duplicate_ids(group)
+            # A file copy of a store collection's identity is a duplicate too.
+            collections.raise_duplicate_ids([*(manifest.collection_id for manifest in group),
+                                             *({collection_id} & store_ids)])
         except collections.CollectionError as error:
             # Every copy is blocked: which folder the owner meant to keep is theirs to decide.
             rows.extend(_row(manifest.path, manifest, status="blocked", blocker=_blocker(error))
                         for manifest in group)
             continue
         pending.extend(group)
-    pending.sort(key=lambda found: found.path)
+    rows.extend(_row(manifest.path, manifest, status="skipped", reason="a dataset keeps file authority")
+                for manifest in pending if not legacy_import.importable(manifest))
+    pending = sorted((manifest for manifest in pending if legacy_import.importable(manifest)),
+                     key=lambda found: found.path)
     if pending:
         rows.extend(_prove_all(root, pending))
     rows.sort(key=lambda row: row["path"])
@@ -85,7 +97,7 @@ def preflight(vault_root) -> dict:
     ready = [row for row in rows if row["status"] == "ready"]
     return {"mode": "collections-store", "dry_run": True,
             "verdict": "blocked" if blocked else "migratable" if ready else "nothing_to_migrate",
-            "blocked": blocked, "collections": rows}
+            "blocked": blocked, "collections": rows, "store_collections": len(store_ids)}
 
 
 def _prove_all(root, manifests) -> list[dict]:
@@ -100,16 +112,21 @@ def _prove_all(root, manifests) -> list[dict]:
         with legacy.LegacyAuditSpool(spool, deadline=time.monotonic() + DEADLINE_SECONDS) as audit:
             try:
                 audit.scan(root)
-            except (CollectionStoreError, TimeoutError) as error:
+            except TimeoutError:
+                return [_row(manifest.path, manifest, status="blocked", blocker=_DEADLINE)
+                        for manifest in manifests]
+            except _REFUSALS as error:
                 # Without the audit census no collection can be proved.
-                return [_row(manifest.path, manifest, status="blocked", blocker=_blocker(error))
+                blocker = _blocker(error)
+                blocker["reason"] = "the vault's audit history could not be read: " + blocker["reason"]
+                return [_row(manifest.path, manifest, status="blocked", blocker=blocker)
                         for manifest in manifests]
             for index, manifest in enumerate(manifests):
                 try:
                     rows.append(_prove_one(root, manifest, staging, audit, context))
-                except TimeoutError as error:
+                except TimeoutError:
                     # The spool is spent: this and every later collection is unchecked, not clean.
-                    rows.extend(_row(later.path, later, status="blocked", blocker=_blocker(error))
+                    rows.extend(_row(later.path, later, status="blocked", blocker=_DEADLINE)
                                 for later in manifests[index:])
                     break
     return rows
@@ -118,18 +135,19 @@ def _prove_all(root, manifests) -> list[dict]:
 def _prove_one(root, manifest, staging, audit, context) -> dict:
     try:
         captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
-    except CollectionStoreError as error:
-        if error.code == "COLLECTION_LEGACY_IMPORT_UNSUPPORTED":
-            return _row(manifest.path, manifest, status="skipped", reason=error.reason)
-        return _row(manifest.path, manifest, status="blocked", blocker=_blocker(error))
-    except collections.CollectionError as error:
+    except TimeoutError:
+        raise
+    except _REFUSALS as error:
         return _row(manifest.path, manifest, status="blocked", blocker=_blocker(error))
     found = {"rows": len(captured.snapshot.records),
              "legacy_audit_status": captured.legacy_inspection["status"]}
     staging.execute("BEGIN IMMEDIATE")
     try:
         result = legacy_import.import_legacy_collection(staging, captured, audit=audit, context=context)
-    except (CollectionStoreError, collections.CollectionError) as error:
+    except TimeoutError:
+        staging.execute("ROLLBACK")
+        raise
+    except _REFUSALS as error:
         staging.execute("ROLLBACK")
         return _row(manifest.path, manifest, status="blocked", blocker=_blocker(error), **found)
     except BaseException:
