@@ -355,6 +355,18 @@ def _delete_coverage(conn: sqlite3.Connection, paths: list[str] | None = None) -
     conn.executemany("DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths))
 
 
+def indexed_parent_paths(conn: sqlite3.Connection) -> list[str]:
+    """Parents this sidecar holds chunks or an occurrence coverage record for."""
+    return [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT file_path FROM chunks UNION "
+            "SELECT substr(key, ?) FROM meta WHERE key >= ? AND key < ?",
+            (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END),
+        )
+    ]
+
+
 def _coverage_index(
     conn: sqlite3.Connection, paths: list[str] | None = None
 ) -> dict[str, tuple[str, int]]:
@@ -1840,6 +1852,9 @@ class EmbeddingIndex:
         keep = egress.page_release_filter(self.vault_root)
         conn = self._connect()
         try:
+            # One snapshot for the rows, the coverage index and the lazily read
+            # records: a publication between them would read a match as a miss.
+            conn.execute("BEGIN")
             rows = conn.execute(
                 "SELECT unit_key, parent_path, parent_generation, parent_source_hash, "
                 "parser_version, vector FROM semantic_unit_vectors"
@@ -1935,6 +1950,8 @@ class EmbeddingIndex:
                 if witness is not None:
                     incomplete_out.append(witness)
         finally:
+            if conn.in_transaction:
+                conn.rollback()
             conn.close()
         ranked.sort(key=lambda hit: (-hit.cosine, hit.unit_ref))
         return ranked[:k]

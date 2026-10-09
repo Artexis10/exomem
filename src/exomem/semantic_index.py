@@ -665,6 +665,26 @@ def _sqlite_unit_rows(path: Path, table: str, key_column: str) -> dict[str, _Sid
     return _rows_by_parent(rows)
 
 
+def _indexed_parents(
+    path: Path, read: Callable[[sqlite3.Connection], Iterable[str]],
+) -> frozenset[str] | None:
+    """The parents a sidecar holds page rows for; None when it cannot be read.
+
+    A page the producer never indexes (a raw Record, a page outside the graph's
+    tree) owes that sidecar no occurrences, so its absence there is not drift.
+    """
+    if not path.exists():
+        return frozenset()
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return frozenset(read(conn))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
     """Stored structural occurrences per parent, keyed by occurrence key."""
     from .epistemic_graph import CANDIDATE_KIND
@@ -774,34 +794,50 @@ def audit_semantic_unit_sidecars(
             str,
             dict[str, _SidecarParentRows],
             Callable[[SemanticParentIndexState], frozenset[str]],
+            frozenset[str] | None,
         ]
     ] = []
     if include_lexical:
+        lexical = lexstore.lexical_path(vault_root)
         sidecars.append(
             (
                 "lexical",
-                _sqlite_unit_rows(lexstore.lexical_path(vault_root), "semantic_units", "unit_ref"),
+                _sqlite_unit_rows(lexical, "semantic_units", "unit_ref"),
                 _occurrence_keys,
+                _indexed_parents(lexical, lambda conn: (
+                    str(row[0]) for row in conn.execute("SELECT path FROM pages")
+                )),
             )
         )
     if include_vectors:
+        from .embedding_index import indexed_parent_paths
+
+        vectors = index_paths.sidecar_path(vault_root)
         sidecars.append(
             (
                 "vector",
-                _sqlite_unit_rows(
-                    index_paths.sidecar_path(vault_root), "semantic_unit_vectors", "unit_key"
-                ),
+                _sqlite_unit_rows(vectors, "semantic_unit_vectors", "unit_key"),
                 _occurrence_keys,
+                _indexed_parents(vectors, indexed_parent_paths),
             )
         )
     if include_graph:
+        graph = epistemic_graph.sidecar_path(vault_root)
         sidecars.append(
-            ("graph", _graph_unit_rows(epistemic_graph.sidecar_path(vault_root)), _occurrence_keys)
+            (
+                "graph",
+                _graph_unit_rows(graph),
+                _occurrence_keys,
+                _indexed_parents(graph, lambda conn: (
+                    str(row[0])
+                    for row in conn.execute("SELECT path FROM graph_nodes WHERE kind = 'file'")
+                )),
+            )
         )
     trashed = _trash_original_paths(vault_root)
     drift: list[SemanticUnitSidecarDrift] = []
     generations_by_parent: dict[str, dict[str, frozenset[str]]] = {}
-    for sidecar, actual_by_parent, expected_keys in sidecars:
+    for sidecar, actual_by_parent, expected_keys, indexed in sidecars:
         for parent_path in sorted(set(expected) | set(actual_by_parent)):
             state = expected.get(parent_path)
             actual = actual_by_parent.get(parent_path)
@@ -833,7 +869,7 @@ def audit_semantic_unit_sidecars(
                 continue
             expected_refs = expected_keys(state)
             if actual is None:
-                if expected_refs:
+                if expected_refs and (indexed is None or parent_path in indexed):
                     drift.append(
                         SemanticUnitSidecarDrift(
                             sidecar,
