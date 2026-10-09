@@ -1802,6 +1802,7 @@
             "structured-files",
             "curation",
             "tag-variants",
+            "collections-store",
             "collections-store-adopt-local"
           ],
           "type": "string"

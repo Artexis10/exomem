@@ -1303,7 +1303,7 @@ def discover_collections_with_errors(
         except CollectionError as error:
             unreadable.append(UnreadableManifest(rel, error.code, error.reason))
     if reject_duplicates:
-        _raise_duplicate_ids(manifests)
+        raise_duplicate_ids(manifest.collection_id for manifest in manifests)
     return tuple(manifests), tuple(unreadable)
 
 
@@ -1386,7 +1386,7 @@ def resolve_collection(
         ]
         if not matches:
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        _raise_duplicate_ids(matches)
+        raise_duplicate_ids(manifest.collection_id for manifest in matches)
         return matches[0]
 
     root = Path(vault_root)
@@ -3470,10 +3470,11 @@ def _validate_item_key(value: object) -> None:
         raise ValueError("item key must be a bounded non-empty string")
 
 
-def _raise_duplicate_ids(manifests: Iterable[CollectionManifest]) -> None:
+def raise_duplicate_ids(collection_ids: Iterable[str]) -> None:
+    """Refuse a set of releasable manifests in which one collection identity appears twice."""
     seen: dict[str, int] = {}
-    for manifest in manifests:
-        seen[manifest.collection_id] = seen.get(manifest.collection_id, 0) + 1
+    for collection_id in collection_ids:
+        seen[collection_id] = seen.get(collection_id, 0) + 1
     duplicate_count = max(seen.values(), default=0)
     if duplicate_count > 1:
         raise CollectionError(
