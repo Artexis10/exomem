@@ -178,7 +178,10 @@ SPEC = registry.RegistrySpec(
     attributes=frozenset({"class", "parents"}),
     # A stored item's archive and hierarchy rules must not change under it.
     immutable=frozenset({"attributes.class", "attributes.parents"}),
-    served_by="planning",
+    # The bootstrap planning block lists kinds, horizons, priorities and commitments.
+    # Statuses and health reach an agent through `new` markers and
+    # schema_memory(subject="planning-values", operation="inspect").
+    summarize_keys=False,
 )
 
 

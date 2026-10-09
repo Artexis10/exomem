@@ -24,6 +24,7 @@ from lifecycle_fixtures import (
 from test_vocabulary_registries import _govern, _reset_governance, _served
 
 from exomem import audit as audit_module
+from exomem import commands
 from exomem import due_state as due_state_module
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
@@ -291,6 +292,9 @@ def test_a_restricted_write_does_not_reopen_an_item_a_vault_status_settled(
     vault, call = _served(tmp_path, monkeypatch)
     seed_vault(vault)
     _save(call, {"status.shipped": {"attributes": {"class": "done"}}}, "shipped work is done")
+    # Bootstrap names the vault status, which the planning block does not list.
+    served = call("bootstrap", {"section": "vocabulary"})["vocabulary"]
+    assert "status.shipped" in served["planning-values"]["new"]
     assert _add(call, vault, "Batch 1").get("success") is not False
     assert _triage(call, "Batch 1", "shipped").get("success") is not False
     due_state_module.reset_emission_state()
@@ -300,6 +304,8 @@ def test_a_restricted_write_does_not_reopen_an_item_a_vault_status_settled(
     _govern(vault, scope_path="_Schema/planning-values.yaml")
     _reset_governance()
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        served = commands.op_bootstrap(vault, profile="compact", section="vocabulary")
+        assert served["vocabulary"]["planning-values"] == {"unavailable": "audience_restricted"}
         report_event(vault, "Batch 1")
 
     # The stored projection still holds the owner's classification: settled.

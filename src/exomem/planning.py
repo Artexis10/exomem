@@ -120,7 +120,9 @@ def _governed(
     if entry is None:
         if name == "kind":
             _invalid("kind must be one of: " + ", ".join(planning_values.values("kind")))
-        _invalid(f"{name} is invalid")
+        _invalid(
+            f"{name} is invalid; see schema_memory(operation=inspect, subject=planning-values)"
+        )
     if entry.status != "active":
         replacement = (entry.replaced_by or "").partition(".")[2]
         _invalid(f"{name} is deprecated" + (f"; use {replacement}" if replacement else ""))
