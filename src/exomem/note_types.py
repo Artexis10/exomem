@@ -24,7 +24,7 @@ authored value before the lookup, and the lookup adds none.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -368,10 +368,15 @@ class Basis:
     `owner_local` marks a producer of shared state that no caller reads except
     through a per-caller serve (the activation census, stored graph and
     artifact-role bits). It admits the overlay as the owner-local producer.
+
+    `refuses` is False for a page the operation only reads or rewrites links in
+    (see `reading`): an unavailable value then has no definition, as on the read
+    side, instead of refusing.
     """
 
     root: Path | None
     owner_local: bool = False
+    refuses: bool = True
     _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
 
@@ -403,6 +408,13 @@ class Basis:
             return None
         return snapshot.typed
 
+    def reading(self) -> Basis:
+        """This basis for a page the operation only reads or rewrites links in."""
+        return replace(self, refuses=False)
+
+    def _withheld(self) -> Resolution:
+        return _UNAVAILABLE if self.refuses else _UNTYPED
+
     def resolve(self, value: object) -> Resolution:
         if not isinstance(value, str) or not value:
             return _UNTYPED
@@ -411,7 +423,7 @@ class Basis:
             return Resolution(shipped_type)
         extension = self._extension()
         if extension is None:
-            return _UNAVAILABLE
+            return self._withheld()
         note_type = extension.types.get(value)
         return Resolution(note_type) if note_type is not None else _UNREGISTERED
 
@@ -425,7 +437,7 @@ class Basis:
             return Resolution(shipped_registry().types[key])
         extension = self._extension()
         if extension is None:
-            return _UNAVAILABLE
+            return self._withheld()
         key = extension.folders.get(name)
         return Resolution(extension.types[key]) if key is not None else _UNREGISTERED
 

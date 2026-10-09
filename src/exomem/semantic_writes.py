@@ -691,6 +691,8 @@ def evaluate_posthoc_batch(
         state = corpus.pages.get(rel_path)
         if state is None or not state.eligible_governed:
             continue
+        # A posthoc pass reads the page; it never refuses for a withheld definition.
+        state = semantic_contract.read_side(state)
         scope = (state.projects, state.page_type)
         contracts = contracts_by_scope.get(scope)
         if contracts is None:
@@ -3340,6 +3342,10 @@ def preflight_move(
     for before_path, after_path in pairs:
         before = before_corpus.pages[before_path]
         after = after_corpus.pages[after_path]
+        if before_path != old_path:
+            # The move only rewrites links in this page, so it is judged as a read.
+            before = semantic_contract.read_side(before)
+            after = semantic_contract.read_side(after)
         before_contracts = memory_schema.resolve_contracts(
             loaded_contracts,
             projects=before.projects,

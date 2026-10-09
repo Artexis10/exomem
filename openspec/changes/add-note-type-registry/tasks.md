@@ -4,17 +4,17 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 
 ## 1. S4a: registry and read side
 
-- [ ] 1.1 Rebase on merged S3; refresh the modified requirements against its synchronized text, keeping every S3 scenario. Verify `openspec validate --all --strict`.
-- [ ] 1.2 Red first: add the workflow test for an overlay compiled type with its own folder. `find` boosts it, the write gate requires a unit, and activation admits it; a restore leaves its pages as debt.
-- [ ] 1.3 Add the `note_types` adapter, pack and `RegistrySpec` as subject `note-types`; give the closed role set its C6 reason. Verify save, history, restore and the immutable attributes through real registry operations.
-- [ ] 1.4 Add the operation basis and predicates under S3 admission. Verify pack parity for sets A to H, shipped classification under each overlay state, and denied absent and present equivalence.
-- [ ] 1.5 Replace each literal copy of sets A to E, G and H with a predicate call, keeping each site's normalisation. Derive the typed writer's accepted types from the shipped pack, expand roles per SQL query, and delete the dead `semantic_writes` set. Verify that the existing suites pass unchanged.
-- [ ] 1.6 Read the semantic contract's destinations from the registry; verify compiled intent, both mismatch findings and a refused duplicate folder.
-- [ ] 1.7 Move the role-to-knob map into `ranking_config`; delete the duplicate `find_policy` constants and the `find` aliases. Verify that the ranking, auto-tune and bounded-pass tests pass unchanged.
-- [ ] 1.8 Count usage from the graph's file nodes by type, and report admitted unregistered types as audit debt. Verify `unavailable` on a cold projection and no debt for product types.
-- [ ] 1.9 Add the registry's effective digest to the catalogue identity. Verify that a save and a restore reach the next `find` and write without a restart or rebuild.
-- [ ] 1.10 Teach the role rule in contract version 7, render the shipped list from the pack and fix `search_guidance.compiled_types`; remove the `COMPILED_TYPES` sentences. Verify skill-contract validation, the no-leak scan and the bootstrap budgets.
-- [ ] 1.11 Regenerate the scaffold copies, plugins, cloud plugin and v5 candidate through their producers; verify the frozen v1 to v4 identities and the legacy contract digest.
+- [x] 1.1 Rebase on merged S3; refresh the modified requirements against its synchronized text, keeping every S3 scenario. Verify `openspec validate --all --strict`.
+- [x] 1.2 Red first: add the workflow test for an overlay compiled type with its own folder. `find` boosts it, the write gate requires a unit, and activation admits it; a restore leaves its pages as debt.
+- [x] 1.3 Add the `note_types` adapter, pack and `RegistrySpec` as subject `note-types`; give the closed role set its C6 reason. Verify save, history, restore and the immutable attributes through real registry operations.
+- [x] 1.4 Add the operation basis and predicates under S3 admission. Verify pack parity for sets A to H, shipped classification under each overlay state, and denied absent and present equivalence.
+- [x] 1.5 Replace each literal copy of sets A to E, G and H with a predicate call, keeping each site's normalisation. Derive the typed writer's accepted types from the shipped pack, expand roles per SQL query, and delete the dead `semantic_writes` set. Verify that the existing suites pass unchanged.
+- [x] 1.6 Read the semantic contract's destinations from the registry; verify compiled intent, both mismatch findings and a refused duplicate folder.
+- [x] 1.7 Move the role-to-knob map into `ranking_config`; delete the duplicate `find_policy` constants and the `find` aliases. Verify that the ranking, auto-tune and bounded-pass tests pass unchanged.
+- [x] 1.8 Count usage from the graph's file nodes by type, and report admitted unregistered types as audit debt. Verify `unavailable` on a cold projection and no debt for product types.
+- [x] 1.9 Add the registry's effective digest to the catalogue identity. Verify that a save and a restore reach the next `find` and write without a restart or rebuild.
+- [x] 1.10 Teach the role rule in contract version 7, render the shipped list from the pack and fix `search_guidance.compiled_types`; remove the `COMPILED_TYPES` sentences. Verify skill-contract validation, the no-leak scan and the bootstrap budgets.
+- [x] 1.11 Regenerate the scaffold copies, plugins, cloud plugin and v5 candidate through their producers; verify the frozen v1 to v4 identities and the legacy contract digest.
 - [ ] 1.12 Turn the workflow test green and run the full suite at the completion boundary.
 - [ ] 1.13 Obtain an exact independent review that names C4 and C6, the product and proof weight and a net call. Pass full CI, merge and verify the ordinary release.
 

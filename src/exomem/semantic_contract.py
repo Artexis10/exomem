@@ -807,6 +807,15 @@ def _type_basis(page: SemanticPageState) -> note_types.Basis:
     return page.type_basis or note_types.Basis(None)
 
 
+def read_side(page: SemanticPageState) -> SemanticPageState:
+    """The page judged as a read or a link rewrite, not as the caller's own write.
+
+    Its folder and type then classify against the shipped pack when the caller
+    cannot admit their definition, instead of refusing the operation.
+    """
+    return replace(page, type_basis=_type_basis(page).reading())
+
+
 def _route(page: SemanticPageState) -> note_types.NoteType | None:
     """The compiled type that owns this page's `Notes/<Name>` folder, if any.
 

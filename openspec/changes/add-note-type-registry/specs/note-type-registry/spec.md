@@ -104,6 +104,10 @@ Ranking SHALL rank such a page neutral.
 - **THEN** the semantic gate reports the note-type definition unavailable and refuses that write
 - **AND** an independently admitted read of an existing page still succeeds
 
+#### Scenario: A link rewrite needs no private definition
+- **WHEN** a restricted move rewrites links in a page whose type or `Notes` folder the caller cannot admit
+- **THEN** the gate judges that page against the shipped pack and does not refuse the move
+
 #### Scenario: Ranking stays neutral without the definition
 - **WHEN** a restricted caller's `find` returns a page whose type needs an unadmitted definition
 - **THEN** that page ranks with a neutral type multiplier
