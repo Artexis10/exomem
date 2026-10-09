@@ -41,8 +41,8 @@ design has to respect:
 - Result identity: every index-backed path returns the set the scan oracle would.
 - Warm search p95 at or below 200 ms on a two-CPU cell of 6,500 pages, with a
   budget for every stage, a pull-request gate that sees per-candidate work grow
-  before merge, and a full-CI comparison of head with the last release that
-  passed its live-cell verdict.
+  before merge, a full-CI comparison of head with the most recent release tag,
+  and an absolute verdict recorded for each release that gates nothing.
 
 **Non-Goals:**
 - Approximate retrieval, dropped features, ANN, or any quality-for-speed trade.
@@ -260,15 +260,21 @@ it with the current path on the reference corpus.
   `ANALYZE`, so `p.path IN (SELECT value FROM json_each(?)) AND p.in_kb = 1`
   plans as `SEARCH p USING INDEX pages_kb (in_kb=?)`: about 67,000 to 74,000
   steps at 6,500 pages. `_eligibility_metadata_query` (`lexstore.py:2837`)
-  uses that `IN` form and scans the same way: 23,160 steps at 1,600 pages and
-  77,060 at 6,500. The proven form is
+  uses the `IN` form with `in_vault = 1`, so it plans as
+  `SEARCH pages USING INDEX pages_vault (in_vault=?)` and visits every vault
+  page: 23,160 steps at 1,600 pages and 77,060 at 6,500, from a replay that
+  `verification/` does not keep. The proven form for parent hints is
   `FROM json_each(?) r CROSS JOIN pages p ON p.path = r.value`. `CROSS JOIN`
   fixes the join order, so `json_each` drives a primary-key lookup; it held
   flat at 1,016 steps at both sizes. A replay of that plan returned the same
   rows in 0.2 ms instead of 135 ms for 300 paths, and 1.0 ms instead of 488 ms
-  for 1,000. Slice 6.3 moves both queries to that form and confirms the plan
-  with `EXPLAIN QUERY PLAN`. It lands after the admission candidate-sizing
-  work, which edits `_eligibility_metadata_query` (decision 10).
+  for 1,000. The eligibility query must also return each requested path's
+  parent, which its `wanted` CTE adds, so its outer select drives from that
+  CTE: `FROM wanted w CROSS JOIN pages p ON p.path = w.path`. Driving it from
+  `json_each(?)` would drop the parents. Slice 6.3 moves both queries and
+  confirms each plan with `EXPLAIN QUERY PLAN`. It lands after the admission
+  candidate-sizing work, which edits `_eligibility_metadata_query`
+  (decision 10).
 - **One catalogue read session per request.** Each catalogue query
   (`_serve_from_ready_catalog_result`, `lexstore.py:7770`) runs a readiness proof
   on its own connection, then opens a second connection and proves the
@@ -339,7 +345,7 @@ which combines them. All four are old C6 debt. This change moves where
 `updated` is read from, not how a lane or an intent is chosen, and it removes
 none of them.
 
-### 9. Three instruments: counts per pull request, a paired comparison in full CI, the absolute verdict at release
+### 9. Three instruments: counts per pull request, a paired comparison in full CI, an absolute record per release
 
 The canonical `Structural Scaling Is The CI Gate` requirement says that
 pull-request CI uses operation counts, and that timing thresholds stay
@@ -410,7 +416,8 @@ threshold, and compares work between two corpus sizes as ratios.
   - the parent-hint query, about 4x, because its plan scans `json_each` per KB
     page;
   - the eligibility metadata query (`_eligibility_metadata_query`), because its
-    `IN` form plans as a scan of `pages_kb` (decision 8).
+    `IN` form plans as a search of `pages_vault (in_vault=?)` that visits every
+    vault page (decision 8).
 
   Also expected: the ranking stages' Markdown reads, 126 per request in R3
   against 15 hydrated hits. BM25 and keyword pass, because their matched rows
@@ -422,9 +429,9 @@ absolute threshold.
 
 - *Arms.* Head and the pairing base, installed side by side in one job on one
   runner, against one reference corpus generated once, with the same cases. The
-  pairing base is the last release whose live-cell verdict passed. Until a
-  release has passed, it is the last release tag, and the job reports that no
-  passed base exists.
+  pairing base is the most recent release tag. It is code only and moves
+  automatically when Release Please tags a release. No vault data, live-cell
+  result or box load moves it.
 - *Order.* Each case runs in both arms back to back, three times per arm, and
   the arm that goes first alternates between cases.
 - *Statistic.* Per case, the ratio of head's median elapsed time to the
@@ -445,13 +452,17 @@ absolute threshold.
 
 Control justification:
 
-- *It prevents* a merged change that slows warm search by 10% or more from
-  reaching a release. The structural counters cannot see constant-factor
-  regressions: a thread-policy change, a slower plan with the same step count,
-  encoder settings or added Python overhead.
-- *A wrong firing* keeps release evidence red until a rerun of the full run
-  passes. The operator pays one rerun and a delayed release. No user and no
-  pull request is gated.
+- *It prevents* a merged change that slows warm search by 10% or more against
+  the last release from reaching the next release. The structural counters
+  cannot see constant-factor regressions: a thread-policy change, a slower plan
+  with the same step count, encoder settings or added Python overhead.
+- *A wrong firing* comes only from runner noise, because both arms are code
+  and run on one runner, one corpus and one case list. It turns the full run
+  red, and the release evidence check stays red with it. The agent or operator
+  who drives the release pays: one rerun of the failed `retrieval-latency` job
+  (`gh run rerun <run-id> --failed`) and a release delay of that job's
+  duration. A green rerun clears it. No user and no pull request is gated, and
+  vault data or the shared box's load cannot fire it.
 - *Wrong firings are rare by construction.* The verdict needs the interval's
   lower bound above the margin, so at a true slowdown of exactly 10% it fires
   falsely in at most 2.5% of runs, and far less near no change. Alternating
@@ -461,26 +472,56 @@ Control justification:
   pass it.
 - *It fails closed only on a broken instrument.* A noisy runner widens the
   interval, so it makes the gate fire less, not more.
-- *Drift.* A release that failed or was refused on the live cell never becomes
-  the pairing base. Head is therefore compared with a release that met the
-  ceilings, and drift cannot accumulate across releases by construction. Until
-  the first release passes, the base is the last release tag, and drift is
-  not bounded; the absolute verdict that every release records shows it.
+- *Drift.* Each release can be up to the 10% margin slower than the release
+  before it without firing the job, and more when a noisy runner widens the
+  interval. CI does not bound cumulative drift: five releases that are each 9%
+  slower compound to about 54%. The absolute record on each release shows that
+  drift against the fixed ceilings, and a failed record opens follow-up work.
+- *A deliberate slowdown* is a correct firing. A change that accepts more than
+  10% on purpose, such as a correctness fix, holds releases until head is back
+  within the margin. This design names no accept path for it yet (Open
+  Questions).
 
-**Absolute verdict, workstation and live cell.** The ceilings and the stage
-budgets are judged on a quiet workstation at delivery (6.9) and on the live
-cell after each release (5.6); that verdict is the release evidence for the
-contract's numbers. Each live-cell attempt records one of three states: passed,
-failed or refused. A refused attempt holds no verdict, and the operator repeats
-it on a quiet cell. Only a passed release becomes the pairing base.
+**Absolute record, workstation and live cell.** The ceilings and the stage
+budgets are judged on a quiet workstation and on the live cell after each
+release. Neither verdict gates CI, a merge or a release. The live cell's
+result depends on the owner's vault data and on the shared box's load, and no
+code change controls either.
 
-The live cell checks contention per sample, net of the measured process. Each
-sample records its request thread's run-queue delay from
-`/proc/self/task/<tid>/schedstat`, which counts only the time that thread
-waited for a CPU. A sample that waited more than the larger of 5 ms and 10% of
-its elapsed time is contended: it leaves the percentiles and is counted, and
-more than 10% contended samples refuse the series. The 5 ms floor keeps
-ordinary scheduler jitter on a fast request from counting. The reference runs
+- *States.* Each verdict is recorded as one of four visible states: passed,
+  failed, refused or not measured. A refused verdict holds no ceiling
+  comparison, and the operator can repeat it on a quiet cell.
+- *Acceptance.* The workstation state is this change's acceptance check
+  (6.9). The change is complete only when a quiet-workstation run on the
+  reference corpus records passed. That run's summary is stored under
+  `verification/`.
+- *Who records the live-cell state, and where.* The agent or operator who
+  rolls a release onto the live cell runs the series. It is a step of the
+  release runbook, `docs/release.md`, under "Managed Linux service: what to
+  check after the handoff", after `/health/ready` reports `ready` (5.6). They
+  attach the gate's content-free summary to that release's GitHub Release with
+  `gh release upload "$TAG" <summary>`. That is the path the release workflow
+  already uses for the wheel, the sdist and the hosted runtime evidence
+  (`.github/workflows/release-please.yml`). Each attempt is one asset, named
+  `recall-latency-live-cell-<UTC time>.json`, so a refused attempt stays
+  visible beside its repeat. The latest attempt gives the release's state. A
+  release with no such asset shows "not measured".
+- *Follow-up.* A failed or refused live-cell state opens follow-up work: a
+  GitHub issue that names the release, the series and the stages over budget.
+  It blocks nothing.
+
+The live cell checks contention per sample. Each sample records its request
+thread's run-queue delay from `/proc/self/task/<tid>/schedstat`: the time that
+thread waited for a CPU. That wait includes waits behind the measured
+process's own threads, so it is not net of the measured process. A sample that
+waited more than the larger of 5 ms and 10% of its elapsed time is contended:
+it leaves the percentiles and is counted, and more than 10% contended samples
+refuse the series. The 5 ms floor keeps ordinary scheduler jitter on a fast
+request from counting. Dropping contended samples biases p95 downward, because
+a slow sample is the likelier one to have waited. The 10% refusal cap bounds
+that bias: at worst, the p95 of the kept samples is about the p85 of the whole
+series. The report therefore states the dropped count and the p95 with
+contended samples included, beside the p95 without them. The reference runs
 keep only the load check before the series. On two pinned CPUs the process's
 own threads, such as a spinning encoder pool, can delay the request thread.
 That delay is a product cost (decision 11), so dropping those samples would
@@ -565,8 +606,10 @@ and keeps encoder output identical.
 - **[Risk] Default `scope="kb"` results change for callers that relied on the
   reserve.** → Called out as a behaviour change; the option is on the surface;
   the connector docs name it.
-- **[Risk] The gate never sees a quiet box.** → It refuses rather than reports;
-  the operator can pause suites, and the structural guards still run in CI.
+- **[Risk] The gate never sees a quiet box.** → It refuses rather than reports,
+  and the refused state is recorded and blocks nothing. The operator can pause
+  suites, and the structural guards and the paired job still run in CI. This
+  change's acceptance waits for a passed workstation run (6.9).
 - **[Risk] A faster read path raises the write rate a client sustains, and the
   graph rebuild livelocks more often.** → Owned by
   `converge-graph-incrementally`; this change ensures a rebuild in flight cannot
@@ -586,10 +629,10 @@ and keeps encoder output identical.
   vault, matches grow with the corpus. The contract bounds that work per
   matched row, and the absolute verdict on the reference corpus and on the live
   cell measures it.
-- **[Risk] The paired comparison carries a slow release forward.** → It judges
-  head against the last release whose live-cell verdict passed, so a release
-  that missed the ceilings never becomes the base. The absolute verdict at each
-  release checks the ceiling itself.
+- **[Risk] The paired comparison carries a slow release forward.** → It does:
+  each release can be up to the margin slower than the last, and CI does not
+  bound the sum. The absolute record on each GitHub Release shows the drift
+  against the fixed ceilings, and a failed record opens follow-up work.
 - **[Risk] Tranches 1 to 5's MODIFIED blocks go stale while section 6 lands.** →
   Section 6 stays in this change, so the archive waits for it, and other changes
   can modify the same canonical requirements meanwhile. Task 5.8 refreshes the
@@ -602,8 +645,8 @@ and keeps encoder output identical.
 2. Land tranche 4 with the widening option default off; regenerate the hosted
    artifacts, the ChatGPT pending digest and the v1 release identities in the
    same commit.
-3. Release; upgrade the live cell; run the gate; record before/after in the
-   change; then archive.
+3. Release; upgrade the live cell; run the gate; attach its summary to the
+   GitHub Release and record before/after in the change; then archive.
 
 Rollback is a release rollback; no data migration, since the metadata index is
 derived and rebuilds from the vault.
@@ -613,3 +656,7 @@ derived and rebuilds from the vault.
 - Whether `speakers` and file-type filters need the metadata table or can stay
   on the media sidecar they read today; decided by the lane that inventories
   the filter registry, without changing the specs.
+- How a deliberate slowdown of more than 10% gets accepted. The paired job
+  fires correctly on it and holds releases until head is within the margin.
+  One candidate is a `workflow_dispatch` input that names a later pairing base
+  for one full run, recorded in the run. The owner decides before 6.1 lands.

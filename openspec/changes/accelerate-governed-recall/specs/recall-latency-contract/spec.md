@@ -26,15 +26,18 @@ product's owner-authority path with nothing patched. An admitted non-owner
 principal SHALL run the same series, reported separately. That series becomes
 gating once admission no longer sizes the candidate pool.
 
-On the live cell, contention during a series SHALL be measured net of the
-measured process. Each sample's timing diagnostics record the request thread's
-run-queue delay: the change, over the request, in the second field of the
-served process's `/proc/self/task/<tid>/schedstat`. A sample whose request
-thread waited on a run queue for more than the larger of 5 ms and 10% of its
-elapsed time is contended. The gate excludes contended samples from the
-percentiles and counts them, and it refuses a series in which more than 10% of
-the samples are contended. When the delay cannot be read, the gate reports
-contention as unknown and refuses the series.
+On the live cell, contention during a series SHALL be judged per sample from
+the request thread's run-queue delay. Each sample's timing diagnostics record
+that delay: the change, over the request, in the second field of the served
+process's `/proc/self/task/<tid>/schedstat`. The delay includes waits behind
+the measured process's own threads. A sample whose request thread waited on a
+run queue for more than the larger of 5 ms and 10% of its elapsed time is
+contended. The gate excludes contended samples from the percentiles and counts
+them, and it refuses a series in which more than 10% of the samples are
+contended. Dropping them biases p95 downward, and that cap bounds the bias.
+The report SHALL state the count of contended samples and the p95 with them
+included, beside the p95 without them. When the delay cannot be read, the gate
+reports contention as unknown and refuses the series.
 
 An index build is in progress while a full build or a repair of a derived store
 for the request's scope runs: the lexical catalogue, the embedding sidecar, the
@@ -92,6 +95,7 @@ governed write changed is not an index build.
 - **WHEN** another process keeps the live cell's CPUs busy and a sample's request thread waits on a run queue for 30 ms of a 150 ms request
 - **THEN** the gate excludes that sample from the percentiles and counts it as contended
 - **AND** it refuses the series when more than 10% of its samples are contended, naming the count
+- **AND** the report shows the series p95 with the contended samples included, beside the p95 without them
 
 ### Requirement: Warm Search Stages Stay Within Their Budgets
 
@@ -221,41 +225,52 @@ that hold the same candidate set, and SHALL NOT pin absolute work counts.
 
 ### Requirement: Search Latency Is Gated Before Release
 
-Two instruments SHALL gate warm search latency, each with the served query
-encoder. The absolute verdict on the ceilings and the stage budgets SHALL come
-from a run on a quiet workstation, on the reference corpus in a process
-restricted to two CPUs, and from the live-cell series after each release,
-through the live cell's served transport. That verdict is release evidence.
-Each live-cell attempt SHALL record its state as passed, failed or refused,
-three distinct visible states, with its sample counts, its load, its contended
-samples and the principal it measured. A refused attempt holds no verdict, and
-the operator can repeat it on a quiet cell.
-
 In the scheduled and dispatched full CI, the `retrieval-latency` job SHALL
-compare head with the pairing base instead: the last release whose live-cell
-verdict passed. A release whose verdict failed or was refused never becomes the
-pairing base, so drift from a release that met the ceilings stays bounded by
-construction. Until a release has passed, the pairing base is the last release
-tag, and the job reports that no passed base exists. Both arms run in a process
-restricted to two CPUs, on the same runner, the same reference corpus and the
-same cases, back to back. The job SHALL compute each case's paired ratio of
-head to the pairing base. It SHALL fail a series only when the lower bound of
-the 95% confidence interval of those ratios is above 1.10, that is, head at
-least 10% slower than the pairing base. A comparison SHALL need at least 20
-paired cases; with fewer, it reports "insufficient samples". The job SHALL NOT
-apply an absolute latency threshold.
+gate warm search latency with the served query encoder. It SHALL compare head
+with the pairing base: the most recent release tag. That base is code only. It
+moves when a release is tagged, and no vault data, live-cell result or box load
+moves it. Both arms run in a process restricted to two CPUs, on the same
+runner, the same reference corpus and the same cases, back to back. The job
+SHALL compute each case's paired ratio of head to the pairing base. It SHALL
+fail a series only when the lower bound of the 95% confidence interval of those
+ratios is above 1.10, that is, head at least 10% slower than the pairing base.
+A comparison SHALL need at least 20 paired cases; with fewer, it reports
+"insufficient samples". A stage that the pairing base does not span yet SHALL
+be reported as "not comparable". The job SHALL NOT apply an absolute latency
+threshold. The job does not bound drift across releases: each release can be up
+to the margin slower than the release before it.
+
+The absolute verdict on the ceilings and the stage budgets SHALL come from a
+run on a quiet workstation, on the reference corpus in a process restricted to
+two CPUs, and from the live-cell series after each release, through the live
+cell's served transport. It SHALL NOT gate CI, a merge or a release. Each
+verdict SHALL be recorded as one of four distinct visible states: passed,
+failed, refused or not measured, with its sample counts, its load, its
+contended samples and the principal it measured. A refused verdict holds no
+ceiling comparison, and the operator can repeat it on a quiet cell. The agent
+or operator who rolls a release onto the live cell SHALL run the live-cell
+series as a step of the release runbook and attach its content-free summary to
+that release's GitHub Release. A release with no attached summary SHALL show
+"not measured". A failed or refused live-cell state SHALL open follow-up work.
 
 #### Scenario: A constant-factor regression blocks the release
 
-- **WHEN** a merged change makes warm hybrid requests slower than the pairing base by more than 10%, with 95% confidence over the paired cases
+- **WHEN** a merged change makes warm hybrid requests slower than the most recent release tag by more than 10%, with 95% confidence over the paired cases
 - **THEN** the next scheduled or dispatched full CI run fails the `retrieval-latency` job and names the series and the stages where the time moved
 - **AND** the release evidence check stays red until a full run passes
 
-#### Scenario: A failed or refused live-cell verdict does not move the pairing base
+#### Scenario: A failed or refused live-cell verdict opens work and blocks nothing
 
 - **WHEN** the live-cell series after a release fails a ceiling, or is refused for load or contention
-- **THEN** the release evidence records that release's state as failed or refused, never as passed and never as absent
-- **AND** the next full CI run keeps pairing head with the last release whose live-cell verdict passed
+- **THEN** that release's GitHub Release carries its state as failed or refused, never as passed
+- **AND** follow-up work is opened that names the release and the series
+- **AND** no CI job, merge or release waits on that state
+- **AND** the next full CI run pairs head with the most recent release tag, whatever its live-cell state
+
+#### Scenario: A release with no live-cell record shows not measured
+
+- **WHEN** a release's GitHub Release has no attached live-cell summary
+- **THEN** that release's live-cell state reads "not measured", never passed
 
 #### Scenario: A slow shared runner is not a regression
 
@@ -263,11 +278,12 @@ apply an absolute latency threshold.
 - **THEN** the verdict depends only on the paired ratios between head and the pairing base
 - **AND** no absolute ceiling or stage budget is checked on the shared runner
 
-#### Scenario: The absolute verdict is workstation and live-cell evidence
+#### Scenario: The absolute verdict is a record with a visible state
 
 - **WHEN** a release is delivered
-- **THEN** a quiet workstation run and the live-cell series after the release record the ceiling and stage-budget verdicts
+- **THEN** the live-cell series after the release, and a quiet workstation run where one ran, record the ceiling and stage-budget verdicts
 - **AND** each verdict records its state, its sample counts, its load and the principal it measured
+- **AND** a verdict that did not run reads "not measured", never passed
 
 #### Scenario: An encoder that cannot load is not a fast encoder
 

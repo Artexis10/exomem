@@ -147,7 +147,9 @@ and no vault text:
 
 - `run-summaries.jsonl`: one line per run and level, with whole-request and
   per-span percentiles, probe counts, load, setup counters and the per-request
-  CPU-over-wall median;
+  CPU-over-wall median. Its `header.admission` field names the principal as
+  the table below does: `patched owner` for R1, R2, R3 and M1. The driver
+  wrote `owner`; the label was corrected after the run;
 - `stage-tables.md`: the per-request stage aggregates that the tables below
   quote;
 - `sqlcheck.txt`: the query plans and isolated replays in the last table.

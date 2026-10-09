@@ -96,11 +96,16 @@ its read entry points.
   pull-request tier compares work per candidate and per matched row between
   400- and 1,600-page generated corpora that hold the same candidates. In the
   scheduled and dispatched full CI, a paired comparison runs head against the
-  last release whose live-cell verdict passed, on one runner, and fails only
-  when head is at least 10% slower with 95% confidence. The absolute verdict on
-  the ceilings and budgets comes from a quiet workstation run and the live-cell
-  series, and it is the release evidence for those numbers. Each live-cell
-  attempt records passed, failed or refused.
+  most recent release tag, on one runner, and fails only when head is at least
+  10% slower with 95% confidence. That base is code only, so vault data and box
+  load cannot fire it. CI does not bound drift across releases: each release
+  can be up to 10% slower than the one before it. A quiet workstation run and
+  the live-cell series after each release record the absolute verdict on the
+  ceilings and budgets as passed, failed, refused or not measured. The agent or
+  operator who rolls the live cell attaches that record to the release's GitHub
+  Release. The record never gates CI or a release, and a failed or refused
+  state opens follow-up work. The workstation record is this change's
+  acceptance check.
 - Out of scope: the cold-start index build, explicitly requested or
   accelerator-driven reranking, and RAW admission candidate sizing for non-owner
   callers, which `fix/admission-candidate-sizing` owns.
@@ -148,8 +153,9 @@ its read entry points.
 - Operations: the live cell shares its box with test suites; the gate refuses to
   run above a load average of 2.0 and records the load it ran under. During a
   live-cell series it drops and counts each sample whose request thread waited
-  on a run queue, so a contended measurement is never mistaken for a
-  regression.
+  on a run queue, and reports the p95 with those samples included. The
+  operator who rolls the live cell adds one release-runbook step: run the
+  series and attach its summary to the GitHub Release.
 - Subsecond search slices (tasks section 6): `src/exomem/lexstore.py` (parent-hint
   query, one catalogue read session per request), `src/exomem/find_candidates.py`,
   `src/exomem/find_policy.py` and `src/exomem/find.py` (ranking metadata from
@@ -160,5 +166,5 @@ its read entry points.
   and `src/exomem/embedding_backend.py` (the cell thread policy),
   `scripts/synth_vault.py` (reference corpus), `scripts/recall_latency_gate.py`
   and its test (new ceilings and budgets, the paired mode), a new pull-request
-  structural test, and `.github/workflows/ci.yml` (the `retrieval-latency`
-  job). The tool surface does not move.
+  structural test, `.github/workflows/ci.yml` (the `retrieval-latency` job) and
+  `docs/release.md` (the live-cell step). The tool surface does not move.
