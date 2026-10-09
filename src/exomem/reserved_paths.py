@@ -13,7 +13,7 @@ import re
 import threading
 import unicodedata
 from collections import ChainMap
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -129,21 +129,24 @@ class InternalStateDescriptor:
     leaf_patterns: tuple[re.Pattern[str], ...] = ()
     component_tree_patterns: tuple[re.Pattern[str], ...] = ()
 
-    def matches(self, parts: tuple[str, ...]) -> bool:
+    def matches(self, parts: tuple[str, ...], leaf_path: str | None = None) -> bool:
+        """`leaf_path`, when given, is `"/".join(parts)` shared across one classification."""
         if not parts:
             return False
-        leaf_path = "/".join(parts)
+        if leaf_path is None:
+            leaf_path = "/".join(parts)
         if leaf_path in self.exact:
             return True
-        if any(leaf_path == tree or leaf_path.startswith(f"{tree}/") for tree in self.trees):
+        # Descriptors set few families; skipping empty ones keeps per-path classification cheap.
+        if self.trees and any(leaf_path == tree or leaf_path.startswith(f"{tree}/") for tree in self.trees):
             return True
-        if len(parts) == 1 and any(pattern.fullmatch(parts[0]) for pattern in self.patterns):
+        if self.patterns and len(parts) == 1 and any(pattern.fullmatch(parts[0]) for pattern in self.patterns):
             return True
-        if any(pattern.fullmatch(parts[0]) for pattern in self.tree_patterns):
+        if self.tree_patterns and any(pattern.fullmatch(parts[0]) for pattern in self.tree_patterns):
             return True
-        if any(pattern.fullmatch(parts[-1]) for pattern in self.leaf_patterns):
+        if self.leaf_patterns and any(pattern.fullmatch(parts[-1]) for pattern in self.leaf_patterns):
             return True
-        return any(
+        return bool(self.component_tree_patterns) and any(
             pattern.fullmatch(part)
             for part in parts
             for pattern in self.component_tree_patterns
@@ -303,11 +306,18 @@ def _identity_coordination_scope(
     *,
     descriptor_ids: Iterable[str] | None = None,
     identity_may_change: bool = True,
+    generic_read: bool = False,
 ) -> Iterator[str | None]:
     """Serialize private identity publication with generic held-leaf acquisition."""
 
     key = _vault_identity_key(vault_root)
-    domains, exclusive = _identity_coordination_domains(descriptor_ids)
+    if generic_read:
+        if descriptor_ids is not None or identity_may_change:
+            raise ValueError("generic read coordination cannot publish identities")
+        # All registered owners participate in final generic-read validation.
+        domains, exclusive = frozenset(descriptor.id for descriptor in _REGISTRY), True
+    else:
+        domains, exclusive = _identity_coordination_domains(descriptor_ids)
     if not domains:
         raise RuntimeError("private identity coordination has no registered domain")
     active = _ACTIVE_IDENTITY_COORDINATION.get()
@@ -321,6 +331,8 @@ def _identity_coordination_scope(
         yield None
         return
     if held_domains:
+        if generic_read:
+            raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
         raise RuntimeError("private identity coordination cannot widen while held")
 
     from .writer_lease import active_manager
@@ -1176,6 +1188,253 @@ def physical_spelling_refusal(vault_root: Path, value: object) -> tuple[str, str
             "move_file it onto this same path to canonicalize its name, then retry"
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class GenericReadObservation:
+    """A held snapshot, proved absence, or a content-free acquisition refusal.
+
+    `locate` leaves both `snapshot` and `code` empty: a unique name, not opened.
+    """
+
+    snapshot: GenericFileSnapshot | None = None
+    code: str | None = None
+    relative_path: str | None = None
+
+    @property
+    def missing(self) -> bool:
+        return self.code == "MISSING"
+
+
+@dataclass(slots=True)
+class _ReadParentObservation:
+    identity: held_fs.StableIdentity | None
+    names: dict[str, tuple[str, ...]]
+    code: str | None = None
+    ancestor: tuple[str, held_fs.StableIdentity] | None = None
+
+
+@dataclass(slots=True)
+class _ReadLeaf:
+    names: tuple[str, ...]
+    code: str | None
+    spelling: tuple[str, str] | None = None
+    relative: str | None = None
+    identity: held_fs.StableIdentity | None = None
+
+
+class GenericReadBatch:
+    """Share name observations while acquiring fresh bytes with bounded handles."""
+
+    def __init__(self, root: Path, filesystem: held_fs.HeldFilesystem,
+                 identities: IdentityCatalogue) -> None:
+        self.root = root
+        self.filesystem = filesystem
+        self.identities = identities
+        self.parents: dict[str, _ReadParentObservation] = {}
+        self.leaves: dict[str, _ReadLeaf] = {}
+        # The classifier's frozen protocol registry leaves only the KB namespace dynamic.
+        self.knowledge_base = kb_dirname()
+
+    def _require_current_namespace(self) -> None:
+        if kb_dirname() != self.knowledge_base:
+            raise ReservedPathLeafError("IDENTITY_CHANGED")
+
+    def _parent_observation(
+        self, path: str, requested: dict[str, held_fs.StableIdentity] | None = None,
+    ) -> _ReadParentObservation:
+        result = self.filesystem.parent(path)
+        if not result.ok:
+            code = result.error.code if result.error else "IO_REFUSED"
+            ancestor = None
+            if code == "MISSING":
+                remaining = path
+                while remaining not in ("", "."):
+                    remaining = remaining.rpartition("/")[0] or "."
+                    acquired = self.filesystem.parent(remaining)
+                    if acquired.ok:
+                        with acquired.require() as parent:
+                            _require_current_generic_directory(self.filesystem, parent)
+                            _refuse_private_identity(parent.identity, self.identities)
+                            ancestor = (remaining, parent.identity)
+                        break
+                    if acquired.error is None or acquired.error.code != "MISSING":
+                        code = acquired.error.code if acquired.error else "IO_REFUSED"
+                        break
+            return _ReadParentObservation(None, {}, code, ancestor)
+        with result.require() as parent:
+            try:
+                _require_current_generic_directory(self.filesystem, parent)
+                _refuse_private_identity(parent.identity, self.identities)
+                names: dict[str, list[str]] = {}
+                for name in self.filesystem.iter_names(parent):
+                    names.setdefault(unicodedata.normalize("NFKC", name), []).append(name)
+                _require_current_generic_directory(self.filesystem, parent)
+            except (held_fs.HeldFsError, ReservedPathLeafError) as error:
+                return _ReadParentObservation(parent.identity, {}, error.code)
+            if requested is not None:
+                for name, expected in requested.items():
+                    result = self.filesystem.file(parent, name)
+                    if not result.ok:
+                        raise ReservedPathLeafError("IDENTITY_CHANGED")
+                    with result.require() as file:
+                        if file.identity != expected:
+                            raise ReservedPathLeafError("IDENTITY_CHANGED")
+                        _refuse_private_identity(file.identity, self.identities)
+                _require_current_generic_directory(self.filesystem, parent)
+            return _ReadParentObservation(
+                parent.identity, {key: tuple(sorted(value)) for key, value in names.items()}
+            )
+
+    def include(self, paths: Iterable[str]) -> None:
+        """Classify and map leaves without opening them; `read` acquires each one."""
+        self._require_current_namespace()
+        for path in paths:
+            if path in self.leaves:
+                continue
+            try:
+                spelling = _leaf_spelling(path)
+            except ReservedPathLeafError as error:
+                self.leaves[path] = _ReadLeaf((), error.code)
+                continue
+            parent_path, leaf = spelling
+            if parent_path not in self.parents:
+                self.parents[parent_path] = self._parent_observation(parent_path)
+            parent = self.parents[parent_path]
+            names = parent.names.get(leaf, ())
+            code = parent.code or ("MISSING" if not names else "AMBIGUOUS_PATH" if len(names) > 1 else None)
+            # Authorization uses the same physical spelling selected for acquisition.
+            relative = (Path(parent_path) / (names[0] if len(names) == 1 else leaf)).as_posix()
+            self.leaves[path] = _ReadLeaf(names, code, spelling, relative)
+
+    def locate(self, path: str) -> GenericReadObservation:
+        """Map one leaf to its physical name without opening it; `validate` rechecks the name."""
+        self.include((path,))
+        entry = self.leaves[path]
+        return GenericReadObservation(code=entry.code, relative_path=entry.relative)
+
+    def read(self, path: str) -> GenericReadObservation:
+        """Acquire one leaf for fresh bytes; a repeated read must find the same identity."""
+        self.include((path,))
+        entry = self.leaves[path]
+        if entry.spelling is None:
+            return GenericReadObservation(code=entry.code)
+        if entry.code is not None:
+            return GenericReadObservation(code=entry.code, relative_path=entry.relative)
+        parent_path = entry.spelling[0]
+        expected = entry.identity
+        result = self.filesystem.parent(parent_path)
+        if not result.ok:
+            raise ReservedPathLeafError("IDENTITY_CHANGED")
+        with result.require() as parent:
+            initial = self.parents[parent_path].identity
+            if initial is None or _identity_key(parent.identity) != _identity_key(initial):
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            _require_current_generic_directory(self.filesystem, parent)
+            _refuse_private_identity(parent.identity, self.identities)
+            result = self.filesystem.file(parent, entry.names[0])
+            if not result.ok:
+                if expected is not None:
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+                # A matching directory entry that cannot be acquired is not absence.
+                code = result.error.code if result.error else "IO_REFUSED"
+                entry.code = "IO_REFUSED" if code == "MISSING" else code
+                return GenericReadObservation(code=entry.code, relative_path=entry.relative)
+            with result.require() as file:
+                if expected is not None and file.identity != expected:
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+                try:
+                    _refuse_private_identity(file.identity, self.identities)
+                except ReservedPathLeafError as error:
+                    if expected is not None:
+                        raise
+                    entry.code = error.code
+                    return GenericReadObservation(code=error.code, relative_path=entry.relative)
+                entry.identity = file.identity
+                try:
+                    data = self.filesystem.read(file).require()
+                    mtime = os.fstat(file.descriptor).st_mtime
+                    _require_current_generic_directory(self.filesystem, parent)
+                except (held_fs.HeldFsError, OSError) as error:
+                    raise ReservedPathLeafError("IO_REFUSED") from error
+                return GenericReadObservation(
+                    GenericFileSnapshot(data, file.identity, mtime), relative_path=entry.relative,
+                )
+
+    def validate(self) -> None:
+        self._require_current_namespace()
+        requested: dict[str, dict[str, held_fs.StableIdentity]] = {}
+        for entry in self.leaves.values():
+            if entry.identity is not None:
+                assert entry.spelling is not None
+                requested.setdefault(entry.spelling[0], {})[entry.names[0]] = entry.identity
+        current = {
+            path: self._parent_observation(path, requested.get(path))
+            for path in self.parents
+        }
+        for path, initial in self.parents.items():
+            final = current[path]
+            if initial.identity is not None:
+                if final.identity is None or _identity_key(initial.identity) != _identity_key(final.identity):
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+            elif initial.code == "MISSING":
+                if (final.code != "MISSING" or initial.ancestor is None
+                        or final.ancestor is None or initial.ancestor[0] != final.ancestor[0]
+                        or _identity_key(initial.ancestor[1]) != _identity_key(final.ancestor[1])):
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+            # A failed enumeration cannot validate a successful observation.
+            if initial.code != final.code:
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+        for entry in self.leaves.values():
+            if entry.spelling is None:
+                continue
+            parent, leaf = entry.spelling
+            if entry.names != current[parent].names.get(leaf, ()):
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+        self._require_current_namespace()
+
+
+@contextmanager
+def generic_read_batch(
+    vault_root: Path, paths: Iterable[str], *, publish: Callable[[], None] | None = None,
+) -> Iterator[GenericReadBatch]:
+    """Validate all requested mappings before the caller publishes decisions.
+
+    A concurrent change costs one retry; accepting changed private authority
+    could disclose private bytes. No sibling file handles survive enumeration.
+    The optional publisher runs inside the final validation boundary.
+    """
+    root = Path(vault_root)
+    requested = tuple(paths)
+    with _generic_identity_catalogue_scope(root, *requested) as initial:
+        identities = initial
+    acquired = held_fs.acquire(root)
+    if not acquired.ok:
+        raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+    with acquired.require() as filesystem:
+        root_identity = _lstat_identity(root)
+        anchored = filesystem.parent(".")
+        if not anchored.ok:
+            raise ReservedPathLeafError("IO_REFUSED")
+        with anchored.require() as anchor:
+            if _identity_key(anchor.identity) != _identity_key(root_identity):
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+        batch = GenericReadBatch(root, filesystem, identities)
+        batch.include(requested)
+        yield batch
+        # Serving owners admit the baseline at promotion. Refresh this process's
+        # publications here; unrelated owner-token churn is not a leaf change.
+        with _identity_coordination_scope(
+            root, identity_may_change=False, generic_read=True
+        ):
+            batch.identities = _merge_identity_catalogues(
+                identities, _published_identity_catalogue(root)
+            )
+            batch.validate()
+            if _identity_key(_lstat_identity(root)) != _identity_key(root_identity):
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            if publish is not None:
+                publish()
 
 
 def read_generic_bytes(
@@ -2068,16 +2327,17 @@ def classify_logical(value: object) -> PathClassification:
     parts = _normalized_parts(value)
     if isinstance(parts, PathClassification):
         return parts
-    canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
+    leaf_path = "/".join(parts)
+    canonical = kb_dirname() if not parts else f"{kb_dirname()}/{leaf_path}"
     replica = _DESCRIPTOR_BY_ID["collection-replica"]
-    if replica.matches(parts):
+    if replica.matches(parts, leaf_path):
         return PathClassification(
             PathDisposition.RESERVED,
             descriptor_id=replica.id,
             canonical=canonical,
             reason="path is reserved for an owning subsystem",
         )
-    matches = tuple(descriptor for descriptor in _REGISTRY if descriptor.matches(parts))
+    matches = tuple(descriptor for descriptor in _REGISTRY if descriptor.matches(parts, leaf_path))
     if not matches:
         return PathClassification(PathDisposition.ORDINARY, canonical=canonical)
     if len(matches) != 1:

@@ -35,9 +35,6 @@ _COMPILED_TYPES = frozenset(
     {"experiment", "failure", "insight", "pattern", "production-log", "research-note"}
 )
 _SCOPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
-_BRIDGE_BYTES_RE = re.compile(
-    rb"(?m)^(?:bridge_[A-Za-z0-9_-]+|['\"]bridge_[A-Za-z0-9_-]+['\"])\s*:"
-)
 _WIKILINK_RE = re.compile(r"\[\[([^]]+)\]\]")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 _REFERENCE_FIELDS = frozenset(
@@ -136,15 +133,6 @@ class BridgeReviewSignal:
     review_date: str
     dependency_digest: str
     signal_version: str
-
-
-def maybe_bridge(raw: bytes) -> bool:
-    """Cheap cache guard: bridge-shaped bytes depend on live source state."""
-    if not raw.startswith(b"---"):
-        return False
-    boundary = raw.find(b"\n---", 3)
-    frontmatter = raw if boundary < 0 else raw[:boundary]
-    return _BRIDGE_BYTES_RE.search(frontmatter) is not None
 
 
 def _decode_fixed_point(value: str) -> str:
@@ -747,16 +735,28 @@ def restriction_signature(
 
 
 def _read_exact_snapshot(
-    vault_root: Path, rel_path: str, expected_raw: bytes | None = None
+    vault_root: Path, rel_path: str, expected_raw: bytes | None = None,
+    *, reader: reserved_paths.GenericReadBatch | None = None,
 ) -> tuple[bytes, find_corpus.ParsedPage | None] | None:
-    """Acquire one unique held leaf, retaining the logical approval path."""
+    """Acquire one unique held leaf and parse its approval path.
+
+    A batch `reader` parses the physical path it acquired. Without one, a
+    scalar held read keeps the logical approval path.
+    """
     if Path(rel_path).suffix.casefold() != ".md":
         return None
     try:
-        physical = reserved_paths.resolve_physical_relative(vault_root, rel_path)
-        snapshot = reserved_paths.read_generic_bytes(
-            vault_root, physical, physical=True
-        )
+        if reader is None:
+            physical = reserved_paths.resolve_physical_relative(vault_root, rel_path)
+            snapshot = reserved_paths.read_generic_bytes(
+                vault_root, physical, physical=True
+            )
+        else:
+            observed = reader.read(rel_path)
+            if observed.snapshot is None:
+                return None
+            snapshot = observed.snapshot
+            rel_path = observed.relative_path or rel_path
     except (OSError, reserved_paths.ReservedPathLeafError):
         return None
     if expected_raw is not None and snapshot.data != expected_raw:
@@ -787,12 +787,13 @@ def _dependency_snapshot(
     *,
     policy: Policy,
     audience: str,
+    reader: reserved_paths.GenericReadBatch | None = None,
 ) -> tuple[str, str, str, str, str] | None:
     try:
         resolved = memory_refs.resolve_identifier_read_only(vault_root, ref)
     except memory_refs.ReferenceError:
         return None
-    snapshot = _read_exact_snapshot(vault_root, resolved)
+    snapshot = _read_exact_snapshot(vault_root, resolved, reader=reader)
     if snapshot is None:
         return None
     raw, parsed = snapshot
@@ -831,8 +832,17 @@ def admit(
     snapshot = _read_exact_snapshot(Path(vault_root), rel_path, expected_raw=raw)
     if snapshot is None or snapshot[1] is None:
         return BridgeAdmission(True, False, RELEASE_STALE)
-    _raw, parsed = snapshot
-    metadata, error = parse_bridge_frontmatter(parsed.frontmatter)
+    return _admit_parsed(vault_root, raw, snapshot[1], policy=policy, audience=audience)
+
+
+def _admit_parsed(
+    vault_root: Path, raw: bytes, parsed: find_corpus.ParsedPage,
+    *, policy: Policy, audience: str, reader: reserved_paths.GenericReadBatch | None = None,
+    bridge_metadata: tuple[BridgeMetadata | None, str | None] | None = None,
+) -> BridgeAdmission:
+    """Admit already-acquired bridge bytes; dependencies read through `reader` when a batch supplies one."""
+    rel_path = parsed.rel_path
+    metadata, error = bridge_metadata if bridge_metadata is not None else parse_bridge_frontmatter(parsed.frontmatter)
     bridge_shaped = metadata is not None or error is not None
     if not bridge_shaped:
         return BridgeAdmission(False, True)
@@ -865,7 +875,7 @@ def admit(
         matched = True
         for dependency in grant.bridge_of:
             live = _dependency_snapshot(
-                Path(vault_root), dependency.ref, policy=policy, audience=audience
+                Path(vault_root), dependency.ref, policy=policy, audience=audience, reader=reader
             )
             if live is None:
                 matched = False
@@ -912,6 +922,7 @@ def resolve_approved_abstraction(
     *,
     policy: Policy,
     audience: str,
+    reader: reserved_paths.GenericReadBatch | None = None,
 ) -> BridgeProjection:
     """Resolve an opaque policy option to exact approved bridge content.
 
@@ -932,15 +943,16 @@ def resolve_approved_abstraction(
     if len(candidates) != 1:
         return BridgeProjection(False, RELEASE_STALE)
     grant = candidates[0]
-    snapshot = _read_exact_snapshot(Path(vault_root), grant.path)
+    snapshot = _read_exact_snapshot(Path(vault_root), grant.path, reader=reader)
     if snapshot is None or snapshot[1] is None:
         return BridgeProjection(False, RELEASE_STALE)
     raw, parsed = snapshot
 
-    admission = admit(
+    admission = _admit_parsed(
         Path(vault_root),
-        grant.path,
         raw,
+        parsed,
+        reader=reader,
         policy=policy,
         audience=audience,
     )

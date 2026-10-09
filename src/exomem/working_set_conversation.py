@@ -98,6 +98,10 @@ NONE = Conversation()
 class InferredPacket(dict[str, Any]):
     """Request-local inference marker, preserved by deepcopy but not serialized."""
 
+    #: The unit ref of the unit that licensed a single carry; egress drops the
+    #: carry claim when it removes that unit.
+    witness_ref: str | None = None
+
 
 _REFERENCE_FIELDS = frozenset({
     "ref", "path", "anchor", "neighbourhood", "anchor_neighbourhood",
@@ -478,10 +482,8 @@ def apply(
     return tuple(ordered), origins, entry_candidates
 
 
-def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
-    """Ruling C1 on #1463, round 6: pointing plus a narrow content licence.
-    Only the subject's own title/name or frozen task forms license content.
-    Words merely shared with earlier turns are never evidence of reference."""
+def may_carry(analysis: Any, *, subject_title: str = "", supporting_text: str = "") -> bool:
+    """License pointing content from the subject title and one admitted unit."""
     if analysis.local_material or not analysis.points_back:
         return False
     if not analysis.content_words:
@@ -489,9 +491,9 @@ def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
     from . import working_set_anaphora
     from .working_set_index import normalize, tokens_of
 
-    licensed = working_set_anaphora._TASK_FORMS | frozenset(
+    licensed = frozenset(
         form
-        for word in working_set_anaphora._words(tokens_of(normalize(subject_title)))
+        for word in working_set_anaphora._words(tokens_of(normalize(subject_title + " " + supporting_text)))
         for form in working_set_anaphora.forms(word)
     )
     return all(working_set_anaphora.forms(word) & licensed for word in analysis.content_words)

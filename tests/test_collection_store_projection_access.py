@@ -376,6 +376,34 @@ def test_owner_walk_treats_an_unbound_projection_directory_as_absent(store):
         }
 
 
+def test_bound_collection_scalar_and_packet_reads_keep_canonical_admission(store):
+    """Compiler and hit reads cannot borrow another caller's canonical snapshot."""
+    from test_governance_egress import _hit
+
+    store.create_collection(manifest_path(), manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
+    path = receipt["affected_paths"][0]
+    alias = path.replace("Records", "Ｒecords")
+    units = [{"ref": candidate, "text": "Current", "provenance": {"path": candidate}}
+             for candidate in (path, alias)]
+    with preview_store(store.root, store.handle) as writer, request_scope(owner_principal()):
+        with writer.read_snapshot():
+            assert [hit.path for hit in egress.annotate_hits(
+                store.root, [_hit(path)], principal=owner_principal(), limit=1,
+            ).hits] == [path]
+            assert egress.classify_units(store.root, units) == [egress.UNIT_KEPT] * 2
+            with request_scope(_external()):
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.annotate_hits(store.root, [_hit(path)], principal=_external(), limit=1)
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.classify_units(store.root, units)
+            assert egress.classify_units(store.root, units) == [egress.UNIT_KEPT] * 2
+        page = store.root / path
+        page.write_text(page.read_text() + "\nUnaccepted edit.\n")
+        assert egress.annotate_hits(store.root, [_hit(path), _hit(alias)], limit=2).hits == []
+        assert egress.classify_units(store.root, units) == [egress.UNIT_WITHHELD_SILENTLY] * 2
+
+
 def test_owner_walk_on_an_empty_policy_decides_only_marker_owned_paths(tmp_path, monkeypatch):
     import json
 
@@ -407,3 +435,32 @@ def test_owner_walk_on_an_empty_policy_decides_only_marker_owned_paths(tmp_path,
         assert keep(ordinary)
         # A marker-owned path still needs the store, which no service serves here.
         assert not keep(owned)
+
+
+def test_batched_decisions_route_a_marker_owned_page_through_the_store(tmp_path):
+    """The packet guard and the page batch decide an owned page as a scalar read does."""
+    import json
+
+    from exomem.collection_store import authority
+
+    root = tmp_path / "vault"
+    owned = "Knowledge Base/Records/Work/Items/item.md"
+    (root / owned).parent.mkdir(parents=True, exist_ok=True)
+    (root / owned).write_text("---\ntype: insight\nstatus: active\n---\n\nOwned projection body.\n")
+    sid = "11111111-1111-4111-8111-111111111111"
+    marker = authority.marker_path(root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
+                         "authority": "store", "store_id": sid,
+                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+    units = [{"ref": owned + "#item", "text": "Owned projection body.", "provenance": {"path": owned}}]
+    # No service serves the store here, so the owned page is withheld, never decided as a file.
+    with request_scope(_external()):
+        assert egress.classify_units(root, units) == [egress.UNIT_WITHHELD_SILENTLY]
+        with egress.reader_view(root).page_batch() as keep:
+            assert not keep(owned)

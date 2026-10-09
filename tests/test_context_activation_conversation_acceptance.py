@@ -6,8 +6,8 @@ anchor kind, with no aggregate. Arm (a) is the mechanism-removal control and
 must stay red. Arms (b) to (d) must meet the floors.
 
 Every scored row must meet its pre-registered expectation, except the rows
-pinned in `PENDING_RULING` (empty). The test fails if that set changes in
-either direction.
+pinned in `PENDING_RULING`. The test fails if that set changes in either
+direction.
 """
 
 from __future__ import annotations
@@ -25,16 +25,30 @@ from test_context_activation_conversation_baseline import Run, run  # noqa: F401
 #: own bound allows.
 pytestmark = pytest.mark.timeout(1800)
 
-#: Rows awaiting a ruling. Empty since the orchestrator's rulings on #1455:
-#: twins W17 to W24 were re-authored with a focus that names nothing (V29 pins
-#: that a focus naming the subject resolves), and bare "one" no longer makes a
-#: turn anaphoric. Anything that fails again must be added here with its reason.
+#: Rows that fail their pre-registered expectation, each with its reason. The
+#: orchestrator's rulings on #1455 emptied the earlier set: twins W17 to W24 were
+#: re-authored with a focus that names nothing (V29 pins that a focus naming the
+#: subject resolves), and bare "one" no longer makes a turn anaphoric. A row that
+#: starts to fail is added here with its reason.
 PENDING_RULING: set[tuple[str, str]] = {
     # Round 3 on #1463: the content gate reads "book the inspector" as new
     # content, so "Is it safe to use this week, or should we book the
     # inspector first?" is no longer carried to the winch on arm (b). A real
     # positive the gate rejects; arm (d) still resolves it through `focus`.
     ("V21", "b"),
+    # T2e (task 6.17c) removed the task-word licence: the subject's title and
+    # admitted units do not support "results", "compare", "round" and "change"
+    # (V17), "right", "person" and "chase" (V18), "risks" and "affected" (V19),
+    # or "change" (the withheld pair V28/W28). These rows are a recall record.
+    # V28/W28 now compare two fall-throughs, so the withheld-equals-absent check
+    # for a carried turn is in `test_working_set_literal_support.py`.
+    ("V17", "b"),
+    ("V18", "b"),
+    ("V19", "b"),
+    ("V28", "b"),
+    ("V28", "d"),
+    ("W28", "b"),
+    ("W28", "d"),
 }
 
 
@@ -68,7 +82,8 @@ def test_every_row_meets_its_expectation_except_the_pinned_pending_ruling_set(ru
 
 def test_the_withheld_pair_and_the_attachment_cases_pass_on_the_arms_that_carry_a_conversation(run: Run) -> None:  # noqa: F811
     for row in run.rows:
-        if row.arm != "a" and row.case_id in {"V26", "V27", "V29", "W26", "V28", "W28"}:
+        if (row.arm != "a" and row.case_id in {"V26", "V27", "V29", "W26", "V28", "W28"}
+                and (row.case_id, row.arm) not in PENDING_RULING):
             assert row.passed, (row.case_id, row.arm, row.failure_reasons)
 
 

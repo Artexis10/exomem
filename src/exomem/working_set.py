@@ -28,6 +28,7 @@ import logging
 import os
 import posixpath
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -396,7 +397,9 @@ def _folded_prose(text: str) -> str:
     return " ".join(str(text or "").casefold().split())
 
 
-def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
+def _without_lede_repeats(
+    ordered: Sequence[LaneItem], *, retained_ref: str | None = None,
+) -> tuple[LaneItem, ...]:
     """Drop a unit the anchor page's own lede already says (close-memory-loop,
     activation quality).
 
@@ -417,7 +420,7 @@ def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
         return tuple(ordered)
     out: list[LaneItem] = []
     for item in ordered:
-        if item.level == "unit" and item.path in ledes:
+        if item.level == "unit" and item.path in ledes and item.ref != retained_ref:
             text = _folded_prose(item.text)
             if text and any(text in lede for lede in ledes[item.path]):
                 continue
@@ -452,6 +455,7 @@ def build_packet(
     recent_context: Sequence[Mapping[str, Any]] = (),
     conversation_inferred: bool = False,
     promoted_paths: frozenset[str] = frozenset(),
+    witness: LaneItem | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
@@ -510,7 +514,9 @@ def build_packet(
     ordered = _without_lede_repeats(
         _deduplicated(
             sorted(working_set_currency.annotate(items, status_basis=status_basis), key=_sort_key)
-        )
+        ),
+        # A page lede cannot replace the concrete unit that licensed inference.
+        retained_ref=witness.ref if witness is not None else None,
     )
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
@@ -973,12 +979,13 @@ def run_lanes(
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
     material_scopes: dict[str, frozenset[str]] = {}
-    if neighbourhood is None:
-        neighbourhood = _neighbourhood_paths(
-            root, anchors, reached=reached, material_scopes=material_scopes,
-        )
-    if visible is not None:
-        neighbourhood = frozenset(path for path in neighbourhood if visible(path))
+    with (visible.page_batch() if isinstance(visible, egress.ReaderView) else nullcontext(visible)) as keep:
+        if neighbourhood is None:
+            neighbourhood = _neighbourhood_paths(
+                root, anchors, reached=reached, material_scopes=material_scopes, keep=keep,
+            )
+        if keep is not None:
+            neighbourhood = frozenset(path for path in neighbourhood if keep(path))
     for role in roles:
         role_id = str(role.get("id"))
         definition = registry.roles.get(role_id)
@@ -1172,6 +1179,7 @@ def reach_precedents(
 def _neighbourhood_paths(
     vault_root: Path, anchors: Sequence[Any], *, reached: dict[str, set[str]] | None = None,
     material_scopes: dict[str, frozenset[str]] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
     """Anchor paths plus their typed neighbours, at the depth each status allows."""
     paths: set[str] = set()
@@ -1183,7 +1191,7 @@ def _neighbourhood_paths(
         mine = {path} if path else set()
         mine.update(str(item) for item in getattr(anchor, "neighbourhood", ()) or ())
         if depth >= 2:
-            mine.update(_graph_neighbours(vault_root, path, depth=depth))
+            mine.update(_graph_neighbours(vault_root, path, depth=depth, keep=keep))
         paths.update(mine)
         if material_scopes is not None:
             material_scopes[working_set_state._anchor_ref(anchor)] = frozenset(mine)
@@ -1192,7 +1200,11 @@ def _neighbourhood_paths(
     return frozenset(paths)
 
 
-def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[str]:
+def _graph_neighbours(
+    vault_root: Path, path: str, *, depth: int, keep: Callable[[str], bool] | None = None,
+) -> frozenset[str]:
+    from .governance import egress
+
     if not path or not path.endswith(".md"):
         return frozenset()
     try:
@@ -1205,7 +1217,10 @@ def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[s
             max_nodes=GRAPH_MAX_NODES,
             max_edges=GRAPH_MAX_EDGES,
             traversal_profile=GRAPH_TRAVERSAL_PROFILE,
+            keep=keep,
         )
+    except egress.ReaderViewUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - the graph lane is optional by contract
         log.debug("activation graph expansion failed for %s", path, exc_info=True)
         return frozenset()
@@ -3084,6 +3099,113 @@ def _first_mention(
     return None
 
 
+def _conversation_support(
+    vault_root: Path,
+    *,
+    subject: Any,
+    analysis: Any,
+    registry: context_roles.RoleRegistry,
+    freshness_snapshot: Any,
+    visible: Callable[[str], bool] | None,
+    purpose: str | None,
+) -> tuple[bool, LaneItem | None]:
+    """License from the first 200 admitted units, in stable reference order.
+
+    Raw keyset pages are transport only: withheld units spend no admitted slot.
+    Each candidate hydrates against the existing current-source owner before
+    the release plane decides its actual packet representation.
+    """
+    from . import find, lexstore, semantic_index, semantic_language_registry, structured_filters
+    from .governance import egress
+
+    if working_set_conversation.may_carry(analysis, subject_title=subject.title):
+        return True, None
+    with (visible.page_batch() if isinstance(visible, egress.ReaderView) else nullcontext(visible)) as keep:
+        paths = _neighbourhood_paths(vault_root, (subject,), keep=keep)
+        if keep is not None:
+            paths = frozenset(path for path in paths if keep(path))
+    if not paths:
+        return False, None
+    # No reader view means nothing is withheld from this caller (`egress.reader_view`),
+    # as every other lane reads it; the final guard still decides the packet.
+    reader = visible if isinstance(visible, egress.ReaderView) else None if visible is None else egress.ReaderView(
+        vault_root, visible, principal=None, purpose=purpose,
+    )
+    snapshot = freshness_snapshot or find.FreshnessSnapshot(vault_root)
+    fresh = snapshot.for_scope("kb")
+    checkpoint = snapshot.recall_checkpoint("kb")
+    store = lexstore.get_store(vault_root)
+    admitted: list[tuple[LaneItem, Any]] = []
+    parent_states: dict[str, semantic_index.SemanticParentIndexState] = {}
+    cursor = ""
+    while len(admitted) < UNIT_LANE_LIMIT:
+        if budget_exhausted("working_set.conversation"):
+            raise BudgetExhausted("working_set.conversation")
+        result = store.search_semantic_units_result(
+            [], UNIT_LANE_LIMIT, (), (), "kb", fresh,
+            allowed_parent_paths=set(paths), after_unit_ref=cursor,
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        if not result.readiness.complete:
+            return False, None
+        candidates = list(result.value or ())
+        if not candidates:
+            break
+        cursor = candidates[-1].unit_ref
+        stale: list[str] = []
+        records = find._hydrate_indexed_unit_records(
+            vault_root, candidates, plan=structured_filters.compile_filter(None), stale_out=stale,
+            parent_states=parent_states,
+        )
+        if stale:
+            return False, None
+        hits = [
+            find._semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
+            for candidate in candidates if candidate.unit_ref in records
+            for page, unit, _order in (records[candidate.unit_ref],)
+        ]
+        items = _unit_items(None, hits)
+        verdicts = (reader.verdicts([_served_unit(item) for item in items]) if reader is not None
+                    else [egress.UNIT_KEPT] * len(items))
+        admitted.extend(
+            (item, records[item.ref][0])
+            for item, verdict in zip(items, verdicts, strict=True) if verdict == egress.UNIT_KEPT
+        )
+        if len(candidates) < UNIT_LANE_LIMIT:
+            break
+    roles = context_roles.select_roles(
+        registry, anchor_kinds=(subject.kind,), analysis=analysis,
+        anchor_names=context_intents.anchor_terms((subject.title,)),
+    )
+    selected = [registry.roles[str(role["id"])] for role in roles]
+    language = semantic_language_registry.load_registry(vault_root)
+    for item, page in admitted[:UNIT_LANE_LIMIT]:
+        text = bounded_text(item.text)
+        if len(text) > MAX_UNIT_HARD_CHARS or not working_set_conversation.may_carry(
+            analysis, subject_title=subject.title, supporting_text=text,
+        ):
+            continue
+        scoped = semantic_language_registry.for_attached_projects(
+            language, tuple(find._all_projects(page.frontmatter)),
+        )
+        # Unknown categories cannot establish a role for an inferred witness.
+        if scoped.resolve_category(item.provenance["category"], page_type=page.page_type).definition is None:
+            continue
+        owners = {
+            role.id for role in registry.roles.values() if role.lane != "material"
+            and item.provenance["category"] in {
+                scoped.resolve_category(category, page_type=page.page_type).resolved
+                for category in role.categories
+            }
+        }
+        role = next((role for role in selected if role.id in owners), None)
+        if role is None and not owners:
+            role = next((role for role in selected if role.lane == "material"), None)
+        if role is not None:
+            return True, replace(item, role=role.id, why=role.description or f"{role.id} lane")
+    return False, None
+
+
 def _follow_up_packet(
     vault_root: Path,
     *,
@@ -3104,6 +3226,7 @@ def _follow_up_packet(
     visible: Callable[[str], bool] | None = None,
     row: Any = None,
     carried_by: str = "follow_up",
+    witness: LaneItem | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """The packet for a follow-up carried from the caller's own thread, or (with
@@ -3200,6 +3323,8 @@ def _follow_up_packet(
             analysis=analysis,
             status_basis=status_basis,
         )
+        if witness is not None:
+            items = (*items, witness)
         missing = (*missing, *({"role": role, "reason": "role_limit"} for role in omitted))
         packet = None
         if items or current_state:
@@ -3219,6 +3344,7 @@ def _follow_up_packet(
                     # `_carried_packet`: the anchor's own status says partial.
                     status="resolved",
                     recent_context=recent_context,
+                    witness=witness,
                     status_basis=status_basis,
                 )
     if packet is not None:
@@ -3822,8 +3948,8 @@ def _compile_packet(
     # follow-up carries above (each returned if it decided), before the
     # retrieval carry below. A turn whose own words reached nothing, that
     # points back, is considered against the newest earlier USER turn that
-    # named a subject. Only that subject's own title/name or frozen task words
-    # license its content (`may_carry`); shared turn vocabulary never does.
+    # named a subject. Its own title/name and one admitted semantic unit
+    # license its content; shared turn vocabulary never does.
     # Unlicensed content falls through without seeking an older subject.
     # Two subjects in that turn abstain `ambiguous` and stop the ladder;
     # nothing named falls through.
@@ -3838,22 +3964,21 @@ def _compile_packet(
             for item in resolution.anchors
         )
     ):
-        # The carry's whole-catalogue scan is part of the conversation stage.
         with _span(timings, "working_set.conversation"):
-            carried_entries = entry_candidates()
-        verdict = working_set_conversation.carry(carried_entries)
-        licensed = bool(verdict.anchors) and all(
-            working_set_conversation.may_carry(analysis, subject_title=item.title)
-            for item in verdict.anchors
-        )
+            verdict = working_set_conversation.carry(entry_candidates())
+            support = [
+                _conversation_support(
+                    root, subject=item, analysis=analysis, registry=registry,
+                    freshness_snapshot=freshness_snapshot, visible=visible, purpose=purpose,
+                )
+                for item in verdict.anchors
+            ]
+            licensed = bool(support) and all(allowed for allowed, _witness in support)
         if verdict.status == "one" and licensed:
             (found,) = verdict.anchors
             source = next(item for item in rows if item.anchor_id == found.anchor_id)
-            if _origins is not None:
-                for key in (working_set_resolve.anchor_ref(source), source.path):
-                    if key:
-                        _origins[key] = working_set_conversation.ORIGIN_CONVERSATION
-            return _follow_up_packet(
+            witness = support[0][1]
+            packet = _follow_up_packet(
                 root,
                 page=source.path,
                 row=source,
@@ -3872,8 +3997,20 @@ def _compile_packet(
                 recent_context=recent,
                 visible=visible,
                 carried_by="conversation",
+                witness=witness,
                 status_basis=status_basis,
             )
+            # The witness is matched by its unit ref: currency, history and
+            # deduplication may reshape the served entry without removing it.
+            licensed = witness is None or any(unit.get("ref") == witness.ref for unit in packet["units"])
+            if licensed:
+                if isinstance(packet, working_set_conversation.InferredPacket):
+                    packet.witness_ref = witness.ref if witness is not None else None
+                if _origins is not None:
+                    for key in (working_set_resolve.anchor_ref(source), source.path):
+                        if key:
+                            _origins[key] = working_set_conversation.ORIGIN_CONVERSATION
+                return packet
         if verdict.status == "ambiguous" and licensed:
             return abstained_packet(
                 reason="ambiguous",

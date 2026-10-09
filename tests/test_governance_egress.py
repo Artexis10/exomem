@@ -2251,19 +2251,12 @@ def test_two_vaults_sharing_a_policy_do_not_share_decisions(vault: Path, tmp_pat
     )
 
 
-def test_decision_memo_fails_closed_when_the_page_cannot_be_stat_ed(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_decision_memo_drops_a_page_removed_after_a_warm_read(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_FULL)
-    real_stat = Path.stat
-
-    def _boom(self, *a, **kw):
-        if str(self).endswith("kill-switch-for-risky-releases.md"):
-            raise OSError("stat refused")
-        return real_stat(self, *a, **kw)
-
-    monkeypatch.setattr(Path, "stat", _boom)
+    first = egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=5)
+    assert [hit.path for hit in first.hits] == [RESTRICTED_PATH]
+    (vault / RESTRICTED_PATH).unlink()
     result = egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=5)
     assert result.hits == []
 
