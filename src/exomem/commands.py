@@ -11331,7 +11331,7 @@ def _registry_schema_operation(
     from .vocabulary import instances
 
     try:
-        spec = instances.select(vault_root, registry_spec(subject), registry_scope)
+        spec = instances.select(vault_root, registry_spec(subject), registry_scope, authoring=True)
     except instances.RegistryError as error:
         reason = ("registry_assignment_required" if str(error).startswith("REGISTRY_ASSIGNMENT_REQUIRED:")
                   else "audience_restricted")

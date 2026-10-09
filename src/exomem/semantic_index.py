@@ -380,8 +380,9 @@ def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
     }
 
 
-#: Registry subjects one page interpretation admits together.
-INTERPRETATION_SUBJECTS = ("categories", "relations", "entity-types")
+#: Registry subjects one page interpretation admits together. The parser reads
+#: exactly these adapters, so a new subject needs parser code, not data.
+INTERPRETATION_SUBJECTS = ("categories", "relations", "entity-types")  # nosemgrep: ep-word-set -- Registry adapter names the parser implements.
 
 
 @dataclass(frozen=True, slots=True)

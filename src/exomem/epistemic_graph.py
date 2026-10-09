@@ -8221,7 +8221,7 @@ def _query_meaning(
 
 
 #: The stored edge columns `GraphView.edge_row` serves, in order.
-_EDGE_FIELDS = (
+_EDGE_FIELDS = (  # nosemgrep: ep-word-set -- The graph_edges table's stored column names.
     "edge_key", "src_key", "dst_key", "relation_type", "raw_relation",
     "parent_relation", "registry_status", "registry_version", "registry_hash",
     "origin", "source_path", "source_anchor", "metadata",

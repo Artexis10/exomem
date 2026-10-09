@@ -13,6 +13,10 @@ from typing import Any
 from .registry import PUBLIC_INSTANCE, RegistryError, RegistrySpec, Snapshot
 
 
+class AssignmentRequired(RegistryError):
+    """A version-1 armed vault: no instance namespace or page binding is assigned."""
+
+
 @dataclass(frozen=True)
 class PageDefinitions:
     """Admitted operation inputs; never published into the shared corpus cache."""
@@ -146,7 +150,7 @@ def configuration(root: Path) -> dict[str, Any] | None:
     if requirement is None:
         return None
     if requirement["version"] == 1:
-        raise RegistryError(
+        raise AssignmentRequired(
             "REGISTRY_ASSIGNMENT_REQUIRED: registry interpretation is unavailable; "
             "assign namespaces and pages through stopped connector-boundary arming"
         )
@@ -174,10 +178,38 @@ def revision(document: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def select(root: Path, spec: RegistrySpec, scope: str | None = None) -> RegistrySpec:
-    """Select storage only; the canonical release decision still owns admission."""
+def _legacy_storage(root: Path, spec: RegistrySpec) -> bool:
+    """Whether an unassigned overlay or history for this subject exists at its default path."""
+    from .. import registry_history
+
+    return spec.overlay(root).exists() or registry_history.history_dir(root, spec.stem).exists()
+
+
+def unassigned_pack_only(root: Path, spec: RegistrySpec) -> bool:
+    """A version-1 vault with no legacy storage for `spec`: the shipped pack is all of it."""
+    try:
+        configuration(root)
+    except AssignmentRequired:
+        return not _legacy_storage(Path(root), spec)
+    return False
+
+
+def select(root: Path, spec: RegistrySpec, scope: str | None = None, *,
+           authoring: bool = False) -> RegistrySpec:
+    """Select storage only; the canonical release decision still owns admission.
+
+    `authoring` marks a registry operation or overlay write. A version-1 armed
+    vault assigns nothing: authoring refuses, because a write would make an
+    overlay public implicitly. Interpretation of the public instance reads the
+    shipped pack exactly while no legacy definition or history exists to assign.
+    """
     scope = None if scope == PUBLIC_INSTANCE else scope
-    document = configuration(root)
+    try:
+        document = configuration(root)
+    except AssignmentRequired:
+        if authoring or scope is not None or _legacy_storage(Path(root), spec):
+            raise
+        return spec
     if document is None:
         if scope is not None:
             raise RegistryError("REGISTRY_UNAVAILABLE: selected instance is unavailable")
@@ -225,7 +257,11 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
         registry_scope = frontmatter.get("registry_scope")
     if registry_scope is not None and not isinstance(registry_scope, str):
         raise RegistryError("REGISTRY_UNAVAILABLE: invalid page instance selector")
-    document = configuration(root)
+    try:
+        document = configuration(root)
+    except AssignmentRequired:
+        # Version 1 assigns no private instance, so every page selects public.
+        document = None
     if document is None:
         if registry_scope not in (None, PUBLIC_INSTANCE):
             raise RegistryError("REGISTRY_UNAVAILABLE: selected instance is unavailable")

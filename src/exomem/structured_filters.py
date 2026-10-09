@@ -230,7 +230,10 @@ MISSING = _Missing()
 
 
 class _ForeignEntry:
-    """A unit value that is another instance's extension entry: present, never equal."""
+    """A unit value that is another instance's extension entry: present, never equal.
+
+    A sentinel object, not a vocabulary value, so no spelling can collide with it.
+    """
 
     __slots__ = ()
 
@@ -238,6 +241,7 @@ class _ForeignEntry:
 FOREIGN_ENTRY = _ForeignEntry()
 
 #: The unit axes whose values are vocabulary entries rather than authored spelling.
+#: Closed filter field names that the filter schema declares, not vocabulary.
 _ENTRY_AXES: Final = frozenset({"unit.category", "unit.kind"})
 
 

@@ -650,7 +650,7 @@ def commit(
 
     root = Path(vault_root)
     if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
-        spec = instances.select(root, spec)
+        spec = instances.select(root, spec, authoring=True)
     path = spec.overlay(root)
     try:
         history = registry_history.commit(

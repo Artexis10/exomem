@@ -56,15 +56,17 @@ VECTOR_DIM = recall_space.LEGACY_DIM
 #: 4: rows are selection-free structural occurrences, and each parent's
 #: coverage record lives in `meta`. An older table is dropped, not migrated.
 SEMANTIC_UNIT_SCHEMA_VERSION = 4
-#: `meta` key prefix of one parent's neutral structural coverage record.
+#: `meta` key prefix of one parent's neutral structural coverage record. A storage
+#: key format this sidecar alone writes and reads; it decides no meaning.
 COVERAGE_PREFIX = "occurrence_coverage:"
 #: The first key past the prefix's range, so a range scan uses the key index.
 _COVERAGE_END = COVERAGE_PREFIX[:-1] + chr(ord(COVERAGE_PREFIX[-1]) + 1)
-#: The generation `semantic_unit_parent_states` reports for an absent record;
-#: no parse produces it.
+#: The generation `semantic_unit_parent_states` reports for an absent record. A
+#: sentinel, not a vocabulary value: no parse produces it.
 MISSING_COVERAGE = "missing-coverage"
-#: The occurrence columns, in table order, before `vector` and `file_mtime`.
-OCCURRENCE_COLUMNS = (
+#: The occurrence columns, in table order, before `vector` and `file_mtime`. The
+#: table's own schema, named once for every reader and writer of its rows.
+OCCURRENCE_COLUMNS = (  # nosemgrep: ep-word-set -- The table's own column names.
     "unit_key", "record_type", "parent_path", "parent_ref", "parent_generation",
     "parent_source_hash", "parser_version", "form", "content", "unit_source_hash",
     "source_order",
@@ -529,6 +531,7 @@ class EmbeddingIndex:
                 conn.execute("DROP TABLE IF EXISTS embedding_build_units")
                 conn.execute("DROP TABLE IF EXISTS embedding_build_coverage")
                 _delete_coverage(conn)
+            # The record_type CHECK fixes this table's one row format token.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS semantic_unit_vectors (

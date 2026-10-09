@@ -2411,7 +2411,8 @@ def _vector_unit_candidates(
             incomplete_out=incomplete,
         )
         if incomplete and not hits:
-            # Unproved coverage is never a proved miss.
+            # Unproved coverage is never a proved miss. The status, reason and
+            # coverage values are tokens of the closed vector-profile protocol.
             return (
                 [],
                 {"status": "unavailable", "reason": "coverage_incomplete", "model": model_name},
@@ -3258,7 +3259,7 @@ def _raise_catalog_outcome(readiness: object) -> None:
     # Closed `CatalogReadiness` statuses that index warm-up does not resolve.
     public_status = (
         "temporarily_unavailable"
-        if outcome in {"transient_failure", "unsupported", "definitions_unavailable"}
+        if outcome in {"transient_failure", "unsupported", "definitions_unavailable"}  # nosemgrep: ep-word-membership -- CatalogReadiness declares these closed statuses.
         else "warming"
     )
     raise RetrievalIndexWarming(site="catalog_outcome", status=public_status)

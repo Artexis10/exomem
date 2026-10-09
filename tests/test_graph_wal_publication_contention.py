@@ -200,7 +200,7 @@ def test_an_in_place_republication_keeps_the_live_store_in_wal_mode(tmp_path: Pa
     # bytes, so read the published file back rather than trusting the report.
     with sqlite3.connect(graph.path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert conn.execute("SELECT count(*) FROM graph_nodes").fetchone()[0] == 4
+        assert conn.execute("SELECT count(*) FROM graph_nodes WHERE kind = 'file'").fetchone()[0] == 4
 
 
 def _publish_again(vault: Path, graph: EpistemicGraphIndex, index: int) -> dict[str, int]:
@@ -289,7 +289,7 @@ def test_the_published_store_carries_no_detached_wal_companion(tmp_path: Path) -
     try:
         assert str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert conn.execute("SELECT count(*) FROM graph_nodes").fetchone()[0] == 3
+        assert conn.execute("SELECT count(*) FROM graph_nodes WHERE kind = 'file'").fetchone()[0] == 3
     finally:
         conn.close()
 

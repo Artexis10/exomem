@@ -724,7 +724,7 @@ def test_find_hot_cache_stays_principal_free(vault: Path, monkeypatch: pytest.Mo
     assert RESTRICTED_PATH not in [hit["path"] for hit in restricted_hits]
 
     # Every Hit sitting in the shared hot cache is principal-free.
-    cached_hits = [hit for cached in find_module._FIND_CACHE.values() for hit in cached]
+    cached_hits = [hit for cached, _dependency in find_module._FIND_CACHE.values() for hit in cached]
     assert cached_hits, "expected the hot cache to be populated"
     assert all(getattr(hit, "decision", None) is None for hit in cached_hits)
     assert all("referents" not in hit.as_dict() for hit in cached_hits)

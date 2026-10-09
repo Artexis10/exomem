@@ -94,6 +94,10 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
         return None
     if is_owner(who) and restricted_reason(root) is None:
         return None
+    if instances.unassigned_pack_only(root, spec):
+        # No overlay or history exists and none can be written unassigned, so
+        # the shipped pack is the whole public instance: nothing is withheld.
+        return None
     path = spec.overlay(root).relative_to(root).as_posix()
     if egress.release_level_for_path_only(root, path) < egress.LEVEL_FULL:
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
@@ -168,7 +172,7 @@ def inspect(
 ) -> dict[str, Any]:
     """The live registry in the generic entry shape, paginated, with usage counts."""
     if spec.binding_revision is None:
-        spec = instances.select(vault_root, spec)
+        spec = instances.select(vault_root, spec, authoring=True)
     size = INSPECT_DEFAULT_LIMIT if limit is None else int(limit)
     if not 1 <= size <= INSPECT_MAX_LIMIT:
         raise RegistryError(f"INVALID_REGISTRY_ARGUMENT: limit must be 1 to {INSPECT_MAX_LIMIT}")
@@ -315,7 +319,7 @@ def _candidate(
 def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, Any]:
     """Read-only: what a save of `delta` would register, and what it resembles."""
     if spec.binding_revision is None:
-        spec = instances.select(vault_root, spec)
+        spec = instances.select(vault_root, spec, authoring=True)
     refusal = admission_refusal(vault_root, spec)
     if refusal is not None:
         return refusal
@@ -504,7 +508,7 @@ def save(
     root = Path(vault_root)
     reason = queues_for_owner(root)
     if spec.binding_revision is None:
-        spec = instances.select(root, spec)
+        spec = instances.select(root, spec, authoring=True)
     refusal = admission_refusal(root, spec)
     if refusal is not None:
         return refusal
@@ -564,7 +568,7 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
 
     root = Path(vault_root)
     if spec.binding_revision is None:
-        spec = instances.select(root, spec)
+        spec = instances.select(root, spec, authoring=True)
     refusal = admission_refusal(root, spec) or history_refusal(root, spec)
     if refusal is not None:
         return refusal
@@ -605,7 +609,7 @@ def restore(
     if not is_owner(effective_principal()):
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     if spec.binding_revision is None:
-        spec = instances.select(root, spec)
+        spec = instances.select(root, spec, authoring=True)
     refusal = admission_refusal(root, spec) or history_refusal(root, spec)
     if refusal is not None:
         return refusal

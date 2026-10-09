@@ -974,8 +974,19 @@ def _copy_registry(
     )
 
 
+#: The writer view is not decided yet; `writer_view_relations` decides it.
+_DECIDE = object()
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticCorpusContext:
+    """One corpus judged for one operation.
+
+    `writer_visibility` is the operation's writer view, decided where the
+    context is built so evaluation reads no host or vault state; `_DECIDE`
+    means the evaluator decides it.
+    """
+
     vault_root: Path
     pages: Mapping[str, SemanticPageState]
     resolver_entries: tuple[tuple[str, str], ...]
@@ -993,6 +1004,7 @@ class SemanticCorpusContext:
     activation_census: activation_manifest.ActivationCensus | None
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
+    writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1057,6 +1069,7 @@ class SemanticCorpusContext:
             by_path,
             _copy_registry(registry),
             StableIdentityCensus(tuple(identity_census.entries)),
+            writer_visibility=vault.writer_link_visibility(Path(vault_root)),
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
@@ -1088,13 +1101,11 @@ class SemanticCorpusContext:
             self.identity_census.with_page(
                 state, casefold_paths=vault.vault_casefolds(self.vault_root)
             ),
+            writer_visibility=self.writer_visibility,
         )
 
     def registry_for(self, path: str) -> relation_registry.RelationRegistry:
-        state = self.pages.get(path)
-        if state is not None and state.definitions is not None:
-            return state.definitions.snapshots["relations"].typed
-        return self.registry
+        return _authored_relations(self.pages.get(path), self.registry)
 
     @property
     def status_dependencies(self) -> tuple[tuple[str, str], ...]:
@@ -2797,7 +2808,19 @@ def build_corpus_context_with_census(
         if candidate is not None
         else context.identity_census
     )
-    return _context_from_state_map(root, states, context.registry, identity), census
+    corpus_registry = registry
+    if corpus_registry is None:
+        try:
+            unarmed = instances.configuration(root) is None
+        except ValueError:
+            unarmed = False
+        # Unarmed, the public overlay is every page's meaning. Armed, each visible
+        # page carries its own instance and every other page keeps core meaning.
+        corpus_registry = relation_registry.load_registry(root) if unarmed else context.registry
+    return _context_from_state_map(
+        root, states, corpus_registry, identity,
+        writer_visibility=vault.writer_link_visibility(root),
+    ), census
 
 
 def _build_corpus_context_with_census(
@@ -3300,6 +3323,8 @@ def _context_from_state_map(
     states: Mapping[str, SemanticPageState],
     registry: relation_registry.RelationRegistry,
     identity_census: StableIdentityCensus,
+    *,
+    writer_visibility: Any = _DECIDE,
 ) -> SemanticCorpusContext:
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
@@ -3313,6 +3338,7 @@ def _context_from_state_map(
         entries=entries,
         resolver=resolver,
         facts=facts,
+        writer_visibility=writer_visibility,
     )
 
 
@@ -3341,6 +3367,7 @@ def _context_with_stable_topology_candidate(
         entries=context.resolver_entries,
         resolver=resolver,
         facts=facts,
+        writer_visibility=context.writer_visibility,
     )
 
 
@@ -3353,6 +3380,7 @@ def _context_from_resolved_state(
     entries: tuple[tuple[str, str], ...],
     resolver: vault.WikilinkResolver,
     facts: tuple[RelationFact, ...],
+    writer_visibility: Any = _DECIDE,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -3400,6 +3428,7 @@ def _context_from_resolved_state(
         activation_census=None,
         identity_census=identity_census,
         registry=registry,
+        writer_visibility=writer_visibility,
     )
 
 
@@ -3520,6 +3549,22 @@ def _fact_identity(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _authored_relations(
+    state: SemanticPageState | None, registry: relation_registry.RelationRegistry
+) -> relation_registry.RelationRegistry:
+    """The relation definitions one authored page is judged with.
+
+    An assigned instance supplies its own definitions. A page whose instance is
+    unavailable keeps core meaning only. Otherwise the vault is unarmed and the
+    corpus registry, which a caller may supply, is the public instance.
+    """
+    if state is not None and state.definitions is not None and state.definitions.binding_revision is not None:
+        return state.definitions.snapshots["relations"].typed
+    if state is not None and state.definitions_unavailable:
+        return relation_registry.core_registry()
+    return registry
+
+
 def _derive_relation_facts(
     root: Path,
     states: Mapping[str, SemanticPageState],
@@ -3609,8 +3654,7 @@ def _derive_relation_facts(
     facts: list[RelationFact] = []
     for raw in raw_facts:
         state = raw["authored"]
-        selected_registry = (state.definitions.snapshots["relations"].typed
-                             if state.definitions is not None else registry)
+        selected_registry = _authored_relations(state, registry)
         target_status, resolved_target, target_anchor, target_alias = _resolve_target(
             root,
             raw["raw_target"],
@@ -3893,9 +3937,6 @@ def is_relation_review_current(
     )
 
 
-_DECIDE = object()
-
-
 def writer_view_relations(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -3918,6 +3959,8 @@ def writer_view_relations(
     """
     outbound = corpus.outbound.get(page.path, ())
     inbound = corpus.inbound.get(page.path, ())
+    if visible is _DECIDE:
+        visible = corpus.writer_visibility
     if visible is _DECIDE:
         visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not callable(visible) or not visible(page.path):
@@ -3966,7 +4009,9 @@ def writer_authored_facts(
     judging a page it may see, the same facts with their targets resolved
     only over the pages that writer may see (see `writer_view_relations`).
     """
-    visible = vault.writer_link_visibility(corpus.vault_root)
+    visible = corpus.writer_visibility
+    if visible is _DECIDE:
+        visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not visible(page.path):
         return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
     resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)

@@ -445,10 +445,20 @@ def test_limited_owner_can_update_a_wholly_admitted_public_relation_registry(con
     # same all-writer visibility rule as other connector creation destinations.
     host = json.loads(config.read_text())
     host["capture_paths"].append(registry_history.history_dir(vault, relation_registry.SPEC.stem).relative_to(vault).as_posix())
+    # Arming assigns the existing public definitions and history explicitly.
+    host["vocabulary"] = {"public": {
+        "namespace": "Knowledge Base/_Schema/public", "history": "public",
+        "overrides": {relation_registry.SPEC.stem: {
+            "overlay": relation_registry.SPEC.overlay(vault).relative_to(vault).as_posix(),
+            "history": relation_registry.SPEC.stem,
+        }},
+    }, "private": {}, "destinations": {}, "selections": {}}
     config.write_text(json.dumps(host))
     authority = state_migration.assert_offline_migration_authority(source="isolated public history stop window")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
-    before = relation_registry.load_registry(vault).extension_hash
+    owner = principal.owner_principal(surface="library")
+    with principal.request_scope(owner):
+        before = relation_registry.load_registry(vault).extension_hash
     with principal.request_scope(authenticate("limited")):
         result = commands.op_schema_memory(vault, subject="relations", operation="save-relations", expected_hash=before,
             why="retain a public relation", proposal={"upsert": {"vault.correlates": {
@@ -456,7 +466,8 @@ def test_limited_owner_can_update_a_wholly_admitted_public_relation_registry(con
             }}})
     assert result["valid"] is True
     assert result["saved"]["previous_hash"] == before
-    assert "vault.correlates" in relation_registry.load_registry(vault).extensions
+    with principal.request_scope(owner):
+        assert "vault.correlates" in relation_registry.load_registry(vault).extensions
 
 
 def test_private_registry_blocks_vocabulary_currency_before_work_item_lookup(configured_boundary, vault):
