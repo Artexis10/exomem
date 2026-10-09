@@ -32,6 +32,17 @@ def owner():
         yield
 
 
+@pytest.fixture(autouse=True)
+def admission_not_latency(monkeypatch):
+    """These cases check which fields a query may read, not how fast it runs.
+
+    The interactive profile's 200 ms deadline is wall-clock time from before the reader
+    opens, so a contended CI runner trips it with QUERY_TIMEOUT on a two-row query. The
+    latency gates measure that deadline; here it only adds a load-dependent failure.
+    """
+    monkeypatch.setitem(runtime.PROFILES, "interactive", {**runtime.PROFILES["interactive"], "timeout_ms": 10_000})
+
+
 def create(store):
     front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
     front["item_schema"]["fields"].update({
