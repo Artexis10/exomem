@@ -35,8 +35,9 @@ Every extraction, CLIP, and post-processing operation SHALL be represented in a 
 SQLite ledger before execution. Enqueue MUST deduplicate equivalent pending work, claiming MUST
 be atomic, and interrupted running work MUST become eligible after recovery.
 
-Work that a memory brake interrupts SHALL return to pending. It SHALL NOT be recorded as an
-artifact failure, and SHALL NOT consume an artifact attempt.
+Work that a memory stop interrupts SHALL return to pending. A memory stop is a stop for memory
+pressure, or an allocation failure under the worker's hard memory limit. The job SHALL NOT be
+recorded as an artifact failure, and SHALL NOT consume an artifact attempt.
 
 #### Scenario: Service crashes after claim
 - **WHEN** a service or child process exits while a media job is running
@@ -52,3 +53,7 @@ artifact failure, and SHALL NOT consume an artifact attempt.
 - **WHEN** the supervisor stops a media child because of memory pressure while a job runs
 - **THEN** the job returns to pending with its artifact attempt count unchanged
 - **AND** neither the job nor its sidecar reports the artifact as failed or corrupt
+
+#### Scenario: An allocation failure under the hard limit is a memory stop
+- **WHEN** an engine's allocation fails under the worker's hard memory limit
+- **THEN** the job returns to pending with a typed memory reason and its artifact attempt count unchanged

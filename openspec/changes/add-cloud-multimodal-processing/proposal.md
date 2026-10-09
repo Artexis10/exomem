@@ -24,25 +24,25 @@ Invited friends write in Japanese and other languages, so these gaps are part of
 
 ## What Changes
 
-- **Media runs inside each cell.** Media runs in the cell's existing serialized, disposable media worker, inside the cell container. Plaintext never leaves the cell, and no third-party service sees it.
+- **Media runs inside each cell.** Media runs in the cell's existing serialized, disposable media worker, inside the cell container. The media bytes and the extraction process stay in the cell, and no third party receives media for extraction. Later reads of the stored text follow the capabilities that own them.
   - Engines and their weights are pre-baked into the image and load offline.
   - Where the runtime allows it, weights are file-backed, so one node keeps one copy for all cells.
 - **Memory brakes keep search safe.** Media must never take the serving process down. The worker:
-  - claims a job only while the cell's measured memory leaves room for it;
-  - runs under a hard memory limit;
+  - claims a job only while the cell's anonymous memory leaves room for it, below `memory.high` and the profile's admission fraction;
+  - runs under a VmData limit, as a backstop against runaway allocation;
   - stops when memory pressure rises.
 
-  A stopped job returns to pending. It is never recorded as an artifact failure.
+  A stopped job returns to pending. It is never recorded as an artifact failure. A job that keeps being stopped waits as memory-blocked, shows the tenant no action, and returns to pending by itself.
 - **Documents.** Cloud reads every type a personal install reads: PDF, Word, Excel, PowerPoint, HTML, plain text, email and calendar. Every install gains EPUB, OpenDocument (text, spreadsheet, presentation) and RTF.
 - **Images.**
   - OCR detects the script first, then reads with that script's model and the installed language packs for it. The installed set is deployment configuration. The first language packs are English, Japanese (horizontal and vertical) and Estonian.
-  - Every install encodes images with one pinned image model, chosen by published benchmarks (design D5), so stored vectors are interchangeable across installs. The candidates are:
-    - an ONNX build of today's CLIP image model, with a multilingual text encoder aligned to its image space, which answers queries in any supported language and leaves stored image vectors unchanged;
+  - Every install encodes images with one pinned image model at one precision, chosen by published benchmarks (design D5), so stored vectors are interchangeable across installs. A same-precision substitution that passes the 0.9999 parity bound keeps the vector space. The candidates are:
+    - an fp32 ONNX build of today's CLIP image model, with a multilingual text encoder aligned to its image space, which answers queries in any supported language and keeps the stored image vectors;
     - a multilingual image–text model, which re-encodes stored image vectors once.
   - HEIC is decoded, subject to a licence check.
 - **Speech.** Audio and video get transcripts from the engine and model that the bake-off in design.md selects. The first required language set is Japanese, English and Estonian, and it is deployment configuration.
-- **Off until proven.** Each engine has a deployment switch. On Cloud it stays off until its acceptance passes on a real cell.
-  - An engine that is off or not shipped is reported as disabled on operator surfaces.
+- **Off until proven.** Each engine has a switch, off by default on Cloud. It turns on first in the owner's cell, which is the canary, for that engine's acceptance, and then in the other cells one at a time.
+  - An engine that is off or not shipped is reported as disabled on runtime status and doctor.
   - It is never reported as degraded on each query, and never shown to a tenant as an install instruction.
 - **Backfill.** Media already in a cell is processed automatically once its engine is on, one cell at a time.
 - **Blocked jobs recover.** A job blocked because its engine was missing is requeued when the engine appears.
@@ -62,7 +62,7 @@ Invited friends write in Japanese and other languages, so these gaps are part of
 
 - `multimodal-job-runtime`:
   - a job blocked on a missing engine is requeued when the engine becomes available;
-  - a worker stopped for memory pressure returns its job to pending.
+  - a memory stop, for pressure or for an allocation failure under the hard limit, returns its job to pending.
 - `automatic-media-processing`:
   - EPUB, OpenDocument, RTF and HEIC are extracted on every install;
   - media whose engine is disabled keeps its pending sidecar without a job, and is queued once the engine is enabled;
@@ -71,16 +71,16 @@ Invited friends write in Japanese and other languages, so these gaps are part of
 - `multilingual-recall`:
   - OCR reads with the installed script models and language packs, after script detection;
   - image search accepts queries in every language the multilingual text encoder supports;
-  - the image vector sidecar records its vector space, and image spaces never mix.
+  - the image vector sidecar records its vector space, a same-precision substitution that passes the parity bound keeps it, and image spaces never mix.
 
 ## Impact
 
 - **Image:**
-  - the `cloud` stage gains Tesseract with the configured packs, Pillow, PyMuPDF, the document libraries, the ONNX CLIP models and the selected speech model;
+  - a Cloud-only build stage, never `builder-hosted`, gains Tesseract with the configured packs, Pillow, PyMuPDF, the document libraries, the ONNX image models and the selected speech model. The Hosted image is unchanged;
   - a CPU-only media extra keeps CUDA wheels out;
   - the image grows by an estimated 0.6–1.5 GB, depending on the speech model (unverified).
 - **Code:**
-  - the media worker's admission and pressure stop;
+  - the media worker's admission, pressure stop, hard limit and memory-blocked recovery;
   - the ONNX CLIP backend;
   - the multilingual query encoder;
   - the new document extractors and HEIC decoding;
@@ -89,8 +89,9 @@ Invited friends write in Japanese and other languages, so these gaps are part of
 - **Capacity:** measured warm peaks per cell rise, so fewer friends fit on one node before the 20% headroom rule closes admission. Acceptance measures this before any switch is turned on.
 - **Depends on:** the `shared-model-runtime` capability of `ship-models-as-shared-onnx`, which states the shared-weights rule that the media engines follow.
 - **Tool surface:** the Cloud exclusions of `process_media` and `read_media` name a media-capable image as their lift condition. That requirement lives in the active change `adopt-exomem-cloud-plain-cells`, so any lift is amended there, not here.
+- **cellctl:** a per-engine cell-ID selection renders each engine's switch into the selected cells only. The chart-level `model_env` map applies to every cell at once, so it cannot hold a canary.
 - **Unchanged:**
-  - cellctl, quotas, holds, backups and the rollout procedure;
+  - quotas, holds, backups and the image rollout procedure;
   - the media Markdown sidecar format, and every field search reads. Only the image vector sidecar gains a record of its vector space.
 
 ## Pure substrate and soft-fail

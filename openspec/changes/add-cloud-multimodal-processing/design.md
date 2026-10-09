@@ -31,6 +31,8 @@
 
 Extraction runs only in the serialized media child. The serving process runs one media model, the CLIP text encoder, because the image lane encodes the query. The reaper unloads that encoder when idle.
 
+The media bytes and the extraction process stay in the cell, and no third party receives media for extraction. This promise covers extraction only. Later reads of the stored text follow the capabilities that own them. One of those is the per-tenant opt-in API instrument of `add-sensed-epistemic-model` (its ruling R7).
+
 Rejected alternatives:
 - **A per-cell media Job.** Volumes are RWO and Jobs run with the runtime scaled to zero, so every media batch would cost downtime. Job pods also match the `job-egress` policy, so plaintext would sit in a pod with egress.
 - **A shared media pool.** It needs a new path from the cell to the pool, and one process would hold several tenants' plaintext. With a few cells it saves little.
@@ -39,34 +41,40 @@ Escalation: if acceptance shows starvation or memory aborts, move the engines in
 
 ### D2. Memory brakes, derived from the cell
 
-All three brakes are derived from the cell's own cgroup (`memory.max`, `memory.current`), never from constants. Each one, when it fires wrongly, costs only delay: a job waits and retries. Search never pays for it.
+All three brakes are derived from the cell's own cgroup, never from constants. Each brake names the measure it reads, because the obvious one is wrong:
 
-- **Admission.** The worker claims a job only when `memory.current` plus the engine's measured budget stays at or below 80% of `memory.max`.
-- **Hard limit.** The child runs under a data-segment limit (`RLIMIT_DATA`) set to the engine's budget. Since Linux 4.7 it counts private writable memory, and not file-backed read-only mappings, so the shared weights of D3 do not count against it. An address-space limit (`RLIMIT_AS`) would count them. Tesseract and other native code inherit the limit.
-- **Pressure stop.** The supervisor stops the child when cell memory crosses a high-water mark. The job returns to pending, never to an artifact failure.
+- `memory.current` counts reclaimable page cache. It also counts shared model weights, charged to whichever cell faulted them first (change `ship-models-as-shared-onnx`, design Context). So it can block a cell that has room, or admit work into a cell that has none. Admission and the pressure stop never read it.
+- **Admission** reads anonymous memory (`memory.stat` anon). The worker claims a job only while anonymous memory plus the engine's measured resident budget stays below the lower of two values:
+  - the cell's `memory.high`, when one is set;
+  - the `service-v1` admission fraction of `memory.max`, which is the 80% cgroup peak gate in "Cloud outcome and capacity gates" (`add-cloud-service-resource-policy`). The spec references that gate rather than restating it.
 
-Each engine's budget is measured during acceptance and pinned in deployment configuration.
+  With kubelet MemoryQoS on, `memory.high` = request + 0.625 × (limit − request) (`memoryThrottlingFactor` in the K3s role). At a 1 GiB request and the 3 GiB limit that is 2.25 GiB, or 75%, which is below 80%. At cellctl's default 512 MiB request it is about 2.06 GiB. MemoryQoS is off by default (`k3s_memory_qos_enabled: false`), and then `memory.high` is `max`. The request in production was not checked for this design.
+- **Pressure stop** reads memory pressure stall information (`memory.pressure`) and anonymous memory. The supervisor stops the child when either crosses its high-water mark.
+- **Hard limit** is a VmData budget (`RLIMIT_DATA`), and it is a backstop against runaway allocation, not the main brake.
+  - ONNX Runtime maps `model.onnx.data` as `rw-p`: private and writable. VmData counts that mapping. The review reproduced it on ORT 1.27.0: a limit of VmData + 100 or 120 MiB failed the load with `std::bad_alloc`, and VmData + 140 MiB passed.
+  - So the budget includes the mapped weights. Each engine's VmData budget is measured at acceptance and pinned with a margin.
+  - The pages stay clean, because prepacking is off and nothing writes them. So they stay shared, and the Pss sharing evidence stands.
+  - Tesseract and other native code inherit the limit.
 
-A job that a brake stops repeatedly would otherwise loop. After a bounded number of consecutive stops, it becomes blocked with a typed memory reason, visible on runtime status. It never becomes failed, because its artifact is not at fault.
+Each engine has two measured budgets: a resident budget for admission, and a VmData budget for the hard limit. Both are pinned in deployment configuration.
 
-The 80% admission fraction is the `service-v1` cgroup peak gate ("Cloud outcome and capacity gates" in `add-cloud-service-resource-policy`). The spec references that gate rather than restating the number.
+**What a wrong firing costs.** A brake that fires wrongly delays media; it never takes search down. Delay is cheap only while it is visible and bounded, so:
+
+- A pressure stop, and an allocation failure under the hard limit (an ORT `bad_alloc`, a native allocation failure), are typed memory stops. The job returns to pending and is never an artifact failure.
+- After a bounded number of consecutive memory stops, the job becomes memory-blocked, so it cannot loop.
+- A memory-blocked job returns to pending automatically: when a supervisor starts, when the cell limit or an engine budget changes, and periodically with a bounded backoff while pressure is low. No human retry is needed. On Cloud none would be possible anyway, because `process_media` is excluded from the cell's tool surface.
+- A tenant sees the job only as waiting, with no action to take. The memory reason appears on operator surfaces only.
+- Starvation is caught before rollout: acceptance requires the owner-sized backlog to drain within a bound stated before the run, with no job left memory-blocked.
 
 ### D3. Pre-baked engines and shared weights
 
 Every model and language pack is baked into an image layer and loaded with network access off, behind a build-time offline load gate.
 
-Weights SHALL be file-backed and shared read-only across cells, as `onnx_share_weights_enabled` already does for the text encoder. On 2026-10-09 the Cloud node showed the bge-m3 int8 `model.onnx.data` mapped by 3 cell processes:
+The engines and their dependencies install in a build stage that only the `cloud` target uses, never in `builder-hosted`. So the Hosted image still carries only the runtime it serves with (the `hosted-tenant-cell` delta of `swap-embedding-runtime-to-onnx`).
 
-- Rss 290, 509 and 290 MB;
-- Pss 96, 315 and 96 MB.
+The weights follow the rule of the `shared-model-runtime` capability (change `ship-models-as-shared-onnx`): file-backed, read-only and shared across the cells on a node. That change's design records the 2026-10-09 production measurement, in which three cells held one copy of the bge-m3 weights. Each cell adds only its working memory while active, plus its own indexes, which stay per tenant. Acceptance measures each engine's sharing with Pss.
 
-So the node held one copy of about 509 MB, not three. Each cell adds only its working memory while active, plus its own indexes, which stay per tenant. Only immutable model bytes are shared. No writable page, cache or process is shared between tenants, so sharing costs no isolation.
-
-Two consequences:
-- An engine whose runtime cannot map its weights, such as one that copies them into private memory, needs a measured reason to be chosen over a shareable one.
-- Acceptance measures the sharing of each engine with Pss.
-
-The rule itself is stated once, in the `shared-model-runtime` capability of the change `ship-models-as-shared-onnx`. This change applies it to the media engines, and its spec references that capability. So `ship-models-as-shared-onnx` lands first, or in the same delivery.
+This change applies that rule to the media engines, and its spec references the capability. So `ship-models-as-shared-onnx` lands first, or in the same delivery.
 
 ### D4. Documents
 
@@ -90,7 +98,8 @@ Reuse wins where it fits. A format is "supported" only when a check in the Cloud
   - When detection names no script, which happens on images with little text, OCR reads with the deployment's configured default language packs.
   - Today every install calls Tesseract without a language, so it reads English only (`extract._ocr_image` and `extract._ocr_pdf_page`).
   - The installed set is an image build parameter, which makes it deployment data, never a code list.
-  - Mapping scripts to models is a closed set that Tesseract defines.
+  - The mapping from scripts to models and packs comes from Tesseract's published names: the `script/` models and the language pack codes. Whether that mapping can be read by machine, or needs a small table generated from Tesseract's published lists, is verified at implementation.
+  - A pack belongs to every script its language writes. Kanji-only Japanese may be detected as Han, so the Han route includes the deployment's Japanese packs.
   - Acceptance records the image size the models add.
 - **Image search model.** It is chosen by published benchmarks, not by our own accuracy runs. The candidates are:
   - `clip-ViT-B-32`, today's model, English queries only, with the multilingual text encoder `clip-ViT-B-32-multilingual-v1` aligned to its image space;
@@ -100,9 +109,10 @@ Reuse wins where it fits. A format is "supported" only when a check in the Cloud
   - use published multilingual image–text retrieval results, such as Crossmodal-3600 recall@k for English and Japanese;
   - pick the best model whose measured CPU speed and memory on our hardware fit the media budget, with its weights shareable under D3.
 
-  If the model changes, every install switches together, and stored image vectors are re-encoded once by D8's backfill. Vectors from different models are never mixed.
-  - Today the image vector sidecar (`.clip.sqlite`) records no vector space: `clip_index` fixes the width at 512 and stores no model. So this change extends the `multilingual-recall` space rule to that sidecar. It records the model and, for a served artifact, the same artifact identity that a recall sidecar records. A legacy sidecar with rows and no record is read as `clip-ViT-B-32` at 512 dimensions.
-  - Parity of an ONNX build against its reference at the same precision stays cosine ≥ 0.9999 (the existing `MIN_COSINE` in `tests/test_embedding_backend.py`). That bound is for a runtime substitution. An int8 build does not meet it against fp32: a shared int8 batch alone moves a vector by up to 0.02 cosine (archived `make-recall-multilingual` design). So the stored vectors stay interchangeable across installs only while every install runs the same artifact, or artifacts that meet the bound against one reference.
+  If the model changes, every install switches together, and stored image vectors are re-encoded once by D8's backfill. Vectors from different spaces are never mixed.
+  - **Precision.** The image model ships at its reference precision, as an fp32 ONNX build. No image relevance fixture exists, so nothing could gate an int8 build (`shared-model-runtime`; change `ship-models-as-shared-onnx`, design D3, explains why int8 cannot meet the 0.9999 bound). int8 waits until such a fixture exists.
+  - **One rule for the space.** A same-precision substitution that passes cosine ≥ 0.9999 keeps the vector space, and its new artifact identity is recorded. So an fp32 ONNX build of today's `clip-ViT-B-32` keeps every stored vector of a personal install. Another model or another precision is another space.
+  - **Recorded space.** Today the image vector sidecar (`.clip.sqlite`) records no vector space: `clip_index` fixes the width at 512 and stores no model. This change extends the `multilingual-recall` space rule to that sidecar: it records model, width, precision and artifact identity. A legacy sidecar with rows and no record is read as `clip-ViT-B-32` at 512 dimensions and full precision.
 - **Image captions.** Optionally, a small pinned-weight, frozen captioner writes one descriptive sentence per image, chosen by the same benchmark-then-measure rule. The caption joins the image's OCR text in ordinary multilingual semantic search, so a full-sentence question in any language finds the photo, and the assistant can read what the photo shows.
   - The captioner is never an instruction-following model. The authority matrix in `openspec/config.yaml` admits pinned-weight frozen captioners as transducers, default-off because they emit prose. It puts an instruction-following generative model out of bounds in every modality pairing, except as an instrument.
   - The hook exists today as `EXOMEM_VISION_CAPTION`, off by default. Its default checkpoint (`Salesforce/blip-image-captioning-large`) runs through the transformers pipeline on torch, so Cloud needs a build that meets the shared model runtime rule.
@@ -117,22 +127,24 @@ The engine and model are chosen by the bake-off recorded below:
 - SenseVoice-Small in ONNX;
 - optionally, Whisper `large-v3-turbo` in ONNX.
 
-Accuracy comes from published results: the Open ASR Leaderboard, model cards and papers, with FLEURS or Common Voice for English, Japanese and Estonian. We measure only what no benchmark covers:
-- the int8 real-time factor on pinned CPU threads, calibrated to the cell's CPU;
-- peak memory;
-- whether the weights can be shared under D3.
+Selection follows the general rule of the `shared-model-runtime` capability. The speech terms add only what speech needs, and the spec states them:
 
-A 10-utterance-per-language sanity check catches a broken int8 or ONNX conversion.
-
-The frozen rule picks the lowest-memory arm whose published error is within 2.0 points of the best arm in every language. Shareable weights count once per node. Routing by language is allowed only if no single arm passes, and only if the routed pair stays under 1.5 GB.
+- **Metric per language.** WER for English and Estonian, which are written with spaces between words, and CER for Japanese, which is not.
+- **One benchmark.** Candidates are compared on the same published benchmark wherever one covers them all: the Open ASR Leaderboard, then FLEURS or Common Voice results from model cards and papers.
+- **Missing results.** A candidate with no published result in a required language is measured on that language's FLEURS test set (40 utterances), or excluded for that language. The owner's amendment to the bake-off allows this measurement. That amendment is not recorded in this repository.
+- **Cost.** The int8 real-time factor at pinned CPU threads on the cell's CPU, peak memory, and whether the weights can be shared under D3.
+- **Sanity check.** Ten utterances per language catch a broken int8 or ONNX conversion.
+- **Pick.** The lowest-memory candidate whose error rate is within 2.0 points of the best in every required language. Shareable weights count once per node. Routing by language is allowed only if no single candidate passes, and only if the routed pair stays under 1.5 GB.
 
 Bake-off result: *pending; recorded here when the run completes.*
 
 ### D7. Off until proven, and the disabled state
 
-Each engine (documents, OCR, image search, captions, speech) has a deployment switch.
-- **Cloud:** the switch stays off until that engine's acceptance passes on a real cell.
+Each engine (documents, OCR, image search, captions, speech) has a switch.
+- **Cloud:** every switch defaults to off. The operator turns it on first in the owner's cell, the acceptance cell and canary, and runs that engine's acceptance there. A pass rolls the switch to the other cells one at a time. A miss turns it off again in the owner's cell, and it stays off elsewhere.
 - **Personal installs:** they keep today's defaults.
+
+**Where the switch lives.** cellctl renders each cell's environment. Today it has one chart-level `model_env` map (`CELLCTL_CELL_MODEL_ENV`), which it renders into every cell after `check_model_env` refuses forbidden keys, prefixes and suffixes. A change to that map changes every cell's render digest at once, so it cannot hold a per-cell canary. cellctl selects cells per feature only through cell-ID lists, such as `CELLCTL_ARTIFACT_BROKER_CELL_IDS` and `CELLCTL_DEDICATED_CELL_IDS`. So this change adds a per-engine cell-ID selection to cellctl on that precedent. It renders the engine's switch variable into the selected cells only, and the variable passes the same `check_model_env` rules.
 
 On Cloud, an engine that the image does not ship is disabled by the deployment's configuration. On a personal install, an enabled engine that is missing keeps today's blocked state with install guidance, and D8 requeues its jobs once it appears.
 
@@ -151,7 +163,7 @@ Until images ship, the interim is configuration only: `EXOMEM_DISABLE_CLIP=1` in
 - **Backfill.** When an engine's switch turns on, media already in the cell is queued automatically. Rollout turns engines on one cell at a time, so backfill never runs in every cell at once. On every install, the same backfill is reconciliation: media that waited with a pending sidecar and no job gets its stage once the engine is enabled.
 - **Recovery.** A job blocked with the typed reason "engine unavailable" is requeued when the engine appears. Today that reason is an `ExtractionUnavailable` error (`media_worker`). Other blocked reasons keep today's behaviour.
 
-## Acceptance (per engine, before its switch turns on)
+## Acceptance (per engine, in the owner's cell, before the switch rolls out)
 
 Run on the owner-sized cell with that engine's backlog active:
 
@@ -161,8 +173,10 @@ Run on the owner-sized cell with that engine's backlog active:
   - query p95 of 3 s or less;
   - publication p95 of 5 s or less;
 - there are no OOMs and no serving restarts, and `memory.oom.group` has been read and recorded;
-- outputs match a personal install in shape. Image vectors meet the parity bound;
-- shared weights are measured on the node: the page cache counts the file once.
+- the owner-sized backlog drains within a bound stated before the run, and no job is left memory-blocked;
+- each processed sidecar reaches a completed `processing_state`, with non-empty extracted text and an `extracted_by` engine marker (`+timed` for audio and video). Image vectors carry the recorded model, width and precision, and meet the parity bound;
+- shared weights are measured on the node: the cells' Pss for the weights file sums to about one copy;
+- the engine's resident and VmData budgets are recorded and pinned.
 
 ## Risks / Trade-offs
 

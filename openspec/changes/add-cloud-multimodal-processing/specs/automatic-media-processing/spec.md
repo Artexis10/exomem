@@ -36,6 +36,11 @@ On an Exomem Cloud cell, the next action SHALL NOT be an instruction to install 
 - **WHEN** the ASR backend cannot be loaded on a personal install
 - **THEN** the job remains blocked with retryability and installation/remediation guidance
 
+#### Scenario: A Hosted cell keeps its current guidance
+- **WHEN** the ASR backend cannot be loaded in a Hosted cell
+- **THEN** the job remains blocked and retryable, with the remediation guidance it receives today
+- **AND** whether the cell runs media at all still follows its Hosted media entitlement
+
 #### Scenario: A Cloud engine cannot load
 - **WHEN** a Cloud cell's enabled engine cannot be loaded
 - **THEN** the job remains blocked and retryable
@@ -54,7 +59,7 @@ On an Exomem Cloud cell, the next action SHALL NOT be an instruction to install 
 ## ADDED Requirements
 
 ### Requirement: Open and e-book document formats and HEIC images extract on every install
-Every install SHALL classify EPUB, OpenDocument text, spreadsheet and presentation (ODT, ODS and ODP) and RTF artifacts as documents through the canonical media registry, and SHALL extract their text through the same sidecar-and-job path as the existing document types. Every install SHALL decode HEIC images and process them as images. A format SHALL count as supported on a deployment only when a check on that deployment's image or install extracts a real sample of it.
+Every install SHALL classify EPUB, OpenDocument text, spreadsheet and presentation (ODT, ODS and ODP) and RTF artifacts as documents through the canonical media registry, and SHALL extract their text through the same sidecar-and-job path as the existing document types. Every install SHALL decode HEIC images and process them as images. A format SHALL count as supported on a deployment only when a check on that deployment's image or install extracts a real sample of it. Doctor's media report SHALL list a format as supported only on that evidence.
 
 #### Scenario: An EPUB is searchable
 - **WHEN** an EPUB book is added to the governed Knowledge Base
@@ -71,4 +76,4 @@ Every install SHALL classify EPUB, OpenDocument text, spreadsheet and presentati
 
 #### Scenario: A format without a real-sample check is not claimed
 - **WHEN** a deployment's checks extract no real sample of a format
-- **THEN** that format is not reported as supported on that deployment
+- **THEN** doctor's media report does not list that format as supported on that deployment
