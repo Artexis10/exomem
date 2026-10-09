@@ -90,7 +90,7 @@
   - The audit's in-request NLI enrichment (`audit.py:6218-6268`) moves onto the ledger with extractor `page-claim-v1`, per the `contradiction-queue` delta.
 - [ ] 9.3 Slice 5:
   - The Cloud placement: cells run the dreamer, each cell senses with its own instruments on shared read-only model weights, and no third-party API sees vault text by default. Measure it against the hosted-inference acceptance measures, which include per-cell activation memory and CPU contention between cells.
-  - Move the Cloud NLI instrument to a runtime that maps its weights read-only, such as ONNX Runtime with prepacking off. The change alters `runtime` in `instrument_id`, so it is a new pin: re-admit it on the fixture set and run the instrument migration (D3). Measure per-cell activation memory on the node.
+  - Move the NLI instrument to a runtime that maps its weights read-only, such as ONNX Runtime with prepacking off, for every placement. One pin serves personal vaults and Cloud cells, because no runtime configuration may select a pin (frozen-verifiers). The change alters `runtime` in `instrument_id`, so it is a new pin: re-admit it on the fixture set and run the instrument migration (D3) for every ledger. Measure per-cell activation memory on the node.
   - Remove `cloud-plane` from `PLACEMENTS` in `src/exomem/sensing.py`. A Cloud cell's instruments run on CPU inside the cell and record `local-cpu` (D2).
   - The per-vault and per-tenant API placement opt-in, with `unpinned_weights` identity and retirement migration (R7).
   - The ledger registered as a portable-derived external-state family for hosted export and restore (R3).
