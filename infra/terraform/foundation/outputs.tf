@@ -4,7 +4,7 @@ output "server_id" {
 }
 
 output "server_ipv4" {
-  description = "Stable primary IPv4 used only for restricted SSH administration."
+  description = "Stable primary IPv4 of the K3s server: public ingress, break-glass SSH and the shared database's allowlisted client address."
   value       = hcloud_primary_ip.node.ip_address
 }
 
@@ -84,12 +84,14 @@ output "database_hostname" {
 }
 
 output "fleet_dependency" {
-  description = "Non-secret versioned coordinates consumed by the shared infrastructure owner."
+  description = "Non-secret versioned network, bootstrap-key and database-client coordinates consumed by the shared infrastructure owner."
   value = {
-    schema_version = 1
+    schema_version = 2
     network_id     = hcloud_network.alpha.id
     subnet_id      = hcloud_network_subnet.alpha.id
     ssh_key_ids    = [hcloud_ssh_key.admin.id]
+    # The shared database admits direct PostgreSQL only from this address (decision 10).
+    database_client_ipv4_cidr = "${hcloud_primary_ip.node.ip_address}/32"
   }
 }
 
