@@ -13,9 +13,6 @@
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if and .Values.cloudDatabase.privateIp (not (has (printf "%s/32" .Values.cloudDatabase.privateIp) .Values.cellctl.databaseEgressCidrs)) }}
-{{- fail "cloudDatabase.privateIp/32 must be listed in cellctl.databaseEgressCidrs" }}
-{{- end }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -189,12 +186,6 @@ spec:
       {{- with .Values.cellctl.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- if .Values.cloudDatabase.hostname }}
-      hostAliases:
-        - ip: {{ .Values.cloudDatabase.privateIp | quote }}
-          hostnames:
-            - {{ .Values.cloudDatabase.hostname | quote }}
       {{- end }}
       securityContext:
         runAsNonRoot: true
