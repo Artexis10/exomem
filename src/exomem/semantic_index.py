@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -517,6 +517,76 @@ class Interpretations:
         return selected
 
 
+class AdmittedParents:
+    """One operation's admitted parents over one sidecar's stored summaries.
+
+    `load(paths)` reads many pages' stored structural summaries in one query:
+    `{path: summary}` for each stored page, so serving rows from many pages
+    never costs one query per page. A page `allowed` refuses is never read or
+    interpreted for this operation. `unavailable` holds the admitted pages
+    whose selected coverage is incomplete here.
+    """
+
+    def __init__(
+        self,
+        load: Callable[[list[str]], Mapping[str, Mapping[str, Any]]],
+        *,
+        allowed: Callable[[str], bool],
+        interpretations: Interpretations,
+        admitted: dict[str, bool] | None = None,
+    ) -> None:
+        self.interpretations = interpretations
+        self.unavailable: set[str] = set()
+        self._load = load
+        self._allowed = allowed
+        #: Admission verdicts per page. A caller that already checked pages by
+        #: the same rule shares its map, so no page is checked twice.
+        self._admitted = admitted if admitted is not None else {}
+        self._parents: dict[str, SelectedParent | None] = {}
+        self._stored: dict[str, Mapping[str, Any] | None] = {}
+
+    def allowed(self, path: str) -> bool:
+        verdict = self._admitted.get(path)
+        if verdict is None:
+            verdict = bool(self._allowed(path))
+            self._admitted[path] = verdict
+        return verdict
+
+    def hold(self, path: str, summary: Mapping[str, Any] | None) -> None:
+        """Keep a summary a caller already read with its page row."""
+        if path not in self._parents:
+            self._stored[path] = summary
+
+    def prefetch(self, paths: Iterable[str]) -> None:
+        wanted = sorted({
+            str(path) for path in paths
+            if path and path not in self._parents and path not in self._stored
+            and self.allowed(str(path))
+        })
+        if wanted:
+            self._stored.update(dict.fromkeys(wanted))
+            self._stored.update(self._load(wanted))
+
+    def parent(self, path: str) -> SelectedParent | None:
+        """The admitted page's selected interpretation, or None when unavailable."""
+        if path in self._parents:
+            return self._parents[path]
+        selected = None
+        # A page the reader may not see is never interpreted for it.
+        if self.allowed(path):
+            self.prefetch([path])
+            summary = self._stored.pop(path, None)
+            try:
+                if summary is not None:
+                    selected = self.interpretations.parent(path, summary)
+            except (ValueError, KeyError, TypeError):
+                selected = None
+            if selected is None or not selected.structure.complete:
+                self.unavailable.add(path)
+        self._parents[path] = selected
+        return selected
+
+
 def _registry_hashes(
     language: semantic_language_registry.SemanticLanguageRegistry,
     relations: relation_registry.RelationRegistry,
@@ -709,7 +779,7 @@ def audit_semantic_unit_sidecars(
             (
                 "lexical",
                 _sqlite_unit_rows(lexstore.lexical_path(vault_root), "semantic_units"),
-                _unit_refs,
+                _occurrence_keys,
             )
         )
     if include_vectors:

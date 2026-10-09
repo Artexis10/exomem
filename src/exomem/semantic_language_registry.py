@@ -165,6 +165,24 @@ class UnitQueryPlan:
                  and (kind in self.core_kinds or instance_id == self.instance_id))
         )
 
+    def predicate(self, category: str, kind: str) -> tuple[str, list[str]]:
+        """SQL proposing candidates over stored raw-label columns `category` and `kind`."""
+        parts: list[str] = []
+        params: list[str] = []
+        if self.categories is not None:
+            labels, fallback = sorted(self.category_labels), sorted(self.category_kind_labels)
+            # A rich block without a recognized category falls back to its kind.
+            parts.append(
+                f"({category} IN ({','.join('?' for _ in labels)}) "
+                f"OR {kind} IN ({','.join('?' for _ in fallback)}))"
+            )
+            params.extend((*labels, *fallback))
+        if self.kinds is not None:
+            labels = sorted(self.kind_labels)
+            parts.append(f"{kind} IN ({','.join('?' for _ in labels)})")
+            params.extend(labels)
+        return ("(" + " AND ".join(parts) + ")" if parts else "1"), params
+
 
 def _heading_labels(registry: SemanticLanguageRegistry, kinds: frozenset[str]) -> set[str]:
     """Raw heading labels this adapter can recognize as one of `kinds`.

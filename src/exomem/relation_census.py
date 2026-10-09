@@ -389,7 +389,7 @@ class _Reader:
         for path, page_type, status, tags_json, origin_date, tier, entity, scope in (
             connection.execute(
                 "SELECT path, page_type, lifecycle_status, tags_json, origin_date, "
-                "access_tier, json_extract(metadata, '$.entity_type'), "
+                "access_tier, json_extract(metadata, '$.entity_type_raw'), "
                 "json_extract(metadata, '$.scope') FROM graph_nodes WHERE kind = 'file'"
             )
         ):
@@ -625,9 +625,11 @@ def _census_payload(
         page = reader.pages.get(path)
         if page is None or not page.admitted or page.page_type != "entity":
             return None
-        if not page.entity_type or types.resolve(page.entity_type) is None:
+        # Stored rows hold the authored label; this census resolves it.
+        definition = types.resolve(page.entity_type) if page.entity_type else None
+        if definition is None:
             return None
-        return types.family_of(page.entity_type)
+        return types.family_of(definition.id)
 
     entity_pages = {path for path in eligible if entity_family(path) is not None}
     pages_with_sources = reader.sources_pages()

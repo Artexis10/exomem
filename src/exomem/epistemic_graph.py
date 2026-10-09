@@ -10169,6 +10169,9 @@ def _file_node(
             "body_wikilinks": len(activation.find_body_wikilinks(state.body)),
         },
     }
+    if page.page_type == "entity" and frontmatter.get("entity_type"):
+        # The authored label only; each reader resolves it with its own definitions.
+        metadata["entity_type_raw"] = str(frontmatter["entity_type"])
     return GraphNode(
         node_key=_file_key(page.rel_path),
         kind="file",
@@ -11093,18 +11096,9 @@ def _planned_unit_rows(
         clauses.append("(title LIKE ? OR text LIKE ?)")
         like = f"%{query}%"
         params.extend((like, like))
-    if plan.categories is not None:
-        categories = sorted(plan.category_labels)
-        fallback = sorted(plan.category_kind_labels)
-        clauses.append(
-            f"(unit_category IN ({','.join('?' for _ in categories)}) "
-            f"OR unit_kind IN ({','.join('?' for _ in fallback)}))"
-        )
-        params.extend((*categories, *fallback))
-    if plan.kinds is not None:
-        kinds = sorted(plan.kind_labels)
-        clauses.append(f"unit_kind IN ({','.join('?' for _ in kinds)})")
-        params.extend(kinds)
+    predicate, labels = plan.predicate("unit_category", "unit_kind")
+    clauses.append(predicate)
+    params.extend(labels)
     after: tuple[str, str] | None = None
     while True:
         cursor = [] if after is None else ["(path, node_key) > (?, ?)"]
@@ -11435,79 +11429,51 @@ class GraphView:
         self.vault_root = Path(vault_root)
         self.conn = conn
         self.keep = keep
-        #: Admission verdicts per page for this operation. A caller that already
-        #: checked pages by the same rule shares its map, so no page is checked twice.
-        self._admitted = admitted if admitted is not None else {}
         self.interpretations = interpretations or semantic_index.Interpretations(vault_root)
-        #: Admitted pages whose selected coverage is incomplete for this operation.
-        self.unavailable: set[str] = set()
-        self._parents: dict[str, semantic_index.SelectedParent | None] = {}
-        #: Stored file-node metadata read ahead by `prefetch`, consumed by `parent`.
-        self._stored: dict[str, str | None] = {}
+        self.parents = semantic_index.AdmittedParents(
+            self._summaries,
+            allowed=lambda rel_path: _recall_path_allowed(self.vault_root, rel_path)
+            and (keep is None or keep(rel_path)),
+            interpretations=self.interpretations,
+            admitted=admitted,
+        )
         self._nodes: dict[str, dict[str, Any] | None] = {}
         self._resolver: vault_module.WikilinkResolver | None = None
         self._changes: dict[str, bool] = {}
         self._edges: dict[str, list[dict[str, Any]] | None] = {}
         self._evidence: dict[str, dict[str, dict[str, Any]]] = {}
 
-    def allowed(self, rel_path: str) -> bool:
-        verdict = self._admitted.get(rel_path)
-        if verdict is None:
-            verdict = _recall_path_allowed(self.vault_root, rel_path) and (
-                self.keep is None or self.keep(rel_path)
+    def _summaries(self, paths: list[str]) -> dict[str, Mapping[str, Any]]:
+        return {
+            str(path): _json(metadata).get(STRUCTURAL_METADATA) or {}
+            for path, metadata in self.conn.execute(
+                "SELECT path, metadata FROM graph_nodes "
+                "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
+                (json.dumps(paths),),
             )
-            self._admitted[rel_path] = verdict
-        return verdict
+        }
+
+    @property
+    def unavailable(self) -> set[str]:
+        """Admitted pages whose selected coverage is incomplete for this operation."""
+        return self.parents.unavailable
+
+    def allowed(self, rel_path: str) -> bool:
+        return self.parents.allowed(rel_path)
 
     def parent(self, rel_path: str) -> semantic_index.SelectedParent | None:
         """The admitted page's selected interpretation, or None when unavailable."""
-        if rel_path in self._parents:
-            return self._parents[rel_path]
-        selected = None
-        # A page the reader may not see is never interpreted for it.
-        if self.allowed(rel_path):
-            if rel_path in self._stored:
-                row = (self._stored.pop(rel_path),)
-            else:
-                row = self.conn.execute(
-                    "SELECT metadata FROM graph_nodes WHERE node_key = ?", (_file_key(rel_path),)
-                ).fetchone()
-            try:
-                if row is not None and row[0] is not None:
-                    selected = self.interpretations.parent(
-                        rel_path, _json(row[0]).get(STRUCTURAL_METADATA) or {}
-                    )
-            except (ValueError, KeyError, TypeError):
-                selected = None
-            if selected is None or not selected.structure.complete:
-                self.unavailable.add(rel_path)
-        self._parents[rel_path] = selected
-        return selected
+        return self.parents.parent(rel_path)
 
     def hold(self, rel_path: str, metadata: str | None) -> None:
         """Keep file-node metadata a caller already read with its page row."""
-        if rel_path not in self._parents:
-            self._stored[rel_path] = metadata
+        self.parents.hold(
+            rel_path, None if metadata is None else _json(metadata).get(STRUCTURAL_METADATA) or {}
+        )
 
     def prefetch(self, paths: Iterable[str]) -> None:
-        """Read many admitted pages' stored summaries in one query before serving.
-
-        Serving rows from many pages otherwise costs one query per page.
-        """
-        wanted = sorted({
-            str(path) for path in paths
-            if path and path not in self._parents and path not in self._stored
-            and self.allowed(str(path))
-        })
-        if not wanted:
-            return
-        self._stored.update(dict.fromkeys(wanted))
-        for path, metadata in self.conn.execute(
-            "SELECT path, metadata FROM graph_nodes "
-            "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
-            (json.dumps(wanted),),
-        ):
-            self._stored[str(path)] = metadata
+        """Read many admitted pages' stored summaries in one query before serving."""
+        self.parents.prefetch(paths)
 
     def registry_for(self, rel_path: str) -> relation_registry.RelationRegistry:
         parent = self.parent(rel_path)

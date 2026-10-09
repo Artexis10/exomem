@@ -1213,8 +1213,13 @@ def enrich_page_state(
     language_hash = f"{language.schema_version}:{language.content_hash}"
     relation_hash = f"{relation_definitions.core_version}:{relation_definitions.extension_hash}"
     if (state.language_registry_hash, state.relation_registry_hash) != (language_hash, relation_hash):
+        # The same parent input as the detached parse: a page without an
+        # `exomem_id` derives its legacy path ref, which is not a memory ref.
         document = semantic_units.parse_semantic_units(
-            state.body, path=state.path, parent_ref=state.document.parent_ref,
+            state.body, path=state.path,
+            parent_ref=(
+                memory_refs.memory_ref(state.identity) if state.identity_kind == "exomem_id" else None
+            ),
             candidates=state.candidates,
             language_registry=semantic_language_registry.for_attached_projects(language, state.projects),
             relation_registry=relation_definitions, include_legacy_relations=True,
@@ -1246,7 +1251,8 @@ def enrich_page_state(
         if governed or compiled or connectable
         else lifecycle_statuses.Classification(None)
     )
-    live = classification.lifecycle_class == "live"
+    # `live` refuses an unavailable classification; never read it as "not live".
+    live = classification.live if governed or compiled or connectable else False
     return replace(
         state,
         document=document,

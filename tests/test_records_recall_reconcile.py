@@ -73,7 +73,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
             "INSERT INTO semantic_units(record_type, unit_ref, parent_path, parent_generation, "
             "parent_source_hash, parser_version, form, category_raw, category_key, category, "
             "kind, content, tags_json, unit_source_hash, line, end_line, source_order) "
-            "VALUES ('semantic_unit', 'raw-unit', ?, 'generation', 'hash', 1, 'fact', "
+            "VALUES ('structural_occurrence', 'raw-unit', ?, 'generation', 'hash', 1, 'fact', "
             "'config', 'config', 'config', 'fact', 'private', '[]', 'unit-hash', 1, 1, 0)",
             (rel,),
         )

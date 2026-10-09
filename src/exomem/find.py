@@ -3230,8 +3230,11 @@ class RetrievalIndexWarming(cli_ops.OpError):
 
 def _raise_catalog_outcome(readiness: object) -> None:
     outcome = str(getattr(readiness, "status", "stale"))
+    # Closed `CatalogReadiness` statuses that index warm-up does not resolve.
     public_status = (
-        "temporarily_unavailable" if outcome in {"transient_failure", "unsupported"} else "warming"
+        "temporarily_unavailable"
+        if outcome in {"transient_failure", "unsupported", "definitions_unavailable"}
+        else "warming"
     )
     raise RetrievalIndexWarming(site="catalog_outcome", status=public_status)
 

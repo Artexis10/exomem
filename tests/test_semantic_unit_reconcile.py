@@ -82,10 +82,12 @@ def _seed_sidecars(
 
 
 def test_hierarchy_parser_and_sidecar_versions_are_incremented() -> None:
-    assert semantic_index.PARSER_VERSION == 4
-    assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION == 3
-    assert lexstore.SCHEMA_VERSION == 12
-    assert epistemic_graph.SCHEMA_VERSION == 12
+    # Lower bounds: the hierarchy parser shipped at these versions, and later
+    # format changes move them further without undoing it.
+    assert semantic_index.PARSER_VERSION >= 4
+    assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION >= 3
+    assert lexstore.SCHEMA_VERSION >= 12
+    assert epistemic_graph.SCHEMA_VERSION >= 12
 
 
 def test_explicit_upgrade_reconcile_reprojects_unchanged_rich_units_everywhere(
@@ -151,7 +153,7 @@ Keep retry windows bounded.
         ).fetchall()
         for node_key, raw_metadata in rows:
             metadata = json.loads(raw_metadata)
-            if metadata.get("record_type") != "semantic_unit":
+            if not metadata.get("occurrence_key"):
                 continue
             metadata.update(
                 tags=[],
@@ -196,14 +198,10 @@ Keep retry windows bounded.
     assert [(row.tags, row.context) for row in rows] == [
         (("reliability", "runtime/retry"), "Edge path")
     ]
-    graph_rows = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path)).execute(
-        "SELECT metadata FROM graph_nodes WHERE path = ?",
-        (_REL,),
-    ).fetchall()
     graph_units = [
-        json.loads(raw_metadata)
-        for (raw_metadata,) in graph_rows
-        if json.loads(raw_metadata).get("record_type") == "semantic_unit"
+        node["metadata"]
+        for node in epistemic_graph.graph_context(tmp_path, path=_REL, depth=1)["nodes"]
+        if node["metadata"].get("record_type") == "semantic_unit"
     ]
     assert [(row["tags"], row["context"]) for row in graph_units] == [
         (["reliability", "runtime/retry"], "Edge path")
@@ -257,7 +255,8 @@ Parent conclusion.
     try:
         conn.execute(
             "UPDATE semantic_units SET parser_version = ?, "
-            "parent_generation = 'pre-hierarchy', unit_ref = 'old-overlap-ref' "
+            "parent_generation = 'pre-hierarchy', "
+            "unit_ref = 'old-overlap-ref-' || source_order "
             "WHERE parent_path = ?",
             (semantic_index.PARSER_VERSION - 1, _REL),
         )

@@ -92,9 +92,10 @@ def entity_types(vault_root: Path, snapshot: Snapshot) -> Usage:
     """Entity pages per registered type, from the graph's file nodes."""
 
     def read() -> Usage:
+        # Stored rows hold the authored label; this snapshot resolves it.
         rows = _graph_rows(
             vault_root,
-            "SELECT json_extract(metadata, '$.entity_type'), COUNT(*) FROM graph_nodes "
+            "SELECT json_extract(metadata, '$.entity_type_raw'), COUNT(*) FROM graph_nodes "
             "WHERE kind = 'file' AND page_type = 'entity' GROUP BY 1",
         )
         if isinstance(rows, str):

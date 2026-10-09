@@ -157,7 +157,7 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
             scope="kb",
             freshness=old_freshness,
         )
-        is None
+        == []
     )
     stale_context = epistemic_graph.graph_context(tmp_path, path=_REL, depth=1)
     assert not any(
