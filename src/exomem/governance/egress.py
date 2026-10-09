@@ -1876,7 +1876,14 @@ def _decide_path(
         who = RequestPrincipal(audience_id=audience)
     if not content_permits(vault_root, rel_path, who):
         return Decision(DISCLOSURE_MIN)
-    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
+    from ..collection_store.connection import CollectionStoreError
+
+    try:
+        empty = _file_policy_empty(vault_root, policy, rel_path=rel_path)
+    except CollectionStoreError:
+        # An unplaceable path or an un-upgraded marker cannot be decided: withhold.
+        return Decision(DISCLOSURE_MIN)
+    if empty:
         return Decision(DISCLOSURE_MAX)
     full_path = vault_root / rel_path
     try:
@@ -5819,9 +5826,15 @@ def release_level_for(
     if not content_permits(vault_root, rel_path, who):
         return DISCLOSURE_MIN
     policy = policy_module.load(vault_root)
-    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
+    from ..collection_store.connection import CollectionStoreError
+
+    try:
+        empty = _file_policy_empty(vault_root, policy, rel_path=rel_path)
+    except CollectionStoreError:
+        # An unplaceable path or an un-upgraded marker cannot be decided: withhold.
+        return DISCLOSURE_MIN
+    if empty:
         return DISCLOSURE_MAX
-    who = principal if principal is not None else effective_principal()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
