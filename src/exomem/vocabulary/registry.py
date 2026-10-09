@@ -229,7 +229,13 @@ class FixedPackAdapter:
         self._pack, self._spec, self._check = pack, spec, check
 
     def _shipped(self) -> dict[str, Entry]:
-        return {entry.key: entry for entry in pack_entries(self._pack)}
+        entries = {entry.key: entry for entry in pack_entries(self._pack)}
+        for entry in entries.values():
+            try:
+                self._check(entry, entries)
+            except RegistryError as error:
+                raise RuntimeError(f"shipped pack {self._pack} is invalid: {error}") from error
+        return entries
 
     def normalize_key(self, raw: str) -> str:
         key = token(raw)
