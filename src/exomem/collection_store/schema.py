@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -87,6 +87,7 @@ TABLES = (
     "typed_encoding_mappings",
     "import_jobs",
     "import_rejections",
+    "import_members",
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
@@ -694,6 +695,23 @@ def _migrate_to_8(conn: sqlite3.Connection) -> None:
       groups TEXT NOT NULL,
       row_id INTEGER NOT NULL REFERENCES items(row_id),
       PRIMARY KEY(rollup_id,bucket,groups,row_id)
+    ) STRICT, WITHOUT ROWID""")
+
+
+def _migrate_to_9(conn: sqlite3.Connection) -> None:
+    """Record which export members an import has read into a collection, per mapping.
+
+    A member is ``complete`` once a job has taken all of its rows, and a later job with
+    the same mapping skips it; ``partial`` holds the rows taken so far and is never
+    skipped. ``rows`` counts the rows taken from the member, rejected ones included.
+    """
+    conn.execute("""CREATE TABLE import_members(
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      mapping_sha256 TEXT NOT NULL,
+      member_sha256 TEXT NOT NULL,
+      rows INTEGER NOT NULL CHECK (rows >= 0),
+      state TEXT NOT NULL CHECK (state IN ('partial', 'complete')),
+      PRIMARY KEY (collection_id, mapping_sha256, member_sha256)
     ) STRICT, WITHOUT ROWID""")
 
 
