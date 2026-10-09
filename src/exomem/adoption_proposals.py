@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import context_refs, guards
+from . import context_refs, guards, lifecycle_statuses
 from . import get_page as get_page_module
 from . import note as note_module
 from . import relation_registry as relation_registry_module
@@ -357,7 +357,9 @@ def _validate_supersession_target(root: Path, old_path: Any, findings: list[dict
     frontmatter = _page_frontmatter(root, clean)
     if frontmatter is None:
         findings.append(_finding("OLD_NOT_FOUND", "old_path", f"{clean} does not exist"))
-    elif frontmatter.get("status") == "superseded":
+    elif (
+        lifecycle_statuses.Basis(root).classify(frontmatter.get("status")).require() == "superseded"
+    ):
         findings.append(
             _finding("ALREADY_SUPERSEDED", "old_path", f"{clean} is already superseded")
         )

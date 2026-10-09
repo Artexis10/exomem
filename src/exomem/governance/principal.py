@@ -37,6 +37,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -505,4 +506,23 @@ def library_scope() -> Iterator[None]:
         yield
         return
     with request_scope(owner_principal(surface="library")):
+        yield
+
+
+@contextmanager
+def owner_local_producer(vault_root: Path, boundary: str) -> Iterator[None]:
+    """Run a producer of shared state as the owner, in a disclosure boundary of its own.
+
+    Unlike `library_scope`, this escalates under a bound request, so it is only for
+    state that every audience shares and no caller reads except through a per-caller
+    serve; computing it from one caller's view would make it depend on whoever ran
+    it last. The boundary keeps the producer's release decisions off the caller's
+    receipt.
+    """
+    from . import egress  # egress imports this module at load time
+
+    with (
+        egress.disclosure_boundary(Path(vault_root), boundary),
+        request_scope(owner_principal(surface="library")),
+    ):
         yield

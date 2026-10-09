@@ -29,7 +29,7 @@ from test_governance_egress import (
 
 from exomem import context_refs
 from exomem.governance import egress
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance.principal import library_scope, owner_principal, request_scope
 
 
 @pytest.mark.parametrize("cue", ["", "right now", "currently", "how much"])
@@ -3775,7 +3775,9 @@ def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
     lexstore.ensure_fresh(vault)
     _indexed(vault)
 
-    hits, state = working_set_runtime.carry_candidates(vault, CARRY_TURN)
+    # The owner's half: an unbound call admits as the floor, so the owner says so.
+    with library_scope():
+        hits, state = working_set_runtime.carry_candidates(vault, CARRY_TURN)
     assert state == "available"
     # Exactly the page the turn named; the second page exists in the corpus
     # but the naming gate never admits it.

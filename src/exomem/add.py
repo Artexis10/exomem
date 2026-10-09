@@ -1120,6 +1120,7 @@ def _supersede_writes(
         if actual != expected:
             raise ContentHashMismatchError(target, expected, actual)
         frontmatter, _body, _raw = parse_frontmatter(text)
+        # Recorder accounting fixes this tombstone in the atomic episode revision protocol.
         if str(frontmatter.get("status") or "").casefold() == "superseded":
             continue
         updated = _mark_superseded(text, link, stamp_iso)

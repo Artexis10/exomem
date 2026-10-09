@@ -220,8 +220,16 @@ class HeldFilesystem:
     ) -> HeldResult[None]:
         raise NotImplementedError
 
-    def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
-        """Return stable immediate children, omitting unsafe alias objects."""
+    def children(
+        self,
+        parent: HeldDirectory,
+        *,
+        name_filter: Callable[[str], bool] | None = None,
+    ) -> HeldResult[tuple[SagaRecord, ...]]:
+        """Return stable children, omitting unsafe alias objects.
+
+        Filter names before acquiring identities when a caller supplies a filter.
+        """
 
         raise NotImplementedError
 

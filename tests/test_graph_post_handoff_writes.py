@@ -2298,7 +2298,7 @@ def test_the_warm_up_adopts_before_it_builds_the_semantic_corpus(
         EpistemicGraphIndex, "adopt_published_snapshot", traced_adopt, raising=True
     )
     monkeypatch.setattr(
-        semantic_contract, "build_corpus_context", traced_corpus, raising=True
+        semantic_contract, "warm_corpus_context", traced_corpus, raising=True
     )
     monkeypatch.setattr(readiness, "mark_ready", traced_mark, raising=True)
 
@@ -2444,7 +2444,7 @@ def _trace_warm(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
         lambda _root: (order.append("graph_snapshot"), {})[1],
         raising=True,
     )
-    monkeypatch.setattr(semantic_contract, "build_corpus_context", traced_corpus, raising=True)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", traced_corpus, raising=True)
     monkeypatch.setattr(readiness, "mark_ready", traced_mark, raising=True)
     return order, marked
 

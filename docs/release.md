@@ -122,6 +122,25 @@ unit and excludes recognized blocks with no substantive body. Its parser/index
 version bump invalidates stale derived rows; it does not rewrite Markdown. After
 an upgrade, follow the [derived-state rebuild guidance](deployment.md#deploying-a-new-version).
 
+### Lifecycle status registry: downgrading below this release
+
+The release that adds the lifecycle status registry lets the activation manifest
+record a page `status` and its `class_at_activation`. An older release accepts
+only the four original page fields, so it refuses a manifest that records either.
+
+Do not skip step 3. If you skip it on a vault whose manifest records a page
+`status`, every write on the older release refuses with
+`ACTIVATION_MANIFEST_INVALID` until you delete the file.
+
+1. Downgrade the service to the older release.
+2. Open `Knowledge Base/_Schema/semantic-activation.yaml` in the vault.
+3. If a page entry in that file records `status`, delete the file.
+4. Make one ordinary write.
+
+The older release prepares its own manifest on the first write that needs one,
+and writes stop refusing. The new manifest takes the corpus at that moment as
+its activation baseline.
+
 ## Commit convention
 
 Release Please reads Conventional Commit messages after the latest release tag:

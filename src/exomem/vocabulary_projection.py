@@ -160,7 +160,6 @@ def _note_pairs(connection, path, known_types, after):
             "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
             "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND e.relation_type IN ('links_to', 'relates_to') AND t.kind='file' "
-            "AND t.lifecycle_status='active' "
             f"AND t.page_type IN ({placeholders}) AND t.path {comparison} ? "
             "ORDER BY t.path LIMIT ?",
             (epistemic_graph._with_md(path), *known_types, boundary, limit),
@@ -202,7 +201,6 @@ def _candidate_rows(connection, path, known_types, anchor, after):
             "JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND e.relation_type='relates_to' "
             "AND s.kind='file' AND t.kind='file' "
-            "AND s.lifecycle_status='active' AND t.lifecycle_status='active' "
             "AND (s.path, t.path) > (?, ?) "
             "GROUP BY s.node_key, t.node_key ORDER BY s.path, t.path LIMIT ?",
             (epistemic_graph._with_md(path), *after, EDGE_PAGE + 1),
@@ -410,6 +408,9 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
             raise ValueError("VOCABULARY_EVIDENCE_UNAVAILABLE: written context changed")
         anchor_evidence = [Evidence(anchor_ref, anchor[1])]
         hints[anchor_ref] = anchor[0]
+    from . import lifecycle_statuses
+
+    status_basis = lifecycle_statuses.Basis(vault_root)
     items, signals = [], []
     for (
         source_path,
@@ -430,6 +431,7 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
             memory_refs.memory_ref(target_id),
         )
         targets = {source_ref: source_path, target_ref: target_path}
+        current_pair = True
         for ref, expected in ((source_ref, source_hash), (target_ref, target_hash)):
             page = vocabulary_review._read(vault_root, {"paths": targets}, ref)
             if page["content_hash"] != expected:
@@ -439,6 +441,19 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
                     "items": [],
                     "signals": [],
                 }
+            try:
+                current_pair &= status_basis.classify(
+                    page.get("frontmatter", {}).get("status")
+                ).live
+            except lifecycle_statuses.ClassificationUnavailable:
+                return {
+                    "status": "unavailable",
+                    "reason": "status_classification_unavailable",
+                    "items": [],
+                    "signals": [],
+                }
+        if not current_pair:
+            continue
         signal = consider_generic_pair(
             source_ref=source_ref,
             target_ref=target_ref,

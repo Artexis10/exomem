@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_store, episode_capture, find_corpus
+from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses
 from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
@@ -43,8 +43,6 @@ SETTLE_SECONDS = 3600.0
 #: changes. It stays listed on explicit review.
 MAX_DELIVERIES = 2
 
-_INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "planned", "dropped"})
-
 
 class Deferred(Exception):
     """A page cannot be processed right now (a derived read is unavailable).
@@ -59,8 +57,10 @@ class Deferred(Exception):
         self.reason = reason
 
 
-#: Every `Deferred.reason`: why a page is held, as status reports it.
-DEFERRAL_REASONS = frozenset({"graph_unavailable", "identity_cache_cold", "identity_unavailable"})
+#: Closed Deferred.reason protocol: why a page is held, as status reports it.
+DEFERRAL_REASONS = frozenset(
+    {"graph_unavailable", "identity_cache_cold", "identity_unavailable", "status_unavailable"}
+)
 #: The reasons that hold every page, not just the one that met them.
 VAULT_WIDE_DEFERRALS = frozenset({"graph_unavailable"})
 
@@ -83,6 +83,18 @@ class Context:
     #: registry is loaded once per tick). Empty on the request path.
     shared: dict[str, Any] = field(default_factory=dict)
     _members: list[sqlite3.Connection] = field(default_factory=list)
+
+    status_basis: lifecycle_statuses.Basis = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.status_basis = lifecycle_statuses.Basis(self.vault_root)
+
+    def live_status(self, value: object) -> bool:
+        """An unavailable dependent classification defers this page's proposal."""
+        try:
+            return self.status_basis.classify(value).live
+        except lifecycle_statuses.ClassificationUnavailable as error:
+            raise Deferred("status_unavailable") from error
 
     def graph(self) -> Any:
         """One validated graph read snapshot for this page, opened once.
@@ -324,11 +336,6 @@ class Family:
     stores_whole_view: bool = False
 
 
-def _status(page: Any) -> str:
-    status = getattr(page, "status", None)
-    return status.strip().casefold() if isinstance(status, str) else ""
-
-
 def _sig(ctx: Context, rel_path: str) -> str | None:
     from . import dreamer_delta
 
@@ -390,10 +397,10 @@ def _identity_wait(vault_root: Path) -> str:
 
 def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     """The open relation proposals whose source page is `rel_path`, by relation id."""
-    from . import activation, epistemic_graph, relation_queue, review_state
+    from . import epistemic_graph, relation_queue, review_state
 
-    page = ctx.page(rel_path)
-    if page is None or not activation._eligible(ctx.vault_root, page):
+    page = _governed(ctx, rel_path)
+    if page is None:
         return {}
     snapshot = ctx.graph()  # raises Deferred when the graph cannot be read
     payload = ctx.review_payload()
@@ -408,13 +415,11 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
         if epistemic_graph._with_md(str(candidate.get("from") or rel_path)) != rel_path:
             continue
         target_rel = epistemic_graph._with_md(str(candidate.get("to") or ""))
-        target = ctx.page(target_rel)
-        if target is None or _status(target) in _INACTIVE_STATUSES:
+        target = _governed(ctx, target_rel)
+        if target is None:
             continue
         # Only a governed page is a link target: never raw evidence, a Source,
         # an episode recap or a navigation page.
-        if not activation.is_eligible_governed_page(ctx.vault_root, target):
-            continue
         if _authored_between(ctx, page, target):
             continue
         refs = relation_queue._hinted_candidate_refs(ctx.vault_root, candidate, snapshot=snapshot)
@@ -610,18 +615,16 @@ _NEWER_THAN = (
 
 _CONTRIBUTORS_SQL = (
     "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id, "
-    "f.title "
+    "f.title, f.lifecycle_status "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_page_key = ? AND e.source_path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     f"AND {_NEWER_THAN} "
     f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
-    f"AND COALESCE(f.lifecycle_status, '') NOT IN "
-    f"({','.join('?' for _ in _INACTIVE_STATUSES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
     "AND b.dst_page_key = ('file:' || e.source_path)) "
-    "ORDER BY e.source_path, e.src_key LIMIT ?"
+    "ORDER BY e.source_path, e.src_key"
 )
 
 
@@ -682,15 +685,18 @@ def _declared_sources(
     return sources
 
 
-def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
-    """The hydration proposal for one entity, from the graph snapshot alone.
+def _hydration_detect(ctx: Context, entity: str, keep=None) -> dict[str, Any] | None:
+    """The hydration proposal from graph links and current eligibility.
 
     Newer facts about the entity live on compiled pages that link it, and the
-    entity's own page does not link or cite those pages back. Reads no
-    Markdown: every input is a row of the published graph sidecar.
+    entity's own page does not link or cite those pages back. The existing
+    page cache supplies current eligibility, and `keep` admission, before
+    contributors spend the cap. `keep=None` is the worker's owner view.
     """
     from . import provenance
 
+    if not _visible(keep, entity):
+        return None
     graph = ctx.graph()
     node = graph.execute(
         "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id, title "
@@ -699,7 +705,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     ).fetchone()
     if node is None or node[0] != "entity":
         return None
-    if str(node[1] or "").strip().casefold() in _INACTIVE_STATUSES:
+    if not ctx.live_status(node[1]):
         return None
     entity_date = _date(node[2], node[3])
     rows = graph.execute(
@@ -709,14 +715,16 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             entity,
             entity_date,
             *_HYDRATION_TYPES,
-            *sorted(_INACTIVE_STATUSES),
             entity,
-            _HYDRATION_ROW_LIMIT,
         ),
-    ).fetchall()
+    )
     contributors: dict[str, dict[str, Any]] = {}
-    for path, src_key, _updated, _origin, exomem_id, title in rows:
+    accepted = 0
+    for path, src_key, _updated, _origin, exomem_id, title, _status in rows:
         path = str(path)
+        if _governed(ctx, path, keep) is None:
+            continue
+        accepted += 1
         entry = contributors.setdefault(
             path,
             {"exomem_id": exomem_id, "title": title, "units": set(), "page_level": False},
@@ -730,6 +738,8 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             ).fetchone()
             if unit is not None:
                 entry["units"].add(str(unit[0]))
+        if accepted >= _HYDRATION_ROW_LIMIT:
+            break
     for path, entry in list(contributors.items()):
         if entry["page_level"]:
             entry["units"].update(
@@ -744,7 +754,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             contributors.pop(path)
     if not contributors:
         return None
-    sources = _declared_sources(graph, list(contributors))
+    sources = _declared_sources(graph, list(contributors), keep)
     # Pages that declare no Source count as ONE origin between them. The graph
     # carries no session key to tell their conversations apart, so the
     # conservative reading is a single conversation-only fan-out.
@@ -774,9 +784,9 @@ def review_state_digest(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def _hydration_kwargs(ctx: Context, entity: str) -> dict[str, Any] | None:
+def _hydration_kwargs(ctx: Context, entity: str, keep=None) -> dict[str, Any] | None:
     """One entity's hydration proposal as the store's upsert arguments."""
-    proposal = _hydration_detect(ctx, entity) if _sig(ctx, entity) else None
+    proposal = _hydration_detect(ctx, entity, keep) if _sig(ctx, entity) else None
     if proposal is None:
         return None
     contributors = proposal["contributors"]
@@ -845,7 +855,11 @@ def _hydration_refresh(ctx: Context, entity: str) -> None:
 
 
 def _hydration_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
-    kwargs = _hydration_kwargs(ctx, str(row.get("subject_path") or ""))
+    from .governance import egress
+
+    # The request path's revalidation: contributors the caller cannot see spend no cap slot.
+    keep = egress.release_walk_filter(ctx.vault_root)
+    kwargs = _hydration_kwargs(ctx, str(row.get("subject_path") or ""), keep)
     if kwargs is None:
         return None
     kwargs["fingerprint"] = dreamer_store.proposal_fingerprint(
@@ -912,14 +926,26 @@ def _member_entry(ctx: Context, rel_path: str, role: str, **extra: Any) -> dict[
     }
 
 
-def _governed(ctx: Context, rel_path: str) -> Any | None:
-    """The parsed page when it is an active governed page, else None."""
+def _governed(ctx: Context, rel_path: str, keep=None) -> Any | None:
+    """A currently eligible page that `keep` admits before its status or content is read.
+
+    `keep=None` is the producer's owner view, as in every other view here; a
+    served view passes the caller's predicate.
+    """
     from . import activation
 
-    page = ctx.page(rel_path)
-    if page is None or not activation.is_eligible_governed_page(ctx.vault_root, page):
+    if not _visible(keep, rel_path):
         return None
-    return page
+    page = ctx.page(rel_path)
+    if page is None:
+        return None
+    try:
+        eligible = activation.is_eligible_governed_page(
+            ctx.vault_root, page, status_basis=ctx.status_basis
+        )
+    except lifecycle_statuses.ClassificationUnavailable as error:
+        raise Deferred("status_unavailable") from error
+    return page if eligible else None
 
 
 def _pages_in(rows: list[tuple[str, ...]]) -> dict[str, list[Any]]:
@@ -1664,21 +1690,20 @@ _LINKER_ROW_LIMIT = 64
 _LINKED_SUBJECTS_SQL = (
     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
     "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
-    "WHERE e.source_path = ? AND d.path <> ? AND d.review_eligible = 1 "
+    "WHERE e.source_path = ? AND d.path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
-    "ORDER BY d.path LIMIT ?"
+    "ORDER BY d.path"
 )
 
 #: Live episode recaps recorded after the subject's date that link the subject
 #: and that it neither links nor cites.
 _RECAPS_SQL = (
-    "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date "
+    "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date, f.lifecycle_status "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_page_key = ? AND substr(e.source_path, 1, ?) = ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     f"AND {_NEWER_THAN} "
-    f"AND COALESCE(f.lifecycle_status, '') NOT IN ({','.join('?' for _ in _INACTIVE_STATUSES)}) "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
     "AND b.dst_page_key = ('file:' || e.source_path)) "
     "ORDER BY e.source_path"
@@ -1688,7 +1713,7 @@ _RECAPS_SQL = (
 _REFERRERS_SQL = (
     "SELECT DISTINCT e.source_path FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_page_key = ? AND e.source_path <> ? AND f.review_eligible = 1 "
+    "WHERE e.dst_page_key = ? AND e.source_path <> ? "
     "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     "ORDER BY e.source_path"
 )
@@ -1708,18 +1733,18 @@ def _episodes_prefix() -> str:
 
 def _subject_node(ctx: Context, subject: str, keep) -> tuple[Any, ...] | None:
     """The subject's graph row when it is an active governed page the caller may see."""
-    if not _visible(keep, subject):
+    if _governed(ctx, subject, keep) is None:
         return None
     node = (
         ctx.graph()
         .execute(
-            "SELECT review_eligible, updated_date, origin_date, exomem_id, title "
+            "SELECT path, updated_date, origin_date, exomem_id, title "
             "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
             (f"file:{subject}",),
         )
         .fetchone()
     )
-    return node if node is not None and node[0] else None
+    return node
 
 
 def _visible(keep, path: str) -> bool:
@@ -1746,7 +1771,7 @@ def subject_rows_touched(ctx: Context, paths: list[str]) -> set[str]:
                 for row in ctx.graph().execute(
                     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
                     "ON d.node_key = e.dst_page_key AND d.kind = 'file' "
-                    f"WHERE e.source_path IN ({marks}) AND d.review_eligible = 1",
+                    f"WHERE e.source_path IN ({marks})",
                     paths,
                 )
             }
@@ -1771,13 +1796,13 @@ def _released_rows(cursor, keep) -> list[tuple[Any, ...]]:
 
 
 def _linked_subjects(ctx: Context, rel_path: str) -> list[str]:
-    """The page itself and the governed pages it links (at most 16)."""
-    linked = [
-        str(row[0])
-        for row in ctx.graph().execute(
-            _LINKED_SUBJECTS_SQL, (rel_path, rel_path, _LINKED_SUBJECTS_PER_PAGE)
-        )
-    ]
+    """The page and currently eligible linked subjects, within the existing cap."""
+    linked = []
+    for (path,) in ctx.graph().execute(_LINKED_SUBJECTS_SQL, (rel_path, rel_path)):
+        if _governed(ctx, str(path)) is not None:
+            linked.append(str(path))
+            if len(linked) >= _LINKED_SUBJECTS_PER_PAGE:
+                break
     return [rel_path, *linked]
 
 
@@ -1795,21 +1820,24 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     since = _date(node[1], node[2])
     prefix = _episodes_prefix()
     rows = _released_rows(
-        ctx.graph().execute(
-            _RECAPS_SQL,
-            (
-                f"file:{subject}",
-                len(prefix),
-                prefix,
-                since,
-                *sorted(_INACTIVE_STATUSES),
-                subject,
-            ),
+        (
+            row
+            for row in ctx.graph().execute(
+                _RECAPS_SQL,
+                (
+                    f"file:{subject}",
+                    len(prefix),
+                    prefix,
+                    since,
+                    subject,
+                ),
+            )
+            if _visible(keep, str(row[0])) and ctx.live_status(row[3])
         ),
         keep,
     )
     episodes: dict[str, tuple[str, str, str]] = {}
-    for path, updated, origin in rows:
+    for path, updated, origin, _status in rows:
         path = str(path)
         page = ctx.page(path)
         frontmatter = page.frontmatter if page is not None else {}
@@ -1889,7 +1917,14 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     graph = ctx.graph()
     referrers = [
         str(row[0])
-        for row in _released_rows(graph.execute(_REFERRERS_SQL, (f"file:{subject}", subject)), keep)
+        for row in _released_rows(
+            (
+                row
+                for row in graph.execute(_REFERRERS_SQL, (f"file:{subject}", subject))
+                if _governed(ctx, str(row[0]), keep) is not None
+            ),
+            keep,
+        )
     ]
     if len(referrers) < PROFILE_MIN_ORIGINS:
         return None

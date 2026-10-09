@@ -499,3 +499,37 @@ def test_recovery_advances_source_discovery_before_an_item_exists(tmp_path):
         recovered = vocabulary_delivery.recover(tmp_path)
     assert recovered["state"] == "current"
     assert len(VocabularyState(tmp_path).page()["items"]) == 1
+
+
+def test_registry_only_retirement_changes_pairs_but_cannot_prove_empty(tmp_path):
+    from exomem import commands
+
+    source, target = fixture_graph(tmp_path)
+    page = tmp_path / target
+    page.write_text(page.read_text().replace("status: active", "status: closed-locally"))
+    original = page.read_bytes()
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+        assert projection.for_write(tmp_path, path=source)["items"]
+        inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
+        saved = commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"closed-locally": {"attributes": {"class": "retired"}}}},
+            expected_hash=inspected["content_hash"],
+            why="retire the old endpoint",
+        )["saved"]
+        retired = projection.for_write(tmp_path, path=source)
+        assert retired["status"] == "current" and retired["items"] == []
+        assert not projection.proven_empty_for_write(tmp_path, path=source)
+        commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="restore",
+            version=saved["history"]["version"],
+            expected_hash=saved["content_hash"],
+            why="restore the former endpoint lifecycle",
+        )
+        assert projection.for_write(tmp_path, path=source)["items"]
+    assert page.read_bytes() == original

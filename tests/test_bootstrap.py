@@ -523,7 +523,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault, section="all")
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-10-07.1"
+    assert out["contract_version"] == "2026-10-08.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",

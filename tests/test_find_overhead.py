@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import bm25, warmup
+from exomem import bm25, lifecycle_statuses, warmup
 from exomem import find as find_module
 
 
@@ -207,6 +207,7 @@ def test_single_pass_matches_sequential_reference(
         prefer_active=prefer_active,
         temporal=temporal,
         page_of=page_of,
+        status_basis=lifecycle_statuses.Basis(vault),
     )
     assert combined == reference
 

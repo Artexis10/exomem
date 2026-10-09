@@ -457,6 +457,9 @@ class RetrievalTrace:
     def record_unit_keyword(
         self,
         ordered: list[tuple[Any, Any, int]],
+        *,
+        status_basis: Any,
+        prefer_active: bool,
     ) -> None:
         self.effective_mode = "keyword"
         self.fusion_profile = None
@@ -486,7 +489,11 @@ class RetrievalTrace:
             self.evidence_by_id[unit.unit_ref] = {
                 "lanes": {"keyword": {"rank": rank}},
                 "final_sort_tuple": [
-                    page.status == "superseded",
+                    bool(
+                        prefer_active
+                        and status_basis.classify(page.frontmatter.get("status")).require()
+                        == "superseded"
+                    ),
                     page.updated,
                     page.rel_path,
                     source_order,
@@ -512,6 +519,7 @@ class RetrievalTrace:
         weights: tuple[float, float],
         rrf_k: int,
         prefer_active: bool,
+        status_basis: Any,
         superseded_penalty: float,
         lexical_used: bool,
         vector_used: bool,
@@ -613,7 +621,7 @@ class RetrievalTrace:
             else:
                 raw_score = lexical_scores[unit_ref]
             factor = 1.0
-            if prefer_active and page.status == "superseded":
+            if prefer_active and status_basis.classify(page.frontmatter.get("status")).require() == "superseded":
                 factor = superseded_penalty if raw_score >= 0 else 1.0 / superseded_penalty
             adjusted_score = raw_score * factor
             evidence: dict[str, Any] = {
@@ -630,14 +638,20 @@ class RetrievalTrace:
                 else [],
                 "final_sort_tuple": [
                     adjusted_score,
-                    bool(prefer_active and page.status == "superseded"),
+                    bool(
+                        prefer_active
+                        and status_basis.classify(page.frontmatter.get("status")).require()
+                        == "superseded"
+                    ),
                     page.rel_path,
                     source_order,
                     unit_ref,
                 ],
                 "tie_breaks": {
                     "superseded": bool(
-                        prefer_active and page.status == "superseded"
+                        prefer_active
+                        and status_basis.classify(page.frontmatter.get("status")).require()
+                        == "superseded"
                     ),
                     "parent_path": page.rel_path,
                     "source_order": source_order,

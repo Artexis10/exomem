@@ -32,6 +32,7 @@ from . import (
     foreground_priority,
     freshness,
     graph_sync,
+    lifecycle_statuses,
     markdown_relations,
     memory_refs,
     mutation_lock,
@@ -264,6 +265,7 @@ class GraphNode:
     origin_date: str | None = None
     updated_date: str | None = None
     access_tier: str | None = None
+    # Status-neutral structural eligibility; current readers classify admitted labels.
     review_eligible: bool = False
     activation_signal_version: str | None = None
     exomem_id: str | None = None
@@ -7544,15 +7546,19 @@ class EpistemicGraphIndex:
         *,
         limit_pages: int = 50,
         limit_per_page: int = 10,
+        status_basis: lifecycle_statuses.Basis | None = None,
     ) -> dict[str, Any]:
-        """Assemble the deterministic relation queue from one bounded snapshot.
+        """Assemble the relation queue after the caller's aggregate admission.
 
-        The eight statements below are a fixed plan: eligibility, sources, and
-        one set query for each graph-representable candidate family.  Nothing in
-        this path opens Markdown, invokes embeddings, or acquires writer authority.
+        Stream all current file metadata for exact coverage and live source
+        selection, then run the existing bounded candidate-family queries.
+        No Markdown census, embeddings or writer authority are involved.
         """
-        from . import context_refs, relation_queue, review_state, semantic_contract
+        from types import SimpleNamespace
 
+        from . import activation, context_refs, relation_queue, review_state, semantic_contract
+
+        status_basis = status_basis or lifecycle_statuses.Basis(self.vault_root)
         page_cap = min(50, max(0, int(limit_pages)))
         item_cap = min(64, max(0, int(limit_per_page)))
         source_cap = min(200, max(page_cap, page_cap * 4))
@@ -7575,44 +7581,57 @@ class EpistemicGraphIndex:
                 "coverage": {"eligible_pages": 0, "relation_scan_complete": False},
             }
         try:
-            coverage_row = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(activation_connected), 0), "
-                "COALESCE(SUM(activation_typed_relations > 0), 0), "
-                "COALESCE(SUM(activation_connected = 1 "
-                "AND activation_typed_relations = 0), 0), "
-                "COALESCE(SUM(activation_connected = 0), 0), "
-                "COALESCE(SUM(activation_assertion_blocks > 0), 0), "
-                "COALESCE(SUM(activation_assertion_blocks > 0 "
-                "AND activation_provenance_relations > 0), 0), "
-                "COALESCE(SUM(activation_unregistered), 0) "
-                "FROM graph_nodes WHERE kind = 'file' AND review_eligible = 1"
-            ).fetchone()
-            coverage = dict(
-                zip(
-                    (
-                        "eligible_pages",
-                        "connected_pages",
-                        "typed_relation_pages",
-                        "generic_only_pages",
-                        "disconnected_pages",
-                        "provenance_candidate_pages",
-                        "provenance_linked_pages",
-                        "unregistered_relation_observations",
-                    ),
-                    (int(value or 0) for value in coverage_row),
-                    strict=True,
-                )
+            coverage = dict.fromkeys(
+                (
+                    "eligible_pages",
+                    "connected_pages",
+                    "typed_relation_pages",
+                    "generic_only_pages",
+                    "disconnected_pages",
+                    "provenance_candidate_pages",
+                    "provenance_linked_pages",
+                    "unregistered_relation_observations",
+                ),
+                0,
             )
-            eligible_total = coverage["eligible_pages"]
-            source_rows = conn.execute(
+            source_rows: list[tuple[Any, ...]] = []
+            rows = conn.execute(
                 "SELECT n.path, n.title, n.source_hash, n.activation_signal_version, "
                 "n.exomem_id, CASE WHEN n.exomem_id IS NULL THEN 0 ELSE "
                 "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
-                "AND ids.exomem_id = n.exomem_id) END "
-                "FROM graph_nodes n WHERE n.kind = 'file' AND n.review_eligible = 1 "
-                "ORDER BY n.activation_priority, n.path LIMIT ?",
-                (source_cap + 1,),
-            ).fetchall()
+                "AND ids.exomem_id = n.exomem_id) END, n.page_type, n.lifecycle_status, "
+                "n.tags_json, n.activation_connected, n.activation_typed_relations, "
+                "n.activation_assertion_blocks, n.activation_provenance_relations, "
+                "n.activation_unregistered FROM graph_nodes n WHERE n.kind = 'file' "
+                "ORDER BY n.activation_priority, n.path"
+            )
+            for row in rows:
+                path = str(row[0])
+                page = SimpleNamespace(
+                    path=self.vault_root / path,
+                    rel_path=path,
+                    page_type=row[6],
+                    tags=json.loads(row[8]),
+                )
+                if (
+                    not activation.structurally_eligible_for_types(
+                        self.vault_root, page, page_types=activation._ELIGIBLE_TYPES
+                    )
+                    or not status_basis.classify(row[7]).live
+                ):
+                    continue
+                connected, typed, assertions, provenance, unregistered = row[9:]
+                coverage["eligible_pages"] += 1
+                coverage["connected_pages"] += bool(connected)
+                coverage["typed_relation_pages"] += typed > 0
+                coverage["generic_only_pages"] += bool(connected) and typed == 0
+                coverage["disconnected_pages"] += not connected
+                coverage["provenance_candidate_pages"] += assertions > 0
+                coverage["provenance_linked_pages"] += assertions > 0 and provenance > 0
+                coverage["unregistered_relation_observations"] += unregistered
+                if len(source_rows) < source_cap + 1:
+                    source_rows.append(row[:6])
+            eligible_total = coverage["eligible_pages"]
             selected_rows = source_rows[:source_cap]
             selected = [str(row[0]) for row in selected_rows]
             if not selected or page_cap == 0 or item_cap == 0:
@@ -10074,7 +10093,9 @@ def _file_node(
         origin_date=str(origin_date) if origin_date not in (None, "") else None,
         updated_date=str(updated) if updated not in (None, "") else None,
         access_tier=access.access_tier(vault_root, page.rel_path),
-        review_eligible=activation.is_eligible_governed_page(vault_root, page),
+        review_eligible=activation.structurally_eligible_for_types(
+            vault_root, page, page_types=activation._ELIGIBLE_TYPES
+        ),
         activation_signal_version=activation._signal_version(page),
         exomem_id=memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),
         activation_priority=activation_priority,

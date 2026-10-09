@@ -56,6 +56,7 @@ class _Revision:
 
     @property
     def live(self) -> bool:
+        # The atomic episode revision protocol fixes this recorder tombstone.
         return str(self.frontmatter.get("status") or "").casefold() != "superseded"
 
 

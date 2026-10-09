@@ -2,7 +2,9 @@
 
 The cache may only ever serve a context that is indistinguishable from a
 fresh build. Object identity is the detector below: a cache hit returns the
-same object, a rebuild returns a new one.
+same object, a rebuild returns a new one. The detector reads the shared
+structural cache itself, because the public builder returns a detached,
+request-enriched copy on every call by design.
 """
 
 from __future__ import annotations
@@ -30,6 +32,10 @@ from exomem import vault as vault_module
 from exomem.vault import WikilinkResolver
 
 _PAGE_REL = "Knowledge Base/Notes/Insights/one.md"
+
+
+def _shared_context(vault: Path, **kwargs):
+    return semantic_contract._build_corpus_context_with_census(vault, **kwargs)[0]
 
 
 #: The wall-clock shape of every contention test in this file.
@@ -88,8 +94,8 @@ def vault(tmp_path: Path) -> Path:
 
 
 def test_unchanged_corpus_is_reused(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
-    second = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
+    second = _shared_context(vault)
     assert second is first
     assert set(second.pages) == {
         "Knowledge Base/Notes/Insights/one.md",
@@ -128,7 +134,7 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
         _page(title="Nested reset lookalike"), encoding="utf-8"
     )
 
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
 
     assert set(first.pages) == {
         "Knowledge Base/Notes/Insights/one.md",
@@ -141,12 +147,12 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
     reset_page.write_text(invalid_runtime_page + "reset changed\n", encoding="utf-8")
     batch_page.write_text(invalid_runtime_page + "batch changed\n", encoding="utf-8")
 
-    assert semantic_contract.build_corpus_context(vault) is first
+    assert _shared_context(vault) is first
 
     nested_reset_page.write_text(
         _page(title="Changed nested reset lookalike"), encoding="utf-8"
     )
-    changed = semantic_contract.build_corpus_context(vault)
+    changed = _shared_context(vault)
     assert changed is not first
     assert changed.pages[
         f"Knowledge Base/Notes/.graph-reset-{'1' * 24}/page.md"
@@ -253,11 +259,11 @@ def test_a_vanishing_sqlite_sidecar_does_not_degrade_the_census(
 
 
 def test_content_change_rebuilds(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     (vault / _PAGE_REL).write_text(
         _page(title="One", body="Entirely new body text.\n"), encoding="utf-8"
     )
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
     assert second is not first
     assert second.pages[_PAGE_REL].source_hash != first.pages[_PAGE_REL].source_hash
 
@@ -265,7 +271,7 @@ def test_content_change_rebuilds(vault: Path) -> None:
 def test_markdown_change_reconciles_without_full_rebuild(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     (vault / _PAGE_REL).write_text(
         _page(title="One", body="Incrementally refreshed body.\n"),
         encoding="utf-8",
@@ -275,7 +281,7 @@ def test_markdown_change_reconciles_without_full_rebuild(
         raise AssertionError("a Markdown delta must not rebuild the whole corpus")
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", fail_full_rebuild)
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
 
     assert second is not first
     assert second.pages[_PAGE_REL].source_hash != first.pages[_PAGE_REL].source_hash
@@ -285,7 +291,7 @@ def test_markdown_change_reconciles_without_full_rebuild(
 def test_markdown_delete_reconciles_without_full_rebuild(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     removed = "Knowledge Base/Notes/Insights/two.md"
     (vault / removed).unlink()
 
@@ -293,7 +299,7 @@ def test_markdown_delete_reconciles_without_full_rebuild(
         raise AssertionError("a Markdown deletion must not rebuild the whole corpus")
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", fail_full_rebuild)
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
 
     assert removed not in second.pages
     assert all(entry.path != removed for entry in second.identity_census.entries)
@@ -302,16 +308,16 @@ def test_markdown_delete_reconciles_without_full_rebuild(
 def test_incremental_reconcile_matches_full_rebuild(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     (vault / _PAGE_REL).write_text(
         _page(title="Incremental", body="Changed with the same governed rules.\n"),
         encoding="utf-8",
     )
-    incremental = semantic_contract.build_corpus_context(vault)
+    incremental = _shared_context(vault)
 
     semantic_contract.reset_corpus_context_cache()
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
-    rebuilt = semantic_contract.build_corpus_context(vault)
+    rebuilt = _shared_context(vault)
 
     assert incremental.as_dict() == rebuilt.as_dict()
 
@@ -319,7 +325,7 @@ def test_incremental_reconcile_matches_full_rebuild(
 def test_live_event_patch_makes_hot_reads_census_free(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     pages = tuple(vault.rglob("*.md"))
     freshness.seed(
         vault,
@@ -335,7 +341,7 @@ def test_live_event_patch_makes_hot_reads_census_free(
         raise AssertionError("a live, event-patched cache must not stat-walk the vault")
 
     monkeypatch.setattr(semantic_contract, "_corpus_census", fail_census)
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
 
     assert second is not first
     assert second.pages[_PAGE_REL].title == "Event patched"
@@ -344,13 +350,13 @@ def test_live_event_patch_makes_hot_reads_census_free(
 def test_non_markdown_event_does_not_evict_or_corrupt_warm_context(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
     )
-    assert semantic_contract.build_corpus_context(vault) is first
+    assert _shared_context(vault) is first
     schema = vault / "Knowledge Base" / "_Schema"
     schema.mkdir(parents=True, exist_ok=True)
     manifest = schema / "semantic-activation.yaml"
@@ -362,17 +368,17 @@ def test_non_markdown_event_does_not_evict_or_corrupt_warm_context(
         raise AssertionError("an unrelated non-Markdown event must keep the context warm")
 
     monkeypatch.setattr(semantic_contract, "_corpus_census", fail_census)
-    assert semantic_contract.build_corpus_context(vault) is first
+    assert _shared_context(vault) is first
 
 
 def test_writer_preflight_self_heals_exact_page_before_delayed_event(vault: Path) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
     )
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
 
     # Model the disk-visible window before a watcher/out-of-band publisher has
     # advanced the freshness token. Preflight already owns these exact guarded
@@ -395,7 +401,7 @@ def test_writer_preflight_self_heals_exact_page_before_delayed_event(vault: Path
 
 
 def test_atomic_event_publish_keeps_concurrent_page_changes(vault: Path) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
@@ -416,7 +422,7 @@ def test_atomic_event_publish_keeps_concurrent_page_changes(vault: Path) -> None
         for future in futures:
             future.result(timeout=10)
 
-    current = semantic_contract.build_corpus_context(vault)
+    current = _shared_context(vault)
     assert current.pages[_PAGE_REL].title == "First concurrent"
     assert current.pages["Knowledge Base/Notes/Insights/two.md"].title == ("Second concurrent")
 
@@ -436,8 +442,8 @@ def test_cold_build_absorbs_markdown_churn_instead_of_discarding_cache(
         return context
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", edit_after_first_build)
-    first = semantic_contract.build_corpus_context(vault)
-    second = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
+    second = _shared_context(vault)
 
     assert builds == 1
     assert first.pages[_PAGE_REL].title == "Changed during build"
@@ -464,7 +470,7 @@ def test_concurrent_cold_builds_share_one_uncached_result(
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", slow_build)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(semantic_contract.build_corpus_context, vault) for _ in range(2)]
+        futures = [pool.submit(_shared_context, vault) for _ in range(2)]
         duplicated = duplicate_entered.wait(timeout=_NO_DUPLICATE_SECONDS)
         (vault / _PAGE_REL).write_text(_page(title="Current during flight"), encoding="utf-8")
         release_build.set()
@@ -517,7 +523,7 @@ def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", tracked_build)
     monkeypatch.setattr(semantic_contract, "_corpus_census", observed_census)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first_future = pool.submit(semantic_contract.build_corpus_context, vault)
+        first_future = pool.submit(_shared_context, vault)
         assert first_build_entered.wait(timeout=_OBSERVE_SECONDS)
         registry_path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
         registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -527,7 +533,7 @@ def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
             encoding="utf-8",
         )
         current_hash = relation_registry.load_registry(vault).extension_hash
-        second_future = pool.submit(semantic_contract.build_corpus_context, vault)
+        second_future = pool.submit(_shared_context, vault)
         assert current_census_seen.wait(timeout=_OBSERVE_SECONDS)
         release_first_build.set()
         first = first_future.result(timeout=10)
@@ -542,7 +548,7 @@ def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
 def test_cold_cache_publication_serializes_with_file_events(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
@@ -579,23 +585,23 @@ def test_cold_cache_publication_serializes_with_file_events(
     monkeypatch.setattr(semantic_contract, "_corpus_census", census_with_racing_event)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(publish_edit)
-        semantic_contract.build_corpus_context(vault)
+        _shared_context(vault)
         future.result(timeout=10)
 
-    current = semantic_contract.build_corpus_context(vault)
+    current = _shared_context(vault)
     assert current.pages[_PAGE_REL].title == "Event after cold census"
 
 
 def test_event_delta_rejects_reparse_markdown_like_full_identity_census(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
     )
-    rejected = semantic_contract.build_corpus_context(vault)
+    rejected = _shared_context(vault)
     page = vault / _PAGE_REL
     real_lstat = Path.lstat
     fake_info = SimpleNamespace(st_mode=real_lstat(page).st_mode)
@@ -639,19 +645,19 @@ def test_event_delta_rejects_reparse_markdown_like_full_identity_census(
     assert (
         repopulated.pages["Knowledge Base/Notes/Insights/two.md"].title == "Later valid event"
     )
-    assert semantic_contract.build_corpus_context(vault) is repopulated
+    assert _shared_context(vault) is repopulated
 
 
 def test_event_delete_rejects_missing_leaf_below_reparse_ancestor(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
     )
-    semantic_contract.build_corpus_context(vault)
+    _shared_context(vault)
     page = vault / _PAGE_REL
     page.unlink()
     unsafe_ancestor = page.parent
@@ -677,7 +683,7 @@ def test_event_delete_rejects_missing_leaf_below_reparse_ancestor(
 def test_candidate_with_stable_topology_rederives_only_its_own_facts(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    before = semantic_contract.build_corpus_context(vault)
+    before = _shared_context(vault)
     candidate = semantic_contract.build_page_state(
         vault,
         _PAGE_REL,
@@ -709,7 +715,7 @@ def test_candidate_with_stable_topology_rederives_only_its_own_facts(
 def test_corpus_entries_prime_writer_resolver_without_full_vault_build(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    context = semantic_contract.build_corpus_context(vault)
+    context = _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
@@ -735,7 +741,7 @@ def test_corpus_entries_prime_writer_resolver_without_full_vault_build(
 def test_corpus_entries_do_not_prime_resolver_after_freshness_changes(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    context = semantic_contract.build_corpus_context(vault)
+    context = _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
@@ -769,7 +775,7 @@ def test_mtime_preserving_sync_edit_rebuilds(vault: Path) -> None:
     invalidates the entry.
     """
     page = vault / _PAGE_REL
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     original = page.stat()
     original_bytes = page.read_bytes()
     replacement = original_bytes.replace(b"One", b"Uno")
@@ -779,33 +785,33 @@ def test_mtime_preserving_sync_edit_rebuilds(vault: Path) -> None:
     hour_ns = 3_600_000_000_000
     os.utime(page, ns=(original.st_mtime_ns - hour_ns, original.st_mtime_ns - hour_ns))
     assert page.stat().st_size == original.st_size
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
     assert second is not first
     assert second.pages[_PAGE_REL].title == "Uno"
 
 
 def test_added_page_rebuilds(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     (vault / "Knowledge Base" / "Notes" / "Insights" / "three.md").write_text(
         _page(title="Three"), encoding="utf-8"
     )
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
     assert second is not first
     assert "Knowledge Base/Notes/Insights/three.md" in second.pages
 
 
 def test_removed_page_rebuilds(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     (vault / "Knowledge Base" / "Notes" / "Insights" / "two.md").unlink()
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
     assert second is not first
     assert "Knowledge Base/Notes/Insights/two.md" not in second.pages
 
 
 def test_access_config_change_rebuilds(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     (vault / "Knowledge Base" / "_access.yaml").write_text("readonly:\n- Notes\n", encoding="utf-8")
-    second = semantic_contract.build_corpus_context(vault)
+    second = _shared_context(vault)
     assert second is not first
 
 
@@ -819,7 +825,7 @@ def test_census_covers_non_markdown_inputs(vault: Path) -> None:
 
 
 def test_candidate_build_bypasses_and_does_not_pollute_cache(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     candidate = semantic_contract.build_page_state(
         vault,
         "Knowledge Base/Notes/Insights/draft.md",
@@ -827,44 +833,44 @@ def test_candidate_build_bypasses_and_does_not_pollute_cache(vault: Path) -> Non
         relation_registry=relation_registry.core_registry(),
         language_registry=semantic_language_registry.core_registry(),
     )
-    with_candidate = semantic_contract.build_corpus_context(vault, candidate=candidate)
+    with_candidate = _shared_context(vault, candidate=candidate)
     assert with_candidate is not first
     assert "Knowledge Base/Notes/Insights/draft.md" in with_candidate.pages
-    again = semantic_contract.build_corpus_context(vault)
+    again = _shared_context(vault)
     assert again is first
     assert "Knowledge Base/Notes/Insights/draft.md" not in again.pages
 
 
 def test_disk_equal_registries_share_the_cache(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     registry = relation_registry.load_registry(vault)
     language = semantic_language_registry.load_registry(vault)
-    second = semantic_contract.build_corpus_context(
+    second = _shared_context(
         vault, registry=registry, language_registry=language
     )
     assert second is first
 
 
 def test_synthetic_registry_bypasses_cache(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     core = relation_registry.load_registry(vault)
     synthetic = dataclasses.replace(core, extension_hash="0" * 64)
-    second = semantic_contract.build_corpus_context(vault, registry=synthetic)
+    second = _shared_context(vault, registry=synthetic)
     assert second is not first
 
 
 def test_live_event_cache_rejects_synthetic_language_registry(vault: Path) -> None:
-    first = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
     freshness.seed(
         vault,
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
     )
-    assert semantic_contract.build_corpus_context(vault) is first
+    assert _shared_context(vault) is first
     disk_language = semantic_language_registry.load_registry(vault)
     synthetic = dataclasses.replace(disk_language, content_hash="0" * 64)
 
-    second = semantic_contract.build_corpus_context(
+    second = _shared_context(
         vault,
         language_registry=synthetic,
     )
@@ -874,8 +880,8 @@ def test_live_event_cache_rejects_synthetic_language_registry(vault: Path) -> No
 
 def test_kill_switch_disables_cache(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
-    first = semantic_contract.build_corpus_context(vault)
-    second = semantic_contract.build_corpus_context(vault)
+    first = _shared_context(vault)
+    second = _shared_context(vault)
     assert second is not first
 
 
@@ -1165,7 +1171,7 @@ def test_a_quieted_publish_leaves_the_cache_cold_not_wrong(
     assert len(calls) == 1
     assert cache_key not in semantic_contract._CORPUS_CONTEXT_CACHE
 
-    context = semantic_contract.build_corpus_context(vault)
+    context = _shared_context(vault)
     assert context.pages[_PAGE_REL].title == "Edited while quiet"
 
 

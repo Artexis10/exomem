@@ -17,8 +17,15 @@ from typing import Any
 
 from . import semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 5
+AUTHORING_CONTRACT_VERSION = 6
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
+
+STATUS_CLASSIFICATION_RULE = (
+    "Validation now uses page status classes, not historical inactive-label lists. "
+    "Live compiled results require a semantic unit; pending results may stay unit-free until activation. "
+    "Statusless pages are publicly live. Canonical meanings need no private definitions. "
+    "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
+)
 
 
 def _freeze(value: Any) -> Any:
@@ -316,7 +323,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
     }
     minimum_semantic_unit = {
         "rule": (
-            "Every new, replaced, or activated active compiled note needs at least one "
+            "Every new, replaced, or activated compiled note in the live class needs at least one "
             "valid, non-empty semantic unit."
         ),
         "form_rule": (
@@ -354,15 +361,13 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "the result is writable managed Markdown in the governed subtree",
             "the result is outside Sources, Evidence, and trash",
             "no activation exclusion applies",
-            "the resolved lifecycle is active",
+            "the admitted effective status class is live",
         ],
-        "inactive_lifecycles": [
-            "archived",
-            "draft",
-            "dropped",
-            "planned",
-            "superseded",
-        ],
+        "required_status_class": "live",
+        "status_registry": {
+            "tool": "schema_memory",
+            "args": {"subject": "statuses", "operation": "inspect"},
+        },
         "exemptions": [
             "arbitrary non-compiled Markdown",
             "dataset cards",
@@ -382,8 +387,8 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "the minimum-unit predicate."
         ),
         "lifecycle_rule": (
-            "Check new active creates, replacements, and inactive-to-active transitions; "
-            "inactive drafts may remain unit-free until activation."
+            "Check live creates, replacements and transitions to live; "
+            "pending compiled notes may remain unit-free until activation."
         ),
         "independence_rule": (
             "Semantic-unit coverage and relation-review disposition are independent obligations."
@@ -410,7 +415,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         },
         "missing_semantic_unit": {
             "severity": "error",
-            "when": "an applicable active compiled result has no valid non-empty unit",
+            "when": "an applicable live-class compiled result has no valid non-empty unit",
             "compact_remediation": (
                 "Add `## Observations` and `- [operating constraint] Keep retries bounded "
                 "#reliability`."
@@ -586,7 +591,7 @@ def project_tool_description(
 def render_concise(
     contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
 ) -> str:
-    """Render the complete minimum contract for schemas and compact skills."""
+    """Render canonical guidance with a live lookup for applicability values."""
     compact = contract.compact
     rich = contract.rich
     roles = contract.semantic_roles
@@ -602,16 +607,6 @@ def render_concise(
     applies = "; ".join(minimum["applies_when"])
     exemptions = ", ".join(minimum["exemptions"])
     compact_exclusions = "; ".join(compact["exclusions"])
-    compiled_types = ", ".join(
-        f"`{page_type}`" for page_type in minimum["compiled_types"]
-    )
-    compiled_destinations = ", ".join(
-        f"`{page_type}` → `{path}`"
-        for page_type, path in minimum["compiled_destinations"].items()
-    )
-    inactive = ", ".join(
-        f"`{lifecycle}`" for lifecycle in minimum["inactive_lifecycles"]
-    )
     metadata = ", ".join(f"`{row}`" for row in rich["metadata_syntax"])
     breadth_block = "\n".join(portable["examples"]["breadth"])
     return (
@@ -650,11 +645,14 @@ def render_concise(
         f"- Rich boundary: {rich['heading_boundary_rule']} `empty_rich_unit` means "
         f"{findings['empty_rich_unit']['when']}; "
         f"{findings['empty_rich_unit']['remediation']}\n"
-        f"- Exact applicability: `compiled_intent(after_state) = "
-        f"{minimum['compiled_intent']}`. `COMPILED_TYPES` contains exactly "
-        f"{compiled_types}, with canonical destinations {compiled_destinations}. "
+        '- Exact applicability: obtain `bootstrap(profile="compact", '
+        'section="authoring")` and read `semantic_authoring.minimum_semantic_unit` '
+        "for current structural applicability and the status-class rule. "
+        "If the exposed bootstrap schema lacks `section`, use "
+        '`bootstrap(profile="full")` instead; released profiles reject section arguments. '
+        f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
         f"{minimum['structural_rule']} The minimum predicate applies when "
-        f"{applies}. Inactive lifecycle values are {inactive}. "
+        f"{applies}. "
         f"{minimum['lifecycle_rule']}\n"
         f"- Existing active pages: {minimum['final_unit_rule']}\n"
         f"- Exempt content: {exemptions}.\n"
@@ -688,19 +686,13 @@ def render_expanded(
     """Render the concise contract plus deterministic reference detail and examples."""
     minimum = contract.minimum_semantic_unit
     findings = contract.findings
-    destinations = "\n".join(
-        f"- `{page_type}` → `{path}`"
-        for page_type, path in minimum["compiled_destinations"].items()
-    )
     applies = "\n".join(f"- {item}" for item in minimum["applies_when"])
     exemptions = "\n".join(f"- {item}" for item in minimum["exemptions"])
     return (
         render_concise(contract)
         + "\n### Exact applicability\n\n"
         + f"`compiled_intent(after_state) = {minimum['compiled_intent']}`. "
-        + "Canonical destinations are:\n\n"
-        + destinations
-        + "\n\nThe minimum-unit predicate is true only when:\n\n"
+        + "The minimum-unit predicate is true only when:\n\n"
         + applies
         + "\n\n"
         + minimum["lifecycle_rule"]

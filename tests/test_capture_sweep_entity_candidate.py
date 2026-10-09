@@ -43,14 +43,20 @@ def _page(
     status: str | None = "active",
 ) -> SimpleNamespace:
     """The write's own page state -- also evaluated for self-eligibility."""
+    # Recurrence classifies the raw frontmatter label, as parsed pages carry it.
     return SimpleNamespace(
-        path=path, frontmatter={}, body_wikilinks=wikilinks, title=title, status=status
+        path=path,
+        frontmatter={} if status is None else {"status": status},
+        body_wikilinks=wikilinks,
+        title=title,
+        status=status,
     )
 
 
 def _page_state(path: str, *, title: str = "", status: str | None = "active") -> SimpleNamespace:
     """The `corpus.pages[...]` shape `_linking_page_eligible` reads."""
-    return SimpleNamespace(path=path, title=title, status=status)
+    frontmatter = {} if status is None else {"status": status}
+    return SimpleNamespace(path=path, title=title, status=status, frontmatter=frontmatter)
 
 
 def _corpus(

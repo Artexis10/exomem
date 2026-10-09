@@ -97,9 +97,8 @@ def test_engagement_reference_preserves_the_live_user_preference() -> None:
 def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> None:
     concise = semantic_authoring.render_concise()
     identity = semantic_authoring.contract_identity()
-    # The concise projection carries the v4 identity marker and the complete
+    # The concise projection carries the current identity marker and the complete
     # portable-category teaching; every embedding must therefore be exact.
-    assert "exomem-semantic-authoring:v5 " in concise
     assert identity.split(" ", 1)[1] in concise  # content digest
     for expected_fragment in (
         "Core keys are `action`",

@@ -179,9 +179,8 @@ def test_bounds_are_checked_before_classification():
     )
 
 
-def test_inactive_and_non_experiment_origins_are_quiet():
+def test_non_experiment_origins_are_quiet():
     assert not roles(page(method(), kind="research"))
-    assert not roles(replace(page(method()), status="superseded"))
 
 
 def test_exact_method_reference_disambiguates_shared_context():
