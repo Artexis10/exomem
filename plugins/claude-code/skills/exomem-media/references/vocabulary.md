@@ -15,10 +15,11 @@ If the registry contract is unavailable, report that limitation instead of
 treating the registry as empty.
 
 The current registry subjects are `entity-types`, `relations`, `source-kinds`,
-`domains`, `categories`, and `statuses`. These are `schema_memory` subjects, not a list of
-allowed vocabulary entries. Compiled applicability comes from
-`semantic_authoring.minimum_semantic_unit` in the authoring bootstrap section,
-or the full-profile fallback. Note types have no registry subject here.
+`domains`, `categories`, `statuses`, and `note-types`. These are `schema_memory`
+subjects, not a list of allowed vocabulary entries. Compiled applicability comes
+from `semantic_authoring.minimum_semantic_unit` in the authoring bootstrap section,
+or the full-profile fallback. A page type is compiled when its `note-types` entry
+has note-type role `compiled`.
 
 ## Reuse before promotion
 
