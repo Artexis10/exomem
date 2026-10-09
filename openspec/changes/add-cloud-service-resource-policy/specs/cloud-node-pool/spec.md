@@ -13,7 +13,7 @@ Adding or removing an entry MUST NOT replace or change any other entry's server.
 
 - an address outside the subnet, or one that is not a usable host address;
 - a duplicate address;
-- an address reserved for the fleet server or the control database;
+- an address reserved for the fleet server;
 - a server type outside the existing general x86 allow-list, except CX33 with a nonempty exact sixteen-character lowercase base32 `dedicated_cell_id`;
 - a nonempty `dedicated_cell_id` that is not an exact cell identifier.
 
@@ -31,7 +31,7 @@ The optional reservation SHALL default to empty, survive module and root outputs
 
 #### Scenario: Colliding address
 
-- **WHEN** an entry declares the fleet server's or the control database's private address
+- **WHEN** an entry declares the fleet server's private address
 - **THEN** planning fails validation before any resource is proposed
 
 #### Scenario: Restricted small dedicated agent

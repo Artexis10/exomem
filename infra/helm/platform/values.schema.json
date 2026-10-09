@@ -202,22 +202,6 @@
         }
       }
     },
-    "cloudDatabase": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["hostname", "privateIp"],
-      "properties": {
-        "hostname": {"type": "string"},
-        "privateIp": {"type": "string"}
-      },
-      "oneOf": [
-        {"properties": {"hostname": {"const": ""}, "privateIp": {"const": ""}}},
-        {"properties": {
-          "hostname": {"maxLength": 253, "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$", "not": {"pattern": "^[0-9]+(?:\\.[0-9]+){3}$"}},
-          "privateIp": {"pattern": "^(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|172\\.(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))$"}
-        }}
-      ]
-    },
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
@@ -345,6 +329,7 @@
         "backupMasterKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "b2KeyManagementSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "hetznerReadTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
         "databaseEgressCidrs": {
           "type": "array", "maxItems": 32, "uniqueItems": true,
           "items": {"type": "string", "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$"}
@@ -425,6 +410,7 @@
         "databaseSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "databaseSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
         "databaseEgressCidrs": {
           "type": "array", "maxItems": 32, "uniqueItems": true,
           "items": {"type": "string", "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$"}

@@ -19,8 +19,8 @@ server with encrypted local cell storage), follow
   `secrets.md`. It must differ from `k3s_server_token`.
 - The first run that introduces the agent token restarts the K3s server once.
   Schedule it in a maintenance window; running cells ride through the restart.
-- Pick an unused private address in the subnet (not `10.50.1.10` or
-  `10.50.1.20`), and a type from the allow-list: `cpx42`, `ccx23`, `ccx33`
+- Pick an unused private address in the subnet (not the fleet server's
+  `10.50.1.10`), and a type from the allow-list: `cpx42`, `ccx23`, `ccx33`
   or `ccx43`. A `cx33` (4 CPU / 8 GiB) is permitted only with a nonempty
   exact `dedicated_cell_id`, reserving the node for that one cell and zero
   general slots. Check actual same-location availability and obtain saved-plan
