@@ -4,7 +4,7 @@
 
 **Status:** written with `move-cloud-cells-to-local-storage` phase 2. The node-loss drill rehearsed it on disposable K3s, in the cloud rehearsal's `local-storage-drill` mode ([run 37428273291](https://github.com/Artexis10/exomem/actions/runs/37428273291), 2026-10-06). It ran "Relocate the cells of a lost agent" steps 1-4 and 6, "Restore etcd from an older snapshot" steps 3-6 from a snapshot on the server's disk, "After restoring etcd" steps 1-4 and 6, and the `CELL_INIT_EMPTY_VOLUME_REFUSED` steps 1-3 for a row that records its volume, through step 5's mark. It did not rehearse the escrowed-key S3 listing and `--etcd-s3` restore, a real B2 upload time (its object store is a local S3 double), the `CELL_INIT_EMPTY_VOLUME_REFUSED` steps 4-5 for a row that records no volume, the Hetzner `VOLUME_MISSING` steps, or the erase of a removed agent's cells device.
 
-This applies to cells on local storage (the `exomem-cloud-local` class, TopoLVM). A cell on a Hetzner Cloud Volume never needs it: its volume survives its node.
+This applies to cells on local storage (the `exomem-cloud-local` class, TopoLVM). A cell on a Hetzner Cloud Volume never needs it: its volume survives its node. To restore such a cell from one of its backups, use [cloud operator restore](cloud-operator-restore.md).
 
 Run the `kubectl` steps as break-glass ([cloud operator access](cloud-operator-access.md#break-glass-mint-a-one-hour-identity)) and the host steps as root on the agent.
 
