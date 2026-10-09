@@ -39,6 +39,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
         entity_types,
         lifecycle_statuses,
         note_types,
+        planning_values,
         relation_registry,
         semantic_language_registry,
         source_taxonomy,
@@ -53,6 +54,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             source_taxonomy.DOMAIN_SPEC,
             semantic_language_registry.CATEGORY_SPEC,
             lifecycle_statuses.SPEC,
+            planning_values.SPEC,
             note_types.SPEC,
         )
     }

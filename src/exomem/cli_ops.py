@@ -100,6 +100,10 @@ _REMEDIATION: dict[str, str] = {
     "INVALID_PLAN_ARGUMENTS": "Use only the arguments accepted by the selected Planning action.",
     "PLANNING_PROFILE_REQUIRED": "Choose a collection with semantic_profile: planning.",
     "INVALID_PLAN": "Correct the authored Planning values and retry.",
+    "PLANNING_VALUES_UNAVAILABLE": (
+        "Use a shipped Planning value, or have the owner repair or release the vault's "
+        "Planning values."
+    ),
     "PLAN_NOT_FOUND": "Re-read the collection and select one exact plan_id.",
     "AMBIGUOUS_PLAN": "Repair duplicate Planning IDs before mutating this collection.",
     "PLAN_ID_CONFLICT": "Use a new plan_id or retry the identical original add.",

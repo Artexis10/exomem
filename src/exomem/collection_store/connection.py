@@ -77,6 +77,7 @@ class CollectionStoreError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+        self.reason = message
 
 
 def busy(message: str):
@@ -147,6 +148,26 @@ def _writer_engine(database: str):
         conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     return engine
+
+
+@contextmanager
+def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
+    """A private, unpublished store at ``path`` with the current schema, for a proof that never publishes.
+
+    It takes no writer lease: only its caller opens it, and the caller removes it.
+    """
+    check_sqlite_version()
+    load_store_libraries()
+    engine = _writer_engine(str(path))
+    try:
+        with engine.connect() as core:
+            conn = core.connection.driver_connection
+            conn.execute("PRAGMA recursive_triggers=ON")
+            conn.execute("PRAGMA foreign_keys=ON")
+            schema.ensure_schema(core)
+            yield conn
+    finally:
+        engine.dispose()
 
 
 def rollback(conn: Connection) -> None:

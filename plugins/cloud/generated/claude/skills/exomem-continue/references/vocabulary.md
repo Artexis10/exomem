@@ -14,9 +14,9 @@ Follow the returned routes and use only operations exposed by the active surface
 If the registry contract is unavailable, report that limitation instead of
 treating the registry as empty.
 
-Read the registry subjects from the `subject` argument of `schema_memory`. They
-name registries, not allowed vocabulary entries. Compiled applicability comes
-from `semantic_authoring.minimum_semantic_unit` in the authoring bootstrap section,
+The `subject` argument of `schema_memory` names the current registry subjects.
+They are `schema_memory` subjects, not a list of allowed vocabulary entries. Compiled applicability comes from
+`semantic_authoring.minimum_semantic_unit` in the authoring bootstrap section,
 or the full-profile fallback. A page type is compiled when its `note-types` entry
 has note-type role `compiled`.
 

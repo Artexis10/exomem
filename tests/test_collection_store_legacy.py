@@ -13,7 +13,7 @@ from test_planning_profile import _manifest as planning_manifest_text
 
 from exomem import record_formats, records
 from exomem import structured_collections as collections
-from exomem.collection_store import legacy
+from exomem.collection_store import connection, legacy, legacy_import
 from exomem.collection_store.connection import CollectionStoreError
 
 
@@ -482,6 +482,14 @@ def test_migration_history_has_no_legacy_size_count_or_depth_ceiling(
         assert proof.legacy_inspection["status"] == historical_status
         assert proof.reachable_count == count
         assert sum(1 for _event_row in audit.iter_reachable(proof)) == count
+        # The whole uncapped history imports, and the proof's chain-length check (d) passes.
+        captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
+        context = legacy_import.ImportContext("migration-test", "2026-10-02T10:00:00Z", "attempt-one")
+        with connection.staging_store(tmp_path / "staging.sqlite") as staging:
+            staging.execute("BEGIN IMMEDIATE")
+            imported = legacy_import.import_legacy_collection(staging, captured, audit=audit, context=context)
+            staging.execute("ROLLBACK")
+        assert imported.legacy_event_count == count
     assert list(stage.iterdir()) == []
 
 

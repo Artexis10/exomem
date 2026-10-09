@@ -3,7 +3,7 @@
 This change is the programme's one home. S1 shipped in foundation merge `e844290a16b298fa30edfefea5e38d9951d54973` (PR #1623, CI `37762518836`).
 S2 guidance and S3 lifecycle consumers now share one meaning and form one cohesive delivery under `add-lifecycle-status-registry`.
 Their source checkpoint does not claim generated-carrier, runtime or delivery completion.
-Later slices remain sequenced here; S4 and S7 use their own OpenSpec changes, and Planning gets a small change when S10 starts.
+Later slices remain sequenced here; S4 and S7 use their own OpenSpec changes, and Planning gets `add-planning-value-registry`.
 After S1, the coupled S2/S3 batch, S5 and S10 can run in parallel; other dependencies remain unchanged.
 
 Base `118f377ab04c595db26f13024a682f05aca31fc0` has the foundation merge's exact tree.
@@ -74,9 +74,9 @@ Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.
 
 - [ ] 9.1 Use the `activate-agent-led-vocabulary-evolution` work-item queue as the nudge channel: "you used X, the vault calls it Y" in the advisory slot; Dreamer upkeep families for recurring unregistered values, near-duplicate entries and per-registry debt.
 
-## S10. Planning
+## S10. Planning (`add-planning-value-registry`)
 
-- [ ] 10.1 Move Planning values into `_collection_types/planning.yaml` as enum values with `rank`, `parents`, `class` and `order` attributes, under a small Planning change.
+- [ ] 10.1 Move Planning values into the vocabulary substrate as the `planning-values` registry (pack `packs/core/planning-values.yaml`, overlay `_Schema/planning-values.yaml`), with `class` on statuses and `parents` on kinds, under `add-planning-value-registry`. The values do not go into `_collection_types/planning.yaml`: only the substrate has the overlay, history and restore a vault-added value needs, and a built-in collection type cannot change its bytes before P4. `rank` and `order` wait for a consumer.
 
 ## Closure
 

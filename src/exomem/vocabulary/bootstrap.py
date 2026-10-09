@@ -1,14 +1,12 @@
 """The bootstrap `vocabulary` block: the live registries, by use, with what is new.
 
-A registry whose keys another bootstrap block already lists (its spec sets
-`summarize_keys` to False) gets no key listing. Its row still reports findings,
-new keys and a refusal, and is left out only when it has none of them.
-
 For each registry the block lists at most `TOP_KEYS` active keys, ordered by
 use and carrying their counts, from a current projection. Without one there is
 no order by use: it lists active keys in registry order and names the reason
 under `unavailable`. `more` counts the active keys a listing left
-out. It never reports a zero it did not count.
+out. It never reports a zero it did not count. A registry whose spec sets
+`summarize_keys` to false lists no keys. It still reports its findings, its new
+keys and `unavailable`, and the block leaves it out only when none applies.
 
 A key a save or an auto-registration added within `NEW_WINDOW_DAYS` is listed
 under `new`, at most `NEW_KEYS` per registry, with the window's start date in
@@ -115,6 +113,7 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
             row["new"] = new[:NEW_KEYS] + (
                 [f"+{len(new) - NEW_KEYS} more"] if len(new) > NEW_KEYS else []
             )
+        # A registry without listed keys appears only when it has something to report.
         if row:
             registries[name] = row
     # Registry names are hyphenated, so they never meet the two plain keys.

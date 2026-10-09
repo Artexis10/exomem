@@ -57,7 +57,9 @@ def _seed_collection(tmp_path: Path) -> str:
 def test_normalize_item_accepts_a_valid_motivation_list() -> None:
     from exomem.planning import normalize_item
 
-    values = normalize_item({"title": "Ship the migration", "motivation": [REF_A, REF_B]})
+    values = normalize_item(
+        {"title": "Ship the migration", "motivation": [REF_A, REF_B]}, vault_root=None
+    )
 
     assert values["motivation"] == [REF_A, REF_B]
 
@@ -68,7 +70,7 @@ def test_normalize_item_refuses_more_than_sixteen_motivation_entries() -> None:
     refs = [f"exomem://memory/00000000-0000-4000-8000-{index:012d}" for index in range(17)]
 
     with pytest.raises(CollectionError, match="^INVALID_PLAN:"):
-        normalize_item({"title": "Too many motivations", "motivation": refs})
+        normalize_item({"title": "Too many motivations", "motivation": refs}, vault_root=None)
 
 
 def test_normalize_item_accepts_exactly_sixteen_motivation_entries() -> None:
@@ -76,7 +78,7 @@ def test_normalize_item_accepts_exactly_sixteen_motivation_entries() -> None:
 
     refs = [f"exomem://memory/00000000-0000-4000-8000-{index:012d}" for index in range(16)]
 
-    values = normalize_item({"title": "At the bound", "motivation": refs})
+    values = normalize_item({"title": "At the bound", "motivation": refs}, vault_root=None)
 
     assert values["motivation"] == refs
 
@@ -85,14 +87,14 @@ def test_normalize_item_refuses_a_malformed_motivation_reference() -> None:
     from exomem.planning import normalize_item
 
     with pytest.raises(CollectionError, match="^INVALID_PLAN:"):
-        normalize_item({"title": "Bad ref", "motivation": ["not-a-memory-ref"]})
+        normalize_item({"title": "Bad ref", "motivation": ["not-a-memory-ref"]}, vault_root=None)
 
 
 def test_normalize_item_refuses_a_non_list_motivation() -> None:
     from exomem.planning import normalize_item
 
     with pytest.raises(CollectionError, match="^INVALID_PLAN:"):
-        normalize_item({"title": "Not a list", "motivation": REF_A})
+        normalize_item({"title": "Not a list", "motivation": REF_A}, vault_root=None)
 
 
 def test_normalize_item_refuses_a_plan_reference_as_motivation() -> None:
@@ -102,14 +104,14 @@ def test_normalize_item_refuses_a_plan_reference_as_motivation() -> None:
     plan_ref = "exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/991acdd4-16b9-4396-8220-2cb37b7e8516"
 
     with pytest.raises(CollectionError, match="^INVALID_PLAN:"):
-        normalize_item({"title": "Wrong namespace", "motivation": [plan_ref]})
+        normalize_item({"title": "Wrong namespace", "motivation": [plan_ref]}, vault_root=None)
 
 
 def test_normalize_item_omits_motivation_when_absent() -> None:
     """Absence must behave exactly as today: no key is defaulted in."""
     from exomem.planning import normalize_item
 
-    values = normalize_item({"title": "Keep this for later"})
+    values = normalize_item({"title": "Keep this for later"}, vault_root=None)
 
     assert "motivation" not in values
     assert values == {

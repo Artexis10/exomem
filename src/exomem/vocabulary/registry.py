@@ -158,9 +158,8 @@ class RegistrySpec:
     cap: int = 512
     #: How usage counts are read: `(vault_root, snapshot) -> Usage`.
     usage: Callable[[Path, Snapshot], Any] | None = None
-    #: False when another bootstrap block already lists this registry's keys. The
-    #: vocabulary summary then leaves out `top`, `more` and the usage count, but it
-    #: still reports findings, new keys and a refusal.
+    #: Whether the bootstrap vocabulary section lists this registry's keys. Some
+    #: registries' keys are listed elsewhere or are too many for the compact payload.
     summarize_keys: bool = True
 
 
