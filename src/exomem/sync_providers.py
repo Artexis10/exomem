@@ -8,7 +8,7 @@ change, so it is registry data. Code knows only how to look for each evidence ki
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .vault import kb_root
 from .vocabulary import registry
@@ -41,6 +41,7 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
         or len(value) > 255
         or "\\" in value
         or PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).drive
         or any(part in ("", ".", "..") for part in value.split("/"))
     ):
         raise registry.RegistryError(
