@@ -178,6 +178,7 @@ SPEC = registry.RegistrySpec(
     attributes=frozenset({"class", "parents"}),
     # A stored item's archive and hierarchy rules must not change under it.
     immutable=frozenset({"attributes.class", "attributes.parents"}),
+    served_by="planning",
 )
 
 

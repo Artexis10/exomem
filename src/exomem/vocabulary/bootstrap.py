@@ -4,7 +4,8 @@ For each registry the block lists at most `TOP_KEYS` active keys, ordered by
 use and carrying their counts, from a current projection. Without one there is
 no order by use: it lists active keys in registry order and names the reason
 under `unavailable`. `more` counts the active keys a listing left
-out. It never reports a zero it did not count.
+out. It never reports a zero it did not count. A registry whose spec names
+`served_by` is left out, because that bootstrap block already lists its values.
 
 A key a save or an auto-registration added within `NEW_WINDOW_DAYS` is listed
 under `new`, at most `NEW_KEYS` per registry, with the window's start date in
@@ -77,6 +78,9 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
 
     registries: dict[str, Any] = {}
     for name, spec in registry_specs().items():
+        # Another block already lists these values; a second copy costs bytes and adds nothing.
+        if spec.served_by is not None:
+            continue
         refusal = admission_refusal(vault_root, spec)
         if refusal is not None:
             registries[name] = {"unavailable": refusal["reason"]}
