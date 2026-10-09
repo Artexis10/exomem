@@ -96,6 +96,7 @@ from typing import Any
 from . import call_spans
 from . import review_state as review_state_module
 from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer, selected_writer
+from .planning_values import PlanningValues
 
 log = logging.getLogger(__name__)
 
@@ -2108,8 +2109,9 @@ def apply_record_write_delta(
             snapshot = _unfiltered_snapshot(Path(vault_root), planning)
             if snapshot is None:
                 continue
+            planning_values = PlanningValues(Path(vault_root))
             for item in snapshot.records:
-                if not audit_module.open_plan_item(item.values):
+                if not audit_module.open_plan_item(item.values, planning_values):
                     continue
                 item_key = audit_module.join_key(plan_fields, item.values)
                 if item_key is None:
@@ -2199,7 +2201,7 @@ def apply_plan_write_delta(
         pages = dict(categories.get(_OUTCOME_FAMILY) or {})
         if not rows:
             return _persist_delta(Path(vault_root), current, categories, today)
-        if not audit_module.open_plan_item(values):
+        if not audit_module.open_plan_item(values, PlanningValues(Path(vault_root))):
             # Item-wide, and the only case that is: a closed item is not a
             # finding under ANY binding.
             _drop_item_entries(pages, str(path), str(key), today)

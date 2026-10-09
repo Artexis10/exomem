@@ -1,0 +1,49 @@
+# The Planning values Exomem ships: the governed vocabulary of the Planning
+# core fields. A key is `<field>.<value>`; a Planning item stores the value.
+# A vault adds values in `_Schema/planning-values.yaml`; shipped values are
+# fixed. A status carries its planning `class` (open, done or dropped). A kind
+# carries `parents`, the kinds that may be its parent; an empty list means the
+# kind takes no parent. Pack order is presentation order.
+schema_version: 1
+registry: planning-values
+entries:
+  kind.area:
+    description: ongoing responsibility; carries no delivery state
+    attributes: {parents: []}
+  kind.outcome:
+    description: a desired end state
+    attributes: {parents: []}
+  kind.initiative:
+    attributes: {parents: [outcome]}
+  kind.work-item:
+    attributes: {parents: [initiative]}
+  status.candidate:
+    attributes: {class: open}
+  status.planned:
+    attributes: {class: open}
+  status.active:
+    attributes: {class: open}
+  status.blocked:
+    attributes: {class: open}
+  status.completed:
+    attributes: {class: done}
+  status.cancelled:
+    attributes: {class: dropped}
+  priority.critical: {}
+  priority.high: {}
+  priority.medium: {}
+  priority.low: {}
+  priority.none: {}
+  commitment.uncommitted: {}
+  commitment.considering: {}
+  commitment.committed: {}
+  horizon.inbox: {}
+  horizon.week: {}
+  horizon.month: {}
+  horizon.quarter: {}
+  horizon.year: {}
+  horizon.multi-year: {}
+  health.unknown: {}
+  health.on-track: {}
+  health.at-risk: {}
+  health.off-track: {}

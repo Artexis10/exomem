@@ -7,21 +7,17 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Never
 
 from . import memory_refs, record_formats, record_governance, records
 from . import structured_collections as collections
 from .governance import egress
+from .planning_values import PlanningValues, Unavailable
 from .structured_collections import CollectionError, parse_plan_ref
 
-_KINDS = frozenset({"area", "outcome", "initiative", "work-item"})
-_STATUSES = frozenset({"candidate", "planned", "active", "blocked", "completed", "cancelled"})
 _LIFECYCLES = frozenset({"active", "archived"})
-_PRIORITIES = frozenset({"critical", "high", "medium", "low", "none"})
-_COMMITMENTS = frozenset({"uncommitted", "considering", "committed"})
-_HORIZONS = frozenset({"inbox", "week", "month", "quarter", "year", "multi-year"})
-_HEALTH = frozenset({"unknown", "on-track", "at-risk", "off-track"})
 _EXECUTION_KIND = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _AREA_FORBIDDEN = frozenset({"status", "priority", "commitment", "horizon", "area", "parent"})
 _OPTIONAL = frozenset(
@@ -64,12 +60,21 @@ def motivation_is_governed(manifest: collections.CollectionManifest) -> bool:
 def normalize_item(
     item: Mapping[str, Any],
     *,
+    vault_root: Path | None = None,
+    stored: Mapping[str, Any] | None = None,
     apply_defaults: bool = True,
     validate_motivation: bool = True,
 ) -> dict[str, Any]:
-    """Validate one authored Planning item without inferring from prose."""
+    """Validate one authored Planning item without inferring from prose.
+
+    `stored` is the item as the vault holds it, or None for a new item. A
+    Planning value that equals its stored value stays readable after its
+    definition is deprecated or removed; a new or changed value must be an
+    active registered value. Without `vault_root` only shipped values register.
+    """
     if not isinstance(item, Mapping):
         _invalid("item must be an object")
+    planning_values = PlanningValues(vault_root)
     values = dict(item)
     if apply_defaults:
         values.setdefault("kind", "work-item")
@@ -83,23 +88,50 @@ def normalize_item(
         else:
             values.setdefault("lifecycle", "active")
     _bounded_string(values.get("title"), "title", 512)
-    _enum(values.get("kind"), _KINDS, "kind")
+    _governed(planning_values, values, stored, "kind")
     _enum(values.get("lifecycle"), _LIFECYCLES, "lifecycle")
     if values["kind"] == "area":
         if _AREA_FORBIDDEN & values.keys():
             _invalid("areas cannot carry delivery state or hierarchy")
-        _validate_optional(values, validate_motivation=validate_motivation)
+        _validate_optional(
+            values, planning_values, stored, validate_motivation=validate_motivation
+        )
         return values
-    for name, allowed in (
-        ("status", _STATUSES),
-        ("priority", _PRIORITIES),
-        ("commitment", _COMMITMENTS),
-        ("horizon", _HORIZONS),
-    ):
-        _enum(values.get(name), allowed, name)
-    _validate_lifecycle(values)
-    _validate_optional(values, validate_motivation=validate_motivation)
+    for name in ("status", "priority", "commitment", "horizon"):
+        _governed(planning_values, values, stored, name)
+    _validate_lifecycle(values, planning_values, stored)
+    _validate_optional(values, planning_values, stored, validate_motivation=validate_motivation)
     return values
+
+
+def _governed(
+    planning_values: PlanningValues,
+    values: Mapping[str, Any],
+    stored: Mapping[str, Any] | None,
+    name: str,
+) -> None:
+    """Refuse a new or changed Planning value that is not active in the registry."""
+    value = values.get(name)
+    if type(value) is str and value and stored is not None and stored.get(name) == value:
+        return
+    entry = _registered(planning_values, name, value)
+    if entry is None:
+        if name == "kind":
+            _invalid("kind must be one of: " + ", ".join(planning_values.values("kind")))
+        _invalid(f"{name} is invalid")
+    if entry.status != "active":
+        replacement = (entry.replaced_by or "").partition(".")[2]
+        _invalid(f"{name} is deprecated" + (f"; use {replacement}" if replacement else ""))
+
+
+def _registered(planning_values: PlanningValues, name: str, value: Any) -> Any:
+    try:
+        return planning_values.find(name, value)
+    except Unavailable:
+        raise CollectionError(
+            "PLANNING_VALUES_UNAVAILABLE",
+            f"{name} needs vault Planning values that are withheld or invalid",
+        ) from None
 
 
 def require_planning_profile(
@@ -139,7 +171,7 @@ def create_collection(
     manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode("utf-8"))
     require_planning_profile(manifest)
     if scaffold:
-        manifest_text = _with_default_scaffold(manifest_text, manifest)
+        manifest_text = _with_default_scaffold(manifest_text, manifest, vault_root=root)
         manifest = collections.parse_manifest_bytes(
             root, manifest_path, manifest_text.encode("utf-8")
         )
@@ -175,7 +207,9 @@ def validate(
             )
         )
         effective_text = (
-            _with_default_scaffold(manifest_text, manifest) if scaffold else manifest_text
+            _with_default_scaffold(manifest_text, manifest, vault_root=root)
+            if scaffold
+            else manifest_text
         )
         result = records._validate_collection_create_for_profile(
             root,
@@ -262,6 +296,8 @@ def rebaseline(
 def _with_default_scaffold(
     manifest_text: str,
     manifest: collections.CollectionManifest,
+    *,
+    vault_root: Path | None = None,
 ) -> str:
     newline = "\r\n" if "\r\n" in manifest_text else "\n"
     closing = list(re.finditer(r"(?m)^---\r?$", manifest_text))
@@ -307,7 +343,7 @@ def _with_default_scaffold(
     if not manifest.views:
         # Kept explicit so the ordinary YAML remains obvious to a human editor.
         additions.append("views:")
-        for horizon in ("inbox", "week", "month", "quarter", "year", "multi-year"):
+        for horizon in PlanningValues(vault_root).values("horizon"):
             additions.extend(
                 (
                     f"  {horizon}:",
@@ -344,14 +380,16 @@ def add(
     record_governance.require_mutation_visibility(vault_root, manifest)
     _validate_public_text(why, "why")
     _validate_public_text(body, "body")
-    values = normalize_item(item, validate_motivation=motivation_is_governed(manifest))
+    values = normalize_item(
+        item, vault_root=vault_root, validate_motivation=motivation_is_governed(manifest)
+    )
     _validate_declared_text(manifest, values)
     snapshot = record_formats.load_adapter(
         vault_root,
         manifest,
         authorize_path=record_governance.full_release_filter(vault_root),
     ).read()
-    _validate_relationships(manifest, snapshot.records, plan_id or "__new__", values)
+    _validate_relationships(vault_root, manifest, snapshot.records, plan_id or "__new__", values)
     return records.append_record(
         vault_root,
         manifest,
@@ -360,7 +398,7 @@ def add(
         expected_container_hash=expected_container_hash,
         body=body,
         why=why,
-        validate_snapshot=_validate_final_relationships,
+        validate_snapshot=partial(_validate_final_relationships, vault_root),
     )
 
 
@@ -797,8 +835,11 @@ def _valid_hierarchy_node(value: Any, manifest: collections.CollectionManifest) 
     if memory_refs.normalize_id(value.get("plan_id")) != value.get("plan_id"):
         return False
     try:
+        # A served node carries stored values, so only their shape is checked here.
         normalize_item(
             value,
+            vault_root=None,
+            stored=value,
             apply_defaults=False,
             validate_motivation=motivation_is_governed(manifest),
         )
@@ -995,15 +1036,58 @@ def _validate_authorized_snapshot(
     authorize_path: Callable[[str], bool] | None,
     *,
     validate_relationships: bool = True,
-) -> None:
+) -> tuple[record_formats.Record, ...]:
     snapshot = record_formats.load_adapter(
         vault_root, manifest, authorize_path=authorize_path
     ).read()
     governed = motivation_is_governed(manifest)
     for record in snapshot.records:
-        normalize_item(record.values, apply_defaults=False, validate_motivation=governed)
+        normalize_item(
+            record.values,
+            vault_root=vault_root,
+            stored=record.values,
+            apply_defaults=False,
+            validate_motivation=governed,
+        )
     if validate_relationships:
-        _validate_relationships(manifest, snapshot.records, None, None)
+        _validate_relationships(vault_root, manifest, snapshot.records, None, None)
+    return snapshot.records
+
+
+def _value_debt(
+    vault_root: Path, records_in_snapshot: tuple[record_formats.Record, ...]
+) -> list[dict[str, str]]:
+    """Report stored values that are deprecated or no longer registered."""
+    planning_values = PlanningValues(vault_root)
+    debt = unavailable = 0
+    for record in records_in_snapshot:
+        for name in planning_values.fields():
+            if name not in record.values:
+                continue
+            try:
+                entry = planning_values.find(name, record.values[name])
+            except Unavailable:
+                unavailable += 1
+                continue
+            if entry is None or entry.status != "active":
+                debt += 1
+    diagnostics = []
+    if debt:
+        diagnostics.append(
+            {
+                "code": "UNREGISTERED_PLAN_VALUE",
+                "reason": f"{debt} stored Planning values are deprecated or not registered",
+            }
+        )
+    if unavailable:
+        diagnostics.append(
+            {
+                "code": "PLANNING_VALUES_UNAVAILABLE",
+                "reason": f"{unavailable} stored Planning values need vault definitions "
+                "that are withheld or invalid; they were not checked",
+            }
+        )
+    return diagnostics
 
 
 def inspect(vault_root: Path, collection: str | collections.CollectionManifest) -> dict[str, Any]:
@@ -1046,9 +1130,11 @@ def inspect(vault_root: Path, collection: str | collections.CollectionManifest) 
         )
     if len(diagnostics) < 64:
         try:
-            _validate_authorized_snapshot(vault_root, manifest, authorize_path)
+            stored = _validate_authorized_snapshot(vault_root, manifest, authorize_path)
         except CollectionError as error:
             diagnostics.append({"code": error.code, "reason": error.reason})
+        else:
+            diagnostics.extend(_value_debt(vault_root, stored)[: 64 - len(diagnostics)])
     contract = result.get("contract")
     if not isinstance(contract, Mapping):
         raise CollectionError(
@@ -1364,11 +1450,13 @@ def update(
     _require_same_area_side(matches[0].values, final)
     normalize_item(
         final,
+        vault_root=vault_root,
+        stored=matches[0].values,
         apply_defaults=False,
         validate_motivation=motivation_is_governed(manifest),
     )
     _validate_declared_text(manifest, final)
-    _validate_relationships(manifest, snapshot.records, plan_id, final)
+    _validate_relationships(vault_root, manifest, snapshot.records, plan_id, final)
     return records.update_record(
         vault_root,
         manifest,
@@ -1379,7 +1467,7 @@ def update(
         why=why,
         delete_fields=deleted,
         body=body,
-        validate_snapshot=_validate_final_relationships,
+        validate_snapshot=partial(_validate_final_relationships, vault_root),
     )
 
 
@@ -1426,11 +1514,13 @@ def triage(
     _require_same_area_side(matches[0].values, final)
     normalize_item(
         final,
+        vault_root=vault_root,
+        stored=matches[0].values,
         apply_defaults=False,
         validate_motivation=motivation_is_governed(manifest),
     )
     _validate_declared_text(manifest, final)
-    _validate_relationships(manifest, snapshot.records, plan_id, final)
+    _validate_relationships(vault_root, manifest, snapshot.records, plan_id, final)
     return records.update_record(
         vault_root,
         manifest,
@@ -1441,11 +1531,17 @@ def triage(
         why=why,
         operation="triage",
         delete_fields=tuple(name for name, value in transition.items() if value is None),
-        validate_snapshot=_validate_final_relationships,
+        validate_snapshot=partial(_validate_final_relationships, vault_root),
     )
 
 
-def _validate_lifecycle(values: Mapping[str, Any]) -> None:
+def _validate_lifecycle(
+    values: Mapping[str, Any],
+    planning_values: PlanningValues,
+    stored: Mapping[str, Any] | None,
+) -> None:
+    # The candidate, planned, active, blocked and completed rules name shipped
+    # statuses, which are fixed; a vault status takes only its class rule below.
     status = values["status"]
     lifecycle = values["lifecycle"]
     commitment = values["commitment"]
@@ -1466,8 +1562,20 @@ def _validate_lifecycle(values: Mapping[str, Any]) -> None:
         or (status != "completed" and lifecycle != "active")
     ):
         _invalid("active, blocked, and completed plans require committed non-inbox intent")
-    if lifecycle == "archived" and status not in {"completed", "cancelled"}:
-        _invalid("only completed or cancelled plans may be archived")
+    if lifecycle == "archived":
+        unchanged = stored is not None and all(
+            stored.get(name) == values.get(name) for name in ("status", "lifecycle")
+        )
+        # A stored archived item stays readable after its status definition is removed.
+        entry = (
+            PlanningValues(None).find("status", status)
+            if unchanged
+            else _registered(planning_values, "status", status)
+        )
+        if (entry is None and not unchanged) or (
+            entry is not None and entry.attributes["class"] == "open"
+        ):
+            _invalid("only plans with a done or dropped status may be archived")
 
 
 def _require_same_area_side(before: Mapping[str, Any], after: Mapping[str, Any]) -> None:
@@ -1500,6 +1608,7 @@ def _normalize_changes(
 
 
 def _validate_relationships(
+    vault_root: Path,
     manifest: collections.CollectionManifest,
     records_in_snapshot: tuple[record_formats.Record, ...],
     plan_id: str | None,
@@ -1513,26 +1622,34 @@ def _validate_relationships(
         values = dict(record.values)
         normalize_item(
             values,
+            vault_root=vault_root,
+            stored=record.values,
             apply_defaults=False,
             validate_motivation=motivation_is_governed(manifest),
         )
         plans[record.identity.key] = values
     if plan_id is not None and candidate is not None:
         plans[plan_id] = dict(candidate)
-    validate_hierarchy(manifest, plans)
+    validate_hierarchy(manifest, plans, vault_root=vault_root)
 
 
 def validate_hierarchy(
-    manifest: collections.CollectionManifest, plans: Mapping[str, Mapping[str, Any]]
+    manifest: collections.CollectionManifest,
+    plans: Mapping[str, Mapping[str, Any]],
+    *,
+    vault_root: Path | None = None,
 ) -> None:
     """Planning's typed hierarchy over one complete set of plans, keyed by plan id.
 
-    Areas carry no parent; an initiative's parent is an outcome and a work
-    item's is an initiative; active plans point only at active targets; a
-    child's area agrees with its parent's; there are no cycles; and nothing
-    archived keeps an active child. This is the named validator
+    Areas carry no parent; a kind's registered `parents` name the kinds its
+    parent may have, and a committed active item of a kind that has parents
+    needs one; active plans point only at active targets; a child's area
+    agrees with its parent's; there are no cycles; and nothing archived keeps
+    an active child. An item whose kind has no readable definition keeps every
+    rule but the kind rules. This is the named validator
     ``planning.hierarchy.v1``.
     """
+    planning_values = PlanningValues(vault_root)
     parents: dict[str, str] = {}
     for key, values in plans.items():
         kind = values["kind"]
@@ -1551,10 +1668,13 @@ def validate_hierarchy(
                 or (active and target["lifecycle"] != "active")
             ):
                 _relation_error()
-        required_parent = (
-            active and values["commitment"] == "committed" and kind in {"initiative", "work-item"}
-        )
-        if kind == "outcome":
+        try:
+            definition = planning_values.find("kind", kind)
+        except Unavailable:
+            definition = None
+        allowed = None if definition is None else tuple(definition.attributes["parents"])
+        required_parent = active and values["commitment"] == "committed" and bool(allowed)
+        if allowed == ():
             if parent is not None:
                 _relation_error()
         elif parent is None:
@@ -1562,10 +1682,9 @@ def validate_hierarchy(
                 _relation_error()
         else:
             target = plans.get(parent)
-            expected = "outcome" if kind == "initiative" else "initiative"
             if (
                 target is None
-                or target["kind"] != expected
+                or (allowed is not None and target["kind"] not in allowed)
                 or (active and target["lifecycle"] != "active")
             ):
                 _relation_error()
@@ -1603,23 +1722,26 @@ def validate_hierarchy(
 
 
 def _validate_final_relationships(
+    vault_root: Path,
     manifest: collections.CollectionManifest,
     snapshot: record_formats.AdapterSnapshot,
     plan_id: str,
     values: Mapping[str, Any],
     _body: str | None = None,
 ) -> None:
-    before = next(
-        (record.values for record in snapshot.records if record.identity.key == plan_id), values
+    stored = next(
+        (record.values for record in snapshot.records if record.identity.key == plan_id), None
     )
-    _require_same_area_side(before, values)
+    _require_same_area_side(values if stored is None else stored, values)
     normalize_item(
         values,
+        vault_root=vault_root,
+        stored=stored,
         apply_defaults=False,
         validate_motivation=motivation_is_governed(manifest),
     )
     _validate_declared_text(manifest, values)
-    _validate_relationships(manifest, snapshot.records, plan_id, values)
+    _validate_relationships(vault_root, manifest, snapshot.records, plan_id, values)
 
 
 def _validate_declared_text(
@@ -1663,10 +1785,15 @@ def _relation_error() -> Never:
     raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
 
 
-def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool = True) -> None:
-    for name in ("health",):
-        if name in values:
-            _enum(values[name], _HEALTH, name)
+def _validate_optional(
+    values: Mapping[str, Any],
+    planning_values: PlanningValues,
+    stored: Mapping[str, Any] | None,
+    *,
+    validate_motivation: bool = True,
+) -> None:
+    if "health" in values:
+        _governed(planning_values, values, stored, "health")
     start = _date(values.get("window_start"), "window_start") if "window_start" in values else None
     end = _date(values.get("window_end"), "window_end") if "window_end" in values else None
     if start is not None and end is not None and start > end:
@@ -1764,8 +1891,6 @@ def _date(value: Any, name: str) -> dt.date:
 
 def _enum(value: Any, allowed: set[str] | frozenset[str], name: str) -> None:
     if type(value) is not str or value not in allowed:
-        if name == "kind":
-            _invalid("kind must be one of: area, outcome, initiative, work-item")
         _invalid(f"{name} is invalid")
 
 

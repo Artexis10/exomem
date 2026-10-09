@@ -1,6 +1,6 @@
 ## Programme order
 
-This change is the programme's one home. S1 is this delivery. S2 to S10 are sequenced here and land as their own pull requests; S3, S4 and S7 also get their own OpenSpec changes (`add-lifecycle-status-registry`, `add-note-type-registry`, `add-language-packs`), and Planning gets a small change when S10 starts. After S1, S2, S3, S5 and S10 can run in parallel; everything else is sequential.
+This change is the programme's one home. S1 is this delivery. S2 to S10 are sequenced here and land as their own pull requests; S3, S4 and S7 also get their own OpenSpec changes (`add-lifecycle-status-registry`, `add-note-type-registry`, `add-language-packs`), and Planning gets `add-planning-value-registry`. After S1, S2, S3, S5 and S10 can run in parallel; everything else is sequential.
 
 ## S1. Substrate, revert, generic contract, bootstrap section (this delivery)
 
@@ -56,9 +56,9 @@ This change is the programme's one home. S1 is this delivery. S2 to S10 are sequ
 
 - [ ] 9.1 Use the `activate-agent-led-vocabulary-evolution` work-item queue as the nudge channel: "you used X, the vault calls it Y" in the advisory slot; Dreamer upkeep families for recurring unregistered values, near-duplicate entries and per-registry debt.
 
-## S10. Planning
+## S10. Planning (`add-planning-value-registry`)
 
-- [ ] 10.1 Move Planning values into `_collection_types/planning.yaml` as enum values with `rank`, `parents`, `class` and `order` attributes, under a small Planning change.
+- [ ] 10.1 Move Planning values into the vocabulary substrate as the `planning-values` registry (pack `packs/core/planning-values.yaml`, overlay `_Schema/planning-values.yaml`), with `class` on statuses and `parents` on kinds, under `add-planning-value-registry`. The values do not go into `_collection_types/planning.yaml`: only the substrate has the overlay, history and restore a vault-added value needs, and a built-in collection type cannot change its bytes before P4. `rank` and `order` wait for a consumer.
 
 ## Closure
 

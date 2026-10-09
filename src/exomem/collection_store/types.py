@@ -24,6 +24,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -93,7 +94,10 @@ class NamedValidator:
     """One product-owned rule a declaration can opt into by name."""
 
     name: str
-    validate: Callable[[collections.CollectionManifest, Mapping[str, Mapping[str, Any]]], None]
+    #: `(manifest, plans, vault_root)`; the vault root reads the vault's vocabulary.
+    validate: Callable[
+        [collections.CollectionManifest, Mapping[str, Mapping[str, Any]], Path | None], None
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,11 +124,13 @@ class CollectionType:
 
 
 def _planning_hierarchy_v1(
-    manifest: collections.CollectionManifest, plans: Mapping[str, Mapping[str, Any]]
+    manifest: collections.CollectionManifest,
+    plans: Mapping[str, Mapping[str, Any]],
+    vault_root: Path | None = None,
 ) -> None:
     from .. import planning
 
-    planning.validate_hierarchy(manifest, plans)
+    planning.validate_hierarchy(manifest, plans, vault_root=vault_root)
 
 
 _NAMED_VALIDATORS: Mapping[str, NamedValidator] = MappingProxyType(

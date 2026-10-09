@@ -115,6 +115,7 @@ from . import find as find_module
 from . import provenance as provenance_module
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
+from .planning_values import PlanningValues
 from .vault import (
     _mask_code_spans,
     content_hash,
@@ -4144,14 +4145,6 @@ def _check_prediction_window(
 
 # ---------------- check: unreflected_outcomes ----------------
 
-#: A Planning item is OPEN while the vault still intends it: lifecycle `active`
-#: and a status that has not settled. Both are authored values, read as authored;
-#: an absent `lifecycle` reads as `active` because that is Planning's own capture
-#: default for every kind (`planning.py:77,83`), not an inference made here.
-#: Nothing reads a state out of dates, out of the events, or out of how long
-#: anything took.
-_SETTLED_PLAN_STATUSES = frozenset({"completed", "cancelled"})
-
 #: How many joined record references one finding carries. The TOTAL is always
 #: exact; the list is a sample, for the same reason the wire block caps `top`.
 _UNREFLECTED_REF_LIMIT = 8
@@ -4365,9 +4358,9 @@ def declared_bindings(vault_root: Path, manifest: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def open_plan_item(values: Any) -> bool:
+def open_plan_item(values: Any, planning_values: PlanningValues) -> bool:
     """Public alias: a Planning item the vault still intends (design D6)."""
-    return _open_plan_item(values)
+    return _open_plan_item(values, planning_values)
 
 
 def join_key(names: list[str], values: Any) -> tuple[str, ...] | None:
@@ -4424,10 +4417,21 @@ def _join_key(names: list[str], values: Any) -> tuple[str, ...] | None:
     return tuple(tokens)
 
 
-def _open_plan_item(values: Any) -> bool:
+def _open_plan_item(values: Any, planning_values: PlanningValues) -> bool:
+    """A Planning item is OPEN while the vault still intends it.
+
+    That is lifecycle `active` and a status whose planning class is not done
+    or dropped. Both are authored values, read as authored; an absent
+    `lifecycle` reads as `active` because that is Planning's own capture
+    default for every kind, not an inference made here. A status with no
+    readable definition has not settled. Nothing reads a state out of dates,
+    out of the events, or out of how long anything took.
+    """
     lifecycle = str(values.get("lifecycle") or "active").strip().lower()
     status = str(values.get("status") or "").strip().lower()
-    return lifecycle == "active" and status not in _SETTLED_PLAN_STATUSES
+    if lifecycle != "active":
+        return False
+    return not status or planning_values.planning_class(status) in (None, "open")
 
 
 def _outcome_snapshot(vault_root: Path, manifest: Any, authorize: Any) -> Any | None:
@@ -4467,9 +4471,10 @@ def _unreflected_for_binding(
             grouped.setdefault(key, []).append(record)
     findings: list[AuditFinding] = []
     covered: set[str] = set()
+    planning_values = PlanningValues(vault_root)
     for item in plan_snapshot.records:
         covered.add(item.source.path)
-        if not _open_plan_item(item.values):
+        if not _open_plan_item(item.values, planning_values):
             continue
         key = _join_key(plan_fields, item.values)
         if key is None:
