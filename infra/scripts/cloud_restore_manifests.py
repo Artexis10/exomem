@@ -10,9 +10,11 @@ process memory only and never prints it.
 
     scratch                restore a snapshot into a new scratch namespace beside the cell
     in-place               restore a snapshot onto the stopped cell's own volume
+    helper-pod             start a pod on the cell's volume or a scratch volume
     idle                   exit 0 only when the cell runs no Job and carries no hold
     outside-backup-window  exit 0 only outside the live cellctl's nightly backup window
     backup-paths           print the paths a backup covers and a restore rewrites
+    restore-job-selector   print the label selector of cellctl's restore Jobs
 """
 
 from __future__ import annotations
@@ -39,11 +41,18 @@ from cellctl.backup_window import (  # noqa: E402
     parse_backup_window,
     within_backup_window,
 )
+
+# The two private security-context helpers are cellctl's own, so the helper
+# pods match what Pod Security and cell admission already admit for its Jobs.
 from cellctl.manifests import (  # noqa: E402
     BACKUP_PATHS,
     HOLD_ANNOTATION,
+    JOB_KIND_LABEL,
+    JOB_KIND_RESTORE,
     SNAPSHOT_ID_RE,
     CellManifestSpec,
+    _container_security_context,
+    _pod_security_context,
     namespace_name,
     render_cell_manifests,
     render_restore_job,
@@ -53,7 +62,10 @@ from cellctl.storage_config import LEGACY_CLASS  # noqa: E402
 CELL_ID_RE = re.compile(r"[a-z2-7]{16}")  # shape check: a cell ID is 16 base32 characters
 DIGEST_IMAGE_RE = re.compile(r"@sha256:[a-f0-9]{64}$")
 RUNTIME_CONTAINER = "exomem"  # the runtime container cellctl's render_statefulset names
+# Fixed by the platform chart: values.schema.json pins cellctl.namespace, and
+# templates/cellctl.yaml names the Deployment.
 CONTROL_NAMESPACE, CELLCTL_DEPLOYMENT = "exomem-cloud", "cellctl"
+POD_NAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")  # a DNS-1123 label
 # The cell documents a scratch restore needs: the volume, the credentials the
 # Job reads, and the policies that confine it. Never the StatefulSet, Service
 # or quota, so the scratch namespace can never start a runtime.
@@ -104,7 +116,12 @@ def check_arguments(cell_id: str, snapshot: str, scratch: str | None = None) -> 
         raise ValueError("not a cell ID")
     if not SNAPSHOT_ID_RE.fullmatch(snapshot):
         raise ValueError("not a restic snapshot ID")
-    if scratch is not None and not re.fullmatch(rf"exo-scratch-{cell_id}-[0-9a-f]{{8}}", scratch):
+    if scratch is not None:
+        _check_scratch(cell_id, scratch)
+
+
+def _check_scratch(cell_id: str, scratch: str) -> None:
+    if not re.fullmatch(rf"exo-scratch-{cell_id}-[0-9a-f]{{8}}", scratch):
         raise ValueError("the scratch namespace must be exo-scratch-<cell ID>-<8 hex>")
 
 
@@ -178,6 +195,59 @@ def in_place_job(
         hold_kind="restore", hold_started_at=started_at,
     )
     return render_restore_job(spec, bucket_name=settings.bucket, endpoint=settings.endpoint, snapshot_id=snapshot)
+
+
+def helper_pod(*, cell_id: str, statefulset: dict, name: str, scratch: str | None = None) -> dict:
+    """A pod that mounts a volume for the restore tools to exec into: the
+    cell's own volume, or the scratch volume when `scratch` names it.
+
+    On the cell's volume it runs where cellctl's restore Job and the cell run,
+    so the volume never moves between nodes during the downtime. The scratch
+    restore Job runs unplaced (scratch_documents), so its verify pod does too,
+    which keeps it off a dedicated node where the live cell runs.
+    """
+
+    if not POD_NAME_RE.fullmatch(name):
+        raise ValueError("not a pod name")
+    image, placement = runtime_of(statefulset)
+    if scratch is not None:
+        _check_scratch(cell_id, scratch)
+    read_only = scratch is not None
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": name,
+            "namespace": scratch or namespace_name(cell_id),
+            "labels": {"app.kubernetes.io/name": "cloud-restore-helper"},
+        },
+        "spec": {
+            **({} if read_only else placement),
+            "restartPolicy": "Never",
+            "automountServiceAccountToken": False,
+            # The helper keeps no state; its python3 runs as PID 1 and ignores
+            # SIGTERM, so the default 30 s grace would add to every delete.
+            "terminationGracePeriodSeconds": 1,
+            "securityContext": _pod_security_context(),
+            "containers": [
+                {
+                    "name": "helper",
+                    "image": image,
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["python3", "-c", "import time; time.sleep(3600)"],
+                    "resources": {
+                        "requests": {"cpu": "100m", "memory": "256Mi"},
+                        "limits": {"cpu": "1", "memory": "1Gi"},
+                    },
+                    "securityContext": _container_security_context(),
+                    "volumeMounts": [{"name": "data", "mountPath": "/data", "readOnly": read_only}],
+                }
+            ],
+            "volumes": [
+                {"name": "data", "persistentVolumeClaim": {"claimName": "cell-data", "readOnly": read_only}}
+            ],
+        },
+    }
 
 
 def _cellctl(context: str) -> dict:
@@ -265,6 +335,16 @@ def apply_in_place(context: str, cell_id: str, snapshot: str, field_manager: str
     print(job["metadata"]["name"])
 
 
+def apply_helper_pod(context: str, cell_id: str, name: str, field_manager: str, scratch: str | None) -> None:
+    if not CELL_ID_RE.fullmatch(cell_id):
+        raise ValueError("not a cell ID")
+    source = _check_cell_namespace(context, cell_id)
+    pod = helper_pod(
+        cell_id=cell_id, statefulset=_get(context, "statefulset", "cell", source), name=name, scratch=scratch
+    )
+    _apply(context, pod, field_manager)
+
+
 def check_idle(context: str, cell_id: str) -> None:
     if not CELL_ID_RE.fullmatch(cell_id):
         raise ValueError("not a cell ID")
@@ -286,28 +366,37 @@ def check_outside_backup_window(context: str) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("scratch", "in-place", "idle", "outside-backup-window"):
+    for name in ("scratch", "in-place", "helper-pod", "idle", "outside-backup-window"):
         command = commands.add_parser(name)
         command.add_argument("--context", required=True)
         if name == "outside-backup-window":
             continue
         command.add_argument("--cell-id", required=True)
-        if name != "idle":
+        if name in ("scratch", "in-place"):
             command.add_argument("--snapshot", required=True)
+        if name != "idle":
             command.add_argument("--field-manager", required=True)
         if name == "scratch":
             command.add_argument("--scratch", required=True)
+        if name == "helper-pod":
+            command.add_argument("--name", required=True)
+            command.add_argument("--scratch")
     commands.add_parser("backup-paths", help="print what a restore rewrites, one line, space-separated")
+    commands.add_parser("restore-job-selector", help="print the label selector of cellctl's restore Jobs")
     args = parser.parse_args(argv)
     try:
         if args.command == "scratch":
             apply_scratch(args.context, args.cell_id, args.snapshot, args.scratch, args.field_manager)
         elif args.command == "in-place":
             apply_in_place(args.context, args.cell_id, args.snapshot, args.field_manager)
+        elif args.command == "helper-pod":
+            apply_helper_pod(args.context, args.cell_id, args.name, args.field_manager, args.scratch)
         elif args.command == "idle":
             check_idle(args.context, args.cell_id)
         elif args.command == "outside-backup-window":
             check_outside_backup_window(args.context)
+        elif args.command == "restore-job-selector":
+            print(f"{JOB_KIND_LABEL}={JOB_KIND_RESTORE}")
         else:
             print(" ".join(BACKUP_PATHS))
     except (ValueError, RuntimeError, KeyError) as error:

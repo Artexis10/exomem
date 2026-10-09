@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Exomem Cloud restore tools. Run on the node, as root, from a checkout of the
-# reviewed release. docs/runbooks/cloud-operator-restore.md says when to use
-# each one and what to record.
+# Exomem Cloud restore tools. Run on the K3s server, as root, from a checkout
+# of the reviewed release. docs/runbooks/cloud-operator-restore.md says when to
+# use each one and what to record.
 #
 #   cloud_restore.sh drill CELL_ID SNAPSHOT REFERENCE
 #     Restore SNAPSHOT into a scratch namespace, hash every restored vault file
 #     and compare with REFERENCE: "live" (the running cell's vault) or
 #     "prior:<8 hex>" (the vault an earlier restore kept). The cell is never
-#     stopped, mounted by a new pod or written.
+#     stopped, mounted by a new pod or written. The cell must run on this node.
 #   cloud_restore.sh restore CELL_ID SNAPSHOT
 #     Replace the cell's backed-up paths (/data/vault and /data/host) with
 #     SNAPSHOT. The prior contents stay in /data/.restore-prior-<run ID>. The
@@ -25,19 +25,26 @@ set -euo pipefail
 umask 077
 
 K3S=/usr/local/bin/k3s
+ADMIN_KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 STATE=/var/lib/exomem-restore
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 MANIFESTS="$HERE/cloud_restore_manifests.py"
 DIGEST="$HERE/cloud_vault_digest.py"
+VOLUME="$HERE/cloud_restore_volume.sh"
+RELEASE_FILES=(infra/scripts/cloud_restore.sh infra/scripts/cloud_restore_manifests.py
+  infra/scripts/cloud_vault_digest.py infra/scripts/cloud_restore_volume.sh)
 # The import runbook's sizing margin: room for the cell's own writes after the start.
 MARGIN_BYTES=$((2 * 1024 * 1024 * 1024))
 HELPER=cell-restore-helper
 
 die() { echo "!! $*" >&2; exit 1; }
 py() { python3 -I "$@"; }
-admin() { "$K3S" kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml "$@"; }
+admin() { "$K3S" kubectl --kubeconfig "$ADMIN_KUBECONFIG" "$@"; }
 # kubectl is the break-glass shim mint_break_glass writes; see run().
 k() { kubectl --context break-glass "$@"; }
+# cellctl's namespace; the platform chart fixes it (values.schema.json pins
+# cellctl.namespace) and names the Deployment cellctl (templates/cellctl.yaml).
+ctl() { k -n exomem-cloud "$@"; }
 
 # Shape checks, before the values reach names and paths. The manifests module
 # checks the cell and snapshot again.
@@ -60,21 +67,25 @@ launch() {
   local mode=$1 release run_id work
   shift
   check_arguments "$mode" "$@"
-  [ "$(id -u)" = 0 ] || die 'run this on the node as root'
+  [ "$(id -u)" = 0 ] || die 'run this on the K3s server as root'
+  # Only the server holds the admin kubeconfig, which mints break-glass and
+  # removes the scratch namespace even after break-glass expires.
+  [ -r "$ADMIN_KUBECONFIG" ] || die "no $ADMIN_KUBECONFIG; run this on the K3s server"
   release=$(cd -- "$HERE/../.." && pwd -P)
   run_id=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
   work="$STATE/$run_id"
   install -d -m 700 "$STATE" "$work"
   # A frozen copy: a later change to the checkout cannot reach a running unit.
-  (cd -- "$release" && cp --parents -r -- infra/scripts/cloud_restore.sh infra/scripts/cloud_restore_manifests.py \
-    infra/scripts/cloud_vault_digest.py infra/cellctl/src/cellctl "$work/")
-  (cd -- "$work" && sha256sum infra/scripts/cloud_restore.sh infra/scripts/cloud_restore_manifests.py \
-    infra/scripts/cloud_vault_digest.py infra/cellctl/src/cellctl/*.py) > "$work/release.sha256"
+  (cd -- "$release" && cp --parents -r -- "${RELEASE_FILES[@]}" infra/cellctl/src/cellctl "$work/")
+  (cd -- "$work" && sha256sum "${RELEASE_FILES[@]}" infra/cellctl/src/cellctl/*.py) > "$work/release.sha256"
   local limits=(--property=RuntimeMaxSec=3000 --property=TimeoutStopSec=1200)
   # A restore's worst case: about 40 minutes of scratch work, then 70 of
   # downtime. Stopping it runs the recovery, which may start the cell again.
   [ "$mode" = drill ] || limits=(--property=RuntimeMaxSec=9000 --property=TimeoutStopSec=4200)
-  systemd-run --unit="exomem-restore-$run_id" --collect "${limits[@]}" \
+  # KillMode=mixed sends a stop's SIGTERM to bash alone: it starts the recovery
+  # once the current command returns, and no kubectl step of the recovery is
+  # killed under it.
+  systemd-run --unit="exomem-restore-$run_id" --collect "${limits[@]}" --property=KillMode=mixed \
     --property=CPUWeight=50 --property=IOWeight=50 \
     --property=StandardOutput="file:$work/run.log" --property=StandardError="file:$work/run.log" \
     bash "$work/infra/scripts/cloud_restore.sh" run "$mode" "$run_id" "$@"
@@ -87,24 +98,25 @@ follow() {
   tail -n 40 "$STATE/$1/run.log"
 }
 
-# --- break-glass (cloud-operator-access.md): one hour, in memory, minted again
-# whenever less than 20 minutes remain, because a restore can outlast one hour.
-# A failed step returns at once or leaves a kubeconfig the final check refuses.
+# --- break-glass (cloud-operator-access.md): one hour, in memory. It is
+# minted into a new directory and swapped in only once it works, so a failed
+# mint keeps the identity in use.
 mint_break_glass() {
-  local csr cert not_after server kc="$BG_DIR/kubeconfig"
-  rm -rf -- "$BG_DIR"
-  mkdir -m 700 "$BG_DIR" "$BG_DIR/bin" || return 1
+  local csr cert not_after server new="$BG_DIR.new"
+  local kc="$new/kubeconfig"
+  rm -rf -- "$new"
+  mkdir -m 700 "$new" "$new/bin" || return 1
   csr="exomem-break-glass-$(date -u +%Y%m%dt%H%M%S)"
-  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$BG_DIR/key.pem" 2>/dev/null || return 1
-  openssl req -new -key "$BG_DIR/key.pem" -subj "/O=exomem:break-glass/CN=exomem-break-glass" \
-    -out "$BG_DIR/csr.pem" || return 1
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$new/key.pem" 2>/dev/null || return 1
+  openssl req -new -key "$new/key.pem" -subj "/O=exomem:break-glass/CN=exomem-break-glass" \
+    -out "$new/csr.pem" || return 1
   admin apply -f - >/dev/null <<CSR || return 1
 apiVersion: certificates.k8s.io/v1
 kind: CertificateSigningRequest
 metadata:
   name: ${csr}
 spec:
-  request: $(base64 -w0 < "$BG_DIR/csr.pem")
+  request: $(base64 -w0 < "$new/csr.pem")
   signerName: kubernetes.io/kube-apiserver-client
   expirationSeconds: 3600
   usages: [digital signature, client auth]
@@ -116,28 +128,36 @@ CSR
     sleep 1
   done
   [ -n "$cert" ] || return 1
-  printf '%s' "$cert" | base64 -d > "$BG_DIR/cert.pem"
+  printf '%s' "$cert" | base64 -d > "$new/cert.pem"
   # The signer must have honoured expirationSeconds, never its default year.
-  not_after=$(date -u -d "$(openssl x509 -in "$BG_DIR/cert.pem" -noout -enddate | cut -d= -f2)" +%s) || return 1
+  not_after=$(date -u -d "$(openssl x509 -in "$new/cert.pem" -noout -enddate | cut -d= -f2)" +%s) || return 1
   [ "$not_after" -le $(($(date -u +%s) + 3660)) ] || return 1
-  admin config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$BG_DIR/ca.pem"
+  admin config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$new/ca.pem"
   server=$(admin config view --raw -o jsonpath='{.clusters[0].cluster.server}') || return 1
   "$K3S" kubectl --kubeconfig "$kc" config set-cluster exomem --server="$server" \
-    --certificate-authority="$BG_DIR/ca.pem" --embed-certs=true >/dev/null
+    --certificate-authority="$new/ca.pem" --embed-certs=true >/dev/null
   "$K3S" kubectl --kubeconfig "$kc" config set-credentials exomem-break-glass \
-    --client-certificate="$BG_DIR/cert.pem" --client-key="$BG_DIR/key.pem" --embed-certs=true >/dev/null
+    --client-certificate="$new/cert.pem" --client-key="$new/key.pem" --embed-certs=true >/dev/null
   "$K3S" kubectl --kubeconfig "$kc" config set-context break-glass --cluster=exomem --user=exomem-break-glass >/dev/null
-  rm -f -- "$BG_DIR/key.pem" "$BG_DIR/csr.pem" "$BG_DIR/cert.pem" "$BG_DIR/ca.pem"
+  rm -f -- "$new/key.pem" "$new/csr.pem" "$new/cert.pem" "$new/ca.pem"
   # The export runbook's shim: the manifests module calls `kubectl --context break-glass`.
-  printf '#!/bin/sh\nexec %s kubectl "$@"\n' "$K3S" > "$BG_DIR/bin/kubectl"
-  chmod 700 "$BG_DIR/bin/kubectl"
-  k auth whoami | grep -qF 'exomem:break-glass' || return 1
+  printf '#!/bin/sh\nexec %s kubectl "$@"\n' "$K3S" > "$new/bin/kubectl"
+  chmod 700 "$new/bin/kubectl"
+  "$K3S" kubectl --kubeconfig "$kc" --context break-glass auth whoami | grep -qF 'exomem:break-glass' || return 1
+  rm -rf -- "$BG_DIR"
+  mv -- "$new" "$BG_DIR"
   BG_EXPIRES=$not_after
   echo "break-glass csr=$csr"
 }
 
+# Mints again when less than 20 minutes remain, because a restore can outlast
+# one hour. It fails only when no identity with a minute left remains.
 fresh_break_glass() {
-  [ $((BG_EXPIRES - $(date -u +%s))) -gt 1200 ] || mint_break_glass
+  local left=$((BG_EXPIRES - $(date -u +%s)))
+  [ "$left" -gt 1200 ] && return 0
+  mint_break_glass && return 0
+  echo "!! break-glass mint failed; the current identity has $left s left" >&2
+  [ "$left" -gt 60 ]
 }
 
 # cellctl backs up and stops cells in its nightly window (cells.backupWindow).
@@ -145,11 +165,16 @@ check_window() {
   py "$MANIFESTS" outside-backup-window --context break-glass
 }
 
-# The restore pods share the node with live cells; refuse without headroom.
+# The scratch pods run on this node beside live cells; refuse without headroom.
 check_memory() {
   local available
   available=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
   [ "$available" -ge $((2 * 1024 * 1024)) ] || die 'less than 2 GiB available on the node; stop'
+}
+
+check_space() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt $((RESTORED_BYTES + MARGIN_BYTES)) ] \
+    || die "free bytes=$1; the prior and restored contents need $RESTORED_BYTES more plus 2 GiB"
 }
 
 # wait_empty COMMAND...: until COMMAND succeeds with no output, for up to five
@@ -180,12 +205,29 @@ wait_job() {
   return 1
 }
 
-# The root of the running cell runtime's filesystem, as the node sees it.
+# start_helper NAME [--scratch NAMESPACE]: the pod cloud_restore_manifests.py
+# renders, on the cell's volume or the scratch one.
+start_helper() {
+  local namespace=$NS
+  [ "$#" -eq 1 ] || namespace=$3
+  fresh_break_glass || return 1
+  py "$MANIFESTS" helper-pod --context break-glass --cell-id "$CELL_ID" --name "$1" \
+    --field-manager "$FIELD_MANAGER" "${@:2}" || return 1
+  k -n "$namespace" wait --for=condition=Ready "pod/$1" --timeout=180s >/dev/null
+}
+
+# The root of the running cell runtime's filesystem, read through this node's
+# container runtime, so only a runtime on this node has one.
 runtime_root() {
-  local cid pid
+  local cid info pid node
   cid=$(k -n "$NS" get pod cell-0 -o jsonpath='{.status.containerStatuses[?(@.name=="exomem")].containerID}') || return 1
-  [ -n "$cid" ] || return 1
-  pid=$("$K3S" crictl inspect "${cid#*://}" | py -c 'import json, sys; print(json.load(sys.stdin)["info"]["pid"])') || return 1
+  [ -n "$cid" ] || { echo '!! the cell runtime does not run' >&2; return 1; }
+  if ! info=$("$K3S" crictl inspect "${cid#*://}" 2>/dev/null); then
+    node=$(k -n "$NS" get pod cell-0 -o jsonpath='{.spec.nodeName}') || node=unknown
+    echo "!! the cell runs on node $node, not on this node; a drill reads it through this node's runtime" >&2
+    return 1
+  fi
+  pid=$(printf '%s' "$info" | py -c 'import json, sys; print(json.load(sys.stdin)["info"]["pid"])') || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -d "/proc/$pid/root/data" ] || return 1
   printf '%s' "/proc/$pid/root/data"
 }
@@ -204,47 +246,9 @@ scratch_restore() {
   SCRATCH_PV=$(k -n "$SCRATCH" get pvc cell-data -o jsonpath='{.spec.volumeName}')
   wait_job "$SCRATCH" "$job"
   echo "restore completed in $(($(date -u +%s) - started)) s (job deadline 900 s)"
-  IMAGE=$(k -n "$SCRATCH" get job "$job" -o jsonpath='{.spec.template.spec.containers[0].image}')
-  [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || die 'the restore image is not pinned by digest'
 
   echo "== hash the restored vault"
-  k apply -f - >/dev/null <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: restore-verify
-  namespace: ${SCRATCH}
-  labels: {app.kubernetes.io/name: cloud-restore-verify}
-spec:
-  restartPolicy: Never
-  automountServiceAccountToken: false
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 10001
-    runAsGroup: 10001
-    fsGroup: 10001
-    fsGroupChangePolicy: OnRootMismatch
-    seccompProfile: {type: RuntimeDefault}
-  containers:
-    - name: verify
-      image: ${IMAGE}
-      imagePullPolicy: IfNotPresent
-      command: [python3, -c, 'import time; time.sleep(3600)']
-      resources:
-        requests: {cpu: 100m, memory: 128Mi}
-        limits: {cpu: "1", memory: 512Mi}
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities: {drop: [ALL]}
-      volumeMounts:
-        - {name: data, mountPath: /data, readOnly: true}
-  volumes:
-    - name: data
-      persistentVolumeClaim: {claimName: cell-data, readOnly: true}
-EOF
-  k -n "$SCRATCH" wait --for=condition=Ready pod/restore-verify --timeout=180s >/dev/null
-  fresh_break_glass
+  start_helper restore-verify --scratch "$SCRATCH"
   k -n "$SCRATCH" exec restore-verify -- python3 -I -c "$DIGEST_SOURCE" hash /data/vault \
     < /dev/null > "$MEM/snapshot.hashes" || die 'hashing the restored vault failed'
   echo "snapshot vault files=$(wc -l < "$MEM/snapshot.hashes")"
@@ -319,45 +323,8 @@ run_drill() {
 
 helper() { k -n "$NS" exec "$HELPER" -- "$@" < /dev/null; }
 delete_helper() { k -n "$NS" delete pod "$HELPER" --ignore-not-found --wait=true >/dev/null; }
-
-start_helper() {
-  k apply -f - >/dev/null <<EOF || return 1
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${HELPER}
-  namespace: ${NS}
-  labels: {app.kubernetes.io/name: cloud-restore-helper}
-spec:
-  restartPolicy: Never
-  automountServiceAccountToken: false
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 10001
-    runAsGroup: 10001
-    fsGroup: 10001
-    fsGroupChangePolicy: OnRootMismatch
-    seccompProfile: {type: RuntimeDefault}
-  containers:
-    - name: helper
-      image: ${IMAGE}
-      imagePullPolicy: IfNotPresent
-      command: [python3, -c, 'import time; time.sleep(3600)']
-      resources:
-        requests: {cpu: 100m, memory: 256Mi}
-        limits: {cpu: "1", memory: 1Gi}
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities: {drop: [ALL]}
-      volumeMounts:
-        - {name: data, mountPath: /data}
-  volumes:
-    - name: data
-      persistentVolumeClaim: {claimName: cell-data}
-EOF
-  k -n "$NS" wait --for=condition=Ready "pod/$HELPER" --timeout=180s >/dev/null
-}
+# volume move|rollback: cloud_restore_volume.sh in the helper, on the cell's backed-up paths.
+volume() { k -n "$NS" exec -i "$HELPER" -- sh -s "$1" "$RUN_ID" "${BACKUP_PATHS[@]}" < "$VOLUME"; }
 
 # Pods in the cell namespace that may still use the volume: every pod not yet
 # Succeeded or Failed (Kubernetes' terminal phases), except this run's helper.
@@ -375,73 +342,52 @@ only_helper_runs() {
 cellctl_pods() {
   local selector
   # shellcheck disable=SC2016 # a Go template, not a shell expansion
-  selector=$(k -n exomem-cloud get deployment cellctl \
+  selector=$(ctl get deployment cellctl \
     -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}') || return 1
   [ -n "$selector" ] || return 1
-  k -n exomem-cloud get pods -l "${selector%,}" -o name
+  ctl get pods -l "${selector%,}" -o name
 }
 
-# wait_ready MINUTES: rollout status in 5-minute rounds, so break-glass can be
-# minted again between them.
+# wait_ready MINUTES: until the cell is Ready. A failed wait pauses before the
+# next, so a short API outage does not use up the time at once.
 wait_ready() {
-  local round
-  for ((round = 0; round < $1 / 5; round++)); do
-    fresh_break_glass || return 1
-    k -n "$NS" rollout status statefulset/cell --timeout=300s >/dev/null && return 0
+  local deadline=$(($(date -u +%s) + $1 * 60)) left
+  while left=$((deadline - $(date -u +%s))) && [ "$left" -gt 0 ]; do
+    fresh_break_glass || true
+    k -n "$NS" rollout status statefulset/cell --timeout="$((left < 300 ? left : 300))s" >/dev/null && return 0
+    sleep 10
   done
   return 1
 }
 
 resume_cellctl() {
-  k -n exomem-cloud scale deployment cellctl --replicas="$CELLCTL_REPLICAS" >/dev/null \
-    && k -n exomem-cloud rollout status deployment/cellctl --timeout=300s >/dev/null
+  ctl scale deployment cellctl --replicas="$CELLCTL_REPLICAS" >/dev/null \
+    && ctl rollout status deployment/cellctl --timeout=300s >/dev/null
 }
 
-# These run inside the helper pod. $1 is the run ID; the rest are cellctl's
-# backed-up paths, which are exactly what its restore Job rewrites.
-# shellcheck disable=SC2016 # expanded by sh in the pod, not here
-MOVE_ASIDE='
-  prior=/data/.restore-prior-$1
-  shift
-  [ ! -e "$prior" ] || { echo "$prior exists; nothing moved" >&2; exit 1; }
-  mkdir -m 700 "$prior"
-  for path in "$@"; do
-    if [ -e "$path" ]; then mv "$path" "$prior/${path##*/}"; fi
-  done'
-# shellcheck disable=SC2016 # expanded by sh in the pod, not here
-ROLL_BACK='
-  prior=/data/.restore-prior-$1
-  shift
-  [ -d "$prior" ] || { echo "no prior directory; nothing was moved" >&2; exit 0; }
-  for path in "$@"; do
-    if [ -e "$prior/${path##*/}" ]; then
-      rm -rf -- "$path"
-      mv "$prior/${path##*/}" "$path"
-    fi
-  done
-  rmdir "$prior" || echo "$prior is not empty; inspect it" >&2'
-
 run_restore() {
-  local root available paths path
+  local available paths path
   check_memory
   mint_break_glass
   check_window
   paths=$(py "$MANIFESTS" backup-paths)
   read -r -a BACKUP_PATHS <<< "$paths"
-  for path in "${BACKUP_PATHS[@]}"; do [[ "$path" =~ ^/data/[a-z]+$ ]] || die "unexpected backup path $path"; done
   [ "${#BACKUP_PATHS[@]}" -gt 0 ] || die 'cellctl names no backup paths'
+  for path in "${BACKUP_PATHS[@]}"; do [[ "$path" =~ ^/data/[a-z]+$ ]] || die "unexpected backup path $path"; done
+  RESTORE_JOBS=$(py "$MANIFESTS" restore-job-selector)
 
   # 1. Restore and hash the snapshot beside the cell, so a snapshot that cannot
   # be restored is refused before any downtime.
   scratch_restore
   [ -s "$MEM/snapshot.hashes" ] || die 'the snapshot holds an empty vault; stop'
   cleanup_scratch || die 'the scratch namespace could not be removed; stop before any downtime'
-  if root=$(runtime_root); then
-    available=$(df -B1 --output=avail -- "$root" | tail -n 1 | tr -d ' ')
-    [[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -gt $((RESTORED_BYTES + MARGIN_BYTES)) ] \
-      || die "free bytes=$available; the prior and restored contents need $RESTORED_BYTES more plus 2 GiB"
+  # The free space, measured through the running cell on whatever node it
+  # runs; the helper measures it again after the stop.
+  if [ "$(k -n "$NS" get pod cell-0 -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ]; then
+    available=$(k -n "$NS" exec cell-0 -c exomem -- df -B1 --output=avail /data < /dev/null | tail -n 1 | tr -d ' ')
+    check_space "$available"
   else
-    echo 'no running runtime; the free space is checked after the stop'
+    echo 'the cell runtime does not run; the free space is checked after the stop'
   fi
 
   # 2. Stop the cell. Paused, cellctl cannot start a backup, upgrade or hold,
@@ -450,12 +396,12 @@ run_restore() {
   fresh_break_glass
   check_window
   check_memory
-  CELLCTL_REPLICAS=$(k -n exomem-cloud get deployment cellctl -o jsonpath='{.spec.replicas}')
+  CELLCTL_REPLICAS=$(ctl get deployment cellctl -o jsonpath='{.spec.replicas}')
   [[ "$CELLCTL_REPLICAS" =~ ^[1-9][0-9]*$ ]] || die 'cellctl is already paused; another procedure may own the pause'
   [ "$(k -n "$NS" get statefulset cell -o jsonpath='{.spec.replicas}')" = 1 ] || die 'the cell is not scaled to one'
   py "$MANIFESTS" idle --context break-glass --cell-id "$CELL_ID"
   PHASE=stopping
-  k -n exomem-cloud scale deployment cellctl --replicas=0 >/dev/null
+  ctl scale deployment cellctl --replicas=0 >/dev/null
   wait_empty cellctl_pods || die 'cellctl pods are still running'
   py "$MANIFESTS" idle --context break-glass --cell-id "$CELL_ID"
   k -n "$NS" scale statefulset cell --replicas=0 >/dev/null
@@ -464,25 +410,25 @@ run_restore() {
 
   # 3. Move the backed-up paths aside, after the space check.
   echo "== move aside"
-  start_helper
+  start_helper "$HELPER"
   available=$(helper df -B1 --output=avail /data | tail -n 1 | tr -d ' ')
-  [[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -gt $((RESTORED_BYTES + MARGIN_BYTES)) ] \
-    || die "free bytes=$available; the prior and restored contents need $RESTORED_BYTES more plus 2 GiB"
+  check_space "$available"
   only_helper_runs || die "a pod besides the helper runs in $NS"
   PHASE=moved
-  helper sh -euc "$MOVE_ASIDE" move "$RUN_ID" "${BACKUP_PATHS[@]}"
+  volume move
   delete_helper
 
   # 4. Restore the snapshot onto the cell's own volume.
   echo "== restore in place"
   fresh_break_glass
   IN_PLACE_JOB=$(py "$MANIFESTS" in-place --context break-glass --cell-id "$CELL_ID" --snapshot "$SNAPSHOT" \
-    --field-manager cloud-operator-restore)
+    --field-manager "$FIELD_MANAGER")
+  echo "restore job=$IN_PLACE_JOB"
   wait_job "$NS" "$IN_PLACE_JOB"
 
   # 5. The restored vault must equal what the scratch restore produced.
   echo "== verify"
-  start_helper
+  start_helper "$HELPER"
   helper python3 -I -c "$DIGEST_SOURCE" hash /data/vault > "$MEM/in-place.hashes" \
     || die 'hashing the restored vault failed'
   delete_helper
@@ -511,7 +457,7 @@ recover() {
   case "$PHASE" in - | checks | finished) return 0 ;; esac
   echo "!! the restore failed during $PHASE; recovering" >&2
   if ! fresh_break_glass; then
-    echo "!! break-glass re-mint failed; recover by hand (cloud-operator-restore.md, 'Recover by hand')" >&2
+    echo "!! no break-glass identity; recover by hand (cloud-operator-restore.md, 'Recover by hand')" >&2
     return 1
   fi
   if [ "$PHASE" = served ]; then
@@ -521,11 +467,10 @@ recover() {
   if [ "$PHASE" = moved ] || [ "$PHASE" = starting ]; then
     k -n "$NS" scale statefulset cell --replicas=0 >/dev/null
     # A stop during the restore leaves its Job writing to the volume.
-    if [ -n "$IN_PLACE_JOB" ]; then
-      k -n "$NS" delete job "$IN_PLACE_JOB" --ignore-not-found --cascade=foreground --wait=true >/dev/null
-    fi
-    if wait_empty running_pods && { k -n "$NS" get pod "$HELPER" >/dev/null 2>&1 || start_helper; } \
-      && only_helper_runs && helper sh -euc "$ROLL_BACK" rollback "$RUN_ID" "${BACKUP_PATHS[@]}"; then
+    k -n "$NS" delete job -l "$RESTORE_JOBS" --cascade=foreground --wait=true >/dev/null
+    # A fresh helper: one left from the run may still be terminating.
+    if wait_empty running_pods && delete_helper && start_helper "$HELPER" && only_helper_runs \
+      && volume rollback; then
       echo "rolled back to the prior contents" >&2
     else
       echo "!! rollback did not run; the cell stays stopped and cellctl paused." >&2
@@ -545,10 +490,12 @@ recover() {
 on_exit() {
   local rc=$?
   set +e
-  trap - EXIT INT TERM
+  trap - EXIT
+  # A stop or RuntimeMaxSec during recovery must not cut it short.
+  trap '' INT TERM
   if [ "$MODE" = restore ]; then recover || rc=1; fi
   cleanup_scratch || rc=1
-  rm -rf -- "$BG_DIR"
+  rm -rf -- "$BG_DIR" "$BG_DIR.new"
   if [ "$rc" -eq 0 ] && [ "$VERDICT" != pass ]; then rc=1; fi
   if [ "$rc" -eq 0 ]; then rm -rf -- "$MEM"; fi
   echo "run=$RUN_ID mode=$MODE phase=$PHASE verdict=$VERDICT scratch_cleanup=$SCRATCH_CLEAN rc=$rc"
@@ -563,13 +510,13 @@ run() {
   CELL_ID=$1 SNAPSHOT=$2
   NS="exo-cell-$CELL_ID"
   SCRATCH="exo-scratch-$CELL_ID-$RUN_ID"
-  SCRATCH_PV="" SCRATCH_CLEAN=no PHASE=checks VERDICT=fail BG_EXPIRES=0 IMAGE="" RESTORED_BYTES=0
-  CELLCTL_REPLICAS="" BACKUP_PATHS=() IN_PLACE_JOB=""
+  SCRATCH_PV="" SCRATCH_CLEAN=no PHASE=checks VERDICT=fail BG_EXPIRES=0 RESTORED_BYTES=0
+  CELLCTL_REPLICAS="" BACKUP_PATHS=() IN_PLACE_JOB="" RESTORE_JOBS=""
   MEM="/dev/shm/exomem-restore-$RUN_ID"
   BG_DIR="/dev/shm/exomem-break-glass-$RUN_ID"
   DIGEST_SOURCE=$(cat -- "$DIGEST")
   echo "run=$RUN_ID mode=$MODE started at $(date -u +%FT%TZ)"
-  sha256sum "$HERE/cloud_restore.sh" "$MANIFESTS" "$DIGEST" "$HERE/../cellctl/src/cellctl/manifests.py"
+  sha256sum "$HERE/cloud_restore.sh" "$MANIFESTS" "$DIGEST" "$VOLUME" "$HERE/../cellctl/src/cellctl/manifests.py"
   mkdir -m 700 "$MEM"
   export KUBECONFIG="$BG_DIR/kubeconfig" PATH="$BG_DIR/bin:$PATH"
   trap on_exit EXIT

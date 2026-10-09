@@ -1,6 +1,7 @@
 """The Cloud restore tools' own logic: the vault digest the drill and the
-in-place restore trust for their verdict, and the restore resources they render
-with cellctl (infra/scripts/cloud_vault_digest.py and
+in-place restore trust for their verdict, the move and rollback of a cell's
+contents, and the restore resources they render with cellctl
+(infra/scripts/cloud_vault_digest.py, cloud_restore_volume.sh and
 cloud_restore_manifests.py, driven by infra/scripts/cloud_restore.sh).
 
 The digest runs exactly as the tools run it: as a script, writing a hash list
@@ -20,6 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 DIGEST = ROOT / "infra" / "scripts" / "cloud_vault_digest.py"
 MANIFESTS = ROOT / "infra" / "scripts" / "cloud_restore_manifests.py"
+VOLUME = ROOT / "infra" / "scripts" / "cloud_restore_volume.sh"
 CELL_ID = "abcdefghijklmnop"
 SNAPSHOT = "0123456789abcdef" * 4
 IMAGE = "ghcr.io/example/exomem@sha256:" + "a" * 64
@@ -144,6 +146,38 @@ def test_an_unreadable_directory_stops_the_hash(tmp_path: Path) -> None:
     assert result.stderr.strip() == "hash failed: PermissionError"
 
 
+@posix_trees
+@pytest.mark.parametrize("moved", [(), ("vault",), ("vault", "host")])
+def test_a_rollback_brings_back_exactly_what_the_cell_held(tmp_path: Path, moved: tuple[str, ...]) -> None:
+    # `moved` is how far the move got before the run stopped: not at all,
+    # partway, or fully, after which the restore Job wrote part of a vault.
+    data = tmp_path / "data"
+    _vault(data / "vault")
+    (data / "host" / ".cache").mkdir(parents=True)
+    (data / "host" / ".cache" / "index").write_bytes(b"derived state")
+    (data / "lost+found").mkdir()
+    before = _digest("hash", data).stdout
+    paths = [data / "vault", data / "host"]
+
+    def volume(action: str, *targets: Path) -> None:
+        with VOLUME.open("rb") as script:
+            result = subprocess.run(
+                ["sh", "-s", action, "0123abcd", *map(str, targets)], stdin=script, capture_output=True, check=False
+            )
+        assert result.returncode == 0, result.stderr
+
+    if moved:
+        volume("move", *(data / name for name in moved))
+        if moved == ("vault", "host"):
+            (data / "vault").mkdir()
+            (data / "vault" / "partial.md").write_text("half a restore\n", encoding="utf-8")
+
+    volume("rollback", *paths)
+
+    assert _digest("hash", data).stdout == before
+    assert not list(data.glob(".restore-prior-*"))
+
+
 def _manifests():
     spec = importlib.util.spec_from_file_location("cloud_restore_manifests", MANIFESTS)
     module = importlib.util.module_from_spec(spec)
@@ -177,7 +211,7 @@ def test_a_scratch_restore_never_creates_a_runtime_or_a_cell(tmp_path: Path) -> 
     assert "cell-token" not in secret["data"]
 
 
-def test_the_in_place_restore_job_runs_where_the_cell_runs() -> None:
+def test_the_in_place_restore_and_its_helper_run_where_the_cell_runs() -> None:
     manifests = _manifests()
     placement = {
         "nodeSelector": {"exomem.io/dedicated-cell": CELL_ID},
@@ -195,9 +229,19 @@ def test_the_in_place_restore_job_runs_where_the_cell_runs() -> None:
         started_at="2026-10-09T10:00:00+00:00",
     )
 
+    helper = manifests.helper_pod(cell_id=CELL_ID, statefulset=statefulset, name="cell-restore-helper")
+    verify = manifests.helper_pod(
+        cell_id=CELL_ID, statefulset=statefulset, name="restore-verify", scratch=f"exo-scratch-{CELL_ID}-0123abcd"
+    )
+
     pod = job["spec"]["template"]["spec"]
-    assert job["metadata"]["namespace"] == f"exo-cell-{CELL_ID}"
-    assert pod["containers"][0]["image"] == IMAGE
-    # A dedicated or shared-profile cell's Job without them waits Pending while the cell is down.
-    assert pod["nodeSelector"] == placement["nodeSelector"]
-    assert pod["tolerations"] == placement["tolerations"]
+    assert job["metadata"]["namespace"] == helper["metadata"]["namespace"] == f"exo-cell-{CELL_ID}"
+    assert pod["containers"][0]["image"] == helper["spec"]["containers"][0]["image"] == IMAGE
+    # Without them, a dedicated or shared-profile cell's Job waits Pending while
+    # the cell is down, and its helper moves the volume to another node.
+    for spec in (pod, helper["spec"]):
+        assert spec["nodeSelector"] == placement["nodeSelector"]
+        assert spec["tolerations"] == placement["tolerations"]
+    # The scratch verify pod follows the unplaced scratch Job, off the live cell's node.
+    assert "nodeSelector" not in verify["spec"] and "tolerations" not in verify["spec"]
+    assert verify["spec"]["volumes"][0]["persistentVolumeClaim"]["readOnly"] is True
