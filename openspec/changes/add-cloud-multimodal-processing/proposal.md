@@ -32,7 +32,7 @@ Invited friends write in Japanese and other languages, so these gaps are part of
   - runs under a VmData limit, as a backstop against runaway allocation;
   - stops when the memory pressure stall average crosses its threshold.
 
-  A stopped job returns to pending. It is never recorded as an artifact failure. A job that keeps being stopped by contention waits as memory-blocked, shows the tenant no action, and returns to pending by itself. A file too large even for an idle cell is marked as exceeding this deployment's processing budget, and is tried again only when the cell limit or the engine budget changes.
+  A stopped job returns to pending. It is never recorded as an artifact failure. A job that keeps being stopped by contention waits as memory-blocked, shows the tenant no action, and returns to pending by itself. A file whose own allocations repeatedly fail under the hard limit is marked as exceeding this deployment's processing budget, and is tried again only when the cell limit or the engine budget changes. A pressure stop never marks a file that way.
 - **Documents.** Cloud reads every type a personal install reads: PDF, Word, Excel, PowerPoint, HTML, plain text, email and calendar. Every install gains EPUB, OpenDocument (text, spreadsheet, presentation) and RTF. Plain text, email and calendar files already extract on Cloud with the standard library, so they stay on; the documents switch covers only formats that need new dependencies.
 - **Images.**
   - OCR detects the script first, then reads with that script's model and the installed language packs for it. The installed set is deployment configuration. The first language packs are English, Japanese (horizontal and vertical) and Estonian.
@@ -41,7 +41,7 @@ Invited friends write in Japanese and other languages, so these gaps are part of
     - a multilingual image–text model, which re-encodes stored image vectors once.
   - HEIC is decoded, subject to a licence check.
 - **Speech.** Audio and video get transcripts from the engine and model that the bake-off in design.md selects. The first required language set is Japanese, English and Estonian, and it is deployment configuration.
-- **Off until proven.** Each engine has a switch, off by default on Cloud. It turns on first in the owner's cell, which is the canary, for that engine's acceptance, and then in the other cells one at a time. Each switch change restarts that cell briefly, outside the backup window.
+- **Off until proven.** Each engine has a switch, off by default on Cloud. It turns on first in the owner's cell, which is the canary, for that engine's acceptance, and then in the other cells one at a time. Under the current cellctl render, each switch change restarts that cell briefly, so changes happen outside the backup window.
   - Acceptance compares a labelled known-content subset with a personal install's extraction, and reads memory as anonymous plus non-reclaimable memory.
   - An engine that is off or not shipped is reported as disabled on runtime status and doctor.
   - It is never reported as degraded on each query, and never shown to a tenant as an install instruction.

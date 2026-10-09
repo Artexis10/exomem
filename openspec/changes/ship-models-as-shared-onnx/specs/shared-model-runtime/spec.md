@@ -92,7 +92,7 @@ A build that fails its gate SHALL NOT ship. A failed int8 build SHALL leave the 
 
 ### Requirement: An artifact's identity is recorded, it is fetched by digest, and only a same-precision substitution keeps a vector space
 
-Each shipped artifact SHALL record its artifact identity: its model, its upstream revision, its quantisation, its file format and the digest of the bytes it loads. An artifact that Exomem builds SHALL also record its conversion recipe and the recipe's version, and SHALL be published immutably. A host SHALL obtain it only by fetching the published bytes by their digest, SHALL check the digest when it loads, and SHALL load it from local files only. A local rebuild SHALL never substitute for the published artifact, because the runtime version is not pinned and quantiser output can differ by host. A host without the published bytes SHALL refuse that model until it fetches them; a verifier SHALL refuse. The recall encoder's existing local build path stays with the change `swap-embedding-runtime-to-onnx`, and a locally built recall encoder already has its own identity.
+Each shipped artifact SHALL record its artifact identity: its model, its upstream revision, its quantisation, its file format and the digest of the bytes it loads. An artifact that Exomem builds SHALL also record its conversion recipe and the recipe's version, and SHALL be published immutably. A host SHALL fetch it by its digest from that publication, and SHALL load it from local files. Only bytes that match the published digest SHALL load, and hosts SHALL NOT build the artifact locally, because the runtime version is not pinned and quantiser output can differ by host. A host without the published bytes SHALL refuse that model until it fetches them; a verifier SHALL refuse. The recall encoder's existing local build path stays with the change `swap-embedding-runtime-to-onnx`, and a locally built recall encoder already has its own identity.
 
 An instrument with a new artifact identity SHALL be a new pin. A runtime option that leaves the loaded bytes unchanged, such as disabling prepacking, SHALL NOT change the artifact identity.
 
@@ -104,7 +104,7 @@ A value calibrated on an encoder's output SHALL key by its vector space: a space
 
 - **WHEN** a host lacks the published bytes of a derived verifier artifact
 - **THEN** the verifier refuses until the host fetches them by digest
-- **AND** a local rebuild of the artifact is never loaded in their place
+- **AND** the host does not build the artifact locally; only bytes that match the published digest load
 
 #### Scenario: A space change voids a calibrated value
 

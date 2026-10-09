@@ -19,7 +19,7 @@ Today that is a property of one model. Each new model would otherwise be chosen 
   - a scorer or transducer, at an agreement bound stated before the measurement;
   - an instrument, only through its existing fixture admission, at its new pin.
 - **A recorded identity.** Each artifact records its model, revision, quantisation, format and digest. An artifact that Exomem builds also records its conversion recipe and version, and is published immutably.
-  - A host fetches a built artifact by digest from that publication. A local rebuild never substitutes for it, and a host without the published bytes refuses that model until it fetches them.
+  - A host fetches a built artifact by digest from that publication. Only bytes that match the published digest load, hosts do not build the artifact locally, and a host without the published bytes refuses that model until it fetches them.
   - A same-precision substitution that passes the parity bound keeps an encoder's vector space and the values calibrated on it; the recall encoder keeps its stricter rule. A space change voids those values until they are calibrated again.
 - **Measured sharing.** Each model's acceptance reads Pss on a node with at least two cells.
 - **Selection by published accuracy.** Accuracy comes from dated published benchmarks. Exomem measures CPU speed, peak memory and shareability on its own hardware, plus a sanity check for a broken conversion.
