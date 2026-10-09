@@ -127,6 +127,40 @@ def test_limited_owner_edits_allowed_content_without_review_queue(configured_bou
     assert "protected canary" in (vault / PRIVATE).read_text()
 
 
+def test_an_unclassifiable_visible_label_refuses_only_the_writes_that_depend_on_it(configured_boundary, vault):
+    """A visible page whose status label the limited client cannot classify blocks no unrelated edit.
+
+    The label's definition would live in the status overlay, which the limited
+    client cannot read. Its edit of another allowed page still succeeds; an edit
+    whose relation touches the unclassifiable page refuses with the shared
+    unavailable error. This catches a corpus-wide refusal of every limited edit,
+    and a relaxation that judges a relation without its endpoint's class.
+    """
+    from exomem.edit import edit
+    from exomem.lifecycle_statuses import ClassificationUnavailable
+
+    notes = vault / "Knowledge Base/Notes/Insights"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "shelved.md").write_text(
+        "---\ntype: insight\nproject: public-project\nstatus: shelved\n---\n"
+        "# Shelved\n\n- [decision] Pause the archive migration.\n", encoding="utf-8",
+    )
+    (notes / "linked.md").write_text(
+        "---\ntype: insight\nproject: public-project\nstatus: active\n---\n"
+        "# Linked\n\n- [decision] Keep retry windows bounded.\n\n## Relations\n- supports [[shelved]]\n",
+        encoding="utf-8",
+    )
+    _, authenticate = configured_boundary
+    with principal.request_scope(authenticate("limited")):
+        edit(vault, path=PUBLIC, why="correct allowed note", old_string="public information",
+             new_string="corrected public information")
+        with pytest.raises(ClassificationUnavailable):
+            edit(vault, path="Knowledge Base/Notes/Insights/linked.md", why="tighten the decision",
+                 old_string="bounded.", new_string="tightly bounded.")
+    assert "corrected public information" in (vault / PUBLIC).read_text()
+    assert "tightly" not in (notes / "linked.md").read_text()
+
+
 def test_proposed_membership_cannot_move_allowed_content_under_the_denied_scope(configured_boundary, vault):
     from exomem import vault as vault_module
 

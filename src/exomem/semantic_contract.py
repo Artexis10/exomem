@@ -217,6 +217,9 @@ class SemanticPageState:
     status_class: str | None = None
     status_unregistered: bool = False
     status_dependency: tuple[str, str] | None = None
+    # The page needs a lifecycle class that this caller's basis cannot supply.
+    # Its eligibility reads False; a decision that depends on it must refuse.
+    status_unavailable: bool = False
     # (target, line) for each deduped body wikilink not already on a typed
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
@@ -1122,6 +1125,11 @@ class SemanticCorpusContext:
             )
         )
 
+    @property
+    def status_unavailable_paths(self) -> frozenset[str]:
+        """Pages whose lifecycle eligibility this caller cannot decide."""
+        return frozenset(path for path, page in self.pages.items() if page.status_unavailable)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "pages": [self.pages[path].as_dict() for path in sorted(self.pages)],
@@ -1206,8 +1214,14 @@ def enrich_page_state(
     *,
     relation_definitions: relation_registry.RelationRegistry | None = None,
     language: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    require_status: bool = True,
 ) -> SemanticPageState:
-    """Interpret detached facts with this page's admitted instance and lifecycle."""
+    """Interpret detached facts with this page's admitted instance and lifecycle.
+
+    The operation's own page requires its class. Other corpus pages pass
+    ``require_status=False``: an unavailable class marks the page instead of
+    refusing the corpus, and only a decision that reads it refuses.
+    """
     definitions = None
     unavailable = False
     try:
@@ -1258,13 +1272,17 @@ def enrich_page_state(
         page_types=activation._CONNECTABLE_TYPES,
         tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
     )
+    needed = governed or compiled or connectable
     classification = (
         status_basis.classify(state.frontmatter.get("status"), path=state.path, frontmatter=state.frontmatter)
-        if governed or compiled or connectable
+        if needed
         else lifecycle_statuses.Classification(None)
     )
-    # `live` refuses an unavailable classification; never read it as "not live".
-    live = classification.live if governed or compiled or connectable else False
+    unavailable_status = needed and classification.lifecycle_class is None
+    if unavailable_status and require_status:
+        classification.require()
+    # An unavailable class is never "not live": the flag below keeps it unknown.
+    live = needed and not unavailable_status and classification.live
     return replace(
         state,
         document=document,
@@ -1278,6 +1296,7 @@ def enrich_page_state(
         status_class=classification.lifecycle_class,
         status_unregistered=classification.unregistered,
         status_dependency=status_basis.dependency,
+        status_unavailable=unavailable_status,
     )
 
 
@@ -2820,7 +2839,7 @@ def build_corpus_context_with_census(
         states = {
             path: (
                 enrich_page_state(root, state, basis, relation_definitions=registry,
-                                  language=language_registry)
+                                  language=language_registry, require_status=False)
                 if visible is None or visible(path)
                 else state
             )
@@ -3780,6 +3799,12 @@ def _dependency_key(raw_target: str) -> str:
     return path.removesuffix(".md").strip("/").casefold()
 
 
+def require_page_status(page: SemanticPageState | None) -> None:
+    """Refuse a decision that needs the lifecycle class of an unclassifiable page."""
+    if page is not None and page.status_unavailable:
+        lifecycle_statuses.Classification(None).require()
+
+
 def _structural_relation_reasons(
     fact: RelationFact,
     *,
@@ -3793,8 +3818,12 @@ def _structural_relation_reasons(
     unambiguously, originate from an eligible governed page, land on an allowed
     target, not point at itself, and carry an active in-scope registry entry.
     Only family and origin policy differ between the lanes, and each applies its
-    own on top of this.
+    own on top of this. Both endpoints' eligibility depends on their lifecycle
+    class, so an endpoint without one refuses the qualification.
     """
+    require_page_status(corpus.pages.get(fact.logical_source_path))
+    if fact.target_status == "resolved":
+        require_page_status(corpus.pages.get(fact.logical_target_path))
     reasons: list[str] = []
     definition = registry.definition(fact.canonical_relation or "")
     target_page = corpus.pages.get(fact.logical_target_path)
@@ -3933,10 +3962,10 @@ def _qualifying_body_wikilink_targets(
             continue
         path = normalized.split("#", 1)[0]
         resolved_path = path if path.lower().endswith(".md") else f"{path}.md"
-        if (
-            resolved_path != page.path
-            and resolved_path in corpus.connectable_target_paths
-        ):
+        if resolved_path == page.path:
+            continue
+        require_page_status(corpus.pages.get(resolved_path))
+        if resolved_path in corpus.connectable_target_paths:
             targets.append(resolved_path)
     return tuple(targets)
 
@@ -4093,8 +4122,18 @@ def _relation_disposition(
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
+    other_unknown = corpus.status_unavailable_paths - {page.path}
     if visible is not None:
         other_governed = frozenset(path for path in other_governed if visible(path))
+        other_unknown = frozenset(path for path in other_unknown if visible(path))
+
+    def _no_other_governed(governed: frozenset[str], unknown: frozenset[str]) -> bool:
+        # "No other governed page" is undecided while a page's class is unavailable.
+        if governed:
+            return False
+        if unknown:
+            lifecycle_statuses.Classification(None).require()
+        return True
 
     def _satisfied_actions() -> tuple[str, ...]:
         if stale_review:
@@ -4159,7 +4198,7 @@ def _relation_disposition(
         and review.kind == "reviewed_none"
         and not review_is_current
         and review_identity_is_current(review, page, corpus)
-        and not other_governed
+        and _no_other_governed(other_governed, other_unknown)
     ):
         # Renewable ONLY because the identity check above still holds: the review
         # provably describes this page, and the sole thing that drifted is its
@@ -4189,7 +4228,7 @@ def _relation_disposition(
         review_is_current
         and review is not None
         and review.kind == "bootstrap"
-        and not other_governed
+        and _no_other_governed(other_governed, other_unknown)
     ):
         return RelationDisposition(
             "bootstrap",
@@ -4201,18 +4240,23 @@ def _relation_disposition(
         )
     before_governed = before_corpus.eligible_governed_paths
     after_governed = corpus.eligible_governed_paths
+    before_unknown = before_corpus.status_unavailable_paths
+    after_unknown = corpus.status_unavailable_paths - {page.path}
     if visible is not None:
         # A writer that sees no governed page bootstraps its first one, as in
         # a vault without the pages withheld from it.
         before_governed = frozenset(path for path in before_governed if visible(path))
         after_governed = frozenset(path for path in after_governed if visible(path))
+        before_unknown = frozenset(path for path in before_unknown if visible(path))
+        after_unknown = frozenset(path for path in after_unknown if visible(path))
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
-        and not before_governed
         and after_governed == frozenset({page.path})
+        and _no_other_governed(before_governed, before_unknown)
+        and _no_other_governed(frozenset(), after_unknown)
     )
     if automatic_bootstrap:
         return RelationDisposition(

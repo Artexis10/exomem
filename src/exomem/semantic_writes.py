@@ -698,6 +698,8 @@ def evaluate_posthoc_batch(
     evaluations: list[PosthocPageEvaluation] = []
     for rel_path in selected:
         state = corpus.pages.get(rel_path)
+        # Each selected page is this operation's own; its eligibility needs its class.
+        semantic_contract.require_page_status(state)
         if state is None or not state.eligible_governed:
             continue
         scope = (state.projects, state.page_type)
@@ -3101,9 +3103,14 @@ def _move_dependency_signature(
     )
 
     def fact_signature(fact: semantic_contract.RelationFact) -> tuple[Any, ...]:
-        qualification = semantic_contract.qualify_relation(
-            fact, registry=corpus.registry, corpus=corpus
-        )
+        try:
+            qualification = semantic_contract.qualify_relation(
+                fact, registry=corpus.registry, corpus=corpus
+            )
+            outcome: tuple[Any, ...] = (qualification.qualifies, qualification.reasons)
+        except lifecycle_statuses.ClassificationUnavailable:
+            # Unknown alike before and after; the fact's own fields still show a change.
+            outcome = ("status_unavailable",)
         return (
             fact.identity,
             fact.logical_source_path,
@@ -3113,8 +3120,7 @@ def _move_dependency_signature(
             fact.canonical_relation,
             fact.registry_status,
             fact.target_page_type,
-            qualification.qualifies,
-            qualification.reasons,
+            *outcome,
         )
 
     return (
@@ -3214,9 +3220,10 @@ def _move_evaluation_pairs(
                 after_corpus.vault_root, after_corpus.resolver_entries
             ),
         }
+    candidates = after_corpus.eligible_compiled_paths | after_corpus.status_unavailable_paths
     for _ in range(len(after_corpus.pages) + 1):
         added = False
-        for path in sorted(after_corpus.eligible_compiled_paths):
+        for path in sorted(candidates):
             if path in pairs or path not in before_corpus.pages:
                 continue
             if _move_dependency_signature(
@@ -3224,6 +3231,8 @@ def _move_evaluation_pairs(
             ) != _move_dependency_signature(
                 after_corpus, path, visible=visible, resolver=resolvers["after"]
             ):
+                # A dependent whose standing changes needs its own class to be judged.
+                semantic_contract.require_page_status(after_corpus.pages[path])
                 pairs[path] = path
                 added = True
         if not added:
