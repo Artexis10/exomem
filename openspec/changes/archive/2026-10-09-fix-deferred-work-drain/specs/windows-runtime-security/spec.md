@@ -5,7 +5,9 @@
 The disclosure-evidence requirement "Governance Evidence Filesystem Safety And
 Critical Durability Are Cross-Platform" refuses a pre-existing unsafe Windows
 writer-state root. That refusal SHALL reach the operator as one readable line,
-not as a bare pathless `RuntimeError`.
+not as a bare pathless `RuntimeError`. Its remediation command SHALL grant only the
+required trustees, and the refusal SHALL happen before SQLite is opened or persisted
+receipt state is deserialized.
 
 The same validation fault SHALL be visible to `exomem doctor`; an unreadable or unsafe
 idempotency store SHALL NOT be reported as healthy.
