@@ -597,6 +597,27 @@ def test_missing_checkpoint_cannot_receive_verified_watermark(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize(
+    "check, corruption",
+    [
+        ("e", "CREATE TEMP TRIGGER lost_manifest BEFORE INSERT ON collection_manifests "
+              "BEGIN SELECT RAISE(IGNORE); END"),
+        ("f", "CREATE TEMP TRIGGER blessed_status AFTER INSERT ON collections BEGIN UPDATE collections "
+              "SET legacy_audit_status='ok' WHERE collection_id=NEW.collection_id; END"),
+    ],
+)
+def test_manifest_and_status_proof_checks_refuse_a_lossy_import(tmp_path, check, corruption):
+    # A check that never fires lets a lost manifest or blessed history pass as proved.
+    root, path = _items(tmp_path, values={"title": "One"})
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        conn.execute(corruption)
+        with pytest.raises(CollectionStoreError, match=rf"check\({check}\)"):
+            with conn:
+                conn.execute("BEGIN")
+                legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        assert conn.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 0
+
+
 def test_existing_collection_and_cross_profile_transition_collisions_refuse(tmp_path):
     # Global event IDs may collide across profiles and must never be renamed.
     root, path = _items(tmp_path)
