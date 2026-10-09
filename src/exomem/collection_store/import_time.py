@@ -2,7 +2,7 @@
 
 Zone rules come from the pinned ``tzdata`` package, never the host's zone database,
 so every platform resolves the same local time to the same instant; a job binding
-records :data:`VERSION`. A local time in a repeated hour resolves by the mapping's
+records :func:`version`. A local time in a repeated hour resolves by the mapping's
 declared fold rule, and one in a gap resolves to nothing: the importer refuses it.
 """
 
@@ -15,11 +15,14 @@ import zoneinfo
 from collections.abc import Mapping
 from typing import Any
 
-import tzdata
-
-#: The IANA release of the pinned zone rules.
-VERSION: str = tzdata.IANA_VERSION
 _MAX_NAME_BYTES = 64
+
+
+def version() -> str:
+    """The IANA release of the pinned zone rules; loaded on use, so other routes never need them."""
+    import tzdata
+
+    return tzdata.IANA_VERSION
 
 
 @functools.cache

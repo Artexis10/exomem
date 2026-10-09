@@ -17,6 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import pytest
+import tzdata
 from test_collection_store_importer import CID, count, manifest_text, refused, setup
 from test_collection_store_importer import run as run_jobs
 from test_collection_store_writer import store as store
@@ -193,6 +194,10 @@ def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_me
         done = finish(store, job, handle)
         assert (done["state"], done["rows"]["imported"], done["rows"]["duplicates"]) == ("complete", 9, 0)
         assert (done["rows"]["rejected"], [row["code"] for row in done["rejections"]]) == (1, ["TIME_LOCAL_GAP"])
+        bound = handle.connection.execute(
+            "SELECT binding_json FROM import_jobs WHERE job_id=?", (job["continuation"].removeprefix("import-job:"),)
+        ).fetchone()[0]
+        assert json.loads(bound)["mapping"]["zone_rules"] == tzdata.IANA_VERSION
         series = agent(store, handle, mode="start", source_ref=manifest, format="json-document",
                        members=["series/2026-03-29.json"], mapping=POSITIONS)
         assert finish(store, series, handle)["rows"]["imported"] == 23

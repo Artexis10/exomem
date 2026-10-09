@@ -164,7 +164,7 @@ def contract() -> dict[str, Any]:
             "{format, mapping, members?}, checked at every revise; preview's mapping.absent counts "
             "the sampled rows without each mapped path"
         ),
-        "zone_rules": {"package": "tzdata", "version": import_time.VERSION},
+        "zone_rules": {"package": "tzdata", "version": import_time.version()},
         "position": (
             "next_position is {row, byte}; a json-document or export job adds member and "
             "member_row, counts consumed bytes in whole members, and reports members read and "
@@ -2803,7 +2803,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             "reimport": request.reimport,
         }
     if plan.zoned:
-        binding["mapping"]["zone_rules"] = import_time.VERSION
+        binding["mapping"]["zone_rules"] = import_time.version()
     streamed = _streamed(binding)
     start = {"row": 0, "byte": 0, "member": 0, "member_row": 0} if streamed else dict(_START)
     identity = _identity(binding)
