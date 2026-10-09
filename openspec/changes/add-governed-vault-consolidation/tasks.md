@@ -64,13 +64,23 @@ Delivery A is the current implementation batch. Deliveries B and C remain requir
 
 ## 7. Delivery B: private vocabulary domains after the registry foundation
 
-- [ ] 7.1 Reuse the merged registry foundation for core-plus-one-extension instances; verify typed references and canonical Scope binding for overlays and history.
+Evidence for the checked Delivery B tasks. Each test passed in a scoped local run on the delivery branch, and the pull request's CI runs the full corpus.
+
+- 7.1 `tests/test_private_vocabulary_instances.py::test_authenticated_private_promotion_cannot_change_public_observations`, `::test_explicit_public_history_does_not_override_an_unsafe_companion`, `::test_arming_requires_existing_history_assignment`, `::test_colliding_extensions_keep_their_own_cached_meaning`.
+- 7.4 `tests/test_private_vocabulary_instances.py::test_authenticated_private_promotion_cannot_change_public_observations`, `::test_private_history_preserves_reason_without_touching_shared_logs`, `::test_prospective_selector_never_overrides_canonical_destination`, `::test_legacy_armed_registry_requires_explicit_assignment`, `::test_arming_requires_existing_history_assignment`.
+- 7.6 `tests/test_semantic_units.py::test_unavailable_definitions_serve_only_units_no_custom_heading_encloses`, `tests/test_private_vocabulary_instances.py::test_a_live_revocation_withholds_warm_private_units_but_keeps_the_page_readable`.
+- 7.7 `tests/test_private_vocabulary_instances.py::test_vector_candidates_take_their_selected_meaning_before_the_result_limit`, `tests/test_semantic_unit_reconcile.py::test_an_old_generation_reads_incomplete_until_reconcile_restores_coverage_and_lifecycle`, `tests/test_semantic_unit_embeddings.py::test_incremental_index_repairs_unit_rows_even_when_page_chunks_are_current`.
+
+Open: 7.2 has no test that moves or reclassifies a page across instances, and 7.3 has no test that scopes usage counts to an instance.
+
+- [x] 7.1 Reuse the merged registry foundation for core-plus-one-extension instances; verify typed references and canonical Scope binding for overlays and history.
 - [ ] 7.2 Add registry and prospective page selection before lookup; recheck destinations and before/after bindings while preserving instance identity across consumers.
 - [ ] 7.3 Scope collisions, aliases, folders, usage, cache identity, and hashes to admitted instances; prove private edits cannot affect public outcomes.
-- [ ] 7.4 Preserve promotion, restore, and protected history without private shared-log entries; prove direct-read protection, ambiguous bindings, and legacy assignment.
-- [ ] 7.6 Serve core interpretation under unavailable definitions only when every ancestor heading is core-recognized; prove raw reads stay useful, other units report unavailable, and coverage is incomplete, not empty.
-- [ ] 7.7 Store per-parent structural coverage in the existing embedding metadata table with occurrence vectors; prove missing coverage reads as incomplete and hidden or suppressed candidates spend no result slot.
+- [x] 7.4 Preserve promotion, restore, and protected history without private shared-log entries; prove direct-read protection, ambiguous bindings, and legacy assignment.
+- [x] 7.6 Serve core interpretation under unavailable definitions only when every ancestor heading is core-recognized; prove raw reads stay useful, other units report unavailable, and coverage is incomplete, not empty.
+- [x] 7.7 Store per-parent structural coverage in the existing embedding metadata table with occurrence vectors; prove missing coverage reads as incomplete and hidden or suppressed candidates spend no result slot.
 - [ ] 7.5 Document domains and run paired acceptance, independent review, and ordinary release; record evidence before beginning managed-vault import.
+- [ ] 7.8 Follow-up: FTS5 bm25() whole-table statistics include policy-withheld and tombstoned pages, so a restricted caller's scores depend on hidden pages; this is old debt on main too.
 
 ## 8. Delivery C: offline managed-vault import and recovery
 
