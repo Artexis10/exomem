@@ -46,15 +46,28 @@ package whose version the job binding records.
 ### Requirement: Derived import collections rebuild from their sources
 
 A collection declared derived SHALL take rows only from imports and SHALL refuse row
-edits, view edit-back and row tools with `COLLECTION_DERIVED`. Its rows SHALL stay out of
-the vault replica. The replica SHALL carry its manifest, saved mappings, rollups and an
-import log that records each import's manifest and member hashes, member row counts,
-mapping hash, and importer and zone-rules versions. After its rows are lost, Exomem SHALL
-rebuild them by replaying the logged imports from the preserved members, SHALL check each
-member's row count against the log, and SHALL report the rebuild's progress instead of
-complete or zero results until it ends. An original that a derived collection's log names
-SHALL NOT be pruned.
+edits, view edit-back and row tools with `COLLECTION_DERIVED`. A collection SHALL become
+derived only at creation, in summary mode, and SHALL never be converted. Its rows SHALL
+live outside the main collection store and outside the vault replica. The replica SHALL
+carry its manifest, saved mappings, rollups and an import log that records, per member,
+the manifest and member hashes, the row counts, a row digest, the mapping hash, and the
+importer and zone-rules versions. A derived collection's canonical content is its
+manifest, its import log and the preserved members the log names; its rows are a
+rebuildable projection without per-row history, receipts or audit, and row-history
+requests SHALL refuse with `COLLECTION_DERIVED` and name the import log. After its rows
+are lost, Exomem SHALL rebuild them by replaying the logged imports from the preserved
+members, SHALL check each member's row count and digest against the log, and SHALL report
+the rebuild's progress instead of complete or zero results until it ends. An original
+that a derived collection's log names SHALL NOT be pruned.
 
 #### Scenario: Restore on a new machine
 - **WHEN** a vault with a derived collection is restored where its rows do not exist
-- **THEN** its rollups answer at once, row queries report the rebuild's progress, and the rebuilt rows match the logged counts
+- **THEN** its rollups answer at once, row queries report the rebuild's progress, and the rebuilt rows match the logged counts and digests
+
+#### Scenario: A crash between the two stores
+- **WHEN** the service stops after an import batch committed its rows but before the member's log entry committed
+- **THEN** recovery resumes that member without duplicate rows, and the final rows match a run without the crash
+
+#### Scenario: A logged member is missing
+- **WHEN** a rebuild needs a member blob that is absent
+- **THEN** the rebuild stops with `DERIVED_SOURCE_MISSING` naming the member, rollups keep answering, and row queries refuse instead of returning zero

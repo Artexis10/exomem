@@ -19,4 +19,8 @@
 
 ## 4. Derived import collections (D)
 
-- [ ] 4.1 Implement with the replica publisher batch (S1.2b): derived marking, `COLLECTION_DERIVED` refusals, replica exclusion, import log and rebuild.
+- [ ] 4.1 Store schema revision 9: the `derived` flag and its trigger, the append-only import log, and the `import_member` receipt.
+- [ ] 4.2 `collection_store/derived_rows.py`: the derived file, its layout, the two-connection write order, `reconcile` and rebuild; the importer's derived apply path.
+- [ ] 4.3 Query readers attach the derived file through a per-collection row source; `QUERY_REBUILDING` while a rebuild runs.
+- [ ] 4.4 `COLLECTION_DERIVED` refusals, summary counts from the log, `--include-derived` backup, and the reserved-path entry.
+- [ ] 4.5 Prove: an installed-MCP import, then deleting the derived file and restarting, rebuilds rows equal by count and digest while rollups answer throughout; the replica and export hold no derived rows; a crash at each commit boundary recovers without duplicates; a missing blob refuses instead of returning zero.
