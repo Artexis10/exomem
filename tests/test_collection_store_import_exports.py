@@ -17,7 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import pytest
-from test_collection_store_importer import CID, count, refused, setup
+from test_collection_store_importer import CID, count, manifest_text, refused, setup
 from test_collection_store_importer import run as run_jobs
 from test_collection_store_writer import store as store
 
@@ -347,3 +347,32 @@ def test_a_time_basis_places_a_wall_clock_by_its_zone_offset_and_clock(tmp_path,
         assert error[0] == expected
     else:
         assert error is None and (values["at"], values["utc_offset"], values["local_date"]) == expected
+
+
+def test_a_saved_import_is_checked_at_revise_and_named_at_start(store):
+    """A saved import that stopped fitting its collection fails the next start instead of the
+    revise, or a renamed source field imports rows without that field and no warning."""
+    collection(store)
+    text = manifest_text(CID, "Samples", FIELDS)
+
+    def save(imports):
+        guards = store.inspect_collection(CID)["lifecycle_guards"]
+        revised = text.removesuffix("---\n") + f"imports: {json.dumps(imports)}\n---\n"
+        return store.revise_collection(CID, manifest_text=revised, why="save an import", **guards)
+
+    broken = {**SAMPLES, "fields": {**SAMPLES["fields"], "nope": "v"}}
+    with pytest.raises(collections.CollectionError) as error:
+        save({"samples": {"format": "json-document", "members": "samples/*", "mapping": broken}})
+    assert (error.value.code, error.value.details["at"]) == (
+        "IMPORT_MAPPING_INVALID", "imports.samples.mapping.fields.nope"
+    )
+    save({"samples": {"format": "json-document", "members": "samples/*", "mapping": SAMPLES}})
+    manifest, _ = preserve_export(store, "first", {"samples/2026-10.json": AUTUMN})
+    preview = agent(store, mode="preview", source_ref=manifest, mapping="samples")
+    assert (preview["mapping"]["saved"], preview["mapping"]["absent"]) == ("samples", {})
+    job = agent(store, mode="start", source_ref=manifest, mapping="samples")
+    assert finish(store, job)["rows"]["imported"] == 6
+    renamed = {"device": "unit-1", "days": [{"date": "2026-11-01", "samples": [
+        {"t": "2026-11-01T09:00:00", "value": 7}, {"t": "2026-11-01T10:00:00", "v": 8}]}]}
+    again, _ = preserve_export(store, "second", {"samples/2026-11.json": renamed})
+    assert agent(store, mode="preview", source_ref=again, mapping="samples")["mapping"]["absent"] == {"value": 1}

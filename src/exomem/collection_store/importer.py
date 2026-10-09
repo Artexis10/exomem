@@ -28,6 +28,7 @@ text or executes.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import decimal
 import fnmatch
@@ -77,6 +78,7 @@ JOB_WINDOW_SECONDS = 3600
 MAX_REQUEST_BYTES = 16 << 10
 MAX_MAPPED_FIELDS = 64
 MAX_LISTED_MEMBERS = 256
+MAX_SAVED_IMPORTS = 16
 MAX_MANIFEST_BYTES = 64 << 20
 # nosemgrep: ep-word-set -- The scalar kinds a CSV cell coerces to; a subset of SCALAR_TYPES.
 CSV_TYPES = ("string", "integer", "number", "boolean")
@@ -242,6 +244,7 @@ class _Request:
     job_id: str | None
     members: str | tuple[str, ...] | None = None
     reimport: str | None = None
+    saved: str | None = None
 
 
 #: Modes that write nothing. Lease and egress classify these as reads and every other mode as a mutation.
@@ -278,6 +281,9 @@ def _parse_request(raw: Any) -> _Request:
     required, optional = _MODE_FIELDS[mode]
     if mode == "start" and "continuation" in supplied:
         required, optional = {"continuation"}, set()
+    elif type(raw.get("mapping")) is str:
+        # A saved import names its own format; the request names only the source.
+        required, optional = required - {"format"}, (optional | {"mapping"}) - {"format"}
     for name in sorted(required - supplied):
         _invalid(f"import_request.{name}", f"{mode} requires {name}")
     for name in sorted(supplied - required - optional):
@@ -287,7 +293,9 @@ def _parse_request(raw: Any) -> _Request:
     members = raw.get("members")
     if "members" in supplied:
         members = _selector(members)
-    if "reimport" in supplied and (raw["reimport"] != "all" or "members" not in supplied):
+    if "reimport" in supplied and (
+        raw["reimport"] != "all" or not ("members" in supplied or type(raw.get("mapping")) is str)
+    ):
         _invalid(
             "import_request.reimport",
             "reimport all re-reads an export's members already imported with this mapping",
@@ -308,7 +316,7 @@ def _parse_request(raw: Any) -> _Request:
     )
 
 
-def _selector(raw: Any) -> str | tuple[str, ...]:
+def _selector(raw: Any, at: str = "import_request.members") -> str | tuple[str, ...]:
     """An export's member selector: one glob over member paths, or a list of paths."""
     if type(raw) is str and raw and len(raw.encode()) <= _PATH_BYTES:
         return raw
@@ -320,10 +328,70 @@ def _selector(raw: Any) -> str | tuple[str, ...]:
     ):
         return tuple(raw)
     _invalid(
-        "import_request.members",
+        at,
         "members is a glob over the export's member paths or a list of distinct paths",
         expected=f"glob, or 1 to {MAX_LISTED_MEMBERS} paths",
     )
+
+
+def saved_imports(manifest: collections.CollectionManifest, data: Mapping[str, Any]) -> dict[str, Any]:
+    """The manifest's saved imports, each proved to compile against this manifest.
+
+    ``imports.<name>`` holds ``{format, mapping, members?}`` as JSON data. Governed
+    create and revise run this, so a saved import that no longer fits the collection
+    refuses the revision instead of failing the next start.
+    """
+    declared = data.get("imports")
+    if declared is None:
+        return {}
+    if not isinstance(declared, Mapping) or len(declared) > MAX_SAVED_IMPORTS:
+        _mapping_invalid("imports", f"imports maps up to {MAX_SAVED_IMPORTS} names to saved imports",
+                         expected="object")
+    found = {}
+    for name, spec in declared.items():
+        at = f"imports.{name}"
+        try:
+            encoded = json.dumps(spec, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError):
+            _mapping_invalid(at, "a saved import is JSON data", expected="object")
+        if (
+            type(name) is not str or not name or len(name.encode()) > _PATH_BYTES
+            or not isinstance(spec, Mapping) or len(encoded.encode()) > MAX_REQUEST_BYTES
+        ):
+            _mapping_invalid(at, "a saved import is a bounded {format, mapping, members?}", expected="object")
+        for key in sorted(set(spec) - {"format", "mapping", "members"}):
+            _mapping_invalid(f"{at}.{key}", "unknown saved import key", allowed=["format", "mapping", "members"])
+        if spec.get("format") not in FORMATS:
+            _mapping_invalid(f"{at}.format", "unsupported format", allowed=list(FORMATS))
+        if "members" in spec:
+            _selector(spec["members"], f"{at}.members")
+        try:
+            compile_mapping(spec.get("mapping"), manifest, spec["format"])
+        except collections.CollectionError as error:
+            _mapping_invalid(f"{at}.{error.details['at']}", error.reason, expected=error.details.get("expected"),
+                             allowed=error.details.get("allowed"))
+        found[name] = spec
+    return found
+
+
+def _resolved(writer, row: Mapping[str, Any], manifest, request: _Request) -> _Request:
+    """The request with a named saved import's format, mapping and default members."""
+    if type(request.mapping) is not str:
+        return request
+    text = writer.connection.execute(
+        "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+        (row["collection_id"], row["manifest_version"]),
+    ).fetchone()[0]
+    saved = saved_imports(manifest, vault.parse_frontmatter(text, strict=True)[0])
+    if request.mapping not in saved:
+        _mapping_invalid("import_request.mapping", "the collection saves no import of this name",
+                         allowed=sorted(saved))
+    spec = saved[request.mapping]
+    members = request.members
+    if members is None and "members" in spec:
+        members = _selector(spec["members"])
+    return dataclasses.replace(request, format=spec["format"], mapping=spec["mapping"], members=members,
+                               saved=request.mapping)
 
 
 # Source resolution
@@ -2655,6 +2723,9 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
         )
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
+        request = _resolved(writer, row, manifest, request)
+        if request.reimport is not None and request.members is None:
+            _invalid("import_request.reimport", "reimport applies to an export's members", expected="members")
         plan = compile_mapping(request.mapping, manifest, request.format)
         if not writer._operation.field_plan(manifest).owner:
             from .field_admission import UNRESOLVED, mapping_classes
@@ -2684,6 +2755,8 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             "sha256": hashlib.sha256(_json(plan.canonical).encode()).hexdigest(),
         },
     }
+    if request.saved is not None:
+        binding["mapping"]["saved"] = request.saved
     if request.members is not None:
         binding["source"]["members"] = {
             "select": request.members if type(request.members) is str else list(request.members),
@@ -2857,6 +2930,7 @@ class _Sample:
         self.errors: list[dict[str, Any]] = []
         self.conflicts: dict[str, set[str]] = {}
         self.present: set[str] = set()
+        self.absent: dict[str, int] = {}
         self.truncated = {"fields": False, "nested": False, "time_fields": False}
 
     def _note(self, section: str, found: dict, path: str, value: Any, *, add: bool = False) -> None:
@@ -2905,7 +2979,11 @@ class _Sample:
             self.valid += 1
             return
         for spec in self.plan.fields:
-            if spec.path and spec.source.read(row.value) is not _ABSENT:
+            if not spec.path:
+                continue
+            if spec.source.read(row.value) is _ABSENT:
+                self.absent[spec.target] = self.absent.get(spec.target, 0) + 1
+            else:
                 self.present.add(spec.target)
         values, error = self.plan.values(row.value)
         if self.plan.bases:
@@ -2970,6 +3048,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         # Raw shape previews cannot attest to field-only disclosure; a refused recipient asks the owner to preview.
         if not writer._operation.field_plan(manifest).owner:
             _source_not_found()
+        request = _resolved(writer, row, manifest, request)
         source, _, size = resolve_source(root, writer._operation, request.source_ref)
         members = () if request.members is None else _export(root, source, size, request.members)
         plan, findings, rows = None, [], None
@@ -3063,6 +3142,8 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         },
         "mapping": {
             "declared": plan is not None,
+            "saved": request.saved,
+            "absent": sample.absent,
             "inferred": inferred,
             "findings": (findings + sample.findings())[: 2 * _LISTED],
         },
