@@ -1089,6 +1089,46 @@ def test_malformed_status_does_not_require_private_definitions_for_search_or_aud
     assert (vault / path).read_text() == source
 
 
+def test_unknown_status_debt_is_reported_only_against_admitted_definitions(
+    vault: Path,
+) -> None:
+    from exomem import audit, lifecycle_statuses
+    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+
+    overlay = lifecycle_statuses.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nentries:\n  awaiting-tide:\n    attributes: {class: pending}\n"
+    )
+    defined = "Knowledge Base/Notes/Insights/harbour-defined.md"
+    unknown = "Knowledge Base/Notes/Insights/harbour-unknown.md"
+    for path, status in ((defined, "awaiting-tide"), (unknown, "paused-locally")):
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\nstatus: {status}\n---\n\nThe harbour remains readable.\n"
+        )
+    _govern(vault, scope_path="_Schema/statuses.yaml")
+    _reset_governance()
+
+    # maintain_memory's audit is owner-only, so a restricted caller reaches the
+    # audit library entry, as the malformed-status debt test above does.
+    def unregistered() -> set[str]:
+        return {
+            finding.path
+            for finding in audit.audit(vault, categories=["frontmatter_compliance"]).findings
+            if (finding.meta or {}).get("code") == "unregistered_status"
+        }
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        denied = unregistered()
+    with library_scope():
+        admitted = unregistered()
+
+    assert denied.isdisjoint({defined, unknown})
+    assert unknown in admitted
+    assert defined not in admitted
+
+
 @pytest.mark.usefixtures("owner_scope")
 def test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes(
     vault: Path,
