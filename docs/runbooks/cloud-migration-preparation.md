@@ -25,7 +25,7 @@ Collect these inputs without changing the named systems:
 | Original DNS | Zone, record ID, complete type/content/proxy/TTL settings; preserve the original record for rollback |
 | Endpoint pair | Cloud and replacement personal HTTPS hostnames, both with `/mcp`; certificate coverage, canonical OAuth issuer/resource, discovery and token endpoints, and connector reauthentication requirements |
 | Personal clients | CLI profiles, desktop/web connectors and any other consumers; record which owner has verified each one |
-| Fleet and database | Node identity, private database address, direct PostgreSQL roles on 5432, cluster/pod/service CIDRs, current chart release and values |
+| Fleet and database | Node identity, the database's public address and the server node's allowlisted /32, direct PostgreSQL roles on 5432, cluster/pod/service CIDRs, current chart release and values |
 | Images | Released Cloud cell, cellctl and gateway repository digests, their source revisions, supported architecture and authenticated pull proof |
 | Backup account | Existing business B2 account identity, dedicated Cloud bucket name/ID, account-specific S3 endpoint and separate provider/controller credential references |
 | Release evidence | Green full CI on the final main revision, release PR based on that revision, published image metadata and node acceptance still pending |
@@ -70,8 +70,8 @@ Any override must agree with the chart and destination matrix.
 
 | Kubernetes Secret | Exact keys | Preparation requirement |
 | --- | --- | --- |
-| `exomem-cellctl-database-dsn` | `dsn` | Dedicated cellctl role, direct private PostgreSQL connection, including LISTEN |
-| `exomem-cloud-gateway-database` | `url` | Dedicated gateway role, direct private PostgreSQL connection |
+| `exomem-cellctl-database-dsn` | `dsn` | Dedicated cellctl role, direct PostgreSQL connection over the public address with `verify-full`, including LISTEN |
+| `exomem-cloud-gateway-database` | `url` | Dedicated gateway role, direct PostgreSQL connection over the public address with `verify-full` |
 | `exomem-cloud-gateway-control-plane-key` | `key` | Match the authorized Substrate control-plane key |
 | `exomem-cloud-cell-token-key` | `current`, `currentVersion`; rotation adds both `previous`, `previousVersion` | Key is 32 random bytes encoded as 64 hex characters; both components read the same current entry |
 | `exomem-cloud-backup-master-key` | `keys`, `currentVersion` | `keys` is a JSON version-to-base64-key map; decoded keys are 32 bytes and contain the selected version |
