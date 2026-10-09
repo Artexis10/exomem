@@ -28,6 +28,7 @@ from exomem import (
     readiness,
     recall_migration,
     recall_space,
+    runtime_resources,
 )
 from exomem import find as find_module
 from exomem.embedding_index import EmbeddingIndex
@@ -431,6 +432,97 @@ def test_initial_build_resumes_after_first_encode_fails_and_a_live_write(
     assert _vector_lane(vault)["status"] == "participated"
 
 
+def _recall(vault: Path, query: str) -> dict:
+    from exomem import commands
+
+    find_module.clear_cache()
+    result = commands.op_ask_memory(
+        vault, query=query, limit=5, mode="vector", scope="kb-only", graph=False, rerank=False,
+        detail="compact",
+    )
+    return {"hits": result} if isinstance(result, list) else result
+
+
+def test_an_initial_build_serves_its_sidecar_and_live_writes_while_marked_warming(
+    preseeded_world,
+) -> None:
+    # The state a re-seeded cell reached: the build's sidecar holds the vault,
+    # a live write gave the serving sidecar the same space, and no pointer
+    # names the build yet. Serving only the live write would answer every
+    # query with it.
+    vault, _log, _loads = preseeded_world
+    _warm(vault)
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving is None
+    assert recall_migration.build(vault, plan) is True
+    added = vault / kb_dirname() / "Notes/page-new.md"
+    added.write_text(
+        "---\ntype: note\ntitle: Circuit breaker\nupdated: 2026-09-02\n---\n\n"
+        "# Circuit breaker\n\nA breaker opens after repeated failures and probes later.\n",
+        encoding="utf-8",
+    )
+    assert embeddings.upsert_after_write_status(vault, [added]).status == "completed"
+    assert index_paths.active_sidecar_name(vault) is None
+    assert set(embeddings.get_embedding_index(vault).file_mtimes()) == {f"{kb_dirname()}/Notes/page-new.md"}
+
+    built = _recall(vault, "retry backoff")
+    live = _recall(vault, "breaker opens after repeated failures")
+
+    assert built["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
+    assert live["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-new.md"
+    assert built["warming"]["components"] == ["embeddings"]
+
+    recall_migration.cut_over(vault, plan)
+    after = _recall(vault, "retry backoff")
+    assert after["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
+    assert "warming" not in after
+
+
+def test_a_cell_reads_the_build_while_its_old_sidecar_is_refused(world, monkeypatch) -> None:
+    # The cell's serving sidecar holds another model's vectors, which it never
+    # encodes; the build's sidecar answers alone, so no two spaces meet.
+    vault, log, _loads = world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    _warm(vault)
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving.model == OLD
+    assert recall_migration.build(vault, plan) is True
+    log.clear()
+
+    explained = _explained(vault, "retry backoff")
+
+    assert explained["retrieval_profile"]["lanes"]["vector"]["status"] == "participated"
+    assert explained["hits"][0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
+    assert _query_encoders(log) == [NEW]
+    assert explained["warming"]["components"] == ["embeddings"]
+
+
+def test_a_query_finds_the_loaded_encoder_while_a_build_passage_holds_the_model_slot(monkeypatch) -> None:
+    # A query used to take the model slot only to look the encoder up, so it
+    # waited behind the build's passage once there and again for its own encode.
+    loaded = object()
+    monkeypatch.setattr(embeddings, "_MODEL", loaded)
+    holding, release = threading.Event(), threading.Event()
+
+    def build_passage() -> None:
+        with runtime_resources.model_work("bulk"), runtime_resources.model_execution():
+            holding.set()
+            release.wait(10)
+
+    builder = threading.Thread(target=build_passage)
+    builder.start()
+    try:
+        assert holding.wait(5)
+        found: list[object] = []
+        query = threading.Thread(target=lambda: found.append(embeddings.get_model()))
+        query.start()
+        query.join(5)
+        assert found == [loaded]
+    finally:
+        release.set()
+        builder.join(5)
+
+
 def test_healthy_legacy_sidecar_with_drift_does_not_plan_a_build(
     preseeded_world, monkeypatch
 ) -> None:
@@ -613,6 +705,27 @@ def test_doctor_reports_the_initial_build(preseeded_world, started) -> None:
     progress = [item for item in report.checks if "initial dense index build" in item.message]
     assert len(progress) == 1 and progress[0].id == "embeddings.reembed"
     assert loads == []
+
+
+def test_doctor_reports_an_initial_build_a_live_write_reached(preseeded_world) -> None:
+    # The live write gives the serving sidecar the build's space; it still
+    # holds that one page, so the build is not a healthy re-embed.
+    from exomem import doctor
+
+    vault, log, _loads = preseeded_world
+    plan = recall_migration.plan(vault)
+    assert plan is not None
+    assert not recall_migration.build(vault, plan, should_stop=lambda: len(_passages_by(log, NEW)) >= 2)
+    added = vault / kb_dirname() / "Notes/live-write.md"
+    added.write_text("# Live write\n\nA page written during the initial build.\n", encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [added]).status == "completed"
+    recall_migration.reset_for_tests()
+
+    check = doctor._check_recall_reembed(vault)
+
+    assert check.status == "warn"
+    assert "initial dense index build" in check.message
+    assert check.details["serving"]["model"] == check.details["building"]["model"] == NEW
 
 
 def test_doctor_keeps_missing_sidecar_warning_when_initial_build_is_disabled(
@@ -1020,7 +1133,7 @@ def test_doctor_reports_a_cells_refused_sidecar_as_dense_recall_off(world, monke
 
     assert check.status == "warn"
     assert f"refuses its {OLD} sidecar" in check.message
-    assert "dense recall is off until the re-embed cuts over" in check.message
+    assert "dense recall covers only the pages the re-embed has built" in check.message
     assert "pages built" in check.message
 
     monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")

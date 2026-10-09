@@ -25,10 +25,15 @@ of this job retires it, so a failed or regretted cutover can fall back to it.
 its own encoder.
 
 A hosted or cloud cell holds one encoder, so it never serves the old sidecar
-with the model that wrote it: that sidecar is refused (the vector lane reports
-`vector_space_mismatch` and the lexical lanes answer) until this job cuts over
+with the model that wrote it: that sidecar is refused until this job cuts over
 to the sidecar it builds with the cell's own encoder. A write meanwhile cannot
 land in the refused sidecar and is built by the job's catch-up.
+
+While the job builds, the vector lane reads the new sidecar wherever the
+serving one cannot answer for the vault on its own (`building_sidecar`): an
+initial build, whose serving sidecar holds nothing or only live writes, and a
+cell, whose serving sidecar is refused. Only a personal server migrating from
+another model keeps reading the old, complete sidecar with its own encoder.
 """
 
 from __future__ import annotations
@@ -220,6 +225,30 @@ def plan(vault_root: Path) -> MigrationPlan | None:
     if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
+
+
+def building_sidecar(vault_root: Path) -> Path | None:
+    """The sidecar this process's job is building that the vector lane reads now.
+
+    None when no build runs here, when the active pointer already names the
+    build's sidecar, or on a personal server whose serving sidecar another
+    model wrote: that sidecar is complete and its own encoder serves it. Every
+    other build (an initial one, or a cell whose serving sidecar is refused)
+    leaves the serving sidecar unable to answer for the whole vault. Read from
+    the job's status and two `stat` calls; it never walks the vault.
+    """
+    key = _key(vault_root)
+    with _LOCK:
+        current = _STATUS.get(key) or {}
+        target, serving = current.get("target"), current.get("serving")
+    if not isinstance(target, dict) or not target.get("sidecar"):
+        return None
+    if isinstance(serving, dict) and not _hosted() and serving.get("model") != recall_space.recall_model():
+        return None
+    active = index_paths.sidecar_path(vault_root)
+    shadow = active.parent / str(target["sidecar"])
+    # The job records the target before its first write creates the file.
+    return shadow if shadow != active and shadow.exists() else None
 
 
 def preload_serving_encoder(vault_root: Path) -> bool:
@@ -558,8 +587,13 @@ def run(vault_root: Path, stop: threading.Event) -> str:
 
 
 def _run_logged(vault_root: Path, stop: threading.Event) -> None:
+    from . import runtime_resources
+
     try:
-        run(vault_root, stop)
+        # Bulk work: on a service cell's fair model gate a query's encode goes
+        # ahead of the build's next passage, so it waits for at most one.
+        with runtime_resources.model_work("bulk"):
+            run(vault_root, stop)
     except Exception as error:  # noqa: BLE001 - the job must never take the service down
         log.warning("recall re-embed stopped: %s", error, exc_info=True)
         _update(vault_root, state="failed", error=type(error).__name__)

@@ -958,6 +958,9 @@ class MediaWorker:
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
         findable by visual content — video at the specific moment, not as one blur."""
+        if not embeddings.clip_enabled():
+            # A job queued before CLIP was turned off skips it, as the scan does.
+            return
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return
         is_video = job.media_type == "video"

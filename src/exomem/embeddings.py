@@ -286,10 +286,14 @@ def get_model():
     for the same reason this function did — a lean install must not pay it.
     """
     global _MODEL, _MODEL_GENERATION
-    if _MODEL is None:
-        # A served model's artefact can take minutes to download or build; the
-        # process-wide model slot is taken only to load the finished bytes.
-        embedding_backend.ensure_served_artifact(MODEL_NAME)
+    resident = _MODEL
+    if resident is not None:
+        # The slot serializes a load, not a lookup: taking it here made every
+        # query encode wait behind a bulk encode's batch once before its own turn.
+        return resident
+    # A served model's artefact can take minutes to download or build; the
+    # process-wide model slot is taken only to load the finished bytes.
+    embedding_backend.ensure_served_artifact(MODEL_NAME)
     with runtime_resources.model_execution():
         if _MODEL is not None:
             return _MODEL
@@ -1567,9 +1571,33 @@ def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> Embedd
     with _INDEX_CACHE_LOCK:
         idx = _INDEX_CACHE.get(key)
         if idx is None or idx.path != path:
-            idx = EmbeddingIndex(vault_root, path=path)
+            # The cutover made a build's sidecar the serving one: the instance
+            # the vector lane read it through carries over with its matrix.
+            idx = _INDEX_CACHE.pop(str(path), None)
+            if idx is None:
+                idx = EmbeddingIndex(vault_root, path=path)
             _INDEX_CACHE[key] = idx
         return idx
+
+
+def get_building_index(vault_root: Path, path: Path) -> EmbeddingIndex:
+    """The process-shared index the vector lane reads a building sidecar through.
+
+    Kept beside the serving ones, under the sidecar's own path, so its matrix
+    is loaded once and caught up by write generation as the build commits, and
+    the idle reaper and residency status see it. The cutover hands it to
+    `get_embedding_index`. The build writes through an instance of its own.
+    """
+    key = str(path)
+    with _INDEX_CACHE_LOCK:
+        idx = _INDEX_CACHE.get(key)
+    if idx is not None:
+        return idx
+    fresh = get_embedding_index(vault_root, path=Path(path))
+    if fresh.path == index_paths.sidecar_path(vault_root):
+        return fresh  # the cutover won the race: this is the serving instance
+    with _INDEX_CACHE_LOCK:
+        return _INDEX_CACHE.setdefault(key, fresh)
 
 
 def get_clip_index(vault_root: Path) -> ClipIndex:

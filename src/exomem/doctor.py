@@ -2215,7 +2215,14 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     from . import recall_space
 
     recall = recall_space.recall_model()
-    if serving is None:
+
+    def space(described: dict) -> tuple:
+        return (described.get("model"), described.get("fingerprint"), described.get("dim"))
+
+    # Live writes give an interrupted initial build's serving sidecar the build's
+    # own space; it still holds only those writes.
+    initial = serving is None or (building is not None and space(serving) == space(building))
+    if initial:
         if state.get("paths_total", 0) == 0:
             return _check(
                 "embeddings.reembed", "pass", "No eligible pages need a dense index.", details=state,
@@ -2228,8 +2235,8 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
             "embeddings.reembed",
             "warn",
             f"The initial dense index build for {recall} is {phase}: "
-            f"{built}/{state.get('paths_total', 0)} pages built; lexical recall serves "
-            "until the service cuts over.",
+            f"{built}/{state.get('paths_total', 0)} pages built; dense recall covers only "
+            "the built pages until the service cuts over.",
             details=state,
         )
     if recall_space.cell_mode() and serving["model"] != recall:
@@ -2253,7 +2260,11 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
             "embeddings.reembed",
             "warn",
             f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
-            f"dense recall is off until the re-embed cuts over ({built}).",
+            + (
+                f"dense recall covers only the pages the re-embed has built until it cuts over ({built})."
+                if building
+                else f"dense recall is off until the re-embed builds its sidecar ({built})."
+            ),
             details=state,
         )
     if not building:
