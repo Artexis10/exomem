@@ -41,7 +41,8 @@ design has to respect:
 - Result identity: every index-backed path returns the set the scan oracle would.
 - Warm search p95 at or below 200 ms on a two-CPU cell of 6,500 pages, with a
   budget for every stage, a pull-request gate that sees per-candidate work grow
-  before merge, and a full-CI comparison of head with the last release.
+  before merge, and a full-CI comparison of head with the last release that
+  passed its live-cell verdict.
 
 **Non-Goals:**
 - Approximate retrieval, dropped features, ANN, or any quality-for-speed trade.
@@ -144,10 +145,11 @@ caches, and reads the per-stage diagnostics. It checks the one-minute load
 average once, before the series; above 2.0 it waits a bounded time and then
 exits without a verdict, naming the load. It does not check between samples:
 the measured process keeps up to two cores busy, so its own load would refuse
-its own series. It records the load it ran under next to every percentile.
-Ceilings live in the script as the contract and are not calibrated from the
-runner. The shipped script still checks between samples; task 6.1 moves it to
-the single check.
+its own series. It records the load it ran under next to every percentile. On
+the live cell, contention during the series is judged per sample instead, from
+the request thread's run-queue delay (decision 9). Ceilings live in the script
+as the contract and are not calibrated from the runner. The shipped script
+still checks between samples; task 6.1 moves it to the single check.
 
 The live-cell series appends a token to each query because it cannot reach the
 result cache. That token changes what the lexical lanes match, so the report
@@ -178,7 +180,9 @@ under, 100 to 200 ms acceptable. The contract takes the top of that range as
 the p95 ceiling and the bottom as the p50 target. The reference is 6,500
 pages, about the size of the owner's vault, on two CPUs, the allocation of a
 Cloud cell. The personal service has more CPUs, so meeting the contract on two
-leaves it headroom there. The measured quantity
+leaves it headroom there. Only the reference-corpus runs are pinned to two
+CPUs; the live personal service is measured as it is served. The measured
+quantity
 is the elapsed time of the `ask_memory` call, which is what a client waits for
 before transport. The live-cell gate measures the same call at the REST facade.
 
@@ -186,9 +190,8 @@ The measured principal is the vault owner, identified through the product's
 owner-authority path. The reproduction did not do that: it patched
 `raw_protection.has_unrestricted_access` to return true, so its owner-path
 numbers are patched numbers (`baseline.md`). An admitted non-owner principal
-runs the same series, reported apart. It gates once
-`fix/admission-candidate-sizing` lands; today that path runs Python BM25 over
-the admitted pages. The model-free A1 run, which took the in-process
+runs the same series, reported apart. It gates once admission no longer sizes
+the candidate pool; today that path runs Python BM25 over the admitted pages. The model-free A1 run, which took the in-process
 principal's RAW admission predicate, measured that path at 6.8 s p50.
 
 The old keyword p50 ceiling of 120 ms stays. It is the contract's only p50
@@ -211,7 +214,7 @@ the verdict.
 | Dense search | 33 / 52 | chunk text for 3 x `candidate_k` rows (`embedding_index.py:1822`) | 15 |
 | BM25 | 29 / 56 | FTS5 `bm25()`; the rest is connection setup and readiness | 10 |
 | Keyword | 39 / 91 (up to 177 / 342) | trigram query plus connection setup and readiness | 10 |
-| Unit lanes (`mixed`) | 647 / 2,143 | per-candidate parent re-parse and policy load | 30 |
+| Unit lanes (`mixed`) | 647 / 2,143 | per-candidate parent re-parse and policy load; the unspanned query encode runs inside it | 30 |
 | Parent hints | 85 / 132 | the plan scans `json_each` once per KB page (`lexstore.py:8382`) | 2 |
 | Graph | 26 / 135 | seeds 6 / 30 through Markdown reads; expand 14 / 31; resolver 5 / 16 | 15 |
 | Temporal | 44 / 124 | `updated` read from Markdown per candidate | 5 |
@@ -250,14 +253,22 @@ Every slow stage pays per request for something the catalogue generation
 already fixes. Each fix keeps results identical, and an identity test compares
 it with the current path on the reference corpus.
 
-- **Parent hints.** `_emitted_parent_hints_query` (`lexstore.py:8382-8394`)
-  joins `pages` to `json_each(?)`. SQLite walks the `pages_kb` index and scans
-  `json_each` once per KB page, so the work is KB pages times candidates. The
-  simpler fix is `p.path IN (SELECT value FROM json_each(?))`, the form that
-  `_eligibility_metadata_query` (`lexstore.py:2836`) already uses. A replay that
-  drove the join from `json_each` with a primary-key lookup returned the same
+- **Parent hints and eligibility metadata.** `_emitted_parent_hints_query`
+  (`lexstore.py:8382-8394`) joins `pages` to `json_each(?)`. SQLite walks the
+  `pages_kb` index and scans `json_each` once per KB page, so the work is KB
+  pages times candidates. The `IN` form does not fix it. `lexstore` never runs
+  `ANALYZE`, so `p.path IN (SELECT value FROM json_each(?)) AND p.in_kb = 1`
+  plans as `SEARCH p USING INDEX pages_kb (in_kb=?)`: about 67,000 to 74,000
+  steps at 6,500 pages. `_eligibility_metadata_query` (`lexstore.py:2837`)
+  uses that `IN` form and scans the same way: 23,160 steps at 1,600 pages and
+  77,060 at 6,500. The proven form is
+  `FROM json_each(?) r CROSS JOIN pages p ON p.path = r.value`. `CROSS JOIN`
+  fixes the join order, so `json_each` drives a primary-key lookup; it held
+  flat at 1,016 steps at both sizes. A replay of that plan returned the same
   rows in 0.2 ms instead of 135 ms for 300 paths, and 1.0 ms instead of 488 ms
-  for 1,000. Slice 6.3 confirms that the `IN` form gets that plan.
+  for 1,000. Slice 6.3 moves both queries to that form and confirms the plan
+  with `EXPLAIN QUERY PLAN`. It lands after the admission candidate-sizing
+  work, which edits `_eligibility_metadata_query` (decision 10).
 - **One catalogue read session per request.** Each catalogue query
   (`_serve_from_ready_catalog_result`, `lexstore.py:7770`) runs a readiness proof
   on its own connection, then opens a second connection and proves the
@@ -317,8 +328,8 @@ it with the current path on the reference corpus.
   Text is hydrated by primary key only for the rows that those consumers read.
 - **Response blocks.** `_with_due_state` (`commands.py:6427`) runs after the
   find timings close, so 21 / 58 ms of the request is outside `total_ms`. It
-  becomes a registered stage and reads role state once per request instead of
-  once per hit (`artifact_role_state.py:494`).
+  becomes the registered stage `due_state` and reads role state once per
+  request instead of once per hit (`artifact_role_state.py:494`).
 
 The temporal lane decides "temporal" with a word regex, `TEMPORAL_MARKERS`
 (`find_policy.py:41`, read by `is_temporal_query` at `:427`). Three more
@@ -377,42 +388,57 @@ threshold, and compares work between two corpus sizes as ratios.
   by design, ANN is a non-goal, and the structural gate is model-free; the
   wall-clock instruments bound it.
 - *Not observed.* Python work over in-memory structures, such as graph
-  expansion and carry ranking. The wall-clock ratio checks in
+  expansion and the carry's scoring loop. The wall-clock ratio checks in
   `tests/test_latency_gate.py` keep covering those.
 - *Entry points and principals.* `ask_memory` and `activate_context`, as the
   vault owner and as one admitted principal. Full CI run 37969875369
   (2026-10-09) found two linear-in-corpus regressions only after merge: in
   `activate_context` carry ranking (the working-set compiler test, 208.9 ms at
   2,000 pages and 826.8 ms at 8,000) and in semantic validate. Neither was in
-  `ask_memory`. The admitted principal's bounds are reported from the start and
-  gate once `fix/admission-candidate-sizing` lands. Until then its BM25 falls
-  back to Python `rank_bm25` over the admitted pages
-  (`lexstore.py:7136-7145`), which grows with the admitted set.
-- *Expected failure on main.* The parent-hint query's step ratio, about 4x
-  because its plan scans `json_each` per KB page, and the ranking stages'
-  Markdown reads (126 per request in R3, against 15 hydrated hits). BM25 and
-  keyword pass, because their matched rows are the same at both sizes.
+  `ask_memory`. The carry regression is SQL work, so the step counter would
+  have caught it; the Markdown page-read counter would not. #1630 added
+  `carry_term_statistics` (`lexstore.py:6858`). It reads every KB row of
+  `pages`, then, for each stem, matches FTS rows against a `json_each` list of
+  every admitted path. Both grow with the corpus while the matched rows stay
+  the same, so the carry's steps per matched row fail the full-text bound. The
+  carry's Markdown reads did not change in #1630. This attribution comes from
+  the diff, not from a measurement. The admitted principal's bounds are
+  reported from the start and gate once admission no longer sizes the
+  candidate pool. Until then its BM25 falls back to Python `rank_bm25` over the
+  admitted pages (`lexstore.py:7136-7145`), which grows with the admitted set.
+- *Expected failure on main.* Two step ratios, each far above the 1.5 bound:
+  - the parent-hint query, about 4x, because its plan scans `json_each` per KB
+    page;
+  - the eligibility metadata query (`_eligibility_metadata_query`), because its
+    `IN` form plans as a scan of `pages_kb` (decision 8).
+
+  Also expected: the ranking stages' Markdown reads, 126 per request in R3
+  against 15 hydrated hits. BM25 and keyword pass, because their matched rows
+  are the same at both sizes.
 
 **Paired comparison, full CI.** The `retrieval-latency` job runs on shared
 `ubuntu-latest` runners and feeds `gate` and release evidence, so it applies no
 absolute threshold.
 
-- *Arms.* Head and the last release tag, installed side by side in one job on
-  one runner, against one reference corpus generated once, with the same cases.
+- *Arms.* Head and the pairing base, installed side by side in one job on one
+  runner, against one reference corpus generated once, with the same cases. The
+  pairing base is the last release whose live-cell verdict passed. Until a
+  release has passed, it is the last release tag, and the job reports that no
+  passed base exists.
 - *Order.* Each case runs in both arms back to back, three times per arm, and
   the arm that goes first alternates between cases.
 - *Statistic.* Per case, the ratio of head's median elapsed time to the
-  release's. Per series, the geometric mean of those ratios with its 95%
+  pairing base's. Per series, the geometric mean of those ratios with its 95%
   confidence interval, a t-interval on the log ratios.
 - *Verdict.* A series fails when the interval's lower bound is above 1.10:
-  head at least 10% slower than the release, with 95% confidence. A series
+  head at least 10% slower than the pairing base, with 95% confidence. A series
   with fewer than 20 paired cases reports "insufficient samples".
 - *Stages.* Stage comparisons use the same statistic, name where the time
   moved, and fail nothing. One verdict per series keeps the false-fire rate at
   the interval's level instead of multiplying it by thirteen stages. A stage
   with fewer than 20 paired cases reports "insufficient samples". A stage that
-  the release does not span yet, such as `parent_hints` before 6.3, reports
-  "not comparable".
+  the pairing base does not span yet, such as `parent_hints` before 6.3,
+  reports "not comparable".
 - *Load.* Recorded, never refused: both arms share the runner's speed.
 - *Unknown samples.* A sample without timings, or an encoder that cannot load,
   fails the series, because the instrument is broken.
@@ -435,13 +461,32 @@ Control justification:
   pass it.
 - *It fails closed only on a broken instrument.* A noisy runner widens the
   interval, so it makes the gate fire less, not more.
-- *Drift.* Each release can sit just under the margin. The absolute verdict at
-  each release bounds what accumulates.
+- *Drift.* A release that failed or was refused on the live cell never becomes
+  the pairing base. Head is therefore compared with a release that met the
+  ceilings, and drift cannot accumulate across releases by construction. Until
+  the first release passes, the base is the last release tag, and drift is
+  not bounded; the absolute verdict that every release records shows it.
 
 **Absolute verdict, workstation and live cell.** The ceilings and the stage
 budgets are judged on a quiet workstation at delivery (6.9) and on the live
 cell after each release (5.6); that verdict is the release evidence for the
-contract's numbers. The in-process transport pins itself to two CPUs and loads
+contract's numbers. Each live-cell attempt records one of three states: passed,
+failed or refused. A refused attempt holds no verdict, and the operator repeats
+it on a quiet cell. Only a passed release becomes the pairing base.
+
+The live cell checks contention per sample, net of the measured process. Each
+sample records its request thread's run-queue delay from
+`/proc/self/task/<tid>/schedstat`, which counts only the time that thread
+waited for a CPU. A sample that waited more than the larger of 5 ms and 10% of
+its elapsed time is contended: it leaves the percentiles and is counted, and
+more than 10% contended samples refuse the series. The 5 ms floor keeps
+ordinary scheduler jitter on a fast request from counting. The reference runs
+keep only the load check before the series. On two pinned CPUs the process's
+own threads, such as a spinning encoder pool, can delay the request thread.
+That delay is a product cost (decision 11), so dropping those samples would
+hide it.
+
+The in-process reference transport pins itself to two CPUs and loads
 the served encoder from the published artifact, cached by digest. Corpus chunk
 and unit vectors are seeded unit vectors written through the product's own
 index build and stamped with the served encoder's identity, because embedding
@@ -479,7 +524,8 @@ Slices 6.3 to 6.8 land after three changes that touch the same functions:
 - #1645 (`find_policy`, `find_corpus`, `embedding_index`, `lexstore`,
   `commands`);
 - `fix/admission-candidate-sizing` (`_eligibility_metadata_query`,
-  `candidate_k`).
+  `candidate_k`). Slice 6.3 rewrites `_eligibility_metadata_query` too, so it
+  starts from that work's version of the query.
 
 ### 11. Process CPU is measured per stage, and the idle spin goes first
 
@@ -541,8 +587,9 @@ and keeps encoder output identical.
   matched row, and the absolute verdict on the reference corpus and on the live
   cell measures it.
 - **[Risk] The paired comparison carries a slow release forward.** → It judges
-  head against the last release, not against the ceiling. The absolute verdict
-  at each release checks the ceiling itself.
+  head against the last release whose live-cell verdict passed, so a release
+  that missed the ceilings never becomes the base. The absolute verdict at each
+  release checks the ceiling itself.
 - **[Risk] Tranches 1 to 5's MODIFIED blocks go stale while section 6 lands.** →
   Section 6 stays in this change, so the archive waits for it, and other changes
   can modify the same canonical requirements meanwhile. Task 5.8 refreshes the

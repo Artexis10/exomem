@@ -137,6 +137,21 @@ of those changes.
   `total_ms`. Stage figures are per-request p50 and p95 (nearest rank) over the
   requests that ran the stage. Not-run stages are listed as not run.
 
+### Run files
+
+The run bundle under `/tmp/exomem-subsecond-runs` is not retained: per-sample
+files, profiles, the generated corpus and the driver scripts are gone. Its
+content-free summaries are committed under
+`verification/subsecond-2026-10-09/`. They hold no query text, no page paths
+and no vault text:
+
+- `run-summaries.jsonl`: one line per run and level, with whole-request and
+  per-span percentiles, probe counts, load, setup counters and the per-request
+  CPU-over-wall median;
+- `stage-tables.md`: the per-request stage aggregates that the tables below
+  quote;
+- `sqlcheck.txt`: the query plans and isolated replays in the last table.
+
 ### Whole request
 
 | Run | Corpus | Encoder | Principal | Level | n | Load | Elapsed p50 / p95 ms | `total_ms` p50 / p95 |
@@ -149,14 +164,15 @@ of those changes.
 | M1 | no units | none (model-free) | patched owner | page | 38 | 24.9-25.6 | 429 / 753 | 398 / 731 |
 | A1 | no units | none (model-free) | in-process principal, RAW admission on | page | 38 | 18.8-28.3 | 6,837 / 9,992 | 6,809 / 9,970 |
 
-The R2 `mixed` row comes from `rv2/summary-mixed.json` in the run bundle. A1 is
+The R2 `mixed` row comes from the R2 `mixed` line of `run-summaries.jsonl`. A1 is
 the non-owner path that `fix/admission-candidate-sizing` owns. It is here only
 to show the size of that path, not as this change's baseline, and its principal
 was the in-process default, not an admitted identity.
 
 Process CPU over wall time, p50 per request: 1.89 in R3 page level and 1.53 in
-R3 `mixed`, with the encoder loaded, and 0.42 in M1 (`cpu_ms` and `wall_ms` in
-each run's `samples*.jsonl`).
+R3 `mixed`, with the encoder loaded, and 0.42 in M1
+(`cpu_over_wall_per_request_p50` in `run-summaries.jsonl`, computed from each
+sample's `cpu_ms` and `wall_ms`).
 
 ### Stages, R3 page level (the design's reference profile)
 
@@ -181,9 +197,11 @@ each run's `samples*.jsonl`).
 Per request at p50 and p95: 9 lexical catalogue connections and 6 readiness
 proofs (27.2 / 46.0 ms in proofs), 92 / 150 page hydrations and 126 / 187 page
 file reads. In the `mixed` series the unit lanes took 647 / 2,143 ms and page
-file reads rose to 442 / 497.
+file reads rose to 442 / 497. That figure includes the query encode: in
+`mixed`, the encode runs inside `semantic_units` with no span of its own, and
+`vector.embed` reports 0.0 ms at p50 and p95.
 
-### Isolated replays on a copy of the R2 catalogue
+### Isolated replays on a copy of the R2 catalogue (`sqlcheck.txt`)
 
 | Query | Shipped form | Alternative |
 |---|---|---|

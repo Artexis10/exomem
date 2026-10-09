@@ -76,8 +76,8 @@ its read entry points.
   the `ask_memory` call. Keyword recall keeps its 120 ms p50 ceiling, and the
   empty-query browse stays outside the ceilings.
 - The measured principal is the real vault owner, with nothing patched. An
-  admitted non-owner series is reported apart and gates once the admission
-  candidate-sizing fix lands.
+  admitted non-owner series is reported apart and gates once admission no
+  longer sizes the candidate pool.
 - Each stage of the request gets a p95 budget, named by its timing span keys,
   and the budgets sum below the ceiling. The gate names a stage that exceeds
   twice its budget, and reports process CPU per stage. Query encode keeps the
@@ -96,10 +96,11 @@ its read entry points.
   pull-request tier compares work per candidate and per matched row between
   400- and 1,600-page generated corpora that hold the same candidates. In the
   scheduled and dispatched full CI, a paired comparison runs head against the
-  last release tag on one runner and fails only when head is at least 10%
-  slower with 95% confidence. The absolute verdict on the ceilings and budgets
-  comes from a quiet workstation run and the live-cell series, and it is the
-  release evidence for those numbers.
+  last release whose live-cell verdict passed, on one runner, and fails only
+  when head is at least 10% slower with 95% confidence. The absolute verdict on
+  the ceilings and budgets comes from a quiet workstation run and the live-cell
+  series, and it is the release evidence for those numbers. Each live-cell
+  attempt records passed, failed or refused.
 - Out of scope: the cold-start index build, explicitly requested or
   accelerator-driven reranking, and RAW admission candidate sizing for non-owner
   callers, which `fix/admission-candidate-sizing` owns.
@@ -145,8 +146,10 @@ its read entry points.
   `accelerate-durable-write-acknowledgement`; the maintained FTS5 catalogue; the
   semantic-unit sidecar.
 - Operations: the live cell shares its box with test suites; the gate refuses to
-  run above a load average of 2.0 and records the load it ran under, so a
-  contended measurement is never mistaken for a regression.
+  run above a load average of 2.0 and records the load it ran under. During a
+  live-cell series it drops and counts each sample whose request thread waited
+  on a run queue, so a contended measurement is never mistaken for a
+  regression.
 - Subsecond search slices (tasks section 6): `src/exomem/lexstore.py` (parent-hint
   query, one catalogue read session per request), `src/exomem/find_candidates.py`,
   `src/exomem/find_policy.py` and `src/exomem/find.py` (ranking metadata from
