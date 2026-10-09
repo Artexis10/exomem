@@ -54,6 +54,15 @@ def _preserve_under_guard(
         return preserve_stream(vault_root, **kwargs)
 
 
+def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> Any:
+    """Expand an archive's members outside the guard; commit its manifest under it."""
+    from . import archive_members
+
+    return archive_members.preserve_members(
+        vault_root, guard=lambda: manager.mutation_guard(vault_root), **kwargs
+    )
+
+
 def _capture_source_under_guard(
     manager: Any,
     vault_root: Path,
@@ -350,6 +359,16 @@ def register_transfer_routes(
                 {"code": "INVALID_UPLOAD", "reason": "`raw_protection` must be 1"}, status_code=400
             )
         raw_protection = bool(raw_flag)
+        archive = str(form.get("archive") or "").strip()
+        if archive and archive != "members":
+            return JSONResponse(
+                {"code": "INVALID_UPLOAD", "reason": "`archive` must be members"}, status_code=400
+            )
+        if archive and (str(form.get("hold") or "").strip() or _upload_lane(request) == "source"):
+            return JSONResponse(
+                {"code": "INVALID_UPLOAD", "reason": "archive=members preserves Evidence directly"},
+                status_code=400,
+            )
         if str(form.get("hold") or "").strip():
             # `preserve-attachment-originals`: hold the bytes for a file-handle
             # command instead of preserving them. Only a verified local grant
@@ -387,10 +406,26 @@ def register_transfer_routes(
                     status_code=413 if exc.code == "TOO_LARGE" else 400,
                 )
             return JSONResponse(held, status_code=201)
+        from . import archive_members
+
         preserve_module = _preserve_module()
         lane = _upload_lane(request)
         try:
             manager = get_manager()
+            if archive:
+                receipt, stored = await run_in_threadpool(
+                    _preserve_members_under_guard,
+                    manager,
+                    vault_root,
+                    scope=scope,
+                    category=category,
+                    filename=filename,
+                    stream=upload.file,
+                    max_bytes=max_bytes,
+                    verified="upload",
+                    description=description,
+                )
+                return JSONResponse(receipt, status_code=201 if stored else 200)
             if lane == "source":
                 # The lane came off the token; the title is ordinary data and may
                 # come off the form, falling back to the filename so a capture is
@@ -439,6 +474,11 @@ def register_transfer_routes(
             return JSONResponse(
                 {"code": exc.code, "reason": exc.reason, "missing": exc.missing},
                 status_code=status,
+            )
+        except archive_members.ArchiveError as exc:
+            return JSONResponse(
+                {"code": exc.code, "reason": exc.reason},
+                status_code=413 if exc.code == archive_members.TOO_LARGE else 400,
             )
         except (OpError, ValueError) as exc:
             error = error_dict(exc)

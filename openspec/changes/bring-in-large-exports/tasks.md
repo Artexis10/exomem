@@ -1,8 +1,11 @@
 ## 1. Archive members (B)
 
-- [ ] 1.1 Move the zip checks from `hosted_transfer_routes.py` into `archive_members.py`; adoption staging keeps its behaviour.
-- [ ] 1.2 Preserve `archive=members` into the member pool and manifest, with `already_stored` for a recorded archive.
-- [ ] 1.3 Prove: real-shaped invented archive expands, re-expands with no new blob, and hostile archives write nothing.
+- [x] 1.1 Move the zip checks from `hosted_transfer_routes.py` into `archive_members.py`; adoption staging keeps its behaviour.
+  Evidence: `tests/test_hosted_adoption_staging.py` and `tests/test_hosted_transfer_v2.py` stay green; `test_a_hostile_archive_writes_nothing[zip-slip]` turns red when the shared `..` check is removed.
+- [x] 1.2 Preserve `archive=members` into the member pool and manifest, with `already_stored` for a recorded archive.
+  Evidence: `test_archive_members_upload_stores_each_distinct_member_once` turns red when the recorded-archive lookup never matches.
+- [x] 1.3 Prove: real-shaped invented archive expands, re-expands with no new blob, and hostile archives write nothing.
+  Evidence: the same test turns red when blobs are pooled per archive; each `test_a_hostile_archive_writes_nothing` case turns red when its own check is removed.
 
 ## 2. Upload sessions (A, local and public listeners)
 
