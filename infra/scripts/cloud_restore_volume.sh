@@ -26,6 +26,8 @@ case $action in
     done
     ;;
   rollback)
+    # A link here could aim the rm -rf below outside the prior contents.
+    [ ! -L "$prior" ] || { echo "$prior is a symbolic link; nothing moved back" >&2; exit 1; }
     [ -d "$prior" ] || { echo "no prior directory; nothing was moved" >&2; exit 0; }
     for path in "$@"; do
       if [ -e "$prior/${path##*/}" ]; then
