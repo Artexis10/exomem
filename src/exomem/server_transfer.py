@@ -22,6 +22,12 @@ from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
 
 DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+#: Loopback uploads never cross the Cloudflare edge, whose ~100 MB cap sets the public
+#: default. A request is spooled to temporary storage before the copy-time check, so this
+#: bound is refused early from Content-Length; a whole export fits, a runaway client stops.
+DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+#: Multipart framing and form fields that ride with the file part.
+_FORM_OVERHEAD_BYTES = 1024 * 1024
 log = logging.getLogger(__name__)
 
 
@@ -61,6 +67,7 @@ def _capture_source_under_guard(
     domain: str | None,
     add_module: Any,
     max_bytes: int,
+    raw_protection: bool = False,
 ) -> Any:
     """Capture an out-of-band upload as a Source, under vault authority.
 
@@ -96,6 +103,7 @@ def _capture_source_under_guard(
                     filename=filename,
                     content_type=content_type,
                 ),
+                raw_protection=raw_protection,
             )
 
 
@@ -120,6 +128,7 @@ class TransferConfig:
     cf_aud: str | None
     cf_jwks: Any | None
     principal_signing_root: str | None = None
+    local_upload_max_bytes: int = DEFAULT_LOCAL_UPLOAD_MAX_BYTES
 
     @property
     def enabled(self) -> bool:
@@ -147,6 +156,9 @@ def load_transfer_config() -> TransferConfig:
         cf_jwks=cf_jwks,
         principal_signing_root=upload_tokens.private_signing_root(
             upload_token, os.environ.get("EXOMEM_JWT_SIGNING_KEY"),
+        ),
+        local_upload_max_bytes=int(
+            os.environ.get("EXOMEM_LOCAL_UPLOAD_MAX_BYTES", str(DEFAULT_LOCAL_UPLOAD_MAX_BYTES))
         ),
     )
 
@@ -295,7 +307,20 @@ def register_transfer_routes(
         from .cli_ops import OpError, error_dict, http_status_for
         from .writer_lease import get_manager
 
+        max_bytes = (
+            config.local_upload_max_bytes
+            if local_ingress.current_grant() is not None
+            else config.upload_max_bytes
+        )
+        declared = request.headers.get("content-length", "")
+        if declared.isascii() and declared.isdigit() and int(declared) > max_bytes + _FORM_OVERHEAD_BYTES:
+            # Refuse before the multipart parser spools the whole body to disk.
+            return JSONResponse(
+                {"code": "TOO_LARGE", "reason": f"upload exceeds the {max_bytes:,}-byte limit"},
+                status_code=413,
+            )
         try:
+            # `max_part_size` bounds form fields only; the copy loops bound the file.
             form = await request.form(max_part_size=config.upload_max_bytes)
         except MultiPartException as exc:
             return JSONResponse(
@@ -319,6 +344,12 @@ def register_transfer_routes(
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
+        raw_flag = str(form.get("raw_protection") or "").strip()
+        if raw_flag not in ("", "1", "true"):
+            return JSONResponse(
+                {"code": "INVALID_UPLOAD", "reason": "`raw_protection` must be 1"}, status_code=400
+            )
+        raw_protection = bool(raw_flag)
         if str(form.get("hold") or "").strip():
             # `preserve-attachment-originals`: hold the bytes for a file-handle
             # command instead of preserving them. Only a verified local grant
@@ -329,6 +360,16 @@ def register_transfer_routes(
                 return JSONResponse(
                     {"code": "INVALID_UPLOAD", "reason": "`hold` must be 1"}, status_code=400
                 )
+            if raw_protection:
+                return JSONResponse(
+                    {
+                        "code": "INVALID_UPLOAD",
+                        "reason": "a held upload takes `raw_protection` when its command redeems it",
+                    },
+                    status_code=400,
+                )
+            from .client_artifacts import MAX_FILE_BYTES
+
             try:
                 held = await run_in_threadpool(
                     held_uploads.hold,
@@ -337,7 +378,8 @@ def register_transfer_routes(
                     lane=str(form.get("lane") or "evidence").strip(),
                     filename=filename,
                     content_type=getattr(upload, "content_type", None),
-                    max_bytes=config.upload_max_bytes,
+                    # A hold is only worth what its redeeming command can fetch.
+                    max_bytes=min(max_bytes, MAX_FILE_BYTES),
                 )
             except held_uploads.HeldUploadError as exc:
                 return JSONResponse(
@@ -369,7 +411,8 @@ def register_transfer_routes(
                     source_type=str(form.get("source_kind") or "").strip() or None,
                     domain=str(form.get("domain") or "").strip() or None,
                     add_module=add_module,
-                    max_bytes=config.upload_max_bytes,
+                    max_bytes=max_bytes,
+                    raw_protection=raw_protection,
                 )
             else:
                 result = await run_in_threadpool(
@@ -384,7 +427,8 @@ def register_transfer_routes(
                     content_type=getattr(upload, "content_type", None),
                     description=description,
                     text=text,
-                    max_bytes=config.upload_max_bytes,
+                    max_bytes=max_bytes,
+                    raw_protection=raw_protection,
                 )
         except preserve_module.PreserveError as exc:
             status = {

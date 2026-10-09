@@ -1122,6 +1122,12 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   with `--lane source`, `capture_source`). A held handle is redeemable once,
   within an hour, and only by a request using the same local token, so point
   the client's MCP connection at the local listener with that token.
+  `--raw-protection` keeps a directly preserved original owner-only until you
+  release the whole artifact; a held file takes that choice when its command
+  redeems it. A direct preserve on the local listener never crosses the proxy
+  edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
+  public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
+  file stays within the 100 MB that `preserve_artifacts` can fetch.
 
 The owner REST key and the static upload token keep working on the public path.
 Their use on a Cloudflare-transited request is logged as

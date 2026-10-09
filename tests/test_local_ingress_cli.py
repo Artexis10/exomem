@@ -206,6 +206,34 @@ def test_attach_sends_the_bytes_to_the_local_listener_and_prints_the_handle(
     assert str(tmp_path).encode() not in body
 
 
+def test_attach_asks_for_an_owner_only_original_and_a_hold_refuses_the_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dropped flag stores a private export as an ordinary, releasable original."""
+    source = tmp_path / "export.zip"
+    source.write_bytes(b"PK private export")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request.read()
+        seen.append(request)
+        return httpx.Response(201, json={"path": "Evidence/Health/Exports/raw.export.zip"})
+
+    token = ["--token-file", str(_token_file(tmp_path)), "--port", "8764"]
+    transport = httpx.MockTransport(handler)
+    code = _attach_main(
+        [str(source), "--scope", "Health", "--category", "Exports", "--raw-protection", *token],
+        transport=transport,
+    )
+
+    assert code == 0
+    assert b'name="raw_protection"\r\n\r\n1\r\n' in seen[0].content
+    with pytest.raises(SystemExit) as exc:
+        _attach_main([str(source), "--raw-protection", *token], transport=transport)
+    assert exc.value.code == 2 and len(seen) == 1
+    capsys.readouterr()
+
+
 def test_attach_reads_its_token_and_port_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
