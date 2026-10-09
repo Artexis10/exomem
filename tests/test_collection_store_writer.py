@@ -10,6 +10,7 @@ import pytest
 from exomem import mutation_terminal
 from exomem import structured_collections as collections
 from exomem.collection_store import chain, connection, tokens
+from exomem.governance.principal import library_scope
 
 CID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
 KEY = "11111111-1111-4111-8111-111111111111"
@@ -75,7 +76,7 @@ def store(tmp_path, monkeypatch):
     (root / "Knowledge Base/log.md").write_text("# Existing log\n")
     with connection.open_writer(
         tmp_path / "collections.sqlite", lease_check=lambda: True
-    ) as handle:
+    ) as handle, library_scope():
         yield CollectionWriter(root, handle)
 
 
@@ -353,19 +354,6 @@ def test_two_process_writers_natural_key_race_is_serialized(store):
         output.close()
 
 
-def test_writer_is_dark_without_preview_flag(tmp_path, monkeypatch):
-    from exomem.collection_store.writer import CollectionWriter
-
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
-    with connection.open_writer(
-        tmp_path / "collections.sqlite", lease_check=lambda: True
-    ) as handle:
-        with pytest.raises(
-            connection.CollectionStoreError, match="COLLECTION_STORE_PREVIEW_REQUIRED"
-        ):
-            CollectionWriter(tmp_path, handle)
-
-
 def test_builtin_store_writer_is_available():
     import importlib.util
 
@@ -457,3 +445,30 @@ def test_provenance_is_rechecked_at_precommit(store, monkeypatch):
         store.append_record(CID, item={"title": "One"}, why="capture", sources=(source,))
     assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
     assert chain.verify_store_chain(store.connection)[0] == 1
+
+
+def test_control_transition_chains_without_changing_the_collection_and_splits_large_id_lists(store, monkeypatch):
+    # The importer's job states and reconcile record through this API: each part must
+    # advance the store chain, keep the collection unchanged and pass its own receipt check.
+    create(store)
+    before = store.connection.execute(
+        "SELECT generation, manifest_version, audit_head FROM collections").fetchone()
+    monkeypatch.setattr(mutation_terminal, "CONTROL_RECEIPT_MAX_IDS", 2)
+    held = ["a" * 24, "b" * 24, "c" * 24]
+
+    receipts = store.record_control_transition(
+        "store_reconcile",
+        {CID: {"counts": {"held": 3}, "ids": {"held_ids": held}}},
+        why="reconcile",
+    )
+
+    assert [receipt["ids"]["held_ids"] for receipt in receipts] == [held[:2], held[2:]]
+    assert [receipt["counts"] for receipt in receipts] == [
+        {"held": 3, "part": 1, "parts": 2}, {"held": 3, "part": 2, "parts": 2}]
+    assert all(mutation_terminal.valid_control_receipt(receipt) for receipt in receipts)
+    # Ids are registered names of exact shapes: no free text, no unknown name.
+    assert not mutation_terminal.valid_control_receipt({**receipts[0], "ids": {"held_ids": ["sk-live-0123456789"]}})
+    assert not mutation_terminal.valid_control_receipt({**receipts[0], "ids": {"notes": [held[0]]}})
+    assert chain.verify_store_chain(store.connection)[0] == receipts[-1]["commit_seq"] == 3
+    assert store.connection.execute(
+        "SELECT generation, manifest_version, audit_head FROM collections").fetchone() == before

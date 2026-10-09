@@ -4226,6 +4226,7 @@ def _outcome_bindings(
     unevaluated: list[dict[str, Any]] = [
         {"collection": row.path, "reason": "unreadable_manifest", "error_code": row.code}
         for row in unreadable
+        if row.semantic_profile in (None, "records")  # only Records manifests declare bindings
     ]
     for manifest in manifests:
         if manifest.semantic_profile != "records":

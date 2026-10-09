@@ -2978,6 +2978,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "curation": False,
             # Preview unless `apply=true`, like structured-files.
             "tag-variants": True,
+            "collections-store-adopt-local": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
@@ -3091,6 +3092,17 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "propose-compensation": False,
         "apply-compensation": False,
     }
+
+    # A Records import's mode decides: preview and status read, start and cancel write.
+    record = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    assert {
+        mode: commands.invocation_is_read_only(record, {"action": "import", "import_request": {"mode": mode}})
+        for mode in ("preview", "status", "start", "cancel")
+    } == {"preview": True, "status": True, "start": False, "cancel": False}
+    assert not commands.invocation_is_read_only(record, {"action": "import"})
+    for malformed in (["preview"], {"preview": True}):
+        assert not commands.invocation_is_read_only(
+            record, {"action": "import", "import_request": {"mode": malformed}})
 
 
 def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:

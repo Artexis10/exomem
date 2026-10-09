@@ -6,13 +6,15 @@ import re
 from copy import deepcopy
 
 import pytest
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_collection_store_writer import store as store
 
-from exomem import mutation_terminal, records, structured_collections as collections
+from exomem import mutation_terminal, records
+from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.plan_memory import plan_memory
 from exomem.record_memory import record_memory
-from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text, store as store
 
 
 def normalized(value):
@@ -53,6 +55,7 @@ def same_wire(left, right):
 @pytest.fixture
 def paired(tmp_path, monkeypatch):
     from exomem.collection_store.preview import preview_store
+    from exomem.governance.principal import library_scope
 
     monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
@@ -61,7 +64,8 @@ def paired(tmp_path, monkeypatch):
     for root in roots:
         (root / "Knowledge Base").mkdir(parents=True)
         (root / "Knowledge Base/log.md").write_text("# Log\n")
-    with connection.open_writer(tmp_path / "collections.sqlite", lease_check=lambda: True) as handle:
+    with (connection.open_writer(tmp_path / "collections.sqlite", lease_check=lambda: True) as handle,
+          library_scope()):
         def invoke(mode, profile, action, **args):
             call = record_memory if profile == "records" else plan_memory
             if mode == 1:
@@ -84,9 +88,10 @@ def paired_create(paired, profile, *, scaffold=True):
 
 def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
     """Canonical lifecycle writes must report their durable result, not mid-flight."""
+    from test_due_state_bulk_carriers import _command
+
     from exomem import writer_lease
     from exomem.collection_store.preview import preview_store
-    from test_due_state_bulk_carriers import _command
 
     def invoke(action, **kwargs):
         with preview_store(store.root, store.handle):
@@ -313,7 +318,7 @@ def test_markdown_log_query_preserves_declared_order_and_notes(paired, insertion
         assert all(page["total_matched"] == 2 and page["returned"] == 1 for page in mode_pages)
         assert mode_pages[1]["continuation"] is None
         assert "Private metadata" not in str(mode_pages)
-    for file_page, store_page in zip(*pages):
+    for file_page, store_page in zip(*pages, strict=True):
         assert _query_parity_projection(file_page) == _query_parity_projection(store_page)
     with preview_store(roots[1], handle):
         direct = record_governance.query_collection(roots[1], CID)
@@ -485,6 +490,15 @@ def test_inspect_shape_guards_and_store_only_projection(paired, profile):
     inspections = [invoke(mode, profile, "inspect", collection=manifest_path(profile)) for mode in (0, 1)]
     assert handle.connection.total_changes == before
     stored = inspections[1]
+    # Field-release discovery is store-specific; compare the shared inspection below.
+    basis = stored.pop("field_release_basis")
+    assert basis["version"] == 1
+    assert basis["store_id"] == handle.connection.execute(
+        "SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    assert basis["collection_id"] == CID
+    assert basis["path"] == basis["ref"] == manifest_path(profile)
+    assert basis["fields"] == list(collections.load_manifest(roots[0], manifest_path(profile)).schema.fields)
+    assert len(basis["classification_basis"]) == 64
     assert stored["lifecycle_guards"]["expected_manifest_hash"] == handle.connection.execute(
         "SELECT manifest_hash FROM collection_manifests ORDER BY manifest_version DESC LIMIT 1").fetchone()[0]
     assert stored["lifecycle_guards"]["expected_container_hash"] == stored["snapshot"]
@@ -503,7 +517,7 @@ def test_inspect_shape_guards_and_store_only_projection(paired, profile):
         collections.parse_manifest_bytes(roots[1], manifest_path(profile), text.encode()),
     ]
     assert manifests[1].manifest_version.hash == stored_hash
-    for manifest, inspection in zip(manifests, inspections):
+    for manifest, inspection in zip(manifests, inspections, strict=True):
         if profile == "planning":
             assert inspection["saved_views"], "Planning declares its default saved views"
         for view in inspection["saved_views"]:
@@ -632,13 +646,15 @@ def test_records_nonempty_saved_views_match_definitions_and_mode_local_identity(
     stored_text = handle.connection.execute("SELECT manifest_text FROM collection_manifests").fetchone()[0]
     manifests = [collections.load_manifest(roots[0], manifest_path()),
                  collections.parse_manifest_bytes(roots[1], manifest_path(), stored_text.encode())]
-    for manifest, inspection in zip(manifests, inspections):
+    for manifest, inspection in zip(manifests, inspections, strict=True):
         assert len(inspection["saved_views"]) == 1
         view = inspection["saved_views"][0]
         assert set(view) == {"name", "definition", "identity"}
         assert view["name"] == "one"
         assert view["identity"] == collections.resolve_saved_view(manifest, "one").identity
     same_wire(inspections[0]["saved_views"][0]["definition"], inspections[1]["saved_views"][0]["definition"])
+    # Owner field-release discovery is store-specific; saved-view content remains identical.
+    assert inspections[1].pop("field_release_basis")["collection_id"] == CID
     for inspection in inspections:
         inspection.pop("projection", None)
         inspection["diagnostics"] = []

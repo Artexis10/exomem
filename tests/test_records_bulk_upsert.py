@@ -14,8 +14,9 @@ from record_fixtures import (
 )
 
 from exomem import record_formats, records, vault
-from exomem.cli_ops import OpError
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
+from exomem.governance.principal import library_scope
 from exomem.record_memory import record_memory
 
 EVIDENCE = "Knowledge Base/Evidence/import-a.md"
@@ -99,10 +100,30 @@ def vault_root(tmp_path: Path, request, monkeypatch):
         from exomem.collection_store.preview import preview_store
 
         monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
-        with connection.open_writer(tmp_path.with_suffix(".sqlite"), lease_check=lambda: True) as handle:
+        with connection.open_writer(tmp_path.with_suffix(".sqlite"), lease_check=lambda: True) as handle, library_scope():
             with preview_store(tmp_path, handle) as writer:
                 writer.create_collection(LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT, why="capture")
                 yield tmp_path
+
+
+@pytest.fixture
+def scalar_vault_root(vault_root):
+    """Row/source-policy comparisons need complete fields, independently of the ledger's open-object tests."""
+    from exomem.collection_store.preview import bound_writer
+
+    text = LEDGER_MANIFEST_TEXT.replace("    details:\n      type: object\n" + _METRICS_TAIL, "")
+    writer = bound_writer(vault_root)
+    if writer is None:
+        (vault_root / LEDGER_COLLECTION_PATH).write_text(text, encoding="utf-8")
+    else:
+        writer.revise_collection(LEDGER_COLLECTION_PATH, manifest_text=text, why="declare scalar source-policy fixture",
+                                 **writer.inspect_collection(LEDGER_COLLECTION_PATH)["lifecycle_guards"])
+    return vault_root
+
+
+def _scalar_rows(count, *, start=0):
+    return [{"item": {key: value for key, value in row["item"].items() if key not in {"details", "metrics"}}}
+            for row in _rows(count, start=start)]
 
 
 def _outcomes(result: dict[str, Any]) -> list[str]:
@@ -613,10 +634,11 @@ def _write_rule(vault_root: Path, name: str, scope_id: str, rule_id: str, paths:
 
 
 @pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
-def test_a_withheld_item_makes_the_whole_collection_read_as_absent(vault_root: Path) -> None:
+def test_a_withheld_item_makes_the_whole_collection_read_as_absent(scalar_vault_root: Path) -> None:
     from exomem.governance.principal import RequestPrincipal, request_scope
 
-    first = _bulk(vault_root, _rows(2))
+    vault_root = scalar_vault_root
+    first = _bulk(vault_root, _scalar_rows(2))
     _write_rule(
         vault_root, "records", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0",
         "Records/**", 6,
@@ -629,15 +651,16 @@ def test_a_withheld_item_makes_the_whole_collection_read_as_absent(vault_root: P
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             _bulk(
-                vault_root, _rows(2, start=10), expected_container_hash=first["after_container_hash"]
+                vault_root, _scalar_rows(2, start=10), expected_container_hash=first["after_container_hash"]
             )
     assert _state(vault_root) == before
 
 
 @pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
-def test_a_withheld_source_reads_exactly_like_an_absent_one(vault_root: Path) -> None:
-    from exomem.governance.principal import RequestPrincipal, request_scope
+def test_a_withheld_source_reads_exactly_like_an_absent_one(scalar_vault_root: Path) -> None:
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
+    vault_root = scalar_vault_root
     _write_rule(
         vault_root, "records", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0",
         "**", 6,
@@ -646,14 +669,15 @@ def test_a_withheld_source_reads_exactly_like_an_absent_one(vault_root: Path) ->
         vault_root, "hidden", "01ARZ3NDEKTSV4RRFFQ69G5FZZ", "01ARZ3NDEKTSV4RRFFQ69G5FZY",
         "Evidence/import-b.md", 0,
     )
-    rows = _rows(3)
+    rows = _scalar_rows(3)
     rows[1]["source"] = EVIDENCE_B
     rows[2]["source"] = "Knowledge Base/Evidence/absent.md"
-    with request_scope(RequestPrincipal(audience_id="owner", surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         visible = _bulk(vault_root, [rows[1]], on_reject="skip")
     assert visible["rows"][0]["outcome"] == "inserted"
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
-        result = _bulk(vault_root, rows[:1] + [{**rows[1], "item": ledger_item(slug="other")}, rows[2]], on_reject="skip", expected_container_hash=visible["after_container_hash"])
+        result = _bulk(vault_root, rows[:1] + [{**rows[1], "item": _scalar_rows(1, start=10)[0]["item"]}, rows[2]],
+                       on_reject="skip", expected_container_hash=visible["after_container_hash"])
     assert result["rows"][0]["outcome"] == "inserted"
     hidden, absent = result["rows"][1], result["rows"][2]
     assert hidden["outcome"] == absent["outcome"] == "rejected"

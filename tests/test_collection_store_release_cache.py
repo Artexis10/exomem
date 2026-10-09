@@ -73,23 +73,14 @@ def test_warm_partial_refusal_does_not_rebuild_or_evaluate_the_collection(store,
     assert evaluated == []
 
 
-def test_contract_cache_survives_bindings_but_returns_fresh_heads_and_revised_contract(store, monkeypatch):
+def test_manifest_bindings_return_fresh_heads_and_revised_contract(store):
     create(store)
     with preview_store(store.root, store.handle):
         collections.load_manifest(store.root, manifest_path())
-    parsed = []
-    parse = collections.parse_manifest_bytes
-
-    def counted(*args, **kwargs):
-        parsed.append(args[1])
-        return parse(*args, **kwargs)
-
-    monkeypatch.setattr(collections, "parse_manifest_bytes", counted)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     with preview_store(store.root, store.handle):
         manifest = collections.load_manifest(store.root, manifest_path())
     assert manifest.audit_head == store.connection.execute("SELECT audit_head FROM collections").fetchone()[0]
-    assert parsed == []
     store.revise_collection(CID, manifest_text=manifest_text().replace("title: Work", "title: Revised"),
                             expected_manifest_hash=manifest.manifest_version.hash,
                             expected_container_hash=first["after_container_hash"], why="revise")
@@ -97,7 +88,6 @@ def test_contract_cache_survives_bindings_but_returns_fresh_heads_and_revised_co
         revised = collections.load_manifest(store.root, manifest_path())
     assert revised.title == "Revised"
     assert revised.manifest_version.hash != manifest.manifest_version.hash
-    assert parsed
 
 
 def test_failed_commit_cannot_authorize_different_content_at_the_reused_row_version(store, monkeypatch):

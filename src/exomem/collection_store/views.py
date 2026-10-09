@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, record_formats, reserved_paths, vault
-from . import authority, connection, governance
+from . import authority, connection, governance, summary, typed_storage
 
 STAGE_PREFIX = ".exomem-collection-stage-"
 ASIDE_PREFIX = ".exomem-collection-aside-"
@@ -76,10 +76,15 @@ class PublicationBatch:
     def _render_context(self, projection, manifest=None):
         conn = self.writer.connection
         if projection["kind"] == "item":
-            row = conn.execute("SELECT governance_json,updated_txn,values_json FROM items WHERE row_id=?",
-                               (projection["row_id"],)).fetchone()
-        elif projection["kind"] == "manifest":
-            if manifest is not None:
+            row = conn.execute("SELECT governance_json,updated_txn,values_json,encoding,collection_id FROM items "
+                               "WHERE row_id=?", (projection["row_id"],)).fetchone()
+            if row is not None:
+                item = {"row_id": projection["row_id"], "values_json": row[2], "encoding": row[3],
+                        "collection_id": row[4]}
+                row = (*row[:2], typed_storage.hydrate(conn, [item])[0]["values_json"])
+        elif projection["kind"] in ("manifest", "summary"):
+            # A summary page is governed by its collection's current manifest.
+            if manifest is not None and projection["kind"] == "manifest":
                 row = conn.execute("SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
                                    (projection["collection_id"], projection["pending_row_version"])).fetchone()
             else:
@@ -670,13 +675,13 @@ def manifest_view(text: str, view_stamp: Mapping[str, str | int]) -> str:
 def render_view(conn, identity, projection, manifest):
     """Render an indexed canonical reference; the caller owns its read snapshot and context."""
     if projection["kind"] == "item":
-        version, payload, key, values, body = conn.execute(
-            "SELECT row_version,payload_hash,item_key,values_json,body FROM items WHERE row_id=?",
+        version, payload, key, body = conn.execute(
+            "SELECT row_version,payload_hash,item_key,body FROM items WHERE row_id=?",
             (projection["row_id"],),
         ).fetchone()
         return version, record_formats.render_markdown_item(
             manifest,
-            json.loads(values),
+            typed_storage.item_values(conn, projection["row_id"]),
             key,
             body,
             view_stamp=stamp(identity, version, payload),
@@ -688,6 +693,10 @@ def render_view(conn, identity, projection, manifest):
             (projection["collection_id"],),
         ).fetchone()
         return version, manifest_view(text, stamp(identity, version, payload))
+    if projection["kind"] == "summary":
+        generation, head = conn.execute("SELECT generation,audit_head FROM collections WHERE collection_id=?",
+                                        (projection["collection_id"],)).fetchone()
+        return generation, summary.render_page(conn, manifest, stamp(identity, generation, head))
     cursor = conn.execute(
         "SELECT * FROM held_candidates WHERE held_id=? AND view_path=?",
         (projection.get("held_id", Path(projection["path"]).stem), projection["path"]),

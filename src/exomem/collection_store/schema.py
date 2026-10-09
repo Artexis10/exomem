@@ -8,9 +8,13 @@ Contract held here, not in the writers:
 
 - every table is ``STRICT``;
 - ``txns``, ``audit_effects``, ``item_versions``, ``item_sources``,
-  ``collection_manifests`` and ``collection_type_versions`` are append-only:
-  conflicting ``BEFORE INSERT``, ``BEFORE UPDATE`` and ``BEFORE DELETE``
-  triggers abort the statement;
+  ``collection_manifests``, ``collection_type_versions`` and
+  ``version_identity`` are append-only: conflicting ``BEFORE INSERT``,
+  ``BEFORE UPDATE`` and ``BEFORE DELETE`` triggers abort the statement;
+- ``version_identity`` is the version spine (schema 5): every JSON or typed
+  item version has exactly one identity, and ``item_sources`` references it.
+  A JSON payload mints its identity in the same statement; a typed-v1 identity
+  requires its typed payload (``typed_storage``);
 - ``items`` rows are never deleted (Records and Planning have no delete);
 - a natural key is unique per collection when complete (a partial unique
   index), and a view path is unique across the store;
@@ -31,10 +35,17 @@ import datetime as dt
 import hashlib
 import json
 import sqlite3
+import threading
 import uuid
-from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-SCHEMA_VERSION = 4
+if TYPE_CHECKING:
+    from alembic.config import Config
+    from sqlalchemy.engine import Connection
+
+SCHEMA_VERSION = 8
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -47,6 +58,12 @@ META_LAST_PUBLISHED_REPLICA_SHA256 = "last_published_replica_sha256"
 META_PENDING_REPLICA_PUBLICATION = "pending_replica_publication"
 META_PUBLISHED_REPLICA_HEAD = "published_replica_head"
 META_REPLICA_DIVERGENCE = "replica_divergence"
+# "1" while a view carries another store instance's stamp; business writes refuse until adopt-local or reconcile.
+META_VIEW_DIVERGED = "diverged"
+# Owner adopt-local: the previewed foreign replica digest the next publication keeps as evidence.
+META_ADOPTED_FOREIGN_REPLICA = "adopted_foreign_replica"
+# Digests of foreign evidence already reconciled into held corrections.
+META_RECONCILED_FOREIGN = "reconciled_foreign"
 META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"
@@ -66,8 +83,15 @@ TABLES = (
     "projection_state",
     "query_projection_mappings",
     "query_cursor_state",
+    "version_identity",
+    "typed_encoding_mappings",
+    "import_jobs",
+    "import_rejections",
+    "rollup_definitions",
+    "rollup_buckets",
+    "rollup_members",
 )
-APPEND_ONLY_TABLES = (
+_V1_APPEND_ONLY_TABLES = (
     "txns",
     "audit_effects",
     "item_versions",
@@ -75,6 +99,7 @@ APPEND_ONLY_TABLES = (
     "collection_manifests",
     "collection_type_versions",
 )
+APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity")
 
 _TABLES_V1 = (
     """
@@ -263,6 +288,7 @@ _CONFLICT_KEYS = {
     "collection_manifests": (("collection_id", "manifest_version"),),
     "collection_type_versions": (("name", "version"),),
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
+    "version_identity": (("row_id", "row_version"),),
 }
 
 
@@ -297,7 +323,7 @@ def _append_only_triggers(table: str) -> tuple[str, str, str]:
 
 
 _TRIGGERS_V1 = (
-    *(statement for table in APPEND_ONLY_TABLES for statement in _append_only_triggers(table)),
+    *(statement for table in _V1_APPEND_ONLY_TABLES for statement in _append_only_triggers(table)),
     """
     CREATE TRIGGER IF NOT EXISTS items_never_deleted BEFORE DELETE ON items
     BEGIN SELECT RAISE(ABORT, 'items rows are never deleted'); END
@@ -444,10 +470,257 @@ def _migrate_to_4(conn: sqlite3.Connection) -> None:
                  (Fernet.generate_key().decode("ascii"),))
 
 
-#: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
-    1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4,
-}
+_ITEMS_V5 = """
+    CREATE TABLE items_v5(
+      row_id INTEGER PRIMARY KEY,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      item_key TEXT NOT NULL,
+      natural_key TEXT,
+      row_version INTEGER NOT NULL,
+      schema_version INTEGER NOT NULL,
+      values_json TEXT,
+      body TEXT NOT NULL DEFAULT '',
+      payload_hash TEXT NOT NULL,
+      view_path TEXT,
+      created_txn INTEGER NOT NULL,
+      updated_txn INTEGER NOT NULL,
+      governance_json TEXT,
+      encoding TEXT NOT NULL DEFAULT 'json-v1' CHECK (encoding IN ('json-v1', 'typed-v1')),
+      UNIQUE (collection_id, item_key),
+      UNIQUE (view_path),
+      CHECK ((encoding = 'json-v1') = (values_json IS NOT NULL))
+    ) STRICT
+    """
+_ITEM_COLUMNS_V4 = ("row_id,collection_id,item_key,natural_key,row_version,schema_version,values_json,"
+                    "body,payload_hash,view_path,created_txn,updated_txn,governance_json")
+
+_TRIGGERS_V5 = (
+    *_append_only_triggers("version_identity"),
+    # A JSON payload mints its identity; a JSON identity needs its payload.
+    """
+    CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
+    BEGIN
+      INSERT INTO version_identity VALUES (NEW.row_id, NEW.row_version, 'json-v1', NEW.payload_hash,
+        NEW.txn_id, (SELECT schema_version FROM items WHERE row_id = NEW.row_id));
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
+    WHEN NEW.encoding = 'json-v1' AND NOT EXISTS (
+      SELECT 1 FROM item_versions WHERE row_id = NEW.row_id AND row_version = NEW.row_version)
+    BEGIN SELECT RAISE(ABORT, 'version_identity requires its JSON payload'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
+    WHEN NEW.encoding = 'typed-v1' AND NOT EXISTS (
+      SELECT 1 FROM items i JOIN collections c ON c.collection_id = i.collection_id
+      WHERE i.row_id = NEW.row_id AND i.encoding = 'typed-v1' AND c.encoding = 'typed-v1')
+    BEGIN SELECT RAISE(ABORT, 'version_identity requires its typed payload in a typed-v1 collection'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
+    WHEN EXISTS (SELECT 1 FROM items WHERE row_id = NEW.row_id AND encoding <> 'json-v1')
+    BEGIN SELECT RAISE(ABORT, 'typed-v1 rows take typed versions, not JSON payloads'); END
+    """,
+    # One collection, one encoding authority; typed-v1 has no in-place reverse.
+    """
+    CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON items
+    WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
+    BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection
+    BEFORE UPDATE OF encoding, collection_id ON items
+    WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
+    BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
+    WHEN OLD.encoding = 'typed-v1' AND NEW.encoding <> 'typed-v1'
+    BEGIN SELECT RAISE(ABORT, 'collection encoding typed-v1 has no in-place reverse'); END
+    """,
+)
+
+
+def _migrate_to_5(conn: sqlite3.Connection) -> None:
+    """Add the version spine, encoding discriminators and nullable view paths.
+
+    ``ensure_schema`` runs this with foreign keys off (SQLite's table-rebuild
+    procedure) and checks every foreign key before commit. Existing item,
+    version, source and audit rows keep their bytes; JSON history is not copied.
+    """
+    conn.execute("ALTER TABLE collections ADD COLUMN encoding TEXT NOT NULL DEFAULT 'json-v1' "
+                 "CHECK (encoding IN ('json-v1', 'typed-v1'))")
+    conn.execute(_ITEMS_V5)
+    conn.execute(f"INSERT INTO items_v5({_ITEM_COLUMNS_V4},encoding) "
+                 f"SELECT {_ITEM_COLUMNS_V4},'json-v1' FROM items")
+    conn.execute("DROP TABLE items")
+    conn.execute("ALTER TABLE items_v5 RENAME TO items")
+    conn.execute("CREATE UNIQUE INDEX items_natural_key ON items(collection_id, natural_key) "
+                 "WHERE natural_key IS NOT NULL")
+    conn.execute("CREATE INDEX items_by_collection_row ON items(collection_id,row_id)")
+    conn.execute("""CREATE TABLE version_identity(
+      row_id INTEGER NOT NULL REFERENCES items(row_id),
+      row_version INTEGER NOT NULL CHECK (row_version >= 1),
+      encoding TEXT NOT NULL CHECK (encoding IN ('json-v1', 'typed-v1')),
+      payload_hash TEXT NOT NULL,
+      txn_id INTEGER NOT NULL REFERENCES txns(txn_id) DEFERRABLE INITIALLY DEFERRED,
+      schema_version INTEGER NOT NULL,
+      PRIMARY KEY (row_id, row_version)
+    ) STRICT, WITHOUT ROWID""")
+    # Revise refuses a schema-version change, so every version of an item was
+    # hashed under the item's own recorded schema version.
+    conn.execute("INSERT INTO version_identity SELECT v.row_id, v.row_version, 'json-v1', v.payload_hash, "
+                 "v.txn_id, i.schema_version FROM item_versions v JOIN items i ON i.row_id = v.row_id")
+    conn.execute("""CREATE TABLE item_sources_v5(
+      row_id INTEGER NOT NULL,
+      row_version INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      source_ref TEXT NOT NULL,
+      PRIMARY KEY (row_id, row_version, ordinal),
+      FOREIGN KEY (row_id, row_version) REFERENCES version_identity(row_id, row_version)
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("INSERT INTO item_sources_v5 SELECT row_id,row_version,ordinal,source_ref FROM item_sources")
+    conn.execute("DROP TABLE item_sources")
+    conn.execute("ALTER TABLE item_sources_v5 RENAME TO item_sources")
+    conn.execute("""CREATE TABLE typed_encoding_mappings(
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      state TEXT NOT NULL CHECK (state IN ('building', 'ready', 'failed')),
+      layout_json TEXT NOT NULL CHECK (json_valid(layout_json)),
+      layout_hash TEXT NOT NULL,
+      last_row_id INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (collection_id, generation)
+    ) STRICT, WITHOUT ROWID""")
+    for state in ("ready", "building"):
+        conn.execute(f"CREATE UNIQUE INDEX typed_encoding_one_{state} "
+                     f"ON typed_encoding_mappings(collection_id) WHERE state='{state}'")
+
+
+_PROJECTION_COLUMNS = ("path,collection_id,row_id,kind,published_row_version,published_sha256,"
+                       "pending_row_version,pending_sha256,stat_identity,state,install_json")
+
+
+def _migrate_to_6(conn: sqlite3.Connection) -> None:
+    """Record each collection's view mode and admit summary-page projections.
+
+    Existing collections are items mode. Summary pages are collection-level
+    projections, so ``projection_state`` is rebuilt with the ``summary`` kind.
+    """
+    conn.execute("ALTER TABLE collections ADD COLUMN view_mode TEXT NOT NULL DEFAULT 'items' "
+                 "CHECK (view_mode IN ('items', 'summary'))")
+    conn.execute("""CREATE TABLE projection_state_v6(
+      path TEXT PRIMARY KEY,
+      collection_id TEXT REFERENCES collections(collection_id),
+      row_id INTEGER REFERENCES items(row_id),
+      kind TEXT NOT NULL
+        CHECK (kind IN ('manifest', 'item', 'log', 'held', 'history', 'type', 'summary')),
+      published_row_version INTEGER,
+      published_sha256 TEXT,
+      pending_row_version INTEGER,
+      pending_sha256 TEXT,
+      stat_identity TEXT,
+      state TEXT NOT NULL CHECK (state IN ('current', 'pending', 'held')),
+      install_json TEXT
+    ) STRICT""")
+    conn.execute(f"INSERT INTO projection_state_v6({_PROJECTION_COLUMNS}) "
+                 f"SELECT {_PROJECTION_COLUMNS} FROM projection_state")
+    conn.execute("DROP TABLE projection_state")
+    conn.execute("ALTER TABLE projection_state_v6 RENAME TO projection_state")
+
+
+def _migrate_to_7(conn: sqlite3.Connection) -> None:
+    """Add durable preserved-source import jobs and their rejected positions.
+
+    A job's checkpoint, counters and rejections change only inside the batch
+    transaction that commits its rows (``importer``); the binding JSON holds
+    identifiers and hashes, never credential material. ``identity`` is the
+    digest of what an identical start binds, so a retry finds its job.
+    """
+    conn.execute("""CREATE TABLE import_jobs(
+      job_id TEXT PRIMARY KEY,
+      identity TEXT NOT NULL,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+      state TEXT NOT NULL CHECK (state IN ('running', 'partial', 'failed', 'complete')),
+      reason TEXT CHECK (reason IN ('authority_lost', 'time_cap', 'cancelled', 'invalid_row',
+                                    'batch_error')),
+      checkpoint_json TEXT NOT NULL CHECK (json_valid(checkpoint_json)),
+      progress_json TEXT NOT NULL CHECK (json_valid(progress_json)),
+      window_started INTEGER NOT NULL,
+      window_expires INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("CREATE INDEX import_jobs_by_state ON import_jobs(state, created_at)")
+    conn.execute("CREATE INDEX import_jobs_by_identity ON import_jobs(identity, created_at)")
+    conn.execute("""CREATE TABLE import_rejections(
+      job_id TEXT NOT NULL REFERENCES import_jobs(job_id),
+      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+      byte_offset INTEGER NOT NULL CHECK (byte_offset >= 0),
+      code TEXT NOT NULL,
+      at TEXT NOT NULL,
+      PRIMARY KEY (job_id, ordinal)
+    ) STRICT, WITHOUT ROWID""")
+
+
+def _migrate_to_8(conn: sqlite3.Connection) -> None:
+    """Admit declared exact rollups: versioned definitions, buckets and extreme members.
+
+    A definition is building until bounded writer-owned backfill covers every
+    row, then ready. Buckets hold exact per-bucket reduction state; members
+    index a bucket's rows only for rollups that reduce min/max/latest.
+    """
+    conn.execute("""CREATE TABLE rollup_definitions(
+      rollup_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('building','ready')),
+      definition_json TEXT NOT NULL CHECK(json_valid(definition_json)),
+      last_row_id INTEGER NOT NULL DEFAULT 0,
+      flagged INTEGER NOT NULL DEFAULT 0 CHECK(flagged >= 0),
+      UNIQUE(collection_id,name)
+    ) STRICT""")
+    conn.execute("""CREATE TABLE rollup_buckets(
+      rollup_id INTEGER NOT NULL REFERENCES rollup_definitions(rollup_id),
+      bucket TEXT NOT NULL,
+      groups TEXT NOT NULL CHECK(json_valid(groups)),
+      state_json TEXT NOT NULL CHECK(json_valid(state_json)),
+      PRIMARY KEY(rollup_id,bucket,groups)
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("""CREATE TABLE rollup_members(
+      rollup_id INTEGER NOT NULL REFERENCES rollup_definitions(rollup_id),
+      bucket TEXT NOT NULL,
+      groups TEXT NOT NULL,
+      row_id INTEGER NOT NULL REFERENCES items(row_id),
+      PRIMARY KEY(rollup_id,bucket,groups,row_id)
+    ) STRICT, WITHOUT ROWID""")
+
+
+_MIGRATION_PATH = Path(__file__).with_name("migrations")
+# Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
+_ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
+
+
+def _migration_config(conn: Connection | None = None) -> Config:
+    from alembic.config import Config
+
+    config = Config()
+    # ConfigParser requires literal percent signs in installation paths to be escaped.
+    config.set_main_option("script_location", str(_MIGRATION_PATH).replace("%", "%%"))
+    config.attributes["connection"] = conn
+    return config
+
+
+@lru_cache(maxsize=1)
+def _revisions(path: Path) -> frozenset[str]:
+    from alembic.script import ScriptDirectory
+
+    return frozenset(revision.revision for revision in ScriptDirectory(str(path)).walk_revisions())
+
+
+class SchemaMetadataError(ValueError):
+    """Installation revision metadata does not identify one compatible schema."""
 
 
 class SchemaVersionError(RuntimeError):
@@ -461,46 +734,78 @@ class SchemaVersionError(RuntimeError):
         self.supported = supported
 
 
-def schema_version(conn: sqlite3.Connection) -> int:
+def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> int:
     """The recorded schema version, or 0 for an empty database."""
     present = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_meta'"
     ).fetchone()
-    if present is None:
-        return 0
-    row = conn.execute(
+    row = None if present is None else conn.execute(
         "SELECT value FROM store_meta WHERE key = ?", (META_SCHEMA_VERSION,)
     ).fetchone()
-    if row is None:
-        return 0
-    return int(row[0])
+    version = 0 if row is None else int(row[0])
+    if ceiling is not None and version > ceiling:
+        raise SchemaVersionError(version, ceiling)
+    revision_table = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name='alembic_version' COLLATE NOCASE"
+    ).fetchone()
+    if revision_table is not None:
+        # Contradictory metadata risks a wrong migration; refuse this store for repair.
+        columns = conn.execute("PRAGMA table_xinfo(alembic_version)").fetchall()
+        strict = conn.execute("SELECT strict FROM pragma_table_list WHERE schema='main' AND name='alembic_version' COLLATE NOCASE").fetchone()
+        if (revision_table != ("table",) or strict != (1,) or len(columns) != 1 or columns[0][1] != "version_num"
+                or columns[0][2].upper() != "TEXT" or columns[0][5] != 1):
+            raise SchemaMetadataError("malformed installation revision table")
+        revisions = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+        if len(revisions) != 1 or revisions[0][0] not in _revisions(_MIGRATION_PATH):
+            raise SchemaMetadataError("unknown or missing installation revision")
+        if revisions[0][0] != str(version):
+            raise SchemaMetadataError("installation revision disagrees with compatibility version")
+    return version
 
 
-def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Bring the store up to :data:`SCHEMA_VERSION` in one immediate transaction.
+def ensure_schema(conn: Connection) -> int:
+    """Apply packaged revisions in one writer-owned immediate transaction."""
+    # Store libraries load with the first store, not with every CLI import.
+    from alembic import command
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.schema import CreateTable
 
-    Every missing step runs in order, then the version is recorded, all or
-    nothing. A store newer than this release refuses rather than downgrading.
-    """
+    from . import tables
+    from .connection import rollback
+
+    raw = conn.connection.driver_connection
     target = SCHEMA_VERSION
-    conn.execute("BEGIN IMMEDIATE")
+    current = schema_version(raw, ceiling=target)
+    migrating = current < target
+    enforced = raw.execute("PRAGMA foreign_keys").fetchone()[0]
+    if migrating and enforced:
+        raw.execute("PRAGMA foreign_keys=OFF")
     try:
-        current = schema_version(conn)
-        if current > target:
-            raise SchemaVersionError(current, target)
-        for version in range(current + 1, target + 1):
-            MIGRATIONS[version](conn)
-        # Repair missing protections even when the recorded version is current.
-        for statement in _TRIGGERS_V1:
-            conn.execute(statement)
-        conn.execute(
-            "INSERT INTO store_meta(key, value) VALUES (?, ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (META_SCHEMA_VERSION, str(target)),
-        )
-        conn.execute("COMMIT")
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
+        conn.begin()
+        try:
+            config = _migration_config(conn)
+            conn.execute(CreateTable(tables.alembic_version, if_not_exists=True))
+            with _ALEMBIC_ENVIRONMENT_LOCK:
+                if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
+                    command.stamp(config, str(current))
+                command.upgrade(config, str(target))
+            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ())):
+                raw.execute(statement)
+            if target >= 5:
+                from . import typed_storage
+
+                typed_storage.repair_triggers(raw)
+            revision = raw.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            conn.execute(tables.SET_META, {"key": META_SCHEMA_VERSION, "value": revision})
+            if migrating and raw.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("FOREIGN KEY constraint failed during schema migration")
+            conn.commit()
+        except BaseException as error:
+            rollback(conn)
+            if isinstance(error, DBAPIError):
+                raise error.orig from error
+            raise
+    finally:
+        if migrating and enforced:
+            raw.execute("PRAGMA foreign_keys=ON")
     return target

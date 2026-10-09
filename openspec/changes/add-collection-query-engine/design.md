@@ -234,6 +234,14 @@ S1 uses one versioned vault-side mode marker for both routing and shared-store a
 
 This slice explicitly implements the necessary parent P1b.5 snapshot/replica/flush, P1b.6 coordinator head/store-capability fence, lineage/takeover/divergence/adopt-local held reconciliation and applicable P1b.7 hosted snapshot export/staged restore subset in S1.2b, after S1.2a's A/B/C failure/restart/restore/handoff tests. Adoption validates marker/store identity/epoch and coordinator head before C writes, without importing A/B. Supported launchers reject older store-blind readers before access, including fresh-root copy/restore; store-blind coordinators refuse lease admission. Rollback disables C jobs/slice reads but preserves its marker entry, rows/history/source/replica; A/B files continue. General existing-file import/reverse-export/GA stays deferred under parent P1b/P2/P3.
 
+Marker version 2 adds mandatory `source_path` and `layout` to each entry. These immutable canonical fields establish ownership before a reader opens SQLite. One classifier in `collection_store.authority` serves request routing and projection admission. It owns the exact manifest, the items source subtree or log source with validated item fragments, and sibling `Held`, `_history`, and `_history.md` paths. Other siblings retain file authority. Overlapping ownership refuses; an unknown file inside an owned namespace cannot fall back to ordinary file access.
+
+Canonical egress executes on the existing store thread with the caller's context and request snapshot. Unavailable C paths refuse individually, while unrelated A/B and knowledge paths retain their file behavior. Marker metadata identifies ownership; it grants no row, field, or artifact release. Admission and restore compare these bindings with canonical metadata and reject projections outside their declared namespaces.
+
+Create includes ownership fields in the durable target marker before store commit and retains the existing atomic publication sequence. Version 1 upgrades use identity/head-validated canonical SQLite or its validated replica under the existing lease and recoverable publication sequence. Upgrade increments the authority epoch. Unrecoverable version 1 state cannot establish arbitrary path ownership; the service reports repair required rather than inferring ownership from editable views. This exceptional legacy state cannot claim both complete file availability and C confidentiality.
+
+The existing state compatibility descriptor gains a marker-format identity that rejects older candidates before handoff. The `collections-store-v1` coordinator capability stays unchanged. Copy and restore retain validated version 2 ownership, and rollback retains these fields while disabling C. This prevents private view fallback; a false refusal costs only the affected owned path.
+
 All older-reader entrypoint and sync-custody guarantees in this change use the parent's §16 A5 supported-client boundary (owner, 2026-10-04). Derive compatibility from the sole marker before supported bootstrap/candidate/restore admission. Activation requires actual supported-adapter custody across its participating endpoints; unknown custody preserves pending state and leaves A/B and knowledge usable. Do not claim exclusion of arbitrary manually launched historical binaries or unmanaged sync programs, add a second routing sentinel, or accept a human attestation flag as custody proof.
 
 
@@ -246,6 +254,14 @@ Migration builds new tables/mappings in bounded batches, proves old/new logical 
 Unindexed large text can opt into a versioned lossless codec stored as BLOB with uncompressed byte length/hash. Codec identity travels with portability snapshots; bound decompression by result limits. Indexed scalars remain directly comparable, FTS indexes only opted-in text, and compressed text has no implicit scan predicate. Unknown codec gives a typed unavailable response, never corrupt data. Sparse declared objects may keep residual JSON; a dense scalar row must not use a JSON blob plus full duplicate projection. Render bounded Markdown views/pages, not a million-row file.
 
 The importer streams CSV with a pinned dialect/encoding, NDJSON, or a JSON array through an incremental parser; source and token lengths are bounded (1 MiB decoded row, depth 32, batch ≤500 rows and ≤4 MiB). It resolves a preserved source ref/upload handle through ordinary authorization, never accepts arbitrary filesystem paths, remote URLs or executable mappings. Preview samples ≤100 rows and reports inferred-versus-declared mapping/type conflicts plus authorized target/size bounds, including actual timestamp/offset/date-only fields, flagged absent time bases, nested shape, row identity and the first daily-rollup question. Verify the real export's time mapping before start; inferred mapping never guesses a day. Start requires an explicit authorized target collection and declared field mapping; source import never grants permission to create one. Preserve the raw source/evidence first using existing capture/transport tools; the import job references that immutable receipt. Default policy is stop on the first invalid row, retaining earlier acknowledged batches and reporting partial state and the exact next source position; an explicit skip policy records rejected positions/reasons without presenting a complete import.
+
+
+**Recommended declarations (owner ruling, 2026-10-07: "it needs to be seamless and invisible to the user").** Import preview also returns `recommended_declarations`, a deterministic function of the mapping and the target's current manifest:
+- the mapped time basis gets `filterable` and `sortable`, so §2 declares its index;
+- the mapped numeric fields get a daily source-local rollup with count, sum and avg;
+- every recommendation stays within the index and rollup budgets, and lists what it leaves out when a budget is reached.
+
+The agent applies the recommendation with one governed `revise` before `start`; the revise builds its structures in bounded batches like any other. The import chapter of `schema_memory(subject="query-engine")` teaches this step. Preview changes nothing, and query execution still never creates an index. An owner or agent may still declare other indexes and rollups explicitly through `revise`.
 
 A durable import job binds the initiating principal, authorization-session/grant identifiers and expiry, purpose/policy basis, exact immutable source receipt/hash and lineage, target collection/store identity and lineage, declaration/mapping version and job/batch idempotency identity. Store credential material only through the existing protected authorization-session mechanism, never in receipts or vault pages. Before each batch the service re-resolves that principal's applicable authority and source release, and proves the target's complete-authorized-state mutation rule, not only release for new rows. Recheck the same facts at commit under the writer lease; revocation, expiry, source loss or target mixed release rolls back the current batch and pauses as `partial` with reason `authority_lost`, retaining only acknowledged progress. Ambient service/owner authority never substitutes. Resume requires an explicitly authorized continuation for that bound initiating principal and unchanged exact source/target lineage; a different principal cannot take over the job implicitly. Host writer takeover re-proves lineage and live authority before replay/commit, and expiry is not extended automatically. Status/cancel separately authorize source, target and job ownership, without leaking paused counts to another audience.
 
@@ -374,6 +390,25 @@ Recorded 2026-09-30. The owner supplied O1–O3 and O5 below and O4 in the graph
 | CQ12 | Orchestrator: only this follow-up's matching query units and sibling graph expansion; pins/unrelated lane rewrites deferred, ranking/continuity preserved. |
 | CQ13 | Orchestrator: choose no future engine now; prove semantic seams, then benchmark concrete transactional/analytics/graph backends with partition/consistency/migration contracts before scale claims. |
 | CQ14 | Orchestrator: provisional targets, frozen realistic shape/skew/baselines and authorized real-export evidence. Owner O2 authorizes the separately gated real-vault new-collection slice; unrelated full-capability targets do not block it. |
+
+The CQ rulings map to these collection-delta requirements, with exact headings (reconciled 2026-10-05 for task 0.1; every requirement and scenario named in the round-four table also exists as a heading):
+
+| Ruling | Requirements |
+| --- | --- |
+| CQ1 | Declared indexes have migration-owned lifecycle and budgets; Index maintenance preserves canonical writes and write budgets; Declared full text is optional and governed |
+| CQ2 | Existing Python query semantics gate every push-down; Versioned filters distinguish typed values, nulls and dates; Typed numeric values and history are lossless |
+| CQ3 | Versioned filters distinguish typed values, nulls and dates, scenario "Source local day is never guessed" |
+| CQ4 | Joins follow only declared current-item relations |
+| CQ5 | Grouping supports multiple exact aggregates and HAVING |
+| CQ6 | Query admission and cancellation bound resource use; Large collections use compact typed storage and streaming ingest |
+| CQ7 | Declared full text is optional and governed |
+| CQ8 | Tools and saved views share one bounded query contract; Every capability is discoverable and agent-reachable; Existing tool routes preserve text queries and bounded discovery |
+| CQ9 | Unified query IR preserves governance across backends |
+| CQ10 | Large collections use compact typed storage and streaming ingest; Typed numeric values and history are lossless |
+| CQ11 | Incremental rollups preserve governed exactness |
+| CQ12 | Activation serves query-derived units within exact freshness budgets |
+| CQ13 | Unified query IR preserves governance across backends |
+| CQ14 | Physical plans and release benchmarks prove the targets; First owner slice has a narrow performance exception; First owner slice is a governed new summary collection in the real vault |
 
 ## Round-four coverage
 
