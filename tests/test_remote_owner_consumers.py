@@ -126,12 +126,12 @@ def test_a_rule_naming_the_former_remote_audience_stops_applying(
 
 
 def test_owner_only_governance_admits_the_bound_session(
-    principals: dict[str, RequestPrincipal],
+    vault: Path, principals: dict[str, RequestPrincipal]
 ) -> None:
-    assert _require_owner(principals["bound"]) is principals["bound"]
+    assert _require_owner(principals["bound"], vault_root=vault) is principals["bound"]
     for name in ("former", "other"):
         with pytest.raises(GovernanceError) as raised:
-            _require_owner(principals[name])
+            _require_owner(principals[name], vault_root=vault)
         assert raised.value.code == "GOVERNANCE_OWNER_REQUIRED"
 
 
