@@ -41,7 +41,9 @@
 
 Every model the Cloud image ships is a pinned, pre-baked artifact in ONNX, or in another format whose weights load file-backed. It loads offline, with prepacking or any other load-time private copy disabled on Cloud. Personal servers keep the prepacked fast path.
 
-- A model ships as int8 only where a consumer fixture gates the int8 build (D3). A model with no such fixture ships at its reference precision. The image lane of `add-cloud-multimodal-processing` is the first case: no image relevance fixture exists, so its model ships as fp32 ONNX.
+- A model ships as int8 only where its D3 int8 gate can run and passes.
+  - An encoder's int8 parity can be proved only by consumer fixtures. While an encoder has none, it ships at its reference precision. The image lane of `add-cloud-multimodal-processing` is the first case: no image relevance fixture exists, so its model ships as fp32 ONNX.
+  - A scorer or transducer has its own int8 gate, the pinned agreement sample, so it may ship as int8 without a consumer fixture. That keeps int8 speech candidates, and the 1.5 GB routing cap of the speech rule, workable.
 - A runtime that copies its weights into private memory pays a full copy per cell. It is chosen only with a measured reason. CTranslate2 (faster-whisper) and Tesseract may be such runtimes (unverified); acceptance measures each one.
 - PyTorch is not in the Cloud image.
 
@@ -49,7 +51,7 @@ Every model the Cloud image ships is a pinned, pre-baked artifact in ONNX, or in
 
 Cells share read-only, file-backed weights through the page cache. Each cell keeps its own process, writable memory, caches and tokenizer state. So sharing costs no isolation: no tenant's text or state enters another tenant's process. This holds with no exception.
 
-The owner of `add-sensed-epistemic-model` ruled on 2026-10-09 that Cloud instruments run per cell on these shared, read-only weights. That drops the in-cluster shared sensing plane of its ruling R4 and design D9 (slice 5). The owner amends that change; this change does not edit it. Until the amendment lands, the two active changes disagree on where Cloud instruments run.
+The owner of `add-sensed-epistemic-model` ruled on 2026-10-09 that Cloud instruments run per cell on these shared, read-only weights. That drops the in-cluster shared sensing plane of its ruling R4 and design D9 (slice 5). The owner amends that change; this change does not edit it. Until the amendment lands, the two active changes disagree on where Cloud instruments run, so this change archives only after it (proposal, "Archive dependency").
 
 ### D3. The parity gate
 
@@ -60,7 +62,7 @@ The owner of `add-sensed-epistemic-model` ruled on 2026-10-09 that Cloud instrum
 | Scorer or transducer (reranker, captioner, speech) | agreement with the reference on a pinned sample | a bound recorded before the measurement |
 | Instrument (NLI, named entities, small language model) | its instrument fixture set, at the new pin | `frozen-verifiers`, `sensed-epistemic-model` |
 
-**Why int8 is gated on verdicts, not on cosine.** A cosine of 0.9999 is the bound for a runtime substitution at the same precision. An int8 build cannot meet it against fp32: a shared int8 batch alone moves a vector by up to 0.02 cosine (archived `make-recall-multilingual` design). So a quantised encoder is gated on its consumers' verdicts. Where no consumer fixture exists, there is no int8 gate, and the model ships at reference precision (D1). This is the one place these changes explain it.
+**Why int8 is gated on verdicts, not on cosine.** A cosine of 0.9999 is the bound for a runtime substitution at the same precision. An int8 build cannot meet it against fp32: a shared int8 batch alone moves a vector by up to 0.02 cosine (archived `make-recall-multilingual` design). So a quantised encoder is gated on its consumers' verdicts. Where an encoder has no consumer fixture, there is no int8 gate, and it ships at reference precision (D1). A scorer or transducer is not affected: its pinned agreement sample gates its int8 build. This is the one place these changes explain it.
 
 **A converted instrument is a new pin.** `add-sensed-epistemic-model` defines `instrument_id = sha256(model, revision, weights, runtime, runtime_version, template_version)`. An ONNX or int8 build of the NLI pin changes the weights and the runtime.
 
@@ -68,7 +70,8 @@ The owner of `add-sensed-epistemic-model` ruled on 2026-10-09 that Cloud instrum
   - the upstream revision the artifact was built from;
   - the conversion recipe and its version;
   - the digest of the output manifest.
-- The artifact is published immutably, checked by digest at load, and loaded from local files only. A local rebuild whose digest differs is a different pin and labels nothing.
+- The artifact is published immutably. A host fetches it by digest from that publication, checks the digest at load, and loads it from local files only.
+- A local rebuild is never a substitute. `onnxruntime` is not pinned, and the quantiser's output can differ by host, so a rebuild may not reproduce the published bytes. A host without the published bytes refuses the verifier until it fetches them. This is deliberately stricter than `ensure_artifact`, which builds the recall encoder locally when no download is available; that path stays with `swap-embedding-runtime-to-onnx`.
 - This needs a MODIFIED delta to the canonical `frozen-verifiers` requirement "A frozen verifier runs only under a pinned identity", which today requires the "exact repository-pinned upstream revision" to be resident. The delta adds "or a derived artifact named by its digest and recipe and built from that revision", and the same allowance where the constructor receives the artifact. It adds one scenario for a rebuilt artifact, and changes nothing else.
 - `add-sensed-epistemic-model` also modifies that requirement. Whichever change archives second refreshes its MODIFIED block onto the other's result and keeps both changes' additions.
 - Admission is the existing fixture gate at the new pin: `stance-v2-multilingual`, and `relation-v1-multilingual` at 20 of 20 including the negative twins, in the dedicated `nli` CI lane.
@@ -84,11 +87,13 @@ Each artifact records its artifact identity: model, upstream revision, quantisat
 - `EncoderProfile.fingerprint()` hashes model, pooling, prefixes, sequence limit and normalisation, plus revision, quantisation, format and digest for a served model. It leaves out the backend, so a runtime swap is not a model change.
 - `claims.VerifierPin` holds model, revision, artifact files, weights digest, label-map version and fixture set.
 
-Two different things key on this record:
+Two things key on this record:
 
-- **Calibrated values key on the artifact identity.** The live example is the sensed model's cosine proposer: `sensed_model.COSINE_THETA` holds θ = 0.72 under the fingerprint `BAAI/bge-m3|cls|l2|74068c180d6514e8`, the pinned int8 artifact. Any other fingerprint proposes nothing until it is calibrated. This change keeps the bge-m3 bytes. Disabling prepacking is a session option outside the fingerprint, and the task 5.4 probe gave bit-identical vectors with it, so θ still applies on Cloud.
 - **The vector space follows one rule.** A same-precision substitution that passes the encoder parity bound keeps the vector space, and its new artifact identity is recorded. This is the principle of `swap-embedding-runtime-to-onnx`: a backend swap is not a model change. Another model, precision, pooling, prefix set or sequence limit is another space.
   - The recall encoder keeps its stricter canonical rule. `multilingual-recall` scenario "Another build of the same model is refused" makes another artifact digest another space. This change covers the other encoders, and does not relax that rule.
+- **Calibrated values follow the space.** A value calibrated on an encoder's output keys by its vector space. A space-keeping substitution carries it; a space change voids it until it is calibrated again. A value calibrated on another model's output keys by its artifact identity.
+  - The image-tags threshold (`EXOMEM_IMAGE_TAGS_THRESHOLD`) carries across an fp32 ONNX build of the image model that passes the bound.
+  - The sensed model's cosine proposer keys θ = 0.72 by the recall encoder's fingerprint, `BAAI/bge-m3|cls|l2|74068c180d6514e8` in `sensed_model.COSINE_THETA`. That fingerprint includes the artifact digest, so any rebuilt artifact voids θ until it is calibrated again. This change keeps the bge-m3 bytes. Disabling prepacking is a session option outside the fingerprint, and the task 5.4 probe gave bit-identical vectors with it, so θ still applies on Cloud.
 
 ### D5. Sharing is measured, not assumed
 
@@ -116,7 +121,11 @@ Each switch is off by default. A shipped artifact with its switch off does not l
   - A device runtime may be used only after its outputs meet the same-precision parity bound against the cell's runtime. WebAssembly kernels can differ slightly from native ones.
   - An int8 artifact runs on a device only at one text per encode, because batching moves int8 vectors (D3).
   - Device data carries a device-provenance mark.
-  - A batch is invalid when any item has the wrong artifact identity or the wrong shape, or when the cell's re-encoded random sample deviates beyond the bound. One invalid item rejects the whole batch, and the cell computes that data itself.
+  - A batch is invalid when any item has the wrong artifact identity or the wrong shape, or when a random sample fails the cell's own check:
+    - for vectors, the cell re-encodes the sample, and each vector must stay within the same-precision parity bound;
+    - for extraction results such as OCR text, the cell re-extracts the sample, and each text must equal the cell's exactly after Unicode NFC normalisation and the collapse of each whitespace run to one space.
+  - One invalid item rejects the whole batch, and the cell computes that data itself.
+  - **Wrong-firing cost.** A wrong rejection makes the cell do the computation it would have done without device data. The tenant pays only delay, and no data is lost.
   - Accepted data applies only to that tenant's vault. Accepted extraction results keep their mark and stay recomputable.
   - Identity equality and the sample prove that the batch matches the cell's artifact, not that every item was computed honestly. The harm is bounded to the tenant's own vault, which the tenant can already write.
   - Canonical sidecars that arrive as vault content keep their existing rules. How device-produced data travels, and how an import archive carries it, belong to `add-exomem-cloud-vault-import`, which this change only references.

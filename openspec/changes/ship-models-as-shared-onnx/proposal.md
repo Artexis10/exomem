@@ -9,7 +9,7 @@ Today that is a property of one model. Each new model would otherwise be chosen 
 ## What Changes
 
 - **One runtime rule.** Every model the Cloud image ships is a pinned, pre-baked artifact in ONNX, or in another format whose weights load file-backed. It loads offline, with prepacking disabled on Cloud. So all cells on a node share one read-only copy.
-  - It is int8 only where a consumer fixture gates the int8 build; otherwise it ships at reference precision.
+  - It is int8 only where its int8 gate passes. An encoder without a consumer fixture ships at reference precision; a scorer or transducer is gated by its pinned agreement sample.
   - PyTorch is not in the Cloud image. It stays for development and the personal GPU paths.
   - A runtime that copies weights into private memory needs a measured reason.
   - Only immutable model bytes are shared, never writable memory, caches or processes. Local instruments on Cloud run per cell on the shared weights. So tenant isolation is unchanged.
@@ -18,9 +18,9 @@ Today that is a property of one model. Each new model would otherwise be chosen 
   - a quantised encoder, when its consumers' fixture verdicts are unchanged;
   - a scorer or transducer, at an agreement bound stated before the measurement;
   - an instrument, only through its existing fixture admission, at its new pin.
-- **A recorded identity.** Each artifact records its model, revision, quantisation, format and digest. An artifact that Exomem builds also records its conversion recipe and version, is published immutably, and is checked by digest at load.
-  - A changed identity is a new artifact, and anything calibrated on the old one is calibrated again.
-  - A same-precision substitution that passes the parity bound keeps an encoder's vector space; the recall encoder keeps its stricter rule.
+- **A recorded identity.** Each artifact records its model, revision, quantisation, format and digest. An artifact that Exomem builds also records its conversion recipe and version, and is published immutably.
+  - A host fetches a built artifact by digest from that publication. A local rebuild never substitutes for it, and a host without the published bytes refuses that model until it fetches them.
+  - A same-precision substitution that passes the parity bound keeps an encoder's vector space and the values calibrated on it; the recall encoder keeps its stricter rule. A space change voids those values until they are calibrated again.
 - **Measured sharing.** Each model's acceptance reads Pss on a node with at least two cells.
 - **Selection by published accuracy.** Accuracy comes from dated published benchmarks. Exomem measures CPU speed, peak memory and shareability on its own hardware, plus a sanity check for a broken conversion.
 - **Converted models, each behind its own switch, off by default:**
@@ -30,7 +30,7 @@ Today that is a property of one model. Each new model would otherwise be chosen 
   - a runtime path for small language-model instruments, of the ONNX Runtime GenAI class, which scores closed label sets and never returns sampled text.
 
   Named-entity and small language-model artifacts ship only when an admitted instrument question uses them.
-- **Device-side preparation, allowed and bounded.** The same artifacts may run on the tenant's device, in the browser or the CLI, to prepare vectors and OCR before upload. The cell accepts a batch only on an exact identity match, the right shape and a passing re-encoded sample. Device data stays marked and recomputable.
+- **Device-side preparation, allowed and bounded.** The same artifacts may run on the tenant's device, in the browser or the CLI, to prepare vectors and OCR before upload. The cell accepts a batch only on an exact identity match, the right shape and a passing sample that the cell re-encodes or re-extracts itself. Device data stays marked and recomputable. A wrong rejection costs the tenant only delay.
 
 ## Ownership boundary
 
@@ -41,6 +41,8 @@ This change owns the model runtime and the artifacts. It does not own what the m
   - This change states one placement fact, by the owner's ruling: local instruments on Cloud run per cell on shared weights. The owner amends R4 and D9 of `add-sensed-epistemic-model` to drop the in-cluster shared plane.
 - **Hosted verifier admission** stays with the `hosted-tenant-cell` requirement "Hosted frozen-verifier activation is separately resource-admitted".
 - **Import transport** for device-prepared data stays with `add-exomem-cloud-vault-import`.
+
+**Archive dependency.** This change archives only after `add-sensed-epistemic-model` has amended its ruling R4 and design D9 to run Cloud instruments per cell. Until then, the two active changes disagree on where Cloud instruments run.
 
 ## Pure substrate and soft-fail
 

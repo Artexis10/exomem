@@ -2,7 +2,7 @@
 
 ### Requirement: Every model the Cloud image ships is a pinned artifact whose weights load file-backed
 
-Every model that the Exomem Cloud cell image ships SHALL be a pinned, pre-baked artifact in ONNX format, or in another format whose weights the runtime loads file-backed. It SHALL load with network access off. A Cloud cell SHALL load it with every load-time private copy of the weights disabled, such as ONNX Runtime prepacking, so that the cells on one node map one read-only copy. An artifact SHALL be int8 only where its int8 build passes its parity gate. A model with no consumer fixture to gate an int8 build SHALL ship at its reference precision. A model whose runtime copies its weights into private memory SHALL ship only with a measured reason, recorded in its selection, why no shareable candidate serves. Personal installs MAY keep the prepacked path.
+Every model that the Exomem Cloud cell image ships SHALL be a pinned, pre-baked artifact in ONNX format, or in another format whose weights the runtime loads file-backed. It SHALL load with network access off. A Cloud cell SHALL load it with every load-time private copy of the weights disabled, such as ONNX Runtime prepacking, so that the cells on one node map one read-only copy. An artifact SHALL be int8 only where its int8 build passes its parity gate. An encoder, whose int8 parity can be proved only by consumer fixtures, SHALL ship at its reference precision while no such fixture exists. A scoring model or transducer SHALL use its own int8 gate, the pinned agreement sample. A model whose runtime copies its weights into private memory SHALL ship only with a measured reason, recorded in its selection, why no shareable candidate serves. Personal installs MAY keep the prepacked path.
 
 The recall encoder already meets this rule. Its runtime contract stays with the change `swap-embedding-runtime-to-onnx` and the `multilingual-recall` capability, and this capability does not restate it.
 
@@ -12,10 +12,15 @@ The recall encoder already meets this rule. Its runtime contract stays with the 
 - **THEN** both map the same read-only weights file
 - **AND** the node holds those weights once, not once per cell
 
-#### Scenario: A model without a consumer fixture ships at reference precision
+#### Scenario: An encoder without a consumer fixture ships at reference precision
 
-- **WHEN** a model has no consumer fixture that could gate an int8 build
+- **WHEN** an encoder has no consumer fixture that could gate an int8 build
 - **THEN** it ships at its reference precision
+
+#### Scenario: A transducer's int8 build uses its agreement sample
+
+- **WHEN** a speech model's int8 build agrees with its reference on the pinned sample within the recorded bound
+- **THEN** the int8 build may ship, although no consumer fixture exists
 
 #### Scenario: A private-copy runtime needs a recorded reason
 
@@ -85,19 +90,26 @@ A build that fails its gate SHALL NOT ship. A failed int8 build SHALL leave the 
 - **WHEN** the int8 conversion of an instrument misses any fixture of its set
 - **THEN** it is not admitted, and the fp32 ONNX conversion becomes the candidate pin
 
-### Requirement: An artifact's identity is recorded, and only a same-precision substitution keeps a vector space
+### Requirement: An artifact's identity is recorded, it is fetched by digest, and only a same-precision substitution keeps a vector space
 
-Each shipped artifact SHALL record its artifact identity: its model, its upstream revision, its quantisation, its file format and the digest of the bytes it loads. An artifact that Exomem builds SHALL also record its conversion recipe and the recipe's version. It SHALL be published immutably, checked against its digest when it loads, and loaded from local files only. A local rebuild whose digest differs SHALL be a different artifact, and a pin or calibration made for the published digest SHALL NOT apply to it.
+Each shipped artifact SHALL record its artifact identity: its model, its upstream revision, its quantisation, its file format and the digest of the bytes it loads. An artifact that Exomem builds SHALL also record its conversion recipe and the recipe's version, and SHALL be published immutably. A host SHALL obtain it only by fetching the published bytes by their digest, SHALL check the digest when it loads, and SHALL load it from local files only. A local rebuild SHALL never substitute for the published artifact, because the runtime version is not pinned and quantiser output can differ by host. A host without the published bytes SHALL refuse that model until it fetches them; a verifier SHALL refuse. The recall encoder's existing local build path stays with the change `swap-embedding-runtime-to-onnx`, and a locally built recall encoder already has its own identity.
 
-A value calibrated on an artifact SHALL key by its artifact identity, and SHALL apply to nothing after that identity changes until it is calibrated again. An instrument with a new artifact identity SHALL be a new pin. A runtime option that leaves the loaded bytes unchanged, such as disabling prepacking, SHALL NOT change the artifact identity.
+An instrument with a new artifact identity SHALL be a new pin. A runtime option that leaves the loaded bytes unchanged, such as disabling prepacking, SHALL NOT change the artifact identity.
 
 For the encoders that this capability covers, a same-precision substitution that passes the encoder parity bound SHALL keep the vector space, and the new artifact identity SHALL be recorded. Another model, another precision, or other pooling, prefixes or sequence limit SHALL be another vector space. The recall encoder keeps the stricter space record of the `multilingual-recall` capability, in which another artifact digest is another space.
 
-#### Scenario: A rebuilt artifact is a different artifact
+A value calibrated on an encoder's output SHALL key by its vector space: a space-keeping substitution SHALL carry it, and a space change SHALL void it until it is calibrated again. A value calibrated on any other model's output SHALL key by its artifact identity.
 
-- **WHEN** a host rebuilds an artifact and its bytes differ from the published digest
-- **THEN** its artifact identity differs from the published artifact's
-- **AND** a threshold calibrated on the published identity applies to nothing until it is calibrated again
+#### Scenario: A host without the published bytes refuses
+
+- **WHEN** a host lacks the published bytes of a derived verifier artifact
+- **THEN** the verifier refuses until the host fetches them by digest
+- **AND** a local rebuild of the artifact is never loaded in their place
+
+#### Scenario: A space change voids a calibrated value
+
+- **WHEN** the recall encoder runs bytes whose digest differs from its pinned artifact
+- **THEN** its vector space differs, and a threshold calibrated on the pinned space applies to nothing until it is calibrated again
 
 #### Scenario: Sharing keeps the identity
 
@@ -110,6 +122,7 @@ For the encoders that this capability covers, a same-precision substitution that
 - **WHEN** an fp32 ONNX build of an encoder replaces its fp32 reference implementation and passes the parity bound
 - **THEN** stored vectors stay in the same vector space and are not re-encoded
 - **AND** the new artifact identity is recorded
+- **AND** values calibrated on that space still apply
 
 ### Requirement: Sharing is measured on a node with at least two cells
 
@@ -173,9 +186,10 @@ Device-produced data SHALL carry a device-provenance mark. A cell MAY accept dev
 
 - the recorded artifact identity exactly equals the identity the cell runs;
 - the data has the shape that identity produces;
-- the cell re-encodes a random sample of the batch, and every sampled item stays within the same-precision parity bound.
+- for vectors, the cell re-encodes a random sample of the batch, and every sampled vector stays within the same-precision parity bound;
+- for extraction results, the cell re-extracts a random sample of the batch, and every sampled text equals the cell's text exactly after Unicode NFC normalisation and the collapse of each whitespace run to one space.
 
-Data that fails any condition is invalid. One invalid item SHALL reject the whole batch, and the cell SHALL compute that data itself. Accepted data SHALL apply only to the uploading tenant's own vault. Accepted extraction results SHALL keep their device-provenance mark, and the cell SHALL be able to recompute them. A cell SHALL never require device-produced data. Canonical sidecars that arrive as vault content keep their existing rules. How device-produced data travels with an import is owned by the change `add-exomem-cloud-vault-import`, which this capability only references.
+Data that fails any condition is invalid. One invalid item SHALL reject the whole batch, and the cell SHALL compute that data itself. A wrong rejection SHALL cost only the computation the cell would have done without device data, so the tenant pays only delay. Accepted data SHALL apply only to the uploading tenant's own vault. Accepted extraction results SHALL keep their device-provenance mark, and the cell SHALL be able to recompute them. A cell SHALL never require device-produced data. Canonical sidecars that arrive as vault content keep their existing rules. How device-produced data travels with an import is owned by the change `add-exomem-cloud-vault-import`, which this capability only references.
 
 #### Scenario: A matching batch is accepted
 
@@ -186,6 +200,11 @@ Data that fails any condition is invalid. One invalid item SHALL reject the whol
 
 - **WHEN** one re-encoded sample of an uploaded batch deviates beyond the bound
 - **THEN** the cell rejects the whole batch and encodes those passages itself
+
+#### Scenario: A differing OCR sample rejects the batch
+
+- **WHEN** the cell re-extracts a sampled image of an uploaded OCR batch, and its normalised text differs from the device's
+- **THEN** the cell rejects the whole batch and extracts those images itself
 
 #### Scenario: A mismatched identity is recomputed
 
