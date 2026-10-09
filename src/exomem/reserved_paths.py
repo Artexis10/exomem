@@ -1192,7 +1192,10 @@ def physical_spelling_refusal(vault_root: Path, value: object) -> tuple[str, str
 
 @dataclass(frozen=True, slots=True)
 class GenericReadObservation:
-    """A held snapshot, proved absence, or a content-free acquisition refusal."""
+    """A held snapshot, proved absence, or a content-free acquisition refusal.
+
+    `locate` leaves both `snapshot` and `code` empty: a unique name, not opened.
+    """
 
     snapshot: GenericFileSnapshot | None = None
     code: str | None = None
@@ -1303,6 +1306,12 @@ class GenericReadBatch:
             # Authorization uses the same physical spelling selected for acquisition.
             relative = (Path(parent_path) / (names[0] if len(names) == 1 else leaf)).as_posix()
             self.leaves[path] = _ReadLeaf(names, code, spelling, relative)
+
+    def locate(self, path: str) -> GenericReadObservation:
+        """Map one leaf to its physical name without opening it; `validate` rechecks the name."""
+        self.include((path,))
+        entry = self.leaves[path]
+        return GenericReadObservation(code=entry.code, relative_path=entry.relative)
 
     def read(self, path: str) -> GenericReadObservation:
         """Acquire one leaf for fresh bytes; a repeated read must find the same identity."""

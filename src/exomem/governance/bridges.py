@@ -738,19 +738,25 @@ def _read_exact_snapshot(
     vault_root: Path, rel_path: str, expected_raw: bytes | None = None,
     *, reader: reserved_paths.GenericReadBatch | None = None,
 ) -> tuple[bytes, find_corpus.ParsedPage | None] | None:
-    """Acquire one unique held leaf and parse its physical approval path."""
+    """Acquire one unique held leaf and parse its approval path.
+
+    A batch `reader` parses the physical path it acquired. Without one, a
+    scalar held read keeps the logical approval path.
+    """
     if Path(rel_path).suffix.casefold() != ".md":
         return None
     try:
         if reader is None:
-            with reserved_paths.generic_read_batch(vault_root, (rel_path,)) as scalar:
-                observed = scalar.read(rel_path)
+            physical = reserved_paths.resolve_physical_relative(vault_root, rel_path)
+            snapshot = reserved_paths.read_generic_bytes(
+                vault_root, physical, physical=True
+            )
         else:
             observed = reader.read(rel_path)
-        snapshot = observed.snapshot
-        if snapshot is None:
-            return None
-        rel_path = observed.relative_path or rel_path
+            if observed.snapshot is None:
+                return None
+            snapshot = observed.snapshot
+            rel_path = observed.relative_path or rel_path
     except (OSError, reserved_paths.ReservedPathLeafError):
         return None
     if expected_raw is not None and snapshot.data != expected_raw:
@@ -823,22 +829,18 @@ def admit(
     audience: str,
 ) -> BridgeAdmission:
     """Validate the exact bridge bytes and every dependency snapshot."""
-    try:
-        with reserved_paths.generic_read_batch(vault_root, (rel_path,)) as reader:
-            snapshot = _read_exact_snapshot(vault_root, rel_path, expected_raw=raw, reader=reader)
-            if snapshot is None or snapshot[1] is None:
-                return BridgeAdmission(True, False, RELEASE_STALE)
-            return _admit_parsed(vault_root, raw, snapshot[1],
-                                 policy=policy, audience=audience, reader=reader)
-    except (OSError, reserved_paths.ReservedPathLeafError):
+    snapshot = _read_exact_snapshot(Path(vault_root), rel_path, expected_raw=raw)
+    if snapshot is None or snapshot[1] is None:
         return BridgeAdmission(True, False, RELEASE_STALE)
+    return _admit_parsed(vault_root, raw, snapshot[1], policy=policy, audience=audience)
 
 
 def _admit_parsed(
     vault_root: Path, raw: bytes, parsed: find_corpus.ParsedPage,
-    *, policy: Policy, audience: str, reader: reserved_paths.GenericReadBatch,
+    *, policy: Policy, audience: str, reader: reserved_paths.GenericReadBatch | None = None,
     bridge_metadata: tuple[BridgeMetadata | None, str | None] | None = None,
 ) -> BridgeAdmission:
+    """Admit already-acquired bridge bytes; dependencies read through `reader` when a batch supplies one."""
     rel_path = parsed.rel_path
     metadata, error = bridge_metadata if bridge_metadata is not None else parse_bridge_frontmatter(parsed.frontmatter)
     bridge_shaped = metadata is not None or error is not None
@@ -931,13 +933,6 @@ def resolve_approved_abstraction(
     release-bound provenance stripping is returned to the caller. Structured
     attribution is never part of this prose-only abstraction.
     """
-    if reader is None:
-        try:
-            with reserved_paths.generic_read_batch(vault_root, ()) as scalar:
-                return resolve_approved_abstraction(vault_root, bridge_id, policy=policy,
-                                                    audience=audience, reader=scalar)
-        except (OSError, reserved_paths.ReservedPathLeafError):
-            return BridgeProjection(False, RELEASE_STALE)
     candidates = [
         grant
         for grant in policy.release_grants if grant.raw_protection is None and grant.field_release is None

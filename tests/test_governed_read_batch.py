@@ -37,9 +37,8 @@ def test_unit_reference_refuses_unsafe_or_ambiguous_leaf(vault: Path, alias_kind
     units = [{"ref": relative, "text": "A useful fact.", "provenance": {"path": relative}}]
     with request_scope(_external()):
         assert egress.classify_units(vault, units) == [egress.UNIT_WITHHELD_SILENTLY]
-        reader = egress.reader_view(vault)
-        with pytest.raises(egress.ReaderViewUnavailable), reader.page_batch() as keep:
-            keep(relative)
+        with egress.reader_view(vault).page_batch() as keep:
+            assert keep(relative) is False
 
 
 @pytest.mark.parametrize("change", ["leaf", "parent", "missing-parent"])
@@ -382,7 +381,8 @@ def test_logical_unicode_read_keeps_physical_authority_and_receipt_identity(vaul
         assert egress.classify_units(vault, units) == [egress.UNIT_KEPT]
         guarded = egress.guard_working_set(vault, {"units": units}, egress.AnnotatedHits(hits=[]))
         assert guarded is not None and len(guarded["units"]) == 1
-        assert [hit.path for hit in egress.annotate_hits(vault, [_hit(logical)]).hits] == [physical]
+        # A scalar hit decision reads the spelling it is given, as the search index stores it.
+        assert [hit.path for hit in egress.annotate_hits(vault, [_hit(physical)]).hits] == [physical]
     released = [outcome.value for outcome in collector.outcomes if "content_hash" in outcome.value]
     assert len(released) == 1
     assert released[0]["content_hash"] == hashlib.sha256(content.encode()).hexdigest()
@@ -512,7 +512,7 @@ def test_terminal_packet_lifecycle_change_publishes_no_pending_claims(vault: Pat
     write_rule(vault, ceiling=5)
     alias = OPEN_PATH.replace("Notes", "Ｎotes")
     units = [{"ref": alias, "text": "A useful fact.", "provenance": {"path": alias}}]
-    decide = egress._decide_path_acquired
+    decide = egress._decide_path
     operation = None
 
     def delete_after_decision(root, path, **kwargs):
@@ -529,7 +529,7 @@ def test_terminal_packet_lifecycle_change_publishes_no_pending_claims(vault: Pat
             prior_claims = set(collector.path_outcomes)
             prior_memo = dict(egress._DECISION_MEMO)
             with monkeypatch.context() as changes:
-                changes.setattr(egress, "_decide_path_acquired", delete_after_decision)
+                changes.setattr(egress, "_decide_path", delete_after_decision)
                 with pytest.raises(egress.ReaderViewUnavailable):
                     egress.guard_working_set(vault, {"units": units}, egress.AnnotatedHits(hits=[]))
             assert collector.outcomes == prior_outcomes

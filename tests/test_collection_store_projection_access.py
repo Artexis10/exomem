@@ -435,3 +435,32 @@ def test_owner_walk_on_an_empty_policy_decides_only_marker_owned_paths(tmp_path,
         assert keep(ordinary)
         # A marker-owned path still needs the store, which no service serves here.
         assert not keep(owned)
+
+
+def test_batched_decisions_route_a_marker_owned_page_through_the_store(tmp_path):
+    """The packet guard and the page batch decide an owned page as a scalar read does."""
+    import json
+
+    from exomem.collection_store import authority
+
+    root = tmp_path / "vault"
+    owned = "Knowledge Base/Records/Work/Items/item.md"
+    (root / owned).parent.mkdir(parents=True, exist_ok=True)
+    (root / owned).write_text("---\ntype: insight\nstatus: active\n---\n\nOwned projection body.\n")
+    sid = "11111111-1111-4111-8111-111111111111"
+    marker = authority.marker_path(root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
+                         "authority": "store", "store_id": sid,
+                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+    units = [{"ref": owned + "#item", "text": "Owned projection body.", "provenance": {"path": owned}}]
+    # No service serves the store here, so the owned page is withheld, never decided as a file.
+    with request_scope(_external()):
+        assert egress.classify_units(root, units) == [egress.UNIT_WITHHELD_SILENTLY]
+        with egress.reader_view(root).page_batch() as keep:
+            assert not keep(owned)

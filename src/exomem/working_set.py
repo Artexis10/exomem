@@ -3126,8 +3126,10 @@ def _conversation_support(
             paths = frozenset(path for path in paths if keep(path))
     if not paths:
         return False, None
-    reader = visible if isinstance(visible, egress.ReaderView) else egress.ReaderView(
-        vault_root, visible or (lambda _path: True), principal=None, purpose=purpose,
+    # No reader view means nothing is withheld from this caller (`egress.reader_view`),
+    # as every other lane reads it; the final guard still decides the packet.
+    reader = visible if isinstance(visible, egress.ReaderView) else None if visible is None else egress.ReaderView(
+        vault_root, visible, principal=None, purpose=purpose,
     )
     snapshot = freshness_snapshot or find.FreshnessSnapshot(vault_root)
     fresh = snapshot.for_scope("kb")
@@ -3163,7 +3165,8 @@ def _conversation_support(
             for page, unit, _order in (records[candidate.unit_ref],)
         ]
         items = _unit_items(None, hits)
-        verdicts = reader.verdicts([_served_unit(item) for item in items])
+        verdicts = (reader.verdicts([_served_unit(item) for item in items]) if reader is not None
+                    else [egress.UNIT_KEPT] * len(items))
         admitted.extend(
             (item, records[item.ref][0])
             for item, verdict in zip(items, verdicts, strict=True) if verdict == egress.UNIT_KEPT
@@ -3997,12 +4000,12 @@ def _compile_packet(
                 witness=witness,
                 status_basis=status_basis,
             )
-            with _span(timings, "working_set.conversation"):
-                retained = _served_unit(witness) if witness is not None else None
-                licensed = retained is None or retained in packet["units"]
+            # The witness is matched by its unit ref: currency, history and
+            # deduplication may reshape the served entry without removing it.
+            licensed = witness is None or any(unit.get("ref") == witness.ref for unit in packet["units"])
             if licensed:
                 if isinstance(packet, working_set_conversation.InferredPacket):
-                    packet.witness = retained
+                    packet.witness_ref = witness.ref if witness is not None else None
                 if _origins is not None:
                     for key in (working_set_resolve.anchor_ref(source), source.path):
                         if key:

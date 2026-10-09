@@ -98,7 +98,9 @@ NONE = Conversation()
 class InferredPacket(dict[str, Any]):
     """Request-local inference marker, preserved by deepcopy but not serialized."""
 
-    witness: dict[str, Any] | None = None
+    #: The unit ref of the unit that licensed a single carry; egress drops the
+    #: carry claim when it removes that unit.
+    witness_ref: str | None = None
 
 
 _REFERENCE_FIELDS = frozenset({
