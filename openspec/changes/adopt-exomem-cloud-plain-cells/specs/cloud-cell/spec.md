@@ -318,7 +318,7 @@ The control database SHALL run on a server separate from any fleet node, provisi
 
 - use TLS with verify-full for every client;
 - separate the schema-owner role from runtime roles;
-- give the gateway and cellctl least-privilege roles that connect directly on port 5432. That port admits them only from the K3s server node's public /32, at the provider firewall, the host firewall and `pg_hba` (TLS, SCRAM, those two roles only), and over the shared private network until the control host leaves it. Both workloads run on the server node, so their database egress leaves from that /32;
+- give the gateway and cellctl least-privilege roles that connect directly on port 5432. That port admits them only from the K3s server node's public /32, at the provider firewall, the host firewall and `pg_hba` (TLS, SCRAM, those two roles only). Both workloads run on the server node, so their database egress leaves from that /32;
 - admit only the Substrate roles on its public listener, with SCRAM;
 - serve migrations through a session-mode pool, so a migration's session lock never leaks;
 - issue and renew its own public certificate on the server;
@@ -337,13 +337,12 @@ The control database SHALL run on a server separate from any fleet node, provisi
 
 #### Scenario: Gateway role from the internet
 
-- **WHEN** a client authenticates as the gateway or cellctl role on the public PgBouncer listener, or on port 5432 from any address other than the allowlisted K3s server /32 and the transitional private network
+- **WHEN** a client authenticates as the gateway or cellctl role on the public PgBouncer listener, or on port 5432 from any address other than the allowlisted K3s server /32
 - **THEN** the connection is refused
 
-#### Scenario: Either route preserves the database certificate identity
+#### Scenario: The public route preserves the database certificate identity
 
-- **WHEN** the Cloud gateway and cellctl use the database certificate hostname, resolved through the configured private alias or through public DNS
+- **WHEN** the Cloud gateway and cellctl use the database certificate hostname, resolved through public DNS
 - **THEN** they connect directly on port 5432 with full certificate trust and hostname verification
 - **AND** an untrusted or mismatched certificate is rejected
-- **AND** the chart rejects a partial or malformed hostname/address pair or a mapping absent from an enabled workload's database egress `/32` list
-- **AND** an omitted mapping leaves the hostname to public DNS and adds no host aliases to the gateway, cellctl or tenant workloads
+- **AND** the chart adds no host aliases to the gateway, cellctl or tenant workloads
