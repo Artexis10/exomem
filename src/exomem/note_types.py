@@ -293,9 +293,8 @@ SPEC = registry.RegistrySpec(
         {"attributes.role", "attributes.folder", "attributes.time_bounded"}
     ),
     usage=_usage,
-    # The authoring contract serves the shipped compiled types and folders, and
-    # search guidance the ranking types; `schema_memory` inspect serves the rest.
-    served_by="authoring",
+    # The authoring contract and search guidance already list the shipped keys.
+    summarize_keys=False,
 )
 
 

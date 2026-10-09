@@ -158,10 +158,10 @@ class RegistrySpec:
     cap: int = 512
     #: How usage counts are read: `(vault_root, snapshot) -> Usage`.
     usage: Callable[[Path, Snapshot], Any] | None = None
-    #: The bootstrap block that already serves this registry's values. The
-    #: vocabulary summary leaves the registry out; `schema_memory` inspect
-    #: still serves the live set. None: the summary lists it.
-    served_by: str | None = None
+    #: False when another bootstrap block already lists this registry's keys. The
+    #: vocabulary summary then leaves out `top`, `more` and the usage count, but it
+    #: still reports findings, new keys and a refusal.
+    summarize_keys: bool = True
 
 
 # --------------------------------------------------------------------------- #

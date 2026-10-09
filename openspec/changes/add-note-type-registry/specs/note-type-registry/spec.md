@@ -153,7 +153,7 @@ Reusable derived results that depend on note-type meaning SHALL bind to the regi
 The current semantic authoring contract SHALL state that compiled intent is a canonical destination or a type with note-type role `compiled`.
 It SHALL list the shipped compiled types and folders from the pack.
 The workflow skills SHALL say that a vault may register more and name `schema_memory(subject="note-types", operation="inspect")` as the source of the live set.
-The bootstrap vocabulary summary SHALL leave note types out, because the authoring contract and search guidance already serve the shipped types.
+The bootstrap vocabulary summary SHALL NOT list note-type keys, because the authoring contract and search guidance already list the shipped types. It SHALL still report the registry's findings, new keys and a refusal.
 No published guidance SHALL claim that the shipped list is complete.
 Released hosted profiles SHALL keep their frozen contracts and descriptors.
 

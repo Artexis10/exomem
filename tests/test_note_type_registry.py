@@ -101,6 +101,9 @@ def test_a_vault_compiled_type_takes_compiled_behaviour_until_restored(
         )
         assert saved["valid"] and saved["saved"]
         assert lexstore.catalog_semantic_identity(vault) != catalogue
+        # Bootstrap lists no note-type keys, but it still announces a new one.
+        announced = commands.op_bootstrap(vault, section="vocabulary")["vocabulary"]
+        assert announced["note-types"] == {"new": ["meeting-note"]}
 
         assert _type_factor(vault) == pytest.approx(1.15)
         assert "missing_semantic_unit" in _gate_codes(vault)
@@ -118,6 +121,7 @@ def test_a_vault_compiled_type_takes_compiled_behaviour_until_restored(
         )
         assert restored["removed_keys"] == ["meeting-note"]
         assert lexstore.catalog_semantic_identity(vault) == catalogue
+        assert "note-types" not in commands.op_bootstrap(vault, section="vocabulary")["vocabulary"]
 
         assert _type_factor(vault) == 1.0
         assert "missing_semantic_unit" not in _gate_codes(vault)
@@ -192,6 +196,30 @@ def test_a_save_refuses_a_meaning_outside_the_closed_schema(
     with pytest.raises(registry.RegistryError, match=code):
         _save(vault, {"upsert": delta}, "attempt a meaning the schema does not hold")
     assert note_types.registry_path(vault).read_bytes() == overlay
+
+
+def test_a_registered_folder_routes_like_a_shipped_one(vault: Path) -> None:
+    from exomem.governance.principal import library_scope
+
+    def misfiled_insight_codes() -> set[str]:
+        with library_scope():
+            validation = commands.op_manage_memory_file(
+                vault,
+                operation="create",
+                path="Knowledge Base/Notes/Meetings/2026-10-misfiled.md",
+                content="# Misfiled\n\nAn insight filed with the meetings.\n",
+                frontmatter={"type": "insight", "status": "active"},
+                validate_only=True,
+            )
+        return {finding["code"] for finding in validation["contract_result"]["blocking_findings"]}
+
+    # Before the save the folder belongs to no type, so the insight is off its route.
+    assert "COMPILED_DESTINATION_MISMATCH" in misfiled_insight_codes()
+    _save(vault, {"upsert": {"meeting-note": MEETING_TYPE}}, "meetings are conclusions")
+    # After it the folder routes to `meeting-note`, so the insight has the wrong type.
+    after = misfiled_insight_codes()
+    assert "COMPILED_TYPE_MISMATCH" in after
+    assert "COMPILED_DESTINATION_MISMATCH" not in after
 
 
 def test_the_shipped_pack_reproduces_each_former_type_set() -> None:

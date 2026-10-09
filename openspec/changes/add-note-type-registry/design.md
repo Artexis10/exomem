@@ -74,7 +74,7 @@ Sites normalise the type value differently today. Activation casefolds and strip
 
 The semantic authoring contract states the role rule: `compiled_intent = canonical destination OR the type's note-type role is compiled`. It lists the shipped compiled types and their folders, which it renders from the pack at import, so the list has one source. The skills rendered from it also say that a vault may register more types and that `schema_memory(subject="note-types", operation="inspect")` serves the live set. The contract stays vault-independent, because its digest addresses fixed content.
 
-The note-type registry sets `served_by="authoring"`, so the bootstrap `vocabulary` summary leaves it out. The authoring contract already serves the shipped compiled types and folders, and search guidance the ranking types; a summary row would repeat them in the budgeted reference payload.
+The note-type registry sets `summarize_keys=False`, so the bootstrap `vocabulary` summary lists no note-type keys. The authoring contract already lists the shipped compiled types and folders, and search guidance the ranking types; a key listing would repeat them in the budgeted reference payload. The row still reports findings, new keys and a refusal.
 
 The skills lose the sentence "`COMPILED_TYPES` contains exactly". S4a owns that part of programme task 2.2. The contract version moves once more after S3, from 6 to 7. A one-off script or edit updates the 10 scaffold files that quote the concise contract. Then `package-skills --sync-plugin`, `cloud-plugin.py build` and `hosted-plugin.py regenerate` refresh the copies; the regeneration touches only v5.
 
