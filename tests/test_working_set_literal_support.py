@@ -69,6 +69,28 @@ def test_withheld_support_including_notice_only_is_not_a_licence(vault, monkeypa
         assert packet["abstention"]["reason"] == "unresolved"
 
 
+
+def test_a_withheld_subject_in_the_conversation_answers_as_an_absent_one(vault, monkeypatch):
+    conversation = {
+        "recent": [{"role": "user", "text": "Compare Lattice transport with Restricted dependency."}],
+        "refs": [SUBJECT, SECRET],
+    }
+    _write(vault, SUBJECT, f"- [fact] {SUPPORT} ^support")
+    _write(vault, SECRET, f"- [fact] {SUPPORT} ^support", "Restricted dependency")
+    write_scope(vault, paths="Notes/Restricted/**")
+    write_rule(vault, ceiling=0)
+    _ready(vault, monkeypatch)
+    withheld = _activate(vault, conversation=conversation)
+    (vault / SECRET).unlink()
+    _ready(vault, monkeypatch)
+    absent = _activate(vault, conversation=conversation)
+    for packet in (withheld, absent):
+        packet.pop("continuity", None)
+        packet.pop("timings", None)
+        assert packet["generation"].get("carried_by") == "conversation"
+        assert packet["anchors"][0]["title"] == "Lattice transport"
+    assert withheld == absent
+
 def test_hidden_units_do_not_spend_the_admitted_support_bound(vault, monkeypatch):
     _write(vault, SECRET, "Private fixture.", "Restricted dependency")
     hidden = "\n".join(f"- [fact] Entry {i} cites [[Restricted dependency]]. ^a-{i:03}" for i in range(201))
