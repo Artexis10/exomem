@@ -56,6 +56,10 @@ Single-key comparisons on `entity`, `source`, `evidence` and `collection` outsid
 
 Admission follows S3 exactly. A caller who may not read the overlay classifies against the shipped pack only. So an overlay never shadows, removes, redirects or changes a shipped type, and an extension key never collides with a shipped key. An operation that depends on an unavailable definition reports unavailable rather than guessing. Ranking is a soft signal, so a type whose role is unavailable ranks neutral.
 
+Read-side selection (eligibility, claim scope, contradiction candidates, audit sets) classifies against the shipped pack only for such a caller, so a withheld type matches no predicate there, exactly as an unknown type did before the registry. It never becomes unregistered debt for that caller. The semantic write gate, observe and Tier-2 identity checks need the definition to choose a finding, so they report `NOTE_TYPE_DEFINITION_UNAVAILABLE` and refuse.
+
+Shared state that no caller reads except through a per-caller serve reads the owner's view: the activation census, the stored graph and artifact-role eligibility bits, the claim store, bridge validation and the catalogue identity.
+
 The pack holds every type that the product writes or reads, so a product page never becomes debt or depends on an overlay. After admitted resolution, a type that the registry does not define matches no predicate, as today. The audit reports its pages as unregistered debt.
 
 ### 3. Type normalisation

@@ -79,6 +79,7 @@ from . import find as find_module
 from . import (
     find_types,
     foreground_priority,
+    note_types,
     query_log,
     retrieval_models,
     semantic_census,
@@ -2150,8 +2151,12 @@ def op_bootstrap(
         },
         "search_guidance": {
             "prefer_compiled_default": True,
-            "compiled_types": ["research-note", "insight", "failure", "pattern", "entity"],
-            "raw_types": ["source", "evidence"],
+            # The shipped types `find` boosts and treats as raw. A vault may register
+            # more; the vocabulary section (the core's `vocabulary` pointer) lists them.
+            "compiled_types": [
+                note_type.key for note_type in note_types.shipped(note_types.ranks_as_compiled)
+            ],
+            "raw_types": [note_type.key for note_type in note_types.shipped(note_types.raw)],
             "semantic_recall": {
                 "result_levels": ["page", "unit", "mixed"],
                 "structured_filters": (
@@ -2635,9 +2640,8 @@ def op_find(
             candidate count, not wall-clock latency: the synchronous model
             call has no safe cancellation boundary.
         prefer_compiled: When true (default), applies a small boost to
-            compiled types (insight, pattern, failure, research-note,
-            entity) and a small penalty to raw `source` after fusion
-            AND rerank. Reflects the KB's epistemic hierarchy. Set
+            note-type roles `compiled` and `entity` and a small penalty to
+            role `source` after fusion AND rerank. Reflects the KB's epistemic hierarchy. Set
             false to retrieve raw source discussion verbatim (e.g.
             "what did I capture from Dr. X").
         prefer_active: When true (default), soft-demotes `status:
@@ -4440,7 +4444,9 @@ def op_get(
         out["body_chars"] = len(str(out.get("body", "")))
     if (
         not frontmatter_only
-        and str(result.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+        and note_types.Basis(vault_root).selects(
+            str(result.frontmatter.get("type") or "").casefold(), note_types.raw
+        )
         and out.get("body") == result.body
         and out.get("frontmatter") == result.frontmatter
         and out.get("content_hash") == result.content_hash
@@ -7341,7 +7347,9 @@ def op_read_memory(
         if (
             unit.status == "found"
             and unit.unit is not None
-            and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            and note_types.Basis(vault_root).selects(
+                str(page.frontmatter.get("type") or "").casefold(), note_types.raw
+            )
             and released.get("frontmatter") == page.frontmatter
         ):
             try:
@@ -10508,8 +10516,8 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash. For entity-types, relations, source-kinds, domains, statuses and
-    categories: inspect lists the live vocabulary and usage; propose previews
+    the current hash. For entity-types, relations, source-kinds, domains, statuses,
+    note-types and categories: inspect lists the live vocabulary and usage; propose previews
     a delta; save applies upsert, alias or deprecate with expected_hash and why;
     history lists kept versions; restore reverts one without rewriting pages.
     Operations: references/operation-routing.md.
@@ -10518,7 +10526,8 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract, categories, entity-types, relations, source-kinds, domains, statuses,
-            traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
+            note-types, traversal-profiles, context-roles, activation-conventions, or
+            workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.

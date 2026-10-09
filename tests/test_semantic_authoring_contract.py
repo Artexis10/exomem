@@ -21,8 +21,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    6,
-    "sha256:0d4fa9cb6fedc9477ab1cc08a2338db41541fc06f50b2d8c93ca3ed8021ea22a",
+    7,
+    "sha256:d5037b3bc2046c385c780130a7228d21d917d208818671088c0067e0b8a8479a",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -69,7 +69,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 6
+    assert contract["version"] == 7
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -215,7 +215,8 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     assert applicability["compact_preferred"] is True
     assert applicability["duplicate_compact_for_rich_required"] is False
     assert applicability["compiled_destinations"] == COMPILED_DESTINATIONS
-    assert set(applicability["compiled_types"]) == set(COMPILED_DESTINATIONS)
+    assert "note-type role is compiled" in applicability["compiled_intent"]
+    assert 'bootstrap(section="vocabulary")' in applicability["compiled_destinations_rule"]
     assert applicability["required_status_class"] == "live"
     route = applicability["status_registry"]
     assert route["tool"] == "schema_memory"
@@ -539,15 +540,15 @@ def test_contract_is_deeply_immutable_and_as_dict_is_detached() -> None:
     with pytest.raises(TypeError):
         contract.compact["category"]["role"] = "changed"  # type: ignore[index]
     with pytest.raises(AttributeError):
-        contract.minimum_semantic_unit["compiled_types"].append("entity")
+        contract.minimum_semantic_unit["applies_when"].append("entity")
 
     detached = contract.as_dict()
     detached["compact"]["category"]["role"] = "changed"
-    detached["minimum_semantic_unit"]["compiled_types"].append("entity")
+    detached["minimum_semantic_unit"]["applies_when"].append("entity")
 
     fresh = contract.as_dict()
     assert fresh["compact"]["category"]["role"] != "changed"
-    assert "entity" not in fresh["minimum_semantic_unit"]["compiled_types"]
+    assert "entity" not in fresh["minimum_semantic_unit"]["applies_when"]
 
 
 def test_contract_and_renderers_are_stable_across_process_hash_seeds() -> None:

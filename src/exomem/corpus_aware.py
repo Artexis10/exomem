@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import call_spans, lifecycle_statuses, recall_space, runtime_resources
+from . import call_spans, lifecycle_statuses, note_types, recall_space, runtime_resources
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -1339,6 +1339,7 @@ def detect_contradictions(
     from . import find as find_module
 
     status_basis = lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
     self_canon = _canon(self_path) if self_path else None
     declared = _declared_pair_filter(vault_root, self_path)
     out: list[DupCandidate] = []
@@ -1356,7 +1357,7 @@ def detect_contradictions(
             continue
         # Restrict to active compiled conclusions in a writeable tree: the only
         # candidates a contradiction can actually be reconciled against.
-        if page.page_type not in find_module._COMPILED_TYPES:
+        if not type_basis.selects(page.page_type, note_types.ranks_as_compiled):
             continue
         if status_basis.classify(page.frontmatter.get("status")).historical:
             continue

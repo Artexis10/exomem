@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import curation, provenance, retained_inputs
+from . import curation, note_types, provenance, retained_inputs
 from . import episode_model as model
 from .episode_store import EpisodeStore
 from .get_page import GetResult
@@ -212,7 +212,9 @@ class EpisodeInputOwner:
         digest = model._hash("exomem-episode-input-page-v1", canonical, page.content_hash)
         version_scheme = (
             model.MATERIAL_EVIDENCE_SCHEME
-            if str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            if note_types.Basis(self.vault_root).selects(
+                str(page.frontmatter.get("type") or "").casefold(), note_types.raw
+            )
             else None
         )
         try:

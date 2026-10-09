@@ -36,6 +36,7 @@ from . import (
     markdown_relations,
     memory_refs,
     mutation_lock,
+    note_types,
     recall_policy,
     relation_registry,
     reserved_paths,
@@ -7559,6 +7560,7 @@ class EpistemicGraphIndex:
         from . import activation, context_refs, relation_queue, review_state, semantic_contract
 
         status_basis = status_basis or lifecycle_statuses.Basis(self.vault_root)
+        type_basis = note_types.Basis(self.vault_root)
         page_cap = min(50, max(0, int(limit_pages)))
         item_cap = min(64, max(0, int(limit_per_page)))
         source_cap = min(200, max(page_cap, page_cap * 4))
@@ -7614,8 +7616,11 @@ class EpistemicGraphIndex:
                     tags=json.loads(row[8]),
                 )
                 if (
-                    not activation.structurally_eligible_for_types(
-                        self.vault_root, page, page_types=activation._ELIGIBLE_TYPES
+                    not activation.structurally_eligible(
+                        self.vault_root,
+                        page,
+                        selects=note_types.governed_endpoint,
+                        type_basis=type_basis,
                     )
                     or not status_basis.classify(row[7]).live
                 ):
@@ -10093,8 +10098,12 @@ def _file_node(
         origin_date=str(origin_date) if origin_date not in (None, "") else None,
         updated_date=str(updated) if updated not in (None, "") else None,
         access_tier=access.access_tier(vault_root, page.rel_path),
-        review_eligible=activation.structurally_eligible_for_types(
-            vault_root, page, page_types=activation._ELIGIBLE_TYPES
+        # The producer's stored bit is never served, so it reads the owner's view.
+        review_eligible=activation.structurally_eligible(
+            vault_root,
+            page,
+            selects=note_types.governed_endpoint,
+            type_basis=note_types.Basis(vault_root, owner_local=True),
         ),
         activation_signal_version=activation._signal_version(page),
         exomem_id=memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),

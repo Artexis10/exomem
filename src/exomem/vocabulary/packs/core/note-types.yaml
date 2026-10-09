@@ -1,0 +1,63 @@
+# The note types Exomem ships: every `type:` value the product writes or reads.
+# A vault adds its own types in `_Schema/note-types.yaml`; it never edits this
+# pack, and an overlay never changes a type defined here.
+#
+# `role` is the note-type role: compiled, entity, source or evidence. A type
+# without a role matches no role predicate. A compiled type declares its one
+# `Notes/<Name>` folder. `time_bounded` marks a compiled type whose pages
+# record one bounded period; `sources: required` marks a type whose pages
+# must cite their sources.
+schema_version: 1
+registry: note-types
+entries:
+  research-note:
+    label: Research note
+    description: Findings from a research thread in one project.
+    attributes: {role: compiled, folder: Notes/Research, sources: required}
+  insight:
+    label: Insight
+    description: One durable conclusion and why it holds.
+    attributes: {role: compiled, folder: Notes/Insights, sources: required}
+  failure:
+    label: Failure
+    description: Something that went wrong, its cause and the lesson.
+    attributes: {role: compiled, folder: Notes/Failures, sources: required}
+  pattern:
+    label: Pattern
+    description: A recurring structure seen across several cases.
+    attributes: {role: compiled, folder: Notes/Patterns, sources: required}
+  experiment:
+    label: Experiment
+    description: A bounded trial with a hypothesis and an outcome.
+    attributes: {role: compiled, folder: Notes/Experiments, time_bounded: true}
+  production-log:
+    label: Production log
+    description: The record of one produced artifact and its reception.
+    attributes: {role: compiled, folder: Notes/Productions, time_bounded: true}
+  entity:
+    label: Entity
+    description: A stable identity whose type lives in the entity-type registry.
+    attributes: {role: entity}
+  source:
+    label: Source
+    description: A raw capture that compiled pages cite.
+    attributes: {role: source}
+  evidence:
+    label: Evidence
+    description: A preserved artifact that supports a claim.
+    attributes: {role: evidence}
+  collection:
+    label: Collection
+    description: A structured collection's manifest page.
+  collection-summary:
+    label: Collection summary
+    description: The generated summary page of a structured collection.
+  dataset:
+    label: Dataset card
+    description: The searchable card that points at one data file.
+  adoption-manifest:
+    label: Adoption manifest
+    description: The saved report of an existing-vault adoption scan.
+  adoption-run-manifest:
+    label: Adoption run manifest
+    description: The saved record of one adoption run.

@@ -33,6 +33,7 @@ from . import (
     foreground_priority,
     freshness,
     lifecycle_statuses,
+    note_types,
     recall_policy,
     recall_space,
     request_budget,
@@ -1103,6 +1104,7 @@ def find(
     catalog_proof_out: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
     admit_path: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -1180,9 +1182,9 @@ def find(
     the window are dropped (undated hits drop too). All None/off by default.
 
     `prefer_compiled`: when True (default), applies a small multiplicative
-    boost to fused/rerank scores for COMPILED page types (insight, pattern,
-    failure, research-note, entity) and a small penalty for raw `source`
-    pages. Reflects the KB's epistemic hierarchy — compiled distillations
+    boost to fused/rerank scores for pages whose note-type role is
+    `compiled` or `entity` and a small penalty for role `source`; the
+    ranking configuration maps each role to its knob. Reflects the KB's epistemic hierarchy — compiled distillations
     are the intentional output, sources are inputs. Set False to retrieve
     raw source discussion verbatim (e.g. "what did I capture from Dr. X").
 
@@ -1213,6 +1215,14 @@ def find(
     scanning when the catalogue cannot answer.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = type_basis or note_types.Basis(vault_root)
+
+    def _dependency() -> tuple[tuple[str, str], tuple[str, str]]:
+        return (status_basis.dependency, type_basis.dependency)
+
+    def _current(dependency: tuple[tuple[str, str], tuple[str, str]]) -> bool:
+        return status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
     if scope not in ("kb", "vault", "kb-only"):
@@ -1539,7 +1549,7 @@ def find(
                     cached_units = _FIND_CACHE.get(unit_cache_key)
                     if cached_units is not None:
                         _FIND_CACHE.move_to_end(unit_cache_key)
-            if cached_units is not None and status_basis.matches(cached_units[1]):
+            if cached_units is not None and _current(cached_units[1]):
                 if timings is not None:
                     timings.cache["hit"] = True
                 if unit_algebra.status == "complete":
@@ -1579,7 +1589,7 @@ def find(
                     unit.relation_match = _relation_match_dict(match, matched="parent")
         if unit_cache_key is not None and not degraded and not failed:
             with _FIND_CACHE_LOCK:
-                _FIND_CACHE[unit_cache_key] = (copy.deepcopy(unit_hits), status_basis.dependency)
+                _FIND_CACHE[unit_cache_key] = (copy.deepcopy(unit_hits), _dependency())
                 _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
                 _FIND_CACHE.move_to_end(unit_cache_key)
                 _trim_find_cache(cache_size)
@@ -1719,7 +1729,7 @@ def find(
             and prior_key is not None
             and prior_hits is not None
             and prior_checkpoints is not None
-            and status_basis.matches(prior_hits[1])
+            and _current(prior_hits[1])
         ):
             safe, advanced = _keyword_cache_delta_is_safe(
                 vault_root,
@@ -1742,7 +1752,7 @@ def find(
                         _FIND_CACHE[cache_key] = cached
                         _FIND_CACHE_CHECKPOINTS[cache_key] = advanced
                         _FIND_CACHE.move_to_end(cache_key)
-        if cached is not None and status_basis.matches(cached[1]):
+        if cached is not None and _current(cached[1]):
             if timings is not None:
                 timings.cache["hit"] = True
             _set_rerank_timing_profile(
@@ -1878,6 +1888,7 @@ def find(
                 prefer_compiled=prefer_compiled,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
+                type_basis=type_basis,
                 prefer_used=prefer_used,
                 config=resolved_config,
                 timings=timings,
@@ -2062,7 +2073,7 @@ def find(
         and not unproven_graph_key
     ):
         with _FIND_CACHE_LOCK:
-            _FIND_CACHE[cache_key] = (copy.deepcopy(hits), status_basis.dependency)
+            _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
             if cache_checkpoints is not None:
                 _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
             else:
@@ -4281,6 +4292,7 @@ def _find_semantic(
     query_vector_provider: Callable[[], Any] | None = None,
     pending: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -4294,6 +4306,7 @@ def _find_semantic(
     from . import embeddings, lexstore, readiness, scene_frames
 
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = type_basis or note_types.Basis(vault_root)
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
@@ -4353,6 +4366,7 @@ def _find_semantic(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             status_basis=status_basis,
+            type_basis=type_basis,
             prefer_used=prefer_used,
             config=config,
             timings=timings,
@@ -4772,7 +4786,7 @@ def _find_semantic(
                         [] if retrieval_trace is not None else None
                     )
                     if prefer_compiled:
-                        factor = _type_multiplier(h.type, config)
+                        factor = find_policy.type_multiplier(h.type, config, type_basis)
                         before = adjusted
                         adjusted *= factor
                         if chain is not None:
@@ -5264,16 +5278,6 @@ def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
     return [p for _, p in matches]
 
 
-# KB epistemic hierarchy: compiled distillations are the intentional output,
-# raw sources are inputs. Surfaced via prefer_compiled=True post-RRF boost.
-# Multipliers are small — designed as tie-breakers between similar fused
-# scores, not as dominators. Tune in one place if needed.
-_COMPILED_TYPES = find_policy.COMPILED_TYPES
-_SOURCE_TYPES = find_policy.SOURCE_TYPES
-_COMPILED_BOOST = find_policy.COMPILED_BOOST
-_SOURCE_PENALTY = find_policy.SOURCE_PENALTY
-_SUPERSEDED_PENALTY = find_policy.SUPERSEDED_PENALTY
-_type_multiplier = find_policy.type_multiplier
 _status_multiplier = find_policy.status_multiplier
 _is_temporal_query = find_policy.is_temporal_query
 _classify_intent = find_policy.classify_intent
@@ -5292,7 +5296,9 @@ def _apply_type_boost(
     vault_root: Path,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
-    return find_policy.apply_type_boost(fused, _page_of(vault_root), config)
+    return find_policy.apply_type_boost(
+        fused, _page_of(vault_root), config, type_basis=note_types.Basis(vault_root)
+    )
 
 
 def _apply_status_demotion(
@@ -5315,6 +5321,7 @@ def _apply_post_rrf_multipliers(
     temporal: bool,
     page_of,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
     usage_map: dict[str, float] | None = None,
 ) -> list[tuple[str, float]]:
     return find_policy.apply_post_rrf_multipliers(
@@ -5324,6 +5331,7 @@ def _apply_post_rrf_multipliers(
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         status_basis=status_basis,
+        type_basis=type_basis,
         temporal=temporal,
         page_of=page_of,
         usage_map=usage_map,

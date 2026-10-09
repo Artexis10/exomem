@@ -38,6 +38,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
     from .. import (
         entity_types,
         lifecycle_statuses,
+        note_types,
         relation_registry,
         semantic_language_registry,
         source_taxonomy,
@@ -52,6 +53,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             source_taxonomy.DOMAIN_SPEC,
             semantic_language_registry.CATEGORY_SPEC,
             lifecycle_statuses.SPEC,
+            note_types.SPEC,
         )
     }
 

@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from . import semantic_language_registry
+from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 6
+AUTHORING_CONTRACT_VERSION = 7
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 STATUS_CLASSIFICATION_RULE = (
@@ -338,24 +338,19 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "compact_preferred": True,
         "duplicate_compact_for_rich_required": False,
         "compiled_intent": (
-            "canonical_compiled_destination(path) OR normalized_type in COMPILED_TYPES"
+            "canonical_compiled_destination(path) OR the normalized type's note-type role "
+            "is compiled"
         ),
-        "compiled_types": [
-            "experiment",
-            "failure",
-            "insight",
-            "pattern",
-            "production-log",
-            "research-note",
-        ],
+        # Rendered from the shipped pack, so the list has one source. The contract
+        # is vault-independent: a vault-defined type never enters it.
         "compiled_destinations": {
-            "experiment": "Notes/Experiments",
-            "failure": "Notes/Failures",
-            "insight": "Notes/Insights",
-            "pattern": "Notes/Patterns",
-            "production-log": "Notes/Productions",
-            "research-note": "Notes/Research",
+            note_type.key: note_type.folder
+            for note_type in note_types.shipped(note_types.compiled)
         },
+        "compiled_destinations_rule": (
+            'More compiled types may be registered; bootstrap(section="vocabulary") '
+            "serves the live set."
+        ),
         "applies_when": [
             "the path and normalized compiled type structurally match",
             "the result is writable managed Markdown in the governed subtree",
@@ -606,6 +601,10 @@ def render_concise(
     portable_rules = " ".join(portable["rules"])
     applies = "; ".join(minimum["applies_when"])
     exemptions = ", ".join(minimum["exemptions"])
+    destinations = ", ".join(
+        f"`{page_type}` in `{folder}`"
+        for page_type, folder in minimum["compiled_destinations"].items()
+    )
     compact_exclusions = "; ".join(compact["exclusions"])
     metadata = ", ".join(f"`{row}`" for row in rich["metadata_syntax"])
     breadth_block = "\n".join(portable["examples"]["breadth"])
@@ -651,6 +650,7 @@ def render_concise(
         "If the exposed bootstrap schema lacks `section`, use "
         '`bootstrap(profile="full")` instead; released profiles reject section arguments. '
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
+        f"Shipped compiled types: {destinations}. {minimum['compiled_destinations_rule']} "
         f"{minimum['structural_rule']} The minimum predicate applies when "
         f"{applies}. "
         f"{minimum['lifecycle_rule']}\n"
