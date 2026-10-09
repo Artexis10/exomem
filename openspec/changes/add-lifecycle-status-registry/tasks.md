@@ -16,6 +16,8 @@ The core and harness shards of that run reported 29,168 test cases: no failures,
 - 2.6 `tests/test_working_set_carry.py::test_hidden_status_contributors_do_not_change_public_carry_at_production_volume`, `tests/test_working_set_carry_revision_rarity.py::test_retired_revisions_do_not_count_toward_a_words_rarity`, `::test_warm_carry_rarity_changes_when_new_current_pages_share_the_name`, `::test_carry_rarity_cache_keeps_filtered_counts_separate`. Measurements: design.md, "Carry rarity at production volume (task 2.6)".
 - 2.7 `tests/test_relation_queue.py::test_registry_retirement_changes_an_already_built_relation_queue`, `tests/test_relation_queue_graph_native.py::test_queue_uses_one_fixed_cost_graph_batch_for_3600_pages`, `tests/test_dreamer_hydration_family.py::test_a_status_registry_save_and_restore_change_hydration_without_page_rewrites`, `tests/test_artifact_role_projection.py::test_stored_role_support_rechecks_status_definitions_without_reconcile`. Measurements: design.md, "Relation queue at 3,600 pages (task 2.7)" and "Hydration after a status registry save and restore (task 2.7)".
 - 2.8 `tests/test_retained_inputs.py::test_private_status_blocks_new_binding_but_not_retained_unit_disclosure`, `tests/test_vocabulary_projection.py::test_registry_only_retirement_changes_pairs_but_cannot_prove_empty`, `::test_note_pair_pages_cover_all_pairs_without_a_quadratic_intermediate`, `::test_real_generic_edge_and_independent_sources_produce_bounded_work`, `::test_origin_discovery_pages_before_eligibility_without_counting_cross_page_copies`, `tests/test_vocabulary_registries.py::test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes`.
+- 3.1 The existing producers regenerated the skills, tool schemas, plugin trees and cloud packages, and `scripts/cloud-plugin.py check`, `scripts/hosted-plugin.py check` and `scripts/generate-capabilities.py --check` report them current. The compact reference payload is 63,296 bytes against its 63,300-byte bound, and the worst core payload is 14,352 bytes against 15,000.
+- 3.2 An independent reviewer approved the batch after three correction rounds, with no blocking findings. The review found no vocabulary fixed in code and recorded `_OPTIONAL_PAGE_KEYS` with its C6 reason. Round 2 weighed source +347/-122 against tests +194/-114, and round 3 weighed source +12/-4 against tests +211/-1.
 
 ## 1. Registry and admission
 
@@ -38,7 +40,7 @@ The core and harness shards of that run reported 29,168 test cases: no failures,
 
 ## 3. Integrated delivery
 
-- [ ] 3.1 Regenerate affected skills and surfaces through existing producers; verify budgets, frozen artifact identities and only available bootstrap or registry routes.
-- [ ] 3.2 Obtain exact independent review; record C6 reasons, product/proof weight, scoped baseline failure differences and the net shipping call.
+- [x] 3.1 Regenerate affected skills and surfaces through existing producers; verify budgets, frozen artifact identities and only available bootstrap or registry routes.
+- [x] 3.2 Obtain exact independent review; record C6 reasons, product/proof weight, scoped baseline failure differences and the net shipping call.
 - [ ] 3.3 Pass required full repository CI and installed workflow proof; merge the cohesive batch and verify the ordinary release outcome.
 - [ ] 3.4 Synchronize and archive this change with shipped evidence; verify strict OpenSpec checks and leave incomplete parent tasks open.
