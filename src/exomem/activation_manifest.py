@@ -519,16 +519,11 @@ def _owner_local_classes(vault_root: Path, labels: Iterable[str]) -> dict[str, s
     """Classify recorded labels as the owner-local producer of the shared boundary.
 
     The manifest is governed state shared by every caller and never served, so
-    whoever prepares it records the same boundary. Its release decisions go to
-    a boundary of their own, never to the preparing caller's receipt.
+    whoever prepares it records the same boundary.
     """
-    from .governance import egress
-    from .governance import principal as principal_module
+    from .governance.principal import owner_local_producer
 
-    with (
-        egress.disclosure_boundary(Path(vault_root), "activation_boundary"),
-        principal_module.request_scope(principal_module.owner_principal(surface="library")),
-    ):
+    with owner_local_producer(vault_root, "activation_boundary"):
         basis = lifecycle_statuses.Basis(Path(vault_root))
         return {label: basis.classify(label).lifecycle_class for label in labels}
 

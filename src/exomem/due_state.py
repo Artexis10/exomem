@@ -914,22 +914,15 @@ def _owner_local(producer: Callable[..., Any]) -> Callable[..., Any]:
     """Compute what the projection stores as the owner-local producer.
 
     The stored projection is shared by every audience, and each serve filters it
-    for its own caller. A projection computed from one caller's view would make
-    the stored entries depend on whoever wrote last, so the producer binds the
-    owner-local principal even under a bound request. Its release decisions go
-    to a boundary of their own, never to the caller's receipt; nothing it
-    computes returns to a caller except through a per-caller serve.
+    for its own caller, so nothing it computes returns to a caller except through
+    a per-caller serve.
     """
 
     @functools.wraps(producer)
     def run(vault_root: Path, *args: Any, **kwargs: Any) -> Any:
-        from .governance import egress as egress_module
-        from .governance import principal as principal_module
+        from .governance.principal import owner_local_producer
 
-        with (
-            egress_module.disclosure_boundary(Path(vault_root), "due_state_projection"),
-            principal_module.request_scope(principal_module.owner_principal(surface="library")),
-        ):
+        with owner_local_producer(vault_root, "due_state_projection"):
             return producer(vault_root, *args, **kwargs)
 
     return run
