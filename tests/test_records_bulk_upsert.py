@@ -317,6 +317,7 @@ def test_skip_commits_the_accepted_rows_once_and_reports_the_rejected(vault_root
     assert _audit_gap(vault_root, manifest)["status"] == "ok"
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_batch_that_would_change_nothing_leaves_the_audit_head_alone(vault_root: Path) -> None:
     head = _manifest(vault_root).audit_head
     rows = _rows(2)
@@ -424,6 +425,7 @@ def test_rows_without_a_complete_natural_key_insert_only_and_rerun_duplicates(
     assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == 4
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_natural_keyed_rows_report_their_identity_kind(vault_root: Path) -> None:
     assert {row["identity"] for row in _bulk(vault_root, _rows(2))["rows"]} == {"natural-key"}
 
@@ -469,6 +471,7 @@ def test_the_row_cap_admits_exactly_its_bound(vault_root: Path) -> None:
 
 
 @pytest.mark.parametrize("rows", [[], "rows", [1], [{"nope": 1}], [{}]])
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_malformed_row_list_is_refused_or_rejected(vault_root: Path, rows: Any) -> None:
     before = _state(vault_root)
     try:
@@ -529,6 +532,7 @@ def test_the_command_action_runs_a_bulk_upsert(vault_root: Path) -> None:
     assert result["counts"]["inserted"] == 3
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_the_command_action_refuses_arguments_of_other_actions(vault_root: Path) -> None:
     with pytest.raises(OpError, match="arguments do not match"):
         record_memory(

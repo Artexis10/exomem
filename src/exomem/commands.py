@@ -1473,17 +1473,21 @@ def op_bootstrap(
             "available": False,
             "unavailable_reason": "The active surface does not export the Records command.",
         }
+    from .planning_values import PlanningValues
+
+    # A released profile keeps its published lists; the live surface adds the vault's.
+    planning_values = PlanningValues(None if frozen_profile else vault_root)
     planning_contract = {
         "available": "plan_memory" in active_product_names,
         "route": {
             "tool": "plan_memory",
             "actions": ["inspect", "create", "query", "add", "update", "triage"],
         },
-        "kinds": ["area", "outcome", "initiative", "work-item"],
-        "horizons": ["inbox", "week", "month", "quarter", "year", "multi-year"],
+        "kinds": list(planning_values.values("kind")),
+        "horizons": list(planning_values.values("horizon")),
         "lifecycle": ["active", "archived"],
-        "priorities": ["critical", "high", "medium", "low", "none"],
-        "commitments": ["uncommitted", "considering", "committed"],
+        "priorities": list(planning_values.values("priority")),
+        "commitments": list(planning_values.values("commitment")),
         "default_capture": (
             "Default capture creates an active candidate work-item with none priority, "
             "uncommitted commitment, unknown health, and inbox horizon."
@@ -10061,6 +10065,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "collections-store",
         "collections-store-adopt-local",
     ] = "audit",
     categories: list[str] | None = None,
@@ -10336,6 +10341,26 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "collections-store":
+        if (
+            categories is not None
+            or dry_run is not True
+            or rebuild_embeddings
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or apply is not None
+            or plan_id is not None
+            or why is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight with "
+                "dry_run=true; migrating a vault is the declared offline upgrade step"
+            )
+        from .collection_store import preflight as store_preflight
+
+        return store_preflight.preflight(vault_root)
     if mode == "collections-store-adopt-local":
         from .collection_store import admission as store_admission
 
@@ -10519,17 +10544,18 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash. For entity-types, relations, source-kinds, domains, statuses and
-    categories: inspect lists the live vocabulary and usage; propose previews
-    a delta; save applies upsert, alias or deprecate with expected_hash and why;
-    history lists kept versions; restore reverts one without rewriting pages.
+    the current hash. For a vocabulary registry: inspect lists the live vocabulary
+    and usage; propose previews a delta; save applies upsert, alias or deprecate
+    with expected_hash and why; history lists kept versions; restore reverts one
+    without rewriting pages.
     Operations: references/operation-routing.md.
 
     Args:
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, source-kinds, domains, statuses,
-            traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
+        subject: contract; a vocabulary registry (categories, entity-types, relations,
+            source-kinds, domains, statuses or planning-values); traversal-profiles,
+            context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.

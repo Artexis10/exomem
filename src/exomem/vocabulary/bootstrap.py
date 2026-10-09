@@ -4,7 +4,9 @@ For each registry the block lists at most `TOP_KEYS` active keys, ordered by
 use and carrying their counts, from a current projection. Without one there is
 no order by use: it lists active keys in registry order and names the reason
 under `unavailable`. `more` counts the active keys a listing left
-out. It never reports a zero it did not count.
+out. It never reports a zero it did not count. A registry whose spec sets
+`summarize_keys` to false lists no keys. It still reports its findings, its new
+keys and `unavailable`, and the block leaves it out only when none applies.
 
 A key a save or an auto-registration added within `NEW_WINDOW_DAYS` is listed
 under `new`, at most `NEW_KEYS` per registry, with the window's start date in
@@ -88,20 +90,26 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
             registries[name] = {"unavailable": refusal["reason"]}
             continue
         snapshot = registry.load(spec, vault_root)
-        active = [entry for entry in snapshot.entries.values() if entry.status == "active"]
         row: dict[str, Any] = {}
-        usage = _usage(vault_root, spec, snapshot)
-        if usage is not None and usage.available:
-            ordered = sorted(active, key=lambda entry: (-usage.counts.get(entry.key, 0), entry.key))
-            row["top"] = {entry.key: usage.counts.get(entry.key, 0) for entry in ordered[:TOP_KEYS]}
-            row["count_source"] = usage.source
-        else:
-            row["top"] = [entry.key for entry in active[:TOP_KEYS]]
-            row["unavailable"] = usage.reason if usage is not None else "not_counted"
-        listed = len(row.get("top", ()))
-        if listed and len(active) > listed:
-            row["more"] = f"+{len(active) - listed} more"
-        row["findings"] = len(snapshot.findings)
+        if spec.summarize_keys:
+            active = [entry for entry in snapshot.entries.values() if entry.status == "active"]
+            usage = _usage(vault_root, spec, snapshot)
+            if usage is not None and usage.available:
+                ordered = sorted(
+                    active, key=lambda entry: (-usage.counts.get(entry.key, 0), entry.key)
+                )
+                row["top"] = {
+                    entry.key: usage.counts.get(entry.key, 0) for entry in ordered[:TOP_KEYS]
+                }
+                row["count_source"] = usage.source
+            else:
+                row["top"] = [entry.key for entry in active[:TOP_KEYS]]
+                row["unavailable"] = usage.reason if usage is not None else "not_counted"
+            listed = len(row.get("top", ()))
+            if listed and len(active) > listed:
+                row["more"] = f"+{len(active) - listed} more"
+        if spec.summarize_keys or snapshot.findings:
+            row["findings"] = len(snapshot.findings)
         new = (
             recently_added(vault_root, spec, snapshot, since=since)
             if history_refusal(vault_root, spec) is None
@@ -111,7 +119,9 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
             row["new"] = new[:NEW_KEYS] + (
                 [f"+{len(new) - NEW_KEYS} more"] if len(new) > NEW_KEYS else []
             )
-        registries[name] = row
+        # A registry without listed keys appears only when it has something to report.
+        if row:
+            registries[name] = row
     # Registry names are hyphenated, so they never meet the two plain keys.
     out: dict[str, Any] = {**registries, "inspect": inspect_route}
     if any("new" in row for row in registries.values()):
