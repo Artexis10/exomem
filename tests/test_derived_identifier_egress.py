@@ -3347,3 +3347,91 @@ def test_a_restricted_reclassification_proposal_counts_the_links_it_may_see(
     assert "__error__" not in answers["B"], answers["B"]
     assert answers["A"] == answers["B"]
     assert answers["C"] == answers["B"]
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_reclassification_preview_answers_as_if_no_withheld_page_linked_it(
+    tmp_path: Path, audience: str
+) -> None:
+    """A withheld Evidence page that links a source by path refuses the owner's
+    move. The restricted mover's preview neither names that page nor reports
+    its refusal, exactly as in a vault without it."""
+    source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
+    base = {
+        source: _page("Tide table", "High water 06:12.", type="source", source_type="other"),
+        f"{KB}/Evidence/Harbor/tide-proof.md": _page(
+            "Proof", "See [[2026-01-02-tide-table]].", type="evidence"
+        ),
+        f"{INSIGHTS}/tide-note.md": _typed("Tide note", "See the table.", source[:-3]),
+    }
+    withheld = {
+        f"{KB}/Evidence/Withheld/held.md": _page(
+            "Held", f"Cites [[{source.removesuffix('.md')}]].", type="evidence"
+        )
+    }
+    vaults = _twins(
+        tmp_path, base, withheld, audience, scope="Evidence/Withheld/**, Notes/Withheld/**"
+    )
+    preview = {"operation": "propose-reclassification", "path": source,
+               "source_kind": "dataset", "domain": "travel"}
+
+    answers = {
+        variant: _text(_call(vault, _principal(audience), "manage_memory_file", **preview))
+        for variant, vault in vaults.items()
+    }
+    owner = _call(vaults["A"], None, "manage_memory_file", **preview)
+
+    assert [refusal["path"] for refusal in owner["refusals"]] == [
+        f"{KB}/Evidence/Withheld/held.md"
+    ]
+    assert '"__error__"' not in answers["B"], answers["B"]
+    assert f'"rewritten": ["{INSIGHTS}/tide-note.md"]' in answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_linked_it(
+    tmp_path: Path, audience: str
+) -> None:
+    """A correction moves the source and rewrites every linking page, including
+    one withheld from the mover. Its answer, and its revert's, carry nothing
+    that rewrite produced, in every response detail: no graph outcome either,
+    since a withheld rewrite can move whether the graph join finishes in time."""
+    source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
+    base = {
+        source: _page("Tide table", "High water 06:12.", type="source", source_type="other"),
+        f"{INSIGHTS}/tide-note.md": _typed("Tide note", "See the table.", source[:-3]),
+        f"{KB}/log.md": "# Log\n\n",
+    }
+    hidden = f"{INSIGHTS}/Withheld/linker.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("Linker", f"Cites [[{source[:-3]}]].", source[:-3])},
+        "C": {**base, hidden: _typed("Linker", "Unrelated.", f"{INSIGHTS}/tide-note")},
+    }
+    vaults = {
+        variant: _materialize(
+            tmp_path / variant / "vault", files, audience, scope="Notes/Insights/Withheld/**"
+        )
+        for variant, files in variants.items()
+    }
+    destination = f"{KB}/Sources/Datasets/Travel/2026-01-02-tide-table.md"
+    answers: dict[str, list[str]] = {variant: [] for variant in vaults}
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        for variant, vault in vaults.items():
+            for request in (
+                {"operation": "reclassify", "path": source, "source_kind": "dataset",
+                 "domain": "travel", "reason": "a table of measurements"},
+                {"operation": "revert-reclassification", "path": destination,
+                 "reason": "keep it in the drain queue"},
+            ):
+                answer = _call(vault, _principal(audience), "manage_memory_file", **request, **extra)
+                answers[variant].append(_VOLATILE_TEXT.sub("<v>", _text(answer)))
+
+    assert '"__error__"' not in _text(answers["B"]), answers["B"]
+    assert not any('"graph_sync' in answer for answer in answers["B"]), answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+    assert f"[[{source[:-3]}]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")

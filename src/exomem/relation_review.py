@@ -3084,8 +3084,6 @@ def _attempt(
             language_registry=language,
             status_basis=status_basis,
         )
-    if activation_manifest.load_manifest(root) is None:
-        before = replace(before, activation_census=activation_manifest.build_census(root))
     if not candidate.eligible_compiled:
         raise RelationReviewError(
             "INVALID_DRAFT_PATH", "draft destination is not an eligible compiled page"

@@ -121,6 +121,9 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     """Pure canonical path-only rewrite shared by move staging and review carry.
 
     An origin carrier is recorded data, so a link inside one keeps its bytes.
+    The count covers only links whose bytes change. A bare-name link to a file
+    that keeps its basename resolves as before and keeps its bytes, so a page
+    holding only such links is neither rewritten nor, when append-only, refused.
     """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
@@ -136,8 +139,9 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
 
     def replace(match: re.Match[str]) -> str:
         nonlocal changed
+        original = match.group(0)
         if inside_carrier(match.start(), match.end()):
-            return match.group(0)
+            return original
         target = match.group(1).strip()
         alias = match.group(2) or ""
         target_path, marker, anchor = target.partition("#")
@@ -145,13 +149,19 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
         target_path = target_path.rstrip()
         target_no_ext = target_path.removesuffix(".md")
         if target_no_ext in {old_full, old_stripped}:
-            changed += 1
             replacement = new_full if target_path.startswith(prefix) else new_stripped
-            return f"[[{replacement}{anchor_suffix}{alias}]]"
-        if "/" not in target_no_ext and target_no_ext == old_basename:
+        elif (
+            "/" not in target_no_ext
+            and target_no_ext == old_basename
+            and new_basename != old_basename
+        ):
+            replacement = new_basename
+        else:
+            return original
+        rewritten = f"[[{replacement}{anchor_suffix}{alias}]]"
+        if rewritten != original:
             changed += 1
-            return f"[[{new_basename}{anchor_suffix}{alias}]]"
-        return match.group(0)
+        return rewritten
 
     return _MOVE_WIKILINK_PATTERN.sub(replace, text), changed
 
@@ -716,6 +726,7 @@ def evaluate_posthoc_batch(
                 census=corpus.activation_census,
                 identity_census=corpus.identity_census,
                 eligible_compiled=state.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         result = semantic_contract.evaluate(
@@ -2095,12 +2106,8 @@ def _preflight_existing(
         )
 
     manifest = activation_manifest.load_manifest(root)
-    if manifest is None:
-        before_corpus = replace(
-            before_corpus, activation_census=activation_manifest.build_census(root)
-        )
     boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest
+        before_corpus.activation_census, manifest=manifest, vault_root=root
     )
     grandfathered = activation_manifest.is_grandfathered(
         root,
@@ -2111,6 +2118,7 @@ def _preflight_existing(
         census=before_corpus.activation_census,
         identity_census=before_corpus.identity_census,
         eligible_compiled=before.eligible_compiled,
+        status_basis=status_basis,
     )
     with mutation_timing_span(timings, "preflight.contract_eval"):
         result = semantic_contract.evaluate(
@@ -2172,6 +2180,7 @@ def _reevaluate_existing(
     preflight: ExistingPreflight,
     *,
     manifest: activation_manifest.ActivationManifest,
+    status_basis: lifecycle_statuses.Basis,
 ) -> tuple[semantic_contract.SemanticContractResult, bool]:
     grandfathered = activation_manifest.is_grandfathered(
         preflight.before_corpus.vault_root,
@@ -2184,6 +2193,7 @@ def _reevaluate_existing(
         census=preflight.activation_census,
         identity_census=preflight.before_corpus.identity_census,
         eligible_compiled=preflight.before.eligible_compiled,
+        status_basis=status_basis,
     )
     result = semantic_contract.evaluate(
         before=preflight.before,
@@ -2939,7 +2949,9 @@ def _commit_existing(
                 winner = activation_manifest.ensure_manifest(
                     root, census=preflight.activation_census, commit_point=False
                 )
-                result, _ = _reevaluate_existing(preflight, manifest=winner)
+                result, _ = _reevaluate_existing(
+                    preflight, manifest=winner, status_basis=status_basis
+                )
                 if result.should_block:
                     raise SemanticWriteError(
                         "SEMANTIC_CONTRACT_BLOCKED",
@@ -3331,12 +3343,8 @@ def preflight_move(
         status_basis=status_basis,
     )
     manifest = activation_manifest.load_manifest(root)
-    if manifest is None:
-        before_corpus = replace(
-            before_corpus, activation_census=activation_manifest.build_census(root)
-        )
     boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest
+        before_corpus.activation_census, manifest=manifest, vault_root=root
     )
     evaluations: list[MovePageEvaluation] = []
     pairs = _move_evaluation_pairs(
@@ -3428,6 +3436,7 @@ def preflight_move(
                 census=before_corpus.activation_census,
                 identity_census=before_corpus.identity_census,
                 eligible_compiled=before.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         result = semantic_contract.evaluate(
@@ -3775,6 +3784,7 @@ def preflight_recovery(
                 census=after_corpus.activation_census,
                 identity_census=after_corpus.identity_census,
                 eligible_compiled=after.eligible_compiled,
+                status_basis=status_basis,
             )
         )
         baseline_result = semantic_contract.evaluate(

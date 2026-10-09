@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import held_fs, planning, record_formats, records, vault
 from .. import structured_collections as collections
-from . import chain, governance, tokens, types
+from . import chain, governance, summary, tokens, types
 from .connection import CollectionStoreError
 from .legacy import LegacyAuditProof, LegacyAuditSpool
 
@@ -768,6 +768,9 @@ def import_legacy_collection(
         raise CollectionStoreError(
             "COLLECTION_LEGACY_IMPORT_PATH_CONFLICT", "collection path is already occupied"
         )
+    if captured.manifest.view_mode != "items":
+        # A file collection is an items view of its rows; summary is only ever a NEW collection.
+        raise summary.mode_change_refused("items", captured.manifest.view_mode)
     _recheck(captured)
     chain.verify_store_chain(staging_conn)
     first = staging_conn.execute("SELECT COALESCE(MAX(txn_id),0)+1 FROM txns").fetchone()[0]

@@ -417,9 +417,6 @@ class RetrievalTrace:
     def record_unit_filter_only(
         self,
         ordered: list[tuple[Any, Any, int]],
-        *,
-        status_basis: Any,
-        prefer_active: bool,
     ) -> None:
         self.effective_mode = "filter_only"
         self.fusion_profile = None

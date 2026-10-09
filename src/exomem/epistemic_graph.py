@@ -7308,7 +7308,7 @@ class EpistemicGraphIndex:
                 0,
             )
             view = GraphView(self.vault_root, conn)
-            source_rows = []
+            source_rows: list[tuple[Any, ...]] = []
             rows = conn.execute(
                 "SELECT n.path, n.title, n.source_hash, n.activation_signal_version, "
                 "n.exomem_id, CASE WHEN n.exomem_id IS NULL THEN 0 ELSE "

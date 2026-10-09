@@ -452,7 +452,7 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
                     path=targets[ref],
                     frontmatter=page.get("frontmatter", {}),
                 ).live
-            except lifecycle_statuses.OpError:
+            except lifecycle_statuses.ClassificationUnavailable:
                 return {
                     "status": "unavailable",
                     "reason": "status_classification_unavailable",

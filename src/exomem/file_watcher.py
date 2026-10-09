@@ -1249,6 +1249,13 @@ class FileWatcher:
     # ---- debounce loop ----
 
     def _run_dispatch(self) -> None:
+        from .governance.principal import library_scope
+
+        # An owner-local maintenance worker: no request principal crosses into this thread.
+        with library_scope():
+            self._dispatch()
+
+    def _dispatch(self) -> None:
         if self._dispatch_waits_for_seed:
             # Observation is armed before the long seed.  Keep those events in
             # the coalescing buffer until both scope maps are published, then

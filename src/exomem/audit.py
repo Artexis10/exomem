@@ -1926,14 +1926,18 @@ def _complete_semantic_category_summary(
 
 
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
-    """Walk the KB once, parse every .md, return ParsedPage objects."""
+    """Parse the admitted Markdown pages in the knowledge base."""
     from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
+    admitted = egress.restricted_release_filter(vault_root)
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
-        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+        rel = path.relative_to(vault_root).as_posix()
+        if not egress.content_permits(vault_root, rel, who):
+            continue
+        if admitted is not None and not admitted(rel):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -3366,7 +3370,7 @@ def relation_debt_eligible(
     *,
     page_type: str | None,
     rel_path: str,
-    status: str | None,
+    status: object,
     tags: list[str] | tuple[str, ...] | set[str] | frozenset[str],
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> bool:
@@ -3403,7 +3407,7 @@ def _check_relation_debt(
             vault_root,
             page_type=page.page_type,
             rel_path=page.rel_path,
-            status=page.status,
+            status=page.frontmatter.get("status"),
             tags=page.tags,
             status_basis=status_basis,
         ):
@@ -4274,6 +4278,7 @@ def _outcome_bindings(
     unevaluated: list[dict[str, Any]] = [
         {"collection": row.path, "reason": "unreadable_manifest", "error_code": row.code}
         for row in unreadable
+        if row.semantic_profile in (None, "records")  # only Records manifests declare bindings
     ]
     for manifest in manifests:
         if manifest.semantic_profile != "records":

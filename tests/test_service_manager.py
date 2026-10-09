@@ -461,8 +461,8 @@ def _mixed_marker(vault):
     }))
 
 
-def test_unsupported_interpreter_on_copied_vault_keeps_serving_worker_admitted(
-    tmp_path, monkeypatch,
+def test_unsupported_candidate_on_copied_vault_keeps_serving_worker_admitted(
+    tmp_path, monkeypatch, candidate_runtime,
 ):
     from exomem import state_migration, state_paths
 
@@ -471,13 +471,12 @@ def test_unsupported_interpreter_on_copied_vault_keeps_serving_worker_admitted(
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
 
     async def scenario():
-        from importlib.metadata import version
-
         manager, ingress, runtime, _ = _supervisor(tmp_path)
-        candidate = _manager().WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        candidate, actual = candidate_runtime
+        actual["supported_state_compatibility"] = []
         runtime.inspect = candidate.inspect
         runtime.migration_required = candidate.migration_required
-        result = await manager.upgrade({"python": sys.executable, "version": version("exomem")})
+        result = await manager.upgrade({"python": sys.executable, "version": "1.2.3"})
         assert not result["ok"]
         assert runtime.pid == 100
         assert runtime.events == ingress.events == []
@@ -537,7 +536,7 @@ def candidate_runtime(tmp_path, monkeypatch):
         "version": "1.2.3",
         "protocol": module.WORKER_PROTOCOL,
         "state_descriptors": list(state_migration.declared_descriptor_ids()),
-        "supported_state_compatibility": ["collections-store-v1"],
+        "supported_state_compatibility": list(state_migration.supported_state_compatibility_ids()),
     }
 
     async def communicate():

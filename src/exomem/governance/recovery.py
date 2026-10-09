@@ -568,13 +568,8 @@ def _proposal_guard_actual(
         prospective = prospective_compile.policy
         if prior.blocked or prospective.blocked:
             return {"status": "invalid"}
-        if (
-            not prior.scopes
-            and not prior.rules
-            and not prior.grants
-            and not prior.release_grants
-            and not prior.findings
-        ):
+        # Ignored authoring files do not create policy; recognized inputs retain their exact prior fingerprint.
+        if not any(policy_module._document_kind(path) is not None for path, _ in prior_compile.target_documents):
             prior = policy_module.EMPTY_POLICY
         manifest = _proposal_evidence(vault_root, prior, prospective, documents, payload)
         return _proposal_guard_value(prior.fingerprint, canonical_json(manifest))

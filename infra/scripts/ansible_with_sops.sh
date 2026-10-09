@@ -4,7 +4,7 @@ set +x
 umask 077
 
 usage() {
-  echo "usage: ansible_with_sops.sh --inventory PATH --vars FILE [--vars FILE ...] [-- ANSIBLE_ARGS ...]" >&2
+  echo "usage: ansible_with_sops.sh --inventory PATH --vars FILE [--vars FILE ...] [--playbook PATH --config PATH] [-- ANSIBLE_ARGS ...]" >&2
 }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -13,6 +13,8 @@ sops_bin="${SOPS_BIN:-sops}"
 ansible_playbook_bin="${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook}"
 tmpfs_root="${EXOMEM_SECRET_TMPFS_DIR:-${XDG_RUNTIME_DIR:-}}"
 inventory=""
+playbook="${repo_root}/infra/ansible/site.yml"
+ansible_config="${repo_root}/infra/ansible/ansible.cfg"
 encrypted_vars=()
 ansible_args=()
 
@@ -26,6 +28,16 @@ while (($# > 0)); do
     --vars)
       (($# >= 2)) || { usage; exit 2; }
       encrypted_vars+=("$2")
+      shift 2
+      ;;
+    --playbook)
+      (($# >= 2)) || { usage; exit 2; }
+      playbook="$2"
+      shift 2
+      ;;
+    --config)
+      (($# >= 2)) || { usage; exit 2; }
+      ansible_config="$2"
       shift 2
       ;;
     --)
@@ -54,7 +66,7 @@ for argument in ${ansible_args[@]+"${ansible_args[@]}"}; do
   esac
 done
 
-if [[ -z "${inventory}" || ! -f "${inventory}" || ${#encrypted_vars[@]} -eq 0 ]]; then
+if [[ -z "${inventory}" || ! -f "${inventory}" || ! -f "${playbook}" || ! -f "${ansible_config}" || ${#encrypted_vars[@]} -eq 0 ]]; then
   usage
   exit 2
 fi
@@ -92,7 +104,7 @@ trap cleanup EXIT HUP INT TERM
 # The repository's Ansible configuration applies wherever the operator runs
 # this from; among other things it keeps module-returned facts from shadowing
 # inventory variables.
-export ANSIBLE_CONFIG="${repo_root}/infra/ansible/ansible.cfg"
+export ANSIBLE_CONFIG="${ansible_config}"
 # An environment variable would outrank the file, so drop the one that could
 # switch fact injection back on.
 unset ANSIBLE_INJECT_FACT_VARS
@@ -125,6 +137,6 @@ done
 
 "${ansible_playbook_bin}" \
   --inventory "${inventory}" \
-  "${repo_root}/infra/ansible/site.yml" \
+  "${playbook}" \
   "${extra_vars[@]}" \
   ${ansible_args[@]+"${ansible_args[@]}"}

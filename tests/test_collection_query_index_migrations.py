@@ -38,7 +38,7 @@ def test_declared_index_tracks_correction_and_canonical_rollback(store):
     before = store.connection.execute(f"SELECT * FROM {plan.table_name}").fetchall()
     with pytest.raises(RuntimeError, match="interrupt"):
         with store.handle.transaction():
-            manager.maintain_item(store.connection, CID, 1, KEY, 99, {"count": 9})
+            manager.maintain_item(manager.AccountedWriter(store.connection, store._execute), CID, 1, KEY, 99, {"count": 9})
             raise RuntimeError("interrupt")
     assert store.connection.execute(f"SELECT * FROM {plan.table_name}").fetchall() == before
 
@@ -59,11 +59,20 @@ def test_bounded_rebuild_resumes_and_writes_catch_up_before_cutover(store):
     assert manager.ready_plan(store.connection, CID) == old
     store.append_record(CID, item={"title": "Two", "count": 2}, item_key=OTHER, why="observe")
     assert not store.backfill_query_indexes(CID, limit=1)
-    assert store.backfill_query_indexes(CID, limit=1)
-    published = manager.ready_plan(store.connection, CID)
-    assert published == replacement
-    assert store.connection.execute(f"SELECT item_key,row_version FROM {published.table_name} ORDER BY item_key").fetchall() == [(KEY, 1), (OTHER, 1)]
-    assert store.connection.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 4
+    from exomem.collection_store import connection
+    from exomem.collection_store.writer import CollectionWriter
+
+    path, root = store.handle.path, store.root
+    checkpoint = store.connection.execute("SELECT last_row_id FROM query_projection_mappings WHERE state='building'").fetchone()
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        reopened = CollectionWriter(root, handle)
+        assert reopened.connection.execute("SELECT last_row_id FROM query_projection_mappings WHERE state='building'").fetchone() == checkpoint
+        assert reopened.backfill_query_indexes(CID, limit=1)
+        published = manager.ready_plan(reopened.connection, CID)
+        assert published == replacement
+        assert reopened.connection.execute(f"SELECT item_key,row_version FROM {published.table_name} ORDER BY item_key").fetchall() == [(KEY, 1), (OTHER, 1)]
+        assert reopened.connection.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 4
 
 
 def test_failed_candidate_preserves_old_ready_values_and_audit(store):
@@ -79,7 +88,7 @@ def test_failed_candidate_preserves_old_ready_values_and_audit(store):
     generation = store.connection.execute("SELECT generation FROM query_projection_mappings WHERE state='building'").fetchone()[0]
     before = store.connection.execute("SELECT * FROM txns").fetchall()
     with store.handle.transaction():
-        assert not manager.backfill_batch(store.connection, CID, limit=1)
+        assert not manager.backfill_batch(manager.AccountedWriter(store.connection, store._execute), CID, limit=1)
     assert manager.ready_plan(store.connection, CID) == old
     assert store.connection.execute("SELECT state FROM query_projection_mappings WHERE generation=?", (generation,)).fetchone() == ("failed",)
     assert store.connection.execute("SELECT 1 FROM sqlite_master WHERE name=?", (f"cq_{CID.replace('-', '')}_{generation}",)).fetchone() is None
@@ -120,7 +129,7 @@ def test_reverting_declaration_cancels_the_obsolete_rebuild(store):
     pending = revise(store, original, changed, first["after_container_hash"])
     revise(store, changed, original, pending["after_container_hash"])
     with store.handle.transaction():
-        assert not manager.backfill_batch(store.connection, CID)
+        assert not manager.backfill_batch(manager.AccountedWriter(store.connection, store._execute), CID)
     assert manager.ready_plan(store.connection, CID) == old
     assert store.connection.execute("SELECT 1 FROM query_projection_mappings WHERE state='building'").fetchone() is None
 
@@ -166,3 +175,70 @@ def test_rebuild_requires_current_full_collection_authority(store):
     with request_scope(_external()), pytest.raises(collections.CollectionError):
         store.backfill_query_indexes(CID, limit=1)
     assert store.connection.execute("SELECT * FROM query_projection_mappings").fetchall() == before
+
+
+def _import_files(tmp_path, store, values, text=None):
+    """Import one file collection into the store as P1b does: its rows, and no query projection."""
+    from test_collection_store_legacy_import import CONTEXT, _capture, _items
+
+    from exomem.collection_store import legacy_import
+
+    root, path = _items(tmp_path, text=text, values=values)
+    with _capture(tmp_path, root, path) as (audit, captured):
+        store.connection.execute("BEGIN")
+        legacy_import.import_legacy_collection(store.connection, captured, audit=audit, context=CONTEXT)
+        store.connection.commit()
+
+
+def _rows(store, fields):
+    from exomem.query_engine import runtime
+    from exomem.query_engine.typed_rows import execute_rows
+    from exomem.query_engine.validation import normalize_query
+
+    logical = normalize_query({"version": 1, "select": list(fields)}, collection=CID, declarations={CID: {
+        "domain": "collections", "type": "records", "vault": "fixture",
+        "fields": {"item_key": {"type": "string"}, **{name: {"type": kind} for name, kind in fields.items()}}}}).query
+    with runtime.read_session(store.root, store.handle.path) as session:
+        return execute_rows(session.admit_query(logical, as_of="2026-10-07T00:00:00+00:00")).rows
+
+
+def test_a_populated_collection_without_a_projection_gets_one_by_backfill_never_by_a_query(tmp_path, store):
+    """Defect: a collection imported from files, or enrolled before every collection carried a
+    projection, refuses typed queries forever without naming why, or a query builds its projection."""
+    from exomem.query_engine import runtime
+
+    _import_files(tmp_path, store, {"title": "Imported", "count": 3})
+    with pytest.raises(runtime.QueryError, match="QUERY_PROJECTION_BUILDING"):
+        _rows(store, {"title": "string", "count": "integer"})
+    assert store.connection.execute("SELECT COUNT(*) FROM query_projection_mappings").fetchone() == (0,)
+    assert store.backfill_query_indexes(CID)
+    manager, plan = ready(store)
+    assert plan is not None and plan.indexes == () and plan.scalars == ()
+    assert _rows(store, {"title": "string", "count": "integer"}) == [{"title": "Imported", "count": 3}]
+
+
+def test_a_projection_without_indexes_accepts_a_row_too_large_to_index(tmp_path, store):
+    """Defect: one stored row over the 256 KiB index cell fails the first build of a projection
+    that indexes nothing, so the collection's typed queries never become available."""
+    fields = "".join(f"    part{n}: {{type: string}}\n" for n in range(9))
+    text = manifest_text().replace("    count: {type: integer}\n", fields)
+    _import_files(tmp_path, store, {"title": "Large", **{f"part{n}": "x" * 30_000 for n in range(9)}}, text=text)
+    assert store.connection.execute("SELECT length(values_json) FROM items").fetchone()[0] > 256 * 1024
+    assert store.backfill_query_indexes(CID)
+    assert _rows(store, {"title": "string"}) == [{"title": "Large"}]
+
+
+def test_a_first_build_whose_declaration_never_normalized_fails_once_and_says_so(tmp_path, store):
+    """Defect: an imported declaration that never normalized retries its first build every tick
+    forever, or its queries refuse without naming the failed projection and its repair."""
+    from exomem.collection_store import index_migrations
+    from exomem.query_engine import runtime
+
+    text = manifest_text().replace("count: {type: integer}", "count: {type: integer, sortable: yes-please}")
+    _import_files(tmp_path, store, {"title": "Imported", "count": 3}, text=text)
+    assert not store.backfill_query_indexes(CID)
+    assert store.connection.execute("SELECT generation,state FROM query_projection_mappings").fetchall() == [
+        (1, "failed")]
+    assert index_migrations.backfill_due(store.connection) == ()
+    with pytest.raises(runtime.QueryError, match="QUERY_PROJECTION_FAILED"):
+        _rows(store, {"title": "string"})

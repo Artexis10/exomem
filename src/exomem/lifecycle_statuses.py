@@ -143,6 +143,10 @@ SPEC = registry.RegistrySpec(
 )
 
 
+class ClassificationUnavailable(OpError):
+    """A dependent operation needs a page lifecycle class that no admitted definition supplies."""
+
+
 @dataclass(frozen=True)
 class Classification:
     lifecycle_class: str | None
@@ -150,7 +154,7 @@ class Classification:
 
     def require(self) -> str:
         if self.lifecycle_class is None:
-            raise OpError(
+            raise ClassificationUnavailable(
                 "STATUS_CLASSIFICATION_UNAVAILABLE",
                 "Page status classification is unavailable.",
                 "Use an admitted status definition before this dependent operation.",
@@ -245,6 +249,18 @@ class Basis:
         while entry.status == "deprecated":
             entry = snapshot.entries[entry.replaced_by]
         return Classification(str(entry.attributes["class"]))
+
+    def ordering(self, value: object, *, path: str | None = None) -> Classification | None:
+        """Classify a label for presentation order, through the page's own instance.
+
+        A rooted basis keeps the fail-closed refusal. A rootless basis has no
+        overlay to admit, so a label it cannot resolve has no class and orders
+        as neither live nor historical instead of refusing the result.
+        """
+        classification = self.classify(value, path=path)
+        if classification.lifecycle_class is None and self.root is None:
+            return None
+        return classification
 
     @property
     def dependency(self) -> tuple[str, str]:

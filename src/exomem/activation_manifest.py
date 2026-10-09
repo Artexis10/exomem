@@ -14,14 +14,14 @@ import threading
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
 import yaml
 
-from . import access, activation
+from . import access, activation, lifecycle_statuses
 from . import find as find_module
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
@@ -39,6 +39,9 @@ SCHEMA_VERSION = 1
 CONTRACT_VERSION = 1
 _MANIFEST_NAME = "semantic-activation.yaml"
 _PAGE_KEYS = frozenset({"identity_kind", "identity", "path_at_activation", "source_hash"})
+# Absent means live: every earlier manifest recorded only live pages.
+# nosemgrep: ep-word-set -- The manifest schema fixes these optional page field names.
+_OPTIONAL_PAGE_KEYS = frozenset({"status", "class_at_activation"})
 _ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _UNSET = object()
@@ -62,6 +65,8 @@ class ActivationPage:
     identity: str
     path_at_activation: str
     source_hash: str
+    status: str | None = None
+    class_at_activation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,11 +89,15 @@ class ActivationCandidate:
     rel_path: str
     source_hash: str
     normalized_id: str | None
+    status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ActivationCensus:
-    """Immutable eligible-page snapshot reusable by activation consumers."""
+    """Immutable structural snapshot of the compiled corpus, independent of any caller.
+
+    Each candidate keeps its raw status label unclassified; the census is never served.
+    """
 
     candidates: tuple[ActivationCandidate, ...]
     by_path: Mapping[str, ActivationCandidate] = field(init=False, repr=False)
@@ -157,6 +166,19 @@ def _validate_candidate(candidate: ActivationCandidate, *, index: int) -> None:
             "ACTIVATION_CENSUS_INVALID",
             f"activation census candidate {index} normalized_id must be a normalized UUID",
         )
+    if candidate.status is not None and recorded_status(candidate.status) != candidate.status:
+        raise ActivationManifestError(
+            "ACTIVATION_CENSUS_INVALID",
+            f"activation census candidate {index} status must be a non-empty string",
+        )
+
+
+def recorded_status(value: object) -> str | None:
+    """The authored status label a census records.
+
+    Absent, empty and non-string values record nothing: each classifies live.
+    """
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def manifest_path(vault_root: Path) -> Path:
@@ -274,19 +296,6 @@ def ensure_manifest(
     if existing is not None:
         return existing
 
-    from . import lifecycle_statuses
-    from .governance import egress
-    from .vocabulary.contract import admission_refusal
-
-    # First-boundary capture must describe the complete admitted corpus; a
-    # restricted first write waits for ordinary canonical/admin preparation.
-    if (
-        egress.owner_only_aggregate(vault_root) is not None
-        or admission_refusal(vault_root, lifecycle_statuses.SPEC) is not None
-    ):
-        raise ActivationManifestError(
-            "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is unavailable"
-        )
     if not commit_point and census is None:
         raise ActivationManifestError(
             "ACTIVATION_MANIFEST_UNAVAILABLE", "a prepared activation census is required"
@@ -322,8 +331,14 @@ def is_grandfathered(
     census: ActivationCensus | None = None,
     identity_census: Any | None = None,
     eligible_compiled: bool | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> bool:
-    """Return whether the current page belongs to the activation baseline."""
+    """Return whether the current page belongs to the activation baseline.
+
+    A matched entry's recorded label is classified with the caller's
+    ``status_basis``; a label that basis cannot classify refuses the check
+    rather than guessing.
+    """
     if eligible_compiled is False:
         return False
     vault_root = Path(vault_root)
@@ -353,10 +368,17 @@ def is_grandfathered(
             frontmatter, _, _ = parse_frontmatter(raw)
             normalized_id = normalize_id(frontmatter.get(ID_FIELD))
 
-    if normalized_id is not None and any(
-        page.identity_kind == "exomem_id" and page.identity == normalized_id
-        for page in loaded.pages
-    ):
+    stable = next(
+        (
+            page
+            for page in loaded.pages
+            if normalized_id is not None
+            and page.identity_kind == "exomem_id"
+            and page.identity == normalized_id
+        ),
+        None,
+    )
+    if stable is not None:
         if identity_census is not None:
             from .semantic_contract import StableIdentityCensus, identity_owners_match
 
@@ -366,59 +388,101 @@ def is_grandfathered(
                 )
             from . import vault
 
-            return identity_owners_match(
+            owned = identity_owners_match(
                 identity_census.paths_by_identity.get(normalized_id),
                 rel_path,
                 folds=vault.vault_casefolds(vault_root),
             )
-        if eligible_compiled is not None:
+        elif eligible_compiled is not None:
             return False
-        try:
-            observed = census if census is not None else build_census(vault_root)
-        except ActivationManifestError:
-            return False
-        return observed.unique_path_for_id(normalized_id) == rel_path
-    return bool(
-        current_hash
-        and any(
-            page.identity_kind == "path_source_hash"
+        else:
+            try:
+                observed = census if census is not None else build_census(vault_root)
+            except ActivationManifestError:
+                return False
+            owned = observed.unique_path_for_id(stable.identity) == rel_path
+        return owned and _recorded_live(vault_root, stable, status_basis)
+    if not current_hash:
+        return False
+    matched = next(
+        (
+            page
+            for page in loaded.pages
+            if page.identity_kind == "path_source_hash"
             and page.identity == rel_path
             and page.path_at_activation == rel_path
             and page.source_hash == current_hash
-            for page in loaded.pages
-        )
+        ),
+        None,
     )
+    return matched is not None and _recorded_live(vault_root, matched, status_basis)
+
+
+def _recorded_live(
+    vault_root: Path, page: ActivationPage, status_basis: lifecycle_statuses.Basis | None
+) -> bool:
+    """Whether the recorded label classifies live for this caller and was live at activation.
+
+    The caller's basis classifies the label first, so a caller that cannot
+    classify it is refused whatever class the owner recorded at activation.
+    """
+    if page.status is None:
+        return True
+    basis = status_basis if status_basis is not None else lifecycle_statuses.Basis(vault_root)
+    live = basis.classify(page.status).live
+    return live and (page.class_at_activation is None or page.class_at_activation == "live")
 
 
 def build_census(vault_root: Path) -> ActivationCensus:
-    """Build complete activation evidence after complete-view and registry admission."""
-    from . import lifecycle_statuses
-    from .governance import egress
-    from .vocabulary.contract import admission_refusal
-
-    if (
-        egress.owner_only_aggregate(vault_root) is not None
-        or admission_refusal(vault_root, lifecycle_statuses.SPEC) is not None
-    ):
-        raise ActivationManifestError(
-            "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is unavailable"
-        )
+    """Walk the compiled corpus once; the census is structural and caller-independent."""
     return ActivationCensus.from_candidates(_eligible_candidates(Path(vault_root)))
 
 
-def snapshot_from_census(census: ActivationCensus) -> ActivationManifest:
-    """Build the immutable activation snapshot without filesystem access."""
+def snapshot_from_census(
+    census: ActivationCensus, *, vault_root: Path | None = None
+) -> ActivationManifest:
+    """Build the immutable activation snapshot from a structural census.
+
+    Canonical labels resolve from the shipped pack alone: a canonical live
+    label needs no record and a canonical non-live page stays out. Any other
+    label is recorded. With ``vault_root``, the record also keeps the class
+    the vault's owner defines for it now, so a later registry change cannot
+    grandfather a page that was not live at activation. A label without an
+    available class is left for the checking caller's basis to classify.
+    """
     if not isinstance(census, ActivationCensus):
         raise ActivationManifestError(
             "ACTIVATION_CENSUS_INVALID",
             "activation snapshot requires an immutable census",
         )
-    candidates = census.candidates
+    public = lifecycle_statuses.Basis(None)
+    unresolved = sorted(
+        {
+            candidate.status
+            for candidate in census.candidates
+            if candidate.status is not None
+            and public.classify(candidate.status).lifecycle_class is None
+        }
+    )
+    owner_classes = (
+        _owner_local_classes(vault_root, unresolved)
+        if vault_root is not None and unresolved
+        else {}
+    )
+    candidates: list[tuple[ActivationCandidate, str | None]] = []
+    for candidate in census.candidates:
+        canonical = public.classify(candidate.status).lifecycle_class
+        if canonical == "live":
+            candidates.append((replace(candidate, status=None), None))
+        elif canonical is None and candidate.status is not None:
+            candidates.append((candidate, owner_classes.get(candidate.status)))
     counts = Counter(
-        candidate.normalized_id for candidate in candidates if candidate.normalized_id is not None
+        candidate.normalized_id
+        for candidate, _ in candidates
+        if candidate.normalized_id is not None
     )
     pages = []
-    for candidate in candidates:
+    for candidate, class_at_activation in candidates:
         stable = candidate.normalized_id is not None and counts[candidate.normalized_id] == 1
         pages.append(
             ActivationPage(
@@ -426,6 +490,8 @@ def snapshot_from_census(census: ActivationCensus) -> ActivationManifest:
                 identity=(candidate.normalized_id if stable else candidate.rel_path),
                 path_at_activation=candidate.rel_path,
                 source_hash=candidate.source_hash,
+                status=candidate.status,
+                class_at_activation=class_at_activation,
             )
         )
     return ActivationManifest(
@@ -439,6 +505,7 @@ def plan_activation_boundary(
     census: ActivationCensus | None,
     *,
     manifest: ActivationManifest | None,
+    vault_root: Path | None = None,
 ) -> ActivationBoundaryPlan:
     """Select an observed or prospective boundary without installing it."""
     if manifest is not None:
@@ -447,19 +514,29 @@ def plan_activation_boundary(
         raise ActivationManifestError(
             "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is required"
         )
-    return ActivationBoundaryPlan(snapshot_from_census(census), True)
+    return ActivationBoundaryPlan(snapshot_from_census(census, vault_root=vault_root), True)
 
 
 def _snapshot(vault_root: Path, *, census: ActivationCensus | None = None) -> ActivationManifest:
     observed = census if census is not None else build_census(vault_root)
-    return snapshot_from_census(observed)
+    return snapshot_from_census(observed, vault_root=vault_root)
+
+
+def _owner_local_classes(vault_root: Path, labels: Iterable[str]) -> dict[str, str | None]:
+    """Classify recorded labels as the owner-local producer of the shared boundary.
+
+    The manifest is governed state shared by every caller and never served, so
+    whoever prepares it records the same boundary.
+    """
+    from .governance.principal import owner_local_producer
+
+    with owner_local_producer(vault_root, "activation_boundary"):
+        basis = lifecycle_statuses.Basis(Path(vault_root))
+        return {label: basis.classify(label).lifecycle_class for label in labels}
 
 
 def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
     kb = vault_root / kb_dirname()
-    from . import lifecycle_statuses
-
-    status_basis = lifecycle_statuses.Basis(vault_root)
     candidates: list[ActivationCandidate] = []
     if kb.is_dir():
         paths = sorted(
@@ -486,8 +563,8 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
                 title="",
                 mtime=0.0,
             )
-            if not activation.is_eligible_compiled_page(
-                vault_root, page, status_basis=status_basis
+            if not activation.structurally_eligible_for_types(
+                vault_root, page, page_types=activation._COMPILED_PAGE_TYPES
             ):
                 continue
             candidates.append(
@@ -495,6 +572,7 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
                     rel_path=rel_path,
                     source_hash=content_hash(raw),
                     normalized_id=normalize_id(frontmatter.get(ID_FIELD)),
+                    status=recorded_status(frontmatter.get("status")),
                 )
             )
     return candidates
@@ -510,6 +588,12 @@ def _serialize(manifest: ActivationManifest) -> str:
                 "identity": page.identity,
                 "path_at_activation": page.path_at_activation,
                 "source_hash": page.source_hash,
+                **({"status": page.status} if page.status is not None else {}),
+                **(
+                    {"class_at_activation": page.class_at_activation}
+                    if page.class_at_activation is not None
+                    else {}
+                ),
             }
             for page in manifest.pages
         ],
@@ -552,10 +636,30 @@ def _validate_manifest(value: Any, *, path: Path) -> ActivationManifest:
     seen_identities: set[tuple[str, str]] = set()
     previous_path: str | None = None
     for index, raw_page in enumerate(raw_pages):
-        if not isinstance(raw_page, dict) or set(raw_page) != _PAGE_KEYS:
-            _invalid(path, f"pages[{index}] must contain exactly the four page fields")
+        if (
+            not isinstance(raw_page, dict)
+            or not _PAGE_KEYS <= set(raw_page)
+            or set(raw_page) - _PAGE_KEYS - _OPTIONAL_PAGE_KEYS
+        ):
+            _invalid(
+                path,
+                f"pages[{index}] must contain the four page fields and at most a status "
+                "with its class at activation",
+            )
         if not all(isinstance(raw_page[key], str) for key in _PAGE_KEYS):
             _invalid(path, f"pages[{index}] fields must be strings")
+        status = raw_page.get("status")
+        if status is not None and recorded_status(status) != status:
+            _invalid(path, f"pages[{index}].status must be a non-empty string")
+        class_at_activation = raw_page.get("class_at_activation")
+        if class_at_activation is not None and (
+            status is None
+            or not isinstance(class_at_activation, str)
+            or class_at_activation not in lifecycle_statuses.CLASSES
+        ):
+            _invalid(
+                path, f"pages[{index}].class_at_activation must be the class of a recorded status"
+            )
         kind = raw_page["identity_kind"]
         identity = raw_page["identity"]
         rel_path = raw_page["path_at_activation"]
@@ -582,7 +686,9 @@ def _validate_manifest(value: Any, *, path: Path) -> ActivationManifest:
         seen_paths.add(rel_path)
         seen_identities.add(identity_key)
         previous_path = rel_path
-        pages.append(ActivationPage(kind, identity, rel_path, source_hash))
+        pages.append(
+            ActivationPage(kind, identity, rel_path, source_hash, status, class_at_activation)
+        )
     return ActivationManifest(schema_version, contract_version, tuple(pages))
 
 

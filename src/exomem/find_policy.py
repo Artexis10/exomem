@@ -199,6 +199,12 @@ def apply_type_boost(
     return adjusted
 
 
+def _authored_status(page: object) -> object:
+    """The page's raw frontmatter status, so classification sees malformed values as authored."""
+    frontmatter = getattr(page, "frontmatter", None)
+    return frontmatter.get("status") if frontmatter is not None else getattr(page, "status", None)
+
+
 def apply_status_demotion(
     fused: list[tuple[str, float]],
     page_of: PageOf,
@@ -213,7 +219,7 @@ def apply_status_demotion(
         page = page_of(path)
         mult = status_multiplier(
             status_basis.classify(
-                getattr(page, "status", None), path=path, frontmatter=getattr(page, "frontmatter", None)
+                _authored_status(page), path=path, frontmatter=getattr(page, "frontmatter", None)
             ).require(),
             config,
         )
@@ -354,7 +360,7 @@ def apply_post_rrf_multipliers(
         if prefer_active:
             factor = status_multiplier(
                 status_basis.classify(
-                    getattr(page, "status", None),
+                    _authored_status(page),
                     path=path,
                     frontmatter=getattr(page, "frontmatter", None),
                 ).require(),

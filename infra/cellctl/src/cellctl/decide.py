@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from .backup_window import DEFAULT_BACKUP_WINDOW, within_backup_window
 from .capacity import GIB, snapshot_reserve_bytes
 from .rollout import current_image, target_image
 from .state import (
@@ -69,7 +70,7 @@ class ReconcileConfig:
     # hour old plus the time one backup takes (RPO <= 1 h).
     snapshot_backup_interval: timedelta = timedelta(minutes=55)
     # D8: the nightly backup window, as [start_hour, end_hour) UTC.
-    backup_window: tuple[int, int] = (2, 5)
+    backup_window: tuple[int, int] = DEFAULT_BACKUP_WINDOW
     # D8: at most this many backup holds run at once across the fleet.
     backup_concurrency: int = 1
     # D6/D8: the backup-retry-after backoff, doubling from this floor up to
@@ -235,22 +236,10 @@ def decide(
     return decision
 
 
-def _within_backup_window(now: datetime, config: ReconcileConfig) -> bool:
-    # D8: [start, end) UTC hours. A window may cross midnight ("22-3" is
-    # hour >= 22 or hour < 3); start == end is empty, which the chart
-    # schema rejects.
-    start, end = config.backup_window
-    if start < end:
-        return start <= now.hour < end
-    if start > end:
-        return now.hour >= start or now.hour < end
-    return False
-
-
 def nightly_backup_due(
     row: CellRow, observation: ClusterObservation, now: datetime, config: ReconcileConfig
 ) -> bool:
-    if not _within_backup_window(now, config):
+    if not within_backup_window(now.hour, config.backup_window):
         return False
     retry_after = observation.statefulset_backup_retry_after
     if retry_after is not None and retry_after > now:

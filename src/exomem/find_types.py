@@ -158,7 +158,8 @@ class ParsedPage:
     @property
     def status(self) -> str | None:
         s = self.frontmatter.get("status")
-        return str(s) if s else None
+        # Malformed values stay in frontmatter for validation, not lifecycle labels.
+        return s if isinstance(s, str) and s else None
 
     @property
     def superseded_by(self) -> list[str]:

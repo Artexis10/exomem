@@ -478,7 +478,7 @@ def test_warm_up_preloads_a_separate_activation_model_only(
     loads: list[str] = []
     monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=False)
     monkeypatch.setattr(warmup, "warm_caches", lambda _root, **_kw: {})
-    monkeypatch.setattr("exomem.semantic_contract.build_corpus_context", lambda _root: None)
+    monkeypatch.setattr("exomem.semantic_contract.warm_corpus_context", lambda _root: None)
     monkeypatch.setattr(embeddings, "get_model", lambda: types.SimpleNamespace(encode=lambda _t: None))
     monkeypatch.setattr(embeddings, "get_reranker", lambda: types.SimpleNamespace(predict=lambda _p: None))
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
@@ -1523,7 +1523,7 @@ def test_warm_up_readies_a_served_recall_model_off_the_request_path(
     ensured_calls: list[str] = []
     monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=False)
     monkeypatch.setattr(warmup, "warm_caches", lambda _root, **_kw: {})
-    monkeypatch.setattr("exomem.semantic_contract.build_corpus_context", lambda _root: None)
+    monkeypatch.setattr("exomem.semantic_contract.warm_corpus_context", lambda _root: None)
     monkeypatch.setattr(
         embeddings, "get_model", lambda: calls.append("recall") or types.SimpleNamespace(encode=lambda _t: None)
     )

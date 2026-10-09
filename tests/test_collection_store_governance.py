@@ -351,7 +351,8 @@ def test_literal_hash_paths_keep_template_and_collection_authority_separate(stor
         ancillary = policy_path + "#private.md"
         (store.root / ancillary).write_text("# Ordinary ancillary file\n")
         with request_scope(_external()), store.handle.transaction(), store._authorization(mutation=False) as authorization:
-            assert authorization.allows_file(f"{policy_path}#{KEY}")
+            # The unclassified object container cannot release the complete log bytes.
+            assert not authorization.allows_file(f"{policy_path}#{KEY}")
             assert not authorization.allows_file(f"{policy_path}#{OTHER}")
             assert authorization.allows_file(ancillary)
 
@@ -849,9 +850,11 @@ def test_v1_migration_backfills_canonical_metadata_and_restores_manifest_protect
     import sqlite3
 
     from exomem import vault
-    from exomem.collection_store import schema, tokens, types
+    from exomem.collection_store import connection, schema, tokens, types
 
-    conn = sqlite3.connect(tmp_path / "v1.sqlite", isolation_level=None)
+    engine = connection._writer_engine(str(tmp_path / "v1.sqlite"))
+    core = engine.connect()
+    conn = core.connection.driver_connection
     try:
         conn.execute("BEGIN IMMEDIATE")
         schema._migrate_to_1(conn)
@@ -873,7 +876,7 @@ def test_v1_migration_backfills_canonical_metadata_and_restores_manifest_protect
                      (CID, KEY, json.dumps(values), tokens.payload_hash(1, KEY, values, ""),
                       f"Knowledge Base/Records/Work/Items/{KEY}.md"))
         conn.execute("COMMIT")
-        schema.ensure_schema(conn)
+        schema.ensure_schema(core)
         assert json.loads(conn.execute("SELECT governance_json FROM collection_manifests").fetchone()[0]) == {
             "projects": ["alpha"], "tags": [], "classes": ["manifest"]}
         assert json.loads(conn.execute("SELECT governance_json FROM items").fetchone()[0]) == {
@@ -882,7 +885,8 @@ def test_v1_migration_backfills_canonical_metadata_and_restores_manifest_protect
             conn.execute("UPDATE collection_manifests SET governance_json='{}'")
         assert schema.schema_version(conn) == schema.SCHEMA_VERSION
     finally:
-        conn.close()
+        core.close()
+        engine.dispose()
 
 
 def test_manifest_grant_uses_its_own_basis_and_does_not_release_a_row(store, monkeypatch):

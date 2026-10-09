@@ -243,12 +243,6 @@ traefik:
 # cellctl and its gateway run in their own namespace (exomem-cloud) with
 # their own StorageClass, so neither block collides with the hosted one.
 
-cloudDatabase:
-  # Keep the certificate hostname in both DSNs while routing it privately.
-  hostname: ""
-  # RFC1918 IPv4 address of the private PostgreSQL listener.
-  privateIp: ""
-
 cellctl:
   enabled: false
   # Operator-selected cells reserve agents carrying their own cell ID.
@@ -285,6 +279,11 @@ cellctl:
   # explicit addresses, refreshed deliberately, matching gateway's own
   # databaseEgressCidrs pattern.
   databaseEgressCidrs: []
+  # Database admission allowlists the K3s server node's public /32, so cellctl
+  # must egress from that node. K3s labels every server node control-plane=true,
+  # so this selects "the server node" only while the foundation has exactly one.
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
   # memoryLimit is 3Gi because the first index build over a large restored vault
   # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The requests are what an
   # idle 0.108+ cell needs: about 226 MiB private memory with the model weights
@@ -375,6 +374,11 @@ cloudGateway:
   # D5: the gateway may egress only to cell pods on 8765 and the control
   # database on 5432 -- explicit addresses, matching gateway.databaseEgressCidrs.
   databaseEgressCidrs: []
+  # Database admission allowlists the K3s server node's public /32, so the
+  # gateway must egress from that node, as cellctl does. The selector means
+  # "the server node" only while the foundation has exactly one.
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
 
 cloudStorage:
   className: exomem-cloud-encrypted

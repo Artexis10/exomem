@@ -94,7 +94,7 @@ class Context:
         """An unavailable dependent classification defers this page's proposal."""
         try:
             return self.status_basis.classify(value, path=path).live
-        except lifecycle_statuses.OpError as error:
+        except lifecycle_statuses.ClassificationUnavailable as error:
             raise Deferred("status_unavailable") from error
 
     def graph(self) -> Any:
@@ -706,20 +706,18 @@ def _declared_sources(
     return sources
 
 
-def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
-    """The hydration proposal from graph links and admitted current eligibility.
+def _hydration_detect(ctx: Context, entity: str, keep=None) -> dict[str, Any] | None:
+    """The hydration proposal from graph links and current eligibility.
 
     Newer facts about the entity live on compiled pages that link it, and the
     entity's own page does not link or cite those pages back. The existing
-    page cache supplies current eligibility before contributors spend the cap.
+    page cache supplies current eligibility, and `keep` admission, before
+    contributors spend the cap. `keep=None` is the worker's owner view.
     """
     from . import provenance
-    from .governance import egress
 
-    keep = egress.release_walk_filter(ctx.vault_root)
     if not _visible(keep, entity):
         return None
-
     graph = ctx.graph()
     node = graph.execute(
         "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id, title "
@@ -817,9 +815,9 @@ def review_state_digest(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def _hydration_kwargs(ctx: Context, entity: str) -> dict[str, Any] | None:
+def _hydration_kwargs(ctx: Context, entity: str, keep=None) -> dict[str, Any] | None:
     """One entity's hydration proposal as the store's upsert arguments."""
-    proposal = _hydration_detect(ctx, entity) if _sig(ctx, entity) else None
+    proposal = _hydration_detect(ctx, entity, keep) if _sig(ctx, entity) else None
     if proposal is None:
         return None
     contributors = proposal["contributors"]
@@ -888,7 +886,11 @@ def _hydration_refresh(ctx: Context, entity: str) -> None:
 
 
 def _hydration_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
-    kwargs = _hydration_kwargs(ctx, str(row.get("subject_path") or ""))
+    from .governance import egress
+
+    # The request path's revalidation: contributors the caller cannot see spend no cap slot.
+    keep = egress.release_walk_filter(ctx.vault_root)
+    kwargs = _hydration_kwargs(ctx, str(row.get("subject_path") or ""), keep)
     if kwargs is None:
         return None
     kwargs["fingerprint"] = dreamer_store.proposal_fingerprint(
@@ -956,11 +958,13 @@ def _member_entry(ctx: Context, rel_path: str, role: str, **extra: Any) -> dict[
 
 
 def _governed(ctx: Context, rel_path: str, keep=None) -> Any | None:
-    """A currently eligible page, admitted before its status or content is read."""
-    from . import activation
-    from .governance import egress
+    """A currently eligible page that `keep` admits before its status or content is read.
 
-    keep = keep if keep is not None else egress.release_walk_filter(ctx.vault_root)
+    `keep=None` is the producer's owner view, as in every other view here; a
+    served view passes the caller's predicate.
+    """
+    from . import activation
+
     if not _visible(keep, rel_path):
         return None
     page = ctx.page(rel_path)
@@ -970,7 +974,7 @@ def _governed(ctx: Context, rel_path: str, keep=None) -> Any | None:
         eligible = activation.is_eligible_governed_page(
             ctx.vault_root, page, status_basis=ctx.status_basis
         )
-    except lifecycle_statuses.OpError as error:
+    except lifecycle_statuses.ClassificationUnavailable as error:
         raise Deferred("status_unavailable") from error
     return page if eligible else None
 
@@ -1851,15 +1855,12 @@ def _released_rows(cursor, keep) -> list[tuple[Any, ...]]:
 
 def _linked_subjects(ctx: Context, rel_path: str) -> list[str]:
     """The page and currently eligible linked subjects, within the existing cap."""
-    from .governance import egress
-
-    keep = egress.release_walk_filter(ctx.vault_root)
     linked = []
     ctx.graph_view()
     for (path,) in ctx.graph().execute(
         _LINKED_SUBJECTS_SQL.format(link=_authored_link("e")), (rel_path, rel_path)
     ):
-        if _governed(ctx, str(path), keep) is not None:
+        if _governed(ctx, str(path)) is not None:
             linked.append(str(path))
             if len(linked) >= _LINKED_SUBJECTS_PER_PAGE:
                 break
@@ -1874,9 +1875,6 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     worked on in those conversations may not have reached its home. Revisions
     of one episode are one origin; superseded revisions are not live.
     """
-    from .governance import egress
-
-    keep = keep if keep is not None else egress.release_walk_filter(ctx.vault_root)
     node = _subject_node(ctx, subject, keep)
     if node is None:
         return None
@@ -1971,9 +1969,7 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     Sources the caller may see; referrers that declare none are one origin.
     """
     from . import provenance
-    from .governance import egress
 
-    keep = keep if keep is not None else egress.release_walk_filter(ctx.vault_root)
     if _subject_node(ctx, subject, keep) is None:
         return None
     page = ctx.page(subject)

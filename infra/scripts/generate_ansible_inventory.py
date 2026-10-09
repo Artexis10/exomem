@@ -64,12 +64,6 @@ def _public_output(document: dict[str, Any], name: str) -> str:
     return value
 
 
-def _optional_public_output(document: dict[str, Any], name: str) -> str | None:
-    if name not in document:
-        return None
-    return _public_output(document, name)
-
-
 # Terraform names every agent server exomem-agent-<key>; that name is also the
 # inventory name and, through the agent's explicit node-name, the Kubernetes
 # node name that remove-agent.yml acts on.
@@ -240,25 +234,18 @@ def main() -> int:
     try:
         public_ip = str(ipaddress.ip_address(_public_output(document, "server_ipv4")))
         private_ip = str(ipaddress.ip_address(_public_output(document, "private_node_ip")))
-        control_public_ip = _optional_public_output(document, "control_db_server_ipv4")
-        control_private_ip = _optional_public_output(document, "control_db_private_ip")
-        if control_public_ip is not None:
-            control_public_ip = str(ipaddress.ip_address(control_public_ip))
-        if control_private_ip is not None:
-            control_private_ip = str(ipaddress.ip_address(control_private_ip))
         agents = _agent_hosts(document, args.user)
         admin_addresses = (
             _admin_addresses(args.admin_addresses) if args.admin_addresses else {}
         )
         dedicated = _dedicated_hosts(args.dedicated_hosts, args.user, _vswitch(document))
-        reused = sorted(set(dedicated) & ({"exomem-alpha", "substrate-control-01"} | set(agents)))
+        reused = sorted(set(dedicated) & ({"exomem-alpha"} | set(agents)))
         if reused:
             raise ValueError(f"{', '.join(reused)}: a dedicated host reuses another node's name")
-        node_ips = [private_ip, control_private_ip] + [
+        node_ips = [private_ip] + [
             host["private_node_ip"] for host in (*agents.values(), *dedicated.values())
         ]
-        taken = [address for address in node_ips if address is not None]
-        shared = sorted({address for address in taken if taken.count(address) > 1})
+        shared = sorted({address for address in node_ips if node_ips.count(address) > 1})
         if shared:
             raise ValueError(f"{', '.join(shared)}: every node needs its own private address")
     except ValueError as error:
@@ -290,21 +277,6 @@ def main() -> int:
         )
         k3s_agents["children"] = {"dedicated_hosts": {"hosts": dedicated}}
 
-    # The control database server is optional here: not every Terraform
-    # output set carries it yet (e.g. an apply that predates D12), so it is
-    # added only when both of its coordinates are present, rather than
-    # required unconditionally.
-    if control_public_ip is not None and control_private_ip is not None:
-        children["control_nodes"] = {
-            "hosts": {
-                "substrate-control-01": {
-                    "ansible_host": control_public_ip,
-                    "ansible_user": args.user,
-                    "postgres_private_ip": control_private_ip,
-                }
-            }
-        }
-
     # Administration runs over the company NetBird; the operator's own SSH
     # arguments supply any proxy, so the inventory carries only the address.
     # One map serves every runbook flow, so names absent from this inventory
@@ -312,7 +284,6 @@ def main() -> int:
     hosts: dict[str, dict[str, str]] = {
         **children["hosted_nodes"]["hosts"],
         **agents,
-        **children.get("control_nodes", {}).get("hosts", {}),
     }
     for name, host in hosts.items():
         if name in admin_addresses:

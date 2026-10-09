@@ -1257,12 +1257,14 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
     enrolled = json.loads(path.read_text())
     assert enrolled == {
         **original,
-        "descriptors": sorted([*original["descriptors"], "collections-store-v1"]),
+        "descriptors": sorted([*original["descriptors"], "collections-store-v1",
+                               state_migration.COLLECTION_MARKER_COMPATIBILITY_ID]),
     }
     replay = path.read_bytes()
     enroll(vault, authority_check=lambda: True)
     assert path.read_bytes() == replay
-    assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
+    assert "collections-store-v1" in state_migration.supported_state_compatibility_ids()
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ())
     assert state_migration.migration_status(vault) == "unsupported"
     with pytest.raises(state_migration.StateMigrationOfflineRequired, match="compatible runtime"):
         state_migration.require_vault_state_ready(vault)
@@ -1274,8 +1276,11 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
         _migrate(vault, adopt="vault")
     assert path.read_bytes() == replay
 
-    # Conditional contract: a future trusted adapter supplies actual support.
-    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ("collections-store-v1",))
+    # A supported runtime admits the same state without rewriting its descriptor.
+    monkeypatch.setattr(
+        state_migration, "supported_state_compatibility_ids",
+        lambda: ("collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID),
+    )
     assert state_migration.require_vault_state_ready(vault).state_dir == ready.state_dir
     assert state_migration.migration_status(vault) == "complete"
 
@@ -1285,6 +1290,7 @@ def test_interrupted_enrollment_retains_fence_and_invalidates_cached_readiness(
 ) -> None:
     from exomem import state_migration
 
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ())
     vault = tmp_path / "vault"
     vault.mkdir()
     ready = state_migration.require_vault_state_ready(vault)
@@ -1973,6 +1979,7 @@ def test_mixed_marker_requires_support_before_bootstrap_or_cached_admission(
     # Windows spelling must cross the real portable held-path API on every host.
     monkeypatch.setattr(authority, "marker_path", lambda root: WindowsMarker(marker))
     before = {path.name: path.read_bytes() for path in state_dir.iterdir()} if existing_state else {}
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ())
 
     with pytest.raises(state_migration.StateCompatibilityUnsupported):
         state_migration.require_vault_state_ready(vault)

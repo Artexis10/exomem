@@ -78,6 +78,7 @@ projection state.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import json
 import logging
@@ -909,6 +910,25 @@ def _datetime(value: Any) -> dt.datetime | None:
     return parsed.astimezone(dt.UTC)
 
 
+def _owner_local(producer: Callable[..., Any]) -> Callable[..., Any]:
+    """Compute what the projection stores as the owner-local producer.
+
+    The stored projection is shared by every audience, and each serve filters it
+    for its own caller, so nothing it computes returns to a caller except through
+    a per-caller serve.
+    """
+
+    @functools.wraps(producer)
+    def run(vault_root: Path, *args: Any, **kwargs: Any) -> Any:
+        from .governance.principal import owner_local_producer
+
+        with owner_local_producer(vault_root, "due_state_projection"):
+            return producer(vault_root, *args, **kwargs)
+
+    return run
+
+
+@_owner_local
 def recompute(
     vault_root: Path,
     *,
@@ -1348,8 +1368,10 @@ def _schedule_reconcile(
     def _run() -> None:
         try:
             from .foreground_activity import background_scope
+            from .governance.principal import library_scope
 
-            with background_scope(vault_root):
+            # An owner-local worker: a request's principal does not cross into this thread.
+            with background_scope(vault_root), library_scope():
                 reconcile(vault_root, today=today)
         except Exception:  # noqa: BLE001
             # Due state is advisory. Its recovery may be retried by a later read,
@@ -1405,6 +1427,7 @@ def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
         )
 
 
+@_owner_local
 def apply_write_delta(
     vault_root: Path, rel_path: str, *, today: dt.date | None = None
 ) -> dict[str, Any] | None:
@@ -2068,13 +2091,16 @@ def apply_record_write_delta(
                 claims=claims,
             )
         index = _bindings_index(current)
+        # A summary collection declares no planning join (its manifest refuses
+        # one), so an index row naming it is stale until the next full pass.
+        summary = getattr(manifest, "view_mode", "items") == "summary"
         rows = [
             row
             for row in index.get(str(manifest.path), [])
-            if isinstance(row, dict) and row.get("records") == str(manifest.path)
+            if isinstance(row, dict) and row.get("records") == str(manifest.path) and not summary
         ]
         registered = None
-        if not rows:
+        if not rows and not summary:
             # Not in the index: either nothing is bound (the common case, and it
             # costs one attribute read of the manifest already in hand) or this
             # collection was bound since the last full pass. Resolving it here
@@ -2242,7 +2268,9 @@ def apply_plan_write_delta(
             # other's.
             records_path = str(row.get("records") or "")
             records = _load_projection_manifest(Path(vault_root), records_path)
-            if records is None:
+            if records is None or records.view_mode == "summary":
+                # A stale binding to a summary collection, which declares no join:
+                # never load all of its rows to look for partners.
                 continue
             join = dict(row.get("join") or {})
             record_fields = list(join)

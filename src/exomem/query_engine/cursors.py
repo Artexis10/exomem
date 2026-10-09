@@ -6,19 +6,17 @@ import datetime as dt
 import hashlib
 import json
 from contextlib import closing
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, fields, is_dataclass, replace
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from ..collection_store import query_freshness
 from . import ir, typed_sql
-from .runtime import _MAX_DECODE_BYTES, QueryError
+from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
-from .selected_values import read_selected_values
 from .typed_rows import AdmittedQuery, execute_rows
 
 _MAX_TOKEN_BYTES = 4096
-_MAX_RESULT_BYTES = 64 * 1024
 _TOKEN_KEYS = frozenset({"v", "query", "principal", "schema", "authorization", "visible", "lineage", "as_of", "boundary"})
 
 
@@ -78,21 +76,22 @@ def _codec(session):
 
 
 def _visible(admitted, dependencies):
-    if admitted.uniform:
+    plan = admitted.session._field_plans[admitted.query.source.ref]
+    if admitted.uniform and dependencies - {"item_key"} <= plan.whole_fields:
         basis = query_freshness.uniform_basis(admitted.session.connection, admitted.query.source.ref, dependencies)
         if basis is None:
             raise QueryError("QUERY_UNAVAILABLE")
         return _hash(basis)
     session = admitted.session
-    count = admitted.released_count
+    base = session.admit(admitted.query.source.ref)
+    count = base.visible_count
     if count is None or count + session._estimated_visits > session.limits.max_row_visits:
         raise QueryError("QUERY_COST_LIMIT")
     session._estimated_visits += count
     digest = hashlib.sha256(b"exomem.typed-visible-dependencies.v1\0")
-    ids = f"query_ids_{admitted.ordinal}"
     cursor = session.connection.execute(
-        f"SELECT i.row_id,CASE WHEN {admitted.membership_sql} THEN i.item_key END "
-        f"FROM temp.{ids} a CROSS JOIN main.items i WHERE i.row_id=a.row_id ORDER BY a.row_id",
+        f"SELECT i.row_id,i.item_key FROM main.items i WHERE i.collection_id=? AND {base.membership_sql} "
+        "ORDER BY i.row_id", (admitted.query.source.ref,),
     )
     with closing(session.fetch(cursor)) as batches:
         for batch in batches:
@@ -101,11 +100,10 @@ def _visible(admitted, dependencies):
                 if key is None:
                     raise QueryError("QUERY_COST_LIMIT")
                 try:
-                    with session.connection.blobopen("items", "values_json", row_id, readonly=True) as blob:
-                        values = read_selected_values(
-                            blob, set(dependencies) - {"item_key"},
-                            max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
-                        )
+                    values = session.selected_values(
+                        row_id, admitted.layout, set(dependencies) - {"item_key"},
+                        max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
+                    )
                     selected = [(path, path in values, values.get(path)) for path in sorted(dependencies) if path != "item_key"]
                     digest.update(_json([key, selected]).encode() + b"\n")
                 except (ValueError, TypeError, RecursionError) as error:
@@ -114,20 +112,46 @@ def _visible(admitted, dependencies):
     return digest.hexdigest()
 
 
-def _binding(admitted: AdmittedQuery):
-    admitted.check()
-    operation = admitted.session._authorization
+def caller_binding(session, query) -> dict[str, str]:
+    """The query, caller, policy and store-lineage digests every continuation binds."""
+    operation = session._authorization
     principal = operation.who
-    dependencies = set(admitted.compiled.dependency_paths) | set(admitted.fields)
-    lineage = admitted.session.connection.execute(
+    dependencies = set()
+
+    def collect(value):
+        if isinstance(value, ir.Field):
+            dependencies.add(value.path)
+        elif is_dataclass(value):
+            for field in fields(value):
+                collect(getattr(value, field.name))
+        elif isinstance(value, tuple):
+            for child in value:
+                collect(child)
+
+    collect(query)
+    field_plan = session._field_plans.get(query.source.ref)
+    if field_plan is not None and not query.select.fields and query.aggregate is None:
+        dependencies.update(field_plan.fields)
+    # Field release is not row policy. Only grants used by this query invalidate its continuation.
+    # Compiler findings are diagnostics; fresh admission still refuses blocked policy before cursor binding.
+    row_policy = replace(operation.policy, fingerprint="", findings=(), release_grants=tuple(
+        grant for grant in operation.policy.release_grants if grant.field_release is None))
+    lineage = session.connection.execute(
         "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id','lineage','forks') ORDER BY key",
     ).fetchall()
-    return {"query": _hash(replace(admitted.query, page=replace(admitted.query.page, after=None))),
+    return {"query": _hash(replace(query, page=replace(query.page, after=None))),
             "principal": _hash([principal.audience_id, principal.surface, principal.purpose,
                                 principal.authorization_session_id, principal.issuer_family]),
-            "schema": _hash(admitted.schema_identity),
-            "authorization": _hash([operation.policy.fingerprint, operation.access_fingerprint, operation.purpose]),
-            "visible": _visible(admitted, dependencies), "lineage": _hash(lineage)}
+            "authorization": _hash([asdict(row_policy), operation.access_fingerprint, operation.purpose,
+                                    [] if field_plan is None else field_plan.binding(dependencies)]),
+            "lineage": _hash(lineage)}
+
+
+def _binding(admitted: AdmittedQuery):
+    admitted.check()
+    dependencies = set(admitted.compiled.dependency_paths) | set(admitted.fields)
+    return {**caller_binding(admitted.session, admitted.query), "schema": _hash(admitted.schema_identity),
+            "visible": _visible(admitted, dependencies)}
 
 
 def _resume(admitted, payload):
@@ -159,7 +183,7 @@ def _resume(admitted, payload):
 
 
 def execute_page(session, query, *, as_of=None):
-    """A dark leaf; no tool route, field-classified release or migration enabled."""
+    """One typed row page, measured whole against the result cap as the caller receives it."""
     session.check()
     if not isinstance(query, ir.Query):
         raise QueryError("QUERY_UNSUPPORTED")
@@ -183,9 +207,10 @@ def execute_page(session, query, *, as_of=None):
               "schema_version": admitted.schema_version,
               "schema_fingerprint": binding["schema"],
               "truncated": page.has_more,
-              "truncation_reason": ("bytes" if len(page.rows) < query.page.limit else "limit") if page.has_more else None}
+              "truncation_reason": ("bytes" if len(page.rows) < query.page.limit else "limit") if page.has_more else None,
+              "mode": query.mode, "execution_profile": session.limits.profile}
     session.check()
-    if len(_json(result).encode()) > _MAX_RESULT_BYTES:
+    if wire_bytes(result) > MAX_RESULT_BYTES:
         raise QueryError("QUERY_RESULT_TOO_LARGE")
     session.check()
     return result

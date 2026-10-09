@@ -315,7 +315,9 @@ def test_the_correction_records_its_reason_and_previous_path(
     )
     after = _front(vault, result.new_path)
     assert str(after["reclassified"]) == TODAY.isoformat()
-    assert after["reclassified_from"] == captured.path
+    assert after["reclassified_from"] == [
+        {"path": captured.path, "kind": "unclassified", "domain": "travel"}
+    ]
     assert after["reclassified_reason"] == "it is a written investigation"
 
 
@@ -717,3 +719,212 @@ def test_a_recap_cannot_be_reclassified_out_of_the_episode_folder(
 
     assert proposed.value.code == applied.value.code == "EPISODE_KIND_RESERVED"
     assert (vault / recap.path).read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Draining legacy sources: append-only referrers, history and revert
+# ---------------------------------------------------------------------------
+def _legacy_source(vault: Path, name: str = "2026-01-02-tide-table") -> str:
+    """A source filed under the retired catch-all, as the legacy drain finds it."""
+    rel = f"{KB}/Sources/Other/{name}.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: source\ntitle: Tide table\nsource_type: other\n"
+        "captured: 2026-01-02T00:00:00Z\n"
+        "# kept exactly as the capture wrote it\n"
+        "tags: [ harbor,  tides ]\ningested_into: []\n---\n\n"
+        "# Tide table\n\nHigh water 06:12, low water 12:31.\n",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def _write(vault: Path, rel: str, text: str) -> Path:
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(text, encoding="utf-8")
+    return page
+
+
+def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_operation(
+    vault: Path,
+) -> None:
+    """The drain workflow, through the dispatcher every client uses.
+
+    An Evidence page names the source by basename, alias and heading, which
+    resolve unchanged after a move that keeps the basename, so it must neither
+    be rewritten nor refuse the move. A mutable note names it by path and
+    follows it there and back.
+    """
+    from exomem import commands, writer_lease
+
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "manage_memory_file")
+    source = _legacy_source(vault)
+    stem = "2026-01-02-tide-table"
+    original = (vault / source).read_text(encoding="utf-8")
+    evidence = _write(
+        vault,
+        f"{KB}/Evidence/Harbor/tide-proof.md",
+        f"---\ntype: evidence\n---\n\nTables: [[{stem}]], [[{stem}|the tides]], "
+        f"[[{stem}#Tide table]].\n",
+    )
+    evidence_bytes = evidence.read_bytes()
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\n"
+        f"See [[{source.removesuffix('.md')}]].\n",
+    )
+    note_bytes = note.read_bytes()
+
+    preview = writer_lease.invoke_command(
+        command, vault, operation="propose-reclassification", path=source,
+        source_kind="dataset", domain="travel",
+    )
+    first = writer_lease.invoke_command(
+        command, vault, operation="reclassify", path=source,
+        source_kind="dataset", domain="travel", reason="a table of measurements",
+    )
+    second = writer_lease.invoke_command(
+        command, vault, operation="reclassify", path=first["path"],
+        source_kind="research-report", reason="the table is an appendix of a survey",
+    )
+    history = _front(vault, second["path"])["reclassified_from"]
+    note_after_moves = note.read_text(encoding="utf-8")
+    back_once = writer_lease.invoke_command(
+        command, vault, operation="revert-reclassification", path=second["path"],
+        reason="the survey attribution was wrong",
+    )
+    back_twice = writer_lease.invoke_command(
+        command, vault, operation="revert-reclassification", path=back_once["path"],
+        reason="keep it in the drain queue for now",
+    )
+
+    assert preview["destination"] == first["path"]
+    assert preview["referrers"] == {
+        "rewritten": [f"{KB}/Notes/Insights/tide-note.md"],
+        "append_only_unchanged": {"basename": [f"{KB}/Evidence/Harbor/tide-proof.md"]},
+    }
+    assert preview["refusals"] == []
+    assert history == [
+        {"path": source, "kind": "other", "domain": None},
+        {"path": first["path"], "kind": "dataset-export", "domain": "travel"},
+    ]
+    assert second["path"].removesuffix(".md") in note_after_moves
+    assert back_once["path"] == first["path"]
+    assert back_twice["path"] == source
+    assert evidence.read_bytes() == evidence_bytes
+    assert note.read_bytes() == note_bytes
+    restored = (vault / source).read_text(encoding="utf-8")
+    assert _body(vault, source) == original.split("---\n", 2)[2].removeprefix("\n")
+    front_lines = restored.split("---\n", 2)[1].splitlines()
+    # Only the correction record remains; every original byte is kept in place.
+    assert [line for line in front_lines if not line.startswith("reclassified")] == (
+        original.split("---\n", 2)[1].splitlines()
+    )
+    assert "reclassified_from" not in _front(vault, source)
+
+
+def test_an_evidence_path_link_refuses_the_move_and_nothing_changes(vault: Path) -> None:
+    """A path-form link in an append-only page would dangle, so the source stays."""
+    source = _legacy_source(vault)
+    evidence = _write(
+        vault,
+        f"{KB}/Evidence/Harbor/tide-proof.md",
+        f"---\ntype: evidence\n---\n\nTable: [[{source.removesuffix('.md')}]].\n",
+    )
+    paths = (source, evidence.relative_to(vault).as_posix())
+    before = {rel: (vault / rel).read_bytes() for rel in paths}
+
+    proposal = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    with pytest.raises(rc.ReclassifyError) as refused:
+        rc.reclassify(
+            vault, path=source, source_kind="dataset", domain="travel",
+            reason="a table of measurements", today=TODAY,
+        )
+
+    assert [(item["code"], item["path"]) for item in proposal.refusals] == [
+        ("APPEND_ONLY", f"{KB}/Evidence/Harbor/tide-proof.md")
+    ]
+    assert refused.value.code == "APPEND_ONLY"
+    assert {rel: (vault / rel).read_bytes() for rel in before} == before
+    assert not (vault / proposal.destination).exists()
+
+
+def test_a_legacy_previous_path_is_kept_but_never_reverted_by_guessing(vault: Path) -> None:
+    source = _legacy_source(vault)
+    page = vault / source
+    legacy_path = f"{KB}/Sources/Unclassified/2026-01-02-tide-table.md"
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            "ingested_into: []\n", f"ingested_into: []\nreclassified_from: {legacy_path}\n"
+        ),
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+
+    with pytest.raises(rc.ReclassifyError) as refused:
+        rc.revert(vault, path=source, reason="undo", today=TODAY)
+    assert refused.value.code == "HISTORY_CLASSIFICATION_UNKNOWN"
+    assert page.read_bytes() == before
+
+    moved = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel",
+        reason="a table of measurements", today=TODAY,
+    )
+    assert _front(vault, moved.new_path)["reclassified_from"] == [
+        {"path": legacy_path},
+        {"path": source, "kind": "other", "domain": None},
+    ]
+    reverted = rc.revert(vault, path=moved.new_path, reason="undo", today=TODAY)
+    assert reverted.new_path == source
+    assert _front(vault, source)["reclassified_from"] == [{"path": legacy_path}]
+
+
+def test_a_revert_refuses_a_previous_location_another_page_now_occupies(
+    vault: Path,
+) -> None:
+    source = _legacy_source(vault)
+    moved = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel",
+        reason="a table of measurements", today=TODAY,
+    )
+    _write(vault, source, "---\ntype: source\ntitle: A newer capture\n---\n\nOther.\n")
+    before = (vault / moved.new_path).read_bytes()
+
+    with pytest.raises(rc.ReclassifyError) as refused:
+        rc.revert(vault, path=moved.new_path, reason="undo", today=TODAY)
+
+    assert refused.value.code == "PREVIOUS_PATH_OCCUPIED"
+    assert (vault / moved.new_path).read_bytes() == before
+
+
+def test_a_reclassified_artifact_page_follows_its_bytes_and_keeps_its_other_fields(
+    vault: Path,
+) -> None:
+    """The companion pointer is patched in place, not by re-serializing the page."""
+    binary = f"{KB}/Sources/Other/scan.png"
+    (vault / binary).parent.mkdir(parents=True, exist_ok=True)
+    (vault / binary).write_bytes(b"\x89PNG\r\n\x1a\nbytes")
+    page_rel = f"{binary}.md"
+    original = (
+        "---\ntype: source\ntitle: 'Harbour scan'\nsource_type: other\n"
+        f"evidence_file: {binary}\n"
+        "# scanned at the harbour office\n"
+        "tags: [ harbor ]\n---\n\n# Harbour scan\n\nA scanned tide board.\n"
+    )
+    _write(vault, page_rel, original)
+
+    result = rc.reclassify(
+        vault, path=page_rel, source_kind="photograph", domain="travel",
+        reason="it is a photograph of the tide board", today=TODAY,
+    )
+
+    new_binary = result.new_path.removesuffix(".md")
+    assert (vault / new_binary).read_bytes() == b"\x89PNG\r\n\x1a\nbytes"
+    assert _front(vault, result.new_path)["evidence_file"] == new_binary
+    moved_lines = (vault / result.new_path).read_text(encoding="utf-8").splitlines()
+    for line in original.splitlines():
+        if not line.startswith(("source_type:", "evidence_file:")):
+            assert line in moved_lines, line

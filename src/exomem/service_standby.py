@@ -631,7 +631,7 @@ def build_semantic_corpus(vault_root: Path) -> bool:
     process which refuses writes has moved the outage, not removed it.
 
     Safe for a standby, which is the bar every step here has to clear. Checked
-    both ways: statically, `build_corpus_context` walks and parses Markdown,
+    both ways: statically, `warm_corpus_context` walks and parses Markdown,
     resolves in memory, and caches under a module-level `threading.RLock` --
     there is no `batch_atomic_write`, no mutation-lock hold, no sidecar write
     and no publication anywhere in it, and its `freshness.consumer_checkpoint`
@@ -652,7 +652,7 @@ def build_semantic_corpus(vault_root: Path) -> bool:
     with _lock:
         _corpus_attempted = True
     try:
-        semantic_contract.build_corpus_context(Path(vault_root))
+        semantic_contract.warm_corpus_context(Path(vault_root))
     except Exception:  # noqa: BLE001 - an unbuilt corpus is a waiting component
         log.warning("standby semantic corpus build failed", exc_info=True)
         return False

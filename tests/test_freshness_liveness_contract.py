@@ -202,7 +202,8 @@ class TestCorpusHalf:
     def test_identity_snapshot_rejects_distinct_cached_context_reusing_census(
         self, vault: Path
     ) -> None:
-        original = semantic_contract.build_corpus_context(vault)
+        # The shared structural cache entry; the public builder returns a detached copy.
+        original, _census = semantic_contract._build_corpus_context_with_census(vault)
         snapshot = semantic_contract.current_reference_identity_snapshot(vault)
         assert snapshot is not None
         cache_key = semantic_contract._corpus_cache_key(vault)
@@ -340,7 +341,8 @@ class TestCorpusHalf:
         )
 
         censuses, builds = _spy_corpus_work(monkeypatch)
-        context = semantic_contract.build_corpus_context(vault)
+        # The shared structural cache entry; the public builder returns a detached copy.
+        context, _census = semantic_contract._build_corpus_context_with_census(vault)
         assert (censuses, builds) == ([], [])
         assert context is entry[1]
 

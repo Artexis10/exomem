@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from dataclasses import replace
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pytest
@@ -56,11 +57,13 @@ def cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
     vault.chmod(0o700)
     now = int(time.time())
     if getattr(request, "param", None) == "provider":
-        # Lean runtime shards may see provisioner source via another test's
-        # path setup without its dependencies. The hosted infrastructure job
-        # installs both packages and executes these cross-package drills.
-        pytest.importorskip("sqlalchemy", reason="requires provisioner dependencies")
-        pytest.importorskip("exomem_provisioner")
+        # Another test can expose provisioner source without installing its
+        # dependencies. These drills require the installed package, which the
+        # hosted infrastructure job supplies alongside the runtime.
+        try:
+            version("exomem-provisioner")
+        except PackageNotFoundError:
+            pytest.skip("requires the installed provisioner package")
         from exomem_provisioner import authorization_membership
         from exomem_provisioner.lifecycle import OpaqueProviderMetadata
 

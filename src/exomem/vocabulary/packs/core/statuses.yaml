@@ -13,3 +13,14 @@ entries:
     attributes: {class: retired}
   dropped:
     attributes: {class: abandoned}
+  # Labels the product itself writes on experiment and production-log pages.
+  recorded:
+    attributes: {class: live}
+  edited:
+    attributes: {class: live}
+  published:
+    attributes: {class: live}
+  reflected:
+    attributes: {class: live}
+  concluded:
+    attributes: {class: live}

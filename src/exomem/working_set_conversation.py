@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from . import lifecycle_statuses
+
 FOCUS_MAX_CHARS = 240
 USER_ENTRY_MAX_CHARS = 600
 ASSISTANT_ENTRY_MAX_CHARS = 300
@@ -104,17 +106,32 @@ _REFERENCE_FIELDS = frozenset({
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?")
 
 
-def prose_chars(value: Any, *, field: str = "", role_ids: frozenset[str] = frozenset()) -> int:
+def prose_chars(
+    value: Any,
+    *,
+    field: str = "",
+    role_ids: frozenset[str] = frozenset(),
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> int:
     """Inclusive inferred prose; only references and validated categories/dates are free."""
-    # Lifecycle is authored metadata, like a reference; its labels are vault-defined.
-    if field in _REFERENCE_FIELDS or field == "lifecycle":
+    if field in _REFERENCE_FIELDS:
         return 0
     if isinstance(value, Mapping):
-        return sum(prose_chars(item, field=key, role_ids=role_ids) for key, item in value.items())
+        return sum(
+            prose_chars(item, field=key, role_ids=role_ids, status_basis=status_basis)
+            for key, item in value.items()
+        )
     if isinstance(value, (list, tuple)):
-        return sum(prose_chars(item, field=field, role_ids=role_ids) for item in value)
+        return sum(
+            prose_chars(item, field=field, role_ids=role_ids, status_basis=status_basis)
+            for item in value
+        )
     if not isinstance(value, str):
         return 0
+    if field == "lifecycle":
+        # A label the basis resolves (shipped or registered) is a category; any other is prose.
+        resolved = (status_basis or lifecycle_statuses.Basis(None)).classify(value)
+        return 0 if resolved.lifecycle_class is not None and not resolved.unregistered else len(value)
     from . import context_roles, working_set_resolve
 
     closed = {
@@ -142,24 +159,33 @@ def prose_chars(value: Any, *, field: str = "", role_ids: frozenset[str] = froze
     return len(value)
 
 
-def subject_chars(packet: Mapping[str, Any]) -> int:
+def subject_chars(
+    packet: Mapping[str, Any], *, status_basis: lifecycle_statuses.Basis | None = None
+) -> int:
     """Each retained occurrence charged by the conversation-only packet ledger."""
     role_ids = frozenset(
         role["id"] for role in packet.get("roles", ())
         if isinstance(role, Mapping) and isinstance(role.get("id"), str)
     )
-    return sum(prose_chars(packet.get(section, ()), role_ids=role_ids) for section in (
-        "anchors", "ambiguity", "current_state", "units", "pointers",
-    ))
+    return sum(
+        prose_chars(packet.get(section, ()), role_ids=role_ids, status_basis=status_basis)
+        for section in ("anchors", "ambiguity", "current_state", "units", "pointers")
+    )
 
 
-def budget_headers(entries: Sequence[dict[str, Any]], allowance: int, *, role_ids: frozenset[str]) -> int:
+def budget_headers(
+    entries: Sequence[dict[str, Any]],
+    allowance: int,
+    *,
+    role_ids: frozenset[str],
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> int:
     """Titles first, then whole authored header values; identities remain."""
     used = 0
 
     def admit(value: Any, field: str) -> Any:
         nonlocal used
-        cost = prose_chars(value, field=field, role_ids=role_ids)
+        cost = prose_chars(value, field=field, role_ids=role_ids, status_basis=status_basis)
         if used + cost <= allowance:
             used += cost
             return value

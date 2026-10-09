@@ -57,7 +57,7 @@ variable "nodes" {
     condition = alltrue([
       for node in values(var.nodes) : !contains(var.reserved_private_ips, node.private_ip)
     ])
-    error_message = "An agent private_ip must not reuse the fleet server's or the control database's address."
+    error_message = "An agent private_ip must not reuse a reserved address, such as the fleet server's."
   }
   validation {
     condition = alltrue([

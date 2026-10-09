@@ -25,7 +25,7 @@ Collect these inputs without changing the named systems:
 | Original DNS | Zone, record ID, complete type/content/proxy/TTL settings; preserve the original record for rollback |
 | Endpoint pair | Cloud and replacement personal HTTPS hostnames, both with `/mcp`; certificate coverage, canonical OAuth issuer/resource, discovery and token endpoints, and connector reauthentication requirements |
 | Personal clients | CLI profiles, desktop/web connectors and any other consumers; record which owner has verified each one |
-| Fleet and database | Node identity, private database address, direct PostgreSQL roles on 5432, cluster/pod/service CIDRs, current chart release and values |
+| Fleet and database | Node identity, the database's public address and the server node's allowlisted /32, direct PostgreSQL roles on 5432, cluster/pod/service CIDRs, current chart release and values |
 | Images | Released Cloud cell, cellctl and gateway repository digests, their source revisions, supported architecture and authenticated pull proof |
 | Backup account | Existing business B2 account identity, dedicated Cloud bucket name/ID, account-specific S3 endpoint and separate provider/controller credential references |
 | Release evidence | Green full CI on the final main revision, release PR based on that revision, published image metadata and node acceptance still pending |
@@ -70,8 +70,8 @@ Any override must agree with the chart and destination matrix.
 
 | Kubernetes Secret | Exact keys | Preparation requirement |
 | --- | --- | --- |
-| `exomem-cellctl-database-dsn` | `dsn` | Dedicated cellctl role, direct private PostgreSQL connection, including LISTEN |
-| `exomem-cloud-gateway-database` | `url` | Dedicated gateway role, direct private PostgreSQL connection |
+| `exomem-cellctl-database-dsn` | `dsn` | Dedicated cellctl role, direct PostgreSQL connection over the public address with `verify-full`, including LISTEN |
+| `exomem-cloud-gateway-database` | `url` | Dedicated gateway role, direct PostgreSQL connection over the public address with `verify-full` |
 | `exomem-cloud-gateway-control-plane-key` | `key` | Match the authorized Substrate control-plane key |
 | `exomem-cloud-cell-token-key` | `current`, `currentVersion`; rotation adds both `previous`, `previousVersion` | Key is 32 random bytes encoded as 64 hex characters; both components read the same current entry |
 | `exomem-cloud-backup-master-key` | `keys`, `currentVersion` | `keys` is a JSON version-to-base64-key map; decoded keys are 32 bytes and contain the selected version |
@@ -115,27 +115,32 @@ Do not use forced server-side-apply ownership to hide retained foreign fields.
 ## Render and review
 
 Keep the certificate hostname in both PostgreSQL DSNs and use port 5432 with
-`sslmode=verify-full`. Set the paired `cloudDatabase.hostname` and
-`cloudDatabase.privateIp` values to resolve that hostname through a pod-local
-host alias on the Cloud gateway and cellctl. Include the private IP as a `/32`
-in both workloads' `databaseEgressCidrs`. These aliases do not change public DNS
-or tenant workloads. Changing the private address later requires updating both
-the mapping and the egress lists and rolling these two Deployments.
+`sslmode=verify-full`. The hostname resolves through public DNS to PostgreSQL
+on 5432 at the database's public address. That port admits the gateway and
+cellctl roles only from the K3s server's `/32`, as design decision 10 of
+`separate-shared-substrate-control-infrastructure` defines. The chart pins the
+gateway and cellctl to the server node, so their egress leaves from that address.
+
+List the database's public address, `167.233.57.60/32`, in both workloads'
+`databaseEgressCidrs`. NetworkPolicy `ipBlock` entries are literal addresses,
+not DNS names. Changing the address requires updating both egress lists, then
+rolling these two Deployments.
 
 For cellctl, also set the DSN parameter
 `sslrootcert=/etc/ssl/certs/ca-certificates.crt` after confirming that bundle
 exists in the pinned image. The gateway uses Node's trusted roots. Verify each
 actual image client accepts the intended hostname and rejects a mismatched or
 untrusted certificate against disposable TLS PostgreSQL before sealing the
-production DSNs. Do not replace the hostname with the private IP or disable
-certificate verification to make the connection pass.
+production DSNs. Do not replace the hostname with the database address or
+disable certificate verification to make the connection pass.
 
 The values worksheet must resolve these current chart inputs:
 
 - `cellctl.image`, `cellctl.cellImageRepository`, the four `cellctl.b2*` identity/
-  endpoint values, and `cellctl.databaseEgressCidrs`;
-- `cloudDatabase.hostname` matching the certificate and DSNs, and
-  `cloudDatabase.privateIp` matching both database egress `/32` entries;
+  endpoint values, and `cellctl.databaseEgressCidrs` with the database's public
+  `/32`;
+- `cellctl.nodeSelector` and `cloudGateway.nodeSelector` left at the K3s server
+  default, which the database's client allowlist requires;
 - `cloudGateway.image`, `hostname`, `publicBaseUrl`, `/mcp`, matching database
   CIDRs, and the unguessable trusted-ingress source value;
 - `cloudIngress.hostname` equal to the gateway hostname, ACME contact and DNS

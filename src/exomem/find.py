@@ -4821,8 +4821,13 @@ def _find_semantic(
                                 }
                             )
                     if prefer_active:
+                        page = _page_of(h.path)
                         factor = _status_multiplier(
-                            status_basis.classify(h.status, path=h.path).require(), config
+                            status_basis.classify(
+                                page.frontmatter.get("status") if page else h.status,
+                                path=h.path,
+                                frontmatter=page.frontmatter if page else None,
+                            ).require(), config
                         )
                         before = adjusted
                         adjusted *= factor

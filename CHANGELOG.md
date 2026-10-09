@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.114.0](https://github.com/Artexis10/exomem/compare/v0.113.0...v0.114.0) (2026-10-09)
+
+
+### Features
+
+* **collections:** add the SQLite summary core with field admission ([#1624](https://github.com/Artexis10/exomem/issues/1624)) ([1f178c9](https://github.com/Artexis10/exomem/commit/1f178c90f3422e3d4df6ce2353f537eb9b61592f))
+
+## [0.113.0](https://github.com/Artexis10/exomem/compare/v0.112.0...v0.113.0) (2026-10-09)
+
+
+### Features
+
+* **infra:** admit Cloud database clients from the server node ([#1634](https://github.com/Artexis10/exomem/issues/1634)) ([0d4d94b](https://github.com/Artexis10/exomem/commit/0d4d94bb3fa3e261cb25ed6bd442b066dc04a6e6))
+* **infra:** retire the control database's private path ([#1636](https://github.com/Artexis10/exomem/issues/1636)) ([4b34879](https://github.com/Artexis10/exomem/commit/4b34879ee6d1718aae4d8f97477ac53590d41ad0))
+* **sources:** make source reclassification previewed and reversible ([#1632](https://github.com/Artexis10/exomem/issues/1632)) ([762653a](https://github.com/Artexis10/exomem/commit/762653a0c0030b65898355983664efcb435ca0a9))
+
+## [0.112.0](https://github.com/Artexis10/exomem/compare/v0.111.1...v0.112.0) (2026-10-08)
+
+
+### Features
+
+* **infra:** consume shared Substrate control ownership ([#1629](https://github.com/Artexis10/exomem/issues/1629)) ([57b432e](https://github.com/Artexis10/exomem/commit/57b432efa74fefb17b28c0f9131fa0cd67dcb332))
+* **vocabulary:** add shared packs and reversible registry edits ([#1623](https://github.com/Artexis10/exomem/issues/1623)) ([e844290](https://github.com/Artexis10/exomem/commit/e844290a16b298fa30edfefea5e38d9951d54973))
+
 ## [0.111.1](https://github.com/Artexis10/exomem/compare/v0.111.0...v0.111.1) (2026-10-08)
 
 

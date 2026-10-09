@@ -11,7 +11,7 @@
 
 The owner's source vault was checked on 2026-09-28: its governance store is at schema v3, and it has no links, special files or hardlinks. Not yet run against a production cell.
 
-This procedure replaces the Exomem Cloud owner's cell vault with the owner's existing Exomem vault from another machine. It applies to the **owner's own vault only**. The operator mints the key that decrypts the archive, which is acceptable only when the operator and the vault's owner are the same person. Any other user's restore uses the key their own cell mints (`add-exomem-cloud-vault-import`, design D1), never this procedure.
+This procedure replaces the Exomem Cloud owner's cell vault with the owner's existing Exomem vault from another machine. It applies to the **owner's own vault only**. The operator mints the key that decrypts the archive, which is acceptable only when the operator and the vault's owner are the same person. Any other user's restore uses the key their own cell mints (`add-exomem-cloud-vault-import`, design D1), never this procedure. To restore a cell from one of its own backups, use [cloud operator restore](cloud-operator-restore.md).
 
 What moves is the vault directory, as a point-in-time copy. The source machine's machine-local state (indexes, the governance store) does not move; the cell rebuilds its own. The source keeps running and stays the owner's primary vault. Writes made after the copy are not in Cloud.
 

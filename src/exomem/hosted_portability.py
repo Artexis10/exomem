@@ -13,13 +13,14 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import struct
 import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -902,6 +903,22 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _flush_collection_replica(vault_root: Path) -> None:
+    """Export carries the collection store's replica at its committed head (design §11, A9).
+
+    Refusing beats an archive whose replica lacks acknowledged rows, which a restore
+    would silently drop; the operator retries the export. A process that cannot flush
+    refuses whenever the live store is ahead of the replica it last published.
+    """
+    from .cli_ops import OpError
+    from .collection_store import connection, runtime
+
+    try:
+        runtime.flush_for_export(vault_root)
+    except (connection.CollectionStoreError, OpError) as error:
+        _fail("COLLECTION_STORE_FLUSH_PENDING", f"collection store replica is not flushed: {error}")
+
+
 def export_quiesced_vault(
     vault_root: Path | str,
     artifact_root: Path | str,
@@ -934,6 +951,7 @@ def export_quiesced_vault(
         if stat.S_ISLNK(output_stat.st_mode) or not stat.S_ISDIR(output_stat.st_mode):
             _fail("UNSAFE_ARTIFACT_ROOT", "artifact root must be a regular directory")
 
+    _flush_collection_replica(source_root)
     guard = mutation_guard if mutation_guard is not None else nullcontext()
     with guard:
         armed_requirement = connector_boundary.read_requirement(source_root)
@@ -1546,6 +1564,36 @@ def prepare_restore(
     try:
         _extract_verified_archive(verified.archive_path, records, temporary)
         _verify_staged_files(temporary, verified.manifest)
+        from . import structured_collections as collections
+        from .collection_store import authority, chain, connection, replica
+
+        try:
+            raw_marker = authority.read_marker(temporary)
+            marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
+            if marker is not None:
+                with closing(connection.open_reader(replica.replica_path(temporary))) as reader:
+                    chain.verify_store_chain(reader)
+                    authority.require_marker(reader, marker, root=temporary)
+        except (connection.CollectionStoreError, sqlite3.Error, chain.StoreChainError,
+                collections.CollectionError, ValueError):
+            _fail("INVALID_ARCHIVE", "collection store structure is invalid")
+        for record in records:
+            relative = record["path"]
+            # The manifest filename and storage strategy are fixed by structured-collections.
+            if PurePosixPath(relative).name != "_collection.md" or (
+                    marker is not None and authority.selected_entry(temporary, marker, relative) is not None):
+                continue
+            try:
+                collection = collections.parse_manifest_bytes(temporary, relative, (temporary / relative).read_bytes())
+            except collections.CollectionError:
+                continue  # Preserve invalid manifests too; a restore does not repair their contracts.
+            if collection.storage.strategy == "markdown-items":
+                # ZIP files carry no empty directories. Their declared source is canonical;
+                # recreating it keeps an empty file collection writable after restore.
+                try:
+                    (temporary / collection.storage.source).mkdir(parents=True, exist_ok=True)
+                except (FileExistsError, NotADirectoryError):
+                    pass  # Preserve conflicting canonical files; restore does not repair the collection.
         if os.path.lexists(destination):
             _fail("STAGING_ROOT_EXISTS", "restore staging root was claimed concurrently")
         os.rename(temporary, destination)

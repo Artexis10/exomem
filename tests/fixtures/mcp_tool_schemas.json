@@ -978,6 +978,10 @@
           "type": "string",
           "description": "Registry family: resolve-entity matches its leaf types; context and graph-context keep only its entity neighbours."
         },
+        "registry_scope": {
+          "type": "string",
+          "description": "create-entity instance selector; public or a canonical private Scope ID."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -1787,7 +1791,7 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nstructured-files and tag-variants apply needs the preview's `plan_id` and `why`.\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
+    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1801,7 +1805,8 @@
             "backfill-ids",
             "structured-files",
             "curation",
-            "tag-variants"
+            "tag-variants",
+            "collections-store-adopt-local"
           ],
           "type": "string"
         },
@@ -1852,7 +1857,7 @@
         },
         "plan_id": {
           "type": "string",
-          "description": "Preview identity required to apply (structured-files, tag-variants)."
+          "description": "Preview identity required to apply."
         },
         "source_snapshot": {
           "type": "string",
@@ -1860,7 +1865,7 @@
         },
         "why": {
           "type": "string",
-          "description": "Audit reason required to apply structured-files or tag-variants."
+          "description": "Audit reason required to apply."
         },
         "curation_action": {
           "enum": [
@@ -1925,6 +1930,10 @@
           "type": "array",
           "description": "Tag-variant groups to skip; part of plan_id."
         },
+        "acknowledge_skipped": {
+          "type": "boolean",
+          "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -1944,13 +1953,13 @@
     }
   },
   "manage_memory_file": {
-    "description": "Manage files through one governed file operation.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags. validate_only/review apply to Markdown create/append.\n\nSemantic authoring [exomem.semantic-authoring:v6 sha256:0d4fa9cb6fedc9477ab1cc08a2338db41541fc06f50b2d8c93ca3ed8021ea22a]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Manage files through one governed file operation.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags.\n\nSemantic authoring [exomem.semantic-authoring:v6 sha256:0d4fa9cb6fedc9477ab1cc08a2338db41541fc06f50b2d8c93ca3ed8021ea22a]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
           "default": "list",
-          "description": "list, create, append, move, reclassify, propose-reclassification, delete, trash-list, or recover.",
+          "description": "list, create, append, move, reclassify, propose-reclassification, revert-reclassification, delete, trash-list, or recover.",
           "type": "string"
         },
         "path": {
@@ -2007,7 +2016,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "Required for reclassify."
+          "description": "Required for reclassify and revert-reclassification."
         },
         "update_wikilinks": {
           "default": true,
@@ -2733,7 +2742,7 @@
     }
   },
   "record_memory": {
-    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nResolve one compatible collection; otherwise describe/propose before create.",
+    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDescribe/propose before create.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2750,13 +2759,14 @@
             "revise",
             "rebaseline",
             "discard",
+            "import",
             "history"
           ],
           "type": "string"
         },
         "collection": {
           "type": "string",
-          "description": "Target collection; omit for describe, inventory, or new manifest validate/create."
+          "description": "Target; omit for describe, inventory or new-manifest validate/create."
         },
         "manifest_path": {
           "type": "string"
@@ -2767,7 +2777,7 @@
         },
         "why": {
           "type": "string",
-          "description": "Write audit reason."
+          "description": "Audit reason."
         },
         "scaffold": {
           "type": "boolean"
@@ -2838,7 +2848,7 @@
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "Current snapshot for append/bulk_upsert/update/revise/rebaseline."
+          "description": "Current container hash for guarded writes."
         },
         "expected_manifest_hash": {
           "type": "string",
@@ -2935,7 +2945,7 @@
         },
         "held": {
           "type": "string",
-          "description": "Resume append/update with item/changes overrides; null removes a field. Discard removes the held candidate."
+          "description": "Resume append/update (item/changes override; null removes a field); discard deletes it."
         },
         "hold": {
           "type": "boolean",
@@ -2958,7 +2968,14 @@
             "skip"
           ],
           "type": "string",
-          "description": "bulk_upsert: abort writes nothing on rejection; skip commits the rest."
+          "description": "bulk_upsert: abort writes nothing; skip commits the rest."
+        },
+        "import_request": {
+          "type": "object"
+        },
+        "query": {
+          "type": "object",
+          "description": "v1 query object; grammar via describe."
         },
         "response_detail": {
           "default": "compact",
@@ -3642,6 +3659,10 @@
         "version": {
           "type": "string",
           "description": "Kept version from `history`, for `restore`."
+        },
+        "registry_scope": {
+          "type": "string",
+          "description": "Public instance token or canonical private Scope ID; grants no authority."
         },
         "response_detail": {
           "default": "compact",

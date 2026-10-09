@@ -1475,7 +1475,7 @@ def carry_named_groups(
                 admitted_paths=admitted_paths,
             )
         return tuple(groups), "available"
-    except lifecycle_statuses.OpError as error:
+    except lifecycle_statuses.ClassificationUnavailable as error:
         from .governance import egress
 
         raise egress.ReaderViewUnavailable("status classification is unavailable") from error

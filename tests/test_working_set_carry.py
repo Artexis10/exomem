@@ -1548,7 +1548,7 @@ def test_the_fetch_window_outgrows_the_rarity_cap(
     monkeypatch.setattr(
         working_set,
         "_is_current_page",
-        lambda _root, rel: "superseded-" not in rel,
+        lambda _root, rel, **_k: "superseded-" not in rel,
     )
     monkeypatch.setattr(working_set, "rare_document_cap", lambda _pages: 11)
 

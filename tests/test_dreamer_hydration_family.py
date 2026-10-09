@@ -247,6 +247,69 @@ def test_route_uses_explicit_paths_never_review_ref(tmp_path: Path) -> None:
     assert len(paths) <= 8
 
 
+def test_a_status_registry_save_and_restore_change_hydration_without_page_rewrites(
+    tmp_path: Path,
+) -> None:
+    from urllib.parse import quote
+
+    from exomem import commands, upkeep
+    from exomem.governance.principal import library_scope
+
+    vault = fx.build(tmp_path)
+    fx.edit(
+        vault,
+        fx.SEAL_WEAR,
+        fx.insight(
+            "Pump seal wear",
+            sources=["field-report-two"],
+            updated="2026-05-02",
+            links="Seal wear on the [[Notes/Entities/orbit-pump]] doubles after a dry start.",
+            observation="Seal wear doubles after a dry start.",
+            status="bench-checked",
+        ),
+    )
+    with library_scope():
+        _quiet(vault)
+        ref = upkeep.upkeep_ref(_candidate(vault)["id"])
+        pages = {path: (vault / path).read_bytes() for path in (fx.ENTITY, fx.CAVITATION, fx.SEAL_WEAR)}
+
+        def contributors() -> set[str] | None:
+            try:
+                item = commands.op_review_memory(vault, mode="item", ref=ref)["item"]
+            except ValueError as error:
+                assert str(error).startswith("REVIEW_ITEM_NOT_FOUND"), error
+                return None
+            return {entry["ref"] for entry in item["evidence"]}
+
+        both = {
+            f"exomem://vault/{quote(fx.CAVITATION)}",
+            f"exomem://vault/{quote(fx.SEAL_WEAR)}",
+        }
+        assert contributors() == both
+        inspected = commands.op_schema_memory(vault, subject="statuses", operation="inspect")
+        commands.op_schema_memory(
+            vault,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"bench-checked": {"attributes": {"class": "pending"}}}},
+            expected_hash=inspected["content_hash"],
+            why="bench checks are not yet confirmed findings",
+        )
+        # One origin is left, below the family's minimum, so the proposal lapses.
+        assert contributors() is None
+        history = commands.op_schema_memory(vault, subject="statuses", operation="history")
+        commands.op_schema_memory(
+            vault,
+            subject="statuses",
+            operation="restore",
+            version=history["versions"][0]["version"],
+            expected_hash=history["content_hash"],
+            why="bench checks count as findings again",
+        )
+        assert contributors() == both
+    assert {path: (vault / path).read_bytes() for path in pages} == pages
+
+
 def test_hidden_retired_and_unfamiliar_contributors_do_not_spend_hydration_cap(
     tmp_path: Path,
 ) -> None:

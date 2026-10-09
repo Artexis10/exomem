@@ -870,6 +870,16 @@ def _membership_manifest(
         for release in candidate.release_grants
         if release.source in document_paths
     ]
+    field_bases = {}
+    for release in releases:
+        if release.field_release is not None:
+            from ..collection_store.field_admission import resolve_release_basis
+
+            basis = resolve_release_basis(vault_root, release, validate_paths=release in prospective.release_grants)
+            if release in prospective.release_grants and any(release.field_release[key] != value for key, value in basis.items()):
+                raise GovernanceError("INVALID_FIELD_RELEASE", "canonical classification basis changed; inspect and propose again")
+            field_bases[release.path] = basis["classification_basis"]
+    releases = [release for release in releases if release.field_release is None]
     expected_paths = {
         path
         for release in releases
@@ -900,6 +910,9 @@ def _membership_manifest(
             identity = memory_refs.normalize_id(parsed.frontmatter.get("exomem_id"))
             if identity in wanted_ids:
                 rows[parsed.rel_path] = _content_hash(candidate)
+    for path, basis in field_bases.items():
+        # One path can bind both canonical fields and file membership; neither authority may overwrite the other.
+        rows[path] = hashlib.sha256(json.dumps([rows.get(path), basis]).encode()).hexdigest()
     return [
         {"path": rel, "content_hash": rows[rel]}
         for rel in sorted(rows)

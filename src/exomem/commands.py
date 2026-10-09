@@ -10065,6 +10065,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "collections-store-adopt-local",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -10098,6 +10099,7 @@ def op_maintain_memory(
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
     exclude_groups: list[str] | None = None,
+    acknowledge_skipped: bool | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
@@ -10105,7 +10107,6 @@ def op_maintain_memory(
     Remote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.
     Run those writes with exomem maintain on the host; remote dry_run=true works.
 
-    structured-files and tag-variants apply needs the preview's `plan_id` and `why`.
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
 
@@ -10121,9 +10122,9 @@ def op_maintain_memory(
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
         collection: Planning or Records collection for structured-files.
         apply: Omit to preview; true applies the reviewed plan.
-        plan_id: Preview identity required to apply (structured-files, tag-variants).
+        plan_id: Preview identity required to apply.
         source_snapshot: Preview snapshot required to apply structured-files.
-        why: Audit reason required to apply structured-files or tag-variants.
+        why: Audit reason required to apply.
         curation_action: Curation step when mode is curation.
         run_id: Curation run identity.
         plan: Closed agent-authored plan for curation propose.
@@ -10135,6 +10136,7 @@ def op_maintain_memory(
         vocabulary_ref: Vocabulary decision for curation apply or resume.
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
+        acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10144,6 +10146,8 @@ def op_maintain_memory(
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if exclude_groups is not None and mode != "tag-variants":
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
+    if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
+        raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -10336,6 +10340,31 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "collections-store-adopt-local":
+        from .collection_store import admission as store_admission
+
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or (apply is None and (plan_id is not None or why is not None))
+            or (apply is not None and (apply is not True or plan_id is None or why is None))
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store-adopt-local previews without arguments; "
+                "apply needs true, plan_id and why"
+            )
+        if apply is None:
+            preview = store_admission.adopt_local_route(vault_root)
+            # This surface names the preview identity `plan_id`, as its other preview-first modes do.
+            preview["plan_id"] = preview.pop("preview_id")
+            return preview
+        return store_admission.adopt_local_route(vault_root, why=why, preview_id=plan_id,
+                                                 acknowledge_skipped=acknowledge_skipped is True)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10381,7 +10410,7 @@ def op_maintain_memory(
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, or tag-variants"
+        "backfill-ids, structured-files, curation, tag-variants, or collections-store-adopt-local"
     )
 
 
@@ -10546,6 +10575,23 @@ def op_schema_memory(
     ):
         # Entity saves validate global usage, including hidden rows.
         return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
+    if subject == "query-engine":
+        # The typed query grammar's bounded discovery chapters; no vault read or write.
+        from .query_engine import route as query_route
+
+        others = (project, page_type, expected_hash, compare_to, proposal, why, context, date_from,
+                  date_to, continuation, query, requested_type, vocabulary_ref, vocabulary_fingerprint, version,
+                  detail)
+        if operation != "inspect" or any(value is not None for value in others) or save or strict \
+                or include_model_suggestions or limit != 20:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: query-engine accepts operation inspect and name only")
+        from .cli_ops import OpError
+
+        try:
+            return query_route.chapter(name)
+        except query_route.QueryError as error:
+            refusal = query_route.details(error)
+            raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
     if subject in {"categories", "relations", "contract"} and (
         operation == "infer"
         or (
@@ -11752,7 +11798,8 @@ def op_reclassify_source(
     Classification is a judgement made at capture time, often before the answer
     is knowable. This is how it gets corrected: the source's kind, its domain, or
     both change, the file moves to the location those values project to, every
-    inbound reference follows it, and the previous path is recorded.
+    inbound reference follows it, and the previous path, kind and domain are
+    appended to the source's history so the correction can be reverted.
 
     The body is never touched. Only the classification fields and the fields
     recording the correction change, which is the same line `ingested_into:`
@@ -11791,8 +11838,9 @@ def op_propose_reclassification(
     """Report what correcting one source would do, without writing anything.
 
     Pass the kind and domain you have decided on to preview that correction: the
-    location it would project to and how many references would move. This is the
-    normal path — read the source, decide, preview, show the user, then apply.
+    location it would project to, the pages whose links it would rewrite, the
+    append-only pages it leaves unchanged, and any refusal with its cause. This is
+    the normal path — read the source, decide, preview, show the user, then apply.
 
     Called with no values, this reports only what is deterministically observable
     about the source: the domain segment already in its location, whether it
@@ -11810,6 +11858,29 @@ def op_propose_reclassification(
         ).as_dict()
     except reclassify_module.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
+
+
+def op_revert_reclassification(
+    vault_root: Path,
+    *,
+    path: str,
+    reason: str | None = None,
+) -> dict:
+    """Undo a source's latest reclassification.
+
+    The source returns to the location, kind and domain its latest history
+    entry records, every inbound reference follows it, and that entry is
+    removed. `reason` is required and recorded, as for a correction. A history
+    entry that records only a path, as a legacy one does, is refused rather
+    than guessed at.
+    """
+    from . import reclassify_source as reclassify_module
+
+    try:
+        result = reclassify_module.revert(vault_root, path=path, reason=reason)
+    except reclassify_module.ReclassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    return result.as_dict()
 
 
 def op_manage_memory_file(
@@ -11850,17 +11921,18 @@ def op_manage_memory_file(
     """Manage files through one governed file operation.
 
     For structures typed tools do not fit. Destructive operations need explicit
-    flags. validate_only/review apply to Markdown create/append.
+    flags.
 
     Args:
         operation: list, create, append, move, reclassify,
-            propose-reclassification, delete, trash-list, or recover.
+            propose-reclassification, revert-reclassification, delete,
+            trash-list, or recover.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
-        reason: Required for reclassify.
+        reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
         validate_only: Validate a Markdown create or append without writing.
@@ -11960,7 +12032,7 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             expected_dead_inbound=expected_dead_inbound,
         )
-    if operation in {"reclassify", "propose-reclassification"}:
+    if operation in {"reclassify", "propose-reclassification", "revert-reclassification"}:  # nosemgrep: ep-word-membership -- manage_memory_file defines these closed operation selectors.
         target = path or old_path
         if not target:
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
@@ -11968,6 +12040,8 @@ def op_manage_memory_file(
             return op_propose_reclassification(
                 vault_root, path=target, source_kind=source_kind, domain=domain
             )
+        if operation == "revert-reclassification":
+            return op_revert_reclassification(vault_root, path=target, reason=reason)
         return op_reclassify_source(
             vault_root,
             path=target,
@@ -11989,7 +12063,8 @@ def op_manage_memory_file(
         )
     raise ValueError(
         "INVALID_MODE: manage_memory_file operation must be list, create, append, "
-        "move, reclassify, propose-reclassification, delete, trash-list, or recover"
+        "move, reclassify, propose-reclassification, revert-reclassification, delete, "
+        "trash-list, or recover"
     )
 
 
@@ -12007,6 +12082,7 @@ def op_record_memory(
         "revise",
         "rebaseline",
         "discard",
+        "import",
         "history",
     ],
     collection: str | None = None,
@@ -12044,30 +12120,32 @@ def op_record_memory(
     rows: list[dict[str, Any]] | None = None,
     source: str | None = None,
     on_reject: Literal["abort", "skip"] | None = None,
+    import_request: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Store observed state; Planning uses plan_memory, originals use Sources/Evidence.
 
-    Resolve one compatible collection; otherwise describe/propose before create.
+    Describe/propose before create.
 
     Args:
-        collection: Target collection; omit for describe, inventory, or new manifest validate/create.
+        collection: Target; omit for describe, inventory or new-manifest validate/create.
         manifest_text: Full manifest for validate/create/revise.
         expand_child: Exact declared child container.
         refresh_presentation: Guarded managed Markdown rebuild.
         item_key: Update UUID; append derives identity from natural key.
-        expected_container_hash: Current snapshot for append/bulk_upsert/update/revise/rebaseline.
+        expected_container_hash: Current container hash for guarded writes.
         expected_manifest_hash: Current manifest hash for revise/rebaseline.
         expected_item_version: Update item version.
         acknowledged_gap_codes: Inspect-reported rebaseline gaps.
-        why: Write audit reason.
+        why: Audit reason.
         delivery: Append receipt envelope; never sets values or creates collections.
-        held: Resume append/update with item/changes overrides; null removes a field.
-            Discard removes the held candidate.
+        held: Resume append/update (item/changes override; null removes a field); discard deletes it.
         hold: False refuses; otherwise invalid candidates are held.
         rows: bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.
             Outcomes: inserted/updated/unchanged/rejected.
         source: bulk_upsert default preserved Source/Evidence path.
-        on_reject: bulk_upsert: abort writes nothing on rejection; skip commits the rest.
+        on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
+        query: v1 query object; grammar via describe.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -12107,6 +12185,8 @@ def op_record_memory(
         rows=rows,
         source=source,
         on_reject=on_reject,
+        import_request=import_request,
+        query=query,
     )
 
 
@@ -12363,6 +12443,13 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "import-conditional":
+            from .collection_store.importer import READ_ONLY_MODES
+
+            request = kwargs.get("import_request")
+            mode = request.get("mode") if isinstance(request, dict) else None
+            # A malformed mode stays on the writer path, where the importer refuses it.
+            return isinstance(mode, str) and mode in READ_ONLY_MODES
         if adapter == "question-conditional":
             return not _review_question_submission(
                 kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")

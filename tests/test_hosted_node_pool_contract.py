@@ -77,10 +77,9 @@ def test_foundation_adds_agents_from_one_map_variable_defaulting_to_empty() -> N
     assert "image                = var.server_image" in module
     assert "ssh_key_ids          = [hcloud_ssh_key.admin.id]" in module
     assert "admin_ssh_cidrs      = var.admin_ssh_cidrs" in module
-    # Both addresses already on the subnet are reserved against agents.
-    assert (
-        "reserved_private_ips = [var.private_node_ip, var.control_db_private_ip]" in module
-    )
+    # The fleet server's address is reserved against agents; the control host
+    # is not on this subnet.
+    assert "reserved_private_ips = [var.private_node_ip]" in module
     assert compute.count('resource "hcloud_network"') == 1
     assert compute.count('resource "hcloud_network_subnet"') == 1
 
@@ -176,7 +175,7 @@ def test_site_hardens_every_node_first_then_runs_server_then_agents() -> None:
     assert storage["vars"]["ansible_pipelining"] is True
     # Same hardening for every K3s node, and every node's inter-node firewall
     # converged before any agent joins (a join requires its peers to admit it).
-    assert harden["roles"] == ["base"]
+    assert harden["roles"] == ["substrate.infrastructure.base"]
     assert harden["tasks"][0]["ansible.builtin.include_role"] == {
         "name": "k3s",
         "tasks_from": "inter_node.yml",

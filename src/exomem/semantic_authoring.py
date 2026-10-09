@@ -21,8 +21,8 @@ AUTHORING_CONTRACT_VERSION = 6
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 STATUS_CLASSIFICATION_RULE = (
-    "Current shared validation uses page status classes, superseding historical inactive-label lists. "
-    "Live compiled results require a semantic unit; pending results may remain unit-free until activation. "
+    "Validation now uses page status classes, not historical inactive-label lists. "
+    "Live compiled results require a semantic unit; pending results may stay unit-free until activation. "
     "Statusless pages are publicly live. Canonical meanings need no private definitions. "
     "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
 )

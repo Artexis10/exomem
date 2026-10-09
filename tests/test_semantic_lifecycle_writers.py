@@ -4367,7 +4367,10 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
         'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
     )
     _reset_caches()
-    refusals = []
+    # Spec: a restricted first write uses the complete neutral census. Its outcome
+    # is the same with or without hidden pages, and the prepared manifest
+    # describes the complete corpus, not the writer's view.
+    outcomes = []
     for hidden in (False, True):
         if hidden:
             _write(
@@ -4376,14 +4379,17 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
                 _source("Private prose.", page_id=_OTHER_ID, status="private-review"),
             )
         with request_scope(_external()):
-            with pytest.raises(activation_manifest.ActivationManifestError) as unavailable:
-                semantic_writes.preflight_existing(
-                    tmp_path, path=_PAGE, after_source=after, operation="edit"
-                )
-            refusals.append((unavailable.value.code, str(unavailable.value)))
+            first = semantic_writes.preflight_existing(
+                tmp_path, path=_PAGE, after_source=after, operation="edit"
+            )
+        outcomes.append((first.grandfathered, first.contract_result.as_dict()))
+        assert first.manifest_install_required
         assert not activation_manifest.manifest_path(tmp_path).exists()
         assert page.read_text() == before
-    assert refusals[0] == refusals[1]
+    assert outcomes[0] == outcomes[1]
+    prepared = {item.path_at_activation: item for item in first.prospective_manifest.pages}
+    assert set(prepared) == {_PAGE, "Knowledge Base/Notes/Withheld/private.md"}
+    assert prepared["Knowledge Base/Notes/Withheld/private.md"].status == "private-review"
     with library_scope():
         inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
         commands.op_schema_memory(
@@ -4417,3 +4423,71 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
         with pytest.raises(semantic_writes.SemanticWriteError):
             semantic_writes.commit_existing(tmp_path, preflight=blocked)
     assert page.read_text() == after
+
+
+def test_a_denied_writer_cannot_tell_how_the_owner_classed_a_recorded_label(
+    tmp_path: Path,
+) -> None:
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import find as find_module
+    from exomem import lifecycle_statuses
+    from exomem.governance.principal import library_scope, request_scope
+
+    # Spec: denied absent and denied present overlays are indistinguishable. The
+    # page carries `in-review` when the owner prepares the manifest, the owner then
+    # activates it, and a writer denied the status definitions edits its prose.
+    def attempt(root: Path, scope, after: str) -> object:
+        _reset_caches()
+        find_module.clear_cache()
+        semantic_contract.reset_corpus_context_cache()
+        try:
+            with scope:
+                preflight = semantic_writes.preflight_existing(
+                    root, path=_PAGE, after_source=after, operation="edit"
+                )
+        except lifecycle_statuses.ClassificationUnavailable as error:
+            return error.code
+        return preflight.grandfathered, tuple(
+            sorted(finding.code for finding in preflight.contract_result.blocking_findings)
+        )
+
+    denied = {}
+    owner = {}
+    for overlay in ("pending", None, "live"):
+        root = tmp_path / str(overlay)
+        _write(root, _PAGE, _source("Ordinary prose, no unit.", status="in-review"))
+        write_scope(root, paths="Notes/Withheld/**", name="Private lifecycle pages")
+        write_rule(root, ceiling=0)
+        governance = root / "Knowledge Base/_Governance"
+        (governance / "scopes/statuses.yaml").write_text(
+            'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\npaths: ["_Schema/statuses.yaml"]\n'
+        )
+        (governance / "rules/statuses.yaml").write_text(
+            "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
+        )
+        if overlay is not None:
+            registry = lifecycle_statuses.registry_path(root)
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(
+                f"schema_version: 1\nentries:\n  in-review:\n    attributes: {{class: {overlay}}}\n"
+            )
+        _reset_caches()
+        semantic_contract.reset_corpus_context_cache()
+        with library_scope():
+            activation_manifest.ensure_manifest(root)
+        active = _source("Ordinary prose, no unit.", status="active")
+        _write(root, _PAGE, active)
+        after = active.replace("no unit.", "still no unit.")
+        denied[overlay] = attempt(root, request_scope(_external()), after)
+        owner[overlay] = attempt(root, library_scope(), after)
+
+    assert denied == dict.fromkeys(owner, "STATUS_CLASSIFICATION_UNAVAILABLE")
+    # The owner keeps the class it recorded at activation: a page that was pending
+    # then is not grandfathered, whatever the label means now.
+    assert owner == {
+        "pending": (False, ("RELATION_DISPOSITION_MISSING", "missing_semantic_unit")),
+        None: (True, ()),
+        "live": (True, ()),
+    }
