@@ -2097,7 +2097,7 @@ def _preflight_existing(
 
     manifest = activation_manifest.load_manifest(root)
     boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest
+        before_corpus.activation_census, manifest=manifest, vault_root=root
     )
     grandfathered = activation_manifest.is_grandfathered(
         root,
@@ -3333,7 +3333,7 @@ def preflight_move(
     )
     manifest = activation_manifest.load_manifest(root)
     boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest
+        before_corpus.activation_census, manifest=manifest, vault_root=root
     )
     evaluations: list[MovePageEvaluation] = []
     pairs = _move_evaluation_pairs(

@@ -432,25 +432,46 @@ def build_census(vault_root: Path) -> ActivationCensus:
     return ActivationCensus.from_candidates(_eligible_candidates(Path(vault_root)))
 
 
-def snapshot_from_census(census: ActivationCensus) -> ActivationManifest:
-    """Build the immutable activation snapshot without filesystem access."""
+def snapshot_from_census(
+    census: ActivationCensus, *, vault_root: Path | None = None
+) -> ActivationManifest:
+    """Build the immutable activation snapshot from a structural census.
+
+    The boundary holds the pages that are live at activation. Canonical labels
+    resolve from the shipped pack alone, so a canonical live label needs no
+    record. With ``vault_root``, other labels are classified as the vault's
+    owner defines them now; a page they leave non-live stays out, so a later
+    registry change cannot grandfather it. A label without an available class
+    is kept with its record for the checking caller's basis to classify.
+    """
     if not isinstance(census, ActivationCensus):
         raise ActivationManifestError(
             "ACTIVATION_CENSUS_INVALID",
             "activation snapshot requires an immutable census",
         )
-    # Canonical labels resolve from the shipped pack alone, the same for every caller,
-    # so a canonical non-live page stays out of the boundary as it always has and a
-    # canonical live label needs no record. Any other label is recorded for the
-    # checking caller's basis to classify.
     public = lifecycle_statuses.Basis(None)
+    unresolved = sorted(
+        {
+            candidate.status
+            for candidate in census.candidates
+            if candidate.status is not None
+            and public.classify(candidate.status).lifecycle_class is None
+        }
+    )
+    owner_classes = (
+        _owner_local_classes(vault_root, unresolved)
+        if vault_root is not None and unresolved
+        else {}
+    )
     candidates = []
     for candidate in census.candidates:
         canonical = public.classify(candidate.status).lifecycle_class
-        if canonical is None:
-            candidates.append(candidate)
-        elif canonical == "live":
+        if canonical == "live":
             candidates.append(replace(candidate, status=None))
+        elif canonical is None and candidate.status is not None:
+            owner_class = owner_classes.get(candidate.status)
+            if owner_class is None or owner_class == "live":
+                candidates.append(candidate)
     counts = Counter(
         candidate.normalized_id for candidate in candidates if candidate.normalized_id is not None
     )
@@ -477,6 +498,7 @@ def plan_activation_boundary(
     census: ActivationCensus | None,
     *,
     manifest: ActivationManifest | None,
+    vault_root: Path | None = None,
 ) -> ActivationBoundaryPlan:
     """Select an observed or prospective boundary without installing it."""
     if manifest is not None:
@@ -485,12 +507,30 @@ def plan_activation_boundary(
         raise ActivationManifestError(
             "ACTIVATION_MANIFEST_UNAVAILABLE", "complete activation evidence is required"
         )
-    return ActivationBoundaryPlan(snapshot_from_census(census), True)
+    return ActivationBoundaryPlan(snapshot_from_census(census, vault_root=vault_root), True)
 
 
 def _snapshot(vault_root: Path, *, census: ActivationCensus | None = None) -> ActivationManifest:
     observed = census if census is not None else build_census(vault_root)
-    return snapshot_from_census(observed)
+    return snapshot_from_census(observed, vault_root=vault_root)
+
+
+def _owner_local_classes(vault_root: Path, labels: Iterable[str]) -> dict[str, str | None]:
+    """Classify recorded labels as the owner-local producer of the shared boundary.
+
+    The manifest is governed state shared by every caller and never served, so
+    whoever prepares it records the same boundary. Its release decisions go to
+    a boundary of their own, never to the preparing caller's receipt.
+    """
+    from .governance import egress
+    from .governance import principal as principal_module
+
+    with (
+        egress.disclosure_boundary(Path(vault_root), "activation_boundary"),
+        principal_module.request_scope(principal_module.owner_principal(surface="library")),
+    ):
+        basis = lifecycle_statuses.Basis(Path(vault_root))
+        return {label: basis.classify(label).lifecycle_class for label in labels}
 
 
 def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
