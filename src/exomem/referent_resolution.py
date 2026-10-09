@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import lifecycle_statuses
 from .bm25 import stem_word, word_forms
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry, core_registry
@@ -436,13 +437,15 @@ def resolve_referents(
     edges: tuple[EdgeFact, ...] | list[EdgeFact],
     anchor_cap: int = 10,
     registry: EntityTypeRegistry | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> ReferentResolution:
     """Compose categorical evidence without changing recall ordering."""
+    status_basis = status_basis or lifecycle_statuses.Basis(None)
     ordered_hits = tuple(sorted(hits, key=lambda item: (item.rank, item.path)))
     active_anchors = {
         item.path
         for item in ordered_hits[: max(0, anchor_cap)]
-        if item.status.casefold() not in {"superseded", "archived", "dropped"}
+        if status_basis.classify(item.status).carryable
     }
     hits_by_path = {item.path: item for item in hits}
     qualifier_stems = frozenset(stem_word(qualifier) for qualifier in cue.qualifiers)

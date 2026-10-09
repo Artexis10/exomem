@@ -261,17 +261,6 @@ WIKILINK_SPREAD_MIN_PAGES = 2
 #: advice; an unbounded one is a second search result the agent has to triage.
 MAX_NEAR_MATCHES = 3  # PROVISIONAL
 
-#: Statuses whose pages are no longer the corpus paying attention to a name.
-#: The status half of `audit._is_active_compiled_rw`, reused rather than
-#: re-invented: a superseded note's links are a record of what the vault USED to
-#: reach for, and letting them supply spread — or, worse, anchor the finding,
-#: since a retired page often sorts early — measures history rather than
-#: attention. Deliberately only the status half: a Source or an Evidence page IS
-#: the corpus reaching for a name, so the template's compiled-and-read-write
-#: restriction would discard exactly the evidence this sensor exists to count.
-INELIGIBLE_STATUSES = frozenset({"superseded", "archived", "draft"})
-
-
 def entities_prefix() -> str:
     """The subtree whose own links say nothing about recurrence (design D2.4).
 
@@ -580,18 +569,18 @@ def registry_index(
     )
 
 
-def counts_as_evidence(page: Any, *, indexable: bool) -> bool:
+def counts_as_evidence(page: Any, *, indexable: bool, status_basis: Any) -> bool:
     """Whether one page's links are the corpus reaching for a name (design D2.5).
 
     Two ways a page is present in the corpus without its links being evidence of
-    present attention: it has been retired (`INELIGIBLE_STATUSES`), or its tree
+    present attention: its lifecycle class excludes recurrence evidence, or its tree
     is `excluded` in `_access.yaml` and therefore outside every read surface. An
     excluded page must not supply spread and must never become the anchor — the
     finding would name a path the reader has told the system not to surface.
     """
     if not indexable:
         return False
-    return (page.status or "").casefold() not in INELIGIBLE_STATUSES
+    return status_basis.classify(page.frontmatter.get("status")).recurrence_evidence
 
 
 def _digest(value: object) -> str:
@@ -1203,15 +1192,21 @@ def collect(
     entity_types: EntityTypeRegistry,
     indexable: Callable[[str], bool],
     attachment_probe: Callable[[str], bool],
+    status_basis: Any = None,
 ) -> list[Candidate]:
     """Collect legacy links and closed-frame evidence into one lifecycle row."""
+    from . import lifecycle_statuses
+
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     page_rows = tuple(sorted(pages, key=lambda page: str(page.rel_path)))
     entities = entities_prefix()
     eligible_pages = tuple(
         page
         for page in page_rows
         if not str(page.rel_path).startswith(entities)
-        and counts_as_evidence(page, indexable=indexable(str(page.rel_path)))
+        and counts_as_evidence(
+            page, indexable=indexable(str(page.rel_path)), status_basis=status_basis
+        )
     )
     mentions: dict[str, dict[str, str]] = {}
     suffixed: dict[str, set[str]] = {}

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 import pytest
 from governance_projection_support import verified_namespace
 
-from exomem import embeddings, readiness
+from exomem import embeddings, lifecycle_statuses, readiness
 from exomem.governance import (
     principal,
     projected_graph,
@@ -751,6 +751,45 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
     assert [hit.path for hit in result.hits] == [
         active_insight.item_identity,
         stale_source.item_identity,
+    ]
+
+
+def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):
+    registry = lifecycle_statuses.registry_path(tmp_path)
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        "schema_version: 1\nentries:\n  replaced:\n    attributes: {class: superseded}\n"
+    )
+    replaced = _variant(
+        "Knowledge Base/a-note.md",
+        "9" * 64,
+        "alpha",
+        fields={"type": "insight", "status": "replaced"},
+    )
+    current = _variant(
+        "Knowledge Base/z-note.md",
+        "a" * 64,
+        "alpha",
+        fields={"type": "insight", "status": "active"},
+    )
+    runtime = _runtime((_item(replaced), _item(current)))
+
+    with principal.library_scope():
+        result = projection_runtime.find_projected_hits(
+            tmp_path,
+            runtime,
+            query="alpha",
+            limit=2,
+            mode="hybrid",
+            graph=False,
+            rerank=False,
+            principal=principal.owner_principal(surface="library"),
+            purpose=None,
+        )
+
+    assert [hit.path for hit in result.hits] == [
+        current.item_identity,
+        replaced.item_identity,
     ]
 
 

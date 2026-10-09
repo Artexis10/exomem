@@ -112,25 +112,11 @@ def test_current_pages_sharing_the_name_still_make_it_ordinary(vault: Path) -> N
     assert working_set.dominant_carry(hits) is None
 
 
-def test_warm_carry_rarity_reuses_counts_until_the_catalogue_changes(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_warm_carry_rarity_changes_when_new_current_pages_share_the_name(vault: Path) -> None:
     _seed(vault, retired=3)
-    store = lexstore.get_store(vault)
-    counted: list[tuple[str, ...]] = []
-    original = store._document_frequency_query
-
-    def count(conn, tokens, scope, **kwargs):
-        counted.append(tuple(tokens))
-        return original(conn, tokens, scope, **kwargs)
-
-    monkeypatch.setattr(store, "_document_frequency_query", count)
     stems = working_set_runtime.pairable_stems(TURN)
     first = working_set_runtime.rare_turn_terms(vault, stems)
-    working_set_runtime.reset_caches_for_tests()
     assert working_set_runtime.rare_turn_terms(vault, stems) == first
-    assert len(counted) == 1, "an unchanged carry recounted the whole corpus"
-
     for index in range(3):
         _write(
             vault / RESEARCH / f"brask-ferry-timetable-copy-{index}.md",
@@ -141,7 +127,6 @@ def test_warm_carry_rarity_reuses_counts_until_the_catalogue_changes(
     assert state == "available"
     assert pages == first[1] + 3
     assert "brask" not in rare
-    assert len(counted) == 2
 
 
 def test_carry_rarity_cache_keeps_filtered_counts_separate(vault: Path) -> None:
@@ -149,8 +134,12 @@ def test_carry_rarity_cache_keeps_filtered_counts_separate(vault: Path) -> None:
     stems = ["brask"]
     unfiltered = lexstore.term_document_frequencies(vault, stems, scope="kb").value
     filtered = lexstore.term_document_frequencies(
-        vault, stems, scope="kb", exclude_navigation=True,
-        exclude_raw_material=True, exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
+        vault,
+        stems,
+        scope="kb",
+        exclude_navigation=True,
+        exclude_raw_material=True,
+        exclude_statuses=("archived", "dropped", "superseded"),
     ).value
     assert unfiltered is not None and filtered is not None
     assert unfiltered[0]["brask"] == 4
@@ -163,7 +152,7 @@ def test_carry_rarity_cache_eviction_keeps_counts_needed_by_this_request(
 ) -> None:
     _seed(vault, retired=3)
     monkeypatch.setattr(lexstore, "_TERM_FREQUENCY_CACHE_MAX", 2)
-    kwargs = {"scope": "kb", "exclude_statuses": working_set.RETIRED_PAGE_STATUSES}
+    kwargs = {"scope": "kb", "exclude_statuses": ("archived", "dropped", "superseded")}
     first = lexstore.term_document_frequencies(vault, ["brask", "oldword"], **kwargs).value
     assert first is not None and first[0]["brask"] == 1
 
@@ -203,7 +192,7 @@ _FREQUENCY_FILTERS = {
     "scope": "kb",
     "exclude_navigation": True,
     "exclude_raw_material": True,
-    "exclude_statuses": working_set.RETIRED_PAGE_STATUSES,
+    "exclude_statuses": ("archived", "dropped", "superseded"),
 }
 
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import memory_refs, reserved_paths, semantic_unit_read, semantic_units
+from . import lifecycle_statuses, memory_refs, reserved_paths, semantic_unit_read, semantic_units
 from .get_page import GetError, GetResult, get_page, prepare_page_read
 from .governance import authorization_custody, authorization_session_lifecycle, egress, store
 from .governance.principal import RequestPrincipal, effective_principal
@@ -113,7 +113,11 @@ def _read_snapshot(
 
 
 def _release_snapshot(
-    vault_root: Path, snapshot: RetainedInput, *, disclosure: bool = False
+    vault_root: Path,
+    snapshot: RetainedInput,
+    *,
+    disclosure: bool = False,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> RetainedInput:
     """Release and select only this snapshot, retaining its nested decision context.
 
@@ -122,9 +126,7 @@ def _release_snapshot(
     """
     principal = _principal()
     page = snapshot.page
-    if snapshot.guard is None or (
-        not disclosure and str(page.frontmatter.get("status") or "").casefold() == "superseded"
-    ):
+    if snapshot.guard is None:
         raise _unavailable()
     with egress.disclosure_boundary(vault_root, "episode-input-authorization") as collector:
         released = egress.annotate_page(
@@ -140,6 +142,13 @@ def _release_snapshot(
             or released.get("body") != page.body
         ):
             raise _unavailable()
+        basis = status_basis or lifecycle_statuses.Basis(vault_root)
+        if not disclosure:
+            try:
+                if basis.classify(page.frontmatter.get("status")).require() == "superseded":
+                    raise _unavailable()
+            except lifecycle_statuses.ClassificationUnavailable as error:
+                raise _unavailable() from error
         unit = None
         if snapshot.unit_ref is not None:
             selected = semantic_unit_read.read_semantic_unit(
@@ -147,6 +156,8 @@ def _release_snapshot(
                 page=page,
                 unit_ref=snapshot.unit_ref,
                 frontmatter=released.get("frontmatter"),
+                lifecycle_disposition=not disclosure,
+                status_basis=basis,
             )
             if (
                 selected.status != "found"
@@ -207,8 +218,11 @@ def recheck_retained_inputs(
     disclosure: bool = False,
 ) -> None:
     """Refresh a bounded set's release checks, not an atomic cross-system snapshot."""
+    status_basis = lifecycle_statuses.Basis(vault_root)
     for snapshot, text in selections:
-        released = _release_snapshot(vault_root, snapshot, disclosure=disclosure)
+        released = _release_snapshot(
+            vault_root, snapshot, disclosure=disclosure, status_basis=status_basis
+        )
         if (
             released.released is None
             or released.released.get("frontmatter") != snapshot.page.frontmatter

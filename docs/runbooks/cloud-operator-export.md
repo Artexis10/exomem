@@ -141,86 +141,20 @@ identity in an argument, file or transcript.
 
 ## Render and apply only scratch resources
 
-This script uses the existing `render_cell_manifests` and `render_restore_job`
-functions, as rehearsal step 11 does. It takes the source `cell-credentials`
-Secret into process memory and never prints it or writes a manifest file. It
-reads the source Pod's digest image and PVC size, and the live cellctl
-Deployment's bucket, S3 endpoint and job-egress exceptions. A unique scratch
-namespace must not already exist.
+`infra/scripts/cloud_restore_manifests.py` renders the scratch resources with
+the existing `render_cell_manifests` and `render_restore_job` functions, as
+rehearsal step 11 does. It imports them from the same checkout, and the
+[restore drill and in-place restore](cloud-operator-restore.md) use the same
+file. It takes the source `cell-credentials` Secret into process memory and
+never prints it or writes a manifest file. It reads the source StatefulSet's
+digest image and the PVC size, and the live cellctl Deployment's bucket, S3
+endpoint and job-egress exceptions. A unique scratch namespace must not
+already exist.
 
 ```bash
 : "${CELLCTL_PYTHON:?reviewed cellctl Python required}"
-PYTHONPATH="$PWD/infra/cellctl/src" "$CELLCTL_PYTHON" - <<'PY'
-import base64, datetime as dt, ipaddress, json, os, re, secrets, subprocess
-from urllib.parse import urlparse
-from cellctl.manifests import CellManifestSpec, namespace_name, render_cell_manifests, render_restore_job
-
-cell_id, snapshot, scratch = (os.environ[k] for k in ("CELL_ID", "SNAPSHOT", "SCRATCH"))
-assert re.fullmatch(r"[a-z2-7]{16}", cell_id)
-assert re.fullmatch(r"[0-9a-f]{64}", snapshot)
-assert re.fullmatch(rf"exo-scratch-{cell_id}-[0-9a-f]{{8}}", scratch)
-source = namespace_name(cell_id)
-
-def kubectl(*args, payload=None):
-    result = subprocess.run(["kubectl", "--context", os.environ["KUBE_CONTEXT"], *args], input=payload, text=True, capture_output=True)
-    if result.returncode:
-        raise RuntimeError(f"kubectl {args[0]} failed; inspect the named resource without dumping Secrets")
-    return result.stdout
-
-def get(kind, name, namespace=None):
-    args = (["-n", namespace] if namespace else []) + ["get", kind, name, "-o", "json"]
-    return json.loads(kubectl(*args))
-
-assert not kubectl("get", "namespace", scratch, "--ignore-not-found", "-o", "name").strip()
-assert get("namespace", source)["metadata"]["labels"]["exomem.io/cloud-cell"] == cell_id
-pvc = get("pvc", "cell-data", source)
-assert pvc["spec"]["storageClassName"] == "exomem-cloud-encrypted"
-size = pvc["spec"]["resources"]["requests"]["storage"]
-assert re.fullmatch(r"[1-9][0-9]*Gi", size)
-pod = get("pod", "cell-0", source)
-assert pod["status"]["phase"] == "Running"
-image = next(c["image"] for c in pod["spec"]["containers"] if c["name"] == "exomem")
-assert re.search(r"@sha256:[a-f0-9]{64}$", image)
-data = get("secret", "cell-credentials", source)["data"]
-keys = ("backup-password", "b2-key-id", "b2-key-secret")
-credential = {k: base64.b64decode(data[k], validate=True).decode() for k in keys}
-ctl = get("deployment", "cellctl", "exomem-cloud")
-env = {e["name"]: e["value"] for e in ctl["spec"]["template"]["spec"]["containers"][0]["env"] if "value" in e}
-bucket, endpoint = env["CELLCTL_B2_BUCKET_NAME"], env["CELLCTL_B2_ENDPOINT"]
-assert bucket and urlparse(endpoint).scheme == "https" and urlparse(endpoint).hostname
-except_cidrs = tuple(env["CELLCTL_JOB_EGRESS_EXCEPT"].split(","))
-assert except_cidrs and all(ipaddress.ip_network(c) for c in except_cidrs)
-spec = CellManifestSpec(
-    cell_id=cell_id, image=image, replicas=0, read_only=False,
-    storage_gib=int(size[:-2]), bearer_current=secrets.token_urlsafe(32),
-    backup_password=credential["backup-password"],
-    b2_key_id=credential["b2-key-id"], b2_key_secret=credential["b2-key-secret"],
-    hold_kind="restore", hold_started_at=dt.datetime.now(dt.UTC).isoformat(),
-    job_egress_except=except_cidrs,
-)
-allowed = {("Namespace", scratch), ("NetworkPolicy", "default-deny"),
-           ("NetworkPolicy", "job-egress"), ("Secret", "cell-credentials"),
-           ("PersistentVolumeClaim", "cell-data")}
-documents = []
-for doc in render_cell_manifests(spec):
-    if doc["kind"] == "Namespace":
-        doc["metadata"]["name"] = scratch
-        labels = doc["metadata"]["labels"]
-        labels.pop("exomem.io/cloud-cell")
-        labels["exomem.io/scratch-of"] = cell_id
-    else:
-        doc["metadata"]["namespace"] = scratch
-    if (doc["kind"], doc["metadata"]["name"]) in allowed:
-        if doc["kind"] == "Secret": doc["data"].pop("cell-token")
-        documents.append(doc)
-job = render_restore_job(spec, bucket_name=bucket, endpoint=endpoint, snapshot_id=snapshot)
-job["metadata"]["namespace"] = scratch
-assert len(documents) == 5 and documents[0]["kind"] == "Namespace"
-for doc in [*documents, job]:
-    kubectl("apply", "--server-side", "--field-manager=cloud-export-operator",
-            "-f", "-", payload=json.dumps(doc))
-print(f"scratch={scratch} restore_job={job['metadata']['name']} image={image}")
-PY
+"$CELLCTL_PYTHON" -I infra/scripts/cloud_restore_manifests.py scratch --context "$KUBE_CONTEXT" \
+  --cell-id "$CELL_ID" --snapshot "$SNAPSHOT" --scratch "$SCRATCH" --field-manager cloud-export-operator
 ```
 
 Only Namespace, default-deny/job-egress NetworkPolicies, Secret, PVC and Job

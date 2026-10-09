@@ -41,7 +41,9 @@ _ROLLBACK_OPERATIONS = frozenset({
 _LOCK_NAME = ".state-migration.lock"
 _COPY_CHUNK = 4 * 1024 * 1024
 _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
-_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1", "raw-protection-v1"})
+# The marker schema fixes this optional format ID; the coordinator still uses collections-store-v1.
+COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
+_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1", "raw-protection-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
 
 
 class _MigrationLockBusy(TimeoutError):
@@ -227,7 +229,7 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
 def supported_state_compatibility_ids() -> tuple[str, ...]:
     """Optional state formats this runtime can use, not merely parse."""
 
-    return ("raw-protection-v1",)
+    return ("raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID)
 
 
 def partition_state_descriptor_ids(
@@ -245,12 +247,12 @@ def _require_supported_compatibility(optional: frozenset[str]) -> None:
 
 
 def _require_collection_store_recovery(session, token) -> None:
-    """The allocating dark owner can resume its own complete store state only."""
+    """The custody-holding dark producer can resume its own complete store state only."""
     from .collection_store import authority, chain, connection
-    from .collection_store.admission import _IsolatedSession
+    from .collection_store.admission import _ProducerSession
 
-    if type(session) is not _IsolatedSession or not session.require(token):
-        raise StateMigrationOfflineRequired("isolated collection-store custody is absent")
+    if type(session) is not _ProducerSession or not session.require(token):
+        raise StateMigrationOfflineRequired("collection-store producer custody is absent")
     state_dir = state_paths.vault_state_dir(session.root)
     with _migration_lock(state_dir):
         state_paths.validate_hosted_state_directory(state_dir)
@@ -258,7 +260,7 @@ def _require_collection_store_recovery(session, token) -> None:
         if manifest is None or manifest["state"] != "complete":
             raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1"}
+        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
                 or manifest.get("governance_rollback") is not None
                 or manifest.get("governance_adoption") is not None
                 or scan_vault_state(session.root)):
@@ -304,8 +306,9 @@ def record_collection_store_compatibility(
         if authority_check() is not True:
             raise StateMigrationOfflineRequired("collection-store authority was lost")
         try:
-            if "collections-store-v1" not in optional:
-                manifest["descriptors"] = sorted([*manifest["descriptors"], "collections-store-v1"])
+            required = {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
+            if required - optional:
+                manifest["descriptors"] = sorted(set(manifest["descriptors"]) | required)
                 _write_manifest(state_dir, manifest)
         finally:
             # Publication can succeed before a final durability check raises.
@@ -507,6 +510,17 @@ def require_vault_state_ready(
     with _RESOLUTION_LOCK:
         _RESOLUTION_CACHE[key] = resolution
     return resolution
+
+
+def bootstrap_fresh_state(vault_root: Path) -> bool:
+    """Write the first empty complete manifest when this vault's external state is provably empty.
+
+    The store producer calls this for a copied store-routed vault, which the startup
+    gate refuses until store compatibility is supported; it admits the store itself.
+    """
+
+    vault_root = Path(vault_root)
+    return _bootstrap_fresh_state(vault_root, state_paths.vault_state_dir(vault_root))
 
 
 def _bootstrap_fresh_state(vault_root: Path, state_dir: Path) -> bool:

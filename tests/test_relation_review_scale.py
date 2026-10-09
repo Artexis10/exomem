@@ -68,9 +68,16 @@ def test_calibrated_report_is_reconciled_from_typed_records() -> None:
         ),
         (
             lambda report: (
-                report["queue"]["samples"][0].update({"queries": 9}),
+                report["queue"]["samples"][0].update(
+                    {"queries": relation_review_scale._FIXED_INDEXED_QUERIES + 1}
+                ),
                 report["structural"].update(
-                    {"indexed_query_count": 161, "max_indexed_queries_per_request": 9}
+                    {
+                        "indexed_query_count": report["structural"]["indexed_query_count"] + 1,
+                        "max_indexed_queries_per_request": (
+                            relation_review_scale._FIXED_INDEXED_QUERIES + 1
+                        ),
+                    }
                 ),
             ),
             "fixed query",

@@ -1195,9 +1195,9 @@ def test_ansible_vars_destination_rejects_jinja_delimiters_in_secret(
     Ansible Jinja2-templates every string it loads from a host_vars/
     group_vars file. A generated password that happens to contain `{{`,
     `{%` or `{#` (or one an operator pasted in) would not reach the
-    postgres role as the literal value secret_handoff sealed -- Ansible
-    would re-interpret it, so Postgres would end up holding a different
-    password than the one Substrate actually has. round 8, item 3.
+    K3s role as the literal value secret_handoff sealed -- Ansible
+    would re-interpret it, so K3s would end up holding a different
+    token than the one that the secret store holds.
     """
     module = _load_module()
     tainted = f"pw-prefix-{marker}-suffix".encode()
@@ -1213,9 +1213,9 @@ def test_ansible_vars_destination_rejects_jinja_delimiters_in_secret(
         module.execute_handoff(
             matrix_path=MATRIX,
             repository_root=tmp_path,
-            secret_name="control_db_substrate_owner_password",
+            secret_name="k3s_server_token",
             version="v1",
-            destination_ids=("ansible.control-node.control-db-substrate-owner-password.active",),
+            destination_ids=("ansible.hosted-node.k3s-server-token.active",),
             source_kind="stdin",
             terraform_bin="terraform",
             sops_bin="sops",
@@ -1223,7 +1223,7 @@ def test_ansible_vars_destination_rejects_jinja_delimiters_in_secret(
             vercel_project=None,
             dry_run=False,
         )
-    target = tmp_path / "infra/secrets/ansible/control-db-substrate-owner-password.v1.sops.json"
+    target = tmp_path / "infra/secrets/ansible/k3s-server-token.v1.sops.json"
     assert not target.exists()
 
 
@@ -1247,9 +1247,9 @@ def test_ansible_vars_destination_accepts_a_plain_value_without_jinja_delimiters
     module.execute_handoff(
         matrix_path=MATRIX,
         repository_root=tmp_path,
-        secret_name="control_db_substrate_owner_password",
+        secret_name="k3s_server_token",
         version="v1",
-        destination_ids=("ansible.control-node.control-db-substrate-owner-password.active",),
+        destination_ids=("ansible.hosted-node.k3s-server-token.active",),
         source_kind="stdin",
         terraform_bin="terraform",
         sops_bin="sops",
@@ -1257,7 +1257,7 @@ def test_ansible_vars_destination_accepts_a_plain_value_without_jinja_delimiters
         vercel_project=None,
         dry_run=False,
     )
-    target = tmp_path / "infra/secrets/ansible/control-db-substrate-owner-password.v1.sops.json"
+    target = tmp_path / "infra/secrets/ansible/k3s-server-token.v1.sops.json"
     assert target.is_file()
 
 

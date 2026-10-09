@@ -446,6 +446,8 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
     pod = ctx.runtime_pod(ctx.a.cell_id)
     namespace = namespace_name(ctx.a.cell_id)
     pvc = ctx.kube_json("get", "pvc", "cell-data", "--namespace", namespace)
+    if pvc["spec"].get("storageClassName") != ctx.report.stages["platform"]["hetzner_class"]:
+        raise StepFailure("the Hetzner-domain cell's claim uses another storage class")
     record.evidence.update(
         {
             "provision_seconds": round(provision, 2),
@@ -623,9 +625,13 @@ async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
     before = await ctx.cell(ctx.a.cell_id)
     if before.get("observed_image") != ctx.images.cell_v1:
         raise StepFailure(f"tenant A is not on the release under test before the upgrade: {before.get('observed_image')}")
-    started = time.monotonic()
+    snapshot_started = time.monotonic()
     snapshot_logs(ctx)
+    started = time.monotonic()
+    # The upgrade contract starts at the release request, after diagnostics.
+    record.evidence["pre_release_log_snapshot_seconds"] = round(started - snapshot_started, 4)
     await ctx.admin_release({"cellImage": ctx.images.cell_v2})
+    record.evidence["release_request_seconds"] = round(time.monotonic() - started, 4)
     saw_hold = False
 
     def upgraded(row: dict[str, Any]) -> bool:

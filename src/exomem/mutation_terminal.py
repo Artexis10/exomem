@@ -1513,6 +1513,22 @@ def _without_relation_advisory_context(result: Any) -> Any:
     return stripped if changed else result
 
 
+#: A write's vocabulary receipt: at most this many lines of at most this many characters.
+_VOCABULARY_RECEIPT_LINES = 16
+_VOCABULARY_RECEIPT_CHARS = 600
+
+
+def _valid_vocabulary_receipt(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and 0 < len(value) <= _VOCABULARY_RECEIPT_LINES
+        and all(
+            isinstance(line, str) and 0 < len(line) <= _VOCABULARY_RECEIPT_CHARS
+            for line in value
+        )
+    )
+
+
 def _bounded_tokens(value: Any, limit: int) -> bool:
     return (
         isinstance(value, (list, tuple))
@@ -1975,6 +1991,11 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 
             if valid_public_resolution(resolution):
                 compact["vocabulary_resolution"] = resolution
+    if isinstance(leaf, Mapping) and _valid_vocabulary_receipt(leaf.get("vocabulary_receipt")):
+        # One line per key a write registered or changed, with its revert route
+        # (`vocabulary.contract`): a promotion is unmissable in the default
+        # detail, and it belongs to this write's response only.
+        compact["vocabulary_receipt"] = list(leaf["vocabulary_receipt"])
     if "vocabulary_resolution" in result:
         from .vocabulary_resolution import valid_public_resolution
 
@@ -2389,6 +2410,76 @@ def _valid_lifecycle_planning_receipt(value: Mapping[str, Any]) -> bool:
 
 def valid_collection_receipt(value: Any) -> bool:
     return valid_record_receipt(value) or valid_planning_receipt(value)
+
+
+#: Import-job state changes that commit no rows (``collection_store.importer``).
+IMPORT_JOB_OPERATIONS = frozenset({
+    "import_job_start", "import_job_pause", "import_job_authority_lost", "import_job_resume",
+    "import_job_cancel", "import_job_fail", "import_job_complete",
+})
+#: Content-free control transitions a collection-store txn may record. Each changes no
+#: item, manifest or container hash, and its receipt carries counts and ids only.
+CONTROL_OPERATIONS = frozenset({"store_reconcile", *IMPORT_JOB_OPERATIONS})
+CONTROL_RECEIPT_MARKER = "exomem.collection-control"
+#: Identifiers one control receipt may carry; a larger transition is recorded in parts.
+CONTROL_RECEIPT_MAX_IDS = 4096
+_CONTROL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_CONTROL_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:-]{0,127}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_ITEM_REF = re.compile(f"{_UUID}:{_UUID}")  # collection id, then item key
+#: The id names a control receipt may carry, each with the only shape its ids may take.
+#: A caller reusing the API registers its own names here.
+CONTROL_ID_PATTERNS = {
+    "held_ids": re.compile(r"[0-9a-f]{24}"),
+    "evidence_sha256": _HEX64,
+    "skipped_unreadable": _HEX64,
+    "skipped_another_store": _HEX64,
+    "skipped_collection_absent": _ITEM_REF,
+    "skipped_no_committed_row": _ITEM_REF,
+    "import_job_ids": re.compile(r"[0-9a-f]{32}"),
+}
+
+
+def valid_control_receipt(value: Any) -> bool:
+    """Whether *value* is one closed, content-free control-transition receipt.
+
+    ``counts`` maps names to non-negative integers. ``ids`` maps registered names
+    (``CONTROL_ID_PATTERNS``) to lists of identifiers of that name's exact shape, so
+    neither can carry an item value, free text or a secret-shaped string.
+    """
+    if not isinstance(value, Mapping) or set(value) != {
+        "_control_receipt", "receipt_version", "operation", "collection_id", "transition_id",
+        "commit_seq", "counts", "ids", "outcome",
+    }:
+        return False
+    counts, ids = value.get("counts"), value.get("ids")
+    return (
+        value.get("_control_receipt") == CONTROL_RECEIPT_MARKER
+        and type(value.get("receipt_version")) is int
+        and value.get("receipt_version") == 1
+        and value.get("operation") in CONTROL_OPERATIONS
+        and _normalized_uuid(value.get("collection_id"))
+        and isinstance(value.get("transition_id"), str)
+        and _CONTROL_ID.fullmatch(value["transition_id"]) is not None
+        and type(value.get("commit_seq")) is int
+        and value["commit_seq"] > 0
+        and value.get("outcome") == "committed"
+        and isinstance(counts, Mapping)
+        and len(counts) <= 16
+        and all(
+            isinstance(name, str) and _CONTROL_NAME.fullmatch(name) and type(count) is int and count >= 0
+            for name, count in counts.items()
+        )
+        and isinstance(ids, Mapping)
+        and len(ids) <= 16
+        and sum(len(found) for found in ids.values() if isinstance(found, list)) <= CONTROL_RECEIPT_MAX_IDS
+        and all(
+            name in CONTROL_ID_PATTERNS and isinstance(found, list)
+            and all(isinstance(item, str) and CONTROL_ID_PATTERNS[name].fullmatch(item) for item in found)
+            for name, found in ids.items()
+        )
+    )
 
 
 def valid_structured_files_receipt(value: Any) -> bool:

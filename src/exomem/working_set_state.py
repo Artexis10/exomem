@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
 from datetime import date
+from pathlib import Path
 from typing import Any
 
+from . import lifecycle_statuses
 from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer
 from .working_set_index import normalize, terms_of
 
@@ -77,7 +78,10 @@ def bounded_statement(text: str, limit: int = STATEMENT_MAX_CHARS) -> str:
 
 
 def _named_current_page(
-    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+    vault_root: Path,
+    anchor: Any,
+    *,
+    visible: Callable[[str], bool] | None = None,
 ) -> str:
     """The neighbourhood page the anchor's own page declares current, if any."""
     from . import find_corpus
@@ -106,7 +110,11 @@ def _named_current_page(
 
 
 def _from_canonical_page(
-    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+    vault_root: Path,
+    anchor: Any,
+    *,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis,
 ) -> dict[str, Any] | None:
     """The leading current-state unit of the page the anchor declares current.
 
@@ -118,20 +126,18 @@ def _from_canonical_page(
     if not named:
         return None
     from . import find as find_module
-    from . import ranking_config, structured_filters
-    from . import working_set, working_set_currency
+    from . import ranking_config, structured_filters, working_set, working_set_currency
     from .governance import egress
 
     def in_view(hits: Sequence[Any]) -> list[Any]:
-        return working_set.hits_in_view(
-            [
-                hit
-                for hit in hits
-                if str(getattr(hit, "parent_path", "") or "") == named
-                and not getattr(hit, "parent_superseded_by", None)
-            ],
-            visible,
-        )
+        admitted = working_set.hits_in_view(hits, visible)
+        return [
+            hit
+            for hit in admitted
+            if str(getattr(hit, "parent_path", "") or "") == named
+            and not getattr(hit, "parent_superseded_by", None)
+            and status_basis.classify(getattr(hit, "parent_status", None)).live
+        ]
 
     try:
         snapshot = find_module.FreshnessSnapshot(vault_root)
@@ -143,11 +149,21 @@ def _from_canonical_page(
 
         def read(size: int) -> tuple[list[Any], bool]:
             hits = find_module._find_semantic_units(
-                vault_root, query="", limit=size, scope="kb", plan=plan,
-                snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
-                mode="keyword", degraded_out=None, failed_out=None,
+                vault_root,
+                query="",
+                limit=size,
+                scope="kb",
+                plan=plan,
+                snapshot=snapshot,
+                prefer_active=True,
+                config=ranking_config.DEFAULT_RANKING,
+                status_basis=status_basis,
+                mode="keyword",
+                degraded_out=None,
+                failed_out=None,
                 allowed_parent_paths={named},
-                recall_checkpoint=checkpoint, repair=False,
+                recall_checkpoint=checkpoint,
+                repair=False,
                 max_catalog_candidates=size,
             )
             # A full raw window cannot prove exhaustion before reader filtering.
@@ -199,6 +215,7 @@ def current_state_for(
     index_token: tuple[int, int, int] | None = None,
     state_fields: Sequence[str] | None = None,
     date_fields: Sequence[str] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Resolve each stateful anchor's current state, Records first.
 
@@ -221,6 +238,7 @@ def current_state_for(
     vault with no override reads state precisely as before.
     """
     root = Path(vault_root)
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
     if state_fields is None or date_fields is None:
         from . import activation_conventions
 
@@ -235,7 +253,7 @@ def current_state_for(
     out: list[dict[str, Any]] = []
     for anchor in anchors:
         if getattr(anchor, "kind", "") in CANONICAL_KINDS:
-            entry = _from_canonical_page(root, anchor, visible=visible)
+            entry = _from_canonical_page(root, anchor, visible=visible, status_basis=status_basis)
             if entry is not None:
                 out.append(entry)
             continue
@@ -243,10 +261,15 @@ def current_state_for(
             continue
         entry = (
             _from_records(
-                root, anchor, manifests, purpose=purpose, state_fields=state_fields, date_fields=date_fields
+                root,
+                anchor,
+                manifests,
+                purpose=purpose,
+                state_fields=state_fields,
+                date_fields=date_fields,
             )
             or _from_profile(root, anchor, state_fields=state_fields)
-            or _from_neighbourhood(root, anchor, visible=visible)
+            or _from_neighbourhood(root, anchor, visible=visible, status_basis=status_basis)
         )
         if entry is not None:
             out.append(entry)
@@ -268,7 +291,7 @@ def temper_weak_entries(
     entries: Sequence[Mapping[str, Any]],
     anchors: Sequence[Any],
     *,
-    today: "date | None" = None,
+    today: date | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Hold back or age-label current state from weakly-resolved anchors.
 
@@ -521,7 +544,11 @@ def _from_profile(
 
 
 def _from_neighbourhood(
-    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+    vault_root: Path,
+    anchor: Any,
+    *,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis,
 ) -> dict[str, Any] | None:
     best: tuple[str, str, str] | None = None
     for rel in sorted(getattr(anchor, "neighbourhood", ()) or ()):
@@ -531,7 +558,7 @@ def _from_neighbourhood(
         if profile is None:
             continue
         frontmatter, page_title = profile
-        if normalize(frontmatter.get("status") or "active") != "active":
+        if status_basis.classify(frontmatter.get("status")).require() != "live":
             continue
         updated = str(frontmatter.get("updated") or "")
         title = str(frontmatter.get("title") or page_title or "").strip()

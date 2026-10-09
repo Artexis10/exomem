@@ -28,6 +28,7 @@ from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy, 
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
+    InboundLink,
     LogWritePlan,
     PathGuard,
     PathGuardError,
@@ -185,31 +186,83 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
 
 
 def _repoint_artifact(old_binary: str, new_binary: str):
-    """A content transform that repoints a moved page at its moved bytes."""
+    """A content transform that repoints a moved page at its moved bytes.
+
+    Only the pointer fields change, patched where the YAML parser places them,
+    so an append-only page keeps the bytes of its other fields and its body.
+    """
 
     def transform(text: str) -> str:
-        from .vault import document_newline, parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+        from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+        from .vault import parse_frontmatter
 
-        frontmatter, body, block = parse_frontmatter(text, strict=True)
+        frontmatter, _body, block = parse_frontmatter(text, strict=True)
         if block is None:
             return text
-        changed = False
+        changes: dict[str, Any] = {}
         # These two pointer fields belong to the Source/Evidence companion schema.
         for field in ("evidence_file", "data_file"):
             if frontmatter.get(field) == old_binary:
-                frontmatter[field] = new_binary
-                changed = True
+                changes[field] = new_binary
         protection = frontmatter.get("raw_protection")
         if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
-            protection["artifact_path"] = new_binary
-            changed = True
-        if not changed:
+            changes["raw_protection"] = {**protection, "artifact_path": new_binary}
+        if not changes:
             return text
-        return render_frontmatter_document(
-            serialize_frontmatter(frontmatter), body, newline=document_newline(text), blank_line=True,
-        )
+        try:
+            return splice_markdown_frontmatter(text, changes)
+        except FrontmatterSpliceError as error:
+            raise MoveFileError(error.code, error.reason) from error
 
     return transform
+
+
+@dataclass(frozen=True)
+class InboundRewrite:
+    """What a move does to one page that links the moved file."""
+
+    path: str
+    absolute: Path
+    #: The append-only tree that holds the page, or None for a mutable page.
+    append_only: str | None
+    #: Links whose bytes the move changes; zero leaves the page untouched.
+    changes: int
+    content: str
+    guard: PathGuard
+
+
+def plan_inbound_rewrites(
+    vault_root: Path, old_rel: str, new_rel: str, inbound: list[InboundLink]
+) -> list[InboundRewrite]:
+    """Rewrite each page `inbound` names, in path order, without writing it.
+
+    The move and its preview both read their referrer outcomes from here. A
+    page that cannot be read is skipped, and each guard binds the bytes read.
+    """
+    plans: list[InboundRewrite] = []
+    for rel in sorted({hit.path for hit in inbound}):
+        if rel == old_rel:
+            continue
+        try:
+            abs_file = (vault_root / rel).resolve()
+            abs_file.relative_to(vault_root.resolve())
+        except (ValueError, OSError):
+            continue
+        try:
+            text, guard = read_guarded_text(vault_root, abs_file)
+        except (OSError, UnicodeDecodeError, PathGuardError):
+            continue
+        new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
+        append_tree = in_append_only_tree(rel)
+        # A generated index inside an append-only tree is not captured
+        # content: `add` rewrites `Sources/index.md` on every capture.
+        # Rule 2 protects the material, and refusing to repoint an index
+        # at a file this op just moved would leave the index dangling —
+        # the opposite of what the guard is for.
+        if rel.rsplit("/", 1)[-1] == "index.md":
+            append_tree = None
+        plans.append(InboundRewrite(rel, abs_file, append_tree, n_changed, new_text, guard))
+    return plans
 
 
 def move_file(
@@ -539,51 +592,32 @@ def move_file(
     batch_index_reports: list[object] = []
     batch_fanout_paths: list[Path] = []
     if update_wikilinks and inbound:
-        files_to_rewrite = sorted({hit.path for hit in inbound})
-        for rel in files_to_rewrite:
-            if rel == old_rel:
+        for item in plan_inbound_rewrites(vault_root, old_rel, new_rel, inbound):
+            if not item.changes:
                 continue
-            try:
-                abs_file = (vault_root / rel).resolve()
-                abs_file.relative_to(vault_root.resolve())
-            except (ValueError, OSError):
-                continue
-            try:
-                text, guard = read_guarded_text(vault_root, abs_file)
-            except (OSError, UnicodeDecodeError, PathGuardError):
-                continue
-            new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
-            if n_changed > 0:
-                append_tree = in_append_only_tree(rel)
-                # A generated index inside an append-only tree is not captured
-                # content: `add` rewrites `Sources/index.md` on every capture.
-                # Rule 2 protects the material, and refusing to repoint an index
-                # at a file this op just moved would leave the index dangling —
-                # the opposite of what the guard is for.
-                if rel.rsplit("/", 1)[-1] == "index.md":
-                    append_tree = None
-                if visible is not None and not visible(rel):
-                    if append_tree:
-                        continue
-                    hidden_changes[rel] = n_changed
-                if append_tree:
-                    raise MoveFileError(
-                        code="APPEND_ONLY",
-                        reason=(
-                            f"updating inbound wikilinks would rewrite {rel} in "
-                            f"append-only {append_tree}/. Retry with "
-                            f"`update_wikilinks=false` to preserve exact bytes "
-                            f"and run final-corpus semantic evaluation."
-                        ),
-                    )
-                writes.append(
-                    PlannedWrite(path=abs_file, content=new_text, guard=guard)
+            rel = item.path
+            if visible is not None and not visible(rel):
+                if item.append_only:
+                    continue
+                hidden_changes[rel] = item.changes
+            if item.append_only:
+                raise MoveFileError(
+                    code="APPEND_ONLY",
+                    reason=(
+                        f"updating inbound wikilinks would rewrite {rel} in "
+                        f"append-only {item.append_only}/. Retry with "
+                        f"`update_wikilinks=false` to preserve exact bytes "
+                        f"and run final-corpus semantic evaluation."
+                    ),
                 )
-                files_touched.append(rel)
-                wikilinks_updated += n_changed
-                if visible is None or visible(rel):
-                    reported_touched.append(rel)
-                    reported_updated += n_changed
+            writes.append(
+                PlannedWrite(path=item.absolute, content=item.content, guard=item.guard)
+            )
+            files_touched.append(rel)
+            wikilinks_updated += item.changes
+            if visible is None or visible(rel):
+                reported_touched.append(rel)
+                reported_updated += item.changes
 
     def validation_result(
         *, source_hash: str, destination_hash: str

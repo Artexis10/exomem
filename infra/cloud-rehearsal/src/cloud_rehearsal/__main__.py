@@ -56,6 +56,10 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
+        "--local-storage-coexistence", action="store_true",
+        help="install TopoLVM while keeping Hetzner-class cells for the full P3 lifecycle",
+    )
+    run_parser.add_argument(
         "--known-findings", type=Path, default=Path(__file__).resolve().parents[2] / "known-findings.json",
         help="with --harness-check: the product findings each step is expected to record",
     )
@@ -98,6 +102,7 @@ async def _run(args: argparse.Namespace) -> int:
         "s3_double_image": images.S3_DOUBLE,
         "cell_image_source": "prebuilt:" + args.cell_image if args.cell_image else "Dockerfile --target cloud",
         "gateway_image_source": "Dockerfile.exomem-gateway" if args.gateway_build == "dockerfile" else "host-assembled final stage",
+        "local_storage_coexistence": args.local_storage_coexistence,
     }
     if args.cell_image:
         report.valid = False
@@ -166,6 +171,7 @@ async def _run(args: argparse.Namespace) -> int:
                     cell_repository=build.CELL_REPOSITORY, backup_window=closed_window,
                     public_base_url=substrate.PUBLIC_BASE_URL, mcp_path=substrate.MCP_PATH,
                     trusted_ingress_source_value=control.secrets.ingress_source_value,
+                    local_storage_coexistence=args.local_storage_coexistence,
                 ),
                 cellctl_secrets=platform.cellctl_secrets(
                     stack, cell_token_key=control.secrets.cell_token_key,
@@ -176,6 +182,8 @@ async def _run(args: argparse.Namespace) -> int:
                 ingress_image=traefik,
             )
             report.overlays.extend(deployed.overlays)
+            report.stages["platform"]["storage_coexistence"] = deployed.storage_evidence
+            report.stages["platform"]["hetzner_class"] = deployed.hetzner_class
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "cellctl")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "exomem-cloud-gateway")
             platform.wait_rollout(stack, platform.EDGE_NAMESPACE, "rehearsal-traefik")

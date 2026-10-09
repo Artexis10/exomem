@@ -91,7 +91,7 @@ def _stub_corpus(monkeypatch, *, ok=True):
             raise RuntimeError("corpus build failed")
         return None
 
-    monkeypatch.setattr(semantic_contract, "build_corpus_context", _build, raising=True)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", _build, raising=True)
 
 
 def _stub_adoption(monkeypatch, *, adopted=True, residue=(), reason="adopted"):
@@ -714,7 +714,7 @@ def test_the_standbys_corpus_build_writes_nothing_under_the_vault_or_the_state_r
     """A standby owns no state, so every step of its warm must be a read.
 
     The corpus build is the one this task added, and it is the one most likely
-    to grow a publication later: `build_corpus_context` caches, and a cache is
+    to grow a publication later: `warm_corpus_context` caches, and a cache is
     a short walk from a sidecar. This census fails here, on a fixture, rather
     than on a live cutover where the standby would be writing under a worker
     that still owns the vault.

@@ -22,8 +22,12 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from . import schema
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
 
 STORE_FILENAME = "collections.sqlite"
 MINIMUM_SQLITE_VERSION = (3, 38, 0)
@@ -37,6 +41,23 @@ _CONNECTION_FACTORY: type[sqlite3.Connection] = sqlite3.Connection
 # cross-process authority. Reserve before opening, release on failure or close.
 _WRITERS_GUARD = threading.Lock()
 _WRITER_PATHS: set[Path] = set()
+_LIBRARIES_LOCK = threading.Lock()
+
+
+def load_store_libraries() -> None:
+    """Import SQLAlchemy and Alembic, one thread at a time, before store work.
+
+    The CLI imports this module without them. Two threads importing their submodules
+    for the first time at once can see a partially initialised module. Threads start
+    store work only through ``runtime.route``, ``open_writer`` or ``open_reader``,
+    which call this first, or after ``server.run`` has called it on the main thread.
+    Module-level imports in ``tables``, ``typed_storage`` and ``query_indexes`` are
+    safe only under that rule.
+    """
+    with _LIBRARIES_LOCK:
+        import alembic.command  # noqa: F401
+        import alembic.script  # noqa: F401
+        import sqlalchemy  # noqa: F401
 
 
 class CollectionStoreUnavailable(RuntimeError):
@@ -56,6 +77,14 @@ class CollectionStoreError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+
+
+def busy(message: str):
+    """The one shape of every COLLECTION_STORE_BUSY a caller sees: retryable, nothing committed."""
+    from ..cli_ops import OpError
+
+    return OpError("COLLECTION_STORE_BUSY", message, "Retry shortly.",
+                   details={"status": "retryable", "committed": False})
 
 
 def store_path(vault_root: Path) -> Path:
@@ -105,6 +134,30 @@ def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _writer_engine(database: str):
+    # Store libraries load with the first store, not with every CLI import.
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.pool import NullPool
+
+    engine = create_engine("sqlite+pysqlite://", creator=lambda: _connect(database), poolclass=NullPool)
+
+    @event.listens_for(engine, "begin")
+    def begin(conn):
+        # Explicit SQLite transaction control also makes DDL atomic.
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+    return engine
+
+
+def rollback(conn: Connection) -> None:
+    """Clear both transaction states after an unsuccessful mutation."""
+    conn.rollback()
+    raw = conn.connection.driver_connection
+    # A deferred-constraint COMMIT failure deactivates Core before SQLite rolls back.
+    if raw.in_transaction:
+        raw.rollback()
+
+
 def _require_lease(lease_check: Callable[[], bool]) -> None:
     if not lease_check():
         raise CollectionStoreError(
@@ -133,15 +186,21 @@ class WriterConnection:
     """The one write connection to a store."""
 
     def __init__(
-        self, path: Path, conn: sqlite3.Connection, lease_check: Callable[[], bool]
+        self, path: Path, conn: Connection, lease_check: Callable[[], bool]
     ) -> None:
         self.path = path
-        self.connection = conn
+        self.core = conn
+        self.connection = conn.connection.driver_connection
         self._lease_check = lease_check
         self._owner_thread = threading.get_ident()
         self._closed = False
         self._release_cache = None
         self._inspection_identity = object()
+        # Host-local import job facts (``importer``), keyed by job id: this handle's
+        # proofs of bound source bytes, and the store refusal blocking a running job.
+        # A new handle, as after a takeover, starts with neither.
+        self.import_proofs: dict[str, Any] = {}
+        self.import_blocked: dict[str, str] = {}
 
     @property
     def release_cache(self):
@@ -164,7 +223,7 @@ class WriterConnection:
         The publisher may preserve a detected foreign file after recording
         divergence. That trusted filesystem-only caller can opt out of the
         divergence fence, never the opening-thread, open-handle or lease checks.
-        Transactions always retain the fence.
+        Transactions retain the fence, except owner adopt-local's, which clears it.
         """
         self.require_owner_thread()
         if self._closed:
@@ -180,28 +239,47 @@ class WriterConnection:
             )
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, resolve_divergence: bool = False) -> Iterator[sqlite3.Connection]:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
-        self.require_write_authority()
+        from sqlalchemy.exc import DBAPIError
+
+        self.require_write_authority(allow_diverged=resolve_divergence)
         cache = self.release_cache
         cache.check()
-        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.core.begin()
+        except DBAPIError as error:
+            raise error.orig from error
         cache.begin()
         try:
             yield self.connection
             cache.prepare()
-            self.connection.execute("COMMIT")
+            self.core.commit()
             cache.finish(True)
-        except BaseException:
-            if self.connection.in_transaction:
-                self.connection.execute("ROLLBACK")
+        except BaseException as error:
+            rollback(self.core)
             cache.finish(False)
+            if isinstance(error, DBAPIError):
+                raise error.orig from error
             raise
+
+    def execute(self, statement, parameters=None):
+        """Execute Core statements only within this handle's mutation scope."""
+        from sqlalchemy.exc import DBAPIError
+
+        self.require_owner_thread()
+        if not self.core.in_transaction() or not self.connection.in_transaction:
+            raise RuntimeError("Core writes require the writer transaction")
+        try:
+            return self.core.execute(statement, parameters)
+        except DBAPIError as error:
+            raise error.orig from error
 
     def close(self) -> None:
         if not self._closed:
             self._release_cache = None
-            self.connection.close()
+            self.core.close()
+            self.core.engine.dispose()
             self._closed = True
             with _WRITERS_GUARD:
                 _WRITER_PATHS.remove(self.path)
@@ -226,6 +304,9 @@ def open_writer(
     exact store's scoped authority, never the process-wide scheduler predicate.
     """
     check_sqlite_version()
+    load_store_libraries()
+    from sqlalchemy.exc import DBAPIError
+
     target = Path(path).resolve()
     check = lease_check if lease_check is not None else _vault_lease_check(target, vault_root)
     _require_lease(check)
@@ -236,21 +317,29 @@ def open_writer(
             )
         _WRITER_PATHS.add(target)
     conn = None
+    engine = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        conn = _connect(str(target))
-        _apply_writer_pragmas(conn)
+        engine = _writer_engine(str(target))
+        conn = engine.connect()
+        _apply_writer_pragmas(conn.connection.driver_connection)
         _require_lease(check)
         try:
             schema.ensure_schema(conn)
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
+        except schema.SchemaMetadataError as error:
+            raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
         return WriterConnection(target, conn, check)
-    except BaseException:
+    except BaseException as error:
         if conn is not None:
             conn.close()
+        if engine is not None:
+            engine.dispose()
         with _WRITERS_GUARD:
             _WRITER_PATHS.remove(target)
+        if isinstance(error, DBAPIError):
+            raise error.orig from error
         raise
 
 
@@ -259,6 +348,7 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms must be a non-negative integer")
     check_sqlite_version()
+    load_store_libraries()
     target = Path(path)
     if not target.is_file():
         raise CollectionStoreError("COLLECTION_STORE_ABSENT", "the collection store does not exist")
@@ -270,12 +360,12 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA foreign_keys=ON")
-        found = schema.schema_version(conn)
-        if found > schema.SCHEMA_VERSION:
-            raise CollectionStoreError(
-                "COLLECTION_STORE_SCHEMA_NEWER",
-                f"collection store schema {found} is newer than this release supports",
-            )
+        try:
+            found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+        except schema.SchemaMetadataError as error:
+            raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
+        except schema.SchemaVersionError as error:
+            raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
         if found < schema.SCHEMA_VERSION:
             raise CollectionStoreError(
                 "COLLECTION_STORE_SCHEMA_PENDING",

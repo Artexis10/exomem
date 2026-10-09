@@ -33,6 +33,7 @@ hide. Re-measure (don't hand-tune) if the corpus generator or lane code changes.
 
 from __future__ import annotations
 
+import gc
 import json
 import statistics
 import sys
@@ -478,7 +479,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
 
     def cold_find_ms() -> float:
         find_module.clear_cache()
-        entity_types._CACHE.clear()
+        entity_types.clear_cache()
         _seed_freshness_live(vault)
         started = time.perf_counter()
         commands.op_find(
@@ -553,7 +554,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             registry_path.write_text(registry_text, encoding="utf-8")
         else:
             registry_path.unlink(missing_ok=True)
-        entity_types._CACHE.clear()
+        entity_types.clear_cache()
         referent_resolution._CUE_NOUN_CACHE.clear()
         entity_registry.clear_entity_registry_cache()
         started = time.perf_counter()
@@ -601,7 +602,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             parse_ms.append((time.perf_counter() - started) * 1000)
 
     monkeypatch.setattr(entity_types, "_parse_extension_data", timed_parse)
-    entity_types._CACHE.clear()
+    entity_types.clear_cache()
 
     commands.op_find(
         vault,
@@ -750,6 +751,12 @@ def measure_conversation_gate(vault: Path) -> dict:
 
     def call(with_conversation: bool) -> dict:
         working_set_runtime.reset_caches_for_tests()
+        # The stage budget covers the stage's own work. On Python 3.12 a full
+        # collection over this vault's heap pauses about 100 ms wherever the
+        # allocation count trips it, so settle earlier garbage before each sample.
+        # The warm totals then also exclude that debt; a collection that the
+        # sample's own allocation triggers still counts against it.
+        gc.collect()
         extra = {"conversation": conversation} if with_conversation else {}
         return commands.op_activate_context(
             vault, turn=WORKING_SET_TURN, include_timings=True, **extra

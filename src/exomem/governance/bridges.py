@@ -851,7 +851,7 @@ def _admit_parsed(
 
     candidates = [
         grant
-        for grant in policy.release_grants if grant.raw_protection is None
+        for grant in policy.release_grants if grant.raw_protection is None and grant.field_release is None
         if grant.path == rel_path
         and grant.ref == metadata.ref
         and grant.to_audience == audience
@@ -940,7 +940,7 @@ def resolve_approved_abstraction(
             return BridgeProjection(False, RELEASE_STALE)
     candidates = [
         grant
-        for grant in policy.release_grants if grant.raw_protection is None
+        for grant in policy.release_grants if grant.raw_protection is None and grant.field_release is None
         if grant.id == bridge_id and grant.to_audience == audience
     ]
     if not candidates:
@@ -995,7 +995,7 @@ def review_signal(
     today: dt.date,
 ) -> BridgeReviewSignal | None:
     """Derive one approval-bound review signal without writing sidecars."""
-    if grant.raw_protection is not None:
+    if grant.raw_protection is not None or grant.field_release is not None:
         return None
     unavailable_hash = hashlib.sha256(b"bridge-unavailable").hexdigest()
     snapshot = _read_exact_snapshot(vault_root, grant.path)

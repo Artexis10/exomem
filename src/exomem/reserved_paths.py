@@ -1081,13 +1081,15 @@ def _physical_leaf_candidates(
     NFKC form as different names, so the exact logical spelling and the actual
     on-disk spelling can diverge -- and, rarer but real, two differently
     normalized physical names can both collapse to the same logical spelling.
-    This enumerates the parent's immediate children once, through the same
-    alias-safe primitive an ordinary directory listing already uses, and
-    reports every physical name that collapses to `leaf`, so a caller can
-    require exactly one before trusting it.
+    Filter names before acquiring child identities through the alias-safe
+    listing primitive. Every matching physical spelling remains eligible,
+    so a caller can require exactly one before trusting it.
     """
 
-    children = filesystem.children(parent)
+    children = filesystem.children(
+        parent,
+        name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
+    )
     if not children.ok:
         code = children.error.code if children.error is not None else "IO_REFUSED"
         raise ReservedPathLeafError(code)
@@ -1095,7 +1097,6 @@ def _physical_leaf_candidates(
         record.relative_path
         for record in children.require()
         if record.identity.kind == "file"
-        and unicodedata.normalize("NFKC", record.relative_path) == leaf
     )
 
 

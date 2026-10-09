@@ -70,9 +70,8 @@ def test_real_producer_creates_replica_marker_and_exact_receipt(producer):
             json.dumps(result["receipt"], sort_keys=True, separators=(",", ":")),
         )
     assert (session.root / manifest_path()).exists()
-    assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
-    with pytest.raises(state_migration.StateCompatibilityUnsupported):
-        state_migration.require_vault_state_ready(session.root)
+    assert "collections-store-v1" in state_migration.supported_state_compatibility_ids()
+    state_migration.require_vault_state_ready(session.root)
 
 
 def create(producer, **changes):
@@ -241,6 +240,29 @@ def test_resume_rechecks_write_permission_before_cutover(producer, monkeypatch, 
     assert admission.resume_local(session, manager, fence_client=operator)["status"] == "marker_admitted"
 
 
+def test_rollback_refuses_pending_first_enrollment(producer, monkeypatch):
+    """Narrowing cannot grant custody to an unfinished first enrollment."""
+    from exomem.collection_store import capability
+    from exomem.governance.principal import library_scope
+
+    session, manager, operator = producer
+    with monkeypatch.context() as interrupted:
+        def stop(*args, **kwargs):
+            raise InterruptedError("before first cutover")
+        interrupted.setattr(operator, "transition_collection_store_fence", stop)
+        with pytest.raises(InterruptedError):
+            create(producer)
+    fence = operator.collection_store_fence()
+    with connection.open_reader(session.path) as reader:
+        intent = authority.pending_create(reader)
+    with library_scope(), pytest.raises(connection.CollectionStoreError, match="first enrollment"):
+        admission.rollback_slice(session, manager)
+    assert not capability.records_summary_disabled(session.root)
+    assert operator.collection_store_fence() == fence and authority.read_marker(session.root) is None
+    with connection.open_reader(session.path) as reader:
+        assert authority.pending_create(reader) == intent
+
+
 def test_invalid_second_create_keeps_existing_store_admitted(producer):
     # Rejected input with no committed intent cannot strand the already-admitted collection.
     from test_collection_store_writer import KEY
@@ -351,9 +373,8 @@ def _restart_child(session, config, operator_config, database, phase, sender):
             patch.setattr(session.fs, "rename", rename_and_stop)
         if phase is None:
             result = admission.resume_local(session, manager, fence_client=operator)
-            assert "collections-store-v1" not in state_migration.supported_state_compatibility_ids()
-            with pytest.raises(state_migration.StateCompatibilityUnsupported):
-                state_migration.require_vault_state_ready(session.root)
+            assert "collections-store-v1" in state_migration.supported_state_compatibility_ids()
+            state_migration.require_vault_state_ready(session.root)
             sender.send(result)
         else:
             admission.create_new(session, manager, manifest_path(), manifest_text(),
@@ -587,8 +608,7 @@ def mixed(store):
     marker = {
         "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
         "authority_epoch": 1,
-        "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
-                         "authority": "store", "store_id": sid}],
+        "collections": [authority.marker_entry(CID, manifest_path(), sid, "records")],
         "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
     }
     return store, json.dumps(marker).encode(), before
@@ -819,8 +839,7 @@ def test_commit_acknowledgement_survives_actual_runtime_fence(runtime):
         target = json.dumps({
             "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
             "authority_epoch": 1,
-            "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
-                             "authority": "store", "store_id": sid}],
+            "collections": [authority.marker_entry(CID, manifest_path(), sid, "records")],
             "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
         }).encode()
 

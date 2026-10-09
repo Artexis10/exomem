@@ -180,13 +180,13 @@ def test_unadmitted_runtime_renews_without_replacing_coordinator_evidence(runtim
     )
 
 
-def test_cancelled_close_keeps_authority_and_can_retry(runtime):
+def test_cancelled_close_stops_renewal_and_can_retry_handoff(runtime):
     _create(runtime)
     with pytest.raises(OpError, match="FLUSH_PENDING"):
         runtime.manager.close(cancelled=lambda: True)
     assert not runtime.manager.client.released.is_set()
     assert runtime.manager._fencing_token == 1
-    assert not runtime.manager._stop.is_set()
+    assert runtime.manager._stop.is_set()
     runtime.manager.close()
     runtime.manager.close()
     assert runtime.manager.client.released.is_set()
@@ -379,7 +379,7 @@ def test_cancellation_during_real_publication_leaves_release_pending(runtime, mo
             runtime.manager.close(cancelled=cancelled.is_set)
     assert not runtime.manager.client.released.is_set()
     assert runtime.manager._fencing_token == 1
-    assert not runtime.manager._stop.is_set()
+    assert runtime.manager._stop.is_set()
     runtime.manager.close()
     assert runtime.manager.client.release_head == runtime.sample_head()
 
@@ -574,9 +574,11 @@ def test_standalone_preview_close_drains_without_claiming_or_closing_store(tmp_p
         assert client.released.is_set()
         assert client.release_head is None
         assert handle.connection.execute("SELECT 1").fetchone() == (1,)
-        with pytest.raises(OpError, match="COLLECTION_STORE_BUSY"):
+        with pytest.raises(OpError, match="COLLECTION_STORE_BUSY") as busy:
             with preview_store(root, handle):
                 pass
+        # The one shape every BUSY takes, so a caller retries instead of failing.
+        assert busy.value.details == {"status": "retryable", "committed": False}
         manager.close()
 
 
@@ -596,7 +598,7 @@ def test_standalone_close_from_borrower_stays_pending(tmp_path, monkeypatch):
             with pytest.raises(OpError, match="COLLECTION_STORE_FLUSH_PENDING"):
                 manager.close(deadline=time.monotonic() + 0.05)
             assert not client.released.is_set()
-            assert not manager._stop.is_set()
+            assert manager._stop.is_set()
             assert writer.connection.execute("SELECT 1").fetchone() == (1,)
         manager.close()
         assert client.released.is_set()

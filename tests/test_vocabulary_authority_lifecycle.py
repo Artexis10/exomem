@@ -121,6 +121,27 @@ def test_floor_two_pending_session_activation_and_session_revocation(
 ) -> None:
     vault = tmp_path / "vault"
     init.init_vault(vault)
+    registry_path = entity_types.extension_registry_path(vault)
+    registry_path.write_text("schema_version: 1\nentity_types: {}\n", encoding="utf-8")
+    registry_before = registry_path.read_bytes()
+    audience, issuer = wire._service_identity()
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir()
+    (governance / "scopes" / "vocabulary-session.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {wire.SCOPE_ID}\n"
+        f'paths: ["{registry_path.relative_to(vault / "Knowledge Base").as_posix()}"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "vocabulary-session.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {wire.RULE_ID}\n"
+        f'scope_ids: ["{wire.SCOPE_ID}"]\n'
+        f"audience: {audience}\n"
+        "ceiling: 0\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease"))
     wire._configure_v4_authority(vault, tmp_path / "custody", monkeypatch)
     (tmp_path / "custody").chmod(0o700)
@@ -138,15 +159,14 @@ def test_floor_two_pending_session_activation_and_session_revocation(
         opened = wire._call(
             client,
             1,
-            {"operation": "session", "session_action": "open", "ttl_seconds": 60},
+            {"operation": "session", "session_action": "open", "ttl_seconds": 600},
         )
-    issued = opened["diagnostics"]["issued_credential"]
-    assert isinstance(issued, dict)
-    bearer = issued["bearer"]
-    assert isinstance(bearer, str)
+        issued = opened["diagnostics"]["issued_credential"]
+        assert isinstance(issued, dict)
+        bearer = issued["bearer"]
+        assert isinstance(bearer, str)
 
     custody = authorization_custody.load_authorization_custody(vault, now=now)
-    audience, issuer = wire._service_identity()
     connection = store.open_authorization_session_connection(vault)
     try:
         context = authorization_session_lifecycle.resume_session(
@@ -184,6 +204,22 @@ def test_floor_two_pending_session_activation_and_session_revocation(
     )
     assert control.activate(principal=principal, body={}).mode == "v2"
 
+    with TestClient(replica) as client:
+        token = wire._mint_route_grant_token(
+            vault, bearer=bearer, paths=(registry_path.relative_to(vault).as_posix(),)
+        )
+        disclosed = wire._call(
+            client,
+            2,
+            {
+                "operation": "grant",
+                "token": token,
+                "duration_seconds": 60,
+                "authorization_session_credential": bearer,
+            },
+        )
+        assert disclosed["status"] == "committed"
+
     schema_command = next(
         command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory"
     )
@@ -210,6 +246,7 @@ def test_floor_two_pending_session_activation_and_session_revocation(
             read_only=False,
         )
     assert isinstance(denied.value.details.get("vocabulary_request_id"), str)
+    assert registry_path.read_bytes() == registry_before
     assert entity_types.load_entity_types(vault).resolve("venue") is None
 
     authority_id = control.grant(
@@ -230,10 +267,26 @@ def test_floor_two_pending_session_activation_and_session_revocation(
         )
     assert committed["state"] == "committed"
     assert isinstance(committed.get("receipt_id"), str) and committed["receipt_id"]
-    registry_path = entity_types.extension_registry_path(vault)
     assert "venue:" in registry_path.read_text(encoding="utf-8")
     assert entity_types.load_entity_types(vault).resolve("venue") is not None
 
+    # Disclosure binds the current overlay bytes independently of vocabulary authority.
+    token = wire._mint_route_grant_token(
+        vault, bearer=bearer, paths=(registry_path.relative_to(vault).as_posix(),)
+    )
+    with TestClient(replica) as client:
+        disclosed = wire._call(
+            client,
+            3,
+            {
+                "operation": "grant",
+                "token": token,
+                "duration_seconds": 60,
+                "authorization_session_credential": bearer,
+            },
+        )
+    assert disclosed["status"] == "committed"
+    registry_before_revocation = registry_path.read_bytes()
     control.revoke(principal=principal, body={"authority_id": authority_id})
     guild = {
         "folder": "Guilds",
@@ -258,6 +311,7 @@ def test_floor_two_pending_session_activation_and_session_revocation(
             read_only=False,
         )
     assert entity_types.load_entity_types(vault).resolve("guild") is None
+    assert registry_path.read_bytes() == registry_before_revocation
 
     connection = store.open_authorization_session_connection(vault)
     try:

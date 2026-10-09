@@ -144,64 +144,39 @@ variable "private_node_ip" {
   default     = "10.50.1.10"
 }
 
-variable "database_hostname" {
-  description = "DNS-only public hostname for the control database's PgBouncer TLS listener."
-  type        = string
-
+variable "shared_control" {
+  description = "Required non-secret dependency published by substrate-infra. Exomem never reads shared Terraform state."
+  nullable    = false
+  type = object({
+    schema_version = number
+    owner          = string
+    server_id      = string
+    public_ipv4    = string
+    hostname       = string
+    direct_port    = number
+    pooled_port    = number
+    sslmode        = string
+  })
   validation {
+    # Version, owner and TLS mode are fixed by the shared-control dependency contract.
     condition = (
-      can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.database_hostname)) &&
-      var.database_hostname != var.control_hostname &&
-      var.database_hostname != var.transfer_hostname &&
-      var.database_hostname != var.gateway_hostname
+      var.shared_control.schema_version == 2 &&
+      var.shared_control.owner == "substrate-infra" &&
+      var.shared_control.sslmode == "verify-full" &&
+      var.shared_control.direct_port > 0 && var.shared_control.direct_port < 65536 &&
+      var.shared_control.pooled_port > 0 && var.shared_control.pooled_port < 65536 &&
+      can(cidrnetmask("${var.shared_control.public_ipv4}/32")) &&
+      length(var.shared_control.hostname) > 0 &&
+      length(var.shared_control.server_id) > 0
     )
-    error_message = "database_hostname must be a distinct lowercase ASCII DNS name."
-  }
-}
-
-variable "control_db_server_name" {
-  description = "Host name for the shared Substrate control server; retained variable name preserves deployment-input compatibility."
-  type        = string
-  default     = "substrate-control-01"
-}
-
-variable "control_db_server_type" {
-  # cx23 (shared x86, 2 vCPU / 4 GiB) is the smallest x86 type Hetzner still
-  # sells in fsn1; cpx11 can no longer be ordered there (refused on
-  # 2026-09-26). The control database is metadata-sized (cell rows,
-  # capacity, rollout state), not vault data, so this is sized to the
-  # workload rather than padded for headroom that would never be used.
-  description = "Small x86 Hetzner instance type for the control database server."
-  type        = string
-  default     = "cx23"
-
-  validation {
-    condition     = contains(["cx23", "cx33"], var.control_db_server_type)
-    error_message = "The control database server must use an approved small x86 type."
-  }
-}
-
-variable "control_db_private_ip" {
-  description = "Stable private-network address for the control database server."
-  type        = string
-  default     = "10.50.1.20"
-}
-
-variable "pgbouncer_public_port" {
-  description = "Public TLS port the control database's PgBouncer listener binds."
-  type        = number
-  default     = 6432
-
-  validation {
-    condition     = var.pgbouncer_public_port > 1024 && var.pgbouncer_public_port < 65536
-    error_message = "pgbouncer_public_port must be an unprivileged TCP port."
+    error_message = "The shared-control dependency must be complete version 2 from substrate-infra with verify-full TLS."
   }
 }
 
 variable "k3s_agent_nodes" {
   # One entry is one K3s agent server (add-cloud-node-provisioning N1). Adding
   # or removing an entry is the whole Terraform change; the module validates
-  # addresses against the subnet and the two reserved node addresses. Run
+  # addresses against the subnet and the reserved fleet-server address. Run
   # infra/ansible/remove-agent.yml BEFORE removing an entry.
   description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type, optional dedicated_cell_id, optional shared_profile }."
   type = map(object({

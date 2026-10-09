@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 from exomem import commands, hosted_gateway, hosted_plugins, relation_queue, server, writer_lease
 from exomem.__main__ import main
 from exomem.governance import egress
+from exomem.governance.principal import library_scope
 
 
 def _product_command(name: str):
@@ -86,14 +87,15 @@ def test_connect_relation_resolution_has_one_invalid_argument_matrix(
 
 
 def test_relation_proposal_is_read_only_and_returns_a_complete_delta(tmp_path: Path) -> None:
-    result = commands.op_schema_memory(
-        tmp_path / "vault",
-        subject="relations",
-        operation="propose-relation",
-        proposal=_complete_relation_proposal(),
-        continuation=None,
-        limit=4,
-    )
+    with library_scope():
+        result = commands.op_schema_memory(
+            tmp_path / "vault",
+            subject="relations",
+            operation="propose-relation",
+            proposal=_complete_relation_proposal(),
+            continuation=None,
+            limit=4,
+        )
 
     assert result["valid"] is True
     assert result["delta"] == {
@@ -333,7 +335,7 @@ def test_relation_schema_selectors_reject_cross_mode_arguments(
     kwargs: dict[str, object],
     code: str,
 ) -> None:
-    with pytest.raises(ValueError, match=code):
+    with library_scope(), pytest.raises(ValueError, match=code):
         commands.op_schema_memory(
             tmp_path / "vault", subject="relations", operation=operation, **kwargs
         )

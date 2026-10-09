@@ -11,10 +11,12 @@ MISSING = object()
 SCALAR_TYPES = frozenset({"string", "integer", "number", "boolean", "date", "datetime", "enum", "link"})
 MISSING_TAG, NULL_TAG, BOOLEAN_TAG, NUMBER_TAG = 0, 1, 2, 3
 STRING_TAG, DATE_TAG, DATETIME_TAG, LINK_TAG = 4, 5, 6, 7
+_OFFSET_GRAMMAR = r"Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]"
+_OFFSET = re.compile(_OFFSET_GRAMMAR)
 _INSTANT = re.compile(
     r"(?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[Tt ]"
     r"(?P<time>[0-9]{2}:[0-9]{2}:[0-9]{2})(?:[.,](?P<fraction>[0-9]+))?"
-    r"(?P<offset>Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+    rf"(?P<offset>{_OFFSET_GRAMMAR})"
 )
 
 
@@ -32,16 +34,38 @@ def parse_instant(value: object) -> dt.datetime:
     matched = _INSTANT.fullmatch(value) if type(value) is str else None
     if matched is None:
         raise ScalarValueError("datetime requires extended ISO seconds and a UTC/minute offset")
-    fraction = matched["fraction"] or ""
-    if any(digit != "0" for digit in fraction[6:]):
-        raise ScalarValueError("datetime precision exceeds exact microseconds")
-    text = f"{matched['date']}T{matched['time']}"
-    if fraction:
-        text += "." + fraction[:6]
+    fraction = matched["fraction"]
+    if fraction is None and value[10] == "T":
+        # Already the text rebuilt below; base scans parse one per row.
+        text = value
+    else:
+        fraction = fraction or ""
+        if any(digit != "0" for digit in fraction[6:]):
+            raise ScalarValueError("datetime precision exceeds exact microseconds")
+        text = f"{matched['date']}T{matched['time']}"
+        if fraction:
+            text += "." + fraction[:6]
+        text += matched["offset"]
     try:
-        return dt.datetime.fromisoformat(text + matched["offset"]).astimezone(dt.UTC)
+        return dt.datetime.fromisoformat(text).astimezone(dt.UTC)
     except (ValueError, OverflowError) as error:
         raise ScalarValueError("scalar instant is invalid") from error
+
+
+def offset_minutes(value: object) -> int:
+    """Minutes east of UTC for a typed-v1 offset: ``Z`` or ``±HH:MM``."""
+    if type(value) is not str or not _OFFSET.fullmatch(value):
+        raise ScalarValueError("offset requires Z or a ±HH:MM UTC offset")
+    if value == "Z":
+        return 0
+    minutes = int(value[1:3]) * 60 + int(value[4:6])
+    return -minutes if value[0] == "-" else minutes
+
+
+def instant_offset_minutes(value: object) -> int:
+    """The UTC offset, in minutes, carried by a valid typed-v1 instant string."""
+    parse_instant(value)
+    return offset_minutes(_INSTANT.fullmatch(value)["offset"])
 
 
 def _number_key(value: int | float) -> str:

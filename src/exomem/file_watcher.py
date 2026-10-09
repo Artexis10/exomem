@@ -1131,6 +1131,12 @@ class FileWatcher:
                 self._last_change = time.monotonic()
             self._wake.set()
             return
+        if rel is not None and rel.startswith(f"{kb_prefix()}_Schema/") and rel.endswith(".yaml"):
+            # A hand edit of a vocabulary overlay: drop the cached registry so
+            # the next read sees it even when its size and mtime look unchanged.
+            from .vocabulary import invalidate as invalidate_vocabulary
+
+            invalidate_vocabulary(self._vault_root, path=rel)
         if rel is not None and in_excluded_scan_dir(rel):
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds
@@ -1243,6 +1249,13 @@ class FileWatcher:
     # ---- debounce loop ----
 
     def _run_dispatch(self) -> None:
+        from .governance.principal import library_scope
+
+        # An owner-local maintenance worker: no request principal crosses into this thread.
+        with library_scope():
+            self._dispatch()
+
+    def _dispatch(self) -> None:
         if self._dispatch_waits_for_seed:
             # Observation is armed before the long seed.  Keep those events in
             # the coalescing buffer until both scope maps are published, then

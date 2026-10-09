@@ -189,6 +189,11 @@ _STRUCTURAL_FIELDS = frozenset(
     }
 )
 
+#: Structural only as a key of the result itself, never deeper: a typed query
+#: page's encrypted continuation, echoed as `page.after`. A row field with the
+#: same name is data and keeps the entropy heuristic.
+_RESULT_STRUCTURAL_FIELDS = frozenset({"next_cursor"})
+
 #: Identifier-shaped field-name suffixes. The product's capability and
 #: correlation identifiers (`transition_token`, `draft_token`, `content_hash`,
 #: `unit_ref`, `idempotency_key`, …) are high-entropy by construction AND they
@@ -662,7 +667,7 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
     """
     classify = functools.lru_cache(maxsize=256)(_scrub_string)
     try:
-        return _scrub_value(value, field_name=field_name, classify=classify)
+        return _scrub_value(value, field_name=field_name, classify=classify, result=True)
     finally:
         classify.cache_clear()
 
@@ -676,9 +681,12 @@ def _scrub_value(
     *,
     field_name: str | None,
     classify: Callable[[str, bool], tuple[str, bool]],
+    result: bool = False,
+    structural: bool = False,
 ) -> tuple[Any, bool]:
+    """``result`` marks the walk's root mapping; ``structural`` a string under one of its result fields."""
     if isinstance(value, str):
-        structural = field_name is not None and _is_structural_field(field_name)
+        structural = structural or (field_name is not None and _is_structural_field(field_name))
         # Bound per-invocation retention by both entries and text length.
         scanner = classify if type(value) is str and len(value) <= 1024 else _scrub_string
         return scanner(value, structural)
@@ -692,7 +700,8 @@ def _scrub_value(
                 scanner = classify if type(key) is str and len(key) <= 1024 else _scrub_string
                 cleaned_key, key_hit = scanner(key, False)
                 blocked = blocked or key_hit
-            cleaned, hit = _scrub_value(item, field_name=str(key), classify=classify)
+            cleaned, hit = _scrub_value(item, field_name=str(key), classify=classify,
+                                        structural=result and key in _RESULT_STRUCTURAL_FIELDS)
             entries.append((key, cleaned_key, key_hit, cleaned, hit))
             blocked = blocked or hit
         if type(value) is dict and all(

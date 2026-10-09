@@ -332,17 +332,34 @@ def test_owned_unproven_projection_is_absent_with_empty_policy(store, kind):
 
 
 def test_whole_log_path_requires_every_canonical_row(store):
-    store.create_collection(manifest_path(), _log_manifest(), why="create")
+    import yaml
+    from conftest import initialize_vault_state_offline
+    from test_collection_field_admission import GUEST, govern, release_document, tool
+
+    initialize_vault_state_offline(store.root, source="log field-release fixture")
+    text = _log_manifest().replace("details: {type: array,", "details: {type: array, classification: location,")
+    store.create_collection(manifest_path(), text, why="declare reviewed log details")
     store.append_record(CID, item={"title": "Visible"}, item_key=KEY, why="capture")
     store.append_record(CID, item={"title": "Hidden"}, item_key=OTHER, why="capture")
     path = "Knowledge Base/Records/Work/Log.md"
     write_scope(store.root, paths="Unrelated/**")
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\n")
-    write_rule(store.root, ceiling=0)
-    with preview_store(store.root, store.handle), request_scope(_external()):
+    write_rule(store.root, ceiling=0, audience=GUEST.audience_id)
+    with preview_store(store.root, store.handle), request_scope(GUEST):
+        assert egress.release_level_for_path_only(store.root, path) == 0
+        assert egress.release_level_for_path_only(store.root, f"{path}#{KEY}") == 0
+    basis = tool(store, "record_memory", action="inspect", collection=CID)["field_release_basis"]
+    document = yaml.safe_load(release_document(basis, GUEST))
+    document["field_release"]["paths"] = [{"path": "details", "subtree": True}]
+    proposal = govern(store, operation="propose", intent="Release reviewed log details",
+                      documents={"grants/log-details.yaml": yaml.safe_dump(document)},
+                      selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    govern(store, operation="commit", proposal_id=proposal["proposal_id"])
+    with preview_store(store.root, store.handle), request_scope(GUEST):
         assert egress.release_level_for_path_only(store.root, path) == 0
         assert egress.release_level_for_path_only(store.root, f"{path}#{KEY}") == 6
+        assert egress.release_level_for_path_only(store.root, f"{path}#{OTHER}") == 0
 
 
 def test_owner_walk_treats_an_unbound_projection_directory_as_absent(store):
@@ -385,3 +402,36 @@ def test_bound_collection_scalar_and_packet_reads_keep_canonical_admission(store
         page.write_text(page.read_text() + "\nUnaccepted edit.\n")
         assert egress.annotate_hits(store.root, [_hit(path), _hit(alias)], limit=2).hits == []
         assert egress.classify_units(store.root, units) == [egress.UNIT_WITHHELD_SILENTLY] * 2
+
+
+def test_owner_walk_on_an_empty_policy_decides_only_marker_owned_paths(tmp_path, monkeypatch):
+    import json
+
+    from exomem import find_corpus
+    from exomem.collection_store import authority
+
+    root = tmp_path / "vault"
+    ordinary = "Knowledge Base/Notes/plain.md"
+    owned = "Knowledge Base/Records/Work/Items/item.md"
+    for path in (ordinary, owned):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("---\ntype: insight\nstatus: active\n---\n\nBody.\n")
+    sid = "11111111-1111-4111-8111-111111111111"
+    marker = authority.marker_path(root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
+                         "authority": "store", "store_id": sid,
+                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+    # A walk over ordinary files keeps the empty-policy answer and parses nothing;
+    # parsing each page cost the owner's carry rarity seconds per activation.
+    monkeypatch.setattr(find_corpus, "parse_page", lambda *a, **kw: pytest.fail("parsed an ordinary page"))
+    with request_scope(owner_principal()):
+        keep = egress.release_walk_filter(root)
+        assert keep(ordinary)
+        # A marker-owned path still needs the store, which no service serves here.
+        assert not keep(owned)

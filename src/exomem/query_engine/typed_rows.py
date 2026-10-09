@@ -6,12 +6,10 @@ import json
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
-from .. import query_data
 from ..collection_store import index_migrations
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
-from .runtime import _MAX_DECODE_BYTES, QueryError, ReadSession
-from .selected_values import read_selected_values
+from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, ReadSession, wire_bytes
 
 _SEAL = object()
 _RESPONSE_RESERVE_BYTES = 8 * 1024
@@ -29,6 +27,7 @@ class AdmittedQuery:
     table: str
     index: str
     membership_sql: str
+    layout: object
     uniform: bool
     released_count: int | None
     estimated_visits: int
@@ -52,11 +51,21 @@ class RowPage:
     total: int | None = None
 
 
-def _validate(query, manifest, basis):
-    """Rebind raw IR to the current schema using the existing closed validator."""
-    fields = {name: {"type": spec.type, "enum": spec.enum}
+def declaration(manifest, basis, *, projected=frozenset()) -> dict:
+    """The validator's declaration of one admitted collection.
+
+    ``projected`` names fields whose values are projected per caller before a result
+    is built; the validator lets a query read them but not filter, sort or join on them.
+    """
+    fields = {name: {"type": spec.type, "enum": spec.enum, **({"projected": True} if name in projected else {})}
               for name, spec in manifest.schema.fields.items()}
     fields["item_key"] = {"type": "string"}
+    return {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id,
+            "fields": fields, "field_admission": True}
+
+
+def _validate(query, manifest, basis):
+    """Rebind raw IR to the current schema using the existing closed validator."""
     def literal(value):
         if isinstance(value, tuple):
             return [literal(item) for item in value]
@@ -85,9 +94,8 @@ def _validate(query, manifest, basis):
         request["where"] = predicate(query.where)
     if query.as_of is not None:
         request["as_of"] = query.as_of
-    declaration = {manifest.collection_id: {"domain": "collections", "type": basis.type_name,
-                                           "vault": basis.logical_vault_id, "fields": fields}}
-    result = validation.normalize_query(request, declarations=declaration, collection=manifest.collection_id)
+    result = validation.normalize_query(request, declarations={manifest.collection_id: declaration(manifest, basis)},
+                                        collection=manifest.collection_id)
     if result.findings:
         raise QueryError(result.findings[0].code)
     # Re-normalization also verifies source/type/enum bindings and tie-breakers.
@@ -96,13 +104,27 @@ def _validate(query, manifest, basis):
     return tuple(manifest.schema.fields), tuple((name, spec.type, tuple(spec.enum)) for name, spec in manifest.schema.fields.items())
 
 
-def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> AdmittedQuery:
-    session.check()
+def _refuse_request(query) -> None:
+    """Refusals a row query's request decides alone, before any declaration or value is read."""
     if (not isinstance(query, ir.Query) or query.source.domain != "collections"
-            or query.mode != "execute" or query.execution_profile != "interactive"
             or query.joins or query.aggregate is not None or query.having is not None
             or query.text is not None or query.graph is not None):
         raise QueryError("QUERY_UNSUPPORTED")
+    if query.execution_profile != "interactive":
+        raise QueryError("QUERY_UNSUPPORTED", "row pages run under the interactive profile")
+
+
+def check_shape(query, manifest, basis) -> None:
+    """Every refusal a row query gets from its request and declaration; compose runs it too."""
+    _refuse_request(query)
+    _validate(query, manifest, basis)
+
+
+def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> AdmittedQuery:
+    session.check()
+    if getattr(query, "mode", None) != "execute":
+        raise QueryError("QUERY_UNSUPPORTED")
+    _refuse_request(query)
     if query.page.after is not None:
         raise QueryError("QUERY_VALUE_INVALID", "an authenticated continuation is required")
     conn = session.connection
@@ -110,10 +132,15 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
         fields, schema = _validate(query, manifest, basis)
         projection = index_migrations.ready_plan(conn, manifest.collection_id)
         if projection is None:
-            raise QueryError("QUERY_UNAVAILABLE")
+            # Disclosed only after the session admitted the collection: an operator diagnostic.
+            if index_migrations.unready_state(conn, manifest.collection_id) == "failed":
+                raise QueryError("QUERY_PROJECTION_FAILED", "this collection's query projection could not be built")
+            raise QueryError("QUERY_PROJECTION_BUILDING", "this collection's query projection is still building")
         for scalar in projection.scalars:
             spec = manifest.schema.fields.get(scalar.field)
-            if spec is None or spec.type != scalar.kind or scalar.path != (scalar.field,):
+            if spec is None:
+                continue
+            if spec.type != scalar.kind or scalar.path != (scalar.field,):
                 raise QueryError("QUERY_UNAVAILABLE")
         compiled = typed_sql.compile_rows(query, projection, as_of=as_of)
         ordinal = len(session._queries) + 1
@@ -166,14 +193,21 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             else:
                 source = f"temp.{ids} a CROSS JOIN main.{projection.table_name} p NOT INDEXED"
                 where, params = "p.row_id=a.row_id", ()
+            # Projection ordinals are fixed by the validated internal layout; withheld keys never enter TEMP.
+            keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
+                            else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
             conn.execute(f"INSERT INTO {table}(row_id,item_key,row_version,keys_json) "
-                         f"SELECT p.row_id,p.item_key,p.row_version,p.keys_json FROM {source} WHERE {where}", params)
+                         f"SELECT p.row_id,p.item_key,p.row_version,json_array({keys}) FROM {source} WHERE {where}", params)
         session.check_temp()
+        selected = tuple(f.path for f in query.select.fields) or fields
+        dependencies = set(compiled.dependency_paths) | set(selected)
+        schema = tuple(entry for entry in schema if entry[0] in dependencies)
         result = AdmittedQuery(session, query, projection, compiled,
                                (basis.manifest_hash, basis.type_name, basis.type_version, basis.declaration_hash, schema),
                                manifest.schema.version,
-                               tuple(f.path for f in query.select.fields) or fields,
-                               table, index, membership, uniform, count, cost, ordinal, _SEAL)
+                               selected,
+                               table, index, membership, session.typed_layout(manifest.collection_id),
+                               uniform, count, cost, ordinal, _SEAL)
         session._queries[ordinal] = result
         return result
 
@@ -183,7 +217,7 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
     if not isinstance(admitted, AdmittedQuery):
         raise QueryError("QUERY_UNSUPPORTED")
     admitted.check()
-    budget = query_data.MAX_RESPONSE_BYTES - _RESPONSE_RESERVE_BYTES
+    budget = MAX_RESULT_BYTES - _RESPONSE_RESERVE_BYTES
     if max_response_bytes is not None:
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
             raise QueryError("QUERY_VALUE_INVALID")
@@ -201,9 +235,9 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
         try:
             admitted.check()
             maximum = min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes)
-            with conn.blobopen("items", "values_json", row_id, readonly=True) as blob:
-                selected = read_selected_values(blob, (name for name in admitted.fields if name != "item_key"),
-                                                max_bytes=maximum, check=admitted.check)
+            selected = session.selected_values(row_id, admitted.layout,
+                                               (name for name in admitted.fields if name != "item_key"),
+                                               max_bytes=maximum, check=admitted.check)
             if "item_key" in admitted.fields:
                 selected["item_key"] = item_key
             if session._project_values is not None:
@@ -239,13 +273,14 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
                     if error.code == "QUERY_RESULT_TOO_LARGE" and rows:
                         return RowPage(rows, True, last)
                     raise
-                row_size = len(raw.encode())
-                if size + row_size + bool(rows) > budget:
+                row = json.loads(raw)
+                row_size = wire_bytes(row) + 2 * bool(rows)
+                if size + row_size > budget:
                     if not rows:
                         raise QueryError("QUERY_RESULT_TOO_LARGE")
                     return RowPage(rows, True, last)
-                size += row_size + bool(rows)
-                rows.append(json.loads(raw))
+                size += row_size
+                rows.append(row)
                 last = tuple(order)
     admitted.check()
     return RowPage(rows, False, last)

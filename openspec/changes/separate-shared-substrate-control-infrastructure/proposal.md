@@ -16,14 +16,17 @@ The production PostgreSQL host serves Substrate authentication, billing and mult
 
 ## Capabilities
 
-### New Capabilities
+### Shared Capabilities
 
-- `shared-control-infrastructure-ownership`: Single-owner management and reversible state handover for shared control infrastructure, with preserved consumers and secret custody.
-- `tailnet-server-administration`: One shared enrollment and access policy, preserving managed SSH identities and preventing firewall lockout during adoption.
+The shared owner now holds `shared-control-infrastructure-ownership` and
+`tailnet-server-administration` in [Substrate infrastructure OpenSpec](https://github.com/substrate-systems/substrate-infra/tree/main/openspec/specs).
+The requirements moved intact. This change retains the coordinated migration
+plan and Exomem’s product deltas until the remaining work closes.
 
 ### Modified Capabilities
 
 - `cloud-node-pool`: an agent node's firewall admits SSH only during a declared break-glass window; routine administration uses the company NetBird.
+- `cloud-cell`: the gateway and cellctl roles reach the control database on 5432 only from the K3s server node's public /32 (decision 10). The requirement is not canonical yet, so the amendment is made in place in the active change `adopt-exomem-cloud-plain-cells`; this change carries no `cloud-cell` delta.
 
 The existing private-alpha infrastructure change remains evidence for the deployment contracts inherited by this extraction; its unarchived requirements are not silently rewritten here.
 

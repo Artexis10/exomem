@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import call_spans, recall_space, runtime_resources
+from . import call_spans, lifecycle_statuses, recall_space, runtime_resources
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -1338,6 +1338,7 @@ def detect_contradictions(
     from . import access, recall_policy
     from . import find as find_module
 
+    status_basis = lifecycle_statuses.Basis(vault_root)
     self_canon = _canon(self_path) if self_path else None
     declared = _declared_pair_filter(vault_root, self_path)
     out: list[DupCandidate] = []
@@ -1357,7 +1358,7 @@ def detect_contradictions(
         # candidates a contradiction can actually be reconciled against.
         if page.page_type not in find_module._COMPILED_TYPES:
             continue
-        if page.status in ("superseded", "archived"):
+        if status_basis.classify(page.frontmatter.get("status")).historical:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue

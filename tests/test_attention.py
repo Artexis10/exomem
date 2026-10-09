@@ -17,6 +17,7 @@ import pytest
 from exomem import attention as attention_module
 from exomem import commands
 from exomem.audit import AuditFinding, AuditReport
+from exomem.governance.principal import library_scope
 
 C = "corpus_contradictions"
 S = "stale_review"
@@ -299,13 +300,14 @@ def test_registering_the_type_lets_the_stored_dismiss_take_effect(
     entity_reason = next(
         reason for reason in surviving[0].reasons if reason["category"] == E
     )
-    saved = commands.op_schema_memory(
-        tmp_path,
-        operation="save-entity-types",
-        proposal=entity_reason["meta"]["proposal"],
-        why="Register the synthetic place type.",
-        expected_hash=None,
-    )
+    with library_scope():
+        saved = commands.op_schema_memory(
+            tmp_path,
+            operation="save-entity-types",
+            proposal=entity_reason["meta"]["proposal"],
+            why="Register the synthetic place type.",
+            expected_hash=None,
+        )
     assert saved["valid"] is True
 
     assert attention_module.attention(

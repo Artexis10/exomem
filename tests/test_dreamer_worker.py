@@ -425,3 +425,47 @@ def test_an_interrupted_tick_keeps_the_held_reason(tmp_path: Path, monkeypatch) 
     status = dreamer.status()
     assert status["waiting_reason"] == "identity_cache_cold", status
     assert status["state"] == "waiting", status
+
+
+def test_the_worker_thread_serves_an_overlay_label_on_a_governed_vault(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The worker thread is an owner-local caller: no request principal crosses
+    into it. Unbound, it admits as the floor, cannot read a governed status
+    overlay, and defers for good every page whose label only the overlay defines."""
+    import dreamer_fixture as fx
+    from test_governance_egress import _reset_caches
+    from test_upkeep_vocabulary_egress_twin import _govern
+
+    from exomem import lifecycle_statuses
+
+    vault = fx.build(tmp_path, with_graph=False)
+    fx.write(vault, fx.ENTITY, fx.entity(status="verified"))
+    overlay = lifecycle_statuses.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nentries:\n  verified:\n    attributes: {class: live}\n",
+        encoding="utf-8",
+    )
+    _govern(vault, ["Notes/A-Restricted/**"])
+    _reset_caches()
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    monkeypatch.setattr(dreamer_policy, "IDLE_SECONDS", 0.2)
+    monkeypatch.setattr(dreamer_policy, "SETTLE_FLOOR_SECONDS", 0.2)
+    monkeypatch.setattr(dreamer_policy, "settle_seconds", lambda _last: 0.2)
+
+    def produced() -> set[str]:
+        dreamer_store.clear_reader_memo()
+        view = dreamer_store.read_view(vault)
+        return {row["family"] for row in (view.candidates if view else ())}
+
+    assert dreamer.start(vault) is not None
+    try:
+        assert _wait_for(
+            lambda: dreamer_families.HYDRATION_FAMILY in produced(), timeout=30.0
+        ), (produced(), dreamer.status(vault).get("waiting_reason"))
+    finally:
+        dreamer.stop(timeout=5.0)

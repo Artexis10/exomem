@@ -367,8 +367,10 @@ def test_race_loser_returns_winner_installed_between_scan_and_lock(
     winner = activation_manifest.ActivationManifest(1, 1, ())
     original_snapshot = activation_manifest._snapshot
 
-    def snapshot_then_install(root: Path) -> activation_manifest.ActivationManifest:
-        contender = original_snapshot(root)
+    def snapshot_then_install(
+        root: Path, *, census: activation_manifest.ActivationCensus | None = None
+    ) -> activation_manifest.ActivationManifest:
+        contender = original_snapshot(root, census=census)
         path = activation_manifest.manifest_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
         vault.batch_atomic_write(

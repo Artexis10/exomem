@@ -3719,7 +3719,7 @@ def test_historical_capture_contract_refuses_then_recovers_with_existing_kind_ar
     )
     assert bootstrap.status_code == 200, bootstrap.text
     operating = bootstrap.json()["data"]
-    assert operating["contract_version"] == "2026-10-07.1"
+    assert operating["contract_version"] == "2026-10-08.1"
     assert operating["source_taxonomy"]["migration"] == source_taxonomy.CAPTURE_KIND_MIGRATION
     body = {"title": "Migration capture", "content": "Observed three nests."}
     if old_kind is not None:

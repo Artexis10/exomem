@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: the P3 rehearsal. local-storage-drill: the node-loss drill of move-cloud-cells-to-local-storage on a three-node K3s with TopoLVM."
+        description: "full: P3. full-coexistence: P3 with TopoLVM installed and the Hetzner domain selected. local-storage-drill: node-loss recovery on TopoLVM."
         type: choice
-        options: [full, local-storage-drill]
+        options: [full, full-coexistence, local-storage-drill]
         default: full
 
 permissions:
@@ -52,7 +52,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
-    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'local-storage-drill'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -88,8 +88,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
           REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/rehearsal-diagnostics
           HARNESS_CHECK: ${{ github.event_name == 'pull_request' && '--harness-check' || '' }}
+          COEXISTENCE: ${{ inputs.mode == 'full-coexistence' && '--local-storage-coexistence' || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
       - name: Summarize the report
         if: always()
         run: |

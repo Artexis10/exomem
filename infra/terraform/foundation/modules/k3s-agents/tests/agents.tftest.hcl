@@ -10,7 +10,7 @@ variables {
   image                = "ubuntu-24.04"
   ssh_key_ids          = ["4242"]
   admin_ssh_cidrs      = ["192.0.2.10/32"]
-  reserved_private_ips = ["10.50.1.10", "10.50.1.20"]
+  reserved_private_ips = ["10.50.1.10"]
   labels = {
     application = "exomem-hosted"
     environment = "private-alpha"
@@ -265,18 +265,6 @@ run "rejects_the_fleet_server_address" {
   variables {
     nodes = {
       "01" = { private_ip = "10.50.1.10", server_type = "cpx42" }
-    }
-  }
-
-  expect_failures = [var.nodes]
-}
-
-run "rejects_the_control_database_address" {
-  command = plan
-
-  variables {
-    nodes = {
-      "01" = { private_ip = "10.50.1.20", server_type = "cpx42" }
     }
   }
 

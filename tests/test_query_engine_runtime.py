@@ -102,7 +102,8 @@ def test_withheld_row_is_absent_before_decode_and_projection(store):
     # Invalid JSON is an actual decode trap, not a mock of authorization.
     store.connection.execute("UPDATE items SET values_json='not json' WHERE item_key=?", (OTHER,))
     with request_scope(_external()):
-        with runtime.read_session(store.root, store.handle.path, project_values=project) as session:
+        with runtime.read_session(store.root, store.handle.path) as session:
+            session.project_with(project, fields={"title", "count"})
             admitted = session.admit(CID)
             assert admitted.visible_count == absent_count == 1
             assert values(admitted) == absent_values == [{"title": "Visible", "count": 2}]
@@ -196,7 +197,8 @@ def test_cost_rejection_precedes_value_evaluation(store):
 
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         with runtime.read_session(store.root, store.handle.path,
-                                  limits=runtime.QueryLimits(max_row_visits=1), project_values=trap) as session:
+                                  limits=runtime.QueryLimits(max_row_visits=1)) as session:
+            session.project_with(trap, fields={"title", "count"})
             session.admit(CID)
 
 
@@ -254,8 +256,8 @@ def test_cancel_during_projection_does_not_return_a_partial_row(store):
         return value
 
     with pytest.raises(runtime.QueryError, match="QUERY_CANCELLED"):
-        with runtime.read_session(store.root, store.handle.path,
-                                  cancelled=lambda: cancelled[0], project_values=project) as session:
+        with runtime.read_session(store.root, store.handle.path, cancelled=lambda: cancelled[0]) as session:
+            session.project_with(project, fields={"title", "count"})
             values(session.admit(CID))
 
 

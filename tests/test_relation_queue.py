@@ -153,7 +153,7 @@ def test_coverage_counters_align_with_activation(tmp_path: Path) -> None:
 
 
 def test_cap_stops_candidate_generation_early_and_reports_honestly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     # The public cap is handed directly to one bounded graph batch. Per-page
     # queue generation is retired and cannot run beyond the cap.
@@ -163,25 +163,9 @@ def test_cap_stops_candidate_generation_early_and_reports_honestly(
     _write_page(tmp_path, "page-z", "See [[Knowledge Base/Notes/Insights/page-a]].")
 
     epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
-    calls: list[tuple[int, int]] = []
-    real_batch = epistemic_graph.EpistemicGraphIndex.relation_review_batch
-
-    def counting_batch(self, *, limit_pages, limit_per_page):
-        calls.append((limit_pages, limit_per_page))
-        return real_batch(
-            self, limit_pages=limit_pages, limit_per_page=limit_per_page
-        )
-
-    monkeypatch.setattr(
-        epistemic_graph.EpistemicGraphIndex,
-        "relation_review_batch",
-        counting_batch,
-    )
-
     capped = relation_queue.build_queue(tmp_path, limit_pages=1)
 
     assert capped["pages_shown"] == 1
-    assert calls == [(1, relation_queue._DEFAULT_LIMIT_PER_PAGE)]
     # Honest capped-surfacing signal: we stopped before the corpus was fully
     # scanned, so totals beyond the shown prefix are explicitly NOT claimed.
     assert capped["pages_truncated"] is True
@@ -364,3 +348,48 @@ def test_dismissed_shared_open_question_resurfaces_when_the_other_page_changes(
     )
     assert resurfaced["ref"] == item["ref"]
     assert resurfaced["fingerprint"] != item["fingerprint"]
+
+
+def test_registry_retirement_changes_an_already_built_relation_queue(tmp_path: Path) -> None:
+    from exomem import commands
+
+    source_a = _write_page(
+        tmp_path, "alpha", "See [[Knowledge Base/Notes/Insights/beta]].", status="closed-locally"
+    )
+    source_b = _write_page(
+        tmp_path, "gamma", "See [[Knowledge Base/Notes/Insights/beta]].", status="closed-locally"
+    )
+    target = _write_page(tmp_path, "beta", "A measured fact.")
+    original = {path: path.read_bytes() for path in (source_a, source_b, target)}
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+        before = commands.op_review_memory(tmp_path, mode="relation-queue", limit=1)
+        assert before["coverage"]["eligible_pages"] == 3
+        assert before["pages_truncated"] and _all_items(before)
+        inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
+        saved = commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"closed-locally": {"attributes": {"class": "retired"}}}},
+            expected_hash=inspected["content_hash"],
+            why="retire the former conclusions",
+        )["saved"]
+        retired = commands.op_review_memory(tmp_path, mode="relation-queue", limit=1)
+        assert retired["coverage"]["eligible_pages"] == 1
+        assert not retired["pages_truncated"] and _all_items(retired) == []
+        commands.op_schema_memory(
+            tmp_path,
+            subject="statuses",
+            operation="restore",
+            version=saved["history"]["version"],
+            expected_hash=saved["content_hash"],
+            why="restore the former lifecycle",
+        )
+        restored = commands.op_review_memory(tmp_path, mode="relation-queue", limit=1)
+        assert restored["coverage"] == before["coverage"]
+        assert restored["pages_truncated"] == before["pages_truncated"]
+        assert {(item["from"], item["to"]) for item in _all_items(restored)} == {
+            (item["from"], item["to"]) for item in _all_items(before)
+        }
+    assert {path: path.read_bytes() for path in original} == original

@@ -33,7 +33,7 @@ Product-contract notes encoded in the journey bodies:
 - The FIRST compiled note in a fresh vault commits under the automatic
   bootstrap relation disposition (src/exomem/semantic_contract.py lines
   2618-2633); replacements qualify via the auto-written ``supersedes``
-  frontmatter relation (core-relations.yaml: supersedes origins include
+  frontmatter relation (vocabulary/packs/core/relations.yaml: supersedes origins include
   frontmatter), so J1/J2 never need the validate-then-commit dance.
 - Bodies include one compact semantic unit under ``## Observations``
   (semantic authoring contract surfaced in the ``remember --help`` text) so

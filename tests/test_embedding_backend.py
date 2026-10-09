@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -333,13 +335,16 @@ def test_cloud_weight_sharing_is_not_applied_to_a_hub_onnx_path(
 
 
 @pytest.mark.skipif(not RUN_EQUIVALENCE, reason="set RUN_EMBED_EQUIVALENCE_TEST=1")
+@pytest.mark.embeddings
 @pytest.mark.parametrize(
     "model_name",
     # Recall's CLS-pooled model, and the mean-pooled XLM-R activation encoder
     # whose padding token is `<pad>` (id 1), not BERT's `[PAD]` (id 0).
     ["BAAI/bge-base-en-v1.5", "intfloat/multilingual-e5-small"],
 )
-def test_onnx_and_torch_produce_interchangeable_vectors(model_name: str) -> None:
+def test_onnx_and_torch_produce_interchangeable_vectors(
+    model_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Same model, two runtimes: vectors must be substitutable without re-indexing.
 
     Asserts the property that actually matters — that an existing vault's vectors
@@ -370,3 +375,68 @@ def test_onnx_and_torch_produce_interchangeable_vectors(model_name: str) -> None
     left_rank = np.argsort(-(left @ left.T), axis=1)[:, 0]
     right_rank = np.argsort(-(right @ right.T), axis=1)[:, 0]
     assert (left_rank == right_rank).all()
+
+    from exomem import embeddings, readiness, recall_migration
+    from exomem import find as find_module
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    page = vault / kb_dirname() / "Notes" / "retry.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ntype: note\ntitle: Retry with backoff\n---\n\n"
+        + "Retries wait a growing delay so clients do not hammer a recovering service. " * 24,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv(embedding_backend.BACKEND_ENV, embedding_backend.TORCH)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv(recall_migration.REEMBED_ENV, raising=False)
+    monkeypatch.setattr(embeddings, "MODEL_NAME", model_name)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embeddings, "_MODEL", torch_encoder)
+    embeddings.clear_embedding_indexes()
+    find_module.clear_cache()
+    readiness.reset()
+    recall_migration.reset_for_tests()
+    try:
+        embeddings.index_incremental(vault, log_fn=lambda _message: None)
+        original = embeddings.get_embedding_index(vault)
+        metadata, vectors = original.all_vectors()
+        assert metadata and vectors.shape[0] == len(metadata)
+        identity, path = original.identity, original.path
+        assert identity is not None and identity.fingerprint == torch_encoder.profile.fingerprint()
+
+        # A restarted process reads the persisted Torch space with an ONNX encoder.
+        embeddings.clear_embedding_indexes()
+        find_module.clear_cache()
+        recall_migration.reset_for_tests()
+        monkeypatch.setenv(embedding_backend.BACKEND_ENV, embedding_backend.ONNX)
+        monkeypatch.setattr(embeddings, "_MODEL", onnx_encoder)
+        encoded: list[str] = []
+        encode = onnx_encoder.encode
+
+        def count_encode(texts, **kwargs):
+            encoded.extend(texts)
+            return encode(texts, **kwargs)
+
+        monkeypatch.setattr(onnx_encoder, "encode", count_encode)
+        assert recall_migration.run(vault, threading.Event()) == "current"
+        embeddings.index_incremental(vault, log_fn=lambda _message: None)
+        assert encoded == [], "a runtime-only switch re-encoded unchanged passages"
+        reopened = embeddings.get_embedding_index(vault)
+        assert (reopened.path, reopened.identity) == (path, identity)
+        kept_metadata, kept_vectors = reopened.all_vectors()
+        assert kept_metadata == metadata
+        np.testing.assert_array_equal(kept_vectors, vectors)
+        with reopened.encoding(load=True):
+            query = embeddings.embed_texts(["Clients retry with backoff"], is_query=True)[0]
+        assert encoded
+        assert reopened.search(query, k=1)[0][0] == page.relative_to(vault).as_posix()
+    finally:
+        torch_encoder.release()
+        embeddings.unload_model()
+        embeddings.clear_embedding_indexes()
+        recall_migration.reset_for_tests()
+        find_module.clear_cache()
+        readiness.reset()

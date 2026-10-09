@@ -94,7 +94,7 @@ def test_warm_all_finishes_the_required_warm_before_any_model_preload(
     monkeypatch.delenv("EXOMEM_DISABLE_RANKING", raising=False)
     from exomem import embeddings, semantic_contract
 
-    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", lambda _root: None)
     monkeypatch.setattr(embeddings, "get_model", lambda *_a, **_k: seen.append(
         readiness.required_warm_finished()
     ) or (_ for _ in ()).throw(RuntimeError("no model")))
@@ -119,7 +119,7 @@ def test_cloud_service_warms_core_independent_of_stored_quiet(
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
     monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
-    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", lambda _root: None)
     monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
     monkeypatch.setattr(embedding_backend, "served_artifact", lambda _model: None)
     monkeypatch.setattr(recall_migration, "preload_serving_encoder", lambda _root: False)
@@ -148,7 +148,7 @@ def test_service_profile_respects_explicitly_disabled_embeddings(tmp_path, monke
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
     monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
-    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", lambda _root: None)
     monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
     monkeypatch.setattr(embeddings, "get_model", lambda: pytest.fail("disabled encoder loaded"))
     readiness.begin_warm()
@@ -166,7 +166,7 @@ def test_service_core_is_unready_when_its_serving_space_cannot_preload(tmp_path,
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
     monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
-    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", lambda _root: None)
     monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
     configured = SimpleNamespace(encode=lambda *_a, **_k: None)
     monkeypatch.setattr(embeddings, "_MODEL", configured)

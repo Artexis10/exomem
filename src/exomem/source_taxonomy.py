@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 import yaml
 from slugify import slugify as _slugify
@@ -42,6 +43,7 @@ from .vault import (
     kb_root,
     read_guarded_text,
 )
+from .vocabulary import registry as vocabulary_registry
 
 log = logging.getLogger(__name__)
 
@@ -244,172 +246,34 @@ class Resolution:
 # --------------------------------------------------------------------------
 # Built-in vocabulary
 #
-# Deliberately generic and public-safe: no user, product, client, or vault
-# identifier appears here, mirroring `semantic_language_registry`'s core
-# category table and `project_keys._FALLBACK_PROJECTS`. The set is a useful
-# default, never the permitted set.
-#
-# The six kinds Exomem shipped before this module keep their original
-# `path_label`, so every existing capture routes byte-identically.
+# The built-in kinds and domains ship as packs (`vocabulary/packs/core/
+# source-kinds.yaml` and `domains.yaml`). They are a useful default, never the
+# permitted set.
 # --------------------------------------------------------------------------
-_BUILTIN_KINDS: tuple[Definition, ...] = (
-    Definition(
-        key="article",
-        label="Article",
-        path_label="Articles",
-        description="captured web or PDF content",
-        aliases=("articles",),
-        builtin=True,
-        requires_url=True,
-    ),
-    Definition(
-        key="session",
-        label="Session",
-        path_label="Sessions",
-        description="pasted conversation transcripts",
-        aliases=("sessions", "transcript", "transcripts"),
-        builtin=True,
-    ),
-    Definition(
-        key="book",
-        label="Book",
-        path_label="Books",
-        description="book notes or excerpts",
-        aliases=("books",),
-        builtin=True,
-    ),
-    Definition(
-        key="paper",
-        label="Paper",
-        path_label="Papers",
-        description="academic papers",
-        aliases=("papers",),
-        builtin=True,
-        requires_url=True,
-    ),
-    Definition(
-        key="video",
-        label="Video",
-        path_label="Videos",
-        description="captured video transcripts or notes",
-        aliases=("videos",),
-        builtin=True,
-        requires_url=True,
-    ),
-    Definition(
-        key="research-report",
-        label="Research report",
-        path_label="Reports",
-        description="a compiled investigation or research report",
-        aliases=("research-reports", "deep-research"),
-        builtin=True,
-    ),
-    Definition(
-        key="official-guidance",
-        label="Official guidance",
-        path_label="Official Guidance",
-        description="guidance published by an authority",
-        aliases=("guidance",),
-        builtin=True,
-    ),
-    Definition(
-        key="correspondence",
-        label="Correspondence",
-        path_label="Correspondence",
-        description="letters, email, or message threads",
-        aliases=("letter", "letters", "email", "emails"),
-        builtin=True,
-    ),
-    Definition(
-        key="invoice-receipt",
-        label="Invoice or receipt",
-        path_label="Invoices",
-        description="invoices, receipts, and order confirmations",
-        aliases=("invoice", "invoices", "receipt", "receipts"),
-        builtin=True,
-    ),
-    Definition(
-        key="contract-legal-document",
-        label="Contract or legal document",
-        path_label="Contracts",
-        description="contracts and other legal instruments",
-        aliases=("contract", "contracts", "legal-document", "legal-documents"),
-        builtin=True,
-    ),
-    Definition(
-        key="dataset-export",
-        label="Dataset export",
-        path_label="Datasets",
-        description="structured data exports",
-        aliases=("dataset", "datasets", "export", "exports"),
-        builtin=True,
-    ),
-    Definition(
-        key="manual-documentation",
-        label="Manual or documentation",
-        path_label="Manuals",
-        description="product manuals and reference documentation",
-        aliases=("manual", "manuals", "documentation"),
-        builtin=True,
-    ),
-    Definition(
-        key=EPISODE_KIND,
-        label="Episode",
-        path_label=EPISODE_PATH_LABEL,
-        description="agent-authored conversation recaps with bounded verbatim excerpts",
-        aliases=("episodes",),
-        builtin=True,
-    ),
-    Definition(
-        key="webpage-snapshot",
-        label="Webpage snapshot",
-        path_label="Snapshots",
-        description="point-in-time captures of a web page",
-        aliases=("snapshot", "snapshots", "webpage"),
-        builtin=True,
-    ),
-    Definition(
-        key=UNCLASSIFIED_KIND,
-        label="Unclassified",
-        path_label="Unclassified",
-        description="captured with no agent to classify it; needs a kind",
-        builtin=True,
-    ),
-    Definition(
-        key=LEGACY_OTHER_KIND,
-        label="Other",
-        path_label="Other",
-        description="the retired catch-all; needs a kind",
-        status="deprecated",
-        builtin=True,
-    ),
-)
-
-_BUILTIN_DOMAINS: tuple[Definition, ...] = (
-    Definition(key="travel", label="Travel", path_label="Travel", builtin=True),
-    Definition(key="health", label="Health", path_label="Health", builtin=True),
-    Definition(key="finance", label="Finance", path_label="Finance", builtin=True),
-    Definition(key="legal", label="Legal", path_label="Legal", builtin=True),
-    Definition(key="equipment", label="Equipment", path_label="Equipment", builtin=True),
-    Definition(key="software", label="Software", path_label="Software", builtin=True),
-    Definition(
-        key="photography", label="Photography", path_label="Photography", builtin=True
-    ),
-    Definition(key="media", label="Media", path_label="Media", builtin=True),
-    Definition(key="food", label="Food", path_label="Food", builtin=True),
-    Definition(key="research", label="Research", path_label="Research", builtin=True),
-    Definition(key="business", label="Business", path_label="Business", builtin=True),
-)
+def _pack_definitions(name: str) -> tuple[Definition, ...]:
+    return tuple(
+        Definition(
+            key=entry.key,
+            label=entry.label,
+            path_label=str(entry.attributes["path_label"]),
+            description=entry.description,
+            aliases=entry.aliases,
+            status=entry.status,
+            builtin=True,
+            requires_url=bool(entry.attributes.get("requires_url", False)),
+        )
+        for entry in vocabulary_registry.pack_entries(name)
+    )
 
 
 @lru_cache(maxsize=1)
 def builtin_kinds() -> Mapping[str, Definition]:
-    return MappingProxyType({item.key: item for item in _BUILTIN_KINDS})
+    return MappingProxyType({item.key: item for item in _pack_definitions("source-kinds.yaml")})
 
 
 @lru_cache(maxsize=1)
 def builtin_domains() -> Mapping[str, Definition]:
-    return MappingProxyType({item.key: item for item in _BUILTIN_DOMAINS})
+    return MappingProxyType({item.key: item for item in _pack_definitions("domains.yaml")})
 
 
 def _alias_table(definitions: Iterable[Definition]) -> dict[str, str]:
@@ -422,12 +286,12 @@ def _alias_table(definitions: Iterable[Definition]) -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def _builtin_kind_aliases() -> Mapping[str, str]:
-    return MappingProxyType(_alias_table(_BUILTIN_KINDS))
+    return MappingProxyType(_alias_table(builtin_kinds().values()))
 
 
 @lru_cache(maxsize=1)
 def _builtin_domain_aliases() -> Mapping[str, str]:
-    return MappingProxyType(_alias_table(_BUILTIN_DOMAINS))
+    return MappingProxyType(_alias_table(builtin_domains().values()))
 
 
 # --------------------------------------------------------------------------
@@ -651,26 +515,44 @@ def load_taxonomy(vault_root: Path) -> SourceTaxonomy:
 
     Never raises on a malformed file: the built-ins alone are a working
     vocabulary, so a broken registry degrades to defaults with a finding rather
-    than refusing every capture.
+    than refusing every capture. Read and cached through the vocabulary loader.
     """
-    path = registry_path(vault_root)
-    if not path.exists():
+    try:
+        return vocabulary_registry.load(KIND_SPEC, Path(vault_root)).typed
+    except OSError as exc:
+        path = registry_path(vault_root)
+        log.warning("%s unreadable (%s); using built-in source taxonomy", path, exc)
+        return _unreadable(exc)
+
+
+def _unreadable(exc: Exception) -> SourceTaxonomy:
+    return SourceTaxonomy(
+        kinds=dict(builtin_kinds()),
+        domains=dict(builtin_domains()),
+        kind_aliases=dict(_builtin_kind_aliases()),
+        domain_aliases=dict(_builtin_domain_aliases()),
+        findings=(f"{_REGISTRY_FILENAME} is unreadable: {exc}",),
+    )
+
+
+def clear_cache() -> None:
+    """Drop every vault's cached source-taxonomy snapshot."""
+    vocabulary_registry.invalidate_registry(KIND_SPEC.name)
+    vocabulary_registry.invalidate_registry(DOMAIN_SPEC.name)
+
+
+def _parse_overlay_text(text: str | None) -> SourceTaxonomy:
+    if text is None:
         return core_taxonomy()
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("%s unreadable (%s); using built-in source taxonomy", path, exc)
-        return SourceTaxonomy(
-            kinds=dict(builtin_kinds()),
-            domains=dict(builtin_domains()),
-            kind_aliases=dict(_builtin_kind_aliases()),
-            domain_aliases=dict(_builtin_domain_aliases()),
-            findings=(f"{_REGISTRY_FILENAME} is unreadable: {exc}",),
-        )
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        log.warning("%s unreadable (%s); using built-in source taxonomy", _REGISTRY_FILENAME, exc)
+        return _unreadable(exc)
     return taxonomy_from_data(data)
 
 
-def taxonomy_from_data(data: object) -> SourceTaxonomy:
+def taxonomy_from_data(data: object, *, governed: bool = False) -> SourceTaxonomy:
     findings: list[str] = []
     if not isinstance(data, dict):
         return SourceTaxonomy(
@@ -688,6 +570,16 @@ def taxonomy_from_data(data: object) -> SourceTaxonomy:
     )
     _report_segment_collisions("source_kind", kinds, findings)
     _report_segment_collisions("domain", domains, findings)
+    if governed:
+        for axis, definitions in (("source_kind", kinds), ("domain", domains)):
+            tokens = {key: key for key in definitions}
+            for definition in definitions.values():
+                for alias in definition.aliases:
+                    owner = tokens.setdefault(alias, definition.key)
+                    if owner != definition.key:
+                        findings.append(
+                            f"{axis} alias {alias!r} names both {owner!r} and {definition.key!r}"
+                        )
     return SourceTaxonomy(
         kinds=kinds,
         domains=domains,
@@ -859,10 +751,27 @@ class TaxonomyPlan:
     #: The registry text the writes were planned against; None when the
     #: registry did not exist. Meaningful only when there are writes.
     source_text: str | None = None
+    #: The kept version of the replaced registry, when there are writes.
+    version: str | None = None
 
     @property
     def introduced_keys(self) -> tuple[str, ...]:
         return tuple(item.key for item in self.introductions)
+
+    def added(self) -> dict[str, list[str]]:
+        """Introduced keys per registry name (`source-kinds`, `domains`)."""
+        out: dict[str, list[str]] = {}
+        for item in self.introductions:
+            out.setdefault(_spec_for_axis(item.axis).name, []).append(item.key)
+        return out
+
+    def receipt(self) -> list[str]:
+        """One `vocabulary_receipt` line per key this write registered."""
+        if self.version is None:
+            return []
+        from .vocabulary import contract as vocabulary_contract
+
+        return vocabulary_contract.first_use_lines(self.added(), self.version)
 
 
 _BOOTSTRAP_HEADER = f"""\
@@ -948,6 +857,25 @@ def plan_registrations(
         create_only=not path_exists,
         guard=guard,
     )
+    # The capture's batch also keeps the replaced registry, so bootstrap can
+    # mark the keys new and the owner can restore the version before them.
+    from . import registry_history
+
+    plan = TaxonomyPlan(taxonomy, introductions=tuple(introductions))
+    version, kept = registry_history.plan_snapshot(
+        root,
+        path=path,
+        stem=KIND_SPEC.stem,
+        previous=text if path_exists else None,
+        operation="auto-register",
+        before_hash=(
+            vocabulary_registry.content_hash(text)
+            if path_exists
+            else vocabulary_registry.NO_OVERLAY_HASH
+        ),
+        after_hash=vocabulary_registry.content_hash(updated),
+        added=plan.added(),
+    )
     return TaxonomyPlan(
         taxonomy=SourceTaxonomy(
             kinds=definitions["source_kind"],
@@ -957,8 +885,9 @@ def plan_registrations(
             findings=taxonomy.findings,
         ),
         introductions=tuple(introductions),
-        writes=(write,),
+        writes=(write, kept),
         source_text=text if path_exists else None,
+        version=version,
     )
 
 
@@ -1027,3 +956,158 @@ def register(
     if plan.writes:
         batch_atomic_write(list(plan.writes), vault_root=Path(vault_root))
     return plan.introductions
+
+
+# --------------------------------------------------------------------------
+# The registry adapters (`add-vocabulary-registries`)
+#
+# Source kinds and domains are two registries over one overlay file, so they
+# share its history: restoring either restores both sections.
+# --------------------------------------------------------------------------
+class _Adapter:
+    """One axis of `_Schema/source-taxonomy.yaml` as generic entries."""
+
+    def __init__(self, axis: str, section: str) -> None:
+        self.axis = axis
+        self.section = section
+
+    def _definitions(self, typed: SourceTaxonomy) -> Mapping[str, Definition]:
+        return typed.kinds if self.axis == "source_kind" else typed.domains
+
+    def parse(self, text: str | None, digest: str) -> SourceTaxonomy:
+        return _parse_overlay_text(text)
+
+    def parse_document(self, document: Mapping[str, Any]) -> SourceTaxonomy:
+        return taxonomy_from_data(dict(document), governed=True)
+
+    def entries(self, typed: SourceTaxonomy) -> dict[str, vocabulary_registry.Entry]:
+        out: dict[str, vocabulary_registry.Entry] = {}
+        for key, definition in self._definitions(typed).items():
+            attributes: dict[str, Any] = {"path_label": definition.path_label}
+            if definition.requires_url:
+                attributes["requires_url"] = True
+            out[key] = vocabulary_registry.Entry(
+                key=key,
+                label=definition.label,
+                description=definition.description,
+                aliases=definition.aliases,
+                status=definition.status,
+                replaced_by=definition.replaced_by,
+                attributes=MappingProxyType(attributes),
+                origin="pack" if definition.builtin else "vault",
+            )
+        return out
+
+    def findings(self, typed: SourceTaxonomy) -> tuple[dict[str, str], ...]:
+        return tuple(
+            {
+                "code": "taxonomy_entry_ignored",
+                "path": _REGISTRY_FILENAME,
+                "severity": "error",
+                "detail": detail,
+            }
+            for detail in typed.findings
+        )
+
+    def document(self, text: str | None) -> dict[str, Any]:
+        source = _BOOTSTRAP_HEADER if text is None else text
+        try:
+            data = yaml.safe_load(source) or {}
+        except yaml.YAMLError as exc:
+            raise vocabulary_registry.RegistryError(
+                f"INVALID_REGISTRY_OVERLAY: {_REGISTRY_FILENAME} does not parse; fix it or "
+                f"restore a kept version ({exc})"
+            ) from exc
+        if not isinstance(data, dict):
+            raise vocabulary_registry.RegistryError(
+                f"INVALID_REGISTRY_OVERLAY: {_REGISTRY_FILENAME} is not a mapping; fix it or "
+                "restore a kept version"
+            )
+        data.setdefault("schema_version", SCHEMA_VERSION)
+        for section in (_KIND_SECTION, _DOMAIN_SECTION):
+            value = data.get(section)
+            data[section] = dict(value) if isinstance(value, dict) else {}
+        return data
+
+    def put(
+        self,
+        document: dict[str, Any],
+        key: str,
+        entry: vocabulary_registry.Entry,
+        *,
+        existing: bool,
+    ) -> None:
+        row: dict[str, Any] = {"label": entry.label or derive_label(key)}
+        path_label = entry.attributes.get("path_label")
+        if path_label:
+            row["path_label"] = path_label
+        if entry.description:
+            row["description"] = entry.description
+        if entry.aliases:
+            row["aliases"] = list(entry.aliases)
+        row["status"] = entry.status
+        if entry.replaced_by:
+            row["replaced_by"] = entry.replaced_by
+        if entry.attributes.get("requires_url"):
+            row["requires_url"] = True
+        document[self.section][key] = row
+
+    def render(self, document: Mapping[str, Any]) -> str:
+        header = "".join(
+            line + "\n" for line in _BOOTSTRAP_HEADER.splitlines() if line.startswith("#")
+        )
+        return header + yaml.safe_dump(dict(document), sort_keys=False, allow_unicode=True)
+
+    def normalize_key(self, raw: str) -> str:
+        try:
+            return normalize(raw, axis=self.axis)
+        except TaxonomyError as exc:
+            raise vocabulary_registry.RegistryError(f"INVALID_REGISTRY_KEY: {exc}") from exc
+
+
+def _kind_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.catalogue_axis(vault_root, snapshot, column="source_kind")
+
+
+def _domain_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.catalogue_axis(vault_root, snapshot, column="domain")
+
+
+_LABEL_FIELDS = frozenset(
+    {"label", "description", "aliases", "status", "replaced_by", "attributes"}
+)
+
+def _spec_for_axis(axis: str) -> vocabulary_registry.RegistrySpec:
+    return KIND_SPEC if axis == "source_kind" else DOMAIN_SPEC
+
+
+KIND_SPEC = vocabulary_registry.RegistrySpec(
+    name="source-kinds",
+    stem="source-taxonomy",
+    overlay=registry_path,
+    adapter=_Adapter("source_kind", _KIND_SECTION),
+    fields=_LABEL_FIELDS,
+    attributes=frozenset({"path_label", "requires_url"}),
+    # Captured sources keep their path; moving a kind's folder is not a relabel.
+    immutable=frozenset({"attributes.path_label", "attributes.requires_url"}),
+    promotion="auto-register",
+    cap=512,
+    usage=_kind_usage,
+)
+
+DOMAIN_SPEC = vocabulary_registry.RegistrySpec(
+    name="domains",
+    stem="source-taxonomy",
+    overlay=registry_path,
+    adapter=_Adapter("domain", _DOMAIN_SECTION),
+    fields=_LABEL_FIELDS,
+    attributes=frozenset({"path_label"}),
+    immutable=frozenset({"attributes.path_label"}),
+    promotion="auto-register",
+    cap=512,
+    usage=_domain_usage,
+)

@@ -1,12 +1,12 @@
-"""Explicit per-vault preview binding for built-in facade contract tests.
+"""Explicit per-vault store binding for the facades.
 
-The environment flag alone never changes file-mode routing. A trusted caller
-must bind the already lease-owned connection; GA mode resolution is a later slice.
+A trusted caller binds an already lease-owned connection: the service's store thread
+for a store-routed request (``runtime.StoreServer``), or a caller that owns its writer.
+Nothing else, and no environment flag, changes file-mode routing.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,7 +20,9 @@ from .connection import CollectionStoreError, WriterConnection
 if TYPE_CHECKING:
     from .writer import CollectionWriter
 
-_BOUND: ContextVar[tuple[Path, CollectionWriter] | None] = ContextVar(
+# (vault root, writer, served by a production session): only a production session's
+# routes answer to the release's capabilities.
+_BOUND: ContextVar[tuple[Path, CollectionWriter, bool] | None] = ContextVar(
     "collection_store_preview", default=None
 )
 
@@ -32,23 +34,45 @@ def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[Collec
     from .runtime import CollectionStoreRuntime, borrowed_writer
 
     root = Path(vault_root).resolve()
+    production = False
     if isinstance(handle, CollectionStoreRuntime):
         if root != handle.root:
             raise CollectionStoreError("COLLECTION_STORE_VAULT_MISMATCH", "foreign preview runtime")
+        production = handle._session is not None and handle._session.production
         checkout = handle.checkout()
     else:
         checkout = borrowed_writer(root, handle, active_manager())
     with checkout as writer:
-        token = _BOUND.set((root, writer))
+        token = _BOUND.set((root, writer, production))
         try:
             yield writer
         finally:
             _BOUND.reset(token)
 
 
+@contextmanager
+def unbound() -> Iterator[None]:
+    """Bind no writer for the rest of this call context, as after a create left the store pending.
+
+    The vault's marker does not route that collection yet, so the call's remaining reads
+    take ordinary file authority.
+    """
+    token = _BOUND.set(None)
+    try:
+        yield
+    finally:
+        _BOUND.reset(token)
+
+
 def bound_writer(vault_root: Path) -> CollectionWriter | None:
     binding = _BOUND.get()
     return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
+
+
+def production_bound(vault_root: Path) -> bool:
+    """Whether a production session serves ``vault_root`` here, so its routes answer to the release."""
+    binding = _BOUND.get()
+    return binding is not None and binding[0] == Path(vault_root).resolve() and binding[2]
 
 
 def selected_writer(vault_root, selector):
@@ -63,7 +87,7 @@ def selected_writer(vault_root, selector):
     entry = authority.selected_entry(vault_root, marker, selector)
     if entry is None:
         return None
-    authority.require_selected(writer.connection, marker, entry)
+    authority.require_selected(writer.connection, marker, entry, root=vault_root)
     return writer
 
 
@@ -77,12 +101,32 @@ def selected_projection_writer(vault_root, path):
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
-def canonical_read(function):
+def canonical_read(function=None, *, projection=False, unavailable=None):
     """Keep a structured consumer's canonical reads under one request snapshot."""
+    from ..cli_ops import OpError
+
+    if function is None:
+        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable)
+
     @wraps(function)
     def read(vault_root, *args, **kwargs):
         writer = bound_writer(vault_root)
         if writer is None:
+            if not projection:
+                return function(vault_root, *args, **kwargs)
+            from .runtime import projection_route
+
+            # These consumers take a canonical path or page as their first argument; bulk callers decide each path below.
+            value = args[0] if args else kwargs.get("rel_path", kwargs.get("page"))
+            path = value.get("path") if isinstance(value, Mapping) else value
+            try:
+                if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
+                    return server.call(lambda: read(vault_root, *args, **kwargs))
+            except (CollectionStoreError, OpError):
+                if unavailable is None:
+                    raise
+                # Discovery withholds this C candidate instead of making unrelated A/B unavailable.
+                return unavailable()
             return function(vault_root, *args, **kwargs)
         with writer.read_snapshot():
             principal = kwargs.get("principal")
@@ -115,6 +159,30 @@ def projection_decision(vault_root, path, *, policy, audience, purpose,
         )
 
 
+def released_summary(vault_root, path, principal, *, include_raw=False):
+    """Resolve a generated recipient overview from canonical admission, including held publication."""
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return False, None
+    with writer.read_snapshot():
+        operation = writer._operation
+        if operation.who != principal:
+            operation.refuse()
+        row = writer.connection.execute(
+            "SELECT collection_id FROM projection_state WHERE path=? AND kind='summary'", (path,)).fetchone()
+        if row is None:
+            return False, None
+        if selected_writer(vault_root, row[0]) is None or selected_projection_writer(vault_root, path) is None:
+            return False, None
+        manifest = operation.field_manifest(row[0])
+        plan = operation.field_plan(manifest)
+        if plan.owner:
+            return False, None
+        from .summary import released_page
+
+        return True, released_page(operation, plan.manifest, path, include_raw=include_raw)
+
+
 def _mutate(vault_root, method, *args, **kwargs):
     """Own the leaf boundary when the dispatcher holds only its writer fence."""
     from ..writer_lease import active_manager
@@ -130,10 +198,10 @@ def dispatch(
     binding = _BOUND.get()
     if binding is None or binding[0] != Path(vault_root).resolve():
         return False, None
-    if os.environ.get("EXOMEM_COLLECTION_STORE_PREVIEW") != "1":
-        raise CollectionStoreError(
-            "COLLECTION_STORE_PREVIEW_REQUIRED", "collection store writers are dark"
-        )
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, binding[1], action, values)
     writer = binding[1]
     args = {name: value for name, value in values.items() if value is not None}
     from . import authority
@@ -141,17 +209,28 @@ def dispatch(
     marker = authority.routing_marker(writer)
     if marker is not None:
         selector = args.get("collection", args.get("manifest_path"))
+        if action == "create" and binding[2]:
+            from .runtime import served_create
+
+            created = served_create(vault_root, args)
+            if created is not None:
+                return True, created
         if selector is None or selected_writer(vault_root, selector) is None:
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
+    elif action == "create" and binding[2]:
+        # Only admission writes a production store's marker; a create cannot stand in for it.
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the store's authority marker is missing")
     if action == "describe":
         if profile == "records":
-            from ..record_memory import _bulk_upsert_contract
+            from ..record_memory import parse_manifest_contract
 
             writer._require_operation_context()
-            return True, {**collections.manifest_authoring_contract(),
-                          "bulk_upsert": _bulk_upsert_contract(store_mode=True)}
+            from ..query_engine import route
+            from .importer import contract
+
+            return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
@@ -161,6 +240,10 @@ def dispatch(
         return True, writer.inspect_collection(args["collection"], facade_profile=profile)
     if action == "inspect":
         return True, writer.inspect_collection(args["collection"])
+    if action == "query" and "query" in args:
+        from ..query_engine import route
+
+        return True, route.run(writer, args["collection"], args["query"], facade_profile=profile)
     if action == "query":
         from .. import planning, record_governance
 
@@ -178,6 +261,12 @@ def dispatch(
             )
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
+    if action == "import" and profile == "records":
+        from . import importer
+
+        return True, importer.dispatch(
+            vault_root, writer, args["collection"], args["import_request"]
+        )
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
         args["item_key"] = args.pop("plan_id")
@@ -193,6 +282,15 @@ def dispatch(
         args["refresh_presentation"] = args.get("refresh_presentation") is True
         return True, _mutate(vault_root, writer.update_record, collection, **args)
     if action == "revise":
+        if binding[2] and isinstance(args.get("manifest_text"), str):
+            from .admission import require_summary_manifest
+            from .summary import SUMMARY
+
+            # Under the caller's own authority first, so a hidden collection still refuses as not found.
+            # A summary collection stays one; an items-mode store collection from before S1 revises as before.
+            with writer.read_collection(collection, facade_profile=profile) as current:
+                if current.view_mode == SUMMARY:
+                    require_summary_manifest(vault_root, current.path, args["manifest_text"])
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)

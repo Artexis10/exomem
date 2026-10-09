@@ -31,6 +31,11 @@ concurrency:
   group: cross-platform-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # The store-blind release the collection-store gate runs as an actual older
+  # interpreter (tests/test_collection_store_s1_gate.py fails without it).
+  EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
+
 jobs:
   suite:
     name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/6)
@@ -67,6 +72,15 @@ jobs:
       # that dependency is itself a finding this lane exists to surface.
       - name: Verify lockfile is current
         run: uv lock --check
+      - name: Install the pinned older reader for the collection-store gate
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
+          reader="$RUNNER_TEMP/older-reader/bin/python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then reader="$RUNNER_TEMP/older-reader/Scripts/python.exe"; fi
+          uv pip install --python "$reader" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$reader" >> "$GITHUB_ENV"
       # The latency gate is dropped here for two reasons. It asserts *scaling*,
       # which a shared runner cannot measure meaningfully, and this lane exists
       # to expose platform behaviour rather than performance -- it already has

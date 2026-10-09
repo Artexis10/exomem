@@ -988,6 +988,10 @@ def run(
 ) -> None:
     """CLI entry: configure logging, build the server, run it."""
     from . import service_standby
+    from .collection_store import connection
+
+    # Serving threads import store modules lazily; load their libraries before any thread starts.
+    connection.load_store_libraries()
     from .logging_config import configure_logging, resolve_log_dir
 
     if standby or service_standby.standby_requested():

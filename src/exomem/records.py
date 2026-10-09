@@ -1096,37 +1096,67 @@ def _bulk_sources_field(manifest: collections.CollectionManifest) -> bool:
     )
 
 
+def _bulk_row_values(
+    manifest: collections.CollectionManifest, item: Mapping[str, Any], source_rel: str
+) -> dict[str, Any]:
+    """A bulk row's validated values: its item plus, where declared, a link to its source."""
+    values = dict(item)
+    if _bulk_sources_field(manifest):
+        link = _bulk_source_link(source_rel)
+        listed = values.get("sources")
+        if listed is None:
+            values["sources"] = [link]
+        elif isinstance(listed, list) and link not in listed:
+            values["sources"] = [*listed, link]
+    return _validate_values(manifest, values)
+
+
+def resolve_preserved_source(
+    root: Path,
+    reference: object,
+    released: Callable[[str, Path], bool],
+) -> tuple[Path, str] | None:
+    """Resolve a provenance reference to a preserved Sources/Evidence file its reader may use.
+
+    The one gate shared by bulk_upsert rows and import jobs: only the canonical vault
+    path of an existing file in a preserved lane resolves, and only when
+    ``released(relative, path)`` holds. Absent, unpreserved, withheld and malformed
+    references all return None, so a refusal cannot tell them apart. A raw-release
+    fence belongs here.
+    """
+    if type(reference) is not str or not reference or len(reference.encode("utf-8")) > 1024:
+        return None
+    try:
+        path, relative = vault.resolve_under_vault(
+            root, reference, must_exist=True, must_be_file=True
+        )
+        lanes = tuple(f"{vault.kb_prefix()}{lane}/" for lane in _BULK_SOURCE_LANES)
+        if relative == reference and relative.startswith(lanes) and released(relative, path):
+            return path, relative
+    except (vault.VaultPathError, vault.PathGuardError, OSError, ValueError, UnicodeDecodeError):
+        pass
+    return None
+
+
 def _resolve_bulk_source(
     root: Path,
     reference: object,
     allowed: Callable[[str], bool],
     cache: dict[str, tuple[str, vault.PathGuard] | None],
 ) -> tuple[str, vault.PathGuard] | None:
-    """Resolve one provenance reference to a preserved, released Sources/Evidence page.
-
-    An absent page, a page outside the preserved lanes and a page the audience may
-    not read all return None, so the refusal cannot tell them apart.
-    """
-    if type(reference) is not str or not reference or len(reference.encode("utf-8")) > 1024:
+    """Resolve one provenance reference to a preserved, released Sources/Evidence page."""
+    if type(reference) is not str:
         return None
     if reference in cache:
         return cache[reference]
     resolved: tuple[str, vault.PathGuard] | None = None
-    try:
-        page_path, relative = vault.resolve_under_vault(
-            root, reference, must_exist=True, must_be_file=True
-        )
-        lanes = tuple(f"{vault.kb_prefix()}{lane}/" for lane in _BULK_SOURCE_LANES)
-        if relative == reference and relative.startswith(lanes) and allowed(relative):
-            _text, guard = vault.read_guarded_text(root, page_path)
-            resolved = (relative, guard)
-    except (
-        vault.VaultPathError,
-        vault.PathGuardError,
-        OSError,
-        UnicodeDecodeError,
-    ):
-        resolved = None
+    found = resolve_preserved_source(root, reference, lambda relative, _path: allowed(relative))
+    if found is not None:
+        try:
+            _text, guard = vault.read_guarded_text(root, found[0])
+            resolved = (found[1], guard)
+        except (vault.VaultPathError, vault.PathGuardError, OSError, UnicodeDecodeError):
+            resolved = None
     cache[reference] = resolved
     return resolved
 
@@ -1294,15 +1324,7 @@ def bulk_upsert_records(
                     )
                     continue
                 source_rel, source_guard_row = resolved
-                item = dict(raw["item"])
-                if has_sources_field:
-                    link = _bulk_source_link(source_rel)
-                    listed = item.get("sources")
-                    if listed is None:
-                        item["sources"] = [link]
-                    elif isinstance(listed, list) and link not in listed:
-                        item["sources"] = [*listed, link]
-                values = _validate_values(manifest, item)
+                values = _bulk_row_values(manifest, raw["item"], source_rel)
             except collections.CollectionError as error:
                 outcomes.append(_bulk_error_row(index, error))
                 continue
@@ -2565,6 +2587,7 @@ def _validate_revision_manifest(
     if proposed.view_diagnostics:
         diagnostic = proposed.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+    _refuse_file_view_mode(proposed)
     if proposed.semantic_profile != semantic_profile or (
         proposed.collection_id != current.collection_id
         or proposed.semantic_profile != current.semantic_profile
@@ -2887,6 +2910,7 @@ def _preflight_collection_create(
     if manifest.view_diagnostics:
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+    _refuse_file_view_mode(manifest)
     record_formats.validate_storage_contract(manifest)
     source = root / manifest.storage.source
     _assert_portable_absent(root, source)
@@ -2922,6 +2946,7 @@ def _normalized_manifest_contract(
                 **({"enum": list(spec.enum)} if spec.enum else {}),
                 **({"units": list(spec.units)} if spec.units else {}),
                 **({"link_kind": spec.link_kind} if spec.link_kind is not None else {}),
+                **({"offset": spec.offset} if spec.offset is not None else {}),
             }
             for name, spec in manifest.schema.fields.items()
         },
@@ -4078,6 +4103,18 @@ def _refuse_excluded_authored_names(names: object) -> None:
         return
     field, reason = excluded
     raise collections.CollectionError(vault.EXCLUDED_FIELD_CODE, reason, details={"field": field})
+
+
+def _refuse_file_view_mode(manifest: collections.CollectionManifest) -> None:
+    """A file collection is one view per row; summary rows live only in a NEW store collection."""
+    if manifest.view_mode == "items":
+        return
+    from .collection_store import summary
+
+    raise summary.mode_change_refused(
+        "items", manifest.view_mode,
+        reason=f"a file collection keeps one item view per row and cannot use view_mode: {manifest.view_mode}",
+    )
 
 
 def _refuse_excluded_manifest_fields(

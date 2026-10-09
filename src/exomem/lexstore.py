@@ -2201,6 +2201,29 @@ def search_bm25_result(
     )
 
 
+def carry_term_statistics(
+    vault_root: Path,
+    terms: Iterable[str],
+    *,
+    visible: Callable[[str], bool],
+    status_basis: Any,
+    path_limit: Callable[[int], int],
+    freshness: tuple | None = None,
+    recall_checkpoint: Any | None = None,
+) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
+    """Admitted carry counts and bounded discount paths from one SQL snapshot."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root).carry_term_statistics(
+        list(dict.fromkeys(terms)),
+        visible=visible,
+        status_basis=status_basis,
+        path_limit=path_limit,
+        freshness=freshness,
+        recall_checkpoint=recall_checkpoint,
+    )
+
+
 def term_document_frequencies(
     vault_root: Path,
     terms: Iterable[str],
@@ -6832,6 +6855,62 @@ class LexicalStore:
             recall_checkpoint=recall_checkpoint,
         )
 
+    def carry_term_statistics(
+        self,
+        stemmed_tokens: list[str],
+        *,
+        visible: Callable[[str], bool],
+        status_basis: Any,
+        path_limit: Callable[[int], int],
+        freshness: tuple | None,
+        recall_checkpoint: Any | None,
+    ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
+        def query(conn: sqlite3.Connection):
+            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
+            # Read paths before admission. Hidden labels never reach classification;
+            # navigation and retired pages still belong in the admitted denominator.
+            admitted = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT p.path FROM pages p WHERE p.in_kb = 1" + raw_clause, raw_params
+                )
+                if visible(str(row[0]))
+            }
+            pages = len(admitted)
+            limit = path_limit(pages)
+            paths_json = json.dumps(sorted(admitted), ensure_ascii=False)
+            excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
+            frequencies: dict[str, int] = {}
+            paths: dict[str, tuple[str, ...]] = {}
+            for token in stemmed_tokens:
+                count = 0
+                bounded: list[str] = []
+                rows = conn.execute(
+                    "SELECT p.path, p.status FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    "WHERE fts MATCH ? AND p.in_kb = 1 "
+                    "AND p.path IN (SELECT value FROM json_each(?))"
+                    + excluded
+                    + " ORDER BY p.path",
+                    (f'"{token}"', paths_json, *params),
+                )
+                for path, status in rows:
+                    if status_basis.classify(status).carryable:
+                        count += 1
+                        if len(bounded) < limit:
+                            bounded.append(str(path))
+                frequencies[token] = count
+                paths[token] = tuple(bounded)
+            return frequencies, pages, paths, admitted
+
+        return self._serve_from_ready_catalog_result(
+            "kb",
+            freshness,
+            query,
+            "lexical sidecar carry statistics failed (%s)",
+            allow_delta=False,
+            recall_checkpoint=recall_checkpoint,
+        )
+
     def term_document_frequencies(
         self,
         stemmed_tokens: list[str],
@@ -7566,6 +7645,35 @@ class LexicalStore:
             if isinstance(decoded, list):
                 out.append((str(path), [item for item in decoded if isinstance(item, str)]))
         return out
+
+    def page_axis_counts(self, column: str) -> dict[str, int] | None:
+        """Knowledge Base pages per stored value of one scalar page axis.
+
+        `column` is `source_kind` or `domain`, the canonicalized scalar columns
+        a vocabulary registry counts its keys over. None when the catalogue is
+        absent or stale, so a caller reports the counts unavailable rather than
+        reading an unbuilt sidecar as zero use.
+        """
+        if column not in {"source_kind", "domain"}:
+            raise ValueError(f"page_axis_counts: unsupported column {column!r}")
+        from . import freshness as freshness_module
+
+        checkpoint = freshness_module.live_recall_checkpoint(self.vault_root, "kb")
+        if checkpoint is None:
+            return None
+
+        def read(conn: sqlite3.Connection) -> dict[str, int]:
+            rows = conn.execute(
+                f"SELECT {column}, COUNT(*) FROM pages "  # noqa: S608 — closed column set above
+                f"WHERE in_kb = 1 AND {column} IS NOT NULL GROUP BY {column}"
+            ).fetchall()
+            return {str(value): int(count) for value, count in rows}
+
+        result = self._serve_from_ready_catalog_result(
+            "kb", checkpoint.triple, read, "lexical axis-count probe declined (%s)",
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        return result.value if result.readiness.complete else None
 
     def tag_usage_aggregate(
         self, excluded_dirs: Iterable[str], whitespace: str

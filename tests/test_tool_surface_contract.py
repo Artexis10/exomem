@@ -128,7 +128,7 @@ def test_registry_content_and_operation_guidance_covers_every_write_shape() -> N
 
     edit = _command("edit_memory")
     assert "final valid semantic unit" in edit.description
-    assert "inactive-to-active" in edit.description
+    assert "transitions to live" in edit.description
     assert "Semantic authoring" not in _param(edit, "operation").help
 
     manage = _command("manage_memory_file")
@@ -214,7 +214,7 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in tools["remember"][
         "inputSchema"
     ]["properties"]["content"]["description"]
-    assert "inactive-to-active" in tools["edit_memory"]["description"]
+    assert "transitions to live" in tools["edit_memory"]["description"]
     assert "same semantic precommit contract" in tools["manage_memory_file"]["description"]
 
     client = TestClient(mcp.http_app())
