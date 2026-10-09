@@ -6884,8 +6884,10 @@ class LexicalStore:
             }
             pages = len(admitted)
             limit = path_limit(pages)
-            paths_json = json.dumps(sorted(admitted), ensure_ascii=False)
             excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
+            # One classification per distinct label in this snapshot; a hidden
+            # row is dropped before its label is read.
+            carryable: dict[object, bool] = {}
             frequencies: dict[str, int] = {}
             paths: dict[str, tuple[str, ...]] = {}
             for token in stemmed_tokens:
@@ -6893,17 +6895,22 @@ class LexicalStore:
                 bounded: list[str] = []
                 rows = conn.execute(
                     "SELECT p.path, p.status FROM fts JOIN pages p ON p.rowid = fts.rowid "
-                    "WHERE fts MATCH ? AND p.in_kb = 1 "
-                    "AND p.path IN (SELECT value FROM json_each(?))"
+                    "WHERE fts MATCH ? AND p.in_kb = 1"
                     + excluded
                     + " ORDER BY p.path",
-                    (f'"{token}"', paths_json, *params),
+                    (f'"{token}"', *params),
                 )
                 for path, status in rows:
-                    if status_basis.classify(status).carryable:
+                    path = str(path)
+                    if path not in admitted:
+                        continue
+                    allowed = carryable.get(status)
+                    if allowed is None:
+                        allowed = carryable[status] = status_basis.classify(status).carryable
+                    if allowed:
                         count += 1
                         if len(bounded) < limit:
-                            bounded.append(str(path))
+                            bounded.append(path)
                 frequencies[token] = count
                 paths[token] = tuple(bounded)
             return frequencies, pages, paths, admitted

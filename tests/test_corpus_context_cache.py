@@ -1210,3 +1210,35 @@ def test_eviction_does_not_re_arm_populate(
     semantic_contract._populate_corpus_context_after_miss(vault)
 
     assert len(calls) == 1
+
+
+def test_a_warm_owner_view_follows_a_status_save_and_a_page_edit(vault: Path) -> None:
+    """The owner's warm lifecycle view changes when a status save reclassifies a
+    label without any page edit, and again when that page is edited."""
+    from exomem import commands
+    from exomem.governance.principal import library_scope
+
+    page = vault / _PAGE_REL
+    page.write_text(
+        _page(title="One").replace("status: active", "status: awaiting-review"),
+        encoding="utf-8",
+    )
+    with library_scope():
+        warm = semantic_contract.build_corpus_context_with_census(vault)[0]
+        assert _PAGE_REL in warm.eligible_governed_paths
+
+        inspected = commands.op_schema_memory(vault, subject="statuses", operation="inspect")
+        commands.op_schema_memory(
+            vault,
+            subject="statuses",
+            operation="save",
+            proposal={"upsert": {"awaiting-review": {"attributes": {"class": "pending"}}}},
+            expected_hash=inspected["content_hash"],
+            why="hold pages awaiting review",
+        )
+        saved = semantic_contract.build_corpus_context_with_census(vault)[0]
+        assert _PAGE_REL not in saved.eligible_governed_paths
+
+        page.write_text(_page(title="One"), encoding="utf-8")
+        edited = semantic_contract.build_corpus_context_with_census(vault)[0]
+        assert _PAGE_REL in edited.eligible_governed_paths

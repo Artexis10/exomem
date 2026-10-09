@@ -1444,6 +1444,15 @@ def _drop_corpus_caption_locked(cache_key: tuple[str, str]) -> None:
     _CORPUS_CONTEXT_EVENT_CHECKPOINTS.pop(cache_key, None)
 
 
+def _forget_corpus_entry_locked(cache_key: tuple[str, str]) -> bool:
+    """Withdraw one vault's cached context and everything derived from it."""
+    removed = _CORPUS_CONTEXT_CACHE.pop(cache_key, None) is not None
+    _drop_corpus_caption_locked(cache_key)
+    _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+    _ENRICHED_CONTEXT_MEMO.pop(cache_key, None)
+    return removed
+
+
 def _caption_corpus_context_locked(
     cache_key: tuple[str, str], checkpoint: freshness.FreshnessCheckpoint
 ) -> None:
@@ -1476,11 +1485,7 @@ def evict_corpus_context(vault_root: Path) -> bool:
     """Withdraw one vault's corpus projection after an unbridgeable event gap."""
     cache_key = _corpus_cache_key(Path(vault_root))
     with _CORPUS_CONTEXT_CACHE_LOCK:
-        removed = _CORPUS_CONTEXT_CACHE.pop(cache_key, None) is not None
-        _drop_corpus_caption_locked(cache_key)
-        _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
-        _ENRICHED_CONTEXT_MEMO.pop(cache_key, None)
-    return removed
+        return _forget_corpus_entry_locked(cache_key)
 
 
 def current_reference_identity_snapshot(
@@ -1900,7 +1905,7 @@ def _corpus_census(root: Path) -> tuple | None:
             except FileNotFoundError:
                 entries.add((marker, "absent", -1, -1))
             else:
-                entries.add((marker, "cfg", info.st_size, info.st_mtime_ns))
+                entries.add((marker, _config_kind(root, extra), info.st_size, info.st_mtime_ns))
     except _CensusUnsafe:
         # A deliberate refusal: the tree holds an alias or a nonregular page.
         log.debug("corpus census refused an unsafe tree at %s", root)
@@ -2052,10 +2057,18 @@ def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
             except FileNotFoundError:
                 entries.append((marker, "absent", -1, -1))
             else:
-                entries.append((marker, "cfg", info.st_size, info.st_mtime_ns))
+                entries.append((marker, _config_kind(root, extra), info.st_size, info.st_mtime_ns))
     except (OSError, ValueError):
         return None
     return tuple(sorted(entries))
+
+
+def _config_kind(root: Path, extra: Path) -> str:
+    """The access policy is a security boundary that parse-time eligibility
+    reads, so it is keyed by content, never by size and mtime alone."""
+    if extra == access.access_config_path(root):
+        return "cfg:" + access.policy_fingerprint(root)
+    return "cfg"
 
 
 def _stored_config_census(census: tuple) -> tuple:
@@ -2419,9 +2432,7 @@ def publish_corpus_files_changed_classified(
             # this missed delta and stamp stale state as current.
             cache_key = _corpus_cache_key(root)
             with _CORPUS_CONTEXT_CACHE_LOCK:
-                _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
-                _drop_corpus_caption_locked(cache_key)
-                _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+                _forget_corpus_entry_locked(cache_key)
             if not isinstance(error, Exception):
                 raise
             return CorpusPublicationFailure(CORPUS_PUBLICATION_PROJECTION_PATCH, error)
@@ -2457,9 +2468,7 @@ def _patch_corpus_files_changed_locked(
     if _config_census(root) != _stored_config_census(entry[0]):
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
-                _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
-                _drop_corpus_caption_locked(cache_key)
-                _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+                _forget_corpus_entry_locked(cache_key)
         return _CORPUS_PATCH_EVICTED
 
     def relative(value: Path | str) -> str | None:
@@ -2527,10 +2536,7 @@ def _trim_corpus_cache_locked(keep: tuple[str, str]) -> None:
     while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
         for stale_key in list(_CORPUS_CONTEXT_CACHE):
             if stale_key != keep:
-                del _CORPUS_CONTEXT_CACHE[stale_key]
-                _drop_corpus_caption_locked(stale_key)
-                _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(stale_key, None)
-                _ENRICHED_CONTEXT_MEMO.pop(stale_key, None)
+                _forget_corpus_entry_locked(stale_key)
                 break
         else:
             break
@@ -2798,7 +2804,8 @@ def build_corpus_context_with_census(
     )
     if memo_key is not None:
         with _CORPUS_CONTEXT_CACHE_LOCK:
-            if memo_key in _CORPUS_CONTEXT_CACHE:
+            cached = _CORPUS_CONTEXT_CACHE.get(memo_key)
+            if cached is not None and cached[1] is context:
                 _ENRICHED_CONTEXT_MEMO[memo_key] = (context, basis.dependency, enriched, states)
     return enriched, census
 

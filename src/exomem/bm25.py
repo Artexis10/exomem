@@ -373,7 +373,7 @@ def _unknown_error_streak(vault_root: Path, error_class: str | None) -> int:
 
 @dataclass(frozen=True)
 class CorpusStatistics:
-    """One admitted corpus's Okapi figures, as `rank_bm25.BM25Okapi` derives them.
+    """One admitted corpus's Okapi figures, as `rank_bm25.BM25Okapi` 0.2.2 derives them.
 
     It keeps only what scoring a candidate needs, so a retained copy costs one
     vocabulary-sized mapping rather than every document's term counts. The

@@ -97,6 +97,7 @@ Entity identity and Planning, Records, jobs and receipt states keep their existi
 
 The shared semantic corpus cache, uncached builder and delta builder retain neutral parsed state and the complete stable identity census.
 One enrichment step admits paths before classifying statuses and produces a detached request context; it never updates shared cache entries or flights.
+A caller who admits every page reuses its enrichment through a separate memo, keyed by the structural cache entry and bound to the status dependency it consulted. Restricted callers never read or write that memo, and the shared structural entries stay neutral.
 Candidate validation requires classification before applying minimum-unit exemptions.
 A stored activation manifest uses the target's admitted compiled eligibility, content hash and identity, plus complete identity ownership evidence.
 Duplicate identities anywhere in that complete census cannot inherit a stable-identity exemption, including duplicates on otherwise ineligible pages.
