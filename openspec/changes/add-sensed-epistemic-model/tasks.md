@@ -2,7 +2,7 @@
 
 - [x] 1.1 Write this change: the proposal, the design with the owner's rulings R1–R7, the delta specs (`sensed-epistemic-model`, `frozen-verifiers`, `contradiction-queue`) and these tasks. Validate with `openspec validate --all --strict`.
 - [x] 1.2 Amend `close-memory-loop` in place:
-  - `design.md:208`: the Cloud reversal points here.
+  - `design.md:705`: the Cloud reversal points here.
   - `design.md:212`: drop condition 4.
   - Replace the scenario "Verifier labels do not reach upkeep" with the R2 rule.
   - Close task 8.4 as "admitted, re-laned to add-sensed-epistemic-model".
@@ -89,7 +89,9 @@
   - The relation writer cites the reading id (R2).
   - The audit's in-request NLI enrichment (`audit.py:6218-6268`) moves onto the ledger with extractor `page-claim-v1`, per the `contradiction-queue` delta.
 - [ ] 9.3 Slice 5:
-  - The Cloud placement: cells run the dreamer, each cell senses with its own instruments on shared read-only weights, and no third-party API runs by default. It is measured against the hosted-inference acceptance measures, plus per-cell activation memory and CPU contention.
+  - The Cloud placement: cells run the dreamer, each cell senses with its own instruments on shared read-only model weights, and no third-party API sees vault text by default. Measure it against the hosted-inference acceptance measures, which include per-cell activation memory and CPU contention between cells.
+  - Move the Cloud NLI instrument to a runtime that maps its weights read-only, such as ONNX Runtime with prepacking off. The change alters `runtime` in `instrument_id`, so it is a new pin: re-admit it on the fixture set and run the instrument migration (D3). Measure per-cell activation memory on the node.
+  - Remove `cloud-plane` from `PLACEMENTS` in `src/exomem/sensing.py`. A Cloud cell's instruments run on CPU inside the cell and record `local-cpu` (D2).
   - The per-vault and per-tenant API placement opt-in, with `unpinned_weights` identity and retirement migration (R7).
   - The ledger registered as a portable-derived external-state family for hosted export and restore (R3).
   - Update `tests/test_dreamer_hosted_boundary.py` and `tests/test_frozen_verifier_hosted_boundary.py` to the new contract.

@@ -232,17 +232,18 @@ At request time, an edge SHALL be dropped when either page's live signature diff
 
 Personal vaults SHALL sense with local instruments by default. An API instrument SHALL be an opt-in placement per vault, enabled by the owner for personal vaults and by an explicit per-tenant grant for Cloud (off by default). Its identity SHALL be provider, model id and version or snapshot date, flagged `unpinned_weights`. It SHALL obey the same template, closed-label, abstain and fixture-admission contract. Its request SHALL carry only delimited slot texts. A vendor's retirement of the model SHALL trigger the ordinary instrument migration.
 
-Cloud cells SHALL run the dreamer, and each cell SHALL sense with its own local instruments in its own process. Cells SHALL share only immutable model bytes, never a process, writable memory or a cache. No third-party API SHALL receive vault text unless the tenant opted in. The Cloud placement SHALL be measured against the acceptance measures in `docs/hosted-inference-boundary.md`.
+Cloud cells SHALL run the dreamer, and each cell SHALL sense with its own local instruments in a process inside the cell. Cells SHALL have only the shared read-only model weights in common, never a process, writable memory, or a cache of inputs or results. No third-party API SHALL receive vault text unless the tenant opted in. The Cloud placement SHALL be measured against the acceptance measures in `docs/hosted-inference-boundary.md`.
 
 #### Scenario: One process never holds two tenants' text
 
 - **WHEN** two Cloud cells sense at the same time
-- **THEN** each reading is computed in its own cell's process, and the cells share only the read-only model bytes
+- **THEN** no process receives vault text from both cells, and no process outside a cell receives that cell's text
+- **AND** the only memory pages the cells share are read-only mappings of the pinned weight files
 
 #### Scenario: No third-party API by default
 
 - **WHEN** a Cloud cell senses without a tenant API grant
-- **THEN** no request containing vault text leaves the cluster
+- **THEN** no request containing vault text leaves the cell
 
 #### Scenario: An API instrument is identified honestly
 

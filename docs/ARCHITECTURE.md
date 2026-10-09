@@ -123,7 +123,8 @@ See [hosted-operations.md](hosted-operations.md) for the cell runbook and
 the companion ownership contract.
 
 See [hosted-hardware-options.md](hosted-hardware-options.md) for dated EU hardware
-prices, candidate capabilities, and the distinction between cell embeddings and shared sensing.
+prices, candidate capabilities, and the distinction between cell embeddings and
+per-cell sensing on shared read-only model weights.
 
 ## Non-goals
 
