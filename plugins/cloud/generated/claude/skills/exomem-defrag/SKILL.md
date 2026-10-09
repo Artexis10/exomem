@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: a6c24d46e4251881a269c2029b5321db73eb464261744700a864c4bb29026f07
+  skill_contract: cdf6053a3e180d6c47780ff034a42a75799fbcb67ced2559546932be286fa8cb
   version: "0.1.0"
 ---
 
@@ -61,10 +61,10 @@ Only mutate when the correct action is clear. Use supersession for meaningful ch
 ## Mistakes to avoid
 Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
 
-<!-- exomem-semantic-authoring:v5 sha256:9df68fa1ea6b4da5e9fb5ebeb24960710632c200c39b38547d99720db44ee332 -->
+<!-- exomem-semantic-authoring:v6 sha256:0d4fa9cb6fedc9477ab1cc08a2338db41541fc06f50b2d8c93ca3ed8021ea22a -->
 ## Semantic authoring contract
 
-Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
+Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
 
 Semantic roles:
 
@@ -82,11 +82,11 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Compact exclusions: observation-shaped rows inside fenced code blocks; task labels `[ ]`, `[x]`, `[X]`, and `[-]`; reserved or punctuation-bearing bracket labels outside category grammar. Compact units do not carry typed unit relations; use a canonical note-level relation or the rich form.
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, then relations; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
-- Exact applicability: `compiled_intent(after_state) = canonical_compiled_destination(path) OR normalized_type in COMPILED_TYPES`. `COMPILED_TYPES` contains exactly `experiment`, `failure`, `insight`, `pattern`, `production-log`, `research-note`, with canonical destinations `experiment` → `Notes/Experiments`, `failure` → `Notes/Failures`, `insight` → `Notes/Insights`, `pattern` → `Notes/Patterns`, `production-log` → `Notes/Productions`, `research-note` → `Notes/Research`. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the resolved lifecycle is active. Inactive lifecycle values are `archived`, `draft`, `dropped`, `planned`, `superseded`. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation.
+- Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR normalized_type in COMPILED_TYPES`. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
 - Routes: use `remember` for a new compiled note, `replace_memory` for a replacement, `observe_memory` for one unit, and `edit_memory` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits.
-- Findings: `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
+- Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.
 - Semantic-unit coverage and relation-review disposition are independent obligations.

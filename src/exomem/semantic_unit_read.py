@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import semantic_index, semantic_units, vault
+from . import lifecycle_statuses, semantic_index, semantic_units, vault
 from .get_page import GetResult
 
 PARENT_CONTEXT_MAX_CHARS = 2400
@@ -93,6 +93,8 @@ def read_semantic_unit(
     unit_ref: str,
     frontmatter: Mapping[str, Any] | None = None,
     withheld_spans: tuple[tuple[int, int], ...] = (),
+    lifecycle_disposition: bool = True,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> SemanticUnitReadResponse:
     """Resolve one current unit exactly; never substitute a nearby unit.
 
@@ -101,6 +103,8 @@ def read_semantic_unit(
     release plane stripped does not come back through the citation.
     `withheld_spans` are body ranges the release removed: a unit inside one is
     missing, and the parent context stops short of them.
+    Prior-binding disclosure disables lifecycle disposition: `found` then means
+    the exact retained unit resolves, not that its parent is currently live.
     """
     state = semantic_index.current_parent_index_state(
         vault_root,
@@ -130,7 +134,15 @@ def read_semantic_unit(
             actual_fingerprint=resolution.actual_fingerprint,
         )
 
-    status = "superseded" if parent.status == "superseded" else "found"
+    status = (
+        "superseded"
+        if lifecycle_disposition
+        and (status_basis or lifecycle_statuses.Basis(vault_root))
+        .classify(parsed_frontmatter.get("status"))
+        .require()
+        == "superseded"
+        else "found"
+    )
     return SemanticUnitReadResponse(
         status=status,
         unit_ref=resolution.unit_ref,

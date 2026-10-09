@@ -467,7 +467,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         else:
             from . import semantic_contract
 
-            semantic_contract.build_corpus_context(vault_root)
+            semantic_contract.warm_corpus_context(vault_root)
         readiness.mark_ready("semantic_corpus")
     except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
         log.warning("semantic corpus warm-up failed", exc_info=True)

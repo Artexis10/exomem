@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: a6c24d46e4251881a269c2029b5321db73eb464261744700a864c4bb29026f07
+  skill_contract: cdf6053a3e180d6c47780ff034a42a75799fbcb67ced2559546932be286fa8cb
   version: "0.32.0"
 ---
 
@@ -59,8 +59,15 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Save intent or observed events; interpret an ambiguous action | `plan_memory`, `record_memory`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `episode_memory` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Review, adopt, audit, restructure, or maintain a vault | `review_memory`, `triage_memory`, `adopt_vault`, `maintain_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
-| Infer/change vocabulary or schema | `schema_memory` | [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
+| Infer/change vocabulary or schema | `schema_memory` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Configured governance policy or a reserved withhold notice | `govern_memory` | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
+
+If the vocabulary reference is missing, inspect the exposed bootstrap schema.
+Use `bootstrap(profile="compact", section="vocabulary")`, or
+`bootstrap(profile="full")` when `section` is unavailable. Follow the returned
+inspect routes and `save` contract. Reuse or alias before proposing justified
+new meaning; save with the current hash and `why`. Report saved versus queued
+and the returned restore route. Use only exposed operations.
 
 ## Workflow skills
 

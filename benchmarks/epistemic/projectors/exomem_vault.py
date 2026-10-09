@@ -1013,7 +1013,7 @@ class VaultProjector(Projector):
         if not self.runtime_surfaces or not self.declared_entity_subjects:
             return ()
 
-        from exomem import access, entity_recurrence
+        from exomem import access, entity_recurrence, lifecycle_statuses
         from exomem import audit as audit_module
         from exomem.vault import kb_root
 
@@ -1025,12 +1025,15 @@ class VaultProjector(Projector):
 
         eligible: list[tuple[Any, str]] = []
         entities = entity_recurrence.entities_prefix()
+        status_basis = lifecycle_statuses.Basis(self.vault_root)
         # The file-only projector has a different corpus boundary. Use the
         # runtime's canonical page walk before any recurrence finding gate.
         for page in audit_module._parse_all(kb_root(self.vault_root), self.vault_root):
             relative = str(page.rel_path)
             if relative.startswith(entities) or not entity_recurrence.counts_as_evidence(
-                page, indexable=access.is_indexable(self.vault_root, relative)
+                page,
+                indexable=access.is_indexable(self.vault_root, relative),
+                status_basis=status_basis,
             ):
                 continue
             eligible.append((page, page.body))

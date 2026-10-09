@@ -2201,6 +2201,29 @@ def search_bm25_result(
     )
 
 
+def carry_term_statistics(
+    vault_root: Path,
+    terms: Iterable[str],
+    *,
+    visible: Callable[[str], bool],
+    status_basis: Any,
+    path_limit: Callable[[int], int],
+    freshness: tuple | None = None,
+    recall_checkpoint: Any | None = None,
+) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
+    """Admitted carry counts and bounded discount paths from one SQL snapshot."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root).carry_term_statistics(
+        list(dict.fromkeys(terms)),
+        visible=visible,
+        status_basis=status_basis,
+        path_limit=path_limit,
+        freshness=freshness,
+        recall_checkpoint=recall_checkpoint,
+    )
+
+
 def term_document_frequencies(
     vault_root: Path,
     terms: Iterable[str],
@@ -6829,6 +6852,62 @@ class LexicalStore:
             ),
             "lexical sidecar BM25 query failed (%s)",
             allow_delta=allow_delta,
+            recall_checkpoint=recall_checkpoint,
+        )
+
+    def carry_term_statistics(
+        self,
+        stemmed_tokens: list[str],
+        *,
+        visible: Callable[[str], bool],
+        status_basis: Any,
+        path_limit: Callable[[int], int],
+        freshness: tuple | None,
+        recall_checkpoint: Any | None,
+    ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
+        def query(conn: sqlite3.Connection):
+            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
+            # Read paths before admission. Hidden labels never reach classification;
+            # navigation and retired pages still belong in the admitted denominator.
+            admitted = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT p.path FROM pages p WHERE p.in_kb = 1" + raw_clause, raw_params
+                )
+                if visible(str(row[0]))
+            }
+            pages = len(admitted)
+            limit = path_limit(pages)
+            paths_json = json.dumps(sorted(admitted), ensure_ascii=False)
+            excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
+            frequencies: dict[str, int] = {}
+            paths: dict[str, tuple[str, ...]] = {}
+            for token in stemmed_tokens:
+                count = 0
+                bounded: list[str] = []
+                rows = conn.execute(
+                    "SELECT p.path, p.status FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    "WHERE fts MATCH ? AND p.in_kb = 1 "
+                    "AND p.path IN (SELECT value FROM json_each(?))"
+                    + excluded
+                    + " ORDER BY p.path",
+                    (f'"{token}"', paths_json, *params),
+                )
+                for path, status in rows:
+                    if status_basis.classify(status).carryable:
+                        count += 1
+                        if len(bounded) < limit:
+                            bounded.append(str(path))
+                frequencies[token] = count
+                paths[token] = tuple(bounded)
+            return frequencies, pages, paths, admitted
+
+        return self._serve_from_ready_catalog_result(
+            "kb",
+            freshness,
+            query,
+            "lexical sidecar carry statistics failed (%s)",
+            allow_delta=False,
             recall_checkpoint=recall_checkpoint,
         )
 

@@ -9,7 +9,7 @@ import posix as _native
 import secrets
 import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64
 from pathlib import Path
 
@@ -713,12 +713,19 @@ class PosixHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
+    def children(
+        self,
+        parent: HeldDirectory,
+        *,
+        name_filter: Callable[[str], bool] | None = None,
+    ) -> HeldResult[tuple[SagaRecord, ...]]:
         try:
             checked = self._check_directory(parent)
             names = sorted(_names(checked.descriptor))
             records: list[SagaRecord] = []
             for name in names:
+                if name_filter is not None and not name_filter(name):
+                    continue
                 info = _stat(name, dir_fd=checked.descriptor, follow_symlinks=False)
                 observed = _identity(info)
                 if observed.kind not in {"file", "directory"}:

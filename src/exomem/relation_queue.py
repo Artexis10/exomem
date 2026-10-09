@@ -677,6 +677,7 @@ def build_queue(
     The queue is the owner's: another audience receives the
     `audience_restricted` refusal before anything is read.
     """
+    from . import lifecycle_statuses
     from .governance import egress
 
     refusal = egress.owner_only_aggregate(vault_root)
@@ -688,6 +689,7 @@ def build_queue(
     ).relation_review_batch(
         limit_pages=limit_pages,
         limit_per_page=limit_per_page,
+        status_basis=lifecycle_statuses.Basis(vault_root),
     )
     status = str(batch.get("status") or "warming")
     if status != "available":

@@ -425,7 +425,7 @@ def test_warm_all_marks_components_ready_in_semantic_lexical_model_order(
     )
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         lambda _root: call_order.append("semantic"),
     )
     monkeypatch.setattr(
@@ -480,7 +480,7 @@ def test_warm_all_marks_semantic_corpus_ready_before_optional_cache_warm(
         return {}
 
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         _semantic_warm,
     )
     monkeypatch.setattr(warmup, "warm_caches", _optional_caches)
@@ -514,7 +514,7 @@ def test_warm_all_marks_catalog_ready_before_optional_cache_work(
     )
     monkeypatch.setattr(warmup, "warm_caches", optional_caches)
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         lambda _root: call_order.append("semantic"),
     )
 
@@ -670,7 +670,7 @@ def test_eager_managed_warm_publishes_the_successful_retry_generation(
     monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
     monkeypatch.setattr(lexstore, "await_repairs_idle", lambda _root: True)
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         lambda _root: None,
     )
     monkeypatch.setattr(warmup, "warm_caches", lambda *_args, **_kwargs: {})
@@ -693,7 +693,7 @@ def test_warm_all_does_not_admit_catalog_while_background_repair_runs(
         ),
     )
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         lambda _root: None,
     )
 
@@ -760,7 +760,7 @@ def test_warm_all_quiet_mode_still_reconciles_the_catalog(
         lambda _root, **kwargs: cache_policy.update(kwargs) or {},
     )
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         lambda _root: None,
     )
 
@@ -805,7 +805,7 @@ def test_warm_all_primes_semantic_corpus_even_when_cpu_preload_is_quiet(
     warmed: list[Path] = []
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
     monkeypatch.setattr(
-        "exomem.semantic_contract.build_corpus_context",
+        "exomem.semantic_contract.warm_corpus_context",
         lambda root: warmed.append(Path(root)),
     )
 

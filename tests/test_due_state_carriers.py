@@ -405,10 +405,10 @@ def test_the_bootstrap_guidance_teaches_how_to_read_the_counts(vault: Path) -> N
     assert "due_state_authority" in post_write
 
     described = post_write["due_state"].lower()
-    assert "ordinary" in described  # counts arrive on ordinary responses
+    assert "arrive on committed writes" in described  # counts arrive on ordinary responses
 
     handling = post_write["due_state_handling"].lower()
-    assert "invitation" in handling and "interrupt" in handling
+    assert "consult review" in handling and "interrupt" in handling
     assert "fingerprint" in handling
     assert "silence" in handling
 
