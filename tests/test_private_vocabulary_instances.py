@@ -385,3 +385,96 @@ def test_vector_candidates_take_their_selected_meaning_before_the_result_limit(p
         assert unpublished.occurrences == ()
         index.upsert_semantic_units(unpublished, np.zeros((0, index.dim), dtype=np.float32), 0.0)
         assert search(allowed) == ([(pages["public"][0], public_units[0].unit_ref)], [])
+
+
+STORAGE_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+
+
+@pytest.fixture
+def storage_scope(configured_boundary, vault):
+    """A Scope over the private instance's storage that the host may deny later.
+
+    It exists before arming, so a later denial is a live configuration change.
+    """
+    config, _ = configured_boundary
+    (vault / "Knowledge Base/_Governance/scopes/vocabulary-storage.yaml").write_text(
+        f"governance_version: 1\nid: {STORAGE_SCOPE}\n"
+        'paths: ["_Schema/private/**", "_Schema/history/private/**"]\n', encoding="utf-8",
+    )
+    data = json.loads(config.read_text())
+    data["default_denied_scope_ids"].append(STORAGE_SCOPE)
+    config.write_text(json.dumps(data))
+    return STORAGE_SCOPE
+
+
+def test_a_live_revocation_withholds_warm_private_units_but_keeps_the_page_readable(
+    configured_boundary, storage_scope, private_instances, vault
+):
+    """Warm private meaning never outlives the caller's admission; the raw page stays useful.
+
+    The host denies the full client the Scope over the private instance's storage.
+    The private page stays readable, but its private definitions are withheld.
+    This catches a warm projection that keeps serving the private interpretation,
+    and a refusal that withholds the readable page along with its definitions.
+    """
+    from exomem import commands, epistemic_graph, freshness, lexstore, semantic_contract
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    path = "Knowledge Base/Notes/Insights/revocable-interpretation.md"
+    source = (
+        "---\ntype: insight\nproject: private-project\n"
+        "exomem_id: 77777777-7777-4777-8777-777777777777\n---\n"
+        "# Revocable interpretation\n\n- [decision] Ship the shared rollout.\n\n"
+        "## Container\n\n### Protocol\n- id: local-protocol\n\nPrivate procedure with a stable address.\n"
+    )
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(source)
+    full = private_instances("full")
+
+    def observe():
+        with principal.request_scope(full):
+            found = commands.op_find(
+                vault, query="private procedure", mode="keyword", graph=False, result_level="unit", limit=10,
+            )
+            # A degraded answer arrives as an envelope around the same hits.
+            hits = found["hits"] if isinstance(found, dict) else found
+            return {
+                "page": commands.op_read_memory(vault, path=path),
+                "protocol": commands.op_read_memory(vault, path=path, unit_ref=units["protocol"]),
+                "decision": commands.op_read_memory(vault, path=path, unit_ref=units["decision"]),
+                "graph": commands.op_graph_context(vault, path=path, depth=1),
+                "kinds": sorted(str(hit.get("kind")) for hit in hits),
+                "degraded": found.get("degraded", []) if isinstance(found, dict) else [],
+            }
+
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        selected = semantic_contract.build_page_state(vault, path, source)
+        units = {
+            "protocol": next(unit.unit_ref for unit in selected.document.units if unit.kind == "protocol"),
+            "decision": next(unit.unit_ref for unit in selected.document.units if unit.category == "decision"),
+        }
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        lexstore.ensure_fresh(vault)
+    warm = observe()
+    assert warm["protocol"]["status"] == "found"
+    assert any(node["kind"] == "protocol" for node in warm["graph"]["nodes"])
+    assert "protocol" in warm["kinds"]
+
+    config, _ = configured_boundary
+    data = json.loads(config.read_text())
+    data["clients"][1]["denied_scope_ids"] = [storage_scope]
+    config.write_text(json.dumps(data))
+    revoked = observe()
+
+    assert "Private procedure with a stable address." in revoked["page"]["body"]
+    assert revoked["decision"]["status"] == "found"
+    assert revoked["protocol"]["status"] == "unavailable"
+    assert not any(node["kind"] == "protocol" for node in revoked["graph"]["nodes"])
+    assert "protocol" not in revoked["kinds"]
+    # The withheld units make the lexical unit answer incomplete, never a proved miss.
+    assert "semantic_units_lexical" in revoked["degraded"]
