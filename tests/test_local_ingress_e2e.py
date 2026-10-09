@@ -21,6 +21,7 @@ import pytest
 
 from exomem import local_ingress
 from exomem.auth_sessions import SessionAuthority, SessionIdentity
+from exomem.governance import raw_protection
 from exomem.service_ingress import (
     INGRESS_KEY_ENV,
     INGRESS_PROOF_HEADER,
@@ -71,6 +72,9 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
             "EXOMEM_JWT_SIGNING_KEY": ROOT,
             "EXOMEM_REST_API_KEY": "e2e-owner-rest-key",
             "EXOMEM_UPLOAD_TOKEN": "e2e-static-upload-token",
+            # The public cap stands for the proxy edge's; loopback never crosses it.
+            "EXOMEM_UPLOAD_MAX_BYTES": "64",
+            "EXOMEM_LOCAL_UPLOAD_MAX_BYTES": "4096",
             "EXOMEM_LOG_DIR": str(tmp_path / "logs"),
             "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "leases"),
             INGRESS_KEY_ENV: KEY,
@@ -219,6 +223,34 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
                 )
                 assert upload.status_code == 201, upload.text
                 assert (vault / upload.json()["path"]).read_bytes() == b"local e2e bytes"
+
+                # A private export over the public cap lands whole and owner-only
+                # over loopback; the public listener still refuses its size.
+                export = bytes(range(256)) * 4
+                protected = await local.post(
+                    "/upload",
+                    headers={"authorization": f"Bearer {local_token}"},
+                    files={"file": ("export.zip", export, "application/zip")},
+                    data={"scope": "Local", "category": "Exports", "raw_protection": "1"},
+                )
+                assert protected.status_code == 201, protected.text
+                stored = protected.json()["path"]
+                assert raw_protection.marked(stored), stored
+                assert (vault / stored).read_bytes() == export
+                held = await local.post(
+                    "/upload",
+                    headers={"authorization": f"Bearer {local_token}"},
+                    files={"file": ("export.zip", export, "application/zip")},
+                    data={"hold": "1", "raw_protection": "1"},
+                )
+                assert held.status_code == 400, held.text
+                public_upload = await public.post(
+                    "/upload",
+                    headers={"authorization": "Bearer e2e-static-upload-token"},
+                    files={"file": ("export.zip", export, "application/zip")},
+                    data={"scope": "Public", "category": "Exports"},
+                )
+                assert public_upload.status_code == 413, public_upload.text
 
                 # R5: revocation closes the local door on the next request.
                 await public_authority.tombstone(
