@@ -182,3 +182,66 @@ Compose S2's lookup guidance through the existing renderers, stamps and packagin
 2. Ship the adapter, pack and consumers through ordinary review and release; existing page bytes remain unchanged.
 3. Restore the previous registry version when reverting an extension; removed labels remain live with debt after admitted resolution.
 4. Roll back the release through the existing procedure; keep the overlay and retained history for later recovery.
+
+## Evidence
+
+These numbers record what the delivered source costs. They make no claim of a gain or a loss against an earlier release.
+
+Each measurement ran on the source of commit `019d0d77eb09765d366ba37f79e8d8bf5e912972`, with a scratch instrument that is not in the repository.
+The instrument wraps the named functions with counters and `time.perf_counter`; it does not change their arguments or results.
+The runs used the shared test wrapper with `EXOMEM_TEST_UMASK=022`, one measuring process at a time, on a laptop: Intel Core Ultra 7 255HX (20 logical CPUs), 23 GB RAM, WSL2 Linux 6.18, load average about 1.5.
+Other sessions could run tests at the same time.
+"Cold" means that the in-process caches were cleared; the operating-system file cache stayed warm.
+
+### Carry rarity at production volume (task 2.6)
+
+Command: `python -m pytest tests/test_zz_measure_rarity.py`.
+The instrument rebuilds the second state of `test_hidden_status_contributors_do_not_change_public_carry_at_production_volume`: 2,000 bulk notes, the carry pages, 70 withheld contributors and 3 retired revisions.
+It then calls `op_activate_context` with the genuine turn as the `external` caller, cold and then warm, three times (n = 3 per state).
+Before each cold call it clears the governance, find, packet, corpus-context and lexical-store caches.
+
+Each activation ran one rarity stage (`rare_turn_terms`) with one SQL read transaction (`LexicalStore.carry_term_statistics`) over 9 turn terms.
+That transaction examined 2,209 paths, admitted 2,139 and classified 4,217 matched rows in every run.
+
+| Run | Rarity stage ms | SQL transaction ms | Admission predicate ms | Whole activation ms |
+| --- | --- | --- | --- | --- |
+| cold 1 | 3,062.7 | 3,062.5 | 3,036.5 | 5,232.4 |
+| warm 1 | 658.8 | 658.7 | 638.9 | 1,488.2 |
+| cold 2 | 3,088.9 | 3,088.8 | 3,063.2 | 3,891.7 |
+| warm 2 | 658.3 | 658.2 | 637.5 | 1,400.6 |
+| cold 3 | 3,338.9 | 3,338.8 | 3,311.8 | 4,157.9 |
+| warm 3 | 1,017.3 | 1,017.2 | 994.2 | 1,894.6 |
+
+The admission predicate took 96.9 to 99.2 percent of the SQL transaction in each run.
+
+### Relation queue at 3,600 pages (task 2.7)
+
+Command: `python -m pytest tests/test_zz_measure_graph.py::test_measure_relation_queue`.
+The instrument builds the fixture of `test_relation_queue_graph_native.py::test_queue_uses_one_fixed_cost_graph_batch_for_3600_pages` (3,601 eligible pages).
+It then calls `relation_queue.build_queue(limit_pages=5, limit_per_page=5)` four times in one process (n = 4).
+
+| Call | State before the call | Graph snapshot opens | SQL statements | `find._parse_page` calls | ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 | graph just built, as in the test | 1 | 7 | 0 | 329.7 |
+| 2 | find and corpus-context caches cleared | 1 | 7 | 3,601 | 3,241.4 |
+| 3 | warm | 1 | 7 | 0 | 1,186.5 |
+| 4 | warm | 1 | 7 | 0 | 1,154.3 |
+
+No call reached `find_corpus.parse_page`.
+
+### Hydration after a status registry save and restore (task 2.7)
+
+Command: `python -m pytest tests/test_zz_measure_graph.py::test_measure_hydration_parses`.
+The instrument runs the scenario of `test_a_status_registry_save_and_restore_change_hydration_without_page_rewrites` as the owner (n = 1).
+It counts Markdown parses (`find._parse_page` and `find_corpus.parse_page`) and Dreamer page reads (`dreamer_families.Context.page`) in each step.
+
+| Step | Markdown parses | Dreamer page reads | ms |
+| --- | --- | --- | --- |
+| Dreamer run to quiet | 0 | 77 | 120.1 |
+| Serve the item before the save | 0 | 2 | 7.6 |
+| Serve the item after the save; the proposal lapses | 0 | 2 | 6.4 |
+| Dreamer run to quiet after the save | 0 | 0 | 21.8 |
+| Serve the item after the restore | 0 | 2 | 7.5 |
+
+The fixture's graph publish filled the parse cache, so no step parsed Markdown.
+The save changed the served proposal without Dreamer page work; the serve-time revalidation read the two contributors.
