@@ -213,6 +213,10 @@ class SemanticPageState:
     # Compiled-page eligibility without the lifecycle class: neutral parsed
     # structure, shared by every caller and the source of the activation census.
     structurally_compiled: bool = False
+    # Governed and connectable eligibility without the lifecycle class, parsed once
+    # with the page so a caller's status enrichment never recomputes them per call.
+    structurally_governed: bool = False
+    structurally_connectable: bool = False
     status_class: str | None = None
     status_unregistered: bool = False
     status_dependency: tuple[str, str] | None = None
@@ -1179,24 +1183,9 @@ def enrich_page_state(
     status_basis: lifecycle_statuses.Basis,
 ) -> SemanticPageState:
     """Apply one admitted lifecycle basis to detached structural facts."""
-    parsed = find_module.ParsedPage(
-        path=root / state.path,
-        rel_path=state.path,
-        frontmatter=dict(state.frontmatter),
-        body="",
-        title=state.title,
-        mtime=0.0,
-    )
-    governed = activation.structurally_eligible_for_types(
-        root, parsed, page_types=activation._ELIGIBLE_TYPES
-    )
+    governed = state.structurally_governed
     compiled = state.structurally_compiled
-    connectable = activation.structurally_eligible_for_types(
-        root,
-        parsed,
-        page_types=activation._CONNECTABLE_TYPES,
-        tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
-    )
+    connectable = state.structurally_connectable
     classification = (
         status_basis.classify(state.frontmatter.get("status"))
         if governed or compiled or connectable
@@ -1322,6 +1311,15 @@ def _parse_page_state(
         connectable_target=False,
         structurally_compiled=activation.structurally_eligible_for_types(
             root, parsed, page_types=activation._COMPILED_PAGE_TYPES
+        ),
+        structurally_governed=activation.structurally_eligible_for_types(
+            root, parsed, page_types=activation._ELIGIBLE_TYPES
+        ),
+        structurally_connectable=activation.structurally_eligible_for_types(
+            root,
+            parsed,
+            page_types=activation._CONNECTABLE_TYPES,
+            tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
         ),
         body_wikilinks=tuple(body_links),
     )
