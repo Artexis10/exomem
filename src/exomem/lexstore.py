@@ -478,11 +478,6 @@ def _axis_test_sql(
     return "(" + " AND ".join(parts) + ")", params
 
 
-#: Unit filter axes whose value is a selected meaning. Shared rows hold raw
-#: labels there, so the catalogue can only propose candidates on these axes;
-#: the closed set is the filter language's own (`_UNIT_AXIS_COLUMNS`).
-_SELECTED_UNIT_AXES: frozenset[str] = frozenset({"unit.category", "unit.kind"})
-
 #: `(axis, values) -> SQL` proposing occurrences whose raw label could carry
 #: one of `values` on that axis under some admitted instance.
 SelectedAxisLabels = Callable[[str, tuple[str, ...]], tuple[str, list[str]]]
@@ -527,7 +522,7 @@ def _eligibility_sql(
         if unit_missing:
             # MISSING: `$exists false` is the only test a vanished unit passes.
             return ("1" if expr.op == "exists" and not expr.present else "0"), []
-        if axis in _SELECTED_UNIT_AXES and expr.op != "exists":
+        if axis in sf.ENTRY_AXES and expr.op != "exists":
             if expr.op in {"in", "eq"} and labels is not None:
                 sql, bound = labels(axis, tuple(str(value) for value in expr.values))
                 return f"(CASE WHEN {sql} THEN NULL ELSE 0 END)", list(bound)

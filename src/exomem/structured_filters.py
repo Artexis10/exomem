@@ -240,9 +240,10 @@ class _ForeignEntry:
 
 FOREIGN_ENTRY = _ForeignEntry()
 
-#: The unit axes whose values are vocabulary entries rather than authored spelling.
+#: The unit axes whose values are vocabulary entries rather than authored spelling:
+#: each is a selected meaning, so stored rows can only propose candidates on it.
 #: Closed filter field names that the filter schema declares, not vocabulary.
-_ENTRY_AXES: Final = frozenset({"unit.category", "unit.kind"})
+ENTRY_AXES: Final = frozenset({"unit.category", "unit.kind"})
 
 
 def compile_filter(
@@ -1938,7 +1939,7 @@ def _resolve_runtime_field(
         if unit is None:
             return MISSING
         value = unit.get(field.name.removeprefix("unit."), MISSING)
-        if field.name in _ENTRY_AXES and value is not MISSING and unit.get("instance") != instance:
+        if field.name in ENTRY_AXES and value is not MISSING and unit.get("instance") != instance:
             core = semantic_language_registry.core_registry()
             shared = core.core_categories if field.name == "unit.category" else core.core_kinds
             if value not in shared:

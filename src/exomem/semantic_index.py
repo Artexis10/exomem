@@ -364,11 +364,12 @@ def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
     """Portable parser coverage and inputs for body-free selected interpretation."""
     if state.candidates is None:
         raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
-    # These fields are the canonical membership and interpretation input protocol.
-    frontmatter = {key: value for key, value in state.frontmatter.items() if key in {
-        "type", "status", "project", "projects", "entity_type", "registry_scope",
-        "tags", "classes", memory_refs.ID_FIELD,
-    }}
+    from .governance.membership import FRONTMATTER_INPUTS
+
+    # Membership owns its inputs. Instance selection reads `registry_scope`, and
+    # selected interpretation reads `status` and `entity_type`.
+    inputs = {*FRONTMATTER_INPUTS, "registry_scope", "status", "entity_type"}  # nosemgrep: ep-word-set -- closed fields
+    frontmatter = {key: value for key, value in state.frontmatter.items() if key in inputs}
     return {
         "structure": semantic_units.structural_summary(state.candidates),
         "frontmatter_yaml": yaml.safe_dump(dict(frontmatter)),

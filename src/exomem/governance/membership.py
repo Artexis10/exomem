@@ -24,6 +24,9 @@ from . import companions
 from .policy import Policy, Scope
 
 _MEMO_MAX = 4096
+#: The frontmatter fields `_evaluate_markdown_scopes` reads, through `ParsedPage`
+#: and `find_corpus.all_projects`. A stored summary keeps these for membership.
+FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_refs.ID_FIELD)  # nosemgrep: ep-word-set -- the closed frontmatter fields this kernel reads
 _MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str]], frozenset[str]] = OrderedDict()
 _SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str, str, frozenset[str]], frozenset[str]] = OrderedDict()
 _PATH_MEMO: OrderedDict[
