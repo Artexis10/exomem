@@ -33,8 +33,16 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+class LegacyProofError(CollectionStoreError):
+    """A failed round-trip proof check, (a) to (f) of design §10, named as data."""
+
+    def __init__(self, check: str, detail: str) -> None:
+        super().__init__("COLLECTION_LEGACY_IMPORT_PROOF", f"check({check}): {detail}")
+        self.check = check
+
+
 def _refuse(check: str, detail: str):
-    raise CollectionStoreError("COLLECTION_LEGACY_IMPORT_PROOF", f"check({check}): {detail}")
+    raise LegacyProofError(check, detail)
 
 
 @dataclass(frozen=True, slots=True)

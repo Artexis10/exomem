@@ -10019,6 +10019,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "collections-store",
         "collections-store-adopt-local",
     ] = "audit",
     categories: list[str] | None = None,
@@ -10294,6 +10295,26 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "collections-store":
+        if (
+            categories is not None
+            or dry_run is not True
+            or rebuild_embeddings
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or apply is not None
+            or plan_id is not None
+            or why is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight with "
+                "dry_run=true; migrating a vault is the declared offline upgrade step"
+            )
+        from .collection_store import preflight as store_preflight
+
+        return store_preflight.preflight(vault_root)
     if mode == "collections-store-adopt-local":
         from .collection_store import admission as store_admission
 
