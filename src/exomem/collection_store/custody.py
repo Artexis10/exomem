@@ -16,28 +16,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import state_paths
+from .. import state_paths, sync_providers
 
 SYNC_ROOTS_ENV = "EXOMEM_COLLECTION_STORE_SYNC_ROOTS"
 
-# Metadata a sync client keeps inside the root it synchronizes. Per-user client
+# Provider evidence (client metadata in a root, cloud document paths, platform
+# variables, Windows folder names, vault sync plugins) is the `sync-providers`
+# registry. A sync client's metadata marks the root it synchronizes; per-user client
 # configuration (for example a home-directory ``.dropbox`` directory) is not a root.
-_CLIENT_ROOT_ENTRIES = (
-    ".stfolder", ".dropbox.cache", ".sync/ID", ".tresorit", ".SynologyWorkingDirectory",
-    ".nextcloudsync.log", ".owncloudsync.log",
-)
-_CLIENT_ROOT_FILES = (".dropbox",)
-_CLIENT_ROOT_PREFIXES = ("._sync_", ".sync_")
-_CLIENT_PATH_COMPONENTS = ("com~apple~CloudDocs", "Mobile Documents")
-_PLATFORM_SYNC_ENV = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
-# Windows sync folders keep no metadata in the tree, so on a Windows-mounted path their
-# conventional names ("OneDrive - Contoso", "Dropbox (Personal)") are the evidence.
-# nosemgrep: ep-word-set -- Known-provider evidence only; the docstring boundary and SYNC_ROOTS_ENV cover others.
-_WINDOWS_SYNC_FOLDERS = ("onedrive", "dropbox", "google drive", "iclouddrive")
 _WINDOWS_FILESYSTEMS = frozenset({"9p", "drvfs"})
-# Vault-application sync: Obsidian Sync and the community plugins that replicate files.
-# nosemgrep: ep-word-set -- Known-plugin evidence only; the docstring boundary and SYNC_ROOTS_ENV cover others.
-_SYNC_PLUGINS = frozenset({"obsidian-livesync", "remotely-save", "obsidian-git", "remotely-secure"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,28 +41,29 @@ def _overlap(first: Path, second: Path) -> bool:
     return first == second or first.is_relative_to(second) or second.is_relative_to(first)
 
 
-def _configured_roots() -> list[Path]:
+def _configured_roots(evidence) -> list[Path]:
     roots = []
     for raw in os.environ.get(SYNC_ROOTS_ENV, "").split(os.pathsep):
         if raw.strip():
             if not Path(raw).is_absolute():
                 raise ValueError(f"{SYNC_ROOTS_ENV} entries must be absolute paths")
             roots.append(_resolved(raw))
-    roots.extend(_resolved(os.environ[name]) for name in _PLATFORM_SYNC_ENV
+    roots.extend(_resolved(os.environ[name]) for name in evidence["platform-env"]
                  if os.environ.get(name, "").strip())
     return roots
 
 
-def _client_evidence(path: Path) -> str | None:
+def _client_evidence(path: Path, evidence) -> str | None:
     """Sync-client metadata at this path or any ancestor (the client's root)."""
-    if any(part in _CLIENT_PATH_COMPONENTS for part in path.parts):
+    if any(part in evidence["path-component"] for part in path.parts):
         return f"cloud document path {path}"
+    prefixes = evidence["root-journal-prefix"]
     for directory in (path, *path.parents):
-        found = [name for name in _CLIENT_ROOT_ENTRIES if (directory / name).exists()]
-        found += [name for name in _CLIENT_ROOT_FILES if (directory / name).is_file()]
+        found = [name for name in evidence["root-entry"] if (directory / name).exists()]
+        found += [name for name in evidence["root-file"] if (directory / name).is_file()]
         try:
             found += [name for name in os.listdir(directory)
-                      if name.startswith(_CLIENT_ROOT_PREFIXES) and name.endswith(".db")]
+                      if prefixes and name.startswith(prefixes) and name.endswith(".db")]
         except OSError:
             pass
         if found:
@@ -96,18 +84,21 @@ def _windows_mounts() -> list[Path] | None:
             if len(entry) > 2 and entry[2] in _WINDOWS_FILESYSTEMS]  # nosemgrep: ep-lexical-intent -- /proc/self/mounts fstype tokens are kernel names.
 
 
-def _windows_sync_folder(path: Path, mounts: list[Path] | None) -> str | None:
+def _windows_sync_folder(path: Path, mounts: list[Path] | None, evidence) -> str | None:
+    """Windows sync folders keep no metadata in the tree, so on a Windows-mounted path
+    their conventional names ("OneDrive - Contoso", "Dropbox (Personal)") are the evidence."""
     if mounts is not None and not any(path.is_relative_to(mount) for mount in mounts):
         return None
+    folders = [folder.lower() for folder in evidence["windows-folder"]]
     for part in path.parts:
         name = part.lower()
         if any(name == folder or name.startswith((folder + " ", folder + "-"))
-               for folder in _WINDOWS_SYNC_FOLDERS):
+               for folder in folders):
             return f"Windows sync folder {part}"
     return None
 
 
-def _vault_application_sync(vault: Path) -> str | None:
+def _vault_application_sync(vault: Path, evidence) -> str | None:
     config = vault / ".obsidian"
 
     def enabled(name):
@@ -121,9 +112,9 @@ def _vault_application_sync(vault: Path) -> str | None:
             return {key for key, on in value.items() if on is True}
         return set(value) if isinstance(value, list) else set()
 
-    if "sync" in enabled("core-plugins.json"):
+    if enabled("core-plugins.json") & set(evidence["vault-core-plugin"]):
         return "vault application sync is enabled"
-    found = enabled("community-plugins.json") & _SYNC_PLUGINS
+    found = enabled("community-plugins.json") & set(evidence["vault-community-plugin"])
     return f"vault sync plugin {sorted(found)[0]} is enabled" if found else None
 
 
@@ -135,17 +126,18 @@ def verify(vault_root) -> Custody:
         store_directory = _resolved(state_paths.vault_state_dir(Path(vault_root)))
         if _overlap(vault, state_root) or _overlap(vault, store_directory):
             return Custody(False, "the live store and the vault overlap")
-        for root in _configured_roots():
+        evidence = sync_providers.evidence(vault)
+        for root in _configured_roots(evidence):
             if _overlap(root, vault) or _overlap(root, store_directory):
                 return Custody(False, f"configured sync root {root} overlaps the vault or live store")
         mounts = _windows_mounts()
         for path in (vault, store_directory):
-            evidence = _client_evidence(path) or _windows_sync_folder(path, mounts)
-            if evidence is not None:
-                return Custody(False, evidence)
-        evidence = _vault_application_sync(vault)
-        if evidence is not None:
-            return Custody(False, evidence)
+            found = _client_evidence(path, evidence) or _windows_sync_folder(path, mounts, evidence)
+            if found is not None:
+                return Custody(False, found)
+        found = _vault_application_sync(vault, evidence)
+        if found is not None:
+            return Custody(False, found)
     except (OSError, ValueError) as error:
         return Custody(False, f"custody cannot be verified: {error}")
     return Custody(True, "single-host deployment without sync")
@@ -169,16 +161,18 @@ def verify_backup_destination(vault_root, destination) -> Custody:
     return Custody(True, "outside the vault and the live store")
 
 
-def backup_sync_warning(destination) -> str | None:
+def backup_sync_warning(vault_root, destination) -> str | None:
     """Why a sync client may carry this backup and its scratch family, or None.
 
     Backing up into a synced folder is the owner's choice, so this never refuses.
     """
     try:
         target = _resolved(destination)
-        for root in _configured_roots():
+        evidence = sync_providers.evidence(_resolved(vault_root))
+        for root in _configured_roots(evidence):
             if target.is_relative_to(root):
                 return f"the destination is inside configured sync root {root}"
-        return _client_evidence(target.parent) or _windows_sync_folder(target, _windows_mounts())
+        return (_client_evidence(target.parent, evidence)
+                or _windows_sync_folder(target, _windows_mounts(), evidence))
     except (OSError, ValueError) as error:
         return f"the destination's sync state cannot be read: {error}"
