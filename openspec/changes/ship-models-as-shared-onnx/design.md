@@ -3,7 +3,8 @@
 - **The Cloud cell runs one model today.** The `cloud` image stage (`Dockerfile`) installs only the `embeddings-onnx` extra, gates its build on PyTorch being absent, sets `EXOMEM_DISABLE_RANKING=1`, and carries one pre-baked model: the pinned bge-m3 int8 artifact (`embedding_backend._SERVED`). Recall and activation share that one instance (`multilingual-recall`).
 - **The encoder already shares its weights.**
   - `runtime_resources.onnx_share_weights_enabled()` is on by default in Cloud mode, and off for personal servers and Hosted cells. `EXOMEM_ONNX_SHARE_WEIGHTS=0|1` overrides it.
-  - When it is on, `_OnnxEncoder` sets `session.disable_prepacking=1`. The weights then stay in the file-backed mapping of `model.onnx.data`, which every process on the node maps from one page cache.
+  - When it is on, `_OnnxEncoder` sets `session.disable_prepacking=1`. The weights then stay in the file mapping of `model.onnx.data`, which every process on the node maps from one page cache.
+  - ONNX Runtime maps that file private and writable (`rw-p`), so VmData counts it (reproduced on ORT 1.27.0 in the review of this change). Nothing writes the pages, so they stay clean and shared, and Pss shows the sharing. The media hard limit of `add-cloud-multimodal-processing` (design D2) budgets VmData for this reason.
 - **The production measurement.** On 2026-10-09, on `exomem-alpha-01`, three cells mapped the bge-m3 int8 `model.onnx.data`:
   - Rss 290, 509 and 290 MB;
   - Pss 96, 315 and 96 MB.
@@ -31,23 +32,24 @@
 **Non-goals:**
 - Specifying the recall encoder's runtime again. `swap-embedding-runtime-to-onnx` owns it.
 - Deciding what an instrument asks, when it runs, or how its readings are used. `add-sensed-epistemic-model` owns that.
-- A shared inference process across tenants inside this runtime.
+- A shared inference process across tenants.
 - GPUs on Cloud.
 
 ## Decisions
 
 ### D1. One runtime rule
 
-Every model the Cloud image ships is a pinned, pre-baked artifact in ONNX, or in another format whose weights load file-backed. It loads offline, as int8 where its parity gate passes, with prepacking or any other load-time private copy disabled on Cloud. Personal servers keep the prepacked fast path.
+Every model the Cloud image ships is a pinned, pre-baked artifact in ONNX, or in another format whose weights load file-backed. It loads offline, with prepacking or any other load-time private copy disabled on Cloud. Personal servers keep the prepacked fast path.
 
+- A model ships as int8 only where a consumer fixture gates the int8 build (D3). A model with no such fixture ships at its reference precision. The image lane of `add-cloud-multimodal-processing` is the first case: no image relevance fixture exists, so its model ships as fp32 ONNX.
 - A runtime that copies its weights into private memory pays a full copy per cell. It is chosen only with a measured reason. CTranslate2 (faster-whisper) and Tesseract may be such runtimes (unverified); acceptance measures each one.
 - PyTorch is not in the Cloud image.
 
-### D2. Only immutable bytes are shared
+### D2. Only immutable bytes are shared, and local instruments run per cell
 
-Cells share read-only, file-backed weights through the page cache. Each cell keeps its own process, writable memory, caches and tokenizer state. So sharing costs no isolation: no tenant's text or state enters another tenant's process.
+Cells share read-only, file-backed weights through the page cache. Each cell keeps its own process, writable memory, caches and tokenizer state. So sharing costs no isolation: no tenant's text or state enters another tenant's process. This holds with no exception.
 
-This rule covers models that run inside the cells. `add-sensed-epistemic-model` specifies a different placement for instruments on Cloud: an in-cluster shared plane (its ruling R4, design D9). That plane has its own isolation contract and acceptance, and this change neither adopts nor changes it.
+The owner of `add-sensed-epistemic-model` ruled on 2026-10-09 that Cloud instruments run per cell on these shared, read-only weights. That drops the in-cluster shared sensing plane of its ruling R4 and design D9 (slice 5). The owner amends that change; this change does not edit it. Until the amendment lands, the two active changes disagree on where Cloud instruments run.
 
 ### D3. The parity gate
 
@@ -56,74 +58,89 @@ This rule covers models that run inside the cells. `add-sensed-epistemic-model` 
 | Encoder at its reference precision | minimum cosine ≥ 0.9999 on a fixed input set | `MIN_COSINE` in `tests/test_embedding_backend.py` |
 | Quantised encoder | each consumer's pinned fixture verdicts equal the unquantised reference's | how the bge-m3 int8 artifact was admitted (`embedding_backend._SERVED` comment) |
 | Scorer or transducer (reranker, captioner, speech) | agreement with the reference on a pinned sample | a bound recorded before the measurement |
-| Instrument (NLI, named entities, small language model) | its instrument fixture set | `frozen-verifiers`, `sensed-epistemic-model` |
+| Instrument (NLI, named entities, small language model) | its instrument fixture set, at the new pin | `frozen-verifiers`, `sensed-epistemic-model` |
 
-- A cosine of 0.9999 is the bound for a runtime substitution at the same precision. An int8 build cannot meet it against fp32: a shared int8 batch alone moves a vector by up to 0.02 cosine (archived `make-recall-multilingual` design). So a quantised encoder is gated on its consumers' verdicts instead, and it carries its own identity.
-- **A converted instrument is a new pin.** `add-sensed-epistemic-model` defines `instrument_id = sha256(model, revision, weights, runtime, runtime_version, template_version)`. An ONNX or int8 build of the NLI pin changes the weights and the runtime.
-  - Its gate is the existing fixture admission: `stance-v2-multilingual`, and `relation-v1-multilingual` at 20 of 20 including the negative twins, in the dedicated `nli` CI lane.
-  - The PyTorch pin stays admitted until the new pin passes.
-  - Stored readings move through the existing instrument migration and lazy re-sense (`add-sensed-epistemic-model` D3).
-  - This change adds no separate label-agreement bound for instruments.
+**Why int8 is gated on verdicts, not on cosine.** A cosine of 0.9999 is the bound for a runtime substitution at the same precision. An int8 build cannot meet it against fp32: a shared int8 batch alone moves a vector by up to 0.02 cosine (archived `make-recall-multilingual` design). So a quantised encoder is gated on its consumers' verdicts. Where no consumer fixture exists, there is no int8 gate, and the model ships at reference precision (D1). This is the one place these changes explain it.
 
-### D4. The recorded identity
+**A converted instrument is a new pin.** `add-sensed-epistemic-model` defines `instrument_id = sha256(model, revision, weights, runtime, runtime_version, template_version)`. An ONNX or int8 build of the NLI pin changes the weights and the runtime.
 
-Each artifact records its model, upstream revision, quantisation, file format and the digest of the bytes it loads. The pattern exists:
+- The owner ruled on 2026-10-09 that a frozen-verifier pin may name an Exomem-built derived artifact by its digest. The precedent is `embedding_backend.ensure_artifact`, which builds and checks the bge-m3 int8 artifact. The pin records:
+  - the upstream revision the artifact was built from;
+  - the conversion recipe and its version;
+  - the digest of the output manifest.
+- The artifact is published immutably, checked by digest at load, and loaded from local files only. A local rebuild whose digest differs is a different pin and labels nothing.
+- This needs a MODIFIED delta to the canonical `frozen-verifiers` requirement "A frozen verifier runs only under a pinned identity", which today requires the "exact repository-pinned upstream revision" to be resident. The delta adds "or a derived artifact named by its digest and recipe and built from that revision", and the same allowance where the constructor receives the artifact. It adds one scenario for a rebuilt artifact, and changes nothing else.
+- `add-sensed-epistemic-model` also modifies that requirement. Whichever change archives second refreshes its MODIFIED block onto the other's result and keeps both changes' additions.
+- Admission is the existing fixture gate at the new pin: `stance-v2-multilingual`, and `relation-v1-multilingual` at 20 of 20 including the negative twins, in the dedicated `nli` CI lane.
+- If the int8 build misses any fixture, the fp32 ONNX conversion becomes the candidate pin. The upstream quantised export already failed a contradiction fixture (`docs/hosted-inference-boundary.md`), so this fallback is likely to be used.
+- The PyTorch pin stays admitted until the new pin passes. Stored readings move through the existing instrument migration and lazy re-sense (`add-sensed-epistemic-model` D3).
+- This change adds no separate label-agreement bound for instruments.
 
-- `embedding_backend.ServedArtifact` holds revision, source files, quantisation, file format, artifact digest and asset digest.
+### D4. The recorded identity and the vector space
+
+Each artifact records its artifact identity: model, upstream revision, quantisation, file format and the digest of the bytes it loads. An artifact that Exomem builds also records its conversion recipe and version. The pattern exists:
+
+- `embedding_backend.ServedArtifact` holds revision, source files, quantisation, file format, artifact digest and asset digest, and `ensure_artifact` checks the digest on every load.
 - `EncoderProfile.fingerprint()` hashes model, pooling, prefixes, sequence limit and normalisation, plus revision, quantisation, format and digest for a served model. It leaves out the backend, so a runtime swap is not a model change.
 - `claims.VerifierPin` holds model, revision, artifact files, weights digest, label-map version and fixture set.
 
-A rebuilt artifact, another precision or another sequence limit is a new identity. The live example is the sensed model's cosine proposer: `sensed_model.COSINE_THETA` holds θ = 0.72 under the fingerprint `BAAI/bge-m3|cls|l2|74068c180d6514e8`, the pinned int8 artifact, and any other fingerprint proposes nothing until it is calibrated. This change keeps the bge-m3 bytes. Disabling prepacking is a session option outside the fingerprint, and the task 5.4 probe gave bit-identical vectors with it, so θ still applies on Cloud.
+Two different things key on this record:
+
+- **Calibrated values key on the artifact identity.** The live example is the sensed model's cosine proposer: `sensed_model.COSINE_THETA` holds θ = 0.72 under the fingerprint `BAAI/bge-m3|cls|l2|74068c180d6514e8`, the pinned int8 artifact. Any other fingerprint proposes nothing until it is calibrated. This change keeps the bge-m3 bytes. Disabling prepacking is a session option outside the fingerprint, and the task 5.4 probe gave bit-identical vectors with it, so θ still applies on Cloud.
+- **The vector space follows one rule.** A same-precision substitution that passes the encoder parity bound keeps the vector space, and its new artifact identity is recorded. This is the principle of `swap-embedding-runtime-to-onnx`: a backend swap is not a model change. Another model, precision, pooling, prefix set or sequence limit is another space.
+  - The recall encoder keeps its stricter canonical rule. `multilingual-recall` scenario "Another build of the same model is refused" makes another artifact digest another space. This change covers the other encoders, and does not relax that rule.
 
 ### D5. Sharing is measured, not assumed
 
-Each model's acceptance reads the Pss of its weights mapping in at least two cells on one node. The Pss values sum to about one copy when the weights are shared. Linux charges the page cache to the first cgroup that faults it, so a cell's own memory statistics do not show the sharing; Pss does.
+Each model's acceptance reads the Pss of its weights mapping in at least two cells on one node. When the weights are shared, the sum of the cells' Pss is about the largest single Rss, and far below the sum of their Rss, as the 2026-10-09 measurement in Context shows. Linux charges the page cache to the first cgroup that faults it, so a cell's own memory statistics do not show the sharing; Pss does.
 
 ### D6. Selection
 
-Accuracy comes from published benchmarks, leaderboards, model cards and papers, each cited with its date in the model's selection record. Exomem measures only what no benchmark covers:
+Accuracy comes from published benchmarks, leaderboards, model cards and papers, each cited with its date in the model's selection record. Exomem measures what no benchmark covers:
 
 - CPU speed at pinned threads on its hardware;
 - peak memory;
 - whether the weights are shared.
 
-A small sanity check catches a broken conversion. Model choices and language sets are deployment data or selection records, never lists in code.
+A small sanity check catches a broken conversion. A capability that selects a model may add terms for its kind; the speech terms of `add-cloud-multimodal-processing` are an example. Model choices and language sets are deployment data or selection records, never lists in code.
 
 ### D7. Converted models, each behind its own switch
 
 Each switch is off by default. A shipped artifact with its switch off does not load.
 
 - **(a) Reranker.** The reranker model is chosen under D6, and its script coverage stays declared for the `multilingual-recall` rerank gate. Its Cloud switch turns on only after its acceptance on a real cell: the parity gate, measured sharing, and the Cloud service profile's outcome and capacity gates with reranking on.
-- **(b) NLI stance verifier.** The artifact is a new pin under D3. Activation stays with `EXOMEM_CLAIM_POLARITY_NLI` and the no-nudge programme's S9. Hosted keeps its own resource admission (`hosted-tenant-cell`).
-- **(c) Multilingual named entities, GLiNER class.** The artifact and its runtime are available as an instrument runtime. Its outputs are instrument readings recorded in the ledger under rulings R1 and R2 of `add-sensed-epistemic-model`; "sensors" stay the deterministic families only. Whether and how entity recurrence (S5) consumes those readings belongs to `add-sensed-epistemic-model`.
-- **(d) Small language-model instruments, ONNX Runtime GenAI class.** The runtime path scores a closed label set: it reads the logits of the label tokens at one fixed position and normalises them over the closed set plus abstain (R1). Sampled text is never an instrument output. Templates, label maps, the ledger and governance stay with `add-sensed-epistemic-model`.
-- **(e) Device-side processing.** The same artifacts may run on the tenant's device: in the browser through onnxruntime-web, or in the CLI. That lets OCR and vectors be prepared before upload.
-  - A device runtime is supported only after its outputs meet the same-precision parity bound against the cell's runtime.
-  - The cell accepts device-produced vectors, and a device-produced extraction for an artifact that has none, only when the recorded artifact identity exactly equals the cell's.
-  - The data applies only to that tenant's vault, and the cell recomputes anything absent, mismatched or invalid.
-  - Identity equality proves that the claim matches the cell's artifact, not that the device ran it honestly. The harm is bounded to the tenant's own vault, which the tenant can already write.
-  - Canonical sidecars that arrive as vault content keep their existing rules. How device-produced data travels belongs to `add-exomem-cloud-vault-import`, which this change does not modify.
+- **(b) NLI stance verifier.** The artifact is a new derived pin under D3. Activation stays with `EXOMEM_CLAIM_POLARITY_NLI` and the no-nudge programme's S9. Hosted keeps its own resource admission (`hosted-tenant-cell`).
+- **(c) Multilingual named entities, GLiNER class.** The artifact and its runtime are available as an instrument runtime. Its outputs are instrument readings recorded in the ledger under rulings R1 and R2 of `add-sensed-epistemic-model`; "sensors" stay the deterministic families only. Whether and how entity recurrence (S5) consumes those readings belongs to `add-sensed-epistemic-model`. The artifact ships in an image only when an admitted instrument question uses it.
+- **(d) Small language-model instruments, ONNX Runtime GenAI class.** The runtime path returns the label-token logits at one fixed position. The instrument's label map reads them under the `frozen-verifiers` output rule. Sampled text is never an instrument output. Templates, label maps, the ledger and governance stay with `add-sensed-epistemic-model`. The artifact ships in an image only when an admitted instrument question uses it.
+- **(e) Device-side preparation.** The owner approved it. The same artifacts may run on the tenant's device, in the browser through onnxruntime-web or in the CLI, so that OCR and vectors can be prepared before upload. The cell trusts nothing it cannot check cheaply:
+  - A device runtime may be used only after its outputs meet the same-precision parity bound against the cell's runtime. WebAssembly kernels can differ slightly from native ones.
+  - An int8 artifact runs on a device only at one text per encode, because batching moves int8 vectors (D3).
+  - Device data carries a device-provenance mark.
+  - A batch is invalid when any item has the wrong artifact identity or the wrong shape, or when the cell's re-encoded random sample deviates beyond the bound. One invalid item rejects the whole batch, and the cell computes that data itself.
+  - Accepted data applies only to that tenant's vault. Accepted extraction results keep their mark and stay recomputable.
+  - Identity equality and the sample prove that the batch matches the cell's artifact, not that every item was computed honestly. The harm is bounded to the tenant's own vault, which the tenant can already write.
+  - Canonical sidecars that arrive as vault content keep their existing rules. How device-produced data travels, and how an import archive carries it, belong to `add-exomem-cloud-vault-import`, which this change only references.
 
 ## Risks / Trade-offs
 
 - **Disabling prepacking costs latency.** About 12% on short queries and 2% on long chunks, for one copy per node instead of one per cell. Personal servers keep prepacking.
-- **int8 can change verdicts.** The upstream quantised NLI export failed a contradiction fixture. The gate catches that, and the reference-precision artifact stays the candidate.
+- **int8 can change verdicts.** The upstream quantised NLI export failed a contradiction fixture. The gate catches that, and the fp32 conversion stays the candidate.
 - **A cell's memory statistics hide the sharing.** The page cache is charged to the cgroup that unpacked the image. Acceptance reads Pss, not the cell's `memory.stat`.
-- **Newer conversions are less proven.** GLiNER-class and GenAI-class ONNX paths are younger than the encoder path. Each ships only behind its switch and its gate.
-- **Browser numerics differ.** WebAssembly kernels can differ slightly from native ones. The device runtime meets the same-precision bound before it is supported.
+- **Newer conversions are less proven.** GLiNER-class and GenAI-class ONNX paths are younger than the encoder path. Each ships only behind its switch and its gate, and only when a question uses it.
+- **Device data is a new input.** The identity check, the shape check and the re-encoded sample bound it, and the harm stays in the uploading tenant's vault.
 
 ## Migration Plan
 
-1. Land the rule, the identity record and the gates. The encoder already conforms.
+1. Land the rule, the identity record, the gates and the `frozen-verifiers` allowance. The encoder already conforms.
 2. Convert the reranker behind its switch, and run its Cloud acceptance.
-3. Build the ONNX NLI pin when S9 needs it on Cloud. The PyTorch pin stays admitted until the new pin passes.
+3. Build the derived NLI pin when S9 needs it on Cloud. The PyTorch pin stays admitted until the new pin passes.
 4. Ship the named-entity and small language-model runtimes when `add-sensed-epistemic-model` admits a question that uses them.
-5. Add device-side processing after `add-exomem-cloud-vault-import` can carry the data.
+5. Add device-side preparation after `add-exomem-cloud-vault-import` can carry the data.
 
 Rollback: turn the switch off. The model stops loading, and the product behaves as it does without it.
 
 ## Open Questions
 
 - Whether this change owns the reranker's Cloud activation, as D7 (a) assumes, or a later change does.
-- The `frozen-verifiers` requirement asks that the pin's "exact repository-pinned upstream revision is resident". `docs/hosted-inference-boundary.md` records an available full ONNX export of about 1,064 MiB. If that export is published at an upstream revision, an fp32 ONNX pin fits the requirement as written (unverified). An int8 build made by Exomem is a derived manifest; whether a pin may name one is for the owner of `add-sensed-epistemic-model`.
 - The agreement bound for the reranker, recorded before its measurement.
+- The size of the device batch sample, and how the device-provenance mark is stored, are set at implementation with `add-exomem-cloud-vault-import`.
