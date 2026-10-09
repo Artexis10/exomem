@@ -290,3 +290,98 @@ def test_private_heading_read_uses_its_instance_without_publishing_that_meaning(
         assert exact["seeds"][0]["metadata"]["unit_ref"] == unit_ref
     with principal.request_scope(private_instances("limited")):
         assert commands.op_graph_context(vault, path=path)["nodes"] == []
+
+
+def test_a_public_unit_filter_never_names_a_private_extension(private_instances, vault):
+    """A private kind spelled like a public filter value is another entry."""
+    from exomem import find as find_module
+    from exomem import freshness, lexstore
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    path = "Knowledge Base/Notes/Insights/private-filter.md"
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(
+        "---\ntype: insight\nproject: private-project\n"
+        "exomem_id: 55555555-5555-4555-8555-555555555555\n---\n"
+        "# Private filter\n\n## Container\n\n### Protocol\n"
+        "- id: local-protocol\n\nPrivate procedure with a stable address.\n"
+    )
+    with principal.request_scope(private_instances("full")):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert all(freshness.rebaseline(vault).values())
+        lexstore.ensure_fresh(vault)
+
+        def kinds(filters):
+            hits = find_module.find(
+                vault, query="private procedure", scope="kb-only", mode="keyword",
+                graph=False, result_level="unit", filters=filters, limit=10,
+            )
+            return [hit.kind for hit in hits]
+
+        # Find is a public operation: its `protocol` names the public entry.
+        assert kinds({"unit.kind": {"$eq": "protocol"}}) == []
+        assert kinds({"unit.kind": {"$ne": "protocol"}}) == ["protocol"]
+
+
+def test_vector_candidates_take_their_selected_meaning_before_the_result_limit(private_instances, vault):
+    """Hidden or unrecognized occurrences spend no slot; unpublished coverage is never a miss."""
+    import numpy as np
+
+    from exomem import embedding_index, semantic_index
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    heading = "## Container\n\n### Protocol\n- id: local-protocol\n\nShared procedure text.\n"
+    pages = {
+        "private": ("Knowledge Base/Notes/Insights/vector-private.md", "project: private-project\n", heading),
+        "public": ("Knowledge Base/Notes/Insights/vector-public.md", "", "- [decision] Public procedure.\n\n" + heading),
+        "unpublished": ("Knowledge Base/Notes/Insights/vector-unpublished.md", "", "Plain prose only.\n"),
+    }
+    for number, (path, extra, body) in enumerate(pages.values(), start=6):
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\n{extra}exomem_id: {number}6666666-6666-4666-8666-666666666666\n---\n"
+            f"# Vector {number}\n\n{body}"
+        )
+    index = embedding_index.EmbeddingIndex(vault)
+    query = np.eye(index.dim, dtype=np.float32)[0]
+    with principal.request_scope(private_instances("full")):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        for name in ("private", "public"):
+            state = semantic_index.build_parent_index_state(vault, pages[name][0])
+            # Every protocol heading is nearer the query than the public decision.
+            vectors = np.asarray([
+                query if occurrence.kind_raw == "Protocol" else np.eye(index.dim, dtype=np.float32)[1] + 0.5 * query
+                for occurrence in state.occurrences
+            ], dtype=np.float32)
+            index.upsert_semantic_units(state, vectors, 0.0)
+
+        def search(allowed):
+            incomplete: list[str] = []
+            hits = index.search_semantic_units(
+                query, 1, allowed_parent_paths=allowed, validate=False, incomplete_out=incomplete
+            )
+            return [(hit.parent_path, hit.unit_ref) for hit in hits], incomplete
+
+        published = {pages["private"][0], pages["public"][0]}
+        private_unit = semantic_index.selected_parent_index_state(vault, pages["private"][0]).document.units[0]
+        assert private_unit.kind == "protocol"
+        assert search(published) == ([(pages["private"][0], private_unit.unit_ref)], [])
+        public_units = semantic_index.selected_parent_index_state(vault, pages["public"][0]).document.units
+        assert [unit.category for unit in public_units] == ["decision"]
+
+    with principal.request_scope(private_instances("limited")):
+        # The hidden private page and the public page's unrecognized heading outrank
+        # the decision, yet neither takes the single slot.
+        assert search(published) == ([(pages["public"][0], public_units[0].unit_ref)], [])
+        allowed = published | {pages["unpublished"][0]}
+        assert search(allowed)[1] == [pages["unpublished"][0]]
+        unpublished = semantic_index.build_parent_index_state(vault, pages["unpublished"][0])
+        assert unpublished.occurrences == ()
+        index.upsert_semantic_units(unpublished, np.zeros((0, index.dim), dtype=np.float32), 0.0)
+        assert search(allowed) == ([(pages["public"][0], public_units[0].unit_ref)], [])

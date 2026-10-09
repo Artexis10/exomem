@@ -2134,6 +2134,7 @@ def _preflight_existing(
             entry_generation,
             corpus_census=before_corpus_census,
             status_dependencies=after_corpus.status_dependencies,
+            definitions=semantic_contract.page_definitions_witnesses(before, after),
         )
     return ExistingPreflight(
         applicability,
@@ -4254,6 +4255,7 @@ def preflight_creation(
             status_dependencies=tuple(
                 sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
             ),
+            definitions=semantic_contract.page_definitions_witnesses(state),
         )
         return CreationPreflight(
             "full",
@@ -4287,6 +4289,7 @@ def preflight_creation(
         status_dependencies=tuple(
             sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
         ),
+        definitions=semantic_contract.page_definitions_witnesses(state),
     )
     return CreationPreflight(
         applicability,
@@ -4325,6 +4328,7 @@ def _capture_validity_stamp(
     *,
     corpus_census: tuple | None = None,
     status_dependencies: tuple[tuple[str, str], ...] | None = None,
+    definitions: tuple[Any, ...] = (),
 ) -> tuple | None:
     """Assemble the preflight validity stamp WITHOUT a second corpus walk.
 
@@ -4345,6 +4349,7 @@ def _capture_validity_stamp(
     sc_token = semantic_contract.corpus_validity_token(
         root,
         status_dependencies=status_dependencies,
+        definitions=definitions,
         corpus_census=(
             corpus_census
             if corpus_census is not None

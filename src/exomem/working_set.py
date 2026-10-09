@@ -486,7 +486,7 @@ def build_packet(
             item.relevance_order,
             0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
-            _lifecycle_rank(item.lifecycle, status_basis=status_basis),
+            _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
             -_date_rank(item.updated),
             # Most units author no time of their own; their page's time orders
             # them rather than their ref's spelling.
@@ -656,7 +656,7 @@ def build_packet(
             if used + cost > material_limit or not text:
                 _defer(item, "budget")
                 continue
-            if status_basis.classify(item.lifecycle).historical:
+            if status_basis.classify(item.lifecycle, path=item.path or None).historical:
                 unit["history"] = True
             if promoted and promoted_used + cost > promoted_share:
                 _defer(item, "budget")
@@ -898,9 +898,11 @@ def _redundant_superseded(item: LaneItem, present_paths: frozenset[str] | set[st
     return any(target in present_paths for target in _superseded_targets(item))
 
 
-def _lifecycle_rank(lifecycle: str, *, status_basis: lifecycle_statuses.Basis | None = None) -> int:
+def _lifecycle_rank(
+    lifecycle: str, *, path: str | None = None, status_basis: lifecycle_statuses.Basis | None = None
+) -> int:
     status_basis = status_basis or lifecycle_statuses.Basis(None)
-    return 0 if status_basis.classify(lifecycle).require() == "live" else 1
+    return 0 if status_basis.classify(lifecycle, path=path).require() == "live" else 1
 
 
 def _date_rank(updated: str) -> int:
@@ -1971,7 +1973,7 @@ def _is_current_page(
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
-    return status_basis.classify(frontmatter.get("status")).carryable
+    return status_basis.classify(frontmatter.get("status"), path=text, frontmatter=frontmatter).carryable
 
 
 def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
@@ -4458,7 +4460,7 @@ def _referent_filters(
     retired = {
         path
         for path, row in by_path.items()
-        if not status_basis.classify(getattr(row, "lifecycle", None)).carryable
+        if not status_basis.classify(getattr(row, "lifecycle", None), path=path).carryable
     }
 
     def admissible(path: str) -> bool:
@@ -5067,7 +5069,7 @@ def _recent_frontmatter_statement(
         if not isinstance(value, (str, int, float)) or not str(value).strip():
             continue
         if name == "status":
-            classification = status_basis.classify(value)
+            classification = status_basis.classify(value, path=rel, frontmatter=frontmatter)
             classification.require()
             if not classification.unregistered:
                 continue

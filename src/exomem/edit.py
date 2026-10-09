@@ -623,7 +623,9 @@ def load_editable(
         )
 
     if (
-        lifecycle_statuses.Basis(vault_root).classify(parsed.frontmatter.get("status")).require()
+        lifecycle_statuses.Basis(vault_root).classify(
+            parsed.frontmatter.get("status"), path=rel_path, frontmatter=parsed.frontmatter
+        ).require()
         == "superseded"
     ):
         raise EditError(

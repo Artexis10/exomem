@@ -33,7 +33,6 @@ is guaranteed to be uncontended.
 
 from __future__ import annotations
 
-import dataclasses
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -41,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import epistemic_graph, freshness, graph_sync, state_paths
+from exomem import epistemic_graph, freshness, state_paths
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
@@ -380,62 +379,6 @@ def test_sealing_the_rebuild_opens_no_sqlite_under_the_publication_hold(
         f"mutations at the shared boundary: {opened_under_hold}"
     )
     assert _journal_mode(graph.path) == "wal"
-
-
-def test_an_unsealable_rebind_candidate_falls_back_instead_of_failing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A seal refusal at the registry-rebind site must answer `False`, not raise.
-
-    That path has no `except` of its own, only a `finally`. An escaping refusal
-    would skip the full-rebuild fallback and surface to the caller as a
-    convergence failure, which overstates the problem: not being able to rebind
-    the registry in place is exactly the condition the full rebuild exists for.
-    `False` is the answer the function already gives for "cannot rebind".
-    """
-
-    graph = _published_graph(tmp_path)
-
-    # `rebind_registry` only proceeds for a full-scope checkpoint that the
-    # canonical epoch already names. A plain rebuild leaves the epoch's
-    # checkpoint unset and a governed write makes it `paths`-scoped, so the
-    # full-scope epoch is supplied here; everything from the private candidate
-    # build onward then runs for real up to the seal.
-    checkpoint = graph_sync.GraphSyncCheckpoint.create(
-        generation=1,
-        mutation_id=f"{1:024x}",
-        paths=(),
-        created_paths=(),
-        scope="full",
-    )
-    epoch = dataclasses.replace(
-        graph_sync.canonical_publication_epoch(tmp_path), checkpoint=checkpoint
-    )
-    monkeypatch.setattr(graph_sync, "canonical_publication_epoch", lambda _root: epoch)
-
-    # A registry rebind exists for exactly one condition: the published store's
-    # extension-registry hash no longer matches the loaded registry. Simulating
-    # that change is what makes `_registry_rebind_source_proof` produce a proof
-    # and the path reach the seal.
-    graph.registry = dataclasses.replace(graph.registry, extension_hash="f" * 64)
-
-    refusals: list[Path] = []
-
-    def refuse(_vault_root: Path, temporary: Path) -> None:
-        refusals.append(temporary)
-        raise sqlite3.DatabaseError("proven graph rebuild could not be sealed in WAL mode")
-
-    monkeypatch.setattr(epistemic_graph, "_seal_graph_rebuild_as_wal", refuse)
-
-    declined = graph.rebind_registry(checkpoint)
-
-    assert refusals, "the seal was never reached, so the assertion below would be vacuous"
-    assert declined is False, (
-        "an unsealable rebind candidate raised instead of answering False, so the "
-        "full-rebuild fallback is skipped and the caller reports a convergence "
-        "failure for a condition the full rebuild already handles"
-    )
 
 
 def test_a_companion_beside_the_rebuild_refuses_the_immutable_backup(tmp_path: Path) -> None:

@@ -445,7 +445,7 @@ def resolve_referents(
     active_anchors = {
         item.path
         for item in ordered_hits[: max(0, anchor_cap)]
-        if status_basis.classify(item.status).carryable
+        if status_basis.classify(item.status, path=item.path).carryable
     }
     hits_by_path = {item.path: item for item in hits}
     qualifier_stems = frozenset(stem_word(qualifier) for qualifier in cue.qualifiers)

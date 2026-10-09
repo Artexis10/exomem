@@ -46,6 +46,11 @@ class SemanticParentIndexState:
     def occurrences(self) -> tuple[semantic_units.StructuralOccurrence, ...]:
         return semantic_units.structural_occurrences(self.candidates) if self.candidates else ()
 
+    @property
+    def instance_id(self) -> str | None:
+        """The vocabulary instance this interpretation selected; None without definitions."""
+        return self.definitions.instance_id if self.definitions is not None else None
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "frontmatter", MappingProxyType(dict(self.frontmatter)))
 
@@ -642,7 +647,7 @@ def _rows_by_parent(
     }
 
 
-def _sqlite_unit_rows(path: Path, table: str) -> dict[str, _SidecarParentRows]:
+def _sqlite_unit_rows(path: Path, table: str, key_column: str) -> dict[str, _SidecarParentRows]:
     if not path.exists():
         return {}
     try:
@@ -650,7 +655,7 @@ def _sqlite_unit_rows(path: Path, table: str) -> dict[str, _SidecarParentRows]:
         try:
             rows = conn.execute(
                 f"SELECT parent_path, parent_ref, parent_generation, "
-                f"parent_source_hash, parser_version, unit_ref FROM {table}"
+                f"parent_source_hash, parser_version, {key_column} FROM {table}"
             ).fetchall()
         finally:
             conn.close()
@@ -720,10 +725,6 @@ def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
     }
 
 
-def _unit_refs(state: SemanticParentIndexState) -> frozenset[str]:
-    return frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
-
-
 def _occurrence_keys(state: SemanticParentIndexState) -> frozenset[str]:
     """Every structural occurrence a neutral sidecar stores for this parse."""
     if state.candidates is None:
@@ -765,8 +766,8 @@ def audit_semantic_unit_sidecars(
     expected_by_ref = {
         state.parent_ref: path for path, state in expected.items() if state.parent_ref is not None
     }
-    # Each sidecar with the keys it stores for one parse: selected unit refs, or
-    # the structural occurrences shared rows hold before any interpretation.
+    # Each sidecar with the keys it stores for one parse: the structural
+    # occurrences shared rows hold before any interpretation.
     sidecars: list[
         tuple[
             str,
@@ -778,7 +779,7 @@ def audit_semantic_unit_sidecars(
         sidecars.append(
             (
                 "lexical",
-                _sqlite_unit_rows(lexstore.lexical_path(vault_root), "semantic_units"),
+                _sqlite_unit_rows(lexstore.lexical_path(vault_root), "semantic_units", "unit_ref"),
                 _occurrence_keys,
             )
         )
@@ -786,8 +787,10 @@ def audit_semantic_unit_sidecars(
         sidecars.append(
             (
                 "vector",
-                _sqlite_unit_rows(index_paths.sidecar_path(vault_root), "semantic_unit_vectors"),
-                _unit_refs,
+                _sqlite_unit_rows(
+                    index_paths.sidecar_path(vault_root), "semantic_unit_vectors", "unit_key"
+                ),
+                _occurrence_keys,
             )
         )
     if include_graph:

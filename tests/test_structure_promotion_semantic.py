@@ -222,8 +222,8 @@ def test_seeded_unit_vectors_read_back_through_the_corpus_accessor(tmp_path: Pat
 
     assert set(grouped) == {state.path}
     rows = grouped[state.path]
-    assert [row.unit_ref for row in rows] == [u.unit_ref for u in state.document.units]
-    assert [row.source_order for row in rows] == list(range(len(state.document.units)))
+    assert [row.unit_key for row in rows] == [occurrence.key for occurrence in state.occurrences]
+    assert [row.source_order for row in rows] == list(range(len(state.occurrences)))
     # The geometry survives the round trip exactly — this is what the gates read.
     expected = _group(0, 100, 4, _cohesive()) + _group(1, 200, 5, _cohesive())
     for row, want in zip(rows, expected, strict=True):
@@ -251,8 +251,8 @@ def test_corpus_accessor_groups_every_parent_and_pages_the_read(tmp_path: Path) 
 
     # Pagination is an internal batching detail, never a truncation.
     batched = index.all_semantic_unit_vectors(batch_size=2)
-    assert {path: [r.unit_ref for r in rows] for path, rows in batched.items()} == {
-        path: [r.unit_ref for r in rows] for path, rows in grouped.items()
+    assert {path: [r.unit_key for r in rows] for path, rows in batched.items()} == {
+        path: [r.unit_key for r in rows] for path, rows in grouped.items()
     }
     assert first.exists() and second.exists()
 

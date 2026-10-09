@@ -580,7 +580,11 @@ def counts_as_evidence(page: Any, *, indexable: bool, status_basis: Any) -> bool
     """
     if not indexable:
         return False
-    return status_basis.classify(page.frontmatter.get("status")).recurrence_evidence
+    return status_basis.classify(
+        page.frontmatter.get("status"),
+        path=getattr(page, "rel_path", None),
+        frontmatter=page.frontmatter,
+    ).recurrence_evidence
 
 
 def _digest(value: object) -> str:

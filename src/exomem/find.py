@@ -2171,7 +2171,7 @@ def _eligible_unit_records(
             if structured_filters.evaluate_filter(
                 plan,
                 page=page_value,
-                unit=structured_filters.unit_view(unit),
+                unit=structured_filters.unit_view(unit, instance=state.instance_id),
             ):
                 eligible[unit.unit_ref] = (page, unit, source_order)
     return eligible
@@ -2258,7 +2258,7 @@ def _hydrate_indexed_unit_records(
         if not structured_filters.evaluate_filter(
             plan,
             page=structured_filters.page_view(page),
-            unit=structured_filters.unit_view(unit),
+            unit=structured_filters.unit_view(unit, instance=state.instance_id),
         ):
             continue
         records[hit.unit_ref] = (page, unit, getattr(hit, "source_order", source_order))
@@ -2315,7 +2315,7 @@ def _unit_rank_score(
     config: RankingConfig,
     status_basis: lifecycle_statuses.Basis,
 ) -> float:
-    if not prefer_active or status_basis.classify(page.frontmatter.get("status")).require() != "superseded":
+    if not prefer_active or status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).require() != "superseded":
         return raw_score
     penalty = config.superseded_penalty
     return raw_score * penalty if raw_score >= 0 else raw_score / penalty
@@ -2401,15 +2401,25 @@ def _vector_unit_candidates(
                 with recall_space.encoding_for(index):
                     query_vector = embeddings.embed_texts([query], is_query=True)[0]
         recall_space.require_same_space(index, encoded_for, query_vector)
+        incomplete: list[str] = []
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
             validate=False,
+            incomplete_out=incomplete,
         )
+        if incomplete and not hits:
+            # Unproved coverage is never a proved miss.
+            return (
+                [],
+                {"status": "unavailable", "reason": "coverage_incomplete", "model": model_name},
+                "kb",
+            )
         profile = {
             "status": "participated" if hits else "available_nonmatching",
+            **({"coverage": "incomplete"} if incomplete else {}),
             "backend": type(index).__name__,
             "model": recall_space.serving_model(index),
             "metric": {
@@ -2694,7 +2704,11 @@ def _find_semantic_units(
         if prefer_active:
             ordered.sort(
                 key=lambda record: (
-                    status_basis.classify(record[0].frontmatter.get("status")).require()
+                    status_basis.classify(
+                        record[0].frontmatter.get("status"),
+                        path=record[0].rel_path,
+                        frontmatter=record[0].frontmatter,
+                    ).require()
                     == "superseded"
                 )
             )
@@ -2725,12 +2739,18 @@ def _find_semantic_units(
         vector_candidate_limit = (
             len(vector_allowed_refs) if vector_allowed_refs is not None else candidate_limit + 1
         )
+        vector_parent_paths = snapshot.recall_paths(scope)
+        if allowed_parent_paths is not None:
+            vector_parent_paths = vector_parent_paths & allowed_parent_paths
+        if vector_allowed_refs is not None:
+            # Public refs are per-reader meanings; their parents bound the rows read.
+            vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
         vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
             vault_root,
             query=query,
             candidate_limit=vector_candidate_limit,
             allowed_unit_refs=vector_allowed_refs,
-            allowed_parent_paths=(snapshot.recall_paths(scope) if allowed_parent_paths is None else snapshot.recall_paths(scope) & allowed_parent_paths),
+            allowed_parent_paths=vector_parent_paths,
             degraded_out=degraded_out,
             failed_out=failed_out,
             timings=timings,
@@ -2844,7 +2864,9 @@ def _find_semantic_units(
                 bool(
                     prefer_active
                     and status_basis.classify(
-                        records[unit_ref][0].frontmatter.get("status")
+                        records[unit_ref][0].frontmatter.get("status"),
+                        path=records[unit_ref][0].rel_path,
+                        frontmatter=records[unit_ref][0].frontmatter,
                     ).require()
                     == "superseded"
                 ),
@@ -2892,7 +2914,9 @@ def _find_semantic_units(
                     bool(
                         prefer_active
                         and status_basis.classify(
-                            records[item[0]][0].frontmatter.get("status")
+                            records[item[0]][0].frontmatter.get("status"),
+                            path=records[item[0]][0].rel_path,
+                            frontmatter=records[item[0]][0].frontmatter,
                         ).require()
                         == "superseded"
                     ),
@@ -3040,7 +3064,7 @@ def _annotate_matched_units(
             if structured_filters.evaluate_filter(
                 plan,
                 page=page_value,
-                unit=structured_filters.unit_view(unit),
+                unit=structured_filters.unit_view(unit, instance=state.instance_id),
             )
         ]
         hit.matched_units = [
@@ -3119,7 +3143,8 @@ def _eligible_filter_paths(
 
                     state = semantic_index.selected_parent_index_state(vault_root, emitted.path)
                     units = tuple(
-                        structured_filters.unit_view(unit) for unit in state.document.units
+                        structured_filters.unit_view(unit, instance=state.instance_id)
+                        for unit in state.document.units
                     )
                 except (OSError, UnicodeError, ValueError) as error:
                     log.warning(
@@ -3617,7 +3642,10 @@ def _managed_page_metadata(
                     "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n" + page.body
                 )
                 state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
-                units = tuple(structured_filters.unit_view(unit) for unit in state.document.units)
+                units = tuple(
+                    structured_filters.unit_view(unit, instance=state.instance_id)
+                    for unit in state.document.units
+                )
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
                 page.parent_media + ".md" if page.parent_media else None,
@@ -3820,7 +3848,8 @@ def _indexed_eligible_filter_paths(
                 try:
                     state = semantic_index.selected_parent_index_state(vault_root, emitted.rel_path)
                     units = tuple(
-                        structured_filters.unit_view(unit) for unit in state.document.units
+                        structured_filters.unit_view(unit, instance=state.instance_id)
+                        for unit in state.document.units
                     )
                 except (OSError, UnicodeError, ValueError) as error:
                     log.warning(
@@ -4792,7 +4821,7 @@ def _find_semantic(
                             )
                     if prefer_active:
                         factor = _status_multiplier(
-                            status_basis.classify(h.status).require(), config
+                            status_basis.classify(h.status, path=h.path).require(), config
                         )
                         before = adjusted
                         adjusted *= factor

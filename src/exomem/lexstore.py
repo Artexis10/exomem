@@ -3108,6 +3108,7 @@ def _eligibility_metadata_query(
                 tags=json.loads(row[10]),
                 context=row[11],
                 form=row[6],
+                instance=view.instance(str(path)),
             )
             if verdict is not None:
                 unit["verdict"] = verdict
@@ -7142,7 +7143,7 @@ class LexicalStore:
                     (f'"{token}"', paths_json, *params),
                 )
                 for path, status in rows:
-                    if status_basis.classify(status).carryable:
+                    if status_basis.classify(status, path=path).carryable:
                         count += 1
                         if len(bounded) < limit:
                             bounded.append(str(path))

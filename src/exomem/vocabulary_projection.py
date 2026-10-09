@@ -448,7 +448,9 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
                 }
             try:
                 current_pair &= status_basis.classify(
-                    page.get("frontmatter", {}).get("status")
+                    page.get("frontmatter", {}).get("status"),
+                    path=targets[ref],
+                    frontmatter=page.get("frontmatter", {}),
                 ).live
             except lifecycle_statuses.OpError:
                 return {

@@ -90,10 +90,10 @@ class Context:
     def __post_init__(self) -> None:
         self.status_basis = lifecycle_statuses.Basis(self.vault_root)
 
-    def live_status(self, value: object) -> bool:
+    def live_status(self, value: object, path: str | None = None) -> bool:
         """An unavailable dependent classification defers this page's proposal."""
         try:
-            return self.status_basis.classify(value).live
+            return self.status_basis.classify(value, path=path).live
         except lifecycle_statuses.OpError as error:
             raise Deferred("status_unavailable") from error
 
@@ -728,7 +728,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     ).fetchone()
     if node is None or node[0] != "entity":
         return None
-    if not ctx.live_status(node[1]):
+    if not ctx.live_status(node[1], entity):
         return None
     entity_date = _date(node[2], node[3])
     from . import epistemic_graph
@@ -1895,7 +1895,7 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
                     subject,
                 ),
             )
-            if _visible(keep, str(row[0])) and ctx.live_status(row[3])
+            if _visible(keep, str(row[0])) and ctx.live_status(row[3], str(row[0]))
         ),
         keep,
     )

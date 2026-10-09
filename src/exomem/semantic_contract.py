@@ -1992,15 +1992,18 @@ def corpus_validity_token(
     *,
     corpus_census: tuple | None = None,
     status_dependencies: tuple[tuple[str, str], ...] | None = None,
+    definitions: tuple[instances.PageDefinitions, ...] = (),
 ) -> tuple | None:
     """Stable identity for narrow-boundary preflight reuse.
 
     Combines ``_corpus_census`` (every corpus/config input
     ``build_corpus_context`` reads) with ``_relation_review_census`` (the
     review-artifact and lifecycle-sidecar inputs the plain corpus census
-    does not cover). ``None`` means some input cannot be censused cheaply;
-    callers must then always revalidate rather than reuse a pre-boundary
-    result.
+    does not cover). ``definitions`` are the selected vocabulary witnesses
+    the verdict used; the boundary re-admits each one, as it does the
+    lifecycle status dependencies. ``None`` means some input cannot be
+    censused cheaply; callers must then always revalidate rather than reuse
+    a pre-boundary result.
 
     Pass ``corpus_census`` to reuse a census that was just walked (e.g. the
     one ``build_corpus_context`` validated its cache with) instead of paying
@@ -2014,6 +2017,8 @@ def corpus_validity_token(
     basis = lifecycle_statuses.Basis(root)
     if not all(basis.matches(dependency) for dependency in status_dependencies):
         return None
+    if not all(witness.current(root) for witness in definitions):
+        return None
     corpus = (
         corpus_census
         if corpus_census is not None
@@ -2024,7 +2029,7 @@ def corpus_validity_token(
     review = _relation_review_census(root)
     if review is None:
         return None
-    return (corpus, review, status_dependencies)
+    return (corpus, review, status_dependencies, definitions)
 
 
 def cached_corpus_census(root: Path) -> tuple | None:
@@ -2040,6 +2045,11 @@ def cached_corpus_census(root: Path) -> tuple | None:
     with _CORPUS_CONTEXT_CACHE_LOCK:
         entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
     return entry[0] if entry is not None else None
+
+
+def page_definitions_witnesses(*states: Any) -> tuple[instances.PageDefinitions, ...]:
+    """The selected vocabulary definitions these page states were judged with."""
+    return tuple(state.definitions for state in states if state is not None and state.definitions is not None)
 
 
 def validity_stamp_current(
@@ -2061,12 +2071,15 @@ def validity_stamp_current(
     if stamp is None or commit_generation is None or egress.owner_only_aggregate(root) is not None:
         return False
     sc_token, captured_generation = stamp
-    if sc_token is None or len(sc_token) != 3 or captured_generation is None:
+    if sc_token is None or len(sc_token) != 4 or captured_generation is None:
         return False
     if commit_generation != captured_generation:
         return False
     basis = lifecycle_statuses.Basis(root)
     if not all(basis.matches(dependency) for dependency in sc_token[2]):
+        return False
+    # A hand edit of an overlay or binding moves no commit generation.
+    if not all(witness.current(root) for witness in sc_token[3]):
         return False
     fresh_review = _relation_review_census(root)
     return fresh_review is not None and fresh_review == sc_token[1]

@@ -33,6 +33,7 @@ land in the refused sidecar and is built by the job's catch-up.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -173,6 +174,7 @@ def _eligible_pages(vault_root: Path) -> Iterator[tuple[Path, Any]]:
 def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, Any]]) -> bool:
     """A live write's model identity does not prove the preloaded corpus was built."""
     from . import semantic_index
+    from .embedding_index import expected_parent_state
 
     stored = active.file_mtimes()
     stored_units = active.semantic_unit_parent_states()
@@ -183,11 +185,8 @@ def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, 
             state = semantic_index.build_parent_index_state(vault_root, md)
         except (OSError, UnicodeError, ValueError):
             state = None
-        if state is not None:
-            refs = frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
-            have = stored_units.get(page.rel_path)
-            if (have is not None or refs) and have != (frozenset({state.parent_generation}), refs):
-                return True
+        if state is not None and stored_units.get(page.rel_path) != expected_parent_state(state):
+            return True
     return False
 
 
@@ -258,6 +257,7 @@ def _pass(
     """One pass over the vault into the new sidecar: `(finished, paths encoded)`."""
     from . import access, embeddings, semantic_index
     from . import find as find_module
+    from .embedding_index import expected_parent_state
 
     shadow = embeddings.get_embedding_index(vault_root, path=plan_.shadow_path)
     stored = shadow.file_mtimes()
@@ -279,11 +279,8 @@ def _pass(
             unit_state = None
         if unit_state is not None:
             units_seen.add(page.rel_path)
-            refs = frozenset(
-                unit.unit_ref for unit in unit_state.document.units if unit.unit_ref is not None
-            )
-            have = stored_units.get(page.rel_path)
-            if have != (frozenset({unit_state.parent_generation}), refs) and (have is not None or refs):
+            # Every parsed parent owes a coverage record, even with no occurrence.
+            if stored_units.get(page.rel_path) != expected_parent_state(unit_state):
                 pending_units.append((unit_state, md, page.mtime))
         chunks = embeddings._chunks_for_page(vault_root, page)
         if not chunks:
@@ -331,24 +328,18 @@ def _pass(
             offset += count
         _note_progress(vault_root, len(flat), time.monotonic() - started, done=len(batch))
 
-    for batch in batches(
-        pending_units,
-        lambda item: sum(unit.unit_ref is not None for unit in item[0].document.units),
-    ):
+    for batch in batches(pending_units, lambda item: len(item[0].occurrences)):
         if should_stop():
             _update(vault_root, state="paused")
             return False, encoded_paths
-        texts = [
-            unit.content
-            for state, _md, _mtime in batch
-            for unit in state.document.units
-            if unit.unit_ref is not None
-        ]
-        with shadow.encoding():
+        occurrences = [state.occurrences for state, _md, _mtime in batch]
+        texts = [occurrence.content for items in occurrences for occurrence in items]
+        # Coverage records alone need no model.
+        with shadow.encoding() if texts else contextlib.nullcontext():
             vectors = _encode_one_by_one(texts)
         offset = 0
-        for state, md, mtime in batch:
-            count = sum(unit.unit_ref is not None for unit in state.document.units)
+        for (state, md, mtime), items in zip(batch, occurrences, strict=True):
+            count = len(items)
             if _mtime(md) == mtime:
                 shadow.upsert_semantic_units(state, vectors[offset : offset + count], mtime)
             offset += count
@@ -370,6 +361,8 @@ def _encode_one_by_one(texts: list[str]) -> Any:
 
     from . import embeddings
 
+    if not texts:
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     return np.vstack([embeddings.embed_texts([text], is_query=False) for text in texts])
 
 

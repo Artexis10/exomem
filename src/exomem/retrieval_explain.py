@@ -494,7 +494,7 @@ class RetrievalTrace:
                 "final_sort_tuple": [
                     bool(
                         prefer_active
-                        and status_basis.classify(page.frontmatter.get("status")).require()
+                        and status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).require()
                         == "superseded"
                     ),
                     page.updated,
@@ -624,7 +624,7 @@ class RetrievalTrace:
             else:
                 raw_score = lexical_scores[unit_ref]
             factor = 1.0
-            if prefer_active and status_basis.classify(page.frontmatter.get("status")).require() == "superseded":
+            if prefer_active and status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).require() == "superseded":
                 factor = superseded_penalty if raw_score >= 0 else 1.0 / superseded_penalty
             adjusted_score = raw_score * factor
             evidence: dict[str, Any] = {
@@ -643,7 +643,7 @@ class RetrievalTrace:
                     adjusted_score,
                     bool(
                         prefer_active
-                        and status_basis.classify(page.frontmatter.get("status")).require()
+                        and status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).require()
                         == "superseded"
                     ),
                     page.rel_path,
@@ -653,7 +653,7 @@ class RetrievalTrace:
                 "tie_breaks": {
                     "superseded": bool(
                         prefer_active
-                        and status_basis.classify(page.frontmatter.get("status")).require()
+                        and status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).require()
                         == "superseded"
                     ),
                     "parent_path": page.rel_path,

@@ -510,9 +510,7 @@ def _vector_table(vault: Path, paths: list[str], vectors: list) -> dict:
     index = fx.epistemic_graph.EpistemicGraphIndex(vault)
     for path, vec in zip(paths, vectors, strict=True):
         (unit,) = [node for node in index.nodes(path=path) if node["metadata"].get("unit_ref")]
-        out[path] = {
-            unit["metadata"]["unit_ref"]: (sensing.text_sha256(sensing.extract_text(unit["text"])), vec)
-        }
+        out[path] = {sensing.text_sha256(sensing.extract_text(unit["text"])): vec}
     return out
 
 
@@ -569,8 +567,8 @@ def test_one_pass_over_the_vectors_serves_every_page_of_a_tick(
         sensed_model, "_read_blocks", lambda conn: (reads.append(1), read_blocks(conn))[1]
     )
     # c0 moves away from the others; c0, c1 and c2 are processed in one tick.
-    (ref, (digest, _vector)), = table[paths[0]].items()
-    table[paths[0]] = {ref: (digest, np.array([0.0, 0.0, 1.0], dtype=np.float32))}
+    (digest,) = table[paths[0]]
+    table[paths[0]] = {digest: np.array([0.0, 0.0, 1.0], dtype=np.float32)}
     for path in paths[:3]:
         fx.edit(vault, path, (vault / path).read_text(encoding="utf-8") + "\nA later line.\n")
     sf.settle(vault)
@@ -617,9 +615,9 @@ def test_pages_in_one_tick_find_the_cosine_pairs_separate_ticks_find(
             (node["metadata"]["unit_ref"], node["text"])
             for node in index.nodes(path=path) if node["metadata"].get("unit_ref")
         )
-        for ref, text in units:
+        for _ref, text in units:
             digest = sensing.text_sha256(sensing.extract_text(text))
-            table.setdefault(path, {})[ref] = (digest, next(unit_vectors))
+            table.setdefault(path, {})[digest] = next(unit_vectors)
     sf.enable(monkeypatch, vectors=table)
 
     def cosine_pairs() -> list[tuple]:

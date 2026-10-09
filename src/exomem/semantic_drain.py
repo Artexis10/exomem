@@ -75,7 +75,7 @@ def _small_parent(root: Path, path: Path) -> bool:
             if chunks is None or len(chunks) > 3:
                 return False
             state = semantic_index.current_parent_index_state(root, path, source=prepared.source)
-            return sum(unit.unit_ref is not None for unit in state.document.units) <= 3
+            return len(state.occurrences) <= 3
     except (OSError, UnicodeError, ValueError, vault.PathGuardError,
             runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
         return False

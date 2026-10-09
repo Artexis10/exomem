@@ -1531,37 +1531,6 @@ def _admit_epoch_inputs(
     raise GraphEpochUnreadable()
 
 
-def registry_epoch_writes(
-    vault_root: Path,
-) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None]:
-    """Build the full-scope epoch owned by an exact registry replacement."""
-    from .vault import PlannedWrite
-
-    root = Path(vault_root)
-    epoch = _admit_epoch_inputs(root)
-    checkpoint = next_checkpoint(
-        current=epoch.checkpoint,
-        acknowledged_generation=(
-            epoch.acknowledgement.generation
-            if epoch.acknowledgement is not None
-            else 0
-        ),
-        floor_generation=epoch.floor.generation if epoch.floor is not None else 0,
-        mutation_id=_checkpoint_mutation_id(),
-        paths=[],
-        created_paths=[],
-        force_full_scope=True,
-    )
-    return (
-        PlannedWrite(
-            floor_path(root),
-            GraphSyncGenerationFloor.create(checkpoint.generation).render(),
-        ),
-        PlannedWrite(checkpoint_path(root), checkpoint.render()),
-        epoch.checkpoint,
-    )
-
-
 def _is_utf8_stream(stream: BinaryIO) -> bool:
     """Whether a seekable staged payload is strict UTF-8, leaving its position."""
     import codecs
@@ -1587,7 +1556,7 @@ def _epoch_writes_with_predecessor(
 
     The import stays here to keep the vault writer free of a module cycle.
     """
-    from . import recall_policy, relation_registry
+    from . import recall_policy
     from .kbdir import kb_dirname
     from .vault import (
         PlannedWrite,
@@ -1603,21 +1572,6 @@ def _epoch_writes_with_predecessor(
     root = Path(vault_root)
     resolved_root = root.resolve()
     caller_writes = tuple(writes)
-    registry_target = relation_registry.extension_registry_path(root).resolve(
-        strict=False
-    )
-    registry_write = next(
-        (
-            write
-            for write in caller_writes
-            if write.path.resolve(strict=False) == registry_target
-        ),
-        None,
-    )
-    if registry_write is not None and not isinstance(registry_write.content, str):
-        raise GraphEpochIncoherent("relation registry batch content is not textual")
-    if registry_write is not None:
-        return registry_epoch_writes(root)
     paths: list[tuple[str, str | None]] = []
     created_paths: list[str] = []
     for write in caller_writes:
@@ -1649,7 +1603,7 @@ def _epoch_writes_with_predecessor(
         paths.append((relative, digest))
         if not write.path.exists():
             created_paths.append(relative)
-    if registry_write is None and not paths:
+    if not paths:
         return None
     mutation_id = _checkpoint_mutation_id()
     epoch = _admit_epoch_inputs(root)
@@ -1662,7 +1616,7 @@ def _epoch_writes_with_predecessor(
         mutation_id=mutation_id,
         paths=paths,
         created_paths=created_paths,
-        force_full_scope=(registry_write is not None or epoch.requires_full_recovery),
+        force_full_scope=epoch.requires_full_recovery,
     )
     return (
         PlannedWrite(floor_path(root), GraphSyncGenerationFloor.create(checkpoint.generation).render()),
@@ -1676,11 +1630,9 @@ def epoch_writes(
 ) -> tuple[PlannedWrite, PlannedWrite] | None:
     """Build ordered internal epoch replacements for canonical graph inputs.
 
-    In addition to ordinary admitted Markdown, the exact governed relation
-    registry target is a graph input.  It always receives a full checkpoint:
-    changing relation meaning can affect every stored raw observation even
-    though no Markdown path changed.  Detection lives here so callers provide
-    only registry YAML and cannot omit or handcraft the recovery epoch.
+    Only admitted Markdown is a graph input. Stored rows hold raw relation
+    observations that each reader resolves with its own definitions, so a
+    vocabulary registry save changes no stored row and owes the graph nothing.
     """
     result = _epoch_writes_with_predecessor(vault_root, writes)
     return None if result is None else result[:2]

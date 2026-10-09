@@ -575,8 +575,7 @@ def _seal_graph_rebuild_as_wal(vault_root: Path, temporary: Path) -> None:
     "cannot publish this candidate" answer: in `_prepare_publication_ticket` the
     enclosing `except (OSError, sqlite3.Error)` discards the ticket, so exhausting
     the bounded publication attempts becomes the documented Class B publication
-    failure; at the registry-rebind site the seal call is wrapped to return
-    `False`, which is that path's existing "fall back to the full rebuild".
+    failure.
     """
 
     connection = _connect_existing_owner_target(vault_root, temporary, readonly=False)
@@ -1800,18 +1799,6 @@ class _GraphPublicationTicket:
     metadata: tuple[tuple[str, str], ...]
     temporary: Path
     temporary_identity: tuple[int, int, int, int, int]
-
-
-@dataclass(frozen=True)
-class _RegistryRebindProof:
-    """Bounded live-sidecar facts that must still hold at publication."""
-
-    generation: str
-    instance: str
-    extension_registry_hash: str
-    recall_checkpoint: str
-    recall_identity: str
-    resolver_topology: str
 
 
 def _source_signature(path: Path, source: str) -> GraphSourceSignature:
@@ -3821,247 +3808,6 @@ class EpistemicGraphIndex:
         except (OSError, sqlite3.Error):
             return None
 
-    def _registry_rebind_source_proof(
-        self,
-        conn: sqlite3.Connection,
-        recall: freshness.RecallPublicationState,
-    ) -> _RegistryRebindProof | None:
-        """Prove a current schema/current recall source without walking Markdown."""
-        values = dict(
-            conn.execute(
-                "SELECT key, value FROM graph_meta WHERE key IN "
-                "('schema_version', 'core_registry_version', 'extension_registry_hash', "
-                "'recall_policy_version', 'recall_access_fingerprint', "
-                "'recall_projection_identity', 'recall_projection_checkpoint', "
-                "'recall_resolver_topology', 'read_barrier', 'generation', 'instance')"
-            ).fetchall()
-        )
-        expected_identity = _availability_freshness_value(
-            (
-                recall.triple,
-                recall.policy_version,
-                recall.access_policy_fingerprint,
-            )
-        )
-        expected_checkpoint = _checkpoint_value(recall.checkpoint)
-        old_hash = values.get("extension_registry_hash")
-        topology = values.get(_RESOLVER_TOPOLOGY_KEY)
-        if (
-            values.get("schema_version") != str(SCHEMA_VERSION)
-            or values.get("core_registry_version") != str(self.registry.core_version)
-            or not old_hash
-            or old_hash == self.registry.extension_hash
-            or values.get("recall_policy_version") != recall.policy_version
-            or values.get("recall_access_fingerprint")
-            != recall.access_policy_fingerprint
-            or values.get(_AVAILABILITY_FRESHNESS_KEY) != expected_identity
-            or values.get(_RECALL_CHECKPOINT_KEY) != expected_checkpoint
-            or values.get(_READ_BARRIER_KEY) is not None
-            or not isinstance(topology, str)
-            or len(topology) != 64
-            or not values.get("generation")
-            or not values.get("instance")
-        ):
-            return None
-        return _RegistryRebindProof(
-            generation=values["generation"],
-            instance=values["instance"],
-            extension_registry_hash=old_hash,
-            recall_checkpoint=expected_checkpoint,
-            recall_identity=expected_identity,
-            resolver_topology=topology,
-        )
-
-    def _registry_rebind_source_still_matches(
-        self,
-        proof: _RegistryRebindProof,
-        recall: freshness.RecallPublicationState,
-    ) -> bool:
-        try:
-            conn = self._connect_existing(readonly=True)
-            try:
-                return self._registry_rebind_source_proof(conn, recall) == proof
-            finally:
-                conn.close()
-        except (OSError, sqlite3.Error):
-            return False
-
-    def _rebind_registry_candidate(
-        self,
-        conn: sqlite3.Connection,
-        checkpoint: graph_sync.GraphSyncCheckpoint,
-        recall: freshness.RecallPublicationState,
-    ) -> None:
-        """Re-resolve only registry-owned edge fields in one private copy."""
-        rows = conn.execute(
-            "SELECT edge_key, raw_relation, metadata, resolver_project, "
-            "resolver_page_type, resolver_source_kind, resolver_target_kind, "
-            "resolver_origin FROM graph_edges ORDER BY edge_key"
-        ).fetchall()
-        for (
-            edge_key,
-            raw_relation,
-            rendered_metadata,
-            project,
-            page_type,
-            source_kind,
-            target_kind,
-            origin,
-        ) in rows:
-            resolution = self.registry.resolve(
-                str(raw_relation),
-                project=project,
-                page_type=page_type,
-                source_kind=source_kind,
-                target_kind=target_kind,
-                origin=origin,
-            )
-            metadata = _json(rendered_metadata)
-            metadata["replacement"] = resolution.replacement
-            metadata["registry_findings"] = list(resolution.findings)
-            conn.execute(
-                "UPDATE graph_edges SET relation_type = ?, parent_relation = ?, "
-                "registry_status = ?, registry_version = ?, registry_hash = ?, metadata = ? "
-                "WHERE edge_key = ?",
-                (
-                    resolution.canonical,
-                    resolution.parent,
-                    resolution.status,
-                    self.registry.core_version,
-                    self.registry.extension_hash,
-                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-                    edge_key,
-                ),
-            )
-        profile_hash = traversal_profiles.load_profiles(
-            self.vault_root, registry=self.registry
-        ).content_hash
-        conn.executemany(
-            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-            (
-                ("core_registry_version", str(self.registry.core_version)),
-                ("extension_registry_hash", self.registry.extension_hash),
-                ("traversal_profile_hash", profile_hash),
-            ),
-        )
-        self._publish_available_marker_in_transaction(
-            conn,
-            (
-                recall.triple,
-                recall.policy_version,
-                recall.access_policy_fingerprint,
-            ),
-            checkpoint=recall.checkpoint,
-            graph_checkpoint=checkpoint,
-        )
-
-    def rebind_registry(
-        self,
-        checkpoint: graph_sync.GraphSyncCheckpoint,
-    ) -> bool:
-        """Publish a proven private registry-only rebind, or decline safely."""
-        if checkpoint.scope != "full" or not self.path.exists():
-            return False
-        recall = freshness.prepare_recall_publication(self.vault_root, "vault")
-        policy_snapshot = access.publication_policy_snapshot(self.vault_root)
-        if recall is None or policy_snapshot is None:
-            return False
-        epoch = graph_sync.canonical_publication_epoch(self.vault_root)
-        if epoch.checkpoint != checkpoint:
-            return False
-        temporary = graph_sync.temporary_sidecar_path(self.path, checkpoint)
-        registered = False
-        claimed = False
-        publication_hold: str | None = None
-        try:
-            _remove_graph_rebuild_artifact(self.vault_root, temporary, missing_ok=True)
-            graph_sync.register_temporary(temporary)
-            registered = True
-            claimed = graph_sync.claim_rebuild_owner(
-                self.vault_root,
-                temporary,
-                state_root=self._mutation_coordinator.state_root,
-            )
-            if not claimed:
-                raise graph_sync.GraphRebuildInProgress()
-            source = self._connect_existing(readonly=True)
-            try:
-                proof = self._registry_rebind_source_proof(source, recall)
-                if proof is None:
-                    return False
-                destination = self._connect(temporary)
-                try:
-                    source.backup(destination)
-                finally:
-                    destination.close()
-            finally:
-                source.close()
-            candidate = self._connect_existing(temporary, readonly=False)
-            try:
-                with candidate:
-                    self._rebind_registry_candidate(candidate, checkpoint, recall)
-                candidate.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                if candidate.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-                    raise sqlite3.DatabaseError("registry rebind candidate failed integrity check")
-            finally:
-                candidate.close()
-            # Same ordering as the rebuild ticket: settle the journal mode while
-            # the candidate is private, before its identity is captured and
-            # before the publication hold below.
-            #
-            # Wrapped, because this path has no `except` of its own: an escaping
-            # refusal would skip the full-rebuild fallback and surface as a
-            # convergence failure. `False` is this function's existing "cannot
-            # rebind, fall back to the full rebuild", and the `finally` below
-            # still removes the candidate. The pre-existing integrity-check
-            # `DatabaseError` above keeps propagating exactly as before.
-            try:
-                _seal_graph_rebuild_as_wal(self.vault_root, temporary)
-            except (OSError, sqlite3.Error):
-                return False
-            ticket = _GraphPublicationTicket(
-                epoch,
-                recall,
-                (recall.policy_version, recall.access_policy_fingerprint),
-                policy_snapshot,
-                proof.recall_identity,
-                (),
-                temporary,
-                self._temporary_identity(temporary),
-            )
-            with self._mutation_coordinator.hold(
-                operation="epistemic_graph_publish_registry_rebind",
-                holder_kind="graph",
-            ):
-                if (
-                    not self._publication_ticket_matches(ticket)
-                    or not self._registry_rebind_source_still_matches(proof, recall)
-                ):
-                    return False
-                publication_hold = self._before_publish_replacement(temporary, self.path)
-                if (
-                    not self._publication_ticket_matches(ticket)
-                    or not self._registry_rebind_source_still_matches(proof, recall)
-                ):
-                    return False
-                graph_sync.replace_sidecar(temporary, self.path, vault_root=self.vault_root)
-            self._note_graph_published()
-            return True
-        finally:
-            _release_publication_hold(publication_hold)
-            if claimed:
-                graph_sync.release_rebuild_owner(
-                    self.vault_root,
-                    temporary,
-                    state_root=self._mutation_coordinator.state_root,
-                )
-            if registered:
-                graph_sync.unregister_temporary(temporary.resolve())
-            try:
-                _remove_graph_rebuild_artifact(self.vault_root, temporary, missing_ok=True)
-            except OSError:
-                pass
-
     def _publication_ticket_matches(self, ticket: _GraphPublicationTicket) -> bool:
         """The complete bounded publication gate; no walk, policy read, or SQLite."""
         try:
@@ -4630,13 +4376,7 @@ class EpistemicGraphIndex:
         Public readers are unaffected: `_open_read_snapshot` requires the
         availability marker, which is still withdrawn here, so a reader sees
         "marker missing, barrier set" exactly as it did before. Nothing persists
-        differently, and the registry rebind is unaffected either way: its source
-        proof (`_registry_rebind_source_proof`) demands the availability marker,
-        the stored checkpoint and an absent read barrier, so a sidecar fenced
-        here declines it whether or not `schema_version` survives. The identity
-        gate that selects a rebind candidate reads schema, registry, generation
-        and instance, and a candidate that passes it still has to pass that
-        proof.
+        differently.
         """
         if not self.path.exists():
             return
@@ -9309,8 +9049,8 @@ class GraphDispatchResult:
 
 
 #: Dispatch codes that mean a whole-vault pass ran for the marker (published or
-#: lost) or another owner's pass is running. A busy boundary, an unavailable
-#: epoch and a registry rebind are not whole-vault passes.
+#: lost) or another owner's pass is running. A busy boundary and an unavailable
+#: epoch are not whole-vault passes.
 _WHOLE_VAULT_ATTEMPT_CODES = frozenset(
     {
         "graph_rebuild_completed",
@@ -9344,7 +9084,7 @@ def _record_full_marker_dispatch(result: GraphDispatchResult) -> GraphDispatchRe
 
 
 def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
-    """Converge one observed full marker through rebind or the full-rebuild fallback."""
+    """Converge one observed full marker through a full rebuild."""
     return _record_full_marker_dispatch(_converge_full_graph_marker(vault_root))
 
 
@@ -9388,40 +9128,11 @@ def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
                     "deferred", "graph_epoch_unavailable", checkpoint
                 )
             index = EpistemicGraphIndex(root, mutation_coordinator=coordinator)
-            graph_identity: dict[str, str] = {}
-            if index.path.exists():
-                connection = index._connect_existing(readonly=True)
-                try:
-                    graph_sync.limit_graph_metadata_read(connection)
-                    graph_identity = dict(
-                        connection.execute(
-                            "SELECT key, value FROM graph_meta WHERE key IN "
-                            "('schema_version', 'core_registry_version', "
-                            "'extension_registry_hash', 'generation', 'instance')"
-                        ).fetchall()
-                    )
-                finally:
-                    connection.close()
-            try_rebind = bool(
-                checkpoint is not None
-                and graph_identity.get("schema_version") == str(SCHEMA_VERSION)
-                and graph_identity.get("core_registry_version")
-                == str(index.registry.core_version)
-                and graph_identity.get("extension_registry_hash")
-                and graph_identity.get("extension_registry_hash")
-                != index.registry.extension_hash
-                and graph_identity.get("generation")
-                and graph_identity.get("instance")
-            )
-        rebound = try_rebind and checkpoint is not None and index.rebind_registry(checkpoint)
-        if rebound:
-            code = "registry_rebind_completed"
+        if checkpoint is None:
+            index.rebuild_all()
         else:
-            if checkpoint is None:
-                index.rebuild_all()
-            else:
-                _rebuild_outcome(index, checkpoint)
-            code = "graph_rebuild_completed"
+            _rebuild_outcome(index, checkpoint)
+        code = "graph_rebuild_completed"
     except OpError:
         # The durable marker is the retry handle.  Do not re-enter owner state
         # after failing to acquire the canonical boundary merely to decorate

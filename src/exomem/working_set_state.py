@@ -136,7 +136,7 @@ def _from_canonical_page(
             for hit in admitted
             if str(getattr(hit, "parent_path", "") or "") == named
             and not getattr(hit, "parent_superseded_by", None)
-            and status_basis.classify(getattr(hit, "parent_status", None)).live
+            and status_basis.classify(getattr(hit, "parent_status", None), path=named).live
         ]
 
     try:
@@ -558,7 +558,7 @@ def _from_neighbourhood(
         if profile is None:
             continue
         frontmatter, page_title = profile
-        if status_basis.classify(frontmatter.get("status")).require() != "live":
+        if status_basis.classify(frontmatter.get("status"), path=rel, frontmatter=frontmatter).require() != "live":
             continue
         updated = str(frontmatter.get("updated") or "")
         title = str(frontmatter.get("title") or page_title or "").strip()

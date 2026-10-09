@@ -53,7 +53,23 @@ def _sqlite_connect_owned(
 #: The width of the legacy English space, kept for callers that name it. A
 #: sidecar's own width is `EmbeddingIndex.dim`, read from its vector-space record.
 VECTOR_DIM = recall_space.LEGACY_DIM
-SEMANTIC_UNIT_SCHEMA_VERSION = 3
+#: 4: rows are selection-free structural occurrences, and each parent's
+#: coverage record lives in `meta`. An older table is dropped, not migrated.
+SEMANTIC_UNIT_SCHEMA_VERSION = 4
+#: `meta` key prefix of one parent's neutral structural coverage record.
+COVERAGE_PREFIX = "occurrence_coverage:"
+#: The first key past the prefix's range, so a range scan uses the key index.
+_COVERAGE_END = COVERAGE_PREFIX[:-1] + chr(ord(COVERAGE_PREFIX[-1]) + 1)
+#: The generation `semantic_unit_parent_states` reports for an absent record;
+#: no parse produces it.
+MISSING_COVERAGE = "missing-coverage"
+#: The occurrence columns, in table order, before `vector` and `file_mtime`.
+OCCURRENCE_COLUMNS = (
+    "unit_key", "record_type", "parent_path", "parent_ref", "parent_generation",
+    "parent_source_hash", "parser_version", "form", "content", "unit_source_hash",
+    "source_order",
+)
+_CONTENT_COLUMN = OCCURRENCE_COLUMNS.index("content")
 #: The tables holding this sidecar's vectors; the first row read for a legacy width.
 _VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
 
@@ -223,15 +239,14 @@ class SemanticUnitVectorHit(NamedTuple):
 
 
 class SemanticUnitVectorRow(NamedTuple):
-    """One stored unit vector as the corpus-level read returns it.
+    """One stored occurrence vector as the corpus-level read returns it.
 
     `parent_generation` travels with the geometry on purpose: a consumer that
     reads these vectors against a NEWER parse of the same page would be reading
-    deleted text, and an anchored `unit_ref` is content-independent so the join
-    alone cannot detect that.
+    deleted text, and an occurrence key alone cannot detect that.
     """
 
-    unit_ref: str
+    unit_key: str
     source_order: int
     vector: np.ndarray
     parent_generation: str
@@ -251,6 +266,133 @@ SEMANTIC_UNIT_READ_BATCH = 2_000
 #: and 100 s for one `search` per chunk.
 SEARCH_MANY_BLOCK = 64
 _UNSPECIFIED_SPACE = object()
+
+
+def occurrence_rows(state: semantic_index.SemanticParentIndexState) -> list[tuple]:
+    """One parent's occurrence rows, in `OCCURRENCE_COLUMNS` order, without vectors.
+
+    Every occurrence some selected interpretation could emit is encoded once:
+    the rich heading body or the compact content, never a selected meaning.
+    """
+    return [
+        (
+            occurrence.key, "structural_occurrence", state.path, state.parent_ref,
+            state.parent_generation, state.parent_source_hash, state.parser_version,
+            occurrence.form, occurrence.content, occurrence.source_hash, source_order,
+        )
+        for source_order, occurrence in enumerate(state.occurrences)
+    ]
+
+
+def coverage_record(state: semantic_index.SemanticParentIndexState) -> str:
+    """The parent's neutral summary plus the occurrence keys its rows must hold.
+
+    It binds parser generation, source hash and format, and lists every
+    expected key, so an empty set still proves a parent with no occurrences.
+    """
+    return json.dumps(
+        {
+            **semantic_index.structural_metadata(state),
+            "occurrences": sorted(occurrence.key for occurrence in state.occurrences),
+        },
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+
+
+def expected_parent_state(
+    state: semantic_index.SemanticParentIndexState,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """What `semantic_unit_parent_states` reports for a current publication of `state`."""
+    return (
+        frozenset({state.parent_generation}),
+        frozenset(occurrence.key for occurrence in state.occurrences),
+    )
+
+
+def stored_parent_states(
+    conn: sqlite3.Connection, paths: list[str] | None = None
+) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
+    """Stored generations and occurrence keys per parent, from rows and records.
+
+    A parent appears when it has rows or a coverage record. Its generations
+    hold every row's and the record's; `MISSING_COVERAGE` stands for an absent
+    record. `expected_parent_state` is the value of a current publication.
+    """
+    rows = conn.execute(
+        "SELECT parent_path, parent_generation, unit_key FROM semantic_unit_vectors"
+        + ("" if paths is None else " WHERE parent_path IN (SELECT value FROM json_each(?))"),
+        () if paths is None else (json.dumps(paths, ensure_ascii=False),),
+    ).fetchall()
+    grouped: dict[str, tuple[set[str], set[str]]] = {
+        path: ({generation}, set()) for path, (generation, _count) in _coverage_index(conn, paths).items()
+    }
+    for parent_path, generation, unit_key in rows:
+        generations, keys = grouped.setdefault(str(parent_path), ({MISSING_COVERAGE}, set()))
+        generations.add(str(generation))
+        keys.add(str(unit_key))
+    return {
+        parent_path: (frozenset(generations), frozenset(keys))
+        for parent_path, (generations, keys) in grouped.items()
+    }
+
+
+def _write_coverage(conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        (COVERAGE_PREFIX + state.path, coverage_record(state)),
+    )
+
+
+def _delete_coverage(conn: sqlite3.Connection, paths: list[str] | None = None) -> None:
+    if paths is None:
+        conn.execute(
+            "DELETE FROM meta WHERE key >= ? AND key < ?",
+            (COVERAGE_PREFIX, _COVERAGE_END),
+        )
+        return
+    conn.executemany("DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths))
+
+
+def _coverage_index(
+    conn: sqlite3.Connection, paths: list[str] | None = None
+) -> dict[str, tuple[str, int]]:
+    """`{path: (record generation, expected occurrence count)}`, parsed by SQLite."""
+    select = (
+        "SELECT substr(key, ?), json_extract(value, '$.parent_generation'), "
+        "json_array_length(value, '$.occurrences') FROM meta "
+    )
+    if paths is None:
+        rows = conn.execute(
+            select + "WHERE key >= ? AND key < ? AND json_valid(value)",
+            (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END),
+        )
+    else:
+        rows = conn.execute(
+            select + "WHERE key IN (SELECT ? || value FROM json_each(?)) AND json_valid(value)",
+            (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, json.dumps(paths, ensure_ascii=False)),
+        )
+    return {
+        str(path): (str(generation), int(count))
+        for path, generation, count in rows
+        if generation is not None and count is not None
+    }
+
+
+def _coverage_records(conn: sqlite3.Connection, paths: list[str]) -> dict[str, dict[str, Any]]:
+    """Stored coverage records by parent path; an unreadable record is absent."""
+    rows = conn.execute(
+        "SELECT key, value FROM meta WHERE key IN (SELECT ? || value FROM json_each(?))",
+        (COVERAGE_PREFIX, json.dumps(sorted(paths), ensure_ascii=False)),
+    )
+    records: dict[str, dict[str, Any]] = {}
+    for key, value in rows:
+        try:
+            record = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict) and isinstance(record.get("occurrences"), list):
+            records[str(key)[len(COVERAGE_PREFIX):]] = record
+    return records
 
 
 def _top_admitted(
@@ -370,33 +512,6 @@ class EmbeddingIndex:
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS semantic_unit_vectors (
-                unit_key TEXT NOT NULL,
-                record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),
-                unit_ref TEXT NOT NULL,
-                parent_path TEXT NOT NULL,
-                parent_ref TEXT,
-                parent_generation TEXT NOT NULL,
-                parent_source_hash TEXT NOT NULL,
-                parser_version INTEGER NOT NULL,
-                form TEXT NOT NULL,
-                category TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                content TEXT NOT NULL,
-                unit_source_hash TEXT NOT NULL,
-                source_order INTEGER NOT NULL,
-                vector BLOB NOT NULL,
-                file_mtime REAL NOT NULL,
-                PRIMARY KEY (parent_path, unit_key)
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS semantic_unit_vectors_parent "
-            "ON semantic_unit_vectors(parent_path, parent_generation)"
-        )
         sidecar_store.ensure_meta_table(conn, "chunks", self.path.name)
         # Before any write on this connection: every writer must have the log, so
         # that a writer which bumps the generation without logging its paths is
@@ -405,9 +520,40 @@ class EmbeddingIndex:
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
-        if stored_unit_schema != (SEMANTIC_UNIT_SCHEMA_VERSION,):
-            with conn:
-                conn.execute("DELETE FROM semantic_unit_vectors")
+        current_unit_schema = stored_unit_schema == (SEMANTIC_UNIT_SCHEMA_VERSION,)
+        with conn:
+            if not current_unit_schema:
+                # The row shape changed, so an older table and its staging copy
+                # are replaced rather than emptied under their old constraints.
+                conn.execute("DROP TABLE IF EXISTS semantic_unit_vectors")
+                conn.execute("DROP TABLE IF EXISTS embedding_build_units")
+                conn.execute("DROP TABLE IF EXISTS embedding_build_coverage")
+                _delete_coverage(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS semantic_unit_vectors (
+                    unit_key TEXT NOT NULL,
+                    record_type TEXT NOT NULL CHECK(record_type = 'structural_occurrence'),
+                    parent_path TEXT NOT NULL,
+                    parent_ref TEXT,
+                    parent_generation TEXT NOT NULL,
+                    parent_source_hash TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL,
+                    form TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    unit_source_hash TEXT NOT NULL,
+                    source_order INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    file_mtime REAL NOT NULL,
+                    PRIMARY KEY (parent_path, unit_key)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS semantic_unit_vectors_parent "
+                "ON semantic_unit_vectors(parent_path, parent_generation)"
+            )
+            if not current_unit_schema:
                 conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
@@ -682,7 +828,7 @@ class EmbeddingIndex:
         for state, vectors, mtime in unit_replacements:
             if len(vectors) and np.asarray(vectors).shape[1] != identity.dim:
                 raise ValueError(f"semantic-unit vector width mismatch for {state.path}")
-            unit_rows.append((state.path, self._semantic_unit_rows(state, vectors, mtime)))
+            unit_rows.append((state, self._semantic_unit_rows(state, vectors, mtime)))
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -691,7 +837,7 @@ class EmbeddingIndex:
                     raise ValueError("embedding input drifted before publication")
                 stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
                 if any(chunks for _path, chunks, _vectors, _mtime in replacements) or any(
-                    rows for _path, rows in unit_rows
+                    rows for _state, rows in unit_rows
                 ):
                     stored = self._admit_producer(conn, identity)
                 mirror = self._publication_vec(conn, stored)
@@ -714,13 +860,8 @@ class EmbeddingIndex:
                     )
                     if mirror is not None:
                         mirror.dual_insert(conn, "file_path = ?", (path,))
-                for path, rows in unit_rows:
-                    conn.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (path,))
-                    conn.executemany(
-                        "INSERT INTO semantic_unit_vectors VALUES "
-                        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        rows,
-                    )
+                for state, rows in unit_rows:
+                    self._replace_occurrences(conn, state, rows)
                 if replacements:
                     sidecar_store.bump_generation_for_paths(
                         conn, CHUNK_PATH_LOG, [path for path, *_rest in replacements]
@@ -793,7 +934,13 @@ class EmbeddingIndex:
                 "OR length(vector) != ?) FROM semantic_unit_vectors WHERE parent_path = ?",
                 (parent_generation, parent_source_hash, width, rel_path),
             ).fetchone()
-            return units[0] == unit_count and (units[1] or 0) == 0
+            record = _coverage_records(conn, [rel_path]).get(rel_path)
+            return (
+                units[0] == unit_count and (units[1] or 0) == 0
+                and record is not None
+                and record.get("parent_generation") == parent_generation
+                and len(record["occurrences"]) == unit_count
+            )
         finally:
             conn.close()
 
@@ -809,7 +956,7 @@ class EmbeddingIndex:
         """
         if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
             return None
-        units = {row[0]: row for row in self._semantic_unit_metadata_rows(state)}
+        units = {row[0]: row for row in occurrence_rows(state)}
         conn = self._connect()
         try:
             conn.execute("BEGIN")
@@ -830,11 +977,7 @@ class EmbeddingIndex:
             )):
                 if row != (number, chunks[number], width):
                     return None
-            columns = (
-                "unit_key", "record_type", "unit_ref", "parent_path", "parent_ref",
-                "parent_generation", "parent_source_hash", "parser_version", "form",
-                "category", "kind", "content", "unit_source_hash", "source_order",
-            )
+            columns = OCCURRENCE_COLUMNS
             text_size = " + ".join(
                 f"COALESCE(length(CAST({column} AS BLOB)), 0)"
                 for column in columns if column not in {"parser_version", "source_order"}
@@ -857,6 +1000,11 @@ class EmbeddingIndex:
             ):
                 if units.get(row[0]) != row[:-1] or row[-1] != width:
                     return None
+            stored = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (COVERAGE_PREFIX + state.path,),
+            ).fetchone()
+            if stored is None or stored[0] != coverage_record(state):
+                return None
             return self._build_token(conn)
         finally:
             conn.close()
@@ -893,7 +1041,10 @@ class EmbeddingIndex:
                         "SELECT COUNT(*) FROM semantic_unit_vectors WHERE parent_path = ?",
                         (rel_path,),
                     ).fetchone()[0]
-                    if not chunk_count and not unit_count:
+                    covered = conn.execute(
+                        "SELECT 1 FROM meta WHERE key = ?", (COVERAGE_PREFIX + rel_path,),
+                    ).fetchone()
+                    if not chunk_count and not unit_count and covered is None:
                         continue
                     if vec_on and chunk_count:
                         self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
@@ -902,6 +1053,7 @@ class EmbeddingIndex:
                         "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
                         (rel_path,),
                     )
+                    _delete_coverage(conn, [rel_path])
                     removed += 1
                     removed_paths.append(rel_path)
                 if removed:
@@ -976,67 +1128,33 @@ class EmbeddingIndex:
         vectors: np.ndarray,
         mtime: float,
     ) -> None:
-        """Replace one parent's unit vectors in a single sidecar transaction."""
+        """Replace one parent's occurrence vectors and coverage in one transaction.
+
+        An empty `vectors` publishes a parent with no occurrences: its coverage
+        record still proves the empty set.
+        """
         rows = self._semantic_unit_rows(state, vectors, mtime)
         conn = self._connect()
         try:
             if rows:
                 self._admit(conn, np.asarray(vectors).shape[1])
             with conn:
-                conn.execute(
-                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
-                    (state.path,),
-                )
-                if rows:
-                    conn.executemany(
-                        "INSERT INTO semantic_unit_vectors("
-                        "unit_key, record_type, unit_ref, parent_path, parent_ref, "
-                        "parent_generation, parent_source_hash, parser_version, form, "
-                        "category, kind, content, unit_source_hash, source_order, vector, "
-                        "file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        rows,
-                    )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
-        finally:
-            conn.close()
-
-    def delete_semantic_units(self, parent_path: str) -> None:
-        conn = self._connect()
-        try:
-            with conn:
-                conn.execute(
-                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
-                    (parent_path,),
-                )
+                self._replace_occurrences(conn, state, rows)
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
         finally:
             conn.close()
 
     @staticmethod
-    def _semantic_unit_metadata_rows(
-        state: semantic_index.SemanticParentIndexState,
-    ) -> list[tuple]:
-        """The shared exact metadata for publication and cold validation."""
-        return [
-            (
-                unit.unit_ref,
-                "semantic_unit",
-                unit.unit_ref,
-                state.path,
-                state.parent_ref,
-                state.parent_generation,
-                state.parent_source_hash,
-                state.parser_version,
-                unit.form,
-                unit.category,
-                unit.kind,
-                unit.content,
-                unit.source_hash,
-                source_order,
-            )
-            for source_order, unit in enumerate(state.document.units)
-            if unit.unit_ref is not None
-        ]
+    def _replace_occurrences(
+        conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState, rows: list[tuple],
+    ) -> None:
+        conn.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,))
+        conn.executemany(
+            f"INSERT INTO semantic_unit_vectors({', '.join(OCCURRENCE_COLUMNS)}, vector, file_mtime) "
+            f"VALUES ({', '.join('?' for _ in range(len(OCCURRENCE_COLUMNS) + 2))})",
+            rows,
+        )
+        _write_coverage(conn, state)
 
     @classmethod
     def _semantic_unit_rows(
@@ -1045,7 +1163,7 @@ class EmbeddingIndex:
         vectors: np.ndarray,
         mtime: float,
     ) -> list[tuple]:
-        metadata = cls._semantic_unit_metadata_rows(state)
+        metadata = occurrence_rows(state)
         if len(metadata) != len(vectors):
             raise ValueError(
                 f"semantic-unit/vector length mismatch for {state.path}: "
@@ -1688,14 +1806,24 @@ class EmbeddingIndex:
         allowed_unit_refs: set[str] | None = None,
         allowed_parent_paths: set[str] | None = None,
         validate: bool = True,
+        incomplete_out: list[str] | None = None,
     ) -> list[SemanticUnitVectorHit]:
-        """Score unit rows first, then validate only a bounded winner window.
+        """Rank occurrence rows, map each to this reader's unit, then fill `k`.
 
-        Vector scoring is an in-memory/numpy scan of rebuildable blobs. Markdown
-        freshness validation is the expensive part, so an unfiltered query
-        overfetches a bounded ranked window instead of reopening every parent.
-        An explicit allowlist retains its exact validation contract for audit
-        and repair callers.
+        Rows hold neutral occurrences. A candidate parent is interpreted once,
+        from its stored coverage record, with its page's selected instance; a
+        page the reader may not see is never interpreted. Hidden, suppressed,
+        duplicate and reference-less candidates are dropped before `k`, so
+        they spend no result slot. Equal cosines at the cut order by unit ref.
+
+        `incomplete_out` receives one admitted parent whose coverage the
+        records cannot prove (no record, missing occurrence rows, or
+        unavailable definitions) when any exists; one witness makes the answer
+        incomplete. That proof reads records, never Markdown.
+
+        Markdown freshness validation is the expensive part, so an unfiltered
+        validated query checks a bounded window of mapped units; an explicit
+        allowlist validates every mapped unit for audit and repair callers.
         """
         if k <= 0 or not self.path.exists():
             return []
@@ -1703,121 +1831,121 @@ class EmbeddingIndex:
             return []
         if allowed_parent_paths is not None and not allowed_parent_paths:
             return []
+        from .governance import egress
 
+        allowed = None if allowed_parent_paths is None else sorted(allowed_parent_paths)
+        keep = egress.page_release_filter(self.vault_root)
         conn = self._connect()
         try:
-            if allowed_unit_refs is None and allowed_parent_paths is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors"
-                ).fetchall()
-            elif allowed_unit_refs is not None and allowed_parent_paths is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE unit_ref IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),),
-                ).fetchall()
-            elif allowed_unit_refs is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE parent_path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE unit_ref IN (SELECT value FROM json_each(?)) "
-                    "AND parent_path IN (SELECT value FROM json_each(?))",
-                    (
-                        json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),
-                        json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),
+            rows = conn.execute(
+                "SELECT unit_key, parent_path, parent_generation, parent_source_hash, "
+                "parser_version, vector FROM semantic_unit_vectors"
+                + ("" if allowed is None else " WHERE parent_path IN (SELECT value FROM json_each(?))"),
+                () if allowed is None else (json.dumps(allowed, ensure_ascii=False),),
+            ).fetchall()
+            coverage = _coverage_index(conn, allowed)
+            parents = semantic_index.AdmittedParents(
+                lambda paths: _coverage_records(conn, paths),
+                allowed=lambda path: (keep is None or bool(keep(path)))
+                and (allowed_parent_paths is None or path in allowed_parent_paths),
+                interpretations=semantic_index.Interpretations(self.vault_root),
+            )
+            candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
+            present: dict[str, int] = {}
+            unproved: set[str] = set()
+            for key, parent_path, generation, source_hash, parser_version, blob in rows:
+                parent_path = str(parent_path)
+                expected = coverage.get(parent_path)
+                if expected is None or str(generation) != expected[0]:
+                    # No record binds this row's parse, so nothing can interpret it.
+                    unproved.add(parent_path)
+                    continue
+                present[parent_path] = present.get(parent_path, 0) + 1
+                vector = np.frombuffer(blob, dtype=np.float32)
+                if vector.shape != (self.dim,):
+                    continue
+                candidates.append(
+                    (str(key), parent_path, str(generation), str(source_hash), int(parser_version), vector)
+                )
+            unproved.update(
+                path for path, (_generation, count) in coverage.items() if present.get(path, 0) != count
+            )
+
+            ranked: list[SemanticUnitVectorHit] = []
+            if candidates:
+                query = query_vec.astype(np.float32, copy=False)
+                scores = np.stack([candidate[5] for candidate in candidates]) @ query
+                order = sorted(
+                    range(len(candidates)),
+                    key=lambda index: (-float(scores[index]), candidates[index][1], candidates[index][0]),
+                )
+                exact = allowed_unit_refs is not None or allowed_parent_paths is not None
+                validation_limit = len(order) if exact else max(k * 4, k + 32)
+                validated = 0
+                freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+                seen: set[str] = set()
+                for index in order:
+                    if len(ranked) >= k and float(scores[index]) != ranked[k - 1].cosine:
+                        break
+                    if validate and validated >= validation_limit:
+                        break
+                    key, parent_path, generation, source_hash, parser_version, _vector = candidates[index]
+                    parent = parents.parent(parent_path)
+                    unit = parent.structure.unit(key) if parent is not None else None
+                    if unit is None or not unit.unit_ref or unit.unit_ref in seen:
+                        continue
+                    if allowed_unit_refs is not None and unit.unit_ref not in allowed_unit_refs:
+                        continue
+                    if validate:
+                        validated += 1
+                        stamp = (parent_path, generation, source_hash, parser_version)
+                        accepted = freshness_by_stamp.get(stamp)
+                        if accepted is None:
+                            accepted = semantic_index.validate_parent_record(
+                                self.vault_root,
+                                parent_path=parent_path,
+                                parent_generation_value=generation,
+                                parent_source_hash=source_hash,
+                                parser_version=parser_version,
+                            ).current
+                            freshness_by_stamp[stamp] = accepted
+                        if not accepted:
+                            continue
+                    seen.add(unit.unit_ref)
+                    ranked.append(
+                        SemanticUnitVectorHit(
+                            unit.unit_ref, parent_path, generation, source_hash, parser_version,
+                            float(scores[index]),
+                        )
+                    )
+            if incomplete_out is not None:
+                # Lazy, so the per-page owed and release checks stop at one witness.
+                owed = self._coverage_owed()
+                unpublished = (path for path in allowed or () if path not in coverage and owed(path))
+                witness = next(
+                    chain(
+                        sorted(parents.unavailable),
+                        (path for path in chain(sorted(unproved), unpublished) if parents.allowed(path)),
                     ),
-                ).fetchall()
+                    None,
+                )
+                if witness is not None:
+                    incomplete_out.append(witness)
         finally:
             conn.close()
+        ranked.sort(key=lambda hit: (-hit.cosine, hit.unit_ref))
+        return ranked[:k]
 
-        candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
-        for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
-            vector = np.frombuffer(blob, dtype=np.float32)
-            if vector.shape != (self.dim,):
-                continue
-            candidates.append(
-                (
-                    str(unit_ref),
-                    str(parent_path),
-                    str(generation),
-                    str(source_hash),
-                    int(parser_version),
-                    vector,
-                )
-            )
-        if not candidates:
-            return []
+    def _coverage_owed(self) -> Callable[[str], bool]:
+        """Whether a publication writes a page a record: the rebuild walk's own rules."""
+        from . import access
 
-        query = query_vec.astype(np.float32, copy=False)
-        matrix = np.stack([candidate[5] for candidate in candidates])
-        scores = matrix @ query
-        order = sorted(
-            range(len(candidates)),
-            key=lambda index: (-float(scores[index]), candidates[index][0]),
+        walked = index_paths.index_markdown_admitter(self.vault_root)
+        return lambda rel_path: (
+            index_paths.is_embeddable_path(Path(rel_path))
+            and (walked is None or walked(rel_path))
+            and access.is_indexable(self.vault_root, rel_path)
         )
-        validation_limit = (
-            len(order)
-            if allowed_unit_refs is not None or allowed_parent_paths is not None
-            else min(len(order), max(k * 4, k + 32))
-        )
-        if not validate:
-            return [
-                SemanticUnitVectorHit(
-                    candidates[index][0],
-                    candidates[index][1],
-                    candidates[index][2],
-                    candidates[index][3],
-                    candidates[index][4],
-                    float(scores[index]),
-                )
-                for index in order[:k]
-            ]
-
-        freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
-        ranked: list[SemanticUnitVectorHit] = []
-        for index in order[:validation_limit]:
-            unit_ref, parent_path, generation, source_hash, parser_version, _vector = candidates[
-                index
-            ]
-            stamp = (parent_path, generation, source_hash, parser_version)
-            accepted = freshness_by_stamp.get(stamp)
-            if accepted is None:
-                accepted = semantic_index.validate_parent_record(
-                    self.vault_root,
-                    parent_path=parent_path,
-                    parent_generation_value=generation,
-                    parent_source_hash=source_hash,
-                    parser_version=parser_version,
-                ).current
-                freshness_by_stamp[stamp] = accepted
-            if not accepted:
-                continue
-            ranked.append(
-                SemanticUnitVectorHit(
-                    unit_ref,
-                    parent_path,
-                    generation,
-                    source_hash,
-                    parser_version,
-                    float(scores[index]),
-                )
-            )
-            if len(ranked) == k:
-                break
-        return ranked
 
     def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
@@ -2013,30 +2141,19 @@ class EmbeddingIndex:
     def semantic_unit_parent_states(
         self,
     ) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
-        """Return stored generations and unit refs for incremental parity checks."""
+        """Stored generations and occurrence keys per parent, for incremental parity."""
         if not self.path.exists():
             return {}
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT parent_path, parent_generation, unit_ref FROM semantic_unit_vectors"
-            ).fetchall()
+            return stored_parent_states(conn)
         finally:
             conn.close()
-        grouped: dict[str, tuple[set[str], set[str]]] = {}
-        for parent_path, generation, unit_ref in rows:
-            generations, unit_refs = grouped.setdefault(str(parent_path), (set(), set()))
-            generations.add(str(generation))
-            unit_refs.add(str(unit_ref))
-        return {
-            parent_path: (frozenset(generations), frozenset(unit_refs))
-            for parent_path, (generations, unit_refs) in grouped.items()
-        }
 
     def all_semantic_unit_vectors(
         self, *, batch_size: int = SEMANTIC_UNIT_READ_BATCH
     ) -> dict[str, list[SemanticUnitVectorRow]]:
-        """Every stored unit vector, grouped by parent path, in ONE corpus read.
+        """Every stored occurrence vector, grouped by parent path, in ONE corpus read.
 
         The audit's semantic scope-divergence sensor needs a page's unit geometry,
         and nothing here could supply it: `all_vectors()` is the CHUNK matrix
@@ -2044,6 +2161,8 @@ class EmbeddingIndex:
         kNN query whose hit type carries a cosine but no vector. This is the
         missing bulk read, and it is deliberately the ONLY one — a per-page
         `WHERE parent_path = ?` across a sweep is the shape this exists to prevent.
+        Rows carry occurrence keys; the caller maps them to the units of the
+        parse it holds.
 
         Read-only, and NOT wired into `_cache`: that cache is keyed by
         `(file_path, chunk_idx)` and patched by chunk-path deltas, so admitting
@@ -2069,15 +2188,14 @@ class EmbeddingIndex:
             cursor = ("", "")
             while True:
                 rows = conn.execute(
-                    "SELECT parent_path, unit_key, unit_ref, source_order, vector, "
-                    "parent_generation "
+                    "SELECT parent_path, unit_key, source_order, vector, parent_generation "
                     "FROM semantic_unit_vectors WHERE (parent_path, unit_key) > (?, ?) "
                     "ORDER BY parent_path, unit_key LIMIT ?",
                     (*cursor, limit),
                 ).fetchall()
                 if not rows:
                     break
-                for parent_path, _unit_key, unit_ref, source_order, blob, generation in rows:
+                for parent_path, unit_key, source_order, blob, generation in rows:
                     try:
                         vector = np.frombuffer(blob, dtype=np.float32)
                     except (ValueError, TypeError):
@@ -2088,7 +2206,7 @@ class EmbeddingIndex:
                         continue
                     grouped.setdefault(str(parent_path), []).append(
                         SemanticUnitVectorRow(
-                            str(unit_ref), int(source_order), vector, str(generation)
+                            str(unit_key), int(source_order), vector, str(generation)
                         )
                     )
                 cursor = (str(rows[-1][0]), str(rows[-1][1]))
@@ -2097,7 +2215,7 @@ class EmbeddingIndex:
         finally:
             conn.close()
         for unit_rows in grouped.values():
-            unit_rows.sort(key=lambda row: (row.source_order, row.unit_ref))
+            unit_rows.sort(key=lambda row: (row.source_order, row.unit_key))
         return grouped
 
     def _projected_source_snapshot(
@@ -2161,10 +2279,8 @@ class EmbeddingIndex:
                     state = semantic_index.build_parent_index_state(self.vault_root, md)
                 except (OSError, UnicodeError, ValueError):
                     state = None
-                if chunks or (
-                    state is not None
-                    and any(unit.unit_ref is not None for unit in state.document.units)
-                ):
+                # Every parsed parent publishes coverage, even with no occurrence.
+                if chunks or state is not None:
                     yield page, chunks, state
 
         inputs = pages()
@@ -2195,6 +2311,10 @@ class EmbeddingIndex:
                     "FROM semantic_unit_vectors WHERE 0"
                 )
                 conn.execute(
+                    "CREATE TABLE IF NOT EXISTS embedding_build_coverage "
+                    "(run_key TEXT NOT NULL, parent_path TEXT NOT NULL, record TEXT NOT NULL)"
+                )
+                conn.execute(
                     "INSERT INTO embedding_build_runs(run_key, serving_token) VALUES (?, ?)",
                     (run_key, json.dumps(captured_token)),
                 )
@@ -2209,7 +2329,7 @@ class EmbeddingIndex:
                     raise recall_space.VectorSpaceMismatch(
                         "rebuild producer changed during staging"
                     )
-                texts = [row[11] if units else row[2] for row in rows]
+                texts = [row[_CONTENT_COLUMN] if units else row[2] for row in rows]
                 vectors, encoded = embeddings_module._encode_prepared(
                     lambda: embeddings_module.embed_texts(texts, is_query=False)
                 )
@@ -2230,9 +2350,9 @@ class EmbeddingIndex:
                     if units:
                         conn.executemany(
                             "INSERT INTO embedding_build_units VALUES "
-                            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            f"({', '.join('?' for _ in range(len(OCCURRENCE_COLUMNS) + 3))})",
                             (
-                                (run_key, *row[:14], vector.tobytes(), row[15])
+                                (run_key, *row[:-2], vector.tobytes(), row[-1])
                                 for row, vector in zip(rows, vectors, strict=True)
                             ),
                         )
@@ -2256,30 +2376,14 @@ class EmbeddingIndex:
                         flush(pending_chunks)
                 if state is None:
                     continue
-                # Build row metadata without allocating placeholder vectors for a page.
-                for order, unit in enumerate(state.document.units):
-                    if unit.unit_ref is None:
-                        continue
-                    pending_units.append(
-                        (
-                            unit.unit_ref,
-                            "semantic_unit",
-                            unit.unit_ref,
-                            state.path,
-                            state.parent_ref,
-                            state.parent_generation,
-                            state.parent_source_hash,
-                            state.parser_version,
-                            unit.form,
-                            unit.category,
-                            unit.kind,
-                            unit.content,
-                            unit.source_hash,
-                            order,
-                            None,
-                            page.mtime,
-                        )
+                with conn:
+                    conn.execute(
+                        "INSERT INTO embedding_build_coverage VALUES (?, ?, ?)",
+                        (run_key, state.path, coverage_record(state)),
                     )
+                # Build row metadata without allocating placeholder vectors for a page.
+                for row in occurrence_rows(state):
+                    pending_units.append((*row, None, page.mtime))
                     if len(pending_units) >= limit:
                         flush(pending_units, units=True)
             flush(pending_chunks)
@@ -2306,12 +2410,15 @@ class EmbeddingIndex:
                     (run_key,),
                 )
                 conn.execute(
-                    "INSERT INTO semantic_unit_vectors SELECT "
-                    "unit_key, record_type, unit_ref, parent_path, parent_ref, "
-                    "parent_generation, parent_source_hash, parser_version, form, category, "
-                    "kind, content, unit_source_hash, source_order, vector, file_mtime "
-                    "FROM embedding_build_units WHERE run_key = ?",
+                    f"INSERT INTO semantic_unit_vectors SELECT {', '.join(OCCURRENCE_COLUMNS)}, "
+                    "vector, file_mtime FROM embedding_build_units WHERE run_key = ?",
                     (run_key,),
+                )
+                _delete_coverage(conn)
+                conn.execute(
+                    "INSERT INTO meta(key, value) SELECT ? || parent_path, record "
+                    "FROM embedding_build_coverage WHERE run_key = ?",
+                    (COVERAGE_PREFIX, run_key),
                 )
                 mirror = self._publication_vec(conn, producer)
                 if mirror is not None:
@@ -2337,6 +2444,7 @@ class EmbeddingIndex:
                     for table in (
                         "embedding_build_chunks",
                         "embedding_build_units",
+                        "embedding_build_coverage",
                         "embedding_build_runs",
                     ):
                         if (

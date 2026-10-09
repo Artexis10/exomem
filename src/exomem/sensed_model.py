@@ -471,11 +471,13 @@ def encoder_fingerprint(vault_root: Path) -> str | None:
 
 def stored_unit_vectors(
     vault_root: Path, rel_path: str, fingerprint: str | None
-) -> dict[str, tuple[str, Any]]:
-    """`{unit_ref: (source text hash, normalised vector)}` for one page.
+) -> dict[str, Any]:
+    """`{source text hash: normalised vector}` for one page's stored occurrences.
 
-    Only when the sidecar still holds exactly `fingerprint`'s space. Read, never
-    encoded. A seam: tests supply vectors.
+    Rows hold selection-free occurrences, so a unit finds its vector by its
+    own text: one space encodes one text to one vector. Only when the sidecar
+    still holds exactly `fingerprint`'s space. Read, never encoded. A seam:
+    tests supply vectors.
     """
     if not fingerprint:
         return {}
@@ -492,7 +494,7 @@ def stored_unit_vectors(
         if identity is None or identity.fingerprint != fingerprint or identity.dim <= 0:
             return {}
         rows = conn.execute(
-            "SELECT unit_ref, content, vector FROM semantic_unit_vectors WHERE parent_path = ?",
+            "SELECT content, vector FROM semantic_unit_vectors WHERE parent_path = ?",
             (rel_path,),
         ).fetchall()
     except Exception:  # noqa: BLE001 - absent or unreadable vectors propose nothing
@@ -501,8 +503,8 @@ def stored_unit_vectors(
     finally:
         if conn is not None:
             conn.close()
-    out: dict[str, tuple[str, Any]] = {}
-    for unit_ref, content, blob in rows:
+    out: dict[str, Any] = {}
+    for content, blob in rows:
         try:
             vector = np.frombuffer(blob, dtype=np.float32)
         except (TypeError, ValueError):
@@ -512,10 +514,7 @@ def stored_unit_vectors(
         norm = float(np.linalg.norm(vector))
         if norm <= 0.0:
             continue
-        out[str(unit_ref)] = (
-            sensing.text_sha256(sensing.extract_text(content)),
-            (vector / norm).astype(np.float32),
-        )
+        out[sensing.text_sha256(sensing.extract_text(content))] = (vector / norm).astype(np.float32)
     return out
 
 
@@ -1210,15 +1209,12 @@ def _follow_pages(
 
 
 def _own_vectors(facts: PageFacts | None, vectors: Mapping[str, Any]) -> dict[str, Any]:
-    """The page's stored unit vectors whose source text is the unit's current text."""
+    """Each unit's stored vector of its current text, by unit ref."""
     if facts is None:
         return {}
-    out: dict[str, Any] = {}
-    for unit in facts.units:
-        stored = vectors.get(unit.unit_ref)
-        if stored is not None and stored[0] == unit.text_sha256:
-            out[unit.unit_ref] = stored[1]
-    return out
+    return {
+        unit.unit_ref: vectors[unit.text_sha256] for unit in facts.units if unit.text_sha256 in vectors
+    }
 
 
 def _as_applied(
