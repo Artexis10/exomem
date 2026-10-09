@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.114.0](https://github.com/Artexis10/exomem/compare/v0.113.0...v0.114.0) (2026-10-09)
+
+
+### Features
+
+* **collections:** add the SQLite summary core with field admission ([#1624](https://github.com/Artexis10/exomem/issues/1624)) ([1f178c9](https://github.com/Artexis10/exomem/commit/1f178c90f3422e3d4df6ce2353f537eb9b61592f))
+
 ## [0.113.0](https://github.com/Artexis10/exomem/compare/v0.112.0...v0.113.0) (2026-10-09)
 
 
