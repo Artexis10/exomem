@@ -1,23 +1,36 @@
 # Tasks
 
+Delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/1630).
+[CI run 37884083275](https://github.com/Artexis10/exomem/actions/runs/37884083275) passed every test cited below on head `3808ea6ab2f67fe62c34c529eaaacfa4ee994ff4`.
+The core and harness shards of that run reported 29,164 test cases: no failures, no errors, 574 skipped.
+
+- 1.1 The head contains foundation merge `e844290a16b298fa30edfefea5e38d9951d54973` and the S2 reference `src/exomem/_scaffold/_Schema/references/vocabulary.md`. Tests: `tests/test_vocabulary_registries.py::test_a_reverted_promotion_leaves_its_page_as_debt`, `tests/test_workflow_skills.py::test_core_and_standalone_authoring_skills_embed_the_canonical_contract`.
+- 1.2 `tests/test_vocabulary_registries.py::test_each_overlay_adapter_restores_its_legacy_grammar[statuses-awaiting-review-entry4]`, `::test_canonical_status_meaning_cannot_be_shadowed_or_replaced`, `::test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes`, `::test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_aliases`.
+- 1.3 `tests/test_vocabulary_registries.py::test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_aliases`, `::test_malformed_status_does_not_require_private_definitions_for_search_or_audit`, `tests/test_working_set_agent_pick.py::test_malformed_status_keeps_picked_units_when_status_definitions_are_withheld`.
+- 2.1 `tests/test_working_set_carry.py::test_status_save_and_restore_change_warm_carry_without_rewriting_pages`, `::test_a_carried_draft_reports_itself_as_a_draft`, `::test_an_archived_page_is_never_carried`, `::test_a_dropped_page_is_never_carried`, `::test_a_superseded_predecessor_does_not_block_its_successor`, `tests/test_working_set_temporal_currency.py::test_a_draft_or_planned_page_is_not_history`, `::test_superseded_or_archived_material_is_history`, `tests/test_supersession_surface.py::test_find_demotes_and_flags_superseded`, `tests/test_semantic_unit_read.py::test_read_memory_marks_exact_unit_on_superseded_parent`, `tests/test_activation_manifest.py::test_nonempty_baseline_captures_only_active_writable_compiled_pages`.
+- 2.2 `tests/test_working_set_carry.py::test_status_save_and_restore_change_warm_carry_without_rewriting_pages`, `tests/test_vocabulary_registries.py::test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_aliases`, `tests/test_governance_egress.py::test_find_hot_cache_stays_principal_free`, `tests/test_semantic_lifecycle_writers.py::test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_facts`.
+- 2.3 `tests/test_semantic_lifecycle_writers.py::test_existing_preflight_applies_the_lifecycle_matrix`, `tests/test_vocabulary_registries.py::test_withheld_status_definitions_do_not_change_public_statuses_or_reveal_aliases`, `tests/test_bootstrap_frozen_profiles.py::test_frozen_v3_authoring_follows_a_governed_status_replacement`, `::test_a_released_profile_serves_its_versioned_payload`, `::test_a_released_profile_teaches_one_authoring_contract`, `tests/test_semantic_authoring_contract.py::test_contract_pins_exact_language_applicability_and_findings`.
+- 2.4 `tests/test_entity_recurrence.py::test_pending_evidence_does_not_supply_spread_but_abandoned_evidence_does`, `::test_a_retired_page_neither_supplies_spread_nor_anchors`, `tests/test_capture_sweep_entity_candidate.py::test_a_retired_source_is_not_counted`.
+- 2.8 `tests/test_retained_inputs.py::test_private_status_blocks_new_binding_but_not_retained_unit_disclosure`, `tests/test_vocabulary_projection.py::test_registry_only_retirement_changes_pairs_but_cannot_prove_empty`, `::test_note_pair_pages_cover_all_pairs_without_a_quadratic_intermediate`, `::test_real_generic_edge_and_independent_sources_produce_bounded_work`, `::test_origin_discovery_pages_before_eligibility_without_counting_cross_page_copies`, `tests/test_vocabulary_registries.py::test_restore_refuses_corrupt_canonical_status_history_and_preserves_valid_bytes`.
+
 ## 1. Registry and admission
 
-- [ ] 1.1 Integrate merged foundation and S2 guidance; record exact source identities and preserve their verified contracts.
-- [ ] 1.2 Add the adapter and pack through `RegistrySpec`; verify save/history/restore, alias resolution and canonical invariants through real registry operations.
-- [ ] 1.3 Add operation classification; verify canonical parity, the statusless public default, and denied absent/key/alias twins while independently admitted reads succeed.
+- [x] 1.1 Integrate merged foundation and S2 guidance; record exact source identities and preserve their verified contracts.
+- [x] 1.2 Add the adapter and pack through `RegistrySpec`; verify save/history/restore, alias resolution and canonical invariants through real registry operations.
+- [x] 1.3 Add operation classification; verify canonical parity, the statusless public default, and denied absent/key/alias twins while independently admitted reads succeed.
 
 ## 2. Consumers and freshness
 
-- [ ] 2.1 Thread classification through activation, carry, currency, find and unit reads; audit mutual supersession and currency guards, preserving their purpose-specific behavior.
-- [ ] 2.2 Bind existing cache dependencies; prove warm public save/restore changes service without page edits, restart or cross-audience digest leakage.
-- [ ] 2.3 Update semantic state, normative authoring and versioned bootstrap correction; verify minimum applicability, dependent unavailability and a frozen v3 authoring journey.
-- [ ] 2.4 Replace recurrence status comparisons; verify planned evidence stops supplying spread, unchanged entity resolution and retained abandoned evidence.
+- [x] 2.1 Thread classification through activation, carry, currency, find and unit reads; audit mutual supersession and currency guards, preserving their purpose-specific behavior.
+- [x] 2.2 Bind existing cache dependencies; prove warm public save/restore changes service without page edits, restart or cross-audience digest leakage.
+- [x] 2.3 Update semantic state, normative authoring and versioned bootstrap correction; verify minimum applicability, dependent unavailability and a frozen v3 authoring journey.
+- [x] 2.4 Replace recurrence status comparisons; verify planned evidence stops supplying spread, unchanged entity resolution and retained abandoned evidence.
 - [ ] 2.5 Deliver unknown-status debt through existing audit; verify admitted unknown labels stay live and unavailable classification creates no debt.
 
 - [ ] 2.6 Extend admitted carry rarity through the existing lexical transaction; prove hidden-present/absent parity, bounded discount paths and admitted BM25 limits at production volume. Record N-admission cost and whole-stage measurements.
 
 - [ ] 2.7 Keep graph and artifact descriptors lifecycle-neutral; prove current relation coverage, hydration and role support change after registry save/restore without page rewrites. Record metadata and candidate-parse costs.
-- [ ] 2.8 Preserve retained-input disclosure while checking new bindings; verify bounded vocabulary projection and invalid-history refusal through existing workflow boundaries.
+- [x] 2.8 Preserve retained-input disclosure while checking new bindings; verify bounded vocabulary projection and invalid-history refusal through existing workflow boundaries.
 
 ## 3. Integrated delivery
 
