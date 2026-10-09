@@ -101,23 +101,50 @@ def contract() -> dict[str, Any]:
     """The ``import`` action's contract for store-mode ``describe``, from these limits."""
     return {
         "why": (
-            "stream one preserved Sources or Evidence file into this collection as a durable "
-            "job of bounded batches, each committed whole or not at all"
+            "stream one preserved Sources or Evidence file, or chosen members of a preserved "
+            "export, into this collection as a durable job of bounded batches, each committed "
+            "whole or not at all"
         ),
         "import_request": {
             "mode": "preview, start, status or cancel",
-            "source_ref": "vault path of a preserved Sources or Evidence file; preview and start",
-            "format": f"{', '.join(FORMATS)}; csv is RFC 4180 UTF-8 with a header row",
+            "source_ref": (
+                "vault path of a preserved Sources or Evidence file, or of an export manifest; "
+                "preview and start"
+            ),
+            "format": (
+                f"{', '.join(FORMATS)}; csv is RFC 4180 UTF-8 with a header row; json-document "
+                "is one JSON document whose rows mapping.rows names"
+            ),
+            "members": (
+                f"with an export manifest: a glob over member paths, or 1 to {MAX_LISTED_MEMBERS} "
+                "paths. Members import in path order, so a later member's row wins a natural-key "
+                "collision; a member already imported into this collection with the same mapping "
+                "is skipped"
+            ),
+            "reimport": "all reads members already imported with this mapping again",
             "mapping": {
+                "rows": (
+                    "json-document only: the row path, such as a[].b[]; each [] crosses an array "
+                    "and the last array's elements are rows"
+                ),
                 "fields": (
                     f"1 to {MAX_MAPPED_FIELDS} declared target fields, each a dotted source path "
-                    "(a csv column name) or {from, type}; type converts csv text only: "
-                    + ", ".join(CSV_TYPES)
+                    "(a csv column name), {from, type?, scale?} or {const}; type converts csv text "
+                    f"only: {', '.join(CSV_TYPES)}; scale multiplies a number. In json-document a "
+                    "path is relative to the row, $.a.b reads the document and $.a[].b the current "
+                    "element of a[], before the rows; $index is the row's place in its array and "
+                    "$value the row"
                 ),
                 "time": (
-                    "optional {from: 1 to 4 ordered bases, each {date} or {instant, offset?}, "
-                    "instant?, offset?, local_date}: the first basis present gives the UTC "
-                    "instant, its offset and the source-local day; a day is never guessed"
+                    "optional {from: 1 to 4 ordered bases, instant?, offset?, local_date}: the "
+                    "first basis present gives the UTC instant, its offset and the source-local "
+                    "day; a day is never guessed. A basis is {date} or {instant}, then zone (IANA "
+                    "name), offset (path to ±HH:MM) or offset_minutes (path), then seconds (path) "
+                    "or index: $index with every {s or ms: number or path}. A zone declares fold: "
+                    "order (the earlier offset until the clock steps back within one array), "
+                    "earlier or later, and with an increment clock: elapsed or wall. A local time "
+                    "in a gap is refused TIME_LOCAL_GAP and counted without stopping the job; an "
+                    "instant without an offset, zone or offset path is refused TIME_BASIS_UNZONED"
                 ),
                 "coverage": (
                     "owner-reviewed source paths mapped to {classification: null or location, subtree?: boolean}; "
@@ -132,6 +159,17 @@ def contract() -> dict[str, Any]:
                 "unless it failed or was cancelled"
             ),
         },
+        "saved": (
+            "preview and start may pass mapping as a name: imports.<name> in the manifest holds "
+            "{format, mapping, members?}, checked at every revise; preview's mapping.absent counts "
+            "the sampled rows without each mapped path"
+        ),
+        "zone_rules": {"package": "tzdata", "version": import_time.VERSION},
+        "position": (
+            "next_position is {row, byte}; a json-document or export job adds member and "
+            "member_row, counts consumed bytes in whole members, and reports members read and "
+            "skipped"
+        ),
         "identity": (
             "rows sharing a natural key: the last valid occurrence wins whatever the batching; "
             "status counts the superseded ones as duplicates"

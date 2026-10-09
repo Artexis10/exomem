@@ -1385,6 +1385,8 @@ def test_owner_journey_through_preserve_and_record_memory(store, monkeypatch):
         "mode",
         "source_ref",
         "format",
+        "members",
+        "reimport",
         "mapping",
         "continuation",
     }
