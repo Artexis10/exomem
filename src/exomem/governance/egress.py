@@ -1876,7 +1876,7 @@ def _decide_path(
         who = RequestPrincipal(audience_id=audience)
     if not content_permits(vault_root, rel_path, who):
         return Decision(DISCLOSURE_MIN)
-    if _file_policy_empty(vault_root, policy):
+    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
         return Decision(DISCLOSURE_MAX)
     full_path = vault_root / rel_path
     try:
@@ -5819,7 +5819,7 @@ def release_level_for(
     if not content_permits(vault_root, rel_path, who):
         return DISCLOSURE_MIN
     policy = policy_module.load(vault_root)
-    if _file_policy_empty(vault_root, policy):
+    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
         return DISCLOSURE_MAX
     who = principal if principal is not None else effective_principal()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
@@ -6454,11 +6454,16 @@ def release_walk_filter(
         return allowed
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
-    if owned is not None and raw_protection.has_unrestricted_access(vault_root, who):
+    if owned is not None:
         # The empty policy missed its shortcut only because a collection-store marker
         # exists. Ordinary files keep the empty-policy answer, as `annotate_page` reads
-        # them, and only marker-owned paths take the per-path decision.
-        return lambda rel_path: keep(rel_path) if owned(rel_path) else True
+        # them, and only marker-owned paths take the per-path decision. The marker is
+        # read once for the walk, never per path.
+        if unrestricted_content_access(vault_root, who):
+            return lambda rel_path: keep(rel_path) if owned(rel_path) else True
+        return lambda rel_path: (
+            keep(rel_path) if owned(rel_path) else content_permits(vault_root, rel_path, who)
+        )
     return keep
 
 
