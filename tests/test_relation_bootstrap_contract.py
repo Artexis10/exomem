@@ -67,7 +67,8 @@ def test_every_bootstrap_profile_exposes_bounded_relation_currency(tmp_path: Pat
 def test_compact_bootstrap_exposes_relation_routes_and_decision_choices(
     tmp_path: Path,
 ) -> None:
-    result = commands.op_bootstrap(tmp_path / "vault", profile="compact", section="all")
+    with library_scope():
+        result = commands.op_bootstrap(tmp_path / "vault", profile="compact", section="all")
     workflow = result["vocabulary_workflow"]
 
     resolve = workflow["relation_type"]["resolve"]
@@ -97,9 +98,10 @@ def test_compact_bootstrap_exposes_relation_routes_and_decision_choices(
 
 
 def test_compact_entity_guidance_keeps_the_existing_v1_constraints(tmp_path: Path) -> None:
-    rule = commands.op_bootstrap(tmp_path / "vault", profile="compact", section="all")["entity_registry"][
-        "capture_rule"
-    ].lower()
+    with library_scope():
+        rule = commands.op_bootstrap(tmp_path / "vault", profile="compact", section="all")["entity_registry"][
+            "capture_rule"
+        ].lower()
 
     for phrase in (
         "after durable work",
@@ -129,12 +131,13 @@ def test_relation_workflow_routes_reach_relation_schema_guards(
     kwargs: dict[str, object],
     guard: str,
 ) -> None:
-    route = commands.op_bootstrap(tmp_path / "vault", profile="compact", section="all")[
-        "vocabulary_workflow"
-    ]["relation_type"][route_name]["route"]
+    with library_scope():
+        route = commands.op_bootstrap(tmp_path / "vault", profile="compact", section="all")[
+            "vocabulary_workflow"
+        ]["relation_type"][route_name]["route"]
 
-    with library_scope(), pytest.raises(ValueError, match=guard):
-        commands.op_schema_memory(tmp_path / "vault", **route["args"], **kwargs)
+        with pytest.raises(ValueError, match=guard):
+            commands.op_schema_memory(tmp_path / "vault", **route["args"], **kwargs)
 
 
 def test_compact_bootstrap_does_not_inline_unbounded_extension_definitions(

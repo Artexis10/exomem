@@ -332,17 +332,34 @@ def test_owned_unproven_projection_is_absent_with_empty_policy(store, kind):
 
 
 def test_whole_log_path_requires_every_canonical_row(store):
-    store.create_collection(manifest_path(), _log_manifest(), why="create")
+    import yaml
+    from conftest import initialize_vault_state_offline
+    from test_collection_field_admission import GUEST, govern, release_document, tool
+
+    initialize_vault_state_offline(store.root, source="log field-release fixture")
+    text = _log_manifest().replace("details: {type: array,", "details: {type: array, classification: location,")
+    store.create_collection(manifest_path(), text, why="declare reviewed log details")
     store.append_record(CID, item={"title": "Visible"}, item_key=KEY, why="capture")
     store.append_record(CID, item={"title": "Hidden"}, item_key=OTHER, why="capture")
     path = "Knowledge Base/Records/Work/Log.md"
     write_scope(store.root, paths="Unrelated/**")
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\n")
-    write_rule(store.root, ceiling=0)
-    with preview_store(store.root, store.handle), request_scope(_external()):
+    write_rule(store.root, ceiling=0, audience=GUEST.audience_id)
+    with preview_store(store.root, store.handle), request_scope(GUEST):
+        assert egress.release_level_for_path_only(store.root, path) == 0
+        assert egress.release_level_for_path_only(store.root, f"{path}#{KEY}") == 0
+    basis = tool(store, "record_memory", action="inspect", collection=CID)["field_release_basis"]
+    document = yaml.safe_load(release_document(basis, GUEST))
+    document["field_release"]["paths"] = [{"path": "details", "subtree": True}]
+    proposal = govern(store, operation="propose", intent="Release reviewed log details",
+                      documents={"grants/log-details.yaml": yaml.safe_dump(document)},
+                      selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    govern(store, operation="commit", proposal_id=proposal["proposal_id"])
+    with preview_store(store.root, store.handle), request_scope(GUEST):
         assert egress.release_level_for_path_only(store.root, path) == 0
         assert egress.release_level_for_path_only(store.root, f"{path}#{KEY}") == 6
+        assert egress.release_level_for_path_only(store.root, f"{path}#{OTHER}") == 0
 
 
 def test_owner_walk_treats_an_unbound_projection_directory_as_absent(store):

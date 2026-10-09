@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
 import sqlite3
 import uuid
 from collections import ChainMap
@@ -33,9 +32,25 @@ from .. import (
 from .. import structured_collections as collections
 from ..governance.principal import effective_principal
 from ..query_engine.indexes import IndexDeclarationError
-from . import chain, connection, governance, index_migrations, tokens, types, views
+from . import (
+    chain,
+    connection,
+    governance,
+    index_migrations,
+    rollups,
+    schema,
+    summary,
+    tables,
+    tokens,
+    typed_storage,
+    types,
+    views,
+)
+from .reader import row_source
 
 BULK_UPSERT_MAX_ROWS = 500
+#: The parent's items-mode row ceiling; summary mode is bounded by the store instead.
+ITEMS_MODE_MAX_ROWS = 100_000
 
 
 class _RecoveryOnly(Exception):
@@ -66,6 +81,20 @@ def _natural_key(manifest: collections.CollectionManifest, values: Mapping[str, 
         return None
 
 
+def _renders_rows(manifest) -> bool:
+    """Items-mode Markdown items get one view file per row; logs and summaries do not."""
+    return manifest.storage.strategy == "markdown-items" and manifest.view_mode == "items"
+
+
+def _affected(manifest, path) -> list[str]:
+    """The views a row write changes: its file, the log, or the summary pages queued for reconcile."""
+    if manifest.storage.strategy == "markdown-log":
+        return [manifest.storage.source]
+    if manifest.view_mode == summary.SUMMARY:
+        return list(summary.page_paths(manifest))
+    return [path]
+
+
 def _refuse_view_stamp(manifest, values):
     if "exomem_view" in values or "exomem_view" in manifest.schema.fields:
         raise collections.CollectionError(
@@ -77,10 +106,6 @@ class CollectionWriter:
     """Generic store writer parameterized by the persisted built-in declaration."""
 
     def __init__(self, vault_root: Path, handle: connection.WriterConnection) -> None:
-        if os.environ.get("EXOMEM_COLLECTION_STORE_PREVIEW") != "1":
-            raise connection.CollectionStoreError(
-                "COLLECTION_STORE_PREVIEW_REQUIRED", "collection store writers are dark"
-            )
         self.root = Path(vault_root)
         self.handle = handle
         self.connection = handle.connection
@@ -130,12 +155,13 @@ class CollectionWriter:
         try:
             with self.handle.transaction(), self._authorization():
                 if not reconcile and self.connection.execute(
-                    "SELECT 1 FROM store_meta WHERE key='diverged' AND value='1'"
+                    "SELECT 1 FROM store_meta WHERE key=? AND value='1'", (schema.META_VIEW_DIVERGED,)
                 ).fetchone():
                     raise connection.CollectionStoreError(
                         "COLLECTION_STORE_DIVERGED", "collection store requires reconciliation"
                     )
                 batch = self._publication = views.PublicationBatch(self)
+                self._row_counts = {}
                 try:
                     yield
                 except _RecoveryOnly:
@@ -146,7 +172,7 @@ class CollectionWriter:
                 for guard, publication in tuple(batch.guards.values()):
                     self._recheck_guard(guard, publication=publication)
                 if not reconcile and not recovery_only and (batch.foreign_discovered or self.connection.execute(
-                    "SELECT 1 FROM store_meta WHERE key='diverged' AND value='1'"
+                    "SELECT 1 FROM store_meta WHERE key=? AND value='1'", (schema.META_VIEW_DIVERGED,)
                 ).fetchone()):
                     raise connection.CollectionStoreError(
                         "COLLECTION_STORE_DIVERGED", "foreign view discovery requires reconciliation"
@@ -171,7 +197,7 @@ class CollectionWriter:
             self._publication.capture_previous(path)
         if self._publication.foreign_discovered:
             if not self._publication.business_started and self.connection.execute(
-                "SELECT 1 FROM store_meta WHERE key='diverged' AND value='1'"
+                "SELECT 1 FROM store_meta WHERE key=? AND value='1'", (schema.META_VIEW_DIVERGED,)
             ).fetchone():
                 raise _RecoveryOnly
             raise connection.CollectionStoreError(
@@ -181,8 +207,10 @@ class CollectionWriter:
     def _execute(self, statement, parameters=(), *, many=False):
         """Account only this writer statement, never intervening trusted SQL."""
         before = self.connection.total_changes
-        execute = self.connection.executemany if many else self.connection.execute
         try:
+            if not isinstance(statement, str):
+                return self.handle.execute(statement, parameters or None)
+            execute = self.connection.executemany if many else self.connection.execute
             return execute(statement, parameters)
         finally:
             self.handle.release_cache.account(self.connection.total_changes - before)
@@ -264,11 +292,12 @@ class CollectionWriter:
         return replace(manifest, audit_head=row["audit_head"]), declared
 
     def _item(self, cid: str, key: str) -> dict[str, Any] | None:
-        return _row(
+        row = _row(
             self.connection.execute(
                 "SELECT * FROM items WHERE collection_id = ? AND item_key = ?", (cid, key)
             )
         )
+        return None if row is None else typed_storage.hydrate(self.connection, [row])[0]
 
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
@@ -295,7 +324,8 @@ class CollectionWriter:
         if facade_profile is None and isinstance(selector, collections.CollectionManifest):
             facade_profile = selector.semantic_profile
         with self.read_snapshot():
-            yield self._collection(selector, facade_profile=facade_profile)[1]
+            manifest = self._collection(selector, facade_profile=facade_profile)[1]
+            yield self._operation.field_plan(manifest).manifest
 
     def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
         from . import authority
@@ -311,15 +341,19 @@ class CollectionWriter:
                 if authorize_path is not None and not authorize_path(path):
                     continue
                 if marker is not None:
-                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid))
-                catalog = self._operation.catalog(cid)
-                if self._operation.decision(catalog[0]).level < 6:
+                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid),
+                                               root=self.root)
+                head = self._operation.summary_manifest(cid)
+                if head is None:
+                    head = (None, self._operation.decision(self._operation.catalog(cid)[0]))
+                if head[1].level < 6:
                     continue
                 if len(manifests) >= min(max_candidates, max_raw_candidates):
                     raise collections.CollectionError(
                         "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
                     )
-                manifests.append(self._collection(cid)[1])
+                manifest = self._collection(cid)[1]
+                manifests.append(self._operation.field_plan(manifest).manifest)
             return tuple(manifests), ()
 
     def _projection_manifest(self, selector):
@@ -338,7 +372,7 @@ class CollectionWriter:
                 "SELECT * FROM items WHERE collection_id=? ORDER BY view_path", (manifest.collection_id,),
             )
             names = [column[0] for column in cursor.description]
-            items = [dict(zip(names, item, strict=True)) for item in cursor]
+            items = typed_storage.hydrate(self.connection, [dict(zip(names, item, strict=True)) for item in cursor])
             return StoreAdapter(self, manifest, None)._snapshot(manifest, items, self._container(row))
 
     def _allows_item(self, selector, key):
@@ -348,6 +382,10 @@ class CollectionWriter:
             except collections.CollectionError:
                 return False
             identity = f"exomem://{declared.item_type}/{manifest.collection_id}/{key}"
+            if manifest.view_mode == summary.SUMMARY:
+                found = governance.subjects(self.connection, manifest.collection_id,
+                                            self._operation.logical_vault_id, identity=identity)
+                return bool(found) and self._operation.decision(found[0]).level >= 6
             return any(subject.basis.identity == identity and self._operation.decision(subject).level >= 6
                        for subject in self._operation.catalog(manifest.collection_id)[1:])
 
@@ -372,6 +410,12 @@ class CollectionWriter:
             with self._authorization(mutation=False):
                 result, selection = self._inspect_collection(collection, facade_profile=facade_profile)
                 operation = self._operation
+                from .field_admission import public_basis
+
+                _, manifest, _ = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
+                field_basis = public_basis(operation, manifest)
+                if field_basis is not None:
+                    result["field_release_basis"] = field_basis
                 evidence = operation.inspection_evidence(result, self.handle, selection)
                 vault_id = operation.logical_vault_id
         finally:
@@ -394,25 +438,55 @@ class CollectionWriter:
 
         row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
+        field_plan = self._operation.field_plan(manifest)
+        if not field_plan.owner and (field_plan.whole_fields != set(manifest.schema.fields)):
+            rows, snapshot, _ = self._operation.authorized_rows(manifest.collection_id)
+            diagnostics = []
+            record_governance._inspection_templates(
+                self.root, field_plan.manifest, diagnostics, policy=self._operation.policy,
+                authorize_path=self._operation.allows_file,
+            )
+            # Recipient inspection cannot publish full-state guards or import provenance; owners retain them below.
+            return {"kind": "collection", "report_only": True,
+                    "contract": record_governance._inspection_contract(field_plan.manifest),
+                    "snapshot": snapshot,
+                    "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
+                                        *({"path": row_source(manifest, item), "hash": item["public_version"]}
+                                          for item in rows[:record_governance._MAX_ITEM_ENTRIES - 1])],
+                    "diagnostics": diagnostics,
+                    "audit": None, "saved_views": [], "lifecycle_guards": {},
+                    "coverage": {"committed": len(rows)}, "legacy": None}, selection
         allowed = selection.released
         basis = selection.inspection_basis
+        release = self._operation.summary_release(manifest.collection_id)
         cached = None
-        if basis is not None:
+        if release is None and basis is not None:
             epoch, profile = basis
             cached = self.handle.release_cache.inspections.inspect(
                 manifest, epoch, profile, allowed,
                 lambda subject: self._inspection_record(manifest, subject),
             )
-        if cached is None:
+        if release is not None:
+            # Counts, guards and view states only: a summary inspection reads no row.
+            versions = (manifest.manifest_version,)
+            inspection = record_formats.CollectionInspection(
+                collection_id=manifest.collection_id, snapshot=release.snapshot, source_versions=versions,
+                source_hashes={version.path: version.hash for version in versions},
+                diagnostics=record_formats.inspection_diagnostics(manifest, release.snapshot),
+                record_count=release.released, presentation=(), observed_values=None,
+            )
+        elif cached is None:
             inspection = self._uncached_inspection(manifest)
         else:
             contributions, observed, presentation = cached
+            per_row = _renders_rows(manifest)
             contributions = sorted(contributions, key=lambda contribution: (
-                contribution.identity.key if manifest.storage.strategy == "markdown-log"
-                else contribution.source.path
+                contribution.source.path if per_row else contribution.identity.key
             ))
             visible_snapshot = selection.snapshot
-            source_versions = (manifest.manifest_version, *(contribution.source for contribution in contributions))
+            source_versions = (manifest.manifest_version, *(
+                contribution.source for contribution in contributions
+                if per_row or manifest.storage.strategy == "markdown-log"))
             inspection = record_formats.CollectionInspection(
                 collection_id=manifest.collection_id, snapshot=visible_snapshot,
                 source_versions=source_versions,
@@ -435,10 +509,14 @@ class CollectionWriter:
         )
         saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
         catalog = selection.catalog
-        complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
+        if release is not None:
+            complete, committed = release.complete, release.released
+        else:
+            complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
+            committed = len(allowed_rows)
         held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
         pending = sum(
-            kind == "manifest" or row_id in allowed_rows or (kind == "log" and complete)
+            kind == "manifest" or row_id in allowed_rows or (kind in ("log", "summary") and complete)
             or (kind == "held" and path in held_paths)
             for path, row_id, kind in self.connection.execute(
                 "SELECT path,row_id,kind FROM projection_state WHERE collection_id=? AND state='pending'",
@@ -466,7 +544,11 @@ class CollectionWriter:
             "audit": self._inspection_audit(row, complete=complete),
             "saved_views": saved_views, "lifecycle_guards": guards,
         }
-        if manifest.item_presentation or manifest.record_presentation or manifest.item_filename:
+        if manifest.view_mode == summary.SUMMARY:
+            # Items mode stays wire-identical to file collections; summary names its own bounds.
+            payload["contract"]["view_mode"] = manifest.view_mode
+            payload["capacity"] = summary.capacity()
+        if release is None and (manifest.item_presentation or manifest.record_presentation or manifest.item_filename):
             payload["presentation"] = record_governance._presentation_inspection(inspection.presentation, manifest)
         if declared.kind == "intended" and facade_profile != "records":
             payload["contract"].pop("plans")
@@ -478,9 +560,10 @@ class CollectionWriter:
         )
         payload.update({
             "legacy": None,
-            "observed_values": dict(inspection.observed_values or {}),
+            # Summary inspection reads no row, so it has no value vocabulary to report.
+            **({} if release is not None else {"observed_values": dict(inspection.observed_values or {})}),
             "coverage": {
-                "committed": len(allowed_rows), "held": len(held), "unreadable": 0,
+                "committed": committed, "held": len(held), "unreadable": 0,
                 "held_refs": [
                     {"held_id": candidate[0], "held_at": candidate[1],
                      "attempted_action": json.loads(candidate[2]).get("action", "update"),
@@ -527,16 +610,14 @@ class CollectionWriter:
 
     def _inspection_record(self, manifest, subject):
         cursor = self.connection.execute(
-            "SELECT collection_id,item_key,row_version,payload_hash,view_path,values_json "
+            "SELECT row_id,encoding,collection_id,item_key,row_version,payload_hash,view_path,values_json "
             "FROM items WHERE collection_id=? AND row_id=?", (manifest.collection_id, subject.row_id),
         )
         item = _row(cursor)
         if item is None:
             governance.OperationAuthorization.refuse()
-        version = collections.SourceVersion(
-            manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
-            self._version(item),
-        )
+        typed_storage.hydrate(self.connection, [item])
+        version = collections.SourceVersion(row_source(manifest, item), self._version(item))
         return record_formats.Record(
             collections.ItemIdentity(manifest.collection_id, item["item_key"]),
             json.loads(item["values_json"]), version, record_formats.SourceSpan(0, 0),
@@ -547,11 +628,9 @@ class CollectionWriter:
         versions = [manifest.manifest_version]
         parsed = []
         for item in items:
-            version = collections.SourceVersion(
-                manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
-                self._version(item),
-            )
-            versions.append(version)
+            version = collections.SourceVersion(row_source(manifest, item), self._version(item))
+            if manifest.view_mode == "items":
+                versions.append(version)
             parsed.append(record_formats.Record(
                 collections.ItemIdentity(manifest.collection_id, item["item_key"]),
                 json.loads(item["values_json"]), version, record_formats.SourceSpan(0, 0),
@@ -624,7 +703,9 @@ class CollectionWriter:
         request_hash: str,
         *,
         effects: Any = None,
+        control: bool = False,
     ):
+        """One chained txn; a ``control`` txn keeps the collection's generation and manifest."""
         self._publication.business_started = True
         seq, previous = chain.recorded_head(self.connection)
         txn_id = self.connection.execute(
@@ -633,6 +714,8 @@ class CollectionWriter:
         generation = 0 if row is None else row["generation"]
         before_manifest = None if row is None else row["manifest_version"]
         after_manifest = 1 if row is None else before_manifest + (operation == "revise")
+        if control:
+            after_manifest = before_manifest
         transition = records._transition_id()
         committed_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         event = {
@@ -640,7 +723,7 @@ class CollectionWriter:
             "collection_id": manifest.collection_id,
             "operation": operation,
             "generation_before": generation,
-            "generation_after": generation + 1,
+            "generation_after": generation + (not control),
             "manifest_version_before": before_manifest,
             "manifest_version_after": after_manifest,
             "manifest_hash": manifest.manifest_version.hash,
@@ -659,10 +742,10 @@ class CollectionWriter:
             "collection_id": manifest.collection_id,
             "operation": operation,
             "profile_operation": f"plan_{'add' if operation == 'append' else operation}"
-            if manifest.semantic_profile == "planning"
+            if manifest.semantic_profile == "planning" and not control
             else None,
             "generation_before": generation,
-            "generation_after": generation + 1,
+            "generation_after": generation + (not control),
             "manifest_version_before": before_manifest,
             "manifest_version_after": after_manifest,
             "actor": effective_principal().audience_id,
@@ -679,7 +762,15 @@ class CollectionWriter:
 
     def _insert_txn(self, txn: dict[str, Any], receipt: dict[str, Any]) -> None:
         valid = mutation_terminal.valid_collection_receipt(receipt)
-        if txn["operation"] == "bulk_upsert":
+        if txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
+            valid = (
+                mutation_terminal.valid_control_receipt(receipt)
+                and receipt["operation"] == txn["operation"]
+                and (receipt["collection_id"], receipt["transition_id"], receipt["commit_seq"])
+                == (txn["collection_id"], txn["transition_id"], txn["commit_seq"])
+                and txn["generation_before"] == txn["generation_after"]
+            )
+        elif txn["operation"] == "bulk_upsert":
             valid = (
                 receipt["operation"] == "bulk_upsert" and receipt["committed"] is True
                 and receipt["collection_id"] == txn["collection_id"]
@@ -690,18 +781,15 @@ class CollectionWriter:
         if not valid:
             raise RuntimeError("writer constructed an invalid collection receipt")
         data = {**txn, "receipt_json": _json(receipt)}
-        names = list(data)
-        self._execute(
-            f"INSERT INTO txns ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
-            tuple(data.values()),
-        )
-        if self._publication.deferred_create is None:
+        self._execute(tables.INSERT_TXN, data)
+        if self._publication.deferred_create is None and txn["operation"] not in mutation_terminal.CONTROL_OPERATIONS:
             self._publication.bind(receipt)
 
     def _advance(self, txn: Mapping[str, Any]) -> str:
         self._execute(
-            "UPDATE collections SET generation = ?, audit_head = ?, updated_txn = ? WHERE collection_id = ?",
-            (txn["generation_after"], txn["event_hash"], txn["txn_id"], txn["collection_id"]),
+            tables.ADVANCE,
+            {"generation": txn["generation_after"], "audit_head": txn["event_hash"],
+             "updated_txn": txn["txn_id"], "target_collection_id": txn["collection_id"]},
         )
         return tokens.container_hash(
             txn["collection_id"], txn["generation_after"], txn["event_hash"]
@@ -713,17 +801,17 @@ class CollectionWriter:
     ) -> None:
         descriptor = None
         digest = hashlib.sha256(text.encode()).hexdigest()
-        if kind in {"manifest", "item", "held"}:
+        # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+        if kind in {"manifest", "item", "held", "summary"}:
             descriptor = self._publication.prepare({
                 "path": path, "collection_id": cid, "kind": kind, "row_id": row_id,
                 "pending_row_version": version, "pending_sha256": digest,
             }, self._publication.previous(path), manifest)
-        self._execute(
-            "INSERT INTO projection_state (path, collection_id, row_id, kind, pending_row_version, pending_sha256, state, install_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?) ON CONFLICT(path) DO UPDATE SET "
-            "pending_row_version = excluded.pending_row_version, pending_sha256 = excluded.pending_sha256, state = 'pending', install_json=excluded.install_json",
-            (path, cid, row_id, kind, version, digest, descriptor),
-        )
+        self._execute(tables.PENDING, {
+            "path": path, "collection_id": cid, "row_id": row_id, "kind": kind,
+            "pending_row_version": version, "pending_sha256": digest, "state": "pending",
+            "install_json": descriptor,
+        })
 
     def _render_view(self, projection, manifest):
         """Render indexed canonical rows using a context prepared before the filesystem phase."""
@@ -759,6 +847,12 @@ class CollectionWriter:
                 "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
                 (projection["collection_id"],),
             ).fetchone()
+        elif projection["kind"] == "summary":
+            # Generated read-only output: hold any edit with its bytes, never parse it into rows.
+            generation = self.connection.execute(
+                "SELECT generation FROM collections WHERE collection_id=?", (projection["collection_id"],)
+            ).fetchone()[0]
+            return "SUMMARY_VIEW_READ_ONLY", view_stamp, generation
         else:
             return "VIEW_INVALID", view_stamp, projection["pending_row_version"]
         version, payload = current
@@ -782,7 +876,10 @@ class CollectionWriter:
                           if name not in {*system, "exomem_view"}}
                 self._validate(manifest, declared, key, values, operation="update", validate_graph=False)
             else:
-                collections.parse_manifest_bytes(self.root, projection["path"], raw)
+                proposed = collections.parse_manifest_bytes(self.root, projection["path"], raw)
+                if proposed.view_mode != manifest.view_mode and summary.populated(
+                        self.connection, manifest.collection_id):
+                    return summary.MODE_CHANGE_UNSUPPORTED, view_stamp, version
         except collections.CollectionError:
             return "VIEW_INVALID", view_stamp, version
         # Current-base edit-back is a later P2 slice; retain its bytes and ownership.
@@ -848,7 +945,7 @@ class CollectionWriter:
         self.handle.release_cache.touch(projection["collection_id"],
                                        f"exomem://collection-held/{projection['collection_id']}/{reference}")
         if code == "VIEW_FOREIGN":
-            self._execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES ('diverged','1')")
+            self._execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,'1')", (schema.META_VIEW_DIVERGED,))
         self._precommit(manifest)
         return True
 
@@ -893,10 +990,11 @@ class CollectionWriter:
             raise result.error
         return preserved
 
-    def reconcile_views(self, *, limit=64, after=None):
+    def reconcile_views(self, *, limit=64, after=None, pending_only=False):
         """Recover one path window; inspect never writes or invokes this path.
 
         The window does not bound file bytes, preserved inputs or directory enumeration.
+        ``pending_only`` takes only views awaiting publication, as the serving store thread does.
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
             raise ValueError("reconcile limit must be between 1 and 1024")
@@ -908,8 +1006,9 @@ class CollectionWriter:
             batch.bind(result)
             result["recovered_stages"] = batch.recovered_stages
             cursor = self.connection.execute(
-                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held') AND path>? ORDER BY path LIMIT ?",
-                (after or "", limit + 1),
+                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') AND path>? "
+                "AND (? OR state='pending') ORDER BY path LIMIT ?",
+                (after or "", not pending_only, limit + 1),
             )
             rows = [dict(zip((c[0] for c in cursor.description), row, strict=True)) for row in cursor.fetchall()]
             if len(rows) > limit:
@@ -969,14 +1068,17 @@ class CollectionWriter:
                                           (_json(descriptor), projection["path"]))
                             continue
                     if projection["kind"] == "held":
-                        held = _row(self.connection.execute("SELECT * FROM held_candidates WHERE held_id=? AND view_path=?",
-                                                           (Path(projection["path"]).stem, projection["path"])))
-                        if held is None:
-                            if raw is None and not preserved:
-                                self._execute("DELETE FROM projection_state WHERE path=?", (projection["path"],))
-                            else:
-                                batch.retire(projection)
-                            continue
+                        retired = _row(self.connection.execute("SELECT * FROM held_candidates WHERE held_id=? AND view_path=?",
+                                                              (Path(projection["path"]).stem, projection["path"]))) is None
+                    else:
+                        # A page its collection no longer declares (an empty collection left summary mode).
+                        retired = projection["kind"] == "summary" and projection["path"] not in summary.page_paths(manifest)
+                    if retired:
+                        if raw is None and not preserved:
+                            self._execute("DELETE FROM projection_state WHERE path=?", (projection["path"],))
+                        else:
+                            batch.retire(projection)
+                        continue
                     version, text = self._render_view(projection, manifest)
                     self._pending(projection["path"], projection["collection_id"], projection["kind"], version, text, projection["row_id"], manifest=manifest)
                 except (held_fs.HeldFsError, OSError, connection.CollectionStoreError):
@@ -984,20 +1086,183 @@ class CollectionWriter:
                 self._precommit(manifest)
         return result
 
-    def backfill_query_indexes(self, collection, *, limit=128) -> bool:
-        """Resume one derived batch under the writer lease and current authority.
+    def record_control_transition(self, operation, transitions, *, why):
+        """Record a content-free control transition: one chained txn per affected collection.
 
-        This is internal maintenance, not a public query or an automatic job.
-        Canonical items, generations and mutation audit remain unchanged.
+        ``transitions`` maps each collection id to ``{"counts": {name: int}, "ids":
+        {name: [id, ...]}}``: counts and identifiers only, never item values. Each txn
+        advances ``commit_seq`` and the store head, so the next replica publication and
+        an orderly release carry it, and leaves the collection's generation, manifest and
+        container hash unchanged. Inside an open writer mutation it joins that SQLite
+        transaction; otherwise it opens its own. Returns the receipts in collection order.
+
+        A collection whose ids exceed ``CONTROL_RECEIPT_MAX_IDS`` is recorded as
+        successive txns that split the ids in order; each of those receipts repeats the
+        counts and adds ``part`` and ``parts`` (1-based).
+        """
+        if operation not in mutation_terminal.CONTROL_OPERATIONS:
+            raise ValueError(f"unknown control operation {operation!r}")
+        if not isinstance(why, str) or not why.strip():
+            raise ValueError("a control transition needs a reason")
+        if self._publication is None:
+            with self._mutation():
+                return self.record_control_transition(operation, transitions, why=why)
+        limit, receipts = mutation_terminal.CONTROL_RECEIPT_MAX_IDS, []
+        for cid in sorted(transitions):
+            row, manifest, _ = self._collection(cid)
+            counts = dict(transitions[cid].get("counts", {}))
+            flat = [(name, found) for name, ids in transitions[cid].get("ids", {}).items() for found in ids]
+            slices = [flat[start:start + limit] for start in range(0, len(flat), limit)] or [[]]
+            for part, chunk in enumerate(slices, 1):
+                ids = {name: [] for name in transitions[cid].get("ids", {})}
+                for name, found in chunk:
+                    ids[name].append(found)
+                facts = {"counts": counts if len(slices) == 1 else {**counts, "part": part, "parts": len(slices)},
+                         "ids": ids}
+                txn = self._txn(row, manifest, operation, why, None, None, effects=facts, control=True)
+                receipt = {"_control_receipt": mutation_terminal.CONTROL_RECEIPT_MARKER, "receipt_version": 1,
+                           "operation": operation, "collection_id": cid, "transition_id": txn["transition_id"],
+                           "commit_seq": txn["commit_seq"], **facts, "outcome": "committed"}
+                self._insert_txn(txn, receipt)
+                receipts.append(receipt)
+            self._precommit(manifest)
+        return receipts
+
+    def hold_store_delta(self, items, *, reconciled, why, acknowledged=()):
+        """Divergence reconciliation (design §15 item 5): each foreign change becomes a held correction.
+
+        No canonical row changes. Each item another store instance changed after the
+        common ancestor is held as a view correction carrying that store's latest values
+        and diagnostics for an owner decision under the plan's ``held_id``, superseding an
+        older hold. The plan carries one latest change per held id and leaves out a change
+        already held, so a repeat with nothing new records nothing.
+        The ``reconciled`` evidence digests are marked, a view-stamp divergence is cleared,
+        and the reconciliation is recorded as one content-free control transition per
+        affected collection. ``acknowledged`` are the preview's skipped changes the owner
+        accepted; their ids are recorded by skip code.
+        """
+        result = {"held_ids": [], "superseded": 0, "why": why}
+        skipped = {}
+        for entry in acknowledged:
+            ref = entry["sha256"] if "item_key" not in entry else f"{entry['collection_id']}:{entry['item_key']}"
+            skipped.setdefault(f"skipped_{entry['code']}", []).append(ref)
+        with self._mutation(reconcile=True):
+            self._publication.bind(result)
+            touched = {}
+            for item in items:
+                cid, key = item["collection_id"], item["item_key"]
+                _, manifest, _ = self._collection(cid)
+                reference = item["held_id"]
+                path = f"{records._held_directory(manifest)}/{reference}.md"
+                self._preflight_views([path])
+                raw = _json({"item_key": key, "values": item["values"], "body": item["body"]}).encode()
+                metadata = self.connection.execute(
+                    "SELECT m.governance_json FROM collection_manifests m JOIN collections c ON "
+                    "c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+                    (cid,),
+                ).fetchone()[0]
+                try:
+                    held_metadata = governance.row_metadata(manifest.schema, item["values"], metadata)
+                except (ValueError, collections.CollectionError):
+                    held_metadata = _json({**governance._metadata(metadata), "tags": [], "classes": []})
+                diagnostics = _json([{"code": "COLLECTION_STORE_DIVERGED", **{
+                    name: value for name, value in item.items() if name not in {"values", "body"}}}])
+                now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                superseded = self.connection.execute(
+                    "SELECT 1 FROM held_candidates WHERE held_id=?", (reference,)).fetchone() is not None
+                self._execute(
+                    "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
+                    "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash) "
+                    "VALUES (?,?,'view-correction','COLLECTION_STORE_DIVERGED',?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(held_id) DO UPDATE SET candidate_json=excluded.candidate_json,"
+                    "held_bytes=excluded.held_bytes,diagnostics_json=excluded.diagnostics_json,"
+                    "base_row_version=excluded.base_row_version,updated_at=excluded.updated_at,"
+                    "governance_json=excluded.governance_json,governance_hash=excluded.governance_hash",
+                    (reference, cid, _json({"action": "store-delta", "item_key": key}), raw, diagnostics, path,
+                     item["local_row_version"], now, held_metadata, hashlib.sha256(raw).hexdigest()),
+                )
+                text = views.held_view({
+                    "collection_id": cid, "held_id": reference, "updated_at": now, "kind": "view-correction",
+                    "held_bytes": raw, "diagnostics_json": diagnostics, "governance_json": held_metadata,
+                }, self._publication.identity)
+                self._pending(path, cid, "held", 1, text, manifest=manifest)
+                self.handle.release_cache.touch(cid, f"exomem://collection-held/{cid}/{reference}")
+                self._precommit(manifest)
+                facts = touched.setdefault(cid, {"held": [], "superseded": 0})
+                facts["held"].append(reference)
+                facts["superseded"] += superseded
+                result["held_ids"].append(reference)
+                result["superseded"] += superseded
+            meta = dict(self.connection.execute(
+                "SELECT key,value FROM store_meta WHERE key IN (?,?)",
+                (schema.META_RECONCILED_FOREIGN, schema.META_VIEW_DIVERGED)))
+            done = json.loads(meta.get(schema.META_RECONCILED_FOREIGN) or "[]")
+            marked = sorted(set(reconciled) - set(done))
+            cleared = schema.META_VIEW_DIVERGED in meta
+            if marked:
+                self._execute("INSERT INTO store_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET "
+                              "value=excluded.value", (schema.META_RECONCILED_FOREIGN, _json(sorted({*done, *marked}))))
+            if cleared:
+                self._execute("DELETE FROM store_meta WHERE key=?", (schema.META_VIEW_DIVERGED,))
+            result.update(reconciled=marked, view_divergence_cleared=cleared, transitions=[])
+            if touched or marked or cleared:
+                # Store-wide marks without a hold touch every collection's history.
+                affected = touched or {cid: {"held": [], "superseded": 0} for (cid,) in self.connection.execute(
+                    "SELECT collection_id FROM collections ORDER BY collection_id").fetchall()}
+                result["transitions"] = self.record_control_transition("store_reconcile", {
+                    cid: {"counts": {"held": len(facts["held"]), "superseded": facts["superseded"],
+                                     "evidence_reconciled": len(marked), "view_divergence_cleared": int(cleared),
+                                     "skipped_acknowledged": len(acknowledged)},
+                          "ids": {"held_ids": facts["held"], "evidence_sha256": marked, **skipped}}
+                    for cid, facts in affected.items()}, why=why)
+        return result
+
+    def backfill_derived(self, collection, *, limit=128, projection=True, rollup=True) -> tuple[bool, bool]:
+        """Advance this collection's query projection and building rollups by one batch each, in one transaction.
+
+        Internal maintenance under the writer lease and current authority, not a
+        public route; the serving store thread drives it. A collection with no
+        projection at all starts its first build here. Canonical items,
+        generations and audit are unchanged. Returns whether the projection
+        published (True only on the batch that publishes it) and whether every
+        declared rollup is ready; until then the planner reads base rows.
+        """
+        with self._mutation():
+            _, manifest, declared = self._collection(collection)
+            accounted = index_migrations.AccountedWriter(self.connection, self._execute)
+            published = ready = False
+            if projection:
+                index_migrations.begin_missing(accounted, manifest.collection_id, declared)
+                published = index_migrations.backfill_batch(accounted, manifest.collection_id, limit=limit)
+            if rollup:
+                ready = rollups.backfill_batch(accounted, manifest.collection_id, limit=limit)
+            self._precommit(manifest)
+        return published, ready
+
+    def backfill_query_indexes(self, collection, *, limit=128) -> bool:
+        """One projection batch alone; True when it publishes the projection."""
+        return self.backfill_derived(collection, limit=limit, rollup=False)[0]
+
+    def backfill_rollups(self, collection, *, limit=128) -> bool:
+        """One rollup batch alone; True once every declared rollup is ready."""
+        return self.backfill_derived(collection, limit=limit, projection=False)[1]
+
+    def migrate_typed_encoding(self, collection, *, limit=128) -> str:
+        """Advance this collection's forward typed-v1 encoding migration by one batch.
+
+        Internal maintenance under the writer lease and current authority, not
+        a public route. Logical values, hashes, generations and audit are
+        unchanged; the JSON encoding stays authoritative until the proved
+        cutover commits. Returns ``building``, ``ready`` or ``failed``.
         """
         with self._mutation():
             _, manifest, _ = self._collection(collection)
-            complete = index_migrations.backfill_batch(
+            state = typed_storage.migrate_batch(
                 index_migrations.AccountedWriter(self.connection, self._execute),
-                manifest.collection_id, limit=limit,
+                manifest.collection_id, tuple(manifest.schema.fields), limit=limit,
             )
             self._precommit(manifest)
-        return complete
+        return state
 
     def _manifest(
         self, manifest: collections.CollectionManifest, text: str, version: int, txn_id: int
@@ -1097,8 +1362,8 @@ class CollectionWriter:
             types.register_builtins(self.connection, txn_id=txn["txn_id"])
             self._execute(
                 "INSERT INTO collections (collection_id, type_name, type_version, manifest_path, source_path, layout, "
-                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?)",
+                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?)",
                 (
                     manifest.collection_id,
                     declared.name,
@@ -1109,10 +1374,18 @@ class CollectionWriter:
                     txn["event_hash"],
                     txn["txn_id"],
                     txn["txn_id"],
+                    manifest.view_mode,
                 ),
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
-            affected = [manifest.path] + ([manifest.storage.source] if scaffold else [])
+            if manifest.view_mode == summary.SUMMARY:
+                # A NEW summary collection is typed-v1 from its first row: an empty
+                # forward migration publishes the layout in this transaction.
+                if typed_storage.migrate_batch(index_migrations.AccountedWriter(self.connection, self._execute),
+                                               manifest.collection_id, tuple(manifest.schema.fields), limit=1) != "ready":
+                    raise RuntimeError("an empty collection publishes its typed layout at once")
+                self._pending_summary(manifest, 1)
+            affected = [manifest.path, *summary.page_paths(manifest)] + ([manifest.storage.source] if scaffold else [])
             log_text = None
             if scaffold and manifest.storage.strategy == "markdown-log":
                 section = manifest.storage.descriptor["section"]
@@ -1159,13 +1432,7 @@ class CollectionWriter:
                 planning._require_same_area_side(before, values)
         values = records._validate_values(manifest, values)
         if declared.validators and validate_graph:
-            plans = {
-                k: json.loads(v)
-                for k, v in self.connection.execute(
-                    "SELECT item_key, values_json FROM items WHERE collection_id = ?",
-                    (manifest.collection_id,),
-                )
-            }
+            plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
             plans[key] = values
             for name in declared.validators:
                 types.named_validator(name).validate(manifest, plans)
@@ -1323,9 +1590,65 @@ class CollectionWriter:
             guards.append(guard)
         return validated, guards
 
+    def _require_items_capacity(self, cid):
+        """Refuse the row past the items-mode ceiling; count once per mutation."""
+        if cid not in self._row_counts:
+            self._row_counts[cid] = self.connection.execute(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM items WHERE collection_id=? LIMIT ?)",
+                (cid, ITEMS_MODE_MAX_ROWS)).fetchone()[0]
+        if self._row_counts[cid] >= ITEMS_MODE_MAX_ROWS:
+            raise collections.CollectionError(
+                "COLLECTION_ITEM_LIMIT",
+                "the collection is at its items-mode row ceiling; larger data belongs in a NEW summary collection",
+                {"items": self._row_counts[cid], "maximum": ITEMS_MODE_MAX_ROWS},
+            )
+        self._row_counts[cid] += 1
+
+    def _pending_summary(self, manifest, generation):
+        """Commit the summary pages' pending basis with the rows; reconcile publishes them.
+
+        The receipt says so: until reconcile, the published page shows an older basis.
+        """
+        for path in summary.page_paths(manifest):
+            self._publication.pending = True
+            self._confirm_installed(path)
+            self._execute(
+                "INSERT INTO projection_state(path,collection_id,row_id,kind,pending_row_version,pending_sha256,state) "
+                "VALUES (?,?,NULL,'summary',?,NULL,'pending') ON CONFLICT(path) DO UPDATE SET "
+                "pending_row_version=excluded.pending_row_version,pending_sha256=NULL,state='pending'",
+                (path, manifest.collection_id, generation),
+            )
+
+    def _confirm_installed(self, path):
+        """Record a page that a publication installed and no reconcile confirmed yet, before a new basis replaces it.
+
+        Reconcile confirms an installed page on its next pass. A commit in between would
+        otherwise clear the page's digest, so its bytes would match neither recorded digest
+        and read as a foreign edit that never publishes again.
+        """
+        row = self.connection.execute(
+            "SELECT pending_sha256 FROM projection_state WHERE path=? AND pending_sha256 IS NOT NULL", (path,)
+        ).fetchone()
+        if row is None:
+            return
+        batch = self._publication
+        try:
+            opened = batch._fs().file(batch._parent(path), Path(path).name)
+            if not opened.ok:
+                return
+            with opened.require() as file:
+                raw = batch._fs().read(file).require()
+        except (held_fs.HeldFsError, OSError):
+            return
+        if views._digest(raw) == row[0]:
+            self._execute("UPDATE projection_state SET published_row_version=pending_row_version,"
+                          "published_sha256=pending_sha256 WHERE path=?", (path,))
+
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
                     *, ordinal=0, queue_log=True):
-        if manifest.storage.strategy == "markdown-items":
+        if before is None and manifest.view_mode == "items":
+            self._require_items_capacity(manifest.collection_id)
+        if _renders_rows(manifest):
             self._publication.capture_previous(path)
         natural_key = _natural_key(manifest, values)
         payload = tokens.payload_hash(manifest.schema.version, key, values, body)
@@ -1336,64 +1659,54 @@ class CollectionWriter:
             (manifest.collection_id,),
         ).fetchone()[0]
         metadata = governance.row_metadata(manifest.schema, values, manifest_metadata)
+        # The collection is the one encoding authority; json-v1 keeps canonical
+        # JSON, typed-v1 keeps ordinal typed columns and no JSON copy.
+        encoding = typed_storage.collection_encoding(self.connection, manifest.collection_id)
+        stored = _json(values) if encoding == typed_storage.JSON_V1 else None
+        changed = {"natural_key": natural_key, "row_version": version, "values_json": stored,
+                   "body": body, "payload_hash": payload, "updated_txn": txn["txn_id"],
+                   "governance_json": metadata}
         if before is None:
-            cursor = self._execute(
-                "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    manifest.collection_id,
-                    key,
-                    natural_key,
-                    version,
-                    manifest.schema.version,
-                    _json(values),
-                    body,
-                    payload,
-                    path,
-                    txn["txn_id"],
-                    txn["txn_id"],
-                    metadata,
-                ),
-            )
+            cursor = self._execute(tables.INSERT_ITEM, {
+                **changed, "collection_id": manifest.collection_id, "item_key": key,
+                "schema_version": manifest.schema.version, "view_path": path,
+                "created_txn": txn["txn_id"], "encoding": encoding,
+            })
             row_id = cursor.lastrowid
         else:
             row_id = before["row_id"]
-            self._execute(
-                "UPDATE items SET natural_key = ?, row_version = ?, values_json = ?, body = ?, payload_hash = ?, updated_txn = ?,governance_json=? WHERE row_id = ?",
-                (natural_key, version, _json(values), body, payload, txn["txn_id"], metadata, row_id),
+            self._execute(tables.UPDATE_ITEM, {**changed, "target_row_id": row_id})
+        if encoding == typed_storage.JSON_V1:
+            # The JSON payload mints its json-v1 version_identity in the same statement.
+            self._execute(tables.INSERT_VERSION, {
+                "row_id": row_id, "row_version": version, "values_json": stored, "body": body,
+                "payload_hash": payload, "txn_id": txn["txn_id"],
+            })
+        else:
+            typed_storage.write_version(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                typed_storage.require_layout(self.connection, manifest.collection_id),
+                row_id=row_id, row_version=version, values=values, body=body, payload_hash=payload,
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version,
             )
-        self._execute(
-            "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
-            (row_id, version, _json(values), body, payload, txn["txn_id"]),
-        )
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
                                        previous=json.loads(before["values_json"]) if before else None)
         for source_ordinal, source in enumerate(sources):
-            self._execute(
-                "INSERT INTO item_sources VALUES (?, ?, ?, ?)", (row_id, version, source_ordinal, source)
-            )
-        self._execute(
-            "INSERT INTO audit_effects (txn_id, ordinal, row_id, item_key, effect, effect_label, version_before, version_after, hash_before, hash_after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                txn["txn_id"],
-                ordinal,
-                row_id,
-                key,
-                "resume" if resumed else "insert" if before is None else "update",
-                "replan"
-                if manifest.semantic_profile == "planning"
-                else "correction"
-                if before
-                else None,
-                None if before is None else before["row_version"],
-                version,
-                None if before is None else before["payload_hash"],
-                payload,
-            ),
-        )
-        if manifest.storage.strategy == "markdown-items":
+            self._execute(tables.INSERT_SOURCE, {"row_id": row_id, "row_version": version,
+                          "ordinal": source_ordinal, "source_ref": source})
+        self._execute(tables.INSERT_EFFECT, {
+            "txn_id": txn["txn_id"], "ordinal": ordinal, "row_id": row_id, "item_key": key,
+            "effect": "resume" if resumed else "insert" if before is None else "update",
+            "effect_label": "replan" if manifest.semantic_profile == "planning" else "correction" if before else None,
+            "version_before": None if before is None else before["row_version"], "version_after": version,
+            "hash_before": None if before is None else before["payload_hash"], "hash_after": payload,
+        })
+        if _renders_rows(manifest):
             _, text = self._render_view({"kind": "item", "row_id": row_id}, manifest)
             self._pending(path, manifest.collection_id, "item", version, text, row_id, manifest=manifest)
+        elif queue_log and manifest.view_mode == summary.SUMMARY:
+            self._pending_summary(manifest, txn["generation_after"])
         elif queue_log:
             self._pending_log(manifest, txn)
         self._release(resumed)
@@ -1413,23 +1726,37 @@ class CollectionWriter:
             else f"{'#' * section['level']} {section['title']}\n"
         )
         order = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
-        blocks = self.connection.execute(
-            f"SELECT item_key, values_json, row_version, payload_hash FROM items WHERE collection_id = ? ORDER BY created_txn {order}, row_id {order}",
+        cursor = self.connection.execute(
+            f"SELECT item_key, values_json, row_version, payload_hash, row_id, collection_id, encoding FROM items WHERE collection_id = ? ORDER BY created_txn {order}, row_id {order}",
             (manifest.collection_id,),
         )
+        names = [column[0] for column in cursor.description]
+        blocks = typed_storage.hydrate(self.connection, [dict(zip(names, row, strict=True)) for row in cursor])
         identity = self._publication.identity
         text = frame + "".join(
             record_formats.render_markdown_log_item(
-                manifest, json.loads(v), k, "\n",
-                view_stamp=views.stamp(identity, version, payload),
+                manifest, json.loads(block["values_json"]), block["item_key"], "\n",
+                view_stamp=views.stamp(identity, block["row_version"], block["payload_hash"]),
             )
-            for k, v, version, payload in blocks
+            for block in blocks
         )
         self._pending(manifest.storage.source, manifest.collection_id, "log", txn["generation_after"], text)
 
+    def _fresh_authorization(self):
+        """A new mutation-authority snapshot, independent of any open operation."""
+        return governance.OperationAuthorization(
+            self.root, self.connection, mutation=True, cache=self.handle.release_cache
+        )
+
     def bulk_upsert_records(self, collection, *, rows, why, expected_container_hash,
-                            source=None, on_reject="abort", request_id=None):
-        """Plan Records rows under one guard; commit one transition with N effects."""
+                            source=None, on_reject="abort", request_id=None, _import=None):
+        """Plan Records rows under one guard; commit one transition with N effects.
+
+        ``_import`` is an import job's batch settlement (``importer``): its
+        ``source`` is the job's proved source and it is called with the result
+        inside this transaction, so the job's checkpoint commits or rolls back
+        with the rows.
+        """
         records._validate_why(why)
         if on_reject not in {"abort", "skip"} or not isinstance(rows, list | tuple):
             raise collections.CollectionError("INVALID_BULK_ROWS", "rows must be a list and on_reject abort or skip")
@@ -1460,7 +1787,9 @@ class CollectionWriter:
             is_log = manifest.storage.strategy == "markdown-log"
             cache, source_guards, seen = {}, {}, {}
             outcomes, plans = [], []
-            occupied = ChainMap({}, self.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
+            # Only a filename recipe consults occupied keys; fetching them streams every row subject.
+            occupied = (ChainMap({}, self.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
+                        if manifest.item_filename else {})
             for index, raw in enumerate(rows):
                 if (not isinstance(raw, Mapping) or set(raw) - records._BULK_ROW_KEYS
                         or not isinstance(raw.get("item"), Mapping)):
@@ -1481,22 +1810,19 @@ class CollectionWriter:
                         outcomes.append(records._bulk_reject(index, "SOURCE_REQUIRED",
                                                             "a row needs a preserved source reference"))
                         continue
-                    resolved = records._resolve_bulk_source(self.root, reference,
-                                                           self._operation.allows_file, cache)
+                    resolved = (
+                        _import.source
+                        if _import is not None
+                        else records._resolve_bulk_source(
+                            self.root, reference, self._operation.allows_file, cache
+                        )
+                    )
                     if resolved is None:
                         outcomes.append(records._bulk_reject(index, "SOURCE_NOT_FOUND",
                                         "source is not a preserved Sources or Evidence page", source=reference))
                         continue
                     source_rel, guard = resolved
-                    values = dict(raw["item"])
-                    if has_sources:
-                        link = records._bulk_source_link(source_rel)
-                        listed = values.get("sources")
-                        if listed is None:
-                            values["sources"] = [link]
-                        elif isinstance(listed, list) and link not in listed:
-                            values["sources"] = [*listed, link]
-                    values = records._validate_values(manifest, values)
+                    values = records._bulk_row_values(manifest, raw["item"], source_rel)
                 except collections.CollectionError as error:
                     outcomes.append(records._bulk_error_row(index, error))
                     continue
@@ -1533,9 +1859,12 @@ class CollectionWriter:
                     path = before["view_path"]
                 elif is_log:
                     path = f"{manifest.storage.source}#{key}"
+                elif manifest.view_mode == summary.SUMMARY:
+                    path = None
                 else:
                     path = collections.render_item_path(manifest, values, key, occupied_path_keys=occupied) if manifest.item_filename else f"{manifest.storage.source}/{key}.md"
-                occupied[collections._portable_path_key(path)] = 1
+                if path is not None:
+                    occupied[collections._portable_path_key(path)] = 1
                 source_guards[source_rel] = guard
                 plans.append((key, values, effective_body, path, before, source_rel))
                 outcomes.append({"index": index, **base, "outcome": "updated" if before else "inserted"})
@@ -1545,8 +1874,10 @@ class CollectionWriter:
                           batch_id=batch_id, committed=False, on_reject=on_reject, rows=outcomes,
                           counts=counts, before_container_hash=current_hash, after_container_hash=current_hash)
             if not plans or (counts["rejected"] and on_reject == "abort"):
+                if _import is not None:
+                    _import(self, result)
                 return result
-            if not is_log:
+            if _renders_rows(manifest):
                 self._preflight_views(path for _, _, _, path, _, _ in plans)
             txn = self._txn(row, manifest, "bulk_upsert", why, identity, digest,
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
@@ -1556,6 +1887,8 @@ class CollectionWriter:
                                  ordinal=ordinal, queue_log=False)
             if is_log:
                 self._pending_log(manifest, txn)
+            elif manifest.view_mode == summary.SUMMARY:
+                self._pending_summary(manifest, txn["generation_after"])
             result.update(committed=True, after_container_hash=self._advance(txn),
                           first_transition=txn["transition_id"], last_transition=txn["transition_id"])
             for outcome in outcomes:
@@ -1565,10 +1898,12 @@ class CollectionWriter:
             for guard in source_guards.values():
                 self._recheck_guard(guard, publication=True)
             self._insert_txn(txn, result)
+            if _import is not None:
+                _import(self, result)
         writer_lease.mark_active_mutation_committed()
         advisory = None
         for key, values, _, path, before, _ in plans:
-            advisory = records._due_state_carrier(self.root, manifest, path=path, key=key,
+            advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
                                                   values=values, previous=json.loads(before["values_json"]) if before else None)
         return {"due_state": advisory, **result} if advisory else result
 
@@ -1697,8 +2032,7 @@ class CollectionWriter:
                         after_item_hash=self._version(existing),
                         before_container_hash=before_container,
                         after_container_hash=before_container,
-                        affected_paths=[manifest.storage.source if manifest.storage.strategy == "markdown-log"
-                                        else existing["view_path"]],
+                        affected_paths=_affected(manifest, existing["view_path"]),
                         payload_hash=payload,
                         outcome="replayed",
                         audit_correlation=insert[0],
@@ -1711,6 +2045,8 @@ class CollectionWriter:
                 else:
                     if manifest.storage.strategy == "markdown-log":
                         path = f"{manifest.storage.source}#{key}"
+                    elif manifest.view_mode == summary.SUMMARY:
+                        path = None
                     elif manifest.item_filename:
                         path = collections.render_item_path(
                             manifest, values, key,
@@ -1719,7 +2055,7 @@ class CollectionWriter:
                     else:
                         path = f"{manifest.storage.source}/{key}.md"
                     verified, source_guards = self._sources(sources)
-                    self._preflight_views(([path] if manifest.storage.strategy == "markdown-items" else [])
+                    self._preflight_views(([path] if _renders_rows(manifest) else [])
                                           + ([resumed["view_path"]] if resumed else []))
                     txn = self._txn(
                         row,
@@ -1742,7 +2078,7 @@ class CollectionWriter:
                         after_item_hash=item_hash,
                         before_container_hash=before_container,
                         after_container_hash=after_container,
-                        affected_paths=[manifest.storage.source if manifest.storage.strategy == "markdown-log" else path],
+                        affected_paths=_affected(manifest, path),
                         payload_hash=payload,
                         outcome="committed",
                         audit_correlation=txn["transition_id"],
@@ -1755,8 +2091,8 @@ class CollectionWriter:
                     self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, path=result["affected_paths"][0],
-                                   key=key, values=values)
+        return self._item_carriers(result, manifest, key=key, values=values,
+                                   path=result["affected_paths"][0] if manifest.view_mode == "items" else manifest.path)
 
     def update_record(
         self,
@@ -1908,7 +2244,7 @@ class CollectionWriter:
                         )
                 self._twins(manifest.collection_id, key, _natural_key(manifest, final))
                 verified, source_guards = self._sources(sources)
-                self._preflight_views(([before["view_path"]] if manifest.storage.strategy == "markdown-items" else [])
+                self._preflight_views(([before["view_path"]] if _renders_rows(manifest) else [])
                                       + ([resumed["view_path"]] if resumed else []))
                 txn = self._txn(
                     row,
@@ -1945,8 +2281,7 @@ class CollectionWriter:
                     after_item_hash=item_hash,
                     before_container_hash=self._container(row),
                     after_container_hash=after_container,
-                    affected_paths=[manifest.storage.source if manifest.storage.strategy == "markdown-log"
-                                    else before["view_path"]],
+                    affected_paths=_affected(manifest, before["view_path"]),
                     payload_hash=None,
                     outcome="committed",
                     audit_correlation=txn["transition_id"],
@@ -1957,7 +2292,7 @@ class CollectionWriter:
                 self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, path=before["view_path"],
+        return self._item_carriers(result, manifest, path=before["view_path"] or manifest.path,
                                    key=key, values=final, previous=old_values)
 
     def revise_collection(
@@ -2008,6 +2343,11 @@ class CollectionWriter:
                     "IMMUTABLE_COLLECTION_REPRESENTATION",
                     "revision cannot migrate collection representation",
                 )
+            # A populated collection never changes view mode in place; refuse
+            # before any manifest, mapping, file, guard or cursor work.
+            mode_change = proposed.view_mode != current.view_mode
+            if mode_change and summary.populated(self.connection, current.collection_id):
+                raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
             records._refuse_excluded_manifest_fields(proposed)
             if proposed.view_diagnostics:
                 diagnostic = proposed.view_diagnostics[0]
@@ -2016,22 +2356,34 @@ class CollectionWriter:
             if declared.kind == "intended":
                 planning.require_planning_profile(proposed)
             plans = {
-                key: self._validate(proposed, declared, key, json.loads(values),
-                                    operation="revise", validate_graph=False)
-                for key, values in self.connection.execute(
-                    "SELECT item_key, values_json FROM items WHERE collection_id = ?",
-                    (current.collection_id,),
-                )
+                key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False)
+                for key, values in typed_storage.collection_values(self.connection, current.collection_id)
             }
             for name in declared.validators:
                 types.named_validator(name).validate(proposed, plans)
-            self._preflight_views([current.path, *(path for (path,) in self.connection.execute(
-                "SELECT view_path FROM items WHERE collection_id=? UNION ALL "
+            retired_pages = summary.page_paths(current) if mode_change else ()
+            self._preflight_views([current.path, *retired_pages, *(path for (path,) in self.connection.execute(
+                "SELECT view_path FROM items WHERE collection_id=? AND view_path IS NOT NULL UNION ALL "
                 "SELECT view_path FROM held_candidates WHERE collection_id=?",
                 (current.collection_id, current.collection_id),
             ))])
+            if mode_change and (self._publication.pending
+                                or summary.populated(self.connection, current.collection_id)
+                                or summary.publication_outstanding(self.connection, current.collection_id)):
+                # Preflight can hold an offline edit; an unclassified edit or unpublished view also keeps the mode.
+                raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
+            if mode_change:
+                self._execute("UPDATE collections SET view_mode=? WHERE collection_id=?",
+                              (proposed.view_mode, current.collection_id))
+                if proposed.view_mode == summary.SUMMARY and typed_storage.migrate_batch(
+                        index_migrations.AccountedWriter(self.connection, self._execute),
+                        current.collection_id, tuple(proposed.schema.fields), limit=1) != "ready":
+                    raise RuntimeError("an empty collection publishes its typed layout at once")
+                for path in retired_pages:
+                    self._publication.retire(self._publication.captured[path])
+            self._pending_summary(proposed, txn["generation_after"])
             self._execute(
                 "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
                 (txn["manifest_version_after"], current.collection_id),

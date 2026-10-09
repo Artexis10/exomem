@@ -301,7 +301,9 @@ def test_a_continuity_token_crosses_the_boundary_intact() -> None:
     on its next turn: base64 of a compact payload naming a random thread, so
     the entropy heuristic read it as a credential and every caller behind the
     dispatcher received the notice instead of its thread. The explicit
-    credential patterns still apply to it."""
+    credential patterns still apply to it. A typed query page's `next_cursor`
+    round-trips the same way, but only as the result's own key: a row field of
+    that name is data and keeps the entropy heuristic."""
     from exomem import working_set_runtime
 
     token = working_set_runtime.encode_continuity(
@@ -322,6 +324,9 @@ def test_a_continuity_token_crosses_the_boundary_intact() -> None:
     cleaned, blocked = scrubber.scrub_value({"continuity": PRIVATE_KEY})
     assert blocked
     assert "BEGIN RSA PRIVATE KEY" not in json.dumps(cleaned)
+    assert scrubber.scrub_value({"next_cursor": token}) == ({"next_cursor": token}, False)
+    cleaned, blocked = scrubber.scrub_value({"rows": [{"next_cursor": HIGH_ENTROPY}], "next_cursor": None})
+    assert blocked and HIGH_ENTROPY not in json.dumps(cleaned)
 
 
 def test_credential_named_fields_are_never_structural() -> None:

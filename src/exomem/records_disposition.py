@@ -301,6 +301,7 @@ def _occurrence_call(
     item cannot take another citation or already carries this one.
     """
     from . import record_formats
+    from .structured_collections import CollectionError
 
     field = next(
         (name for name, spec in manifest.schema.fields.items()
@@ -309,6 +310,16 @@ def _occurrence_call(
     )
     if field is None or not observation_ref:
         return None
+    writer = selected_writer(vault_root, manifest)
+    if writer is not None:
+        try:
+            writer._operation.require_collection(manifest.collection_id, complete=True)
+            writer._operation.require_complete_fields(manifest.collection_id)
+        except CollectionError as error:
+            if error.code != "COLLECTION_NOT_FOUND":
+                raise
+            # A refused advisory costs a suggestion; canonical guards would disclose withheld state.
+            return None
     snapshot = record_formats.load_adapter(Path(vault_root), manifest).read()
     matches = [record for record in snapshot.records if record.identity.key == key]
     if len(matches) != 1 or matches[0].ambiguous:
@@ -328,19 +339,25 @@ def _occurrence_call(
         if manifest.storage.strategy == "markdown-log"
         else snapshot.snapshot
     )
-    writer = selected_writer(vault_root, manifest)
+    item_version = record.source.hash
     if writer is not None:
+        from .collection_store.writer import _row
+
         row = writer._collection(manifest)[0]
-        catalog = writer._operation.catalog(manifest.collection_id)
-        if len(snapshot.records) == sum(isinstance(subject.row_id, int) for subject in catalog):
-            container = writer._container(row)
+        item = _row(writer.connection.execute(
+            "SELECT collection_id,item_key,row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?",
+            (manifest.collection_id, key)))
+        if item is None:
+            return None
+        container = writer._container(row)
+        item_version = writer._version(item)
     return {
         "action": "update",
         "collection": collection,
         "item_key": key,
         "changes": {field: [*cited, observation_ref]},
         "expected_container_hash": container,
-        "expected_item_version": record.source.hash,
+        "expected_item_version": item_version,
         "why": why,
     }
 

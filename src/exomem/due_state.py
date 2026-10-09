@@ -2091,13 +2091,16 @@ def apply_record_write_delta(
                 claims=claims,
             )
         index = _bindings_index(current)
+        # A summary collection declares no planning join (its manifest refuses
+        # one), so an index row naming it is stale until the next full pass.
+        summary = getattr(manifest, "view_mode", "items") == "summary"
         rows = [
             row
             for row in index.get(str(manifest.path), [])
-            if isinstance(row, dict) and row.get("records") == str(manifest.path)
+            if isinstance(row, dict) and row.get("records") == str(manifest.path) and not summary
         ]
         registered = None
-        if not rows:
+        if not rows and not summary:
             # Not in the index: either nothing is bound (the common case, and it
             # costs one attribute read of the manifest already in hand) or this
             # collection was bound since the last full pass. Resolving it here
@@ -2265,7 +2268,9 @@ def apply_plan_write_delta(
             # other's.
             records_path = str(row.get("records") or "")
             records = _load_projection_manifest(Path(vault_root), records_path)
-            if records is None:
+            if records is None or records.view_mode == "summary":
+                # A stale binding to a summary collection, which declares no join:
+                # never load all of its rows to look for partners.
                 continue
             join = dict(row.get("join") or {})
             record_fields = list(join)

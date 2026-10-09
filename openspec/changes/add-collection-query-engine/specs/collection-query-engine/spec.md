@@ -247,6 +247,12 @@ Large declared collections SHALL support a migration-managed canonical typed-col
 
 The importer SHALL stream authorized preserved-source CSV, NDJSON and JSON arrays through declared mappings, with decoded rows ≤1 MiB/depth 32 and batches ≤500 rows/4 MiB. Each batch SHALL enforce normal mutation authority and atomically commit values/history/audit/checkpoint under one idempotent identity. Preview/start/status/cancel SHALL be agent-reachable through existing MCP names with bounded responses. Invalid/cancelled/interrupted imports SHALL report actual partial state and resume positions, never a fabricated complete import. Additional import peak RSS SHALL be ≤64 MiB independent of collection size. Time-series indexes SHALL support timestamp/type orders within the declared index budget.
 
+#### Scenario: Import preview recommends the declarations that make it fast
+- **WHEN** an agent previews an import whose mapping names a time basis and numeric fields on a collection that declares neither
+- **THEN** preview returns recommended declarations: the time basis is filterable and sortable, and the numeric fields have a daily count/sum/avg rollup within budget
+- **AND** preview changes no manifest, index or rollup
+- **AND** applying them through one governed revise lets a daily sum over the imported rows answer from the rollup
+
 #### Scenario: Crash after a committed import batch
 - **WHEN** a streaming job loses its response after a batch commits and retries the same source/job/batch identity
 - **THEN** rows, version/audit and checkpoint are returned exactly once without duplicate effects, and later work resumes from the next source position

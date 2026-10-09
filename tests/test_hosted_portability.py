@@ -72,6 +72,26 @@ def _seed_vault(root: Path, sentinel: str) -> None:
     _write(root / "Knowledge Base/Notes/Insights/interrupted.tmp", "partial\n")
 
 
+@pytest.mark.parametrize("source", ["Items.md", "Items.md/nested"])
+def test_restore_preserves_file_that_conflicts_with_collection_directory(tmp_path, source):
+    """A damaged collection declaration must not prevent restoration of canonical user bytes."""
+    from test_collection_store_writer import manifest_path, manifest_text
+
+    from exomem.init import init_vault
+
+    vault = tmp_path / "source"
+    init_vault(vault)
+    manifest = vault / manifest_path()
+    text = manifest_text().replace("source: Items", f"source: {source}")
+    _write(manifest, text)
+    _write(manifest.parent / "Items.md", "Canonical user content\n")
+    exported = portability.export_quiesced_vault(vault, tmp_path / "exports", context=_context())
+    target = tmp_path / "restored"
+    portability.prepare_restore(exported.archive_path, target, context=_context(lifecycle_state="restore-staging"))
+    assert (target / manifest_path()).read_bytes() == manifest.read_bytes()
+    assert (target / manifest_path()).parent.joinpath("Items.md").read_text() == "Canonical user content\n"
+
+
 def _error_code(exc: pytest.ExceptionInfo[portability.PortabilityError]) -> str:
     return exc.value.code
 
