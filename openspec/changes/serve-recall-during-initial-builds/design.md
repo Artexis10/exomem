@@ -20,7 +20,7 @@ A partial answer adds `embeddings` to `warming.components`, the component the ve
 
 ### D4. Doctor reads the space comparison and the resume rule from `disk_status`
 
-`disk_status` holds both recorded identities, so it decides whether the build's sidecar is in the serving sidecar's space. For that case it also applies `plan()`'s rule for resuming an interrupted initial build, without loading the encoder. Doctor reports an initial build in progress only when that rule holds. Otherwise it reports the build's sidecar as left over: for example, after an operator reconcile made the serving sidecar cover the vault. Doctor runs in its own process, so it sees a failed build only when it runs in the service's process; the runtime status reports the failure in every case.
+`disk_status` holds both recorded identities, so it decides whether the build's sidecar is in the serving sidecar's space. For that case it also applies `plan()`'s rule for resuming an interrupted initial build, without loading the encoder. Doctor reports an initial build in progress only when that rule holds. Otherwise it reports the build's sidecar as left over: for example, after an operator reconcile made the serving sidecar cover the vault. Doctor runs outside the service and cannot see the job, so the runtime status, not doctor, reports a failed build.
 
 ### D5. A query waits for at most one build passage
 

@@ -2215,16 +2215,6 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     from . import recall_space
 
     recall = recall_space.recall_model()
-    job = recall_migration.status(vault_root)
-    if building and job.get("state") == "failed":
-        return _check(
-            "embeddings.reembed",
-            "warn",
-            f"The dense index build for {recall} failed ({job.get('error')}) at "
-            f"{building['paths_done']}/{state.get('paths_total', 0)} pages; dense recall "
-            "covers only the built pages. A restart retries the build.",
-            details={**state, "job": job},
-        )
     initial = serving is None or bool(building and building.get("same_space_as_serving"))
     if initial:
         if state.get("paths_total", 0) == 0:

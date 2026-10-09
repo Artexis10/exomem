@@ -539,6 +539,51 @@ def test_a_cell_reads_the_build_while_its_old_sidecar_is_refused(world, monkeypa
     assert explained["warming"]["components"] == ["embeddings"]
 
 
+def test_a_personal_server_reads_a_build_of_its_own_model(preseeded_world, monkeypatch) -> None:
+    # The serving sidecar was written by another build (artefact digest) of the
+    # recall model. The resident build cannot be encoded for it, but the job's
+    # sidecar is in the resident build's own space.
+    import dataclasses
+
+    vault, log, _loads = preseeded_world
+    encodes: list[tuple[str, bool]] = []
+
+    def load_build(digest: str):
+        def load(name: str, **_kwargs) -> _Model:
+            model = _Model(name, log)
+            model.profile = dataclasses.replace(model.profile, artifact_digest=digest)
+            encode = model.encode
+            model.encode = lambda texts, **kwargs: (
+                encodes.extend((digest, text.startswith("q: ")) for text in texts) or encode(texts, **kwargs)
+            )
+            return model
+
+        return load
+
+    monkeypatch.setattr(embedding_backend, "load_encoder", load_build("aaaaa"))
+    embeddings.index_incremental(vault, log_fn=lambda _message: None)
+    embeddings.unload_model()
+    monkeypatch.setattr(embedding_backend, "load_encoder", load_build("bbbbb"))
+    embeddings.get_model()
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving.model == plan.target.model == NEW
+    assert plan.serving.fingerprint != plan.target.fingerprint
+    log.clear()
+    assert not recall_migration.build(vault, plan, should_stop=lambda: len(_passages_by(log, NEW)) >= 2)
+    built = set(EmbeddingIndex(vault, path=plan.shadow_path).file_mtimes())
+    assert built and built != set(embeddings.get_embedding_index(vault).file_mtimes())
+    encodes.clear()
+
+    lane = _explained(vault, "retry backoff")["retrieval_profile"]["lanes"]["vector"]
+    queries = [digest for digest, is_query in encodes if is_query]
+    recalled = _recall(vault, "retry backoff")
+
+    assert lane["status"] == "participated"
+    assert queries == ["bbbbb"]
+    assert recalled["hits"] and {hit["path"] for hit in recalled["hits"]} <= built
+    assert recalled["warming"]["components"] == ["embeddings"]
+
+
 def test_a_query_finds_the_loaded_encoder_while_a_build_passage_holds_the_model_slot(monkeypatch) -> None:
     # A query used to take the model slot only to look the encoder up, so it
     # waited behind the build's passage once there and again for its own encode.
