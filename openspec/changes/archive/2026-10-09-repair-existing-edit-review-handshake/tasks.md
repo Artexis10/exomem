@@ -22,6 +22,11 @@
 
 ## 4. Verification And Delivery
 
-- [ ] 4.1 Run the focused regression suite, OpenSpec strict validation, Ruff, and the project test suite with embeddings disabled.
+- [x] 4.1 Run the focused regression suite, OpenSpec strict validation, Ruff, and the project test suite with embeddings disabled.
 - [x] 4.2 Run an independent code review and verifier pass; address confirmed findings and rerun affected tests.
-- [ ] 4.3 Commit the intended scope, integrate current remote main safely, push, and open a ready Conventional Commit pull request noting which Bugs 1–5 were already fixed on main.
+- [x] 4.3 Commit the intended scope, integrate current remote main safely, push, and open a ready Conventional Commit pull request noting which Bugs 1–5 were already fixed on main.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 4.1: PR #411 merged as 665d2f4fd and shipped in v0.42.0. Required CI was green: "lint + targeted types", "tests (py3.11)", "tests (py3.13)", "OpenSpec validation" and "package build".
+- 4.3: PR #411 is a ready Conventional Commit PR. Its body has a section that names the Bugs 1-5 already on main.

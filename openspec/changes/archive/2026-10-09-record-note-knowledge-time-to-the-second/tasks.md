@@ -78,7 +78,12 @@
 ## 7. Validation
 
 - [x] 7.1 `uvx ruff check . --select F` clean.
-- [ ] 7.2 Full suite green, compared against the 1.1 baseline.
-- [ ] 7.3 Latency gate and semantic-write latency check, since `find_policy.parse_date` sits on a
+- [x] 7.2 Full suite green, compared against the 1.1 baseline.
+- [x] 7.3 Latency gate and semantic-write latency check, since `find_policy.parse_date` sits on a
   hot retrieval path.
 - [x] 7.4 `openspec validate record-note-knowledge-time-to-the-second --strict`.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 7.2: PR #375 merged as 77ebc01eb and shipped in v0.39.0. Required CI ran the full suite on py3.11 and py3.13, both green. The PR body attributes its three local failures to CPU contention from a concurrent benchmark.
+- 7.3: `tests/test_latency_gate.py` runs inside those CI suites. The later "retrieval latency (2k synthetic vault)" and "semantic write latency (2k and 8k)" jobs pass over this code, for example on #798 and #801.

@@ -12,4 +12,8 @@
 
 - [x] 3.1 Run the installer-scoped suite and lint: 28 passed in `tests/test_service_installers.py`, ruff clean, `openspec validate guard-live-service-config-rewrite --strict` passes. The fixture errors are the state-root guard observing the two live services on this machine writing their own directories, which its message names as cross-process interference; the only flagged entries are those services' state roots.
 - [x] 3.2 Strengthen the test harness so this path is genuinely covered: the fake interpreter now executes the installer's real publisher instead of reimplementing it, so atomic replacement, permissions and retention are exercised rather than paraphrased.
-- [ ] 3.3 Commit the intended scope, push, and open a ready Conventional Commit PR carrying the reproduction and the verification evidence.
+- [x] 3.3 Commit the intended scope, push, and open a ready Conventional Commit PR carrying the reproduction and the verification evidence.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 3.3: Ready PR #1169 merged as 8d9191e8d with 26 CI checks green and shipped in v0.77.0. Its body carries the reproduction and the verification evidence.

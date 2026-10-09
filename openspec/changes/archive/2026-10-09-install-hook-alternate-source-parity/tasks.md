@@ -23,4 +23,8 @@
 
 - [x] 4.1 Run the scoped suites: `tests/test_install_hook.py` and `tests/test_install_hook_uninstall.py`, named as the scope.
 - [x] 4.2 Exercise a real yadm-shaped fixture end to end — copy deployment and link deployment — proving install then regeneration keeps the entries.
-- [ ] 4.3 Run the full suite at the completion boundary before opening the PR.
+- [x] 4.3 Run the full suite at the completion boundary before opening the PR.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 4.3: PR #1474 merged as 2f9032fc4 and shipped in v0.100.0. CI on its head ran the full corpus (12 core shards and 4 harness shards), all green.

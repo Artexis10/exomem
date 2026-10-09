@@ -25,5 +25,10 @@
 
 ## 5. Closure
 
-- [ ] 5.1 Once merged and therefore demonstrably shipped, sync the delta into `openspec/specs/` and archive with `openspec archive`, re-running `openspec validate --all --strict` before and after.
+- [x] 5.1 Once merged and therefore demonstrably shipped, sync the delta into `openspec/specs/` and archive with `openspec archive`, re-running `openspec validate --all --strict` before and after.
 - [ ] 5.2 Follow-up, filed separately rather than here: with the clock noise gone, triage the real Windows failures the lane reports, concentrated in `tests/test_governance_active_tuple.py` from the v4 catalog wave (#800-#818).
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 5.1: PR #769 merged as 940eb7d04 and shipped in v0.70.0. The lane still runs six shards, and `tests/test_ci_reliability_contract.py` still enforces the headroom rule. A later change raised the session cap to 3400 s under the same rule.
+- 5.2 stays open by design: the change files it separately.

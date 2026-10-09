@@ -14,9 +14,14 @@
 ## 3. Verification and delivery
 
 - [x] 3.1 Run the prominence, bootstrap-contract, byte-budget, hosted-fidelity and scaffold suites scoped to the change; record the compact byte position for a hook-capable client against both pins.
-- [ ] 3.2 Obtain an author-independent review of the diff covering the hook-cadence wording, the hookless `change_with` text, and the interaction between the unreadable-record floor and `capture_gate`.
-- [ ] 3.3 Deliver under the standing merge authority, then synchronize and archive this change.
+- [x] 3.2 Obtain an author-independent review of the diff covering the hook-cadence wording, the hookless `change_with` text, and the interaction between the unreadable-record floor and `capture_gate`.
+- [x] 3.3 Deliver under the standing merge authority, then synchronize and archive this change.
 
 ## 4. Review follow-ups
 
 - [x] 4.1 Close the projection gap the first round left open: the delegation envelope derived `proactive_capture` from the level alone and `schema_memory(subject="workflow-contracts")` built `effective_capture` the same way, so under the floor both granted back the proactive writes the gate had refused. Both now take the resolved gate, and a test asserts the served contract and the envelope agree at every level and under the floor.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 3.2: Task 4.1 records the review round. It found the projection gap in the delegation envelope and in `schema_memory(subject="workflow-contracts")`, and the fix landed before merge with a test that both agree at every level. The PR records no separate verdict note.
+- 3.3: PR #1251 merged as df1dc1e49 with 27 CI checks green and shipped in v0.83.0.

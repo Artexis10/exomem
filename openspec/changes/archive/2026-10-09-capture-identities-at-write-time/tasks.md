@@ -93,9 +93,15 @@
       description changes. Compare the historical profile with its own pin instead, and
       assert the live-fixture identity for the current, unpinned profile. Never edit the
       pin file.
-- [ ] 5.1 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
+- [x] 5.1 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
       plugin tree, hosted render, harness modules pin); `openspec validate --all
       --strict`; privacy gate; full sharded corpus at the delivery boundary.
       Prepared on origin/main 0a9d4517b, left unticked until the delivery CI shows the rest: `scripts/dump-tool-schemas.py` regenerates `tests/fixtures/mcp_tool_schemas.json` and `src/exomem/tool_surface_contract.json` with no diff (fingerprint 441ccfe8), and `generate-capabilities.py --check`, `generate_harness_modules.py --check`, `hosted-plugin.py check --platform claude` and `cloud-plugin.py check` are current; strict validation is green. The plugin skill tree, the privacy gate and the full sharded corpus remain for the delivery run.
-- [ ] 5.2 Independent review of the diff.
-- [ ] 5.3 Archive with `openspec archive` in the same delivery, after confirming 1.3.
+- [x] 5.2 Independent review of the diff.
+- [x] 5.3 Archive with `openspec archive` in the same delivery, after confirming 1.3.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 5.1: PR #1444 merged as ddc7aac9b and shipped in v0.98.0. CI on its head passed 12 core shards, 4 harness shards, "package build" (privacy gate), "capabilities doc" and "OpenSpec validation".
+- 5.2: The identity batch #1430 carried this change as contract 4 (#1306 merge, 14a13a2b). Its independent review REVIEW-IDENTITY-BATCH1 raised F1-F4, and F2 covers `entity_candidate`. The #1444 batch verifier rechecked the merged batch.
+- 5.3: 1.3 holds: the `action-first-audit` delta in `complete-recurring-entity-lifecycle` still states the two-page wikilink gate and the navigation-page exclusion. That change is still active, so the canonical requirement says three pages until it archives.

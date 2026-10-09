@@ -39,5 +39,10 @@
 
 ## 7. Closure
 
-- [ ] 7.1 Once merged and therefore demonstrably shipped, sync the delta into `openspec/specs/` and archive with `openspec archive`, re-running `openspec validate --all --strict` before and after.
+- [x] 7.1 Once merged and therefore demonstrably shipped, sync the delta into `openspec/specs/` and archive with `openspec archive`, re-running `openspec validate --all --strict` before and after.
 - [ ] 7.2 Follow-up, not filed here because it needs a macOS host to characterise: measure what remains red on a macOS shard after the skip branch, and decide whether the graph-epoch cascade warrants its own treatment or whether the matrix entry should say "unserved" instead of running the suite.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 7.1: PR #768 merged as 39f115c9e with 23 CI checks green and shipped in v0.70.0. Strict validation ran before and after this archive.
+- 7.2 stays open by design: the change names it as a follow-up that is not filed here.

@@ -73,8 +73,8 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
 
 ## 9. Verification
 
-- [ ] 9.1 `ruff check`
-- [ ] 9.2 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` green
+- [x] 9.1 `ruff check`
+- [x] 9.2 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` green
 - [x] 9.3 `openspec validate fix-deferred-work-drain --strict`
 - [x] 9.4 Record before/after queue counts from a seeded backlog in the PR body.
 
@@ -87,7 +87,7 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
 - [x] 10.3 Implement the background drain cap without changing real-drift admission or
       explicit unbounded operator-drain semantics.
 - [x] 10.4 Bound per-receipt failure isolation for bounded drains and preserve fair rotation.
-- [ ] 10.5 Run focused watcher/deferred tests, Ruff, strict OpenSpec validation, privacy
+- [x] 10.5 Run focused watcher/deferred tests, Ruff, strict OpenSpec validation, privacy
       validation, and the lean suite before delivery.
 - [x] 10.6 Add red regressions for zero-cap progress and one-slot cross-queue fairness, then
       reserve one background convergence slot and alternate it durably.
@@ -96,3 +96,8 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
 - [x] 10.8 Add adversarial regressions for zero-cap watcher wiring, restart fairness, and
       concurrent turn claims; route startup through the shared allocator and serialize the
       durable read-and-flip.
+
+## Closure evidence (T10 audit, 2026-10-09)
+
+- 9.1, 9.2: PR #456 merged as 47f56c8bc and shipped in v0.49.0. CI ran "lint + targeted types" and eight Linux test shards, all green.
+- 10.5: PRs #798 and #801 merged as ee0f3ab34 and 3ceda5860 and shipped in v0.62.0. CI on each ran lint, four Linux test shards, "package build" (privacy gate), "OpenSpec validation" and both latency jobs, all green.
