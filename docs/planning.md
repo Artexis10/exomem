@@ -17,7 +17,11 @@ or `triage`. Minimal capture creates a candidate work item in the authored
 commitment, horizon, area, and parent changes; time never moves an item.
 
 Kinds are area, outcome, initiative, and work-item. Areas are ongoing
-membership. The goal hierarchy is outcome → initiative → work-item. Planning
+membership. The goal hierarchy is outcome → initiative → work-item. A vault
+adds kinds, statuses, priorities, commitments, horizons, and health values
+through `schema_memory(subject="planning-values")`: a status declares its
+planning class (`open`, `done`, or `dropped`), and a kind declares the kinds
+that may be its parent. Only a done or dropped status may be archived. Planning
 may keep opaque Records evidence descriptors and opaque external execution
 pointers, but `plan_memory` itself does not resolve them or infer progress.
 Planning works standalone by default. A resolved user-authored workflow contract

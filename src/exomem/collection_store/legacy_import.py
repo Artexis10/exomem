@@ -492,6 +492,8 @@ def _map_current(conn, captured, checkpoint, checkpoint_hash):
             planning.require_planning_profile(manifest)
             values = planning.normalize_item(
                 values,
+                vault_root=captured.root,
+                stored=values,
                 apply_defaults=False,
                 validate_motivation=planning.motivation_is_governed(manifest),
             )
@@ -543,7 +545,7 @@ def _map_current(conn, captured, checkpoint, checkpoint_hash):
         if manifest.storage.strategy == "markdown-items":
             _projection(conn, cid, path, "item", 1, sources[record.source.path], row_id)
     for name in declared.validators:
-        types.named_validator(name).validate(manifest, plans)
+        types.named_validator(name).validate(manifest, plans, write=None)
     if manifest.storage.strategy == "markdown-log":
         _projection(
             conn,

@@ -1330,7 +1330,9 @@ class CollectionWriter:
                     f"{self._facade_profile.title()} collection is required",
                 )
             if self._facade_profile == "planning" and scaffold:
-                manifest_text = planning._with_default_scaffold(manifest_text, manifest)
+                manifest_text = planning._with_default_scaffold(
+                    manifest_text, manifest, vault_root=self.root
+                )
                 manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
             if declared.kind == "intended":
                 planning.require_planning_profile(manifest)
@@ -1424,6 +1426,9 @@ class CollectionWriter:
             planning.require_planning_profile(manifest)
             values = planning.normalize_item(
                 values,
+                vault_root=self.root,
+                # A revision re-checks stored values against the proposed manifest.
+                stored=values if operation == "revise" else before,
                 apply_defaults=operation == "append",
                 validate_motivation=planning.motivation_is_governed(manifest),
             )
@@ -1434,8 +1439,9 @@ class CollectionWriter:
         if declared.validators and validate_graph:
             plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
             plans[key] = values
+            write = planning.HierarchyWrite(self.root, key, before)
             for name in declared.validators:
-                types.named_validator(name).validate(manifest, plans)
+                types.named_validator(name).validate(manifest, plans, write=write)
         return values
 
     def _held(self, cid: str, held: str | None):
@@ -1979,7 +1985,9 @@ class CollectionWriter:
                 )
             if declared.kind == "intended":
                 values = planning.normalize_item(
-                    values, validate_motivation=planning.motivation_is_governed(manifest)
+                    values,
+                    vault_root=self.root,
+                    validate_motivation=planning.motivation_is_governed(manifest),
                 )
             key = (
                 records._validate_item_key(item_key, manifest=manifest, candidate=values)
@@ -2360,7 +2368,7 @@ class CollectionWriter:
                 for key, values in typed_storage.collection_values(self.connection, current.collection_id)
             }
             for name in declared.validators:
-                types.named_validator(name).validate(proposed, plans)
+                types.named_validator(name).validate(proposed, plans, write=None)
             retired_pages = summary.page_paths(current) if mode_change else ()
             self._preflight_views([current.path, *retired_pages, *(path for (path,) in self.connection.execute(
                 "SELECT view_path FROM items WHERE collection_id=? AND view_path IS NOT NULL UNION ALL "

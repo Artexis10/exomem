@@ -35,7 +35,7 @@ def test_planning_revision_reads_and_normalizes_graph_once(store, monkeypatch, s
     with store.handle.transaction() as conn:
         for index in range(size):
             key = str(uuid.UUID(int=index + 1))
-            values = planning.normalize_item({"title": f"Item {index}"})
+            values = planning.normalize_item({"title": f"Item {index}"}, vault_root=None)
             encoded = json.dumps(values)
             encoded_values.add(encoded)
             conn.execute(
