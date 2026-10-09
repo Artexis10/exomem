@@ -9,11 +9,7 @@ the defect only it catches.
 from __future__ import annotations
 
 import datetime as dt
-import json
-import sqlite3
-import sys
 import time
-import traceback
 
 import pytest
 from s1_export_fixture import START_DAY, expected_daily, iter_exercises
@@ -151,31 +147,7 @@ def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         reduce(store, request())
     started = time.monotonic()
-    cpu_started = time.thread_time()
-    try:
-        result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
-    except runtime.QueryError as error:
-        # Temporary CI evidence for the unresolved deadline; remove after attribution.
-        details = {"reduce_helper_wall_ms": (time.monotonic() - started) * 1000,
-                   "reduce_helper_thread_cpu_ms": (time.thread_time() - cpu_started) * 1000,
-                   "python": sys.version, "sqlite": sqlite3.sqlite_version,
-                   "trace_active": sys.gettrace() is not None,
-                   "profile_active": sys.getprofile() is not None,
-                   "scan_state": "unavailable"}
-        for failure in (error, error.__cause__):
-            if failure is None:
-                continue
-            for frame, _ in traceback.walk_tb(failure.__traceback__):
-                # The fixed reducer frame provides diagnostics, never authority.
-                if frame.f_code.co_name == "_from_rows":
-                    state = frame.f_locals
-                    details["scan_state"] = {
-                        "visited": state.get("visited"),
-                        "cursor_type": str(type(state.get("cursor"))),
-                        "reader_type": str(type(state["session"].connection)),
-                    }
-        print("Analytics deadline evidence:", json.dumps(details, sort_keys=True))
-        raise
+    result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
     elapsed = time.monotonic() - started
     assert result["plan"]["strategy"] == "base" and len(result["groups"]) == len(daily) <= 200
     assert by_bucket(result) == daily and result["flagged_rows"] == len(flagged)

@@ -225,16 +225,29 @@ def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple
         # Dense admitted scalars share one scan; residuals still need the bounded field-tree reader.
         columns = [(name, layout.fields.index(name)) for name in fields]
         selected = "".join(f",t.t{ordinal},t.v{ordinal},t.k{ordinal}" for _, ordinal in columns)
+        # Row positions of each field's tag; whole scalars must not hold a JSON tree.
+        slots = tuple((name, 3 * index) for index, (name, _) in enumerate(columns, start=1))
+        scalars_only = tuple(at for name, at in slots if selection[name] is True)
+        missing, json_tag = typed_storage.MISSING, typed_storage.JSON
+        string, int64, decode_value = typed_storage.STRING, typed_storage.INT64, typed_storage.decode_value
 
         def decode_typed(row):
             if row[1] != row[2]:
                 raise QueryError("QUERY_UNAVAILABLE")
-            if any(selection[name] is True and row[3 * index] == typed_storage.JSON
-                   for index, (name, _) in enumerate(columns, start=1)):
-                raise QueryError("QUERY_UNAVAILABLE")
-            return {name: typed_storage.decode_value(row[3 * index], row[3 * index + 1], row[3 * index + 2])
-                    for index, (name, _) in enumerate(columns, start=1)
-                    if row[3 * index] != typed_storage.MISSING}
+            for at in scalars_only:
+                if row[at] == json_tag:
+                    raise QueryError("QUERY_UNAVAILABLE")
+            values = {}
+            for name, at in slots:
+                tag = row[at]
+                if tag != missing:
+                    value = row[at + 1]
+                    # typed_storage.decode_value's STRING and INT64 rows, inline to skip a call per row.
+                    if (tag == string and type(value) is str) or (tag == int64 and type(value) is int):
+                        values[name] = value
+                    else:
+                        values[name] = decode_value(tag, value, row[at + 2])
+            return values
 
         return (f"SELECT i.item_key,i.row_version,t.row_version{selected} FROM items i "
                 f"LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id "
@@ -263,6 +276,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     reduced = tuple(zip(shape.fields, shape.kinds, shape.extremes, strict=True))
     groups, retained, flagged, visited = {}, 0, 0, 0
     empty_group = rollups.group_text({}, ())
+    latest, bucket_keys = shape.latest, {}
     cursor = session.connection.execute(sql, (collection_id,))
     try:
         for row in cursor:
@@ -277,17 +291,20 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
                 values = project(values)
             order = None
             if basis is not None:
-                located = basis.locate(values)
+                located = basis.locate(values, ordered=latest)
                 if located is None:
                     flagged += 1
                     continue
-                day = located[0]
+                day, order = located
                 if (start is not None and day < start) or (end is not None and day > end):
                     continue
-                bucket = bucket_key(day, timed.bucket)
+                bucket = bucket_keys.get(day)
+                if bucket is None:
+                    bucket = bucket_key(day, timed.bucket)
+                    if len(bucket_keys) < 4096:
+                        bucket_keys[day] = bucket
                 if bucket < floor:
                     continue
-                order = located[1] if shape.latest else None
             identity = (bucket, rollups.group_text(values, shape.others) if shape.others else empty_group)
             group = groups.get(identity)
             if group is None:

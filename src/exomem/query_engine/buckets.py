@@ -28,6 +28,9 @@ NUMERIC = frozenset({"integer", "number"})
 _SCALE = 1074
 _OFFSET = re.compile(r"[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]")
 _OFFSETS: dict[str, int] = {}
+#: Offset shifts, which repeat across the rows of a base scan; keyed by valid offsets only,
+#: so at most 2,879 entries.
+_SHIFTS: dict[int, dt.timedelta] = {}
 _EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 _MICROSECOND = dt.timedelta(microseconds=1)
 _ENUM_KINDS = {bool: "boolean", int: "number", float: "number", str: "string"}
@@ -89,7 +92,7 @@ class Basis:
     def describe(self) -> dict:
         return {"field": self.field, "kind": self.kind, "offset": self.offset}
 
-    def locate(self, values) -> tuple[dt.date, int] | None:
+    def locate(self, values, *, ordered: bool = True) -> tuple[dt.date, int | None] | None:
         """The source-local day and an integer recency key, or None for a flagged time basis.
 
         A valid value in the declared offset field is the record's supplied UTC
@@ -97,6 +100,7 @@ class Basis:
         own text is supplied: where the basis declares an offset field, a ``Z``
         instant is UTC awaiting that field, not a local day. Unzoned or absent
         instants, invalid offsets and ``-00:00`` are flagged, never guessed.
+        With ``ordered=False`` the recency key is None, for a reduction without ``latest``.
         """
         raw = values.get(self.field)
         if type(raw) is not str:
@@ -108,20 +112,28 @@ class Basis:
                 day = dt.date.fromisoformat(raw)
             except ValueError:
                 return None
-            return day, day.toordinal()
+            return day, (day.toordinal() if ordered else None)
         try:
             instant = parse_instant(raw)
         except ScalarValueError:
             return None
+        own = 0 if raw[-1] in "Zz" else offset_minutes(raw[-6:])
         if self.offset is not None and values.get(self.offset) is not None:
             minutes = offset_minutes(values[self.offset])
         elif raw[-1] in "Zz":
             minutes = None if self.offset is not None else 0
         else:
-            minutes = offset_minutes(raw[-6:])
+            minutes = own
         if minutes is None:
             return None
-        return (instant + dt.timedelta(minutes=minutes)).date(), instant_order(instant)
+        order = instant_order(instant) if ordered else None
+        if minutes == own:
+            # The instant's own offset: its local day is the date written in its text.
+            return dt.date.fromisoformat(raw[:10]), order
+        shift = _SHIFTS.get(minutes)
+        if shift is None:
+            shift = _SHIFTS[minutes] = dt.timedelta(minutes=minutes)
+        return (instant + shift).date(), order
 
 
 def group_key(values, names) -> tuple:

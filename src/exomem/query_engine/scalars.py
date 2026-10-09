@@ -34,14 +34,20 @@ def parse_instant(value: object) -> dt.datetime:
     matched = _INSTANT.fullmatch(value) if type(value) is str else None
     if matched is None:
         raise ScalarValueError("datetime requires extended ISO seconds and a UTC/minute offset")
-    fraction = matched["fraction"] or ""
-    if any(digit != "0" for digit in fraction[6:]):
-        raise ScalarValueError("datetime precision exceeds exact microseconds")
-    text = f"{matched['date']}T{matched['time']}"
-    if fraction:
-        text += "." + fraction[:6]
+    fraction = matched["fraction"]
+    if fraction is None and value[10] == "T":
+        # Already the text rebuilt below; base scans parse one per row.
+        text = value
+    else:
+        fraction = fraction or ""
+        if any(digit != "0" for digit in fraction[6:]):
+            raise ScalarValueError("datetime precision exceeds exact microseconds")
+        text = f"{matched['date']}T{matched['time']}"
+        if fraction:
+            text += "." + fraction[:6]
+        text += matched["offset"]
     try:
-        return dt.datetime.fromisoformat(text + matched["offset"]).astimezone(dt.UTC)
+        return dt.datetime.fromisoformat(text).astimezone(dt.UTC)
     except (ValueError, OverflowError) as error:
         raise ScalarValueError("scalar instant is invalid") from error
 
