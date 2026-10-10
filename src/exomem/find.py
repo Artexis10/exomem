@@ -1800,6 +1800,8 @@ def find(
     # sidecar/model recovers. Tracked internally even when the caller passes None.
     mixed_unit_hits: list[SemanticUnitHit] = []
     if mixed:
+        # Decided before the span: `filter_eligibility` is a top-level stage.
+        unit_admitted = _admitted(walk_scope)
         with _span(timings, "semantic_units"):
             mixed_unit_hits = _find_semantic_units(
                 vault_root,
@@ -1807,7 +1809,7 @@ def find(
                 limit=None,
                 scope=walk_scope,
                 plan=filter_plan,
-                allowed_parent_paths=_admitted(walk_scope),
+                allowed_parent_paths=unit_admitted,
                 snapshot=snapshot,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
