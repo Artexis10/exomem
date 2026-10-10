@@ -39,14 +39,16 @@ design has to respect:
 - Read-side caches that survive governed writes through exact receipt custody.
 - A measured, ratcheting latency contract on the live cell.
 - Result identity: every index-backed path returns the set the scan oracle would.
-- Warm hybrid search p95 at or below 100 ms on a two-CPU cell of 6,500 pages,
-  with a 50 ms p50 target and a budget for every stage along the request's
-  critical path, a pull-request gate that sees per-candidate work grow before
-  merge, a full-CI comparison of head with the most recent release tag, and an
-  absolute verdict recorded for each release that gates nothing.
+- Warm hybrid search p95 at or below 200 ms on a two-CPU cell of 6,500 pages,
+  with a 100 ms p95 target and a 50 ms p50 target that gate nothing, a budget
+  for every stage along the request's critical path as the plan toward the
+  target, a pull-request gate that sees per-candidate work grow before merge, a
+  full-CI comparison of head with the most recent release tag, and an absolute
+  verdict recorded for each release that gates nothing.
 
 **Non-Goals:**
 - Approximate retrieval, dropped features, ANN, or any quality-for-speed trade.
+- More CPU per cell, or a cheaper encoder, to buy search latency.
 - Changing what hybrid recall computes (embed, vector, graph, fusion, rerank).
 - Fixing the graph rebuild's optimistic check (owned elsewhere).
 - Rust, process changes, or moving the cell off the shared box.
@@ -174,16 +176,19 @@ live cell for the first time. Each tranche is a lane with its own
 author-independent reviewer and mutation proofs, after the pattern that
 delivered the write-side change.
 
-### 7. Warm hybrid search costs at most 100 ms at p95 on a two-CPU cell
+### 7. Warm hybrid search costs at most 200 ms at p95 on a two-CPU cell, with a 100 ms target
 
 On 2026-10-09 the owner set the target for every search mode: subsecond and
 well under, 100 to 200 ms acceptable. The owner then asked why search cannot
-run under 100 ms, and the bar became 100 ms. Every warm series holds p95 at or
-below 100 ms. That ceiling is the owner's bar and stays. This design estimates
-that the served encoder cannot meet it on two CPUs: the encode floor, below,
-puts a short query at about 110 to 115 ms p95, and 100 ms needs four or more
-CPUs or a cheaper encoder. The p50 target is 50 ms. The report shows it and it
-gates nothing, because the query encode alone takes about 30 ms at p50 (encode
+run under 100 ms. On 2026-10-10 the owner weighed the whole system: a user
+does not notice 100 against 200 ms, and CPU per cell and retrieval quality are
+worth more than that difference. So every warm hybrid series holds p95 at or
+below 200 ms, and that ceiling gates the verdict. 100 ms at p95 and 50 ms at
+p50 are targets: the report shows them, records each as met or missed, and
+they gate nothing. This design estimates that the served encoder cannot meet
+the 100 ms target on two CPUs: the encode floor, below, puts a short query at
+about 110 to 115 ms p95, well under the ceiling. The p50 target leaves little
+room, because the query encode alone takes about 30 ms at p50 (encode
 evidence, below), which leaves about 20 ms at the median for every other
 stage. The reference is 6,500 pages, about the size of the owner's vault, on
 two CPUs, the allocation of a Cloud cell. The personal service has more CPUs,
@@ -201,22 +206,24 @@ runs the same series, reported apart. It gates once admission no longer sizes
 the candidate pool; today that path runs Python BM25 over the admitted pages. The model-free A1 run, which took the in-process
 principal's RAW admission predicate, measured that path at 6.8 s p50.
 
-Keyword recall runs no query encode, so the contract holds it to a lower
-ceiling: p95 at or below 50 ms. Its budgeted path is 23 ms, or 29 ms with a
-structured filter (the arithmetic below). The remaining 21 ms covers keyword
-work that no budget row bounds: the trigram doclist intersection, which the
-structural gate cannot see (decision 9), and the reference mix's query whose
-tokens are all under three characters, which scans every KB row by design.
-That ceiling replaces keyword's old p50 ceiling of 120 ms. A series whose p95
-is at most 50 ms has a p50 under 120 ms, so the old ceiling no longer bounds
-anything.
+Keyword recall runs no query encode, so the contract holds it to half of each
+hybrid p95 figure: a ceiling of p95 at or below 100 ms, which gates, and a target
+of p95 at or below 50 ms, which does not. Its budgeted path is 23 ms, or 29 ms
+with a structured filter (the arithmetic below). The rest of the 50 ms target
+covers keyword work that no budget row bounds: the trigram doclist
+intersection, which the structural gate cannot see (decision 9), and the
+reference mix's query whose tokens are all under three characters, which scans
+every KB row by design. The ceiling replaces keyword's old p50 ceiling of
+120 ms. A series whose p95 is at most 100 ms has a p50 under 120 ms, so the old
+ceiling no longer bounds anything.
 
 A hybrid request served without the encoder, where embeddings are disabled,
-gets no lower ceiling. It skips only the encode branch and still runs every
-stage after the lanes, so its budgeted path is 47 to 78 ms. That is not far
-enough under 100 ms to be a separate bound, and no reference series runs
-without the served encoder. It holds the 100 ms ceiling. The empty-query
-browse stays outside the ceilings, as the shipped gate already treats it.
+gets no lower ceiling or target. It skips only the encode branch and still
+runs every stage after the lanes, so its budgeted path is 47 to 78 ms. That is
+not far enough under the 100 ms target to justify a separate one, and no
+reference series runs without the served encoder. It holds the 200 ms ceiling
+and reports against the 100 ms target. The empty-query browse stays outside
+the ceilings and the targets, as the shipped gate already treats it.
 
 `baseline.md` records the reproduction. Its third run (R3: 76 samples, load
 average 16-17 on a shared 20-CPU laptop, process pinned to two CPUs) is the
@@ -225,6 +232,13 @@ reranker hard-off and the patched owner path. Run 1 and run 2 measured most
 stages at one to four times these values. Every number was taken under load, so
 a quiescent cell is expected to be faster; the gate, not this table, decides
 the verdict.
+
+The stage budgets serve the 100 ms target: they are the plan toward it, not a
+second ceiling. A stage whose p95 exceeds twice its budget fails its row, as
+before. A failed row diagnoses: the report names the stage, its p95 and its
+budget, so it shows where the target is lost. It fails neither the series nor
+the ceiling verdict, because the target it serves gates nothing. Only the
+ceilings, unknown samples and warming outcomes fail a series.
 
 | Stage | p50 / p95 ms | Cause | Budget | Runs |
 |---|---|---|---|---|
@@ -265,7 +279,7 @@ encode; their lexical lane runs earlier, so the line overstates the branch.
 The encode branch is still the longer one, so whenever the encoder runs, the
 encode and dense search are on the critical path. A request that runs every
 stage, with a filter, the temporal lane, the unit lanes and CLIP, has a 95 ms
-path, 5 ms under the ceiling, if the encode meets its 40 ms budget. The encode
+path, 5 ms under the target, if the encode meets its 40 ms budget. The encode
 floor, below, estimates that it does not on two CPUs. The arithmetic adds p95
 budgets, as the old sum did; the gate's measured percentiles, not this arithmetic, decide the verdict.
 
@@ -278,8 +292,9 @@ budgets, as the old sum did; the gate's measured percentiles, not this arithmeti
 | Keyword | setup 4 + keyword 8 + hydration 8 + due state 3, plus eligibility 6 with a filter | 23 or 29 |
 | Hybrid without the encoder | 4 + BM25 8 + keyword 8 + 27, up to 10 + 38 + 30 with every lane | 47 to 78 |
 
-Run one after another, the same budgets sum to 133 ms, and a default hybrid
-request to 102 ms (4 + 40 + 15 + 8 + 8 + 2 + 9 + 5 + 8 + 3). The ceiling is
+Run one after another, the same budgets sum to 133 ms, under the 200 ms
+ceiling, and a default hybrid request to 102 ms (4 + 40 + 15 + 8 + 8 + 2 + 9 +
+5 + 8 + 3). The ceiling holds on the serial path; the 100 ms target is
 reachable only with the encode beside the lexical lanes.
 
 **The BM25 and keyword budgets are targets.** Their 8 ms rests on a replay at
@@ -306,12 +321,13 @@ In keyword recall the `keyword` span wraps `_find_keyword` (`find.py:1838`),
 which builds the hits itself: it reads each matched page, makes its excerpt and
 builds the hit, for every page that `_keyword_match_paths` returns, before the
 limit cuts the list. That call passes no `k` (`find.py:4115`), so it returns
-every page that matches. `filter_hits` runs only inside `_find_semantic`, so in
-keyword recall no interval is counted twice: the hydration row counts
-`release_gate` and `serialize` only, and the keyword row counts the page reads
-and hit construction. The 23 ms keyword path counts hit construction once, in
-the keyword row. In keyword recall the 8 ms keyword row includes page reads,
-which the replay did not measure, so 6.1 grounds it in that mode too.
+every page that matches, and slice 6.14 limits it before any page read
+(decision 8). `filter_hits` runs only inside `_find_semantic`, so in keyword
+recall no interval is counted twice: the hydration row counts `release_gate`
+and `serialize` only, and the keyword row counts the page reads and hit
+construction. The 23 ms keyword path counts hit construction once, in the
+keyword row. In keyword recall the 8 ms keyword row includes page reads, which
+the replay did not measure, so 6.1 grounds it in that mode too.
 
 Dense search keeps its 15 ms: the exact scan reads the whole float32 chunk
 matrix, about 184 MB at 45,000 chunks of 1,024 dimensions, so memory bandwidth
@@ -320,8 +336,8 @@ sets its floor, and ANN is a non-goal.
 Every stage is over its budget today, at p95 by about three times (query
 encode, 116 ms against 40) to about 180 times (unit lanes, 2,143 ms against
 12). Slices 6.3 to 6.8 remove named per-request work from most of them. Three
-rows have no removable work named yet, and for 100 ms at p95 to hold they need
-constant-factor speed:
+rows have no removable work named yet, and for the 100 ms target to hold they
+need constant-factor speed:
 
 - Request setup, 9.4 ms at p50 and 28.1 at p95 against a 4 ms budget, must
   fall by more than half at p50 and about sevenfold at p95 (slice 6.11).
@@ -331,8 +347,10 @@ constant-factor speed:
 - Query encode must fall to about a third at p95, from 116 ms to 40. The
   encode floor below estimates that it cannot on two CPUs.
 
-**The encode floor.** The encode decides whether the ceiling is reachable,
-and code in this change cannot buy it. These are the measured encode figures:
+**The encode floor.** The encode decides whether the 100 ms target is
+reachable, and code in this change cannot buy it. The floor is information
+about the target: it sits under the 200 ms ceiling, so it decides no verdict.
+These are the measured encode figures:
 
 - The archived `make-recall-multilingual` D7 table: short-query encode at
   30 / 43 ms p50 / p95, and bge-m3 int8 whole queries at 42 / 57 ms at load
@@ -368,10 +386,11 @@ more slowly (D7: whole queries 42 / 57 ms against short queries 30 / 43). This
 is an estimate, not a measurement: no run has measured a one-thread encode p95
 on the pinned profile.
 
-*What 100 ms needs.* The ceiling is reachable at p95 with four or more CPUs,
+*What 100 ms needs.* The target is reachable at p95 with four or more CPUs,
 where the encode keeps two or more intra-op threads beside the lexical branch,
 or with a cheaper encoder whose one-thread p95 fits the 40 ms budget. Neither
-is in this change.
+is in this change. The owner chose on 2026-10-10 not to trade CPU or
+retrieval quality for the 100 ms target.
 
 The rule for the encode is therefore:
 
@@ -381,19 +400,17 @@ The rule for the encode is therefore:
 2. The quiet reference run (6.9) re-measures the encode on the pinned
    profile. If the encode p95 alone exceeds its 40 ms budget there, the run
    records that p95 as the measured floor, beside the budget.
-3. Neither the ceiling nor the encode budget widens to fit the floor. The
-   first lever is the encoder runtime: the thread policy of slice 6.10.
-4. The measured floor keeps the ceiling out of reach when the budgets' critical
+3. Neither the ceiling, the target nor the encode budget widens to fit the
+   floor. The lever in this change is the encoder runtime: the thread policy
+   of slice 6.10.
+4. The measured floor keeps the target out of reach when the budgets' critical
    path, with the measured encode p95 in place of the 40 ms budget, exceeds
-   100 ms. If the reference verdict fails the ceiling and the floor still
-   keeps it out of reach after 6.10, the encoder-and-CPU decision (a cheaper
-   encoder, or four or more CPUs) opens as its own change. The owner's
-   decision is recorded there, and this change completes with its failed
-   verdict on the record (decision 9, acceptance).
+   100 ms. The acceptance summary then records the target as missed, with that
+   floor. A missed target never holds this change (decision 9, acceptance).
 
 `multilingual-recall` already bounds encode p95 at 250 ms, so the 40 ms row is
 a diagnostic target that cites that bound, not a second bound on one
-quantity, and the twice-budget rule does not apply to it. The 100 ms ceiling
+quantity, and the twice-budget rule does not apply to it. The 200 ms ceiling
 bounds it in practice. The CPU spin slice (decision 11) comes first, because a
 request that keeps a second core busy slows every stage on a two-CPU cell, the
 encode most.
@@ -509,6 +526,38 @@ it with the current path on the reference corpus.
   find timings close, so 21 / 58 ms of the request is outside `total_ms`. It
   becomes the registered stage `due_state` and reads role state once per
   request instead of once per hit (`artifact_role_state.py:494`).
+- **Keyword recall's page reads.** `_find_keyword` (`find.py:4070`) calls
+  `_keyword_match_paths` with no `k` (`find.py:4115`). It then reads, parses
+  and builds a hit for every matching page, and only after that sorts and cuts
+  the list to `limit` (`find.py:4244-4245`). Its Markdown reads therefore grow
+  with the matches, not with the hits it returns, which breaks the bound that
+  Markdown reads track the candidate count.
+
+  Today's order and membership depend only on data that the catalogue holds:
+  - The hits sort by the emitted page's `updated or "0000-00-00"` and then its
+    path, both descending. A frame child emits under its parent video, whose
+    `updated` is its own. The catalogue holds each row's `updated` and path,
+    its `emitted_parent_path`, and the parent's own row.
+  - The structured filters apply to the emitted page, and the page-metadata
+    index answers them (decision 1). The eligible and admitted sets are path
+    sets.
+  - Page bytes decide only the content of a hit: the excerpt comes from the
+    first matched row of its group in today's walk order, and the frame
+    annotation from the first matched frame child.
+
+  Slice 6.14 therefore orders and limits in SQL before any page read. One
+  query groups the matched rows by emitted identity, orders the groups by the
+  hit list's key, and returns the first `limit` groups, each with its first
+  matched row and first matched frame child. Only those pages are read.
+  Pending rows lead, as today, as the fixed overfetch. Two checks still read
+  the file per row: `is_recall_candidate` and the page parse. A row that fails
+  either drops, as today, and the slice reads the next group in order, so a
+  drop costs one read and never shortens or reorders the list.
+
+  Results stay identical, so no result contract changes. If an identity case
+  shows that today's order depends on data that only the page holds, slice
+  6.14 records the difference as a contract change in this change's
+  `recall-latency-contract` delta, with a scenario, before it lands.
 
 The temporal lane decides "temporal" with a word regex, `TEMPORAL_MARKERS`
 (`find_policy.py:41`, read by `is_temporal_query` at `:427`). Three more
@@ -598,8 +647,10 @@ threshold, and compares work between two corpus sizes as ratios.
     vault page (decision 8).
 
   Also expected: the ranking stages' Markdown reads, 126 per request in R3
-  against 15 hydrated hits. BM25 and keyword pass, because their matched rows
-  are the same at both sizes.
+  against 15 hydrated hits, and keyword recall's Markdown reads for a query
+  that matches more pages than its limit, because it reads every matching
+  page (decision 8). The BM25 and keyword step ratios pass, because their
+  matched rows are the same at both sizes.
 
 **Paired comparison, full CI.** The `retrieval-latency` job runs on shared
 `ubuntu-latest` runners and feeds `gate` and release evidence, so it applies no
@@ -677,9 +728,10 @@ Control justification:
   input that waives the comparison, because a self-granted waiver at dispatch
   time would be the only unreviewed decision in the release path.
 
-**Absolute record, workstation and live cell.** The ceilings and the stage
-budgets are judged on a quiet workstation and on the live cell after each
-release. Neither verdict gates CI, a merge or a release. The live cell's
+**Absolute record, workstation and live cell.** The ceilings are judged on a
+quiet workstation and on the live cell after each release, and the same runs
+report the targets and the stage rows. Neither verdict gates CI, a merge or a
+release. The live cell's
 result depends on the owner's vault data and on the shared box's load, and no
 code change controls either.
 
@@ -695,17 +747,12 @@ code change controls either.
   a run that fired wrongly is repeated.
 - *Acceptance.* The workstation verdict is this change's acceptance check
   (6.9). The change completes when a quiet-workstation run on the reference
-  corpus records its verdict, passed or failed, with its summary stored under
-  `verification/`. A refused or not-measured state completes nothing. A failed
-  verdict completes the change only when the measured encode floor still keeps
-  the ceiling out of reach after 6.10's thread policy (decision 7). Then:
-  1. the encoder-and-CPU decision opens as its own change;
-  2. the owner's decision is recorded there;
-  3. this change completes.
-
-  The failed state stays visible on the record and is never marked passed. A
-  failed verdict that the encode floor does not explain, such as another stage
-  over its budget, keeps this change open.
+  corpus records its verdict against the ceilings, 200 ms p95 for hybrid
+  series and 100 ms for keyword recall, as passed, with its summary stored
+  under `verification/`. A failed ceiling keeps the change open. A refused or
+  not-measured state completes nothing. The summary also records the target
+  outcome for each series, met or missed, with the measured encode floor and
+  any failed stage rows. A missed target never blocks completion.
 - *Who records the live-cell state, and where.* The agent or operator who
   rolls a release onto the live cell runs the series. It is a step of the
   release runbook, `docs/release.md`, under "Managed Linux service: what to
@@ -811,7 +858,8 @@ and keeps encoder output identical.
 
 ### 12. The query encode runs beside the lexical lanes
 
-The 100 ms ceiling needs the encode off the serial path (decision 7). After
+The 100 ms target needs the encode off the serial path; the 200 ms ceiling
+does not (decision 7). After
 eligibility, the request runs two branches at the same time, and the stages
 after the lanes start when both have ended:
 
@@ -857,8 +905,8 @@ Concurrency helps on two CPUs when both of these hold:
 
 The slice keeps the concurrent path only when it helps. If concurrency does
 not help on two CPUs, the slice records that finding with both arms' figures,
-keeps the serial path, and completes with its finding. The ceiling is then out
-of reach on two CPUs (decision 7), and 6.9 records the verdict as it is. The
+keeps the serial path, and completes with its finding. The 100 ms target is
+then out of reach on two CPUs (decision 7), and 6.9 records it as missed. The
 thread policy of slice 6.10 and this slice are decided on the same
 instrument.
 
@@ -908,7 +956,7 @@ it, and the timing table keeps one row per stage:
 - **[Risk] The gate never sees a quiet box.** → It refuses rather than reports,
   and the refused state is recorded and blocks nothing. The operator can pause
   suites, and the structural guards and the paired job still run in CI. This
-  change's acceptance waits for a recorded workstation verdict (6.9).
+  change's acceptance waits for a passed workstation verdict (6.9).
 - **[Risk] A faster read path raises the write rate a client sustains, and the
   graph rebuild livelocks more often.** → Owned by
   `converge-graph-incrementally`; this change ensures a rebuild in flight cannot
@@ -926,14 +974,17 @@ it, and the timing table keeps one row per stage:
   40 ms p95 budget, and the estimated floor is about 110 to 115 ms p95 for
   short queries (decision 7). Task 6.1 measures the encode per query-length
   band before any budget is trusted. The quiet reference run records a miss
-  as the measured floor. The lever is the thread policy of 6.10, and then the
-  encoder-and-CPU decision as its own change, never a wider ceiling. This
-  change completes on the recorded verdict (decision 9, acceptance).
+  as the measured floor. The lever in this change is the thread policy of
+  6.10, never a wider ceiling, target or budget. The owner chose on
+  2026-10-10 not to trade CPU or retrieval quality for the 100 ms target, so a
+  floor above it is recorded as a missed target and holds nothing (decision 9,
+  acceptance).
 - **[Risk] The concurrent branches slow each other on two CPUs.** → Slice 6.13
   keeps the concurrency only when it helps on the pinned profile (decision
   12). If it does not, the slice records that, keeps the serial path and
-  completes. The budgets then sum to 133 ms, the ceiling is out of reach on
-  two CPUs, and the gate records failed rather than a wider ceiling.
+  completes. The budgets then sum to 133 ms, under the 200 ms ceiling; the
+  100 ms target is out of reach on two CPUs, and the gate records it as missed
+  rather than widening it.
 - **[Risk] The filler corpus hides growth that a real vault has.** → In a real
   vault, matches grow with the corpus. The contract bounds that work per
   matched row, and the absolute verdict on the reference corpus and on the live

@@ -24,9 +24,12 @@ floor; this change removes the read-side one.
 
 On 2026-10-09 the owner set the target for every search mode (semantic, BM25,
 keyword): subsecond and well under, with 100 to 200 ms acceptable. The owner then
-asked why search cannot run under 100 ms, and the bar became 100 ms at p95. The
+asked why search cannot run under 100 ms. On 2026-10-10 the owner weighed the
+whole system: a user does not notice 100 against 200 ms, and CPU per cell and
+retrieval quality are not to be traded for search latency. The gating ceiling is
+therefore 200 ms at p95, and 100 ms at p95 stays as a reported target. The
 300/600 ms ceilings this change first set do not meet that, and the Cloud service
-gate (p95 at or below 3 s in `cloud-service-resource-policy`) is thirty times
+gate (p95 at or below 3 s in `cloud-service-resource-policy`) is fifteen times
 looser. A
 reproduction on a 6,500-page synthetic vault in a process pinned to two CPUs
 measured warm hybrid `ask_memory` at p50 363-700 ms and p95 636-1,799 ms over
@@ -65,48 +68,55 @@ its read entry points.
   intervals counted once, plus `unattributed_ms` stays within `total_ms` for a
   real `op_find`, and `unattributed_ms` is bounded.
 - A recall latency contract replaces the catastrophic-blowup backstop: fixed
-  ceilings (first hybrid p50 300 ms and p95 600 ms on 8,000 pages, tightened on
-  2026-10-09 as below), zero corpus walks on the read path, measured by the
+  ceilings (first hybrid p50 300 ms and p95 600 ms on 8,000 pages, set again on
+  2026-10-10 as below), zero corpus walks on the read path, measured by the
   existing timing diagnostics and checked by a script that refuses to measure
   under load rather than reporting noise.
 - The graph rebuild's whole-vault optimistic check stays out of scope; it is
   owned by `converge-graph-incrementally`. This change only ensures a rebuild in
   flight cannot invalidate the read-side caches.
-- The latency contract tightens to warm search p95 at or below 100 ms, with a
-  50 ms p50 target that gates nothing, on a two-CPU cell of at least 6,500
-  pages. It covers hybrid, keyword, filtered and `mixed`/`unit` requests,
-  measured as the elapsed time of the `ask_memory` call. Keyword recall, which
-  runs no query encode, holds p95 at or below 50 ms, which replaces its 120 ms
-  p50 ceiling. The empty-query browse stays outside the ceilings.
+- The latency contract tightens to warm hybrid search p95 at or below 200 ms
+  on a two-CPU cell of at least 6,500 pages, with a 100 ms p95 target and a
+  50 ms p50 target that gate nothing. It covers hybrid, filtered, temporal and
+  `mixed`/`unit` requests, measured as the elapsed time of the `ask_memory`
+  call. Keyword recall, which runs no query encode, holds p95 at or below
+  100 ms, which replaces its 120 ms p50 ceiling, with a 50 ms p95 target. Each
+  report records every target as met or missed. The empty-query browse stays
+  outside the ceilings and the targets.
 - The measured principal is the real vault owner, with nothing patched. An
   admitted non-owner series is reported apart and gates once admission no
   longer sizes the candidate pool.
 - Each stage of the request gets a p95 budget, named by its timing span keys.
   The query encode runs beside the BM25, keyword and unit lanes, so the budgets
   compose along the request's critical path: at most 95 ms for a request that
-  runs every stage, where the serial sum would be 133 ms. The gate names a
-  stage that exceeds twice its budget. It reports wall time, CPU time and the
+  runs every stage, where the serial sum would be 133 ms. The budgets are the
+  plan toward the 100 ms target. A stage whose p95 exceeds twice its budget
+  fails its row, and the report names it. A failed row diagnoses where the
+  target is lost and fails neither the series nor the ceiling verdict. It reports wall time, CPU time and the
   critical path per stage, and counts overlapping stages once. Query encode
   keeps the bound that `multilingual-recall` already sets, and its stage budget
   is a target. A measured encode floor above that target is recorded and moves
   the encoder runtime, not the contract. The BM25 and keyword budgets are
   targets until a replay on a new connection per request grounds them.
-- The 100 ms ceiling is the owner's bar, and the design estimates that the
-  served encoder cannot meet it on two CPUs. With bge-m3 int8 on one intra-op
-  thread, the estimated floor is about 110 to 115 ms p95 for short queries,
-  with every other stage on budget, and likely higher for the whole query mix.
-  100 ms needs four or more CPUs or a cheaper encoder. The change completes on
-  a recorded quiet-workstation verdict. If that verdict fails and the encode
-  floor still keeps the ceiling out of reach after the thread policy, the
-  encoder-and-CPU decision opens as its own change, and the failed state stays
-  on the record.
+- The design estimates that the served encoder cannot meet the 100 ms target
+  on two CPUs. With bge-m3 int8 on one intra-op thread, the estimated floor is
+  about 110 to 115 ms p95 for short queries, with every other stage on budget,
+  and likely higher for the whole query mix. 100 ms needs four or more CPUs or
+  a cheaper encoder. The owner chose on 2026-10-10 not to trade CPU or
+  retrieval quality for the 100 ms target. The change completes when a
+  quiet-workstation verdict against the 200 ms ceiling is recorded as passed.
+  A failed ceiling keeps it open. The summary records the target as met or
+  missed, with the measured floor, and a missed target never blocks
+  completion.
 - Search work is bounded per candidate and per matched row. Catalogue queries
   keyed by the candidate set do work that does not grow with the corpus for a
   fixed candidate set. BM25 and keyword do bounded work per matched row.
   Ranking, temporal, graph-seed and unit stages read metadata from the catalogue
   and sidecars of the current generation. Markdown reads track the candidate
   count plus a fixed overfetch, and each derived store opens one connection and
-  runs one readiness proof per scope per request.
+  runs one readiness proof per scope per request. Keyword recall reads every
+  matching page today (`find.py:4115`); it orders and limits its matches in SQL
+  before any page read, with identical results.
 - Timing diagnostics cover the whole `ask_memory` request, including the
   due-state block that runs after retrieval, and an unreported duration is
   shown as unknown, never as 0 ms.
@@ -119,7 +129,8 @@ its read entry points.
   load cannot fire it. CI does not bound drift across releases: each release
   can be up to 10% slower than the one before it. A quiet workstation run and
   the live-cell series after each release record the absolute verdict on the
-  ceilings and budgets as passed, failed, refused or not measured. The
+  ceilings as passed, failed, refused or not measured, beside the targets and
+  the stage rows. The
   workstation run links the SQLite that CI or a Cloud cell links, not a local
   venv's newer one. The agent or
   operator who rolls the live cell attaches that record to the release's GitHub
@@ -133,8 +144,8 @@ its read entry points.
 ## Capabilities
 
 ### New Capabilities
-- `recall-latency-contract`: the warm search latency ceilings and per-stage
-  budgets, the no-corpus-walk invariant and the per-candidate work bounds, the
+- `recall-latency-contract`: the warm search latency ceilings, targets and
+  per-stage budgets, the no-corpus-walk invariant and the per-candidate work bounds, the
   reference corpus, the quiescence and attribution rules for measuring them,
   and the pull-request, full-CI and release instruments that enforce them.
 
@@ -183,7 +194,8 @@ its read entry points.
   text after fusion, unit matrix per generation), `src/exomem/commands.py` and
   `src/exomem/due_state.py` (response blocks inside the timings),
   `src/exomem/find.py` and `src/exomem/find_candidates.py` (the query encode
-  beside the lexical lanes), `src/exomem/find_types.py` (`cpu_ms` per span,
+  beside the lexical lanes), `src/exomem/find.py` and `src/exomem/lexstore.py`
+  (keyword recall ordered and limited before page reads), `src/exomem/find_types.py` (`cpu_ms` per span,
   overlapping spans counted once), `src/exomem/runtime_resources.py`
   and `src/exomem/embedding_backend.py` (the cell thread policy),
   `scripts/synth_vault.py` (reference corpus), `scripts/recall_latency_gate.py`

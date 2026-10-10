@@ -10,16 +10,21 @@ numbers are measured so a contended box cannot be mistaken for a regression.
 ### Requirement: Governed Recall Meets Fixed Latency Ceilings On A Quiescent Cell
 
 On the reference corpus in a process restricted to two CPUs, and on the live
-cell as it is served, quiescent and with warm caches, every warm search series
-SHALL have p95 at or below 100 ms, and keyword recall, which runs no query
-encode, SHALL have p95 at or below 50 ms. The two-CPU restriction applies to the
-reference-corpus runs only; the live personal service is not pinned. This covers
-hybrid recall (semantic, BM25, keyword, graph and fusion), keyword recall,
+cell as it is served, quiescent and with warm caches, every warm hybrid search
+series SHALL have p95 at or below 200 ms, and keyword recall, which runs no
+query encode, SHALL have p95 at or below 100 ms. The two-CPU restriction applies
+to the reference-corpus runs only; the live personal service is not pinned. The
+hybrid series are hybrid recall (semantic, BM25, keyword, graph and fusion),
 hybrid recall with one supported structured filter, hybrid recall that runs the
-temporal lane, and the `mixed` and `unit` result levels. Every report shows each
-series' p50 beside a 50 ms target, which gates nothing. The ceilings are the
-capability's contract, not calibrated from any runner, and a gate MUST NOT
-loosen them. The empty-query browse is outside these ceilings.
+temporal lane, and the `mixed` and `unit` result levels.
+
+Each series also has targets, which gate nothing: p95 at or below 100 ms for a
+hybrid series, p95 at or below 50 ms for keyword recall, and p50 at or below 50
+ms for every series. Every report SHALL show each percentile beside its target
+and record each target as met or missed. A missed target SHALL NOT fail a
+series or a verdict. The ceilings and the targets are the capability's
+contract, not calibrated from any runner, and a gate MUST NOT loosen them. The
+empty-query browse is outside these ceilings and targets.
 
 The measured principal SHALL be the vault owner, identified through the
 product's owner-authority path with nothing patched. An admitted non-owner
@@ -47,22 +52,22 @@ governed write changed is not an index build.
 #### Scenario: Warm hybrid search on the reference corpus
 
 - **WHEN** thirty or more hybrid requests from the reference query mix run back to back through `ask_memory` as the vault owner, against the warm reference corpus, in a process restricted to two CPUs, after the quiescence check passed
-- **THEN** the p95 of the elapsed time of the `ask_memory` call is at or below 100 ms
-- **AND** the report shows the p50 beside the 50 ms target
+- **THEN** the p95 of the elapsed time of the `ask_memory` call is at or below 200 ms
+- **AND** the report shows the p95 beside the 100 ms target and the p50 beside the 50 ms target
 - **AND** no request in the series reports a corpus walk in any stage
 
 #### Scenario: Every search shape holds its ceiling
 
 - **WHEN** the series repeats as keyword recall, as hybrid recall with a `projects` filter that the index can answer, as the dedicated temporal series, and at `result_level="mixed"`
-- **THEN** the p95 of each hybrid series is at or below 100 ms
-- **AND** the p95 of the keyword series is at or below 50 ms
-- **AND** the eligibility stage of the filtered series reports an index outcome within its stage budget
+- **THEN** the p95 of each hybrid series is at or below 200 ms
+- **AND** the p95 of the keyword series is at or below 100 ms
+- **AND** the eligibility stage of the filtered series reports an index outcome, with its row reported against its stage budget
 
-#### Scenario: The p50 target gates nothing
+#### Scenario: The targets gate nothing
 
-- **WHEN** a hybrid series has a p95 of 90 ms and a p50 of 62 ms
-- **THEN** the report shows the p50 over its 50 ms target
-- **AND** the series passes its ceiling
+- **WHEN** a hybrid series has a p95 of 160 ms and a p50 of 62 ms, and the keyword series has a p95 of 70 ms
+- **THEN** the report records the hybrid series' 100 ms p95 and 50 ms p50 targets as missed, and the keyword series' 50 ms p95 target as missed
+- **AND** the hybrid series passes its 200 ms ceiling and the keyword series its 100 ms ceiling
 
 #### Scenario: The owner is real and the admitted principal is reported apart
 
@@ -106,13 +111,15 @@ governed write changed is not an index build.
 ### Requirement: Warm Search Stages Stay Within Their Budgets
 
 Each stage of a warm search request SHALL have the fixed p95 budget below.
-Budgets compose along the request's critical path: stages that run one after
-another add, and of branches that run at the same time only the longest
-counts. The encode branch runs the query encode and then dense search. The
-lexical branch runs BM25, keyword, CLIP where it is enabled, and the unit
-lanes, whose vector search waits for the query vector. For a request that runs
-every stage, the critical path of the budgets SHALL be at most 95 ms, under the
-100 ms ceiling. Each row names the timing span keys it counts. A row counts its
+The budgets are the plan toward the 100 ms hybrid target: they serve the
+target, not the ceiling. Budgets compose along the request's critical path:
+stages that run one after another add, and of branches that run at the same
+time only the longest counts. The encode branch runs the query encode and then
+dense search. The lexical branch runs BM25, keyword, CLIP where it is enabled,
+and the unit lanes, whose vector search waits for the query vector. For a
+request that runs every stage, the critical path of the budgets SHALL be at
+most 95 ms, under the 100 ms target. Each row names the timing span keys it
+counts. A row counts its
 keys and their children, excluding any descendant interval that another row
 names. The query encode SHALL be spanned as `vector.embed` wherever it first
 runs, inside `semantic_units` included, so that no other row absorbs it. While
@@ -145,18 +152,21 @@ CPU figure SHALL be attributed per thread. The CPU fields read
 `/proc/self/task`. On a platform without it, every CPU field SHALL read
 unknown, never 0, and an unknown CPU field does not fail a series.
 
-A stage verdict SHALL need at least 20 samples that ran the stage. With fewer,
-the gate reports the stage as "insufficient samples", never as a pass or a
-fail. A gate SHALL fail a series in which a stage with enough samples has a p95
-above twice its budget. Query encode is a diagnostic target: its bound is the
-encode p95 of 250 ms in `multilingual-recall`, and the twice-budget rule does
-not apply to it. When the encode p95 alone exceeds its budget on the reference
-profile, the acceptance run SHALL record that p95 as the measured floor beside
-the budget, and neither the ceiling nor the budget widens to fit it. The BM25
-and keyword budgets are targets until a replay on a new connection per request,
-on a reference SQLite and over the whole query mix, grounds them. Until then a
-gate reports them against their budgets, and the twice-budget rule does not
-apply to them. A budget changes only through this requirement.
+A row's result SHALL need at least 20 samples that ran the stage. With fewer,
+the gate reports the row as "insufficient samples", never as a pass or a fail.
+A row with enough samples whose p95 is above twice its budget SHALL fail. A
+failed row diagnoses: it names the stage, its p95 and its budget, and shows
+where the 100 ms target is lost. It SHALL NOT fail the series or the ceiling
+verdict, because the target that the budgets serve gates nothing. Query encode
+is a diagnostic target: its bound is the encode p95 of 250 ms in
+`multilingual-recall`, and the twice-budget rule does not apply to it. When the
+encode p95 alone exceeds its budget on the reference profile, the acceptance
+run SHALL record that p95 as the measured floor beside the budget, and neither
+the ceiling, the target nor the budget widens to fit it. The BM25 and keyword
+budgets are targets until a replay on a new connection per request, on a
+reference SQLite and over the whole query mix, grounds them. Until then a gate
+reports them against their budgets, and the twice-budget rule does not apply to
+them. A budget changes only through this requirement.
 
 | Stage | Span keys | Runs | p95 budget |
 |---|---|---|---|
@@ -175,22 +185,23 @@ apply to them. A budget changes only through this requirement.
 | Hydration: hit construction, excerpts, release gate, serialization | `filter_hits`, `release_gate`, `serialize` | after the lanes | 8 ms |
 | Due-state response block | `due_state` | after the lanes | 3 ms |
 
-#### Scenario: A stage over its budget is named
+#### Scenario: A stage over its budget is named and fails only its row
 
-- **WHEN** a series meets the 100 ms ceiling but the graph stage's p95 is more than twice its 9 ms budget
-- **THEN** the gate fails and names the graph stage, its p95 and its budget
+- **WHEN** a hybrid series has a p95 of 140 ms, and the graph stage's p95 is more than twice its 9 ms budget
+- **THEN** the gate fails the graph row and names the graph stage, its p95 and its budget
+- **AND** the series passes its 200 ms ceiling, and the report records the 100 ms target as missed
 
 #### Scenario: A lexical budget that is still a target fails nothing
 
 - **WHEN** no replay has grounded the keyword budget yet, and the keyword stage's p95 is 20 ms
 - **THEN** the gate reports the keyword stage over its 8 ms target
-- **AND** the keyword stage does not fail the series
+- **AND** the keyword row does not fail, though 20 ms is more than twice its budget
 
-#### Scenario: The budgets fit the ceiling on the critical path
+#### Scenario: The budgets fit the target on the critical path
 
 - **WHEN** a request runs every stage, with a structured filter, the temporal lane, the unit lanes and CLIP
 - **THEN** its budgeted critical path is 10 ms before the lanes, plus the longer branch, 55 ms, plus 30 ms after the lanes
-- **AND** that path, 95 ms, is under the 100 ms ceiling
+- **AND** that path, 95 ms, is under the 100 ms target
 
 #### Scenario: Overlapping stages are counted once
 
@@ -216,7 +227,7 @@ apply to them. A budget changes only through this requirement.
 
 - **WHEN** the encode branch ends after the lexical branch in every `mixed` request, and the unit-lane stage's p95 is more than twice its 12 ms budget
 - **THEN** the report shows the unit-lane stage off the critical path
-- **AND** the gate still fails the series and names the unit-lane stage
+- **AND** the gate still fails the unit-lane row and names the unit-lane stage
 
 #### Scenario: A stage a request did not run is not a zero
 
@@ -227,9 +238,9 @@ apply to them. A budget changes only through this requirement.
 #### Scenario: A stage with too few samples gets no verdict
 
 - **WHEN** the temporal lane runs in 12 requests of the hybrid series
-- **THEN** the gate reports the hybrid series' temporal stage as "insufficient samples"
-- **AND** that stage neither passes nor fails the hybrid series
-- **AND** the temporal stage's verdict comes from the dedicated temporal series
+- **THEN** the gate reports the hybrid series' temporal row as "insufficient samples"
+- **AND** that row neither passes nor fails
+- **AND** the temporal row's result comes from the dedicated temporal series
 
 #### Scenario: A nested span is counted once
 
@@ -253,14 +264,14 @@ apply to them. A budget changes only through this requirement.
 
 - **WHEN** query encode p95 is above 80 ms and at or below 250 ms
 - **THEN** the gate reports encode over its 40 ms target
-- **AND** the encode stage does not fail the series
-- **AND** the series still answers to its 100 ms ceiling
+- **AND** the encode row does not fail
+- **AND** the series still answers to its 200 ms ceiling
 
 #### Scenario: An encode floor above the budget is recorded, not absorbed
 
 - **WHEN** the quiet reference run measures the encode p95 alone at 48 ms on the pinned profile
 - **THEN** the acceptance summary records 48 ms as the measured floor beside the 40 ms budget
-- **AND** the ceiling stays 100 ms and the encode budget stays 40 ms
+- **AND** the ceiling stays 200 ms, the target 100 ms and the encode budget 40 ms
 
 ### Requirement: Warm Search Work Is Bounded Per Candidate And Per Matched Row
 
@@ -273,16 +284,20 @@ a full-text index's own match and in the exact dense scan, stays under the
 latency ceilings instead.
 
 Markdown page reads SHALL track the candidate count plus a fixed overfetch, as
-`Structural Scaling Is The CI Gate` states; the candidates are the hits that the
-response hydrates. Each derived store SHALL open at most one connection and run
-at most one readiness proof per scope per request. Ranking, temporal,
-graph-seed and unit-lane stages SHALL read page and unit metadata from the
-maintained catalogue and sidecars for the current generation, not from
-Markdown. A gate SHALL check the work bounds as ratios between two corpus sizes
-that hold the same candidate set, and SHALL NOT pin absolute work counts. The
-gate and every query-plan check SHALL also run on the older reference
-SQLite (see `The Reference Corpus And Query Mix Are Fixed`), and the gate's
-report SHALL name each SQLite version it ran on.
+`Structural Scaling Is The CI Gate` states; the candidates are the hits that
+the response hydrates, each with its own page and at most one frame page that
+supplies its excerpt or its frame annotation. Keyword recall SHALL order and
+limit its matches from the catalogue before it reads a page, and SHALL return
+the same hits, in the same order, with the same excerpts and frame annotations,
+as a recall that reads every matching page. Each derived store SHALL open at
+most one connection and run at most one readiness proof per scope per request.
+Ranking, temporal, graph-seed and unit-lane stages SHALL read page and unit
+metadata from the maintained catalogue and sidecars for the current generation,
+not from Markdown. A gate SHALL check the work bounds as ratios between two
+corpus sizes that hold the same candidate set, and SHALL NOT pin absolute work
+counts. The gate and every query-plan check SHALL also run on the older
+reference SQLite (see `The Reference Corpus And Query Mix Are Fixed`), and the
+gate's report SHALL name each SQLite version it ran on.
 
 #### Scenario: Corpus growth cannot hide per-candidate work
 
@@ -296,6 +311,12 @@ report SHALL name each SQLite version it ran on.
 - **WHEN** a catalogue query for the candidate set scans every KB row for each candidate, or the candidate list once for each KB row
 - **THEN** its work grows with corpus size for the same candidates
 - **AND** the structural gate fails and names the stage of that query
+
+#### Scenario: Keyword recall reads only the pages it returns
+
+- **WHEN** a keyword recall with a limit of 10 matches 400 pages, and every matched page's catalogue row is current
+- **THEN** it reads the pages of the 10 hits it returns, the frame pages that supply their excerpts or frame annotations, and the fixed overfetch, and no other page
+- **AND** its hits, their order, their excerpts and their frame annotations equal those of a recall that reads every matching page
 
 #### Scenario: Exact BM25 is judged per matched row
 
@@ -350,11 +371,12 @@ has no other effect. The agent or operator who drives the release deletes it,
 unless the next accept record replaces it first. No run input SHALL waive the
 comparison.
 
-The absolute verdict on the ceilings and the stage budgets SHALL come from a
-run on a quiet workstation, on the reference corpus in a process restricted to
-two CPUs, and from the live-cell series after each release, through the live
-cell's served transport. It SHALL NOT gate CI, a merge or a release. Each
-verdict SHALL be recorded as one of four distinct visible states: passed,
+The absolute verdict on the ceilings SHALL come from a run on a quiet
+workstation, on the reference corpus in a process restricted to two CPUs, and
+from the live-cell series after each release, through the live cell's served
+transport. The same runs report each target as met or missed and each stage
+row against its budget. The verdict SHALL NOT gate CI, a merge or a release.
+Each verdict SHALL be recorded as one of four distinct visible states: passed,
 failed, refused or not measured, with its sample counts, its load, its
 contended samples and the principal it measured. A refused verdict holds no
 ceiling comparison, and the operator can repeat it on a quiet cell. The agent
@@ -410,7 +432,7 @@ Release. A release with no attached summary SHALL show
 #### Scenario: The absolute verdict is a record with a visible state
 
 - **WHEN** a release is delivered
-- **THEN** the live-cell series after the release, and a quiet workstation run where one ran, record the ceiling and stage-budget verdicts
+- **THEN** the live-cell series after the release, and a quiet workstation run where one ran, record the ceiling verdict, each target as met or missed, and each stage row against its budget
 - **AND** each verdict records its state, its sample counts, its load and the principal it measured
 - **AND** a verdict that did not run reads "not measured", never passed
 
