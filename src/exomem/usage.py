@@ -31,6 +31,9 @@ import math
 import os
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from . import query_log
@@ -63,16 +66,46 @@ def _read_jsonl_file(path: Path, out: list[dict]) -> None:
             continue
 
 
+#: Parsed logs shared inside one `read_scope`. None outside a scope.
+_READ_MEMO: ContextVar[dict[str, list[dict]] | None] = ContextVar("usage_read_memo", default=None)
+
+
+@contextmanager
+def read_scope() -> Iterator[None]:
+    """Parse each log at most once inside this scope.
+
+    One audit reads the same access logs for the stale-review gate, its sort and
+    the contradiction dormancy; each file can hold 64 MB plus a rotated
+    generation. Callers must treat the shared lists as read-only. A nested
+    scope reuses the outer one.
+    """
+    if _READ_MEMO.get() is not None:
+        yield
+        return
+    token = _READ_MEMO.set({})
+    try:
+        yield
+    finally:
+        _READ_MEMO.reset(token)
+
+
 def read_jsonl(path: Path) -> list[dict]:
     """Best-effort JSONL reader; malformed lines are skipped.
 
     Also reads one rotated generation (`<path>.1`) when present — read
     oldest-first — so a query spanning a rotation doesn't silently lose the
-    half that just rotated out of the live file.
+    half that just rotated out of the live file. Inside `read_scope` a file is
+    parsed once.
     """
+    memo = _READ_MEMO.get()
+    key = str(path)
+    if memo is not None and key in memo:
+        return memo[key]
     out: list[dict] = []
     _read_jsonl_file(path.with_name(path.name + ".1"), out)
     _read_jsonl_file(path, out)
+    if memo is not None:
+        memo[key] = out
     return out
 
 

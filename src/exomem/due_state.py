@@ -2967,9 +2967,10 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
         entries = []
         for row in rows:
             ref = str(row.get("ref") or "")
-            finger = fingerprints.get(ref)
-            if ref and finger:
-                entries.append((_ref_id(ref), finger))
+            identity = fingerprints.get(ref)
+            if ref and identity:
+                # The row's category is its family on the ledger.
+                entries.append((_ref_id(ref), identity[0], identity[1]))
         if not entries:
             return
         review_state_module.record_surfaced(vault_root, entries, surface="carrier")
@@ -2977,13 +2978,13 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
         log.debug("first-surfaced ledger not recorded for the carrier", exc_info=True)
 
 
-#: `ref -> fingerprint` per vault, valid for one projection file identity.
-_FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+#: `ref -> (fingerprint, category, path)` per vault, valid for one projection file identity.
+_FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, tuple[str, str, str]]]] = {}
 _FINGERPRINTS_LOCK = threading.Lock()
 _FINGERPRINTS_CAP = 8
 
 
-def _fingerprints_for(vault_root: Path) -> dict[str, str]:
+def _fingerprints_for(vault_root: Path) -> dict[str, tuple[str, str, str]]:
     """`_fingerprints_by_ref` over the current projection, computed once per projection file.
 
     Loading the projection to stamp a delivery cost as much as the recall it
@@ -3010,8 +3011,8 @@ def _fingerprints_for(vault_root: Path) -> dict[str, str]:
     return fingerprints
 
 
-def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
-    """``ref -> fingerprint`` over the whole projection. One pass, no ordering.
+def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, tuple[str, str, str]]:
+    """``ref -> (fingerprint, category, path)`` over the projection. One pass, no ordering.
 
     **The coupling this depends on.** A `ref` is a page-level identity and a
     fingerprint is a per-finding one, so the map is only well defined while at
@@ -3026,12 +3027,12 @@ def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
     DROPPED and logged: an unstamped row is a measurement gap, a wrongly
     stamped one is a false record of what a person was shown.
     """
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str, str]] = {}
     conflicted: set[str] = set()
-    for pages in (payload.get("categories") or {}).values():
+    for category, pages in (payload.get("categories") or {}).items():
         if not isinstance(pages, dict):
             continue
-        for entries in pages.values():
+        for page, entries in pages.items():
             for entry in _unbucket(entries):
                 ref = str(entry.get("ref") or "")
                 finger = str(entry.get("fingerprint") or "")
@@ -3039,8 +3040,8 @@ def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
                     continue
                 seen = out.get(ref)
                 if seen is None:
-                    out[ref] = finger
-                elif seen != finger:
+                    out[ref] = (finger, str(category), str(entry.get("path") or page))
+                elif seen[:2] != (finger, str(category)):
                     conflicted.add(ref)
     for ref in conflicted:
         log.debug(
@@ -3050,6 +3051,70 @@ def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
         )
         out.pop(ref, None)
     return out
+
+
+def stored_identity(vault_root: Path, review_id: str) -> tuple[str, str, str] | None:
+    """``(fingerprint, category, path)`` of one stored entry, or None. No audit.
+
+    Read from the per-projection-file index the carrier already keeps, so a
+    review of one delivered ref costs a dictionary lookup once it is warm.
+    """
+    return _fingerprints_for(vault_root).get(review_state_module.review_ref(review_id))
+
+
+def _recheck_supersession(vault_root: Path, pages: list[Any], **_dates: Any) -> list[Any]:
+    from . import audit as audit_module
+
+    return [
+        finding
+        for finding in audit_module._check_supersession_integrity(vault_root, pages)
+        if str((finding.meta or {}).get("defect") or "") in DELTA_DEFECTS["supersession_integrity"]
+    ]
+
+
+def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
+    """The categories whose stored entry one page re-check reproduces.
+
+    Keyed by audit check, a closed set this module implements. Each is
+    page-local and partitions its review id per finding, so the page's own check
+    yields the item the whole-vault union would. `unfinished_experiments` has no
+    partition and shares its id with other page-level queues, so it is not here.
+    A grouped observation backfill entry spans many pages: one page never
+    reproduces it, and its lookup takes the whole-vault path.
+    """
+    from . import audit as audit_module
+
+    return {
+        "prediction_window": lambda root, pages, *, today, now: (
+            audit_module._check_prediction_window(root, pages, today=today)
+        ),
+        "question_aging": lambda root, pages, *, today, now: (
+            audit_module._check_question_aging(root, pages, today=today)
+        ),
+        "supersession_integrity": _recheck_supersession,
+        "unreflected_observations": lambda root, pages, *, today, now: (
+            audit_module._check_unreflected_observations(root, pages, now=now)
+        ),
+    }
+
+
+def recheck_page(
+    vault_root: Path, category: str, rel_path: str, *, today: dt.date, now: dt.datetime
+) -> list[Any] | None:
+    """One stored entry's category, re-checked on its own page at today's date.
+
+    None when the category cannot be settled from one page, so the caller must
+    take its whole-vault path; an empty list when the page no longer exists.
+    """
+    from . import find as find_module
+
+    check = _page_rechecks().get(category)
+    if check is None:
+        return None
+    page = find_module._CACHE.get(Path(vault_root) / rel_path, Path(vault_root))
+    if page is None:
+        return []
+    return list(check(Path(vault_root), [page], today=today, now=now))
 
 
 def _ref_id(ref: str) -> str:
