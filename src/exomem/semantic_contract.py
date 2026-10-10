@@ -29,6 +29,7 @@ from . import (
     memory_refs,
     memory_schema,
     metrics,
+    note_types,
     relation_registry,
     semantic_authoring,
     semantic_language_registry,
@@ -72,23 +73,6 @@ _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
 _GRANDFATHERED_OPERATIONS = frozenset(
     {"edit", "move", "observe", "recover", "tier2_overwrite", "tier2_append"}
-)
-COMPILED_DESTINATIONS = MappingProxyType(
-    {
-        "experiment": "Notes/Experiments",
-        "failure": "Notes/Failures",
-        "insight": "Notes/Insights",
-        "pattern": "Notes/Patterns",
-        "production-log": "Notes/Productions",
-        "research-note": "Notes/Research",
-    }
-)
-COMPILED_TYPES = frozenset(COMPILED_DESTINATIONS)
-_COMPILED_ROOT_TYPES = MappingProxyType(
-    {
-        destination.rsplit("/", 1)[-1].casefold(): page_type
-        for page_type, destination in COMPILED_DESTINATIONS.items()
-    }
 )
 _SEMANTIC_UNIT_EXEMPT_PARTS = frozenset(
     {"sources", "evidence", "_trash", "trash", "_schema", "templates", "data"}
@@ -220,6 +204,9 @@ class SemanticPageState:
     # The page needs a lifecycle class that this caller's basis cannot supply.
     # Its eligibility reads False; a decision that depends on it must refuse.
     status_unavailable: bool = False
+    # The caller's note-type basis. Enrichment sets it; a parsed state without
+    # one resolves its route and type against the shipped pack only.
+    type_basis: note_types.Basis | None = field(default=None, compare=False, repr=False)
     # (target, line) for each deduped body wikilink not already on a typed
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
@@ -805,6 +792,11 @@ def _path_excluded_from_compiled_destination(path: str) -> bool:
     return name in {"hub.md", "index.md", "log.md"}
 
 
+def compiled_route_exempt(folder: str) -> bool:
+    """Whether the compiled router never selects pages under this folder."""
+    return _path_excluded_from_compiled_destination(folder)
+
+
 def _path_excluded_from_semantic_minimum(path: str) -> bool:
     if _path_excluded_from_compiled_destination(path):
         return True
@@ -814,21 +806,55 @@ def _path_excluded_from_semantic_minimum(path: str) -> bool:
     return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
 
 
-def _structural_compiled_destination(path: str) -> str | None:
-    """Return a compiled route without applying minimum-unit-only exemptions."""
+def _route_name(path: str) -> str | None:
+    """The casefolded `Notes/<Name>` folder a compiled route would select, if any.
+
+    Minimum-unit-only exemptions do not apply here.
+    """
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 3 or parts[:2] != (kb_dirname().casefold(), "notes"):
+    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), note_types.NOTES_FOLDER.casefold()):
         return None
-    return _COMPILED_ROOT_TYPES.get(parts[2])
+    return parts[2]
 
 
-def canonical_compiled_destination(path: str) -> str | None:
+def _type_basis(page: SemanticPageState) -> note_types.Basis:
+    return page.type_basis or note_types.Basis(None)
+
+
+def read_side(page: SemanticPageState) -> SemanticPageState:
+    """The page judged as a read or a link rewrite, not as the caller's own write.
+
+    Its folder and type then have no definition when the admitted overlay is
+    invalid, instead of refusing the operation.
+    """
+    return replace(page, type_basis=_type_basis(page).reading())
+
+
+def _route(page: SemanticPageState) -> note_types.NoteType | None:
+    """The compiled type that owns this page's `Notes/<Name>` folder, if any.
+
+    Raises `NOTE_TYPE_DEFINITION_UNAVAILABLE` when the folder needs a definition
+    from an admitted overlay that is invalid.
+    """
+    name = _route_name(page.path)
+    return _type_basis(page).route(name).require() if name is not None else None
+
+
+def _compiled_type(page: SemanticPageState) -> note_types.NoteType | None:
+    """The page type's definition when its note-type role is compiled."""
+    definition = (
+        _type_basis(page).resolve(normalized_compiled_type(page.page_type)).require()
+    )
+    return definition if definition is not None and note_types.compiled(definition) else None
+
+
+def canonical_compiled_destination(page: SemanticPageState) -> note_types.NoteType | None:
     """Return the compiled type selected by one canonical destination, if any."""
-    if _path_excluded_from_semantic_minimum(path):
+    if _path_excluded_from_semantic_minimum(page.path):
         return None
-    return _structural_compiled_destination(path)
+    return _route(page)
 
 
 def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
@@ -850,37 +876,41 @@ def _semantic_unit_explicitly_exempt(page: SemanticPageState) -> bool:
 
 
 def compiled_intent(page: SemanticPageState) -> bool:
-    """Apply the exact route-or-type compiled-intent definition."""
+    """Apply the exact route-or-type compiled-intent definition.
+
+    Raises `NOTE_TYPE_DEFINITION_UNAVAILABLE` when the route or the type needs a
+    definition from an admitted overlay that is invalid.
+    """
     return bool(
-        canonical_compiled_destination(page.path) is not None
-        or normalized_compiled_type(page.page_type) in COMPILED_TYPES
+        canonical_compiled_destination(page) is not None or _compiled_type(page) is not None
     )
 
 
 def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
     """Return a deterministic path/type mismatch before semantic applicability."""
-    destination_type = _structural_compiled_destination(page.path)
+    destination = _route(page)
+    compiled_type = _compiled_type(page)
     page_type = normalized_compiled_type(page.page_type)
-    if _path_excluded_from_semantic_minimum(page.path) and page_type not in COMPILED_TYPES:
+    if _path_excluded_from_semantic_minimum(page.path) and compiled_type is None:
         return None
-    if destination_type is not None and page_type != destination_type:
+    if destination is not None and page_type != destination.key:
         return ContractFinding(
             code="COMPILED_TYPE_MISMATCH",
             severity="error",
             path=page.path,
             span=None,
             detail=(
-                f"canonical {COMPILED_DESTINATIONS[destination_type]} content requires "
-                f"frontmatter type {destination_type!r}"
+                f"canonical {destination.folder} content requires "
+                f"frontmatter type {destination.key!r}"
             ),
             remediation=(
-                f"Set `type: {destination_type}` or move the document outside that "
+                f"Set `type: {destination.key}` or move the document outside that "
                 "canonical compiled destination."
             ),
             governed_element_identity=("compiled_intent", "type"),
             resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
         )
-    if page_type in COMPILED_TYPES and destination_type != page_type:
+    if compiled_type is not None and destination is None:
         return ContractFinding(
             code="COMPILED_DESTINATION_MISMATCH",
             severity="error",
@@ -888,10 +918,10 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             span=None,
             detail=(
                 f"compiled frontmatter type {page_type!r} is outside its canonical "
-                f"{COMPILED_DESTINATIONS[page_type]} destination"
+                f"{compiled_type.folder} destination"
             ),
             remediation=(
-                f"Move the document under `{COMPILED_DESTINATIONS[page_type]}` or use "
+                f"Move the document under `{compiled_type.folder}` or use "
                 "a non-compiled type appropriate to this destination."
             ),
             governed_element_identity=("compiled_intent", "destination"),
@@ -1190,6 +1220,7 @@ def build_page_state(
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
     complete_authored_effects: bool = False,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> SemanticPageState:
     """Parse and classify a target before evaluating lifecycle-dependent obligations."""
     state = _parse_page_state(
@@ -1202,8 +1233,12 @@ def build_page_state(
         complete_authored_effects=complete_authored_effects,
     )
     return enrich_page_state(
-        Path(vault_root), state, status_basis or lifecycle_statuses.Basis(vault_root),
-        relation_definitions=relation_registry, language=language_registry,
+        Path(vault_root),
+        state,
+        status_basis or lifecycle_statuses.Basis(vault_root),
+        type_basis,
+        relation_definitions=relation_registry,
+        language=language_registry,
     )
 
 
@@ -1211,17 +1246,19 @@ def enrich_page_state(
     root: Path,
     state: SemanticPageState,
     status_basis: lifecycle_statuses.Basis,
+    type_basis: note_types.Basis | None = None,
     *,
     relation_definitions: relation_registry.RelationRegistry | None = None,
     language: semantic_language_registry.SemanticLanguageRegistry | None = None,
     require_status: bool = True,
 ) -> SemanticPageState:
-    """Interpret detached facts with this page's admitted instance and lifecycle.
+    """Interpret detached facts with this page's admitted instance, lifecycle and note types.
 
     The operation's own page requires its class. Other corpus pages pass
     ``require_status=False``: an unavailable class marks the page instead of
     refusing the corpus, and only a decision that reads it refuses.
     """
+    type_basis = type_basis or note_types.Basis(root)
     definitions = None
     unavailable = False
     try:
@@ -1262,15 +1299,18 @@ def enrich_page_state(
         mtime=0.0,
         vault_root=root,
     )
-    governed = activation.structurally_eligible_for_types(
-        root, parsed, page_types=activation._ELIGIBLE_TYPES
+    governed = activation.structurally_eligible(
+        root, parsed, selects=note_types.governed_endpoint, type_basis=type_basis
     )
-    compiled = state.structurally_compiled
-    connectable = activation.structurally_eligible_for_types(
+    compiled = activation.structurally_eligible(
+        root, parsed, selects=note_types.compiled, type_basis=type_basis
+    )
+    connectable = activation.structurally_eligible(
         root,
         parsed,
-        page_types=activation._CONNECTABLE_TYPES,
-        tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
+        selects=note_types.connectable,
+        tiers=activation.CONNECTABLE_TIERS,
+        type_basis=type_basis,
     )
     needed = governed or compiled or connectable
     classification = (
@@ -1297,6 +1337,7 @@ def enrich_page_state(
         status_unregistered=classification.unregistered,
         status_dependency=status_basis.dependency,
         status_unavailable=unavailable_status,
+        type_basis=type_basis,
     )
 
 
@@ -1408,8 +1449,13 @@ def _parse_page_state(
         eligible_governed=False,
         eligible_compiled=False,
         connectable_target=False,
-        structurally_compiled=activation.structurally_eligible_for_types(
-            root, parsed, page_types=activation._COMPILED_PAGE_TYPES
+        # Shared, caller-independent structure: the census reads the owner's
+        # note types; a request enriches the state with its own basis.
+        structurally_compiled=activation.structurally_eligible(
+            root,
+            parsed,
+            selects=note_types.compiled,
+            type_basis=note_types.Basis(root, owner_local=True),
         ),
         body_wikilinks=tuple(body_links),
         body=body,
@@ -1877,14 +1923,24 @@ def _deferred_corpus_census(root: Path, sink: list[list], outcome: str) -> tuple
         sink.append([(time.perf_counter() - started) * 1000.0, outcome])
 
 
+def _config_inputs(root: Path) -> tuple[Path, ...]:
+    """The non-Markdown files whose bytes shape parsed corpus structure."""
+    return (
+        access.access_config_path(root),
+        # Parsed structure records the owner's compiled eligibility.
+        note_types.overlay_path(root),
+    )
+
+
 def _corpus_census(root: Path) -> tuple | None:
     """Stat census of every filesystem input ``build_corpus_context`` reads.
 
     Mirrors both production walks — ``_build_identity_census`` (every canonical
     ``.md`` under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
     (the full vault minus skip dirs and sync-conflict copies) — and appends
-    the non-Markdown inputs: ``_access.yaml`` (page eligibility via
-    ``access.access_tier``) and the two ``_Schema`` registry files. Returns
+    the non-Markdown inputs in ``_config_inputs``: ``_access.yaml`` (page
+    eligibility via ``access.access_tier``) and the selected note-type
+    overlay (the owner's compiled eligibility). Returns
     ``None`` when the tree cannot be fingerprinted safely; callers must then
     build uncached so the build path surfaces its own safety errors.
     """
@@ -1968,9 +2024,7 @@ def _corpus_census(root: Path) -> tuple | None:
                 raise _CensusUnsafe
             strict_walk(kb)
         loose_walk(root)
-        for extra in (
-            access.access_config_path(root),
-        ):
+        for extra in _config_inputs(root):
             marker = str(extra.relative_to(root).as_posix())
             try:
                 info = extra.stat()
@@ -2131,9 +2185,7 @@ def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
     """O(1) freshness stamp for non-Markdown semantic inputs."""
     entries: list[tuple[str, str, int, int]] = []
     try:
-        for extra in (
-            access.access_config_path(root),
-        ):
+        for extra in _config_inputs(root):
             marker = extra.relative_to(root).as_posix()
             try:
                 info = extra.stat()
@@ -2787,6 +2839,7 @@ def build_corpus_context(
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> SemanticCorpusContext:
     """Read and parse the corpus once, then resolve every fact in memory.
 
@@ -2802,6 +2855,7 @@ def build_corpus_context(
         registry=registry,
         language_registry=language_registry,
         status_basis=status_basis,
+        type_basis=type_basis,
     )
     return context
 
@@ -2818,6 +2872,7 @@ def build_corpus_context_with_census(
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """Enrich admitted pages without publishing caller facts into the shared cache.
 
@@ -2829,6 +2884,7 @@ def build_corpus_context_with_census(
 
     root = Path(vault_root)
     basis = status_basis or lifecycle_statuses.Basis(root)
+    type_basis = type_basis or note_types.Basis(root)
     context, census = _build_corpus_context_with_census(
         root,
         registry=relation_registry.core_registry(),
@@ -2838,7 +2894,7 @@ def build_corpus_context_with_census(
         visible = egress.restricted_release_filter(root)
         states = {
             path: (
-                enrich_page_state(root, state, basis, relation_definitions=registry,
+                enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
                                   language=language_registry, require_status=False)
                 if visible is None or visible(path)
                 else state
@@ -2847,7 +2903,10 @@ def build_corpus_context_with_census(
         }
     # Candidate validation owns target admission and requires classification.
     if candidate is not None:
-        states[candidate.path] = enrich_page_state(root, candidate, basis, relation_definitions=registry, language=language_registry)
+        states[candidate.path] = enrich_page_state(
+            root, candidate, basis, type_basis,
+            relation_definitions=registry, language=language_registry,
+        )
     identity = (
         context.identity_census.with_page(candidate, casefold_paths=vault.vault_casefolds(root))
         if candidate is not None

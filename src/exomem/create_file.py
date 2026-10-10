@@ -28,6 +28,7 @@ from . import (
     access,
     indexes,
     memory_refs,
+    note_types,
     relation_review,
     semantic_contract,
     semantic_writes,
@@ -269,7 +270,7 @@ def create_file(
             raise CreateFileError(code=EXCLUDED_FIELD_CODE, reason=reason)
 
     if existing_file and overwrite and is_markdown and existing_text is not None:
-        _guard_tier2_stable_identity(existing_text, full_text)
+        _guard_tier2_stable_identity(existing_text, full_text, note_types.Basis(vault_root))
 
     identity = draft_id
     if is_markdown and not existing_file:
@@ -279,10 +280,12 @@ def create_file(
             raise CreateFileError(
                 "INVALID_FRONTMATTER", "Markdown frontmatter is invalid"
             ) from error
-        if (
-            semantic_contract.normalized_compiled_type(fm.get("type"))
-            in semantic_contract.COMPILED_TYPES
-        ):
+        definition = (
+            note_types.Basis(vault_root)
+            .resolve(semantic_contract.normalized_compiled_type(fm.get("type")))
+            .require()
+        )
+        if definition is not None and note_types.compiled(definition):
             try:
                 full_text, identity = memory_refs.add_id_to_markdown(
                     full_text, identity or memory_refs.new_id()
@@ -474,26 +477,17 @@ def create_file(
     )
 
 
-_GOVERNED_IDENTITY_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "failure",
-        "pattern",
-        "experiment",
-        "production-log",
-        "entity",
-    }
-)
-
-
-def _guard_tier2_stable_identity(before_source: str, after_source: str) -> None:
+def _guard_tier2_stable_identity(
+    before_source: str, after_source: str, type_basis: note_types.Basis
+) -> None:
     """Prevent raw overwrite from becoming an identity backfill/replace seam."""
     try:
         before, _, _ = vault_module.parse_frontmatter(before_source, strict=True)
     except vault_module.FrontmatterError as error:
         raise CreateFileError(error.code, error.reason) from error
-    if before.get("type") not in _GOVERNED_IDENTITY_TYPES:
+    # A withheld definition refuses rather than letting an overwrite skip the guard.
+    definition = type_basis.resolve(before.get("type")).require()
+    if definition is None or not note_types.governed_endpoint(definition):
         return
     try:
         after, _, _ = vault_module.parse_frontmatter(after_source, strict=True)

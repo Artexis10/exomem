@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import provenance, retained_inputs, source_closure
+from . import note_types, provenance, retained_inputs, source_closure
 from .episode_recovery import EpisodeInputOwner
 from .vault import PathGuard, PlannedWrite, parse_frontmatter
 
@@ -101,7 +101,9 @@ def resolve_origin_input(
     page = retained.page
     if (
         not source_closure._eligible_path(page.path)  # noqa: SLF001
-        or str(page.frontmatter.get("type") or "").casefold() not in {"source", "evidence"}
+        or not note_types.Basis(vault_root).selects(
+            str(page.frontmatter.get("type") or "").casefold(), note_types.raw
+        )
         or retained.released is None
         or retained.released.get("frontmatter") != page.frontmatter
     ):

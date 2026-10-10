@@ -39,6 +39,7 @@ from . import (
     markdown_relations,
     memory_refs,
     mutation_lock,
+    note_types,
     recall_policy,
     relation_registry,
     reserved_paths,
@@ -4342,6 +4343,7 @@ class EpistemicGraphIndex:
             # itself can share one transaction instead of fsyncing per file.
             indexed = 0
             kb = self.vault_root / kb_dirname()
+            type_basis = _producer_type_basis(self.vault_root)
             with conn:
                 if kb.is_dir():
                     for md in find_module._walk_md(kb):
@@ -4350,7 +4352,7 @@ class EpistemicGraphIndex:
                         # rebuild-owner claim a joining writer already waits on.
                         foreground_priority.yield_to_foreground()
                         if self._index_path(
-                            conn, md, resolver=resolver, commit=False
+                            conn, md, resolver=resolver, commit=False, type_basis=type_basis
                         ):
                             indexed += 1
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
@@ -6186,6 +6188,7 @@ class EpistemicGraphIndex:
     ) -> dict[str, int]:
         conn = self._connect()
         indexed = 0
+        type_basis = _producer_type_basis(self.vault_root)
         try:
             with conn:
                 for path in paths:
@@ -6195,6 +6198,7 @@ class EpistemicGraphIndex:
                         resolver=resolver,
                         commit=False,
                         indexed_versions=indexed_versions,
+                        type_basis=type_basis,
                     ):
                         indexed += 1
                 if resolver_fingerprint is not None:
@@ -6693,6 +6697,7 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         commit: bool = True,
         indexed_versions: dict[str, GraphSourceSignature] | None = None,
+        type_basis: note_types.Basis | None = None,
     ) -> bool:
         rel = _vault_rel(self.vault_root, path)
         if rel is None:
@@ -6727,7 +6732,13 @@ class EpistemicGraphIndex:
             path,
             source=raw,
         )
-        file_node = _file_node(self.vault_root, page, raw, state=state)
+        file_node = _file_node(
+            self.vault_root,
+            page,
+            raw,
+            state=state,
+            type_basis=type_basis or _producer_type_basis(self.vault_root),
+        )
         unit_nodes = [
             _candidate_node(page, unit, state)
             for unit in semantic_units.candidate_units(state.candidates)
@@ -7277,6 +7288,7 @@ class EpistemicGraphIndex:
         from . import activation, context_refs, relation_queue, review_state, semantic_contract
 
         status_basis = status_basis or lifecycle_statuses.Basis(self.vault_root)
+        type_basis = note_types.Basis(self.vault_root)
         page_cap = min(50, max(0, int(limit_pages)))
         item_cap = min(64, max(0, int(limit_per_page)))
         source_cap = min(200, max(page_cap, page_cap * 4))
@@ -7324,13 +7336,14 @@ class EpistemicGraphIndex:
             ).fetchall()
             rows = [
                 row for row in rows
-                if activation.structurally_eligible_for_types(
+                if activation.structurally_eligible(
                     self.vault_root,
                     SimpleNamespace(
                         path=self.vault_root / str(row[0]), rel_path=str(row[0]),
                         page_type=row[6], tags=json.loads(row[7]),
                     ),
-                    page_types=activation._ELIGIBLE_TYPES,
+                    selects=note_types.governed_endpoint,
+                    type_basis=type_basis,
                 )
             ]
             for row in rows:
@@ -9881,12 +9894,21 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     return drift
 
 
+def _producer_type_basis(vault_root: Path) -> note_types.Basis:
+    """One indexing pass's note types.
+
+    The stored bit is never served, so it reads the owner's view.
+    """
+    return note_types.Basis(vault_root, owner_local=True)
+
+
 def _file_node(
     vault_root: Path,
     page,
     raw_text: str,
     *,
     state: semantic_index.SemanticParentIndexState,
+    type_basis: note_types.Basis,
 ) -> GraphNode:
     from . import activation
 
@@ -9924,8 +9946,8 @@ def _file_node(
         origin_date=str(origin_date) if origin_date not in (None, "") else None,
         updated_date=str(updated) if updated not in (None, "") else None,
         access_tier=access.access_tier(vault_root, page.rel_path),
-        review_eligible=activation.structurally_eligible_for_types(
-            vault_root, page, page_types=activation._ELIGIBLE_TYPES
+        review_eligible=activation.structurally_eligible(
+            vault_root, page, selects=note_types.governed_endpoint, type_basis=type_basis
         ),
         activation_signal_version=activation._signal_version(page),
         exomem_id=memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),

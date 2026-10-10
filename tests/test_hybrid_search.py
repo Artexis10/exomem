@@ -380,13 +380,13 @@ def test_hit_signals_omitted_in_keyword(vault) -> None:
 
 def test_compiled_types_include_production_log_and_experiment() -> None:
     """production-log and experiment should boost the same as research-note etc."""
-    assert "production-log" in find_module._COMPILED_TYPES
-    assert "experiment" in find_module._COMPILED_TYPES
-    # Sanity: the multiplier helper returns the boost for both.
-    assert find_module._type_multiplier("production-log") == find_module._COMPILED_BOOST
-    assert find_module._type_multiplier("experiment") == find_module._COMPILED_BOOST
+    from exomem import find_policy
+
+    config = find_module.RankingConfig()
+    assert find_policy.type_multiplier("production-log", config) == config.compiled_boost
+    assert find_policy.type_multiplier("experiment", config) == config.compiled_boost
     # Sources still get the penalty.
-    assert find_module._type_multiplier("source") == find_module._SOURCE_PENALTY
+    assert find_policy.type_multiplier("source", config) == config.source_penalty
 
 
 def test_prefer_compiled_reorders_above_source(vault, source_schema) -> None:

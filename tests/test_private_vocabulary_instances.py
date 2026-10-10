@@ -585,3 +585,69 @@ def test_a_legacy_armed_vault_refuses_an_unassigned_planning_value_and_keeps_shi
             planning.normalize_item({"title": "Later", "status": "parked"}, vault_root=vault)
     assert shipped["status"] == "candidate"
     assert refused.value.code == "PLANNING_VALUES_UNAVAILABLE"
+
+
+
+MEETING_TYPE_OVERLAY = (
+    "schema_version: 1\nentries:\n  meeting-note:\n"
+    "    attributes: {role: compiled, folder: Notes/Meetings}\n"
+)
+
+
+def _blocking_codes(vault, path, page_type, *, overwrite=False):
+    """What the write gate blocks for a draft page with no semantic unit."""
+    from exomem import commands
+
+    validation = commands.op_manage_memory_file(
+        vault, operation="create", path=path, content="# Sync\n\nThe crew met.\n",
+        frontmatter={"type": page_type, "status": "active"}, overwrite=overwrite, validate_only=True,
+    )
+    return {finding["code"] for finding in validation["contract_result"]["blocking_findings"]}
+
+
+def test_a_limited_client_classifies_a_note_type_from_the_bound_public_overlay(private_instances, vault):
+    """Note-type admission checks the overlay the bound public instance reads.
+
+    It used to admit the unbound default path, which a limited client cannot read,
+    and so judged a type that the public instance defines as no type at all.
+    """
+    from exomem import note_types
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    overlay = instances.select(vault, note_types.SPEC).overlay(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(MEETING_TYPE_OVERLAY, encoding="utf-8")
+    # A limited client creates only in capture paths, so it edits an existing page.
+    page = "Knowledge Base/Notes/Meetings/2026-10-sync.md"
+    (vault / page).parent.mkdir(parents=True, exist_ok=True)
+    (vault / page).write_text("---\ntype: meeting-note\n---\n# Sync\n", encoding="utf-8")
+    with principal.request_scope(private_instances("limited")):
+        codes = _blocking_codes(vault, page, "meeting-note", overwrite=True)
+    # The bound type is compiled, so the write gate asks for a semantic unit.
+    assert "missing_semantic_unit" in codes
+
+
+def test_a_legacy_armed_vault_refuses_an_unassigned_note_type_and_keeps_shipped_ones(
+    configured_boundary, vault
+):
+    """Version 1 assigns no instance, so the legacy overlay's types are unavailable.
+
+    The selection error used to escape the write gate instead of its refusal.
+    """
+    from exomem import note_types, state_migration
+    from exomem.cli_ops import OpError
+    from exomem.governance import principal
+
+    _, authenticate = configured_boundary
+    overlay = note_types.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(MEETING_TYPE_OVERLAY, encoding="utf-8")
+    authority = state_migration.assert_offline_migration_authority(source="legacy note types fixture")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    with principal.request_scope(authenticate("full")):
+        shipped = _blocking_codes(vault, "Knowledge Base/Notes/Insights/2026-10-sync.md", "insight")
+        with pytest.raises(OpError) as refused:
+            _blocking_codes(vault, "Knowledge Base/Notes/Meetings/2026-10-sync.md", "meeting-note")
+    assert "missing_semantic_unit" in shipped
+    assert refused.value.code == "NOTE_TYPE_DEFINITION_UNAVAILABLE"

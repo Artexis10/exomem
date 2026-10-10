@@ -1274,13 +1274,20 @@ def _remove_lexical_rebuild_artifact(
         )
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v3"
-_REGISTRY_ABSENT_MARKER = "absent"
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v4"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
-    """Identify structural catalog rows independently of selected extension definitions."""
-    from . import semantic_authoring, semantic_index
+    """Identify structural catalog rows independently of selected extension definitions.
+
+    The rows are structural, so only the components that change how a page is
+    parsed participate: the catalog and parser versions, the semantic-authoring
+    contract, and the note-type registry's admitted dependency, so a save or
+    restore that changes what a type means retires rows parsed under the old
+    meaning. Recall policy and access membership do not participate:
+    ``RecallFreshnessCheckpoint`` attests that independent boundary.
+    """
+    from . import note_types, semantic_authoring, semantic_index
 
     contract = semantic_authoring.get_semantic_authoring_contract()
     payload = {
@@ -1290,6 +1297,10 @@ def catalog_semantic_identity(vault_root: Path) -> str:
         "authoring_contract_id": contract.contract_id,
         "authoring_contract_version": contract.version,
         "authoring_contract_digest": contract.content_digest,
+        # The catalogue is shared by every audience, so it binds the owner's meaning.
+        "note_type_registry": list(
+            note_types.Basis(Path(vault_root), owner_local=True).loaded_dependency()
+        ),
     }
     canonical = json.dumps(
         payload,

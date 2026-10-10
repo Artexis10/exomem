@@ -16,6 +16,7 @@ import yaml
 from . import (
     access,
     lifecycle_statuses,
+    note_types,
     relation_registry,
     semantic_language_registry,
     semantic_units,
@@ -31,33 +32,6 @@ ACTIVATION_CATEGORIES: tuple[str, ...] = (
     "relation_debt",
 )
 
-_ELIGIBLE_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "pattern",
-        "failure",
-        "experiment",
-        "production-log",
-        "entity",
-    }
-)
-_COMPILED_PAGE_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "pattern",
-        "failure",
-        "experiment",
-        "production-log",
-    }
-)
-# Valid *targets* of a connectivity signal. Wider than `_ELIGIBLE_TYPES` because
-# citing a captured Source is a real connection. Kept deliberately separate:
-# `eligible_governed_paths` gates the empty-corpus bootstrap disposition, so
-# folding `source` into that set would let one captured Source destroy the
-# carve-out for a user's very first compiled note.
-_CONNECTABLE_TYPES = _ELIGIBLE_TYPES | {"source"}
 _SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _SKIP_TAGS = frozenset({"hub", "snapshot"})
 _ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
@@ -93,6 +67,7 @@ def scan(vault_root: Path) -> ActivationScan:
     who = effective_principal()
     status_basis = lifecycle_statuses.Basis(vault_root)
     interpretations = semantic_index.Interpretations(vault_root)
+    type_basis = note_types.Basis(vault_root)
     findings: list[AuditFinding] = []
     coverage = {
         "eligible_pages": 0,
@@ -118,7 +93,7 @@ def scan(vault_root: Path) -> ActivationScan:
         except OSError:
             continue
         if page is None or not is_eligible_governed_page(
-            vault_root, page, status_basis=status_basis
+            vault_root, page, status_basis=status_basis, type_basis=type_basis
         ):
             continue
 
@@ -183,44 +158,68 @@ def _eligible(vault_root: Path, page: Any) -> bool:
 
 
 def is_eligible_governed_page(
-    vault_root: Path, page: Any, *, status_basis: lifecycle_statuses.Basis | None = None
+    vault_root: Path,
+    page: Any,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
     """Return whether ``page`` is an active governed graph endpoint."""
-    return _eligible_for_types(
-        vault_root, page, page_types=_ELIGIBLE_TYPES, status_basis=status_basis
+    return _eligible_for(
+        vault_root,
+        page,
+        selects=note_types.governed_endpoint,
+        status_basis=status_basis,
+        type_basis=type_basis,
     )
 
 
 def is_eligible_compiled_page(
-    vault_root: Path, page: Any, *, status_basis: lifecycle_statuses.Basis | None = None
+    vault_root: Path,
+    page: Any,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
     """Return whether ``page`` belongs to the writable compiled-page domain.
 
     Activation coverage historically includes entities.  The semantic contract
-    applies to the six compiled conclusion types only, while sharing every
-    other activation eligibility rule.
+    applies to note-type role `compiled` only, while sharing every other
+    activation eligibility rule.
     """
-    return _eligible_for_types(
-        vault_root, page, page_types=_COMPILED_PAGE_TYPES, status_basis=status_basis
+    return _eligible_for(
+        vault_root,
+        page,
+        selects=note_types.compiled,
+        status_basis=status_basis,
+        type_basis=type_basis,
     )
 
 
 def is_connectable_target(
-    vault_root: Path, page: Any, *, status_basis: lifecycle_statuses.Basis | None = None
+    vault_root: Path,
+    page: Any,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
     """Return whether ``page`` may be the *target* of a connectivity signal.
 
     Shares every eligibility rule with :func:`is_eligible_governed_page` except
     two: append-only material qualifies (a cited Source is a real connection),
-    and the `source` page type is admitted.  This is a target-side predicate
-    only — the authoring page must still be an eligible governed page.
+    and note-type role `source` is admitted.  This is a target-side predicate
+    only — the authoring page must still be an eligible governed page. It stays
+    separate from the governed predicate: `eligible_governed_paths` gates the
+    empty-corpus bootstrap disposition, and one captured Source must not end
+    the carve-out for a user's very first compiled note.
     """
-    return _eligible_for_types(
+    return _eligible_for(
         vault_root,
         page,
-        page_types=_CONNECTABLE_TYPES,
+        selects=note_types.connectable,
         status_basis=status_basis,
-        tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
+        type_basis=type_basis,
+        tiers=CONNECTABLE_TIERS,
     )
 
 
@@ -244,31 +243,44 @@ def normalized_page_type(value: object) -> str | None:
     return normalized or None
 
 
-def _eligible_for_types(
+def _eligible_for(
     vault_root: Path,
     page: Any,
     *,
-    page_types: frozenset[str],
+    selects: note_types.Predicate,
     tiers: frozenset[str] = frozenset({access.TIER_READ_WRITE}),
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
-    if not structurally_eligible_for_types(vault_root, page, page_types=page_types, tiers=tiers):
+    if not structurally_eligible(
+        vault_root, page, selects=selects, tiers=tiers, type_basis=type_basis
+    ):
         return False
     basis = status_basis or lifecycle_statuses.Basis(vault_root)
     return basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live
 
 
-def structurally_eligible_for_types(
+#: Access tiers a connectable target may sit in: a cited append-only Source counts.
+CONNECTABLE_TIERS = frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY})
+
+
+def structurally_eligible(
     vault_root: Path,
     page: Any,
     *,
-    page_types: frozenset[str],
+    selects: note_types.Predicate,
     tiers: frozenset[str] = frozenset({access.TIER_READ_WRITE}),
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
+    """Every eligibility rule except the lifecycle class.
+
+    The type value is casefolded and stripped before the registry lookup. A
+    type whose definition the caller cannot admit matches no predicate.
+    """
     if not is_managed_governed_path(vault_root, page.path):
         return False
-    normalized_type = normalized_page_type(page.page_type)
-    if normalized_type not in page_types:
+    basis = type_basis or note_types.Basis(vault_root)
+    if not basis.selects(normalized_page_type(page.page_type), selects):
         return False
     if page.path.name.casefold() in {"index.md", "log.md"}:
         return False
