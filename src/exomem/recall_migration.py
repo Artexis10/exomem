@@ -13,7 +13,15 @@ Meanwhile this job builds a sidecar for the new space beside it
   current mtime, so a restart re-encodes nothing already built;
 - through the same chunking seam as live writes (`embeddings._chunks_for_page`);
 - with its catch-up in the same pass: a page written while the job ran has a
-  newer mtime than its new rows, or none, and is encoded again.
+  newer mtime than its new rows, or none, and is encoded again;
+- copying, never encoding again, each text whose vector the serving sidecar
+  already holds in the new space.
+
+An initial build is due while no pointer is published and the serving
+sidecar does not cover every eligible page, even when that sidecar holds the
+recall encoder's space: a live write gives it that space, so an imported vault
+saved to before this job plans looks built when it is not. The copy keeps that
+rule cheap: a legacy sidecar with a few stale pages costs only those pages.
 
 The cutover is one atomic replacement of the active pointer
 (`index_paths.publish_active_sidecar`), after a final catch-up pass; one more
@@ -31,7 +39,8 @@ land in the refused sidecar and is built by the job's catch-up.
 
 Until the cutover, the vector lane reads the new sidecar whenever the
 recall encoder cannot answer from the serving one (`building_sidecar`): on an
-initial build, whose serving sidecar holds nothing or only live writes; on a
+initial build, whose serving sidecar holds nothing or does not cover the vault
+(the vector lane joins it when it holds the build's space); on a
 cell, whose serving sidecar is refused; and on a personal server whose serving
 sidecar another build of the same model wrote. The query is then encoded for
 the new sidecar. A failed build keeps serving the pages it built; a restart
@@ -47,7 +56,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
@@ -181,8 +190,11 @@ def _eligible_pages(vault_root: Path) -> Iterator[tuple[Path, Any]]:
             yield md, page
 
 
-def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, Any]]) -> bool:
-    """A live write's model identity does not prove the preloaded corpus was built."""
+def _coverage_incomplete(vault_root: Path, active: Any, pages: Iterable[tuple[Path, Any]]) -> bool:
+    """A live write's model identity does not prove the preloaded corpus was built.
+
+    Stops at the first page the sidecar does not cover.
+    """
     from . import semantic_index
 
     stored = active.file_mtimes()
@@ -202,19 +214,19 @@ def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, 
     return False
 
 
-def _resumes_initial_build(
-    vault_root: Path, active: Any, shadow_path: Path, pages: list[tuple[Path, Any]] | None = None
+def _initial_build_due(
+    vault_root: Path, active: Any, pages: Iterable[tuple[Path, Any]] | None = None
 ) -> bool:
-    """Whether a shadow beside a serving sidecar in its own space is an interrupted
-    initial build that the job resumes, rather than a sidecar left over.
+    """Whether a serving sidecar in the recall encoder's own space still waits for
+    the initial build: no pointer is published and it does not cover the vault.
 
-    Only a separate target-space shadow is evidence of an interrupted initial
-    build, and only while the serving sidecar does not cover the vault: ordinary
-    legacy drift belongs to incremental reconcile. Loads no model.
+    Walks the vault only while no pointer is published. Loads no model.
     """
-    if shadow_path == active.path or not shadow_path.exists():
+    if index_paths.active_sidecar_name(vault_root) is not None:
         return False
-    return _coverage_incomplete(vault_root, active, list(_eligible_pages(vault_root)) if pages is None else pages)
+    if pages is None:
+        pages = _eligible_pages(vault_root)
+    return _coverage_incomplete(vault_root, active, pages)
 
 
 def plan(vault_root: Path) -> MigrationPlan | None:
@@ -229,16 +241,15 @@ def plan(vault_root: Path) -> MigrationPlan | None:
         return None
     active = embeddings.get_embedding_index(vault_root)
     serving = active.identity
-    published = index_paths.active_sidecar_name(vault_root) is not None
     if serving is None and not list(_eligible_pages(vault_root)):
         return None  # No encoder is needed until eligible content exists.
     target = _target_identity()
     key = target.fingerprint or f"{target.model}|{target.dim}"
     shadow_path = active.path.parent / index_paths.space_sidecar_name(key)
     if serving is not None and serving.accepts(target.model, target.fingerprint):
-        if published or not _resumes_initial_build(vault_root, active, shadow_path):
+        if not _initial_build_due(vault_root, active):
             return None
-        serving = None  # Resume the initial shadow build despite live writes to legacy.
+        serving = None  # An initial build, whatever live writes reached legacy first.
     if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
@@ -321,6 +332,17 @@ def _pass(
     from . import find as find_module
 
     shadow = embeddings.get_embedding_index(vault_root, path=plan_.shadow_path)
+    serving = embeddings.get_embedding_index(vault_root)
+    serving_identity = serving.identity
+    # Only a sidecar in the build's own space can give it vectors; a refused
+    # or other-model sidecar never can.
+    donor = (
+        serving
+        if serving.path != shadow.path
+        and serving_identity is not None
+        and serving_identity.accepts(plan_.target.model, plan_.target.fingerprint)
+        else None
+    )
     stored = shadow.file_mtimes()
     stored_units = shadow.semantic_unit_parent_states()
     pending: list[tuple[str, Path, list[str], float]] = []
@@ -380,8 +402,9 @@ def _pass(
             return False, encoded_paths
         started = time.monotonic()
         flat = [chunk for _rel, _md, chunks, _mtime in batch for chunk in chunks]
+        held = _held_vectors(donor, [rel for rel, _md, _chunks, _mtime in batch], units=False)
         with shadow.encoding():
-            vectors = _encode_one_by_one(flat)
+            vectors = _encode_one_by_one(flat, held)
         offset = 0
         for rel, md, chunks, mtime in batch:
             count = len(chunks)
@@ -390,7 +413,13 @@ def _pass(
                 shadow.upsert_file(rel, chunks, vectors[offset : offset + count], mtime)
                 encoded_paths += 1
             offset += count
-        _note_progress(vault_root, len(flat), time.monotonic() - started, done=len(batch))
+        _note_progress(
+            vault_root,
+            len(flat),
+            time.monotonic() - started,
+            done=len(batch),
+            encoded=sum(text not in held for text in flat),
+        )
 
     for batch in batches(
         pending_units,
@@ -405,8 +434,9 @@ def _pass(
             for unit in state.document.units
             if unit.unit_ref is not None
         ]
+        held = _held_vectors(donor, [state.path for state, _md, _mtime in batch], units=True)
         with shadow.encoding():
-            vectors = _encode_one_by_one(texts)
+            vectors = _encode_one_by_one(texts, held)
         offset = 0
         for state, md, mtime in batch:
             count = sum(unit.unit_ref is not None for unit in state.document.units)
@@ -419,8 +449,21 @@ def _pass(
     return True, encoded_paths
 
 
-def _encode_one_by_one(texts: list[str]) -> Any:
-    """Passage vectors for `texts`, one text per encode.
+def _held_vectors(donor: Any | None, rel_paths: list[str], *, units: bool) -> dict[str, Any]:
+    """The vectors `donor` holds for these pages, keyed by the exact text each
+    was encoded from: chunk vectors, or unit vectors when `units`."""
+    from . import embeddings
+
+    held: dict[str, Any] = {}
+    if donor is not None:
+        for rel in rel_paths:
+            held.update(embeddings._stored_text_vectors(donor, rel)[1 if units else 0])
+    return held
+
+
+def _encode_one_by_one(texts: list[str], held: dict[str, Any]) -> Any:
+    """Passage vectors for `texts`, one text per encode, except the texts `held`
+    already has a vector for in this space.
 
     A served int8 model computes each text alone anyway (a shared batch would
     move its vectors with its neighbours'); encoding one text per call also
@@ -431,13 +474,21 @@ def _encode_one_by_one(texts: list[str]) -> Any:
 
     from . import embeddings
 
-    return np.vstack([embeddings.embed_texts([text], is_query=False) for text in texts])
+    return np.vstack(
+        [
+            held[text] if text in held else embeddings.embed_texts([text], is_query=False)
+            for text in texts
+        ]
+    )
 
 
-def _note_progress(vault_root: Path, chunks: int, seconds: float, *, done: int) -> None:
+def _note_progress(
+    vault_root: Path, chunks: int, seconds: float, *, done: int, encoded: int
+) -> None:
+    """Count `chunks` written, `encoded` of them by the encoder, the rest copied."""
     with _LOCK:
         status = _STATUS.setdefault(_key(vault_root), {})
-        status["chunks_encoded"] = int(status.get("chunks_encoded") or 0) + chunks
+        status["chunks_encoded"] = int(status.get("chunks_encoded") or 0) + encoded
         status["encode_seconds"] = float(status.get("encode_seconds") or 0.0) + seconds
         status["chunks_pending"] = max(0, int(status.get("chunks_pending") or 0) - chunks)
         status["paths_done"] = int(status.get("paths_done") or 0) + done
@@ -672,11 +723,11 @@ def disk_status(vault_root: Path) -> dict[str, Any]:
         pages = list(_eligible_pages(vault_root))
         described = _space(identity, candidate)
         described["paths_done"] = len(shadow.file_mtimes())
-        # Live writes give an interrupted initial build's serving sidecar the
-        # build's own space; the job resumes that build only by plan()'s rule.
+        # Live writes give an initial build's serving sidecar the build's own
+        # space; the job resumes that build only by plan()'s rule.
         described["same_space_as_serving"] = identity == serving
         if described["same_space_as_serving"]:
-            described["resumes"] = _resumes_initial_build(vault_root, active, candidate, pages)
+            described["resumes"] = _initial_build_due(vault_root, active, pages)
         result["building"] = described
         result["paths_total"] = len(pages)
         break
