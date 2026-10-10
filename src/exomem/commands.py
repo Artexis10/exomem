@@ -11410,10 +11410,7 @@ def _registry_schema_operation(
     try:
         spec = instances.select(vault_root, registry_spec(subject), registry_scope, authoring=True)
     except instances.RegistryError as error:
-        reason = ("registry_assignment_required" if str(error).startswith("REGISTRY_ASSIGNMENT_REQUIRED:")
-                  else "audience_restricted")
-        return {"subject": subject, "available": False,
-                "reason": reason}
+        return contract.selection_refusal(subject, error)
     if operation == "inspect":
         return contract.inspect(vault_root, spec, limit=limit, continuation=continuation)
     if operation == "history":

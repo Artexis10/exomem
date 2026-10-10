@@ -76,14 +76,14 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
     """The bootstrap's view of every vocabulary registry."""
     since = (today or dt.datetime.now(dt.UTC).date()) - dt.timedelta(days=NEW_WINDOW_DAYS)
     from . import instances
-    from .contract import _usage, admission_refusal, history_refusal
+    from .contract import _usage, admission_refusal, history_refusal, selection_refusal
 
     registries: dict[str, Any] = {}
     for name, spec in registry_specs().items():
         try:
             spec = instances.select(vault_root, spec)
-        except registry.RegistryError:
-            registries[name] = {"unavailable": "registry_assignment_required"}
+        except registry.RegistryError as error:
+            registries[name] = {"unavailable": selection_refusal(name, error)["reason"]}
             continue
         refusal = admission_refusal(vault_root, spec)
         if refusal is not None:

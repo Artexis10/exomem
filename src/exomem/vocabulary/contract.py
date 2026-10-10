@@ -104,16 +104,23 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
     return None
 
 
+def selection_refusal(subject: str, error: RegistryError) -> dict[str, Any]:
+    """The refusal for an instance that cannot be selected; it names no definition."""
+    reason = ("registry_assignment_required" if isinstance(error, instances.AssignmentRequired)
+              else "audience_restricted")
+    return {"subject": subject, "available": False, "reason": reason}
+
+
 def selected_admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
     """Admit the public instance that a read of `spec` selects, the one `registry.load` reads.
 
-    A selection or binding error makes the registry unavailable, as the
-    bootstrap vocabulary block does, instead of escaping the caller.
+    A selection or binding error makes the registry unavailable instead of
+    escaping the caller.
     """
     try:
         spec = instances.select(Path(vault_root), spec)
-    except RegistryError:
-        return {"subject": spec.name, "available": False, "reason": "registry_assignment_required"}
+    except RegistryError as error:
+        return selection_refusal(spec.name, error)
     return admission_refusal(vault_root, spec)
 
 
