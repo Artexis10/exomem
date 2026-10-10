@@ -498,8 +498,8 @@ public_key="$registry_dir/active-secret-registry-$pair_id.public.pem"
 test ! -e "$registry" && test ! -e "$public_key"
 
 BWS_PROJECT_ID=69843186-5161-40a2-951f-b487011122ce \
-  bwsx-run EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY -- sh -c \
-  'printf "%s\\n" "$EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY"' \
+  bwsx-run EXOMEM_CLOUD_ACTIVE_SECRET_REGISTRY_SIGNING_KEY -- sh -c \
+  'printf "%s\\n" "$EXOMEM_CLOUD_ACTIVE_SECRET_REGISTRY_SIGNING_KEY"' \
   | infra/scripts/sign_active_secret_registry.py \
       --matrix infra/contracts/secret-destinations-v1.json \
       --selection infra/contracts/active-secret-selection-v1.json \

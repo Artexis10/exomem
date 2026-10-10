@@ -504,3 +504,61 @@ def test_referents_resolve_a_vault_defined_entity_type_end_to_end(
 
     assert block["entity_type"] == "place"
     assert [item["path"] for item in block["resolved"]] == [place]
+
+
+def test_a_hidden_namesake_never_changes_a_restricted_callers_referents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Referent corroboration reads the typed graph in the caller's view, as a
+    vault without the hidden page holds it. Over the whole vault the hidden
+    namesake makes the entity's `[[coastal-season]]` ambiguous, so its edge to
+    the topic drops and the entity stops resolving."""
+    from exomem.governance import raw_protection
+
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    def _raise(*_args, **_kwargs):
+        raise ImportError("model-free referent envelope test")
+
+    monkeypatch.setattr(embeddings_module, "get_embedding_index", _raise)
+    present, absent = tmp_path / "present", tmp_path / "absent"
+    for root in (present, absent):
+        _write(
+            root,
+            TOPIC,
+            "---\ntype: research-note\ntitle: Coastal season advice\nstatus: active\n"
+            "updated: 2026-08-01\n---\n# Coastal season advice\n\n"
+            "Two coastal friends discussed autumn travel and harbour weather.\n",
+        )
+        _write(
+            root,
+            ENTITY,
+            "---\ntype: entity\ntitle: Aria Vale\nentity_type: person\nstatus: active\n"
+            "relationship: friend\ntags: [coastal, travel]\nupdated: 2026-08-02\n---\n"
+            "# Aria Vale\n\nA coastal friend who discussed when to go.\n\n"
+            "## Relations\n- relates_to [[coastal-season]]\n",
+        )
+    _write(
+        present,
+        "Knowledge Base/Private/coastal-season.md",
+        "---\ntype: insight\n---\n# Ledger\n\nPrivate ledger.\n",
+    )
+    for root in (present, absent):
+        epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+
+    def referents(root: Path) -> dict:
+        find_module.clear_cache()
+        return _block(_call(root))
+
+    owner = referents(present)
+    monkeypatch.setattr(raw_protection, "has_unrestricted_access", lambda _root, _who: False)
+    monkeypatch.setattr(
+        raw_protection,
+        "permits",
+        lambda _root, path, _who, **_kwargs: not path.startswith("Knowledge Base/Private/"),
+    )
+    without_hidden = referents(absent)
+
+    assert owner != without_hidden
+    assert referents(present) == without_hidden

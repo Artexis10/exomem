@@ -21,6 +21,7 @@ import logging
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -36,6 +37,8 @@ from . import (
     extract,
     graph_sync,
     index_sync,
+    media_brakes,
+    media_engines,
     media_jobs,
     preserve,
     recall_policy,
@@ -88,7 +91,6 @@ def _is_canonical_sidecar(sidecar: Path, binary: Path) -> bool:
 _COMPLETE = "complete"
 _HANDOFF = "handoff"
 _STALE = "stale"
-_BLOCKED_ACTION = "install the required media dependency, then retry"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
 _COMPUTE_RUNTIME_ACTION = (
@@ -117,6 +119,19 @@ _FOLLOWER_RECHECK_SECONDS = 5.0
 _CONTRACT_ABSENT_RECHECK_SECONDS = 300.0
 _TRANSIENT_EXIT_CODE = 75
 _LOCK_UNAVAILABLE_EXIT_CODE = 76
+#: The child hit its data-segment limit. Under the brakes every child runs one job
+#: and exits, so each counted failure starts in a fresh child.
+_MEMORY_RECYCLE_EXIT_CODE = 77
+#: The cell had no room for the next job's anonymous-memory budget.
+_MEMORY_WAIT_EXIT_CODE = 78
+#: How long the supervisor waits for room after a refusal or a memory stop. Long
+#: enough for reclaim or a checkpoint to finish; a pending job costs only latency.
+_MEMORY_WAIT_SECONDS = 15.0
+#: The memory-blocked retry: first after a minute, doubling to half an hour while
+#: pressure stays high, and back to a minute once pressure clears or a job completes.
+#: A cell under lasting pressure is asked rarely, and a passing spike costs a minute.
+_MEMORY_RECOVERY_SECONDS = 60.0
+_MEMORY_RECOVERY_MAX_SECONDS = 1800.0
 _TRANSIENT_RECHECK_SECONDS = 5.0
 _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: How long the supervisor sleeps between passes.  Deliberately unchanged: the
@@ -288,6 +303,14 @@ class MediaWorker:
         self._stop_event = threading.Event()
         self._child: subprocess.Popen | None = None
         self._asr_runtime_failure: str | None = None
+        self._memory_hold_until = 0.0
+        self._memory_recovery_at = 0.0
+        self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
+        self._child_started_at = 0.0
+        self._engine_waits: list[_Job] = []
+        # The last pressure reading was high; the supervisor then reads it every pass
+        # so the memory-blocked retry backs off only while pressure lasts.
+        self._pressure_high = False
 
     def start(self) -> None:
         with self._lock:
@@ -308,6 +331,12 @@ class MediaWorker:
                         "media worker: recovered %d sidecar sharing failure(s)",
                         sharing_recovered,
                     )
+                # Read here, converged on the supervisor thread: presenting a dropped
+                # job as pending writes its sidecar, which must not hold up startup.
+                self._engine_waits = self._store.engine_waits()
+                if media_brakes.enabled():
+                    self._recover_memory_verdicts()
+                    self._memory_recovery_at = _clock() + self._memory_recovery_interval
                 target = self._supervise
                 name = "exomem-media-supervisor"
             else:
@@ -417,7 +446,9 @@ class MediaWorker:
                 self._store.complete(job)
             return _ProcessOutcome(_COMPLETE)
         outcome = _ProcessOutcome(_COMPLETE)
-        if job.do_ocr:
+        # A stage whose engine is switched off is dropped unrun: its media keeps a
+        # pending sidecar and is queued again once the engine is enabled.
+        if job.do_ocr and media_engines.stage_enabled(job.media_type):
             outcome = self._run_extraction(job)
         if outcome.state == _HANDOFF:
             return outcome
@@ -523,11 +554,30 @@ class MediaWorker:
                 expected_binary=expected_binary,
                 state=BLOCKED,
                 error=error,
-                next_action=_BLOCKED_ACTION,
+                next_action=media_engines.unavailable_next_action(),
+                blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
+            )
+            return self._publication_outcome(committed, BLOCKED, error)
+        except extract.EngineDisabled as e:
+            # The media waits, shown as pending, and returns when the engine is enabled.
+            error = f"{type(e).__name__}: {e}"
+            log.info("%s waits for the %s engine: %s", job.binary_path.name, e.engine, e)
+            committed = self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                state=BLOCKED,
+                error=error,
+                next_action=media_jobs.WAIT_ACTION,
+                blocked_reason=media_jobs.ENGINE_DISABLED,
+                blocked_context=e.engine,
+                presented_pending=True,
             )
             return self._publication_outcome(committed, BLOCKED, error)
         except runtime_resources.ModelBusyError:
             raise
+        except MemoryError:
+            raise  # a memory stop returns the job to pending; never an artifact failure
         except asr_runtime.ASRComputeRuntimeError as e:
             error = f"{type(e).__name__}: {e}"
             # Ledger first: a crash can leave only a stale sidecar, never a job
@@ -666,6 +716,194 @@ class MediaWorker:
             error=str(job.last_error),
         )
 
+    def publish_over_budget(self, job: _Job, context: str) -> bool:
+        """Show the tenant that the file exceeds this deployment's processing budget.
+
+        `context` is what the verdict depended on (`media_brakes.context`, or
+        `media_brakes.timeout_context` for a file that outran the watchdog).
+        """
+        expected_sidecar = _content_digest(job.sidecar_path)
+        expected_binary = _binary_identity(job.binary_path)
+        if expected_sidecar is None or expected_binary is None:
+            return False
+        return self._commit_processing_failure(
+            job,
+            expected_sidecar=expected_sidecar,
+            expected_binary=expected_binary,
+            state=BLOCKED,
+            error=media_jobs.OVER_BUDGET_ERROR,
+            next_action=media_jobs.OVER_BUDGET_ACTION,
+            # Only a changed cell limit, engine budget or longer job timeout lets it
+            # try again, so the sidecar must not offer a retry the ledger refuses.
+            retryable=False,
+            blocked_reason=media_jobs.OVER_BUDGET,
+            blocked_context=context,
+        )
+
+    def _room_for_next_job(self) -> bool:
+        """Pressure is low and the next pending job's budget fits under the ceiling."""
+        assert self._store is not None
+        cell = media_brakes.read_cell()
+        config = media_brakes.settings(cell=cell)
+        self._note_pressure(media_brakes.pressure_exceeded(cell, config))
+        if self._pressure_high:
+            return False
+        job = self._store.next_pending()
+        if job is None:
+            return True  # nothing to admit; a child finds no claim and exits idle
+        return media_brakes.admits(cell, _budget_for(job, config), config)
+
+    def _converge_engines(self, waits: list[_Job]) -> None:
+        """Converge engine-blocked jobs (`engine_waits`) with this start's engines.
+
+        A job whose engine is now available, or whose wait for a disabled engine has
+        ended, returns to pending. A job blocked on an engine the deployment switched
+        off loses that stage: its sidecar is first shown as pending again, so no old
+        install instruction stays, and its media waits with no job until the engine
+        is enabled.
+        """
+        assert self._store is not None
+        enabled = media_engines.enabled_engines()
+        requeued = dropped = 0
+        for job in waits:
+            if job.blocked_reason == media_jobs.ENGINE_DISABLED:
+                if job.blocked_context in enabled:
+                    requeued += self._store.requeue_engine_wait(job)
+            elif not media_engines.stage_enabled(job.media_type):
+                if self._present_pending(job):
+                    dropped += self._store.drop_extraction_stage(job)
+            elif media_engines.stage_available(job.media_type):
+                requeued += self._store.requeue_engine_wait(job)
+        if requeued or dropped:
+            log.info(
+                "media worker: requeued %d job(s) whose engine is available, "
+                "dropped %d whose engine is switched off",
+                requeued,
+                dropped,
+            )
+
+    def _present_pending(self, job: _Job) -> bool:
+        """Show a blocked job's media as pending. True once no sidecar shows the block."""
+        try:
+            with get_manager().mutation_guard(
+                self._vault_root,
+                operation="background_media_pending_presentation",
+                holder_kind="background",
+            ):
+                if not job.sidecar_path.exists() or not self._is_recall_admitted_media_sidecar(
+                    job.sidecar_path
+                ):
+                    return True
+                return preserve.update_sidecar_processing_pending(
+                    self._vault_root,
+                    job.sidecar_path,
+                    attempts=max(1, job.attempts),
+                    next_action=media_jobs.WAIT_ACTION,
+                )
+        except (OSError, UnicodeError, OpError, preserve.PreserveError):
+            # Kept blocked; the next supervisor start presents it again.
+            log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
+            return False
+
+    def _context_for(self, cell: media_brakes.CellMemory, config: media_brakes.Settings):
+        def context(media_type: str) -> str:
+            budget = config.budget_for(media_engines.engine_for(media_type))
+            return media_brakes.context(cell, budget, config)
+
+        return context
+
+    def _verdict_lifted(self, cell: media_brakes.CellMemory, config: media_brakes.Settings):
+        context = self._context_for(cell, config)
+
+        def lifted(media_type: str, recorded: str | None) -> bool:
+            return media_brakes.verdict_lifted(recorded, current=context(media_type), config=config)
+
+        return lifted
+
+    def _recover_memory_verdicts(self) -> tuple[int, bool]:
+        """Return jobs whose memory verdict may no longer hold; report the pressure.
+
+        Memory-blocked jobs return only while pressure is low. Returns (how many
+        returned, whether pressure was high).
+        """
+        assert self._store is not None
+        cell = media_brakes.read_cell()
+        if cell.problem is not None:
+            # No trustworthy limit to compare with: an unreadable cgroup must not look
+            # like a changed limit and send every over-budget file round again.
+            return 0, True
+        config = media_brakes.settings(cell=cell)
+        pressure = media_brakes.pressure_exceeded(cell, config)
+        recovered = self._store.recover_memory_verdicts(
+            lifted=self._verdict_lifted(cell, config),
+            include_memory_blocked=not pressure,
+        )
+        if recovered:
+            log.info("media worker: returned %d memory-blocked job(s) to pending", recovered)
+        return recovered, pressure
+
+    def _note_pressure(self, exceeded: bool) -> None:
+        """Record a pressure reading; pressure that clears resets the retry backoff."""
+        if exceeded:
+            self._pressure_high = True
+        elif self._pressure_high:
+            self._pressure_high = False
+            self._reset_memory_recovery()
+
+    def _reset_memory_recovery(self) -> None:
+        self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
+        self._memory_recovery_at = min(self._memory_recovery_at, _clock() + _MEMORY_RECOVERY_SECONDS)
+
+    def _stop_child(self, child: subprocess.Popen, kind: str) -> None:
+        """Stop the media child and its tools; record a stop of `kind` for its job.
+
+        A pressure stop is a memory stop. A watchdog stop spends the time budget
+        instead: it counts apart, waits for no memory, and after the stop limit the
+        file is over budget, shown to the tenant as the memory over-budget outcome is.
+        """
+        assert self._store is not None
+        cell = media_brakes.read_cell()
+        config = media_brakes.settings(cell=cell)
+        if kind == media_brakes.TIMEOUT:
+            log.warning(
+                "media worker: media child ran past %.0fs; stopping it",
+                config.job_timeout_seconds,
+            )
+        else:
+            log.warning(
+                "media worker: memory pressure %s (anon %s B%s); stopping the media child",
+                f"{cell.pressure_avg10:.1f}%" if cell.pressure_avg10 is not None else "unread",
+                cell.anon,
+                f", brakes unavailable: {cell.problem}" if cell.problem else "",
+            )
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=5)
+        if child.returncode is not None:
+            _reap_group(child.pid)
+        if kind == media_brakes.TIMEOUT:
+            exceeded = media_brakes.timeout_context(config)
+            for job in self._store.running_jobs():
+                verdict = self._store.record_timeout_stop(job, stop_limit=config.stop_limit, context=exceeded)
+                if verdict == media_jobs.OVER_BUDGET:
+                    log.warning(
+                        "media worker: %s ran past the job timeout %d times; now over budget",
+                        job.binary_path.name,
+                        config.stop_limit,
+                    )
+                    self.publish_over_budget(job, exceeded)
+            return
+        context = self._context_for(cell, config)
+        for job in self._store.running_jobs():
+            self._store.record_memory_stop(
+                job,
+                kind=kind,
+                stop_limit=config.stop_limit,
+                context=context(job.media_type),
+            )
+        self._memory_hold_until = _clock() + _MEMORY_WAIT_SECONDS
+
     def _commit_sidecar_extraction(
         self,
         job: _Job,
@@ -757,15 +995,33 @@ class MediaWorker:
         state: str,
         error: str,
         next_action: str,
+        retryable: bool = True,
+        blocked_reason: str | None = None,
+        blocked_context: str | None = None,
+        presented_pending: bool = False,
     ) -> bool:
+        """Record a blocked or failed job and show it on its sidecar.
+
+        `presented_pending` shows the sidecar as pending with no error: the media
+        waits by itself, and nothing about it is for the tenant to act on.
+        """
         if self._store is not None:
+            payload: dict[str, object] = {
+                "error": error,
+                "next_action": next_action,
+                "retryable": retryable,
+            }
+            if presented_pending:
+                payload["presented_state"] = media_jobs.PENDING
             return self._store.record_result(
                 job,
                 kind="failure",
                 sidecar_before_hash=expected_sidecar,
                 binary_identity=_result_binary_identity(expected_binary),
-                payload={"error": error, "next_action": next_action},
+                payload=payload,
                 terminal_state=state,
+                blocked_reason=blocked_reason,
+                blocked_context=blocked_context,
             )
         token: DeferredGraphCompletion | None = None
         receipts: list[deferred_index.DeferredReceipt] = []
@@ -802,17 +1058,33 @@ class MediaWorker:
                 self._vault_root,
                 [job.sidecar_path.relative_to(self._vault_root).as_posix()],
             )
-            handoff = preserve.update_sidecar_processing_failure(
-                self._vault_root,
-                job.sidecar_path,
-                state=state,
-                attempts=max(1, job.attempts),
-                error=error,
-                retryable=True,
-                next_action=next_action,
-                defer_index_fanout=True,
-                defer_graph_completion=True,
-            )
+            if presented_pending:
+                handoff = preserve.commit_media_sidecar_writes(
+                    self._vault_root,
+                    (
+                        PlannedWrite(
+                            job.sidecar_path,
+                            preserve.render_sidecar_processing_pending(
+                                current_content, attempts=max(1, job.attempts), next_action=next_action
+                            ),
+                            expected_hash=content_hash(current_content),
+                        ),
+                    ),
+                    post_commit_fanout=False,
+                    defer_graph_completion=True,
+                )
+            else:
+                handoff = preserve.update_sidecar_processing_failure(
+                    self._vault_root,
+                    job.sidecar_path,
+                    state=state,
+                    attempts=max(1, job.attempts),
+                    error=error,
+                    retryable=retryable,
+                    next_action=next_action,
+                    defer_index_fanout=True,
+                    defer_graph_completion=True,
+                )
             assert isinstance(handoff, DeferredGraphCompletion)
             token = handoff
         assert token is not None
@@ -1098,9 +1370,18 @@ class MediaWorker:
             str(self._idle_seconds),
         ]
         log.info("media worker: starting disposable child")
+        env = asr_runtime.cuda_runtime_child_env(os.environ)
+        if media_brakes.enabled():
+            # OpenBLAS reserves data segment for one thread per host CPU when numpy
+            # loads (about 40 MiB each), so the child's VmData limit would follow the
+            # node instead of the engine. The serialized child needs one thread.
+            env.setdefault("OPENBLAS_NUM_THREADS", "1")
         return subprocess.Popen(  # noqa: S603 - fixed interpreter/module command
             args,
-            env=asr_runtime.cuda_runtime_child_env(os.environ),
+            env=env,
+            # Under the memory brakes, a pressure stop kills the child's whole group,
+            # so a Tesseract run it started cannot outlive it and keep the memory.
+            start_new_session=media_brakes.enabled(),
         )
 
     def _supervise(self) -> None:
@@ -1111,9 +1392,44 @@ class MediaWorker:
         idle_signature: tuple[object, ...] | None = None
         forced_recheck_at = 0.0
         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+        brakes = media_brakes.enabled()
         try:
+            waits, self._engine_waits = self._engine_waits, []
+            if waits:
+                try:
+                    self._converge_engines(waits)
+                except Exception:  # noqa: BLE001 - convergence retries at the next start
+                    log.warning("media worker: engine convergence deferred", exc_info=True)
             while not self._stop_event.is_set():
                 child = self._child
+                running = child is not None and child.poll() is None
+                if brakes and (running or self._pressure_high):
+                    cell = media_brakes.read_cell()
+                    config = media_brakes.settings(cell=cell)
+                    self._note_pressure(media_brakes.pressure_exceeded(cell, config))
+                if brakes and running:
+                    assert child is not None
+                    if self._pressure_high:
+                        self._stop_child(child, media_brakes.PRESSURE)
+                    elif _clock() - self._child_started_at >= config.job_timeout_seconds:
+                        # A hang or a file too long for the timeout must not hold the
+                        # queue: after the stop limit it is over budget.
+                        self._stop_child(child, media_brakes.TIMEOUT)
+                if brakes and _clock() >= self._memory_recovery_at:
+                    pressure = True
+                    try:
+                        recovered, pressure = self._recover_memory_verdicts()
+                        if recovered:
+                            idle_signature = None
+                    except Exception:  # noqa: BLE001 - recovery retries on the next tick
+                        log.warning("media worker: memory recovery deferred", exc_info=True)
+                    self._pressure_high = pressure
+                    self._memory_recovery_interval = (
+                        min(self._memory_recovery_interval * 2, _MEMORY_RECOVERY_MAX_SECONDS)
+                        if pressure
+                        else _MEMORY_RECOVERY_SECONDS
+                    )
+                    self._memory_recovery_at = _clock() + self._memory_recovery_interval
                 if child is not None:
                     signature = _job_store_signature(self._store)
                     settled = (
@@ -1141,7 +1457,12 @@ class MediaWorker:
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
                         self._store.clear_worker(child_pid)
-                    if returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
+                    if returncode == _MEMORY_RECYCLE_EXIT_CODE:
+                        delay = 0.5
+                    elif returncode == _MEMORY_WAIT_EXIT_CODE:
+                        delay = _MEMORY_WAIT_SECONDS
+                        log.info("media child found no memory room; retrying after %.1fs", delay)
+                    elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
                             _LOCK_UNAVAILABLE_RECHECK_SECONDS
                             if returncode == _LOCK_UNAVAILABLE_EXIT_CODE
@@ -1160,7 +1481,9 @@ class MediaWorker:
                         )
                     else:
                         delay = 0.5
-                    relaunch_after = _clock() + delay
+                        if brakes:
+                            self._reset_memory_recovery()  # the child's job completed
+                    relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                 if self._child is None and _clock() >= relaunch_after:
                     now = _clock()
@@ -1186,13 +1509,18 @@ class MediaWorker:
                         idle_signature = None
                         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                         refusal = _probe_writer_authority()
-                        if refusal is not None:
+                        if brakes and not self._room_for_next_job():
+                            # No child starts into pressure or without room for its
+                            # job: it would only be stopped or exit unrun.
+                            relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
+                        elif refusal is not None:
                             relaunch_after = _clock() + _authority_recheck_seconds(
                                 refusal
                             )
                         else:
                             try:
                                 self._child = self._launch_child()
+                                self._child_started_at = _clock()
                             except OSError:
                                 log.exception("media worker: could not start child")
                                 relaunch_after = _clock() + 5.0
@@ -1392,13 +1720,19 @@ class MediaWorker:
                         speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
                         attempts=max(1, job.attempts),
                     )
+                elif result.payload.get("presented_state") == media_jobs.PENDING:
+                    target = preserve.render_sidecar_processing_pending(
+                        before,
+                        attempts=max(1, job.attempts),
+                        next_action=str(result.payload["next_action"]),
+                    )
                 else:
                     target = preserve.render_sidecar_processing_failure(
                         before,
                         state=media_jobs.PENDING if result.kind == "pending" else job.state,
                         attempts=max(1, job.attempts),
                         error=str(result.payload["error"]),
-                        retryable=True,
+                        retryable=bool(result.payload.get("retryable", True)),
                         next_action=str(result.payload["next_action"]),
                     )
             except preserve.PreserveError as exc:
@@ -1539,6 +1873,8 @@ class MediaWorker:
                 continue
             mt_match = _MEDIA_TYPE_RE.search(head)
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
+            if not media_engines.stage_enabled(media_type):
+                continue  # the engine is off: the sidecar waits without a job
             if media_type and binary.exists():
                 existing = (
                     self._store.get_by_binary(binary)
@@ -1630,6 +1966,28 @@ class MediaWorker:
         return n
 
 
+def _budget_for(job: _Job, config: media_brakes.Settings) -> media_brakes.Budget:
+    """The budget of the engine the job's extraction stage runs, or the default."""
+    return config.budget_for(media_engines.engine_for(job.media_type if job.do_ocr else None))
+
+
+def _reap_group(pgid: int, timeout: float = 2.0) -> None:
+    """Reap the killed media child's tools that were reparented to this process.
+
+    In a Cloud cell the server is PID 1, so a tool orphaned by a pressure stop becomes
+    its child and stays a zombie unless reaped. `waitpid(-pgid)` waits only on children
+    in the media child's own session, so no other subprocess loses its exit status.
+    """
+    deadline = _clock() + timeout
+    while _clock() < deadline:
+        try:
+            pid, _status = os.waitpid(-pgid, os.WNOHANG)
+        except ChildProcessError:
+            return  # no child of this process is left in the group
+        if pid == 0:
+            time.sleep(0.05)  # a member is still exiting
+
+
 def _join_with_timeout(q: queue.Queue, timeout: float) -> None:
     """queue.join() honoring a timeout (queue has no native timed join)."""
     import time
@@ -1663,6 +2021,22 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     last_work = _clock()
     idle_signature: tuple[object, ...] | None = None
     forced_recheck_at = 0.0
+    brakes = media_brakes.enabled()
+    config = media_brakes.settings(cell=media_brakes.read_cell()) if brakes else None
+    refusal: list[int] = []
+
+    def budget_of(job: _Job) -> media_brakes.Budget:
+        assert config is not None
+        return _budget_for(job, config)
+
+    def admit(job: _Job) -> bool:
+        """Claim only what fits in the cell now; the supervisor checked before spawning."""
+        assert config is not None
+        if not media_brakes.admits(media_brakes.read_cell(), budget_of(job), config):
+            refusal.append(_MEMORY_WAIT_EXIT_CODE)
+            return False
+        return True
+
     try:
         if extract.asr_prewarm_enabled():
             prewarm_error = extract.prewarm()
@@ -1680,7 +2054,10 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 # Check for eligible work once more before the idle exit.
                 and now - last_work < idle_seconds
             )
-            job = None if settled else store.claim_next()
+            job = None if settled else store.claim_next(admit if brakes else None)
+            if refusal:
+                log.info("media worker: memory admission refused the next job; child exiting")
+                return refusal[0]
             if job is None:
                 if not settled:
                     idle_signature = _job_store_signature(store)
@@ -1693,7 +2070,35 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
             idle_signature = None
             last_work = _clock()
             try:
-                outcome = worker._process(job)
+                if config is not None:
+                    media_brakes.apply_hard_limit(budget_of(job), config)
+                try:
+                    outcome = worker._process(job)
+                finally:
+                    if config is not None:
+                        media_brakes.lift_hard_limit()
+            except MemoryError as exc:
+                assert job.id is not None
+                if config is None:
+                    log.exception("media child job crashed: %s", job.binary_path)
+                    store.mark(job, FAILED, f"{type(exc).__name__}: {exc}")
+                    continue
+                context = media_brakes.context(media_brakes.read_cell(), budget_of(job), config)
+                verdict = store.record_memory_stop(
+                    job,
+                    kind=media_brakes.HARD_LIMIT,
+                    stop_limit=config.stop_limit,
+                    context=context,
+                )
+                log.warning(
+                    "media worker: %s hit the data limit (%s); job now %s",
+                    job.binary_path.name,
+                    type(exc).__name__,
+                    verdict,
+                )
+                if verdict == media_jobs.OVER_BUDGET:
+                    worker.publish_over_budget(job, context)
+                return _MEMORY_RECYCLE_EXIT_CODE
             except runtime_resources.ModelBusyError:
                 assert job.id is not None
                 store.defer(job)
@@ -1740,6 +2145,8 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     # Durable result custody now belongs to the long-lived parent.
                     # In particular, do not run later CLIP/re-embed stages or
                     # complete this claim in the disposable process.
+                    if brakes:
+                        return 0  # one job per child under the brakes
                     continue
                 if outcome.state == BLOCKED:
                     store.mark(job, BLOCKED, outcome.error)
@@ -1768,6 +2175,10 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         )
                 else:
                     store.complete(job)
+            if brakes:
+                # One job per child: the next starts fresh, with no growth from this
+                # one, and the supervisor's watchdog times exactly one job.
+                return 0
         log.info("media worker: parent exited; child stopping")
         return 0
     finally:

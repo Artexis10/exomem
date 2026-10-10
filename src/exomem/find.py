@@ -546,6 +546,7 @@ class FreshnessSnapshot:
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+        self._admitted: dict[tuple[str, Callable[[str], bool]], frozenset[str]] = {}
 
     @property
     def requires_live_recall(self) -> bool:
@@ -617,8 +618,26 @@ class FreshnessSnapshot:
     def admitted_paths(
         self, scope: str, admit_path: Callable[[str], bool],
         *, page_of: Callable[[str], ParsedPage | None] | None = None,
+    ) -> frozenset[str]:
+        """Authorize both scene identities before candidates or corpus statistics.
+
+        Decided once per request and scope. The lanes, the lexical corpus
+        statistics, the unit lanes and the outside-KB reserve all read this one
+        set. The set is never kept across requests: a decision can read a live
+        authorization session, so no static key could prove it still holds.
+        """
+        key = (scope, admit_path)
+        admitted = self._admitted.get(key)
+        if admitted is None:
+            admitted = self._admitted[key] = frozenset(
+                self._decide_admitted(scope, admit_path, page_of=page_of)
+            )
+        return admitted
+
+    def _decide_admitted(
+        self, scope: str, admit_path: Callable[[str], bool],
+        *, page_of: Callable[[str], ParsedPage | None] | None,
     ) -> set[str]:
-        """Authorize both scene identities before candidates or corpus statistics."""
         from . import readiness
 
         paths = {
@@ -630,7 +649,7 @@ class FreshnessSnapshot:
         try:
             metadata = _managed_page_metadata(
                 self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
-                pending=self._pending,
+                pending=self._pending, parents_only=True,
             )
             parents = {path: row.parent for path, row in metadata.items()}
         except RetrievalIndexWarming:
@@ -1473,6 +1492,7 @@ def find(
         relations=relations,
         relation_of=relation_of,
         relation_direction=relation_direction,
+        keep=admit_path,
     )
 
     # One freshness snapshot + one parsed-page memo per request: every
@@ -1494,10 +1514,15 @@ def find(
         return page_memo[rel]
 
     walk_scope = "vault" if scope == "vault" else "kb"
-    admitted_paths = None
-    if admit_path is not None:
+
+    def _admitted(admission_scope: str) -> frozenset[str] | None:
+        # Decided where a consumer needs it: hybrid recall over the knowledge
+        # base reads only the vault-scope set, so it never decides the other.
+        if admit_path is None:
+            return None
         with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
-            admitted_paths = snapshot.admitted_paths(walk_scope, admit_path, page_of=_page_of)
+            return snapshot.admitted_paths(admission_scope, admit_path, page_of=_page_of)
+
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
@@ -1573,7 +1598,7 @@ def find(
             limit=limit,
             scope=walk_scope,
             plan=filter_plan,
-            allowed_parent_paths=admitted_paths,
+            allowed_parent_paths=_admitted(walk_scope),
             snapshot=snapshot,
             prefer_active=prefer_active,
             status_basis=status_basis,
@@ -1787,6 +1812,8 @@ def find(
     # sidecar/model recovers. Tracked internally even when the caller passes None.
     mixed_unit_hits: list[SemanticUnitHit] = []
     if mixed:
+        # Decided before the span: `filter_eligibility` is a top-level stage.
+        unit_admitted = _admitted(walk_scope)
         with _span(timings, "semantic_units"):
             mixed_unit_hits = _find_semantic_units(
                 vault_root,
@@ -1794,7 +1821,7 @@ def find(
                 limit=None,
                 scope=walk_scope,
                 plan=filter_plan,
-                allowed_parent_paths=admitted_paths,
+                allowed_parent_paths=unit_admitted,
                 snapshot=snapshot,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
@@ -1817,11 +1844,11 @@ def find(
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
 
-    if admit_path is not None and scope == "kb" and mode != "keyword" and query_norm:
-        # Primary page semantic recall spans the vault even before widening.
-        # Unit and lexical scoring retain their existing KB scope.
-        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
-            admitted_paths = snapshot.admitted_paths("vault", admit_path, page_of=_page_of)
+    # Primary page semantic recall spans the vault even before widening.
+    # Unit and lexical scoring retain their existing KB scope.
+    admitted_paths = _admitted(
+        "vault" if scope == "kb" and mode != "keyword" and query_norm else walk_scope
+    )
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -1844,6 +1871,9 @@ def find(
         relation_set = set(relation_paths)
         eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
 
+    # Only the caller's own filters size the candidate pool. Admission narrows
+    # what every lane ranks; it never deepens the pool (`collect_candidates`).
+    filtered = eligible_paths is not None
     if admitted_paths is not None:
         eligible_paths = admitted_paths if eligible_paths is None else eligible_paths & admitted_paths
 
@@ -1903,6 +1933,7 @@ def find(
                 degraded_out=degraded,
                 failed_out=failed,
                 eligible_paths=eligible_paths,
+                filtered=filtered,
                 admitted_paths=admitted_paths,
                 recall_scope="kb" if scope == "kb-only" else "vault",
                 retrieval_trace=retrieval_trace,
@@ -3361,9 +3392,11 @@ def _resolve_relation_filter(
     relations: list[str] | None,
     relation_of: str | None,
     relation_direction: str,
+    keep: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
-    plus per-path provenance and advisory findings.
+    plus per-path provenance and advisory findings. `keep` is a restricted
+    caller's admission (`None` for the owner): its edges resolve in that view.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -3397,7 +3430,7 @@ def _resolve_relation_filter(
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     result = graph_index.relation_participants(
-        relations or (), anchor=relation_of, direction=relation_direction
+        relations or (), anchor=relation_of, direction=relation_direction, keep=keep
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
@@ -3645,11 +3678,13 @@ def _managed_page_metadata(
     freshness_key: tuple[int, int, str] | None,
     pending: Any | None,
     include_units: bool = False,
+    parents_only: bool = False,
 ) -> dict[str, Any]:
     """Resolve current page metadata without opening canonical page files.
 
     The catalogue supplies stable rows and their emitted parents. Exact pending
     snapshots replace only the identities whose committed bytes they own.
+    `parents_only` skips the catalogue's filter views (see lexstore).
     """
     from . import lexstore, semantic_index, vault
 
@@ -3664,6 +3699,7 @@ def _managed_page_metadata(
         scope=scope,
         freshness=freshness_key,
         include_units=include_units,
+        parents_only=parents_only,
     )
     if not result.readiness.complete:
         _raise_catalog_outcome(result.readiness)
@@ -4351,6 +4387,7 @@ def _find_semantic(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     eligible_paths: set[str] | None = None,
+    filtered: bool = False,
     admitted_paths: set[str] | None = None,
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
@@ -4450,6 +4487,7 @@ def _find_semantic(
             ),
             lexical_repair=lexical_repair,
             eligible_paths=eligible_paths,
+            filtered=filtered,
             admitted_paths=admitted_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,

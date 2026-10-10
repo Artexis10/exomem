@@ -340,7 +340,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "pytesseract", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -1820,7 +1820,11 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             details=status,
         )
     counts = status["counts"]
-    blocked = int(counts.get("blocked", 0))
+    memory_blocked = int(status.get("memory_blocked_count", 0))
+    over_budget = int(status.get("over_budget_count", 0))
+    engine_waiting = int(status.get("engine_waiting_count", 0))
+    # Memory-blocked and engine-waiting rows count as pending, as their rows show.
+    blocked = int(counts.get("blocked", 0)) - over_budget
     failed = int(counts.get("failed", 0))
     if blocked or failed:
         compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
@@ -1836,13 +1840,73 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             remediation,
             details=status,
         )
+    if memory_blocked or over_budget:
+        # Operator-only: tenants see memory-blocked work as waiting.
+        return _check(
+            "media.runtime",
+            "warn",
+            f"Media work waits: {memory_blocked} memory-blocked, "
+            f"{over_budget} over this deployment's processing budget.",
+            "Memory-blocked work resumes by itself when pressure stays low. Over-budget "
+            "files resume when the cell's memory limit or the engine's budget changes "
+            "(EXOMEM_MEDIA_BUDGETS), or, for a file that ran past the job timeout, when "
+            "that timeout grows (EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS).",
+            details=status,
+        )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
+    waiting = f", {engine_waiting} waiting for a switched-off engine" if engine_waiting else ""
     return _check(
         "media.runtime",
         "pass",
-        f"Durable media runtime healthy ({queued} queued/running).",
+        f"Durable media runtime healthy ({queued} queued/running{waiting}).",
         details=status,
     )
+
+
+def _check_media_brakes() -> DoctorCheck | None:
+    """The Cloud memory brakes, read from the cell's cgroup now; None without brakes."""
+    from . import media_brakes
+
+    state = media_brakes.status()
+    if state["state"] == "off":
+        return None
+    if state["state"] == "unavailable":
+        return _check(
+            "media.brakes",
+            "warn",
+            f"media brakes unavailable: {state['reason']}",
+            "Media waits until the cell's cgroup v2 memory files read as expected. Check "
+            "the pod's memory limit and the cgroup mount; media resumes by itself.",
+            details=state,
+        )
+    return _check(
+        "media.brakes",
+        "pass",
+        f"Media brakes on: anonymous memory {state['anon_bytes']} B against an "
+        f"admission ceiling of {state['ceiling_bytes']} B (cgroup, read now).",
+        details=state,
+    )
+
+
+def _check_media_engines() -> DoctorCheck:
+    """Each media engine as enabled, disabled or unavailable (EXOMEM_MEDIA_ENGINES)."""
+    from . import media_engines
+
+    states = media_engines.status()
+    summary = ", ".join(f"{engine} {state}" for engine, state in states.items())
+    unavailable = [engine for engine, state in states.items() if state == media_engines.UNAVAILABLE]
+    # Only a deployment that names its engines expects them all installed; a personal
+    # install's default set covers profiles without the media extra.
+    if unavailable and os.environ.get(media_engines.ENGINES_ENV) is not None:
+        return _check(
+            "media.engines",
+            "warn",
+            f"Media engines: {summary}.",
+            f"Install the software for {', '.join(unavailable)}, or switch the engine off "
+            f"in {media_engines.ENGINES_ENV}.",
+            details=states,
+        )
+    return _check("media.engines", "pass", f"Media engines: {summary}.", details=states)
 
 
 #: How long the process census may take before the check gives up on it.
@@ -2409,7 +2473,7 @@ def _check_tesseract(*, required: bool = True) -> DoctorCheck:
     """Report what the RUNTIME will resolve, not a narrower guess.
 
     Doctor checked only `EXOMEM_TESSERACT_CMD` and PATH, while
-    `extract._ensure_tesseract_cmd` also probes the standard install locations.
+    `extract.resolve_tesseract_cmd` also probes the standard install locations.
     The UB-Mannheim Windows package installs to one of those and does not touch
     PATH, so doctor reported FAIL on a host where OCR demonstrably worked — and
     `scripts/upgrade.ps1 -Profile media` then refused a safe service restart
@@ -3653,6 +3717,10 @@ def doctor(
     media_runtime = _check_media_runtime(vault_root)
     if media_runtime is not None:
         checks.append(media_runtime)
+    checks.append(_check_media_engines())
+    media_brakes_check = _check_media_brakes()
+    if media_brakes_check is not None:
+        checks.append(media_brakes_check)
 
     if profile in ("hybrid", "standard", "media"):
         extra, requirements = _embedding_requirements()
@@ -3680,7 +3748,7 @@ def doctor(
     if profile in ("standard", "media"):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
-            _check_dependency("pytesseract", "media"),
+            _check_dependency("pillow", "media", import_name="PIL"),
             _check_dependency("pymupdf", "media", import_name="fitz"),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),

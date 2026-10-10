@@ -2846,26 +2846,34 @@ def eligibility_metadata_result(
     scope: str,
     freshness: tuple | None,
     include_units: bool = False,
+    parents_only: bool = False,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
-    """Exact filter views and parent hints from one proven catalogue snapshot."""
+    """Exact filter views and parent hints from one proven catalogue snapshot.
+
+    `parents_only` reads no filter view: its rows carry only the parent and
+    `updated`, for a caller that decides on parents alone (recall admission).
+    """
     if not _catalog_usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     return get_store(vault_root)._serve_from_ready_catalog_result(
         scope,
         freshness,
-        lambda conn: _eligibility_metadata_query(conn, paths, include_units=include_units),
+        lambda conn: _eligibility_metadata_query(
+            conn, paths, include_units=include_units, parents_only=parents_only
+        ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
     )
 
 
 def _eligibility_metadata_query(
-    conn: sqlite3.Connection, paths: set[str], *, include_units: bool
+    conn: sqlite3.Connection, paths: set[str], *, include_units: bool, parents_only: bool = False
 ) -> dict[str, EligibilityMetadata]:
+    view = "NULL" if parents_only else "eligibility_view_json"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        "SELECT path, eligibility_view_json, emitted_parent_path, updated FROM pages "
+        f"SELECT path, {view}, emitted_parent_path, updated FROM pages "
         "WHERE in_vault = 1 AND path IN (SELECT path FROM wanted)",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
