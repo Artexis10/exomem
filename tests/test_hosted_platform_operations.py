@@ -1113,7 +1113,7 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
     assert (
         "BWS_PROJECT_ID=69843186-5161-40a2-951f-b487011122ce "
         "\\\n"
-        "  bwsx-run EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY --"
+        "  bwsx-run EXOMEM_CLOUD_ACTIVE_SECRET_REGISTRY_SIGNING_KEY --"
     ) in secrets
     assert "bwsx-run --project" not in secrets
     ordered = [

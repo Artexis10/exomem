@@ -54,6 +54,7 @@ import numpy as np
 from . import (
     embeddings,
     index_paths,
+    note_types,
     recall_space,
     reserved_paths,
     semantic_units,
@@ -294,13 +295,17 @@ def sidecar_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ".claims.sqlite"
 
 
+def producer_basis(vault_root: Path | None) -> note_types.Basis:
+    """One claim pass's note types. The store is shared by every audience, so
+    its producer reads the owner's view; without a vault, only shipped types."""
+    return note_types.Basis(vault_root, owner_local=vault_root is not None)
+
+
 # Only compiled CONCLUSIONS carry a claim worth comparing — mirror the exact
 # scope `corpus_aware.detect_contradictions` and `audit` already use so a raw
 # source never enters the claim store.
-def _claim_types() -> frozenset[str]:
-    from . import find as find_module
-
-    return find_module._COMPILED_TYPES
+def _claim_types(type_basis: note_types.Basis) -> frozenset[str]:
+    return frozenset(type_basis.keys(note_types.ranks_as_compiled))
 
 
 class _ClaimCache(NamedTuple):
@@ -834,7 +839,7 @@ class ClaimIndex:
         kb = self.vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
-        claim_types = _claim_types()
+        claim_types = _claim_types(producer_basis(self.vault_root))
         snapshot = self._projected_recall_snapshot()
         if snapshot is None:
             self._mark_repair_needed()
@@ -976,9 +981,15 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     return True
 
 
-def claim_checksum_for_page(page: Any) -> str | None:
-    """Expected claim row from an already-bounded parse; None means no row."""
-    if page.page_type not in _claim_types():
+def claim_checksum_for_page(
+    page: Any, *, vault_root: Path | None = None, type_basis: note_types.Basis | None = None
+) -> str | None:
+    """Expected claim row from an already-bounded parse; None means no row.
+
+    Without `vault_root` only the shipped note types carry a claim. A pass that
+    already holds `producer_basis` passes it as `type_basis`.
+    """
+    if page.page_type not in _claim_types(type_basis or producer_basis(vault_root)):
         return None
     claim = extract_claim_for_page(page)
     return _checksum(claim) if claim else None
@@ -1009,7 +1020,13 @@ def publication_current(vault_root: Path, rel_path: str, checksum: str | None) -
                     conn.close()
 
 
-def upsert_claims_after_write(vault_root: Path, written_paths: list[Path], *, pages: dict[Path, tuple[Any, Any]] | None = None) -> None:
+def upsert_claims_after_write(
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    pages: dict[Path, tuple[Any, Any]] | None = None,
+    type_basis: note_types.Basis | None = None,
+) -> None:
     """Refresh the claim sidecar for each written compiled page (incremental).
 
     Rides the SAME write seam as `embeddings.upsert_after_write` (called from it
@@ -1046,7 +1063,7 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path], *, pa
     existing = idx.checksums() if pages is None else idx.checksums(
         paths=[page.rel_path for page, _signature in pages.values()],
     )
-    claim_types = _claim_types()
+    claim_types = _claim_types(type_basis or producer_basis(vault_root))
     identity = recall_policy.recall_policy_identity(vault_root)
 
     pending: list[

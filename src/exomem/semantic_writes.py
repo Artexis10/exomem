@@ -26,6 +26,7 @@ from . import (
     lifecycle_statuses,
     memory_schema,
     metrics,
+    note_types,
     origin_bindings,
     provenance,
     relation_registry,
@@ -52,16 +53,6 @@ log = logging.getLogger(__name__)
 # to prevent. Clients mid validate->commit re-validate once at the boundary.
 _TOKEN_VERSION = 3
 _MAX_TOKEN_BYTES = 12 * 1024
-_COMPILED_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "failure",
-        "pattern",
-        "experiment",
-        "production-log",
-    }
-)
 _EXISTING_OPERATIONS = frozenset({"edit", "observe", "tier2_overwrite", "tier2_append"})
 _FEEDBACK_FINDING_LIMIT = 32
 _FEEDBACK_RELATION_FACT_LIMIT = 16
@@ -700,6 +691,8 @@ def evaluate_posthoc_batch(
         state = corpus.pages.get(rel_path)
         if state is None or not state.eligible_governed:
             continue
+        # A posthoc pass reads the page; it never refuses for a withheld definition.
+        state = semantic_contract.read_side(state)
         scope = (state.projects, state.page_type)
         contracts = contracts_by_scope.get(scope)
         if contracts is None:
@@ -1706,13 +1699,6 @@ def _existing_applicability(
 ) -> Literal["full", "structural", "not_semantic"]:
     if semantic_contract.requires_semantic_unit(after):
         return "full"
-    if (
-        before.page_type in _COMPILED_TYPES
-        or after.page_type in _COMPILED_TYPES
-        or before.page_type == "entity"
-        or after.page_type == "entity"
-    ):
-        return "structural"
     # This coordinator is entered only for governed Markdown. Untyped/arbitrary
     # Markdown still receives the structural/safety contract; non-Markdown
     # writers preserve their legacy path and never enter this seam.
@@ -1943,8 +1929,8 @@ def _preflight_existing(
 
     closure_required = bool(
         operation == "tier2_overwrite"
-        or source_closure.source_claims(before_source)
-        != source_closure.source_claims(after_source)
+        or source_closure.source_claims(before_source, note_types.Basis(root))
+        != source_closure.source_claims(after_source, note_types.Basis(root))
     )
     closure_plan = source_closure.prepare_source_closure(
         root,
@@ -2859,8 +2845,8 @@ def _commit_existing(
             prior_markdown=preflight.before_source,
             required=bool(
                 preflight.operation == "tier2_overwrite"
-                or source_closure.source_claims(preflight.before_source)
-                != source_closure.source_claims(preflight.after_source)
+                or source_closure.source_claims(preflight.before_source, note_types.Basis(root))
+                != source_closure.source_claims(preflight.after_source, note_types.Basis(root))
             ),
         )
         auxiliaries = source_closure.merge_backref_writes(
@@ -3356,6 +3342,10 @@ def preflight_move(
     for before_path, after_path in pairs:
         before = before_corpus.pages[before_path]
         after = after_corpus.pages[after_path]
+        if before_path != old_path:
+            # The move only rewrites links in this page, so it is judged as a read.
+            before = semantic_contract.read_side(before)
+            after = semantic_contract.read_side(after)
         before_contracts = memory_schema.resolve_contracts(
             loaded_contracts,
             projects=before.projects,

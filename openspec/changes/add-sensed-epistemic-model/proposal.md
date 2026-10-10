@@ -43,7 +43,7 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
 - **Placement:**
   - Local models by default.
   - API instruments are an opt-in placement per vault, flagged `unpinned_weights`.
-  - Cloud cells run the dreamer, with sensing on an in-cluster shared plane. No third-party API sees vault text by default.
+  - Cloud cells run the dreamer, and each cell senses with its own instruments on shared read-only model weights. No third-party API sees vault text by default.
 - Move the audit's in-request NLI enrichment onto the ledger.
 - **BREAKING (constitutional):** amend the canonical `frozen-verifiers` contract:
   - Generative instruments are admitted under a delimited-slot template with closed-label probability output, never sampled text.

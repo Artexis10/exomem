@@ -156,6 +156,9 @@ class PageShape:
     #: Vault-relative path, used only to keep the written page out of its own
     #: destination set. Never reported.
     path: str = ""
+    #: Whether the type, as written, has note-type role `compiled` for the caller.
+    #: None reads the shipped pack.
+    compiled: bool | None = None
 
 
 def _declared_identity(state: Any) -> frozenset[str]:
@@ -253,7 +256,14 @@ def detect(shape: PageShape, *, corpus: Any = None) -> dict[str, Any] | None:
     vocabulary existing eligible pages already own is treated as routed; omit it and
     the result is exactly what it would have been without resolution.
     """
-    if shape.page_type not in _compiled_types():
+    from . import note_types
+
+    compiled = (
+        shape.compiled
+        if shape.compiled is not None
+        else note_types.Basis(None).selects(shape.page_type, note_types.compiled)
+    )
+    if not compiled:
         return None
     if shape.basename.casefold() in NAVIGATION_BASENAMES:
         return None
@@ -331,16 +341,15 @@ def detect(shape: PageShape, *, corpus: Any = None) -> dict[str, Any] | None:
     }
 
 
-def _compiled_types() -> frozenset[str]:
-    from . import semantic_contract
-
-    return semantic_contract.COMPILED_TYPES
-
-
 def shape_from_state(state: Any) -> PageShape:
     """Adapt a `SemanticPageState` the write path already built."""
+    from . import note_types
+
     frontmatter = state.frontmatter or {}
+    # The advisory compares the type as written, under the state's own basis.
+    type_basis = getattr(state, "type_basis", None) or note_types.Basis(None)
     return PageShape(
+        compiled=type_basis.selects(state.page_type, note_types.compiled),
         page_type=state.page_type,
         title=state.title or "",
         tags=tuple(_frontmatter_tags(frontmatter)),
@@ -360,7 +369,7 @@ def suggest_for_page(
     vault_root: Path, rel_path: str, *, corpus: Any = None
 ) -> dict[str, Any] | None:
     """Detect over a page on disk. For out-of-band callers; the write path uses state."""
-    from . import semantic_units, vault
+    from . import note_types, semantic_units, vault
 
     source = (vault_root / rel_path).read_text(encoding="utf-8")
     frontmatter, body, _ = vault.parse_frontmatter(source)
@@ -370,6 +379,9 @@ def suggest_for_page(
         projects = (projects,)
     return detect(
         PageShape(
+            compiled=note_types.Basis(vault_root).selects(
+                frontmatter.get("type"), note_types.compiled
+            ),
             page_type=frontmatter.get("type"),
             title=str(frontmatter.get("title") or ""),
             tags=tuple(_frontmatter_tags(frontmatter)),

@@ -79,6 +79,7 @@ from . import find as find_module
 from . import (
     find_types,
     foreground_priority,
+    note_types,
     query_log,
     retrieval_models,
     semantic_census,
@@ -2154,8 +2155,12 @@ def op_bootstrap(
         },
         "search_guidance": {
             "prefer_compiled_default": True,
-            "compiled_types": ["research-note", "insight", "failure", "pattern", "entity"],
-            "raw_types": ["source", "evidence"],
+            # The shipped types `find` boosts and treats as raw. A vault may register
+            # more; the vocabulary section (the core's `vocabulary` pointer) lists them.
+            "compiled_types": [
+                note_type.key for note_type in note_types.shipped(note_types.ranks_as_compiled)
+            ],
+            "raw_types": [note_type.key for note_type in note_types.shipped(note_types.raw)],
             "semantic_recall": {
                 "result_levels": ["page", "unit", "mixed"],
                 "structured_filters": (
@@ -2639,9 +2644,8 @@ def op_find(
             candidate count, not wall-clock latency: the synchronous model
             call has no safe cancellation boundary.
         prefer_compiled: When true (default), applies a small boost to
-            compiled types (insight, pattern, failure, research-note,
-            entity) and a small penalty to raw `source` after fusion
-            AND rerank. Reflects the KB's epistemic hierarchy. Set
+            note-type roles `compiled` and `entity` and a small penalty to
+            role `source` after fusion AND rerank. Reflects the KB's epistemic hierarchy. Set
             false to retrieve raw source discussion verbatim (e.g.
             "what did I capture from Dr. X").
         prefer_active: When true (default), soft-demotes `status:
@@ -3111,7 +3115,8 @@ def op_find(
         warming = {"components": sorted(set(degraded))}
         if projection_runtime is None:
             info = readiness_module.warming_info() or {}
-            warming["since_s"] = info.get("since_s", 0.0)
+            # Null outside the warm-up window (a recall build): not zero seconds.
+            warming["since_s"] = info.get("since_s")
     # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
     # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
     # keyword. Distinct from `warming`: warming is the transient, expected boot
@@ -4444,7 +4449,9 @@ def op_get(
         out["body_chars"] = len(str(out.get("body", "")))
     if (
         not frontmatter_only
-        and str(result.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+        and note_types.Basis(vault_root).selects(
+            str(result.frontmatter.get("type") or "").casefold(), note_types.raw
+        )
         and out.get("body") == result.body
         and out.get("frontmatter") == result.frontmatter
         and out.get("content_hash") == result.content_hash
@@ -7345,7 +7352,9 @@ def op_read_memory(
         if (
             unit.status == "found"
             and unit.unit is not None
-            and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            and note_types.Basis(vault_root).selects(
+                str(page.frontmatter.get("type") or "").casefold(), note_types.raw
+            )
             and released.get("frontmatter") == page.frontmatter
         ):
             try:
@@ -10581,8 +10590,8 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
-            source-kinds, domains, statuses or planning-values); traversal-profiles,
-            context-roles, activation-conventions, or workflow-contracts.
+            source-kinds, domains, statuses, planning-values or note-types);
+            traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
         save: Legacy inference flag; true is refused for workflow contracts.
