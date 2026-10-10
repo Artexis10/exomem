@@ -188,6 +188,8 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
             (1, 0, row_id, "k1", "insert", 1, H),
         )
         _txn(conn, txn_id=1, commit_seq=1, event_hash="1" * 64, prev_head=None)
+        if schema.schema_version(conn) < 9:  # an older store has no import log
+            return {"row_id": row_id}
         conn.execute(
             "INSERT INTO import_jobs(job_id, identity, collection_id, binding_json, state, checkpoint_json,"
             " progress_json, window_started, window_expires, created_at, updated_at)"
