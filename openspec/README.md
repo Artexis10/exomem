@@ -35,6 +35,12 @@ replacements require measured ablations. See
 [vocabulary reconciliation](changes/reconcile-vocabulary-variants/tasks.md) and
 [vault-owned conventions](changes/make-activation-conventions-vault-owned/tasks.md).
 
+[Referent promotion](changes/promote-referents-without-nudges/tasks.md) measures
+no-nudge entity capture first, then names a write's unpaged links in its receipt.
+An owner's promotion of types, entities and typed edges needs no confirmation,
+appears once in the next session and reverts. A declaration argument ships only
+if the measurement earns it. It does not wait for origin accounting.
+
 ## Governed vault consolidation
 
 [Vault consolidation](changes/add-governed-vault-consolidation/tasks.md) holds
