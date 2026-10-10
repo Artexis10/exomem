@@ -2419,7 +2419,9 @@ IMPORT_JOB_OPERATIONS = frozenset({
 })
 #: Content-free control transitions a collection-store txn may record. Each changes no
 #: item, manifest or container hash, and its receipt carries counts and ids only.
-CONTROL_OPERATIONS = frozenset({"store_reconcile", *IMPORT_JOB_OPERATIONS})
+#: ``import_member`` records one export member an import completed (its import log row).
+# nosemgrep: ep-word-set -- the store's closed set of control operations, each implemented here.
+CONTROL_OPERATIONS = frozenset({"store_reconcile", "import_member", *IMPORT_JOB_OPERATIONS})
 CONTROL_RECEIPT_MARKER = "exomem.collection-control"
 #: Identifiers one control receipt may carry; a larger transition is recorded in parts.
 CONTROL_RECEIPT_MAX_IDS = 4096
@@ -2438,6 +2440,8 @@ CONTROL_ID_PATTERNS = {
     "skipped_collection_absent": _ITEM_REF,
     "skipped_no_committed_row": _ITEM_REF,
     "import_job_ids": re.compile(r"[0-9a-f]{32}"),
+    "member_sha256": _HEX64,
+    "rows_digest": _HEX64,
 }
 
 

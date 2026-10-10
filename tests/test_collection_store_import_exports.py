@@ -166,6 +166,32 @@ def stored(conn):
     }
 
 
+def logged(conn):
+    """The import log: each member's sequence, index, hash, counts, digest, row count and transition."""
+    return conn.execute(
+        "SELECT m.seq, m.member_index, m.member_sha256, m.accepted, m.rejected, m.rows_digest, "
+        "m.row_count_after, t.operation FROM import_members m JOIN txns t ON t.txn_id=m.txn_id "
+        "WHERE m.collection_id=? ORDER BY m.seq",
+        (CID,),
+    ).fetchall()
+
+
+def digest(conn, series, instants):
+    """A member's row digest recomputed from its stored rows: a SHA-256 chained over each
+    accepted row's item key and payload hash, in member order."""
+    keys = {(values["series"], values["at"]): key for key, values in typed_storage.collection_values(conn, CID)}
+    hashes = dict(conn.execute("SELECT item_key, payload_hash FROM items WHERE collection_id=?", (CID,)))
+    running = hashlib.sha256(b"").hexdigest()
+    for instant in instants:
+        key = keys[(series, instant)]
+        running = hashlib.sha256(f"{running}\0{key}\0{hashes[key]}".encode()).hexdigest()
+    return running
+
+
+def sha256(document):
+    return hashlib.sha256(json.dumps(document).encode()).hexdigest()
+
+
 def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_members(store, monkeypatch):
     """The agent route must read nested members, place local times by declared zone rules,
     resume mid-member after a restart without duplicates, and skip members already imported."""
@@ -184,7 +210,7 @@ def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_me
 
     job = agent(store, mode="start", source_ref=manifest, format="json-document", members="samples/*",
                 mapping=SAMPLES)
-    run_jobs(store, max_batches=4)
+    run_jobs(store, max_batches=5)  # two batches of spring, its log row, two of autumn
     middle = agent(store, mode="status", continuation=job["continuation"])
     assert middle["state"] == "running" and middle["next_position"]["member"] == 1
     assert middle["next_position"]["member_row"] == 4  # inside the repeated hour, after the step back
@@ -226,6 +252,50 @@ def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_me
         assert settled["members"] == {"selected": 3, "read": 1, "skipped": 2}
         assert (settled["state"], settled["rows"]["imported"], settled["rows"]["rejected"]) == ("complete", 1, 0)
         assert stored(handle.connection)[("samples", "2026-11-01T07:00:00Z")]["utc_offset"] == "+02:00"
+        spring, autumn = list(EXPECTED_SAMPLES)[:3], list(EXPECTED_SAMPLES)[3:]
+        conn = handle.connection
+        assert logged(conn) == [
+            (1, 0, sha256(SPRING), 3, 1, digest(conn, "samples", spring), 3, "import_member"),
+            (2, 1, sha256(AUTUMN), 6, 0, digest(conn, "samples", autumn), 9, "import_member"),
+            (3, 0, sha256(SHORT_DAY), 23, 0, digest(conn, "positions", SHORT_DAY_INSTANTS), 32, "import_member"),
+            (4, 2, sha256(NOVEMBER), 1, 0, digest(conn, "samples", ["2026-11-01T07:00:00Z"]), 33, "import_member"),
+        ]
+
+
+class _Crash(BaseException):
+    """Process death: no handler in the process sees it."""
+
+
+def test_a_crash_at_a_members_end_logs_it_exactly_once_on_resume(store, monkeypatch):
+    """A log row committed apart from its checkpoint is lost or doubled when the process dies
+    after the member's last rows and before its completion."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 2)
+    collection(store)
+    day = samples(("2026-11-01", at("2026-11-01", ("09:00", 1), ("10:00", 2))))
+    manifest, _ = preserve_export(store, "first", {"samples/2026-11.json": day})
+    job = agent(store, mode="start", source_ref=manifest, format="json-document", members="samples/*",
+                mapping=SAMPLES)
+    run_jobs(store, max_batches=1)  # both rows; the member's end is the next batch
+    record = CollectionWriter.record_control_transition
+
+    def crash(self, operation, *args, **kwargs):
+        if operation == "import_member":
+            raise _Crash
+        return record(self, operation, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "record_control_transition", crash)
+    with pytest.raises(_Crash):
+        run_jobs(store, max_batches=1)
+    monkeypatch.setattr(CollectionWriter, "record_control_transition", record)
+    assert (logged(store.connection), count(store.connection)) == ([], 2)
+    assert agent(store, mode="status", continuation=job["continuation"])["next_position"]["member_row"] == 2
+    assert finish(store, job)["state"] == "complete"
+    instants = ["2026-11-01T07:00:00Z", "2026-11-01T08:00:00Z"]
+    assert logged(store.connection) == [
+        (1, 0, sha256(day), 2, 0, digest(store.connection, "samples", instants), 2, "import_member")
+    ]
 
 
 def test_a_member_whose_bytes_differ_from_its_manifest_loses_authority(store):

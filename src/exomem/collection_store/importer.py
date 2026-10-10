@@ -1029,6 +1029,10 @@ class _Reader:
             )
 
 
+# A bounded member reader's return when it leaves a member it read (``_Streams``).
+_MEMBER_END = object()
+
+
 @dataclass(frozen=True, slots=True)
 class _Stream:
     sha256: str | None  # an export member's; None for one proved json-document file
@@ -1044,10 +1048,14 @@ class _Streams:
     the rows taken from it. A resumed reader reopens its stream and skips those rows.
     Leaving a stream, read whole or skipped as already imported, is an event placed at
     the next stream's start, so a batch records it once its checkpoint is past it.
+    A ``bounded`` reader, a job's, returns ``_MEMBER_END`` when it leaves a stream it
+    read, so a batch never holds rows of two members and the batch that ends a member
+    commits its import log row.
     """
 
-    def __init__(self, streams, fmt, rows, checkpoint, skip=None) -> None:
+    def __init__(self, streams, fmt, rows, checkpoint, skip=None, *, bounded=False) -> None:
         self.streams, self.fmt, self.rows, self.skip = streams, fmt, rows, skip
+        self.bounded = bounded
         self.ordinal, self.base = int(checkpoint["row"]), int(checkpoint["byte"])
         self.member, self.member_row = int(checkpoint["member"]), int(checkpoint["member_row"])
         self.handle = self.inner = self.guard = None
@@ -1083,6 +1091,8 @@ class _Streams:
                 raise _Lost from error
             if item is None:
                 self._leave("read", stream)
+                if self.bounded and self.member < len(self.streams):
+                    return _MEMBER_END
                 continue
             value, error, fatal, span = item
             row = Row(self.ordinal, self.base, self.base, value, error, fatal, span)
@@ -1123,18 +1133,16 @@ class _Streams:
 
     def _leave(self, kind: str, stream: _Stream) -> None:
         self._close()
-        self.events.append(((self.member + 1, 0), kind, stream.sha256, self.member_row))
+        self.events.append(((self.member + 1, 0), kind, self.member, stream.sha256))
         self.base += stream.bytes
         self.member += 1
         self.member_row = 0
 
-    def taken(self, checkpoint: Mapping[str, Any]) -> list[tuple[str, str | None, int]]:
-        """The stream changes up to ``checkpoint``, then its current stream's progress."""
+    def taken(self, checkpoint: Mapping[str, Any]) -> list[tuple[str, int, str | None]]:
+        """The streams left up to ``checkpoint``: ``(read or skipped, index, sha256)``."""
         at, done = (checkpoint["member"], checkpoint["member_row"]), []
         while self.events and self.events[0][0] <= at:
             done.append(self.events.pop(0)[1:])
-        if at[0] < len(self.streams) and at[1]:
-            done.append(("partial", self.streams[at[0]].sha256, at[1]))
         return done
 
     def guards(self) -> list[vault.PathGuard]:
@@ -1794,7 +1802,7 @@ class Batch:
     checkpoint: dict[str, Any]
     source_bytes: int
     eof: bool
-    members: list[tuple[str, str | None, int]] = field(default_factory=list)
+    members: list[tuple[str, int, str | None]] = field(default_factory=list)
 
 
 # A local time inside a gap does not exist; refusing it never stops the job.
@@ -1806,11 +1814,12 @@ def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold 
     rows: list[tuple[Row, dict[str, Any]]] = []
     rejections: list[tuple[Row, str, str]] = []
     checkpoint = reader.position() if not pending else None
-    eof, spent = False, 0
+    eof = ended = False
+    spent = 0
     while len(rows) + len(rejections) < MAX_BATCH_ROWS:
         row = pending.pop() if pending else reader.next()
-        if row is None:
-            eof = True
+        if row is None or row is _MEMBER_END:
+            eof, ended = row is None, True
             break
         extent = row.end - begin if row.span is None else spent + row.span
         if (rows or rejections) and extent > MAX_BATCH_BYTES:
@@ -1830,7 +1839,7 @@ def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold 
         else:
             rows.append((row, values))
         checkpoint = reader.after(row)
-    if eof:
+    if ended:
         checkpoint = reader.position()
     checkpoint = _ordered(checkpoint, order)
     return Batch(rows, rejections, None, checkpoint, checkpoint["byte"] - begin, eof)
@@ -2195,13 +2204,13 @@ def _live(writer, job: _Job, proof: Source, plan: Plan) -> _Streams:
 
         def skip(stream: _Stream) -> bool:
             return writer.connection.execute(
-                "SELECT 1 FROM import_members WHERE collection_id=? AND mapping_sha256=? "
-                "AND member_sha256=? AND state='complete'",
+                "SELECT EXISTS(SELECT 1 FROM import_members WHERE collection_id=? "
+                "AND mapping_sha256=? AND member_sha256=?)",
                 (*key, stream.sha256),
-            ).fetchone() is not None
+            ).fetchone()[0] == 1
 
     reader = readers[job.id] = _Streams(
-        streams, job.binding["mapping"]["format"], plan.rows, job.checkpoint, skip
+        streams, job.binding["mapping"]["format"], plan.rows, job.checkpoint, skip, bounded=True
     )
     return reader
 
@@ -2215,32 +2224,34 @@ def _stamp() -> str:
 
 
 def _collapse(
-    rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str
-) -> tuple[list[tuple[Row, dict[str, Any]]], int]:
+    rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str, *, logged: bool = False
+) -> tuple[list[tuple[Row, dict[str, Any]]], int, list[tuple[str | None, Any]]]:
     """Keep each natural key's last occurrence in a batch, by the writer's own identity rule.
 
     A row the writer would refuse has no identity here, so it neither supersedes
-    nor is superseded: the last valid occurrence wins.
+    nor is superseded: the last valid occurrence wins. When the collection has a
+    natural key, or the job ``logged`` its members, it also returns each row's
+    natural key and stored values as the writer derives them, ``(None, None)`` for
+    a row the writer would refuse.
     """
-    if not manifest.schema.natural_key:
-        return rows, 0
-    keys = []
+    if not (manifest.schema.natural_key or logged):
+        return rows, 0, []
+    prepared: list[tuple[str | None, Any]] = []
     for _, values in rows:
         try:
-            keys.append(
-                collections.derived_item_key(
-                    manifest, records._bulk_row_values(manifest, values, source_ref)
-                )
-            )
+            stored = records._bulk_row_values(manifest, values, source_ref)
+            prepared.append((collections.derived_item_key(manifest, stored), stored))
         except collections.CollectionError:
-            keys.append(None)
-    last = {key: index for index, key in enumerate(keys) if key is not None}
+            prepared.append((None, None))
+    if not manifest.schema.natural_key:
+        return rows, 0, prepared
+    last = {key: index for index, (key, _) in enumerate(prepared) if key is not None}
     kept = [
         row
-        for index, (row, key) in enumerate(zip(rows, keys, strict=True))
+        for index, (row, (key, _)) in enumerate(zip(rows, prepared, strict=True))
         if key is None or last[key] == index
     ]
-    return kept, len(rows) - len(kept)
+    return kept, len(rows) - len(kept), prepared
 
 
 def _rewrote(writer, job: _Job, outcome: Mapping[str, Any]) -> bool:
@@ -2268,12 +2279,16 @@ def _record(
     superseded: int = 0,
     result: Mapping[str, Any] | None = None,
     fail: tuple[Row, str, str] | None = None,
+    prepared: list[tuple[str | None, Any]] = (),
+    version: int = 0,
 ) -> None:
     """Advance the checkpoint, counters and rejections inside the batch transaction.
 
     A row superseded in this batch, or re-stating what this job wrote in an
     earlier one, counts once as a duplicate, so the counts do not depend on where
-    batches end. ``batches`` counts settlements that committed rows.
+    batches end. ``batches`` counts settlements that committed rows. ``prepared``
+    is ``_collapse``'s identity of each batch row and ``version`` the collection's
+    schema version, from which an export member's import log hashes its rows.
     """
     progress = dict(job.progress)
     sequence = job.checkpoint["batch"]
@@ -2307,13 +2322,16 @@ def _record(
         progress["imported"] += sum(counts.values())
         progress["rejected"] += len(rejections)
         progress["duplicates"] += duplicates
-        _members(writer, job, batch, progress)
+        logged = _logged(batch, kept, result, prepared, version) if "members" in job.binding["source"] else []
+        tally = _members(writer, job, batch, progress, logged)
         writer._execute(
             "INSERT INTO import_rejections(job_id,ordinal,byte_offset,code,at) VALUES (?,?,?,?,?)",
             [(job.id, row.ordinal, row.start, code, at) for row, code, at in rejections],
             many=True,
         )
         checkpoint = {**batch.checkpoint, "batch": sequence + 1}
+        if tally is not None:
+            checkpoint["tally"] = tally
         state, reason = ("complete" if batch.eof else "running"), None
     cursor = writer._execute(
         "UPDATE import_jobs SET state=?,reason=?,checkpoint_json=?,progress_json=?,updated_at=? "
@@ -2328,29 +2346,102 @@ def _record(
         _control(writer, job, operation, progress, checkpoint)
 
 
-def _members(writer, job: _Job, batch: Batch, progress: dict[str, Any]) -> None:
-    """Record which export members this batch finished, skipped or is part way through.
+# A member's running row digest starts here; each accepted row extends it (``_members``).
+_NO_ROWS = hashlib.sha256(b"").hexdigest()
 
-    A finished member is complete for this collection and mapping, so a later job skips
-    it; a member part way through is partial and never skipped.
+
+def _logged(
+    batch: Batch,
+    kept: list[tuple[Row, dict[str, Any]]],
+    result: Mapping[str, Any] | None,
+    prepared: list[tuple[str | None, Any]],
+    version: int,
+) -> list[tuple[Row, str | None, str | None]]:
+    """This batch's rows in source order as ``(row, item key, payload hash)``, both None if rejected.
+
+    A row a later row of its member superseded in this batch was accepted all the same,
+    so a member's counts and digest do not depend on where its batches end. The payload
+    hash is ``tokens.payload_hash`` of the row the member supplies; an import has no body.
+    """
+    outcomes = {outcome["index"]: outcome for outcome in (result or {}).get("rows", ())}
+    written = {id(row): index for index, (row, _) in enumerate(kept)}
+    entries = [(row, None, None) for row, _, _ in batch.rejections]
+    for (row, _), (key, stored) in zip(batch.rows, prepared, strict=True):
+        index = written.get(id(row))
+        if index is not None:
+            if outcomes[index]["outcome"] == "rejected":
+                entries.append((row, None, None))
+                continue
+            key = outcomes[index]["item_key"]
+        entries.append((row, key, tokens.payload_hash(version, key, stored, "")))
+    return sorted(entries, key=lambda entry: entry[0].ordinal)
+
+
+def _members(
+    writer,
+    job: _Job,
+    batch: Batch,
+    progress: dict[str, Any],
+    rows: list[tuple[Row, str | None, str | None]],
+) -> dict[str, Any] | None:
+    """Log each export member this batch finished; return the open member's tally.
+
+    A member's tally counts its accepted and rejected rows and chains a SHA-256 over each
+    accepted row's item key and payload hash, in member order. It rides in the job's
+    checkpoint while the member is open, so a restart resumes it with the rows. The batch
+    that leaves a member appends its import log row, and the ``import_member`` transition
+    the row names, in the transaction that advances the checkpoint past it: a crash never
+    leaves one without the other. A skipped member writes nothing.
     """
     if "members" not in job.binding["source"]:
-        return
+        return None
+    opened = job.checkpoint
+    tallies = {opened["member"]: dict(opened["tally"])} if opened["member_row"] else {}
+    for row, key, payload in rows:
+        tally = tallies.setdefault(row.after["member"], _tally())
+        if key is None:
+            tally["rejected"] += 1
+        else:
+            tally["accepted"] += 1
+            tally["rows_digest"] = hashlib.sha256(
+                f"{tally['rows_digest']}\0{key}\0{payload}".encode()
+            ).hexdigest()
     counted = dict(progress["members"])
-    for kind, sha256, rows in batch.members:
-        if kind != "partial":
-            counted[kind] += 1
-        if kind == "skipped":
-            continue
-        state = "complete" if kind == "read" else "partial"
-        writer._execute(
-            "INSERT INTO import_members(collection_id,mapping_sha256,member_sha256,rows,state) "
-            "VALUES (?,?,?,?,?) ON CONFLICT(collection_id,mapping_sha256,member_sha256) DO UPDATE SET "
-            "rows=excluded.rows,state=excluded.state "
-            "WHERE excluded.state='complete' OR import_members.state='partial'",
-            (job.collection_id, job.binding["mapping"]["sha256"], sha256, rows, state),
-        )
+    for kind, index, sha256 in batch.members:
+        counted[kind] += 1
+        if kind == "read":
+            _log_member(writer, job, index, sha256, tallies.pop(index, None) or _tally())
     progress["members"] = counted
+    at = batch.checkpoint
+    return tallies.get(at["member"]) if at["member_row"] else None
+
+
+def _tally() -> dict[str, Any]:
+    return {"accepted": 0, "rejected": 0, "rows_digest": _NO_ROWS}
+
+
+def _log_member(writer, job: _Job, index: int, sha256: str, tally: Mapping[str, Any]) -> None:
+    """Append one member's import log row, named by its own ``import_member`` transition."""
+    cid = job.collection_id
+    rows = writer.connection.execute(
+        "SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)
+    ).fetchone()[0]
+    counts = {"member_index": index, "accepted": tally["accepted"], "rejected": tally["rejected"],
+              "row_count_after": rows}
+    ids = {"import_job_ids": [job.id], "member_sha256": [sha256], "rows_digest": [tally["rows_digest"]]}
+    [receipt] = writer.record_control_transition(
+        "import_member", {cid: {"counts": counts, "ids": ids}}, why=f"import {job.id[:12]} member {index}"
+    )
+    [txn_id] = writer.connection.execute(
+        "SELECT txn_id FROM txns WHERE transition_id=?", (receipt["transition_id"],)
+    ).fetchone()
+    writer._execute(
+        "INSERT INTO import_members(collection_id,seq,txn_id,job_id,member_index,member_sha256,"
+        "mapping_sha256,accepted,rejected,rows_digest,row_count_after) VALUES "
+        "(?,(SELECT COALESCE(MAX(seq),0)+1 FROM import_members WHERE collection_id=?),?,?,?,?,?,?,?,?,?)",
+        (cid, cid, txn_id, job.id, index, sha256, job.binding["mapping"]["sha256"], tally["accepted"],
+         tally["rejected"], tally["rows_digest"], rows),
+    )
 
 
 def _control(
@@ -2392,6 +2483,8 @@ class _Settlement:
         plan: Plan,
         proof: Source,
         guards: list[vault.PathGuard] = (),
+        prepared: list[tuple[str | None, Any]] = (),
+        version: int = 0,
     ) -> None:
         self.job, self.batch, self.kept, self.superseded, self.plan = (
             job,
@@ -2402,6 +2495,7 @@ class _Settlement:
         )
         self.source = (proof.ref, proof.guard)
         self.guards = guards
+        self.prepared, self.version = prepared, version
 
     def __call__(self, writer, result: Mapping[str, Any]) -> None:
         _authorize(writer, self.job, prove=False)
@@ -2424,6 +2518,8 @@ class _Settlement:
                 kept=self.kept,
                 superseded=self.superseded,
                 result=result,
+                prepared=self.prepared,
+                version=self.version,
             )
 
 
@@ -2578,7 +2674,9 @@ def _batch(root: Path, writer, job: _Job) -> str:
     except (_Lost, OSError, vault.PathGuardError):
         return "authority_lost"
     sequence = job.checkpoint["batch"]
-    kept, superseded = _collapse(batch.rows, manifest, proof.ref)
+    logged = "members" in job.binding["source"]  # an export member's log hashes every row
+    kept, superseded, prepared = _collapse(batch.rows, manifest, proof.ref, logged=logged)
+    version = manifest.schema.version
     try:
         if batch.stop is not None or not kept:
 
@@ -2588,7 +2686,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
                 if batch.stop is not None:
                     _record(writer, job, batch, fail=batch.stop)
                 else:
-                    _record(writer, job, batch, superseded=superseded)
+                    _record(writer, job, batch, superseded=superseded, prepared=prepared, version=version)
 
             _transaction(root, writer, settle_alone)
             return "paused" if batch.stop is not None else "batch"
@@ -2602,7 +2700,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
             source=proof.ref,
             on_reject="skip" if plan.on_invalid == "skip" else "abort",
             request_id=f"import:{job.id}:{sequence}",
-            _import=_Settlement(job, batch, kept, superseded, plan, proof, guards),
+            _import=_Settlement(job, batch, kept, superseded, plan, proof, guards, prepared, version),
         )
         return "batch"
     except _Lost:

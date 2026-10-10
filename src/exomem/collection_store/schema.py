@@ -100,7 +100,7 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_manifests",
     "collection_type_versions",
 )
-APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity")
+APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members")
 
 _TABLES_V1 = (
     """
@@ -290,6 +290,7 @@ _CONFLICT_KEYS = {
     "collection_type_versions": (("name", "version"),),
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
     "version_identity": (("row_id", "row_version"),),
+    "import_members": (("collection_id", "seq"),),
 }
 
 
@@ -699,21 +700,36 @@ def _migrate_to_8(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_9(conn: sqlite3.Connection) -> None:
-    """Record which export members an import has read into a collection, per mapping.
+    """Add the append-only import log: one row per export member an import completed.
 
-    A member is ``complete`` once a job has taken all of its rows, and a later job with
-    the same mapping skips it; ``partial`` holds the rows taken so far and is never
-    skipped. ``rows`` counts the rows taken from the member, rejected ones included.
+    A row is written once, in the transaction that advances its job's checkpoint past
+    the member, and never changed. ``seq`` counts a collection's members from 1 and
+    ``txn_id`` is the member's ``import_member`` transition. ``rows_digest`` chains each
+    accepted row's item key and payload hash in member order (``importer``), and
+    ``row_count_after`` is the collection's row count once the member is in. A later
+    job with the same mapping skips a member the log records.
     """
     conn.execute("""CREATE TABLE import_members(
       collection_id TEXT NOT NULL REFERENCES collections(collection_id),
-      mapping_sha256 TEXT NOT NULL,
+      seq INTEGER NOT NULL CHECK (seq >= 1),
+      txn_id INTEGER NOT NULL REFERENCES txns(txn_id),
+      job_id TEXT NOT NULL REFERENCES import_jobs(job_id),
+      member_index INTEGER NOT NULL CHECK (member_index >= 0),
       member_sha256 TEXT NOT NULL,
-      rows INTEGER NOT NULL CHECK (rows >= 0),
-      state TEXT NOT NULL CHECK (state IN ('partial', 'complete')),
-      PRIMARY KEY (collection_id, mapping_sha256, member_sha256)
+      mapping_sha256 TEXT NOT NULL,
+      accepted INTEGER NOT NULL CHECK (accepted >= 0),
+      rejected INTEGER NOT NULL CHECK (rejected >= 0),
+      rows_digest TEXT NOT NULL,
+      row_count_after INTEGER NOT NULL CHECK (row_count_after >= 0),
+      PRIMARY KEY (collection_id, seq)
     ) STRICT, WITHOUT ROWID""")
+    conn.execute("CREATE INDEX import_members_by_member "
+                 "ON import_members(collection_id, mapping_sha256, member_sha256)")
+    for statement in _TRIGGERS_V9:
+        conn.execute(statement)
 
+
+_TRIGGERS_V9 = _append_only_triggers("import_members")
 
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
 # Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
@@ -807,7 +823,8 @@ def ensure_schema(conn: Connection) -> int:
                 if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
                     command.stamp(config, str(current))
                 command.upgrade(config, str(target))
-            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ())):
+            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ()),
+                              *(_TRIGGERS_V9 if target >= 9 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

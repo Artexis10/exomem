@@ -63,6 +63,7 @@ APPEND_ONLY = (
     "item_sources",
     "collection_manifests",
     "collection_type_versions",
+    "import_members",
 )
 
 
@@ -187,6 +188,19 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
             (1, 0, row_id, "k1", "insert", 1, H),
         )
         _txn(conn, txn_id=1, commit_seq=1, event_hash="1" * 64, prev_head=None)
+        conn.execute(
+            "INSERT INTO import_jobs(job_id, identity, collection_id, binding_json, state, checkpoint_json,"
+            " progress_json, window_started, window_expires, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("0" * 32, H, COLLECTION_ID, "{}", "complete", "{}", "{}", 0, 0, "2026-09-30T00:00:00Z",
+             "2026-09-30T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO import_members(collection_id, seq, txn_id, job_id, member_index, member_sha256,"
+            " mapping_sha256, accepted, rejected, rows_digest, row_count_after)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (COLLECTION_ID, 1, 1, "0" * 32, 0, H, H, 1, 0, H, 1),
+        )
     return {"row_id": row_id}
 
 
