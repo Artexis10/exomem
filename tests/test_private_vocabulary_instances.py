@@ -542,3 +542,46 @@ def test_a_hidden_page_with_a_private_status_never_changes_a_limited_clients_fin
     assert observed[0] == observed[1]
     assert [item["path"] for item in observed[1]["suggestions"]] == [public]
     assert list(observed[1]["context"]["claims"]) == [public]
+
+
+def test_a_limited_client_validates_a_planning_value_from_the_bound_public_overlay(private_instances, vault):
+    """Planning admission checks the overlay the bound public instance reads.
+
+    It used to admit the unbound default path, which a limited client cannot read,
+    and so refused a value the public instance defines.
+    """
+    from exomem import planning, planning_values
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    overlay = instances.select(vault, planning_values.SPEC).overlay(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries:\n  status.parked:\n    attributes: {class: open}\n")
+    with principal.request_scope(private_instances("limited")):
+        item = planning.normalize_item({"title": "Later", "status": "parked"}, vault_root=vault)
+    assert item["status"] == "parked"
+
+
+def test_a_legacy_armed_vault_refuses_an_unassigned_planning_value_and_keeps_shipped_ones(
+    configured_boundary, vault
+):
+    """Version 1 assigns no instance, so the legacy overlay's values are unavailable.
+
+    The selection error used to escape the Planning validator instead of its refusal.
+    """
+    from exomem import planning, planning_values, state_migration
+    from exomem.governance import principal
+    from exomem.structured_collections import CollectionError
+
+    _, authenticate = configured_boundary
+    overlay = planning_values.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries:\n  status.parked:\n    attributes: {class: open}\n")
+    authority = state_migration.assert_offline_migration_authority(source="legacy planning values fixture")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    with principal.request_scope(authenticate("full")):
+        shipped = planning.normalize_item({"title": "Now", "status": "candidate"}, vault_root=vault)
+        with pytest.raises(CollectionError) as refused:
+            planning.normalize_item({"title": "Later", "status": "parked"}, vault_root=vault)
+    assert shipped["status"] == "candidate"
+    assert refused.value.code == "PLANNING_VALUES_UNAVAILABLE"
