@@ -8,7 +8,9 @@ The product SHALL define a closed v1 set of envelope action classes —
 hard ceiling: `hygiene_writes` silent; `proactive_capture` silent-capable;
 `link_acceptance` confirm; `structural_suggestions` advisory (surface only);
 `restructure_execution` — covering restructure application, supersession
-commit, entity merge, edge removal, and deletion — confirm-required; `disclosure` governed
+commit, entity merge, deletion, and edge removal, which is a `remove-relation`
+call or the removal of an edge from a page that the current write does not
+author — confirm-required; `disclosure` governed
 exclusively by the governance plane. On a personal vault, additive entity
 creation (a new identity through the entity writer's resolve-before-create
 path, which refuses or prepares a decision on an existing exact name) belongs
@@ -21,7 +23,12 @@ semantic-category registry save, a relation-extension save and a typed edge that
 the agent authors also belong to `proactive_capture`. `link_acceptance` covers
 acceptance of a relation that the server's relation queue suggested. Replacing a
 generic edge in place with a specific predicate is a typed edge the agent
-authors, not an edge removal. A resolved
+authors, not an edge removal, and an `edit_memory` call that drops a
+`## Relations` bullet from the page it writes is part of that write, not an
+edge removal. A promotion revert is `restructure_execution` whose confirmation
+is the user's request; it seals and applies its own curation plan in one call,
+the promotion's item context is its preview, and the promotion's dependants
+block it until the user names them. A resolved
 non-owner's registry save remains a pending item for the owner. An
 additive-authority grant that governs the caller, including the Hosted v2
 grants, applies unchanged and is neither widened nor replaced by this class. No
@@ -40,8 +47,11 @@ tool-schema change; a server-side confirm for supersession is named future
 work behind the documented tool-surface rollout, and its absence today SHALL be
 stated in the served contract rather than implied away. The served contract
 SHALL also state that additive entity creation, the owner's vocabulary saves
-and the agent's own typed edges follow `proactive_capture`, and SHALL NOT tell
-the owner's agent that those need confirmation.
+and the agent's own typed edges follow `proactive_capture`, SHALL name the
+scoped edge removal as confirm-required, and SHALL NOT tell the owner's agent
+that those promotions need confirmation. The served envelope SHALL carry these
+classes as a structured map from each promotion action to its class for the
+caller, so that no promotion action is left without a class.
 
 A request to set a disposition for an unknown class id SHALL be refused with a
 class-specific error and no state change. A request to configure `disclosure`
@@ -101,9 +111,25 @@ time, never refused — reading the envelope never breaks bootstrap.
 
 #### Scenario: An edge removal is confirmed by the user's request
 
-- **WHEN** the agent removes a typed edge
+- **WHEN** the agent runs `remove-relation`, or a write removes an edge from a
+  page that the write does not author
 - **THEN** the action is `restructure_execution`, and a user's explicit revert
   request is its confirmation
+
+#### Scenario: An edit to the page it writes is not an edge removal
+
+- **WHEN** the agent's `edit_memory` call drops a `## Relations` bullet from the
+  page that the call writes
+- **THEN** the edit follows the class of that write and asks no edge-removal
+  confirmation
+
+#### Scenario: Every promotion action has a served class
+
+- **WHEN** the owner's agent on a v1 vault reads the served envelope
+- **THEN** the structured promotion map gives `proactive_capture` for an entity
+  creation, a typed edge and a registry save, `link_acceptance` for queue
+  acceptance, and `restructure_execution` for an edge removal and a promotion
+  revert
 
 #### Scenario: An upgrade grants and gates nothing
 

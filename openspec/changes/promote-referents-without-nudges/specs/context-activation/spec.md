@@ -11,8 +11,8 @@ The existing depth, node and edge bounds, the resolved-only rule and the egress 
 
 #### Scenario: An owned entity is reached from its owner
 
-- **WHEN** a fresh-session turn resolves a person entity that `owns` a dog entity, a supplement entity is `used_for` that dog, and no wikilink joins the person and the supplement
-- **THEN** the packet's `pointers[]` holds the supplement with a `why` that names `owns` and `used_for`
+- **WHEN** a fresh-session turn resolves a person entity that `owns` a boat entity, the boat is `located_at` a harbour entity, and no wikilink joins the person and the harbour
+- **THEN** the packet's `pointers[]` holds the harbour with a `why` that names `owns` and `located_at`
 - **AND** the same corpus under the former `epistemic` selection holds no such pointer
 
 #### Scenario: A non-entity anchor is unchanged

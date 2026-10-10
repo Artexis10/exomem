@@ -87,13 +87,17 @@ The block SHALL hold at most 3 names, each with the `create-entity` route.
 "Newly" SHALL be decided against the page's pre-write state, as for `entity_candidate`.
 A name that the same response's `entity_candidate` block carries SHALL be omitted.
 The block SHALL reuse the capture-sweep link parsing and the preflight's corpus context, with no vault walk and no model call, and SHALL read wikilink markup only, never prose.
-Write-advisory fingerprints SHALL dismiss a name, the `undeclared_referents` family SHALL be quietable, and the block SHALL be withheld when `structural_suggestions` is `off`.
+Pages committed within one mutation batch SHALL count once, so a name that several of them newly link is listed once.
+Write-advisory fingerprints SHALL dismiss a name, and a dismissed name SHALL also get no later `entity_candidate` block.
+The `undeclared_referents` family SHALL be quietable.
+The block SHALL be withheld when `structural_suggestions` is `off`, and when `proactive_capture` resolves to `off`, as it does at `light`.
 A name that matches only a page the writer may not see SHALL be listed exactly as a name with no page.
+The compact response projection SHALL carry the block, so that a hookless client receives it through MCP egress.
 
 #### Scenario: A first link to a new name is named at once
 
-- **WHEN** a note is written that newly links `[[Pip]]`, and no page or Entity answers to that name
-- **THEN** the receipt's `undeclared_referents` block lists `Pip` with the `create-entity` route
+- **WHEN** a note is written that newly links `[[Kestrel]]`, and no page or Entity answers to that name
+- **THEN** the receipt's `undeclared_referents` block lists `Kestrel` with the `create-entity` route
 
 #### Scenario: A name already linked by the page is not repeated
 
@@ -114,3 +118,23 @@ A name that matches only a page the writer may not see SHALL be listed exactly a
 
 - **WHEN** the owner quiets the `undeclared_referents` family, or `structural_suggestions` is `off`
 - **THEN** no receipt carries the block
+
+#### Scenario: A light-prominence client is not prompted
+
+- **WHEN** prominence is `light` and `proactive_capture` resolves to `off`
+- **THEN** no receipt carries the block
+
+#### Scenario: A dismissed name is not prompted again at its second page
+
+- **WHEN** the agent dismisses a name in the block, and a later write links the same name from a second page
+- **THEN** that write's response carries no `entity_candidate` block for the name
+
+#### Scenario: One batch lists a name once
+
+- **WHEN** a single multi-write command commits two notes that newly link the same unpaged name
+- **THEN** the block lists the name once for that batch
+
+#### Scenario: A hookless client receives the block
+
+- **WHEN** a hookless client calls a durable writer over MCP with compact response detail, and the write newly links an unpaged name
+- **THEN** the compact response that passed MCP egress carries the block with the name and its route

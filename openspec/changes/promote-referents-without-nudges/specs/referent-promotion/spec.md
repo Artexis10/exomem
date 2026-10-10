@@ -35,13 +35,18 @@ Both SHALL refuse a withheld subject or target exactly as a missing one, and bot
 An entity creation or typed edge made by `create-entity`, `add-relation` or a declaration SHALL write a log entry on its page.
 `create-entity` SHALL accept the existing `ref` argument as the originating write's ref, and the `undeclared_referents` route SHALL fill it.
 The entry SHALL name the originating write's path and operation id when known, and the episode key when an episode leaf ran the effect.
-An origin ref that the caller cannot read SHALL be refused exactly as a missing ref.
+An origin ref that the caller cannot read SHALL record the origin as unknown and SHALL NOT refuse the creation; a withheld ref and a missing ref SHALL give the same result.
 A registry save SHALL keep its history header and its reason.
 
 #### Scenario: A created entity names its origin
 
 - **WHEN** an agent runs the `create-entity` route from a note's `undeclared_referents` block
 - **THEN** the new entity's log entry names that note's path and operation id
+
+#### Scenario: An unreadable origin does not block the creation
+
+- **WHEN** a restricted caller runs `create-entity` with an origin ref that is withheld from it, and separately with an origin ref that does not exist
+- **THEN** both calls create the entity, both log entries record the origin as unknown, and both results are byte-identical
 
 ### Requirement: Promotions surface once in the next session
 
@@ -50,8 +55,9 @@ An edge from a page that is not an entity SHALL NOT be an entry.
 A bulk writer SHALL add one entry per originating write.
 A parentless entity type's entry SHALL carry `new_family` and SHALL be served first.
 The session that created an entry SHALL NOT count it.
-An entry SHALL settle at its first delivery to an interactive conversation session other than the creator's; a hook process, a CLI or REST call, or a session that declares itself a delegated lane SHALL NOT settle it.
-A revert or a dismissal SHALL also settle it.
+A promotion's entry SHALL settle at its first delivery to an interactive conversation session other than the creator's; a hook process or a CLI or REST call SHALL NOT settle it.
+The server MAY also exclude a session that a wire field identifies as a delegated agent lane.
+A revert or a dismissal SHALL settle any entry.
 Family dispositions SHALL apply, and a withheld promotion SHALL contribute nothing to a restricted audience's count.
 
 #### Scenario: A promotion is seen once, in the next session
@@ -69,21 +75,35 @@ Family dispositions SHALL apply, and a withheld promotion SHALL contribute nothi
 - **WHEN** one adoption run creates twelve entities
 - **THEN** `recent_promotions` holds one entry for that run, naming the twelve
 
-### Requirement: Each promotion carries a revert route
+### Requirement: Each promotion reverts in one call
 
-Each `recent_promotions` entry's item context SHALL carry its revert route:
-one `remove-relation` call for a typed edge;
-one curation plan for an entity creation, whose steps remove that promotion's own edges and then trash the entity, with every other inbound link listed as a dependant;
-and one registry save for a registry addition.
-That save SHALL remove the key through a `remove` delta verb when the key is vault-added and nothing uses it.
-Otherwise it SHALL deprecate the key, to its parent for a relation, and SHALL list the dependants.
+Every `recent_promotions` entry SHALL revert through one call keyed by its ref, `triage_memory(ref=<entry ref>, action="revert")`, and its item context SHALL name that call.
+For a typed edge, the call SHALL run the `remove-relation` step for that triple.
+For an entity creation, the call SHALL seal and apply, in that one call, a curation plan whose steps remove the promotion's own edges and then trash the entity.
+The entry's item context SHALL list every other inbound link to the entity as a dependant, and the entry's fingerprint SHALL cover that list.
+A link from the promotion's originating write SHALL NOT be a dependant, because after the revert it is an unresolved wikilink again, as it was before the promotion.
+When dependants exist, the call SHALL refuse and return them unless it carries the entry's current fingerprint, which the agent passes only after the user names them.
+For a registry addition, the call SHALL remove the key through a `remove` delta verb when the key is vault-added and nothing uses it.
+The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check, which today means entity types, relations and semantic categories, and every other registry SHALL refuse it.
+Otherwise the call SHALL deprecate the key, to its parent for a relation, and SHALL list the dependants.
 A revert SHALL NOT restore an older registry version or drop a later save.
-A revert SHALL run only on the user's request, and history and logs SHALL keep both the promotion and its revert.
+A revert SHALL run only on the user's request, which is its confirmation, and history and logs SHALL keep both the promotion and its revert.
 
 #### Scenario: An edge reverts in one call
 
-- **WHEN** the user asks to undo a promoted `owns` edge and the agent runs the entry's route
-- **THEN** one `remove-relation` call removes the bullet, the page log records the removal, and the entry settles
+- **WHEN** the user asks to undo a promoted `owns` edge and the agent runs the entry's revert call
+- **THEN** the one call removes the bullet, the page log records the removal, and the entry settles
+
+#### Scenario: An entity reverts in one call
+
+- **WHEN** the user asks to undo a promoted entity that only the promotion's own edges and its originating note link to
+- **THEN** one call removes those edges and moves the entity page to the trash, with no separate preview or apply call
+
+#### Scenario: Dependants block an entity revert until the user names them
+
+- **WHEN** a later note links the promoted entity and the agent runs the revert call without a fingerprint
+- **THEN** the call refuses, changes nothing, and lists the later note as a dependant
+- **AND** after the user names that dependant, the same call with the entry's current fingerprint reverts the entity
 
 #### Scenario: A used type is deprecated, not removed
 
@@ -93,7 +113,12 @@ A revert SHALL run only on the user's request, and history and logs SHALL keep b
 #### Scenario: An unused type is removed
 
 - **WHEN** the user asks to undo a promoted entity type that nothing uses
-- **THEN** one save removes the key and the registry history records the removal
+- **THEN** the one call removes the key and the registry history records the removal
+
+#### Scenario: A registry without a usage check refuses removal
+
+- **WHEN** a save sends the `remove` verb to a registry whose adapter declares no usage check
+- **THEN** the save is refused and the registry is unchanged
 
 ### Requirement: Promotion never discloses a withheld page
 

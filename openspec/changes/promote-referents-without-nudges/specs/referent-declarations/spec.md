@@ -18,7 +18,7 @@ A span that does not match SHALL give that declaration the outcome `evidence_not
 
 #### Scenario: Display text counts as evidence
 
-- **WHEN** the content links `[[Pip|my dog Pip]]` and a declaration's evidence is `my dog Pip`
+- **WHEN** the content links `[[Kestrel|our boat Kestrel]]` and a declaration's evidence is `our boat Kestrel`
 - **THEN** the span matches
 
 ### Requirement: Declared referents resolve before anything is created
@@ -45,16 +45,27 @@ A referent outcome SHALL NOT refuse or roll back the primary write.
 - **WHEN** a restricted caller declares a name that no visible entity matches
 - **THEN** the outcome is `needs_create` with the `create-entity` route, and nothing is created
 
-### Requirement: A pending declaration completes with one call
+### Requirement: A declaration with an unregistered type completes with one call
 
-A declaration with the outcome `needs_type` or `type_unknown` SHALL stay pending on the write's operation.
-The outcome SHALL name one completion call, `connect_memory(operation="complete-referents", ref=<operation ref>)`, which runs every pending declaration of that write once.
-Pending declarations SHALL appear in `recent_promotions` until they complete or the agent dismisses them.
+A declaration with the outcome `needs_type` carries no `type`; its outcome SHALL return the `create-entity` route at once, and nothing SHALL stay pending.
+A declaration with the outcome `type_unknown` names a type that is not registered; it SHALL stay pending on the write's operation.
+Its outcome SHALL name one completion call, `connect_memory(operation="complete-referents", ref=<operation ref>)`, which runs every pending declaration of that write once.
+A pending declaration SHALL appear in `recent_promotions` until it completes or the agent dismisses it, and its delivery SHALL NOT settle its entry.
 
 #### Scenario: A type is saved, then the declaration completes
 
-- **WHEN** a declaration names the unregistered type `animal`, the agent saves that type, and then runs the completion call
+- **WHEN** a declaration names the unregistered type `vessel`, the agent saves that type, and then runs the completion call
 - **THEN** the entity is created with the originating write's provenance and the pending entry settles
+
+#### Scenario: A missing type returns its route at once
+
+- **WHEN** a declaration carries no `type`
+- **THEN** its outcome is `needs_type` with the `create-entity` route, and no pending entry exists for it
+
+#### Scenario: Delivery does not settle a pending declaration
+
+- **WHEN** a pending declaration's entry is delivered to the owner's next conversation and the type is not yet saved
+- **THEN** the entry stays in `recent_promotions` until the completion call runs or the agent dismisses it
 
 ### Requirement: A declared relation writes one typed edge
 
@@ -63,7 +74,7 @@ An unregistered or deprecated predicate SHALL write no edge and SHALL return the
 
 #### Scenario: An ownership edge reaches the owner's page
 
-- **WHEN** a declaration creates an animal entity and carries `{predicate: owns, subject: <person ref>}`
+- **WHEN** a declaration creates a vessel entity and carries `{predicate: owns, subject: <person ref>}`
 - **THEN** the person's page gains one `owns` bullet to the new entity through `add-relation`
 
 ### Requirement: A retried write replays its referent outcomes

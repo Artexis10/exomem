@@ -9,9 +9,9 @@ A predicate without declared endpoints SHALL NOT be offered.
 The generic edge SHALL stay committed, the offer SHALL refuse nothing, and the existing write-advisory fingerprints SHALL dismiss it.
 The offer SHALL use the two endpoint pages' families and the in-memory registry only, with no corpus scan.
 
-#### Scenario: A generic edge from a person to an animal is offered ownership
+#### Scenario: A generic edge from a person to a vessel is offered ownership
 
-- **WHEN** an agent writes `relates_to` from a person entity to an animal entity and `owns` declares `subject: [person]` and `object: [any_entity]`
+- **WHEN** an agent writes `relates_to` from a person entity to a vessel entity and `owns` declares `subject: [person]` and `object: [any_entity]`
 - **THEN** the response's `relation_advisory.specific_options` lists `owns` with its label and route
 - **AND** the `relates_to` edge stays written
 
