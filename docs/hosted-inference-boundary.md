@@ -4,7 +4,7 @@
 
 Status: this page sets acceptance measures. It is not a permission gate.
 
-The owner's ruling R4 (2026-09-28) set the direction. The dreamer runs in Cloud cells, and its sensing goes to an in-cluster shared plane. No third-party API sees vault text by default. In the owner's words: "i dont see why we need to compromise".
+The owner's ruling R4 (2026-09-28) set the direction. The dreamer runs in Cloud cells. Each cell senses with its own instruments on shared read-only model weights. No third-party API sees vault text by default. In the owner's words: "i dont see why we need to compromise".
 
 Each measure below states what a server-side job has to achieve to ship. A job that misses its measure has a defect to fix. The measure is not a reason to stop proposing the job.
 
@@ -24,7 +24,7 @@ Every job also carries a privacy note: what content crosses which boundary, and 
 | Job | What it does | Acceptance measure |
 |---|---|---|
 | Background compilation | Compile captured sources into notes off-device | Track D capture fidelity and current-state correctness at or above the client baseline. Manual steps fall by at least 40%. Provenance retention unchanged: 100% of compiled notes cite their sources. |
-| Contradiction/staleness sensing | Sense pair relations beyond the cosine band into the readings ledger | Recall of at least 0.8 on planted contradiction pairs where the client-side band scores below 0.5. Sweep latency at p95 that the client cannot reach on reference hardware. The fixture set is green at the plane's exact pin. |
+| Contradiction/staleness sensing | Sense pair relations beyond the cosine band into the readings ledger | Recall of at least 0.8 on planted contradiction pairs where the client-side band scores below 0.5. Sweep latency at p95 that the client cannot reach on reference hardware. The fixture set is green at the cell instrument's exact pin. |
 | Pack-specific extraction | Domain-pack entity and relation extraction | Connection-discovery precision and recall both at least the client baseline +0.2 on predeclared hidden-link sets. Decoy rejection no worse. |
 | Deep synthesis for thin clients | Multi-note synthesis where the client model is small | Blind pairwise human preference of at least 70% over the client baseline on Track D synthesis rubrics. No deterministic-gate regressions. |
 | Policy-aware redaction (closes the L4 gap) | Span-level redacted excerpts | L4 renders as a true redacted excerpt, with 0 leak-gate failures across the governance family. |
@@ -50,7 +50,7 @@ The frozen stance verifier (claim polarity on the contradiction review queue) wa
 
 The admitted local checkpoint is multilingual, but Exomem's acceptance claim is deliberately narrower than its model card. The production fixture set checks English, German, French, Estonian, and mixed English/Estonian pairs. The neutral fallback means only that the NLI head did not establish contradiction or entailment at the reviewed thresholds. It does not establish topical unrelatedness.
 
-## What the Cloud plane must measure before the NLI pin serves cells
+## What the Cloud placement must measure before the NLI pin serves cells
 
 Today the Hosted image adds no `nli` extra or verifier weights, carries no verifier capability grant, and passes no `EXOMEM_CLAIM_POLARITY_NLI` gate to a cell. The sizes to plan around:
 
@@ -58,17 +58,21 @@ Today the Hosted image adds no `nli` extra or verifier weights, carries no verif
 - The available full ONNX export is about 1,064 MiB.
 - The upstream quantized ONNX export is smaller, at about 323 MiB, but it failed a genuine-contradiction fixture. Its two directional contradiction probabilities were about 0.29 and 0.50, far below the reviewed 0.93 symmetric threshold. It is not an admissible capacity shortcut.
 
-The shared plane must pass the exact multilingual fixture set, and it is accepted on measured values, on the actual cell runtime, for:
+Each cell runs its own NLI instrument on shared read-only model weights. The cells share one copy of the weights only on a runtime that maps them read-only. The instrument runs on torch today, and nothing yet shows torch sharing weight pages across processes.
+
+Each cell's instrument must pass the exact multilingual fixture set. The Cloud placement is accepted on measured values, on the actual cell runtime, for:
 
 - image size;
 - cold and warm latency;
 - peak RSS;
+- per-cell activation memory;
+- CPU contention between cells;
 - cells served per node;
 - idle reclamation;
 - scheduling;
 - failure isolation.
 
-Local admission does not grant Hosted admission. The plane is its own placement, with its own measured acceptance.
+Local admission does not grant Hosted admission. The Cloud placement needs its own measured acceptance.
 
 See the `frozen-verifiers` and `sensed-epistemic-model` capability specs for the normative statement.
 
