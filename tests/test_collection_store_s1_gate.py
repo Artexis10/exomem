@@ -654,7 +654,10 @@ def _until(predicate, seconds=10):
 
 
 def _published(found):
-    """Wait until the coalesced publisher has carried the live head into the vault replica and finished."""
+    """Wait until the coalesced publisher has carried the live head into the vault replica.
+
+    This proves the durable effect only: the publishing call returns a moment after it commits.
+    """
     def done():
         meta = found.meta()
         head = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
@@ -704,6 +707,7 @@ def test_steady_writes_reach_the_replica_off_ack_at_most_once_per_window(abc, mo
         abc.write_c(str(uuid.uuid4()), f"steady {index}")
     assert not calls  # no publication runs inside a write; the coalesced one follows the burst
     _published(abc)
+    _until(lambda: calls)  # the call returns only after the swap commits the head _published reads
     assert len(calls) == 1
 
 
