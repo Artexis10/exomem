@@ -31,7 +31,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
     activation_conventions,
@@ -47,6 +47,9 @@ from . import (
     working_set_resolve,
     working_set_state,
 )
+
+if TYPE_CHECKING:
+    from .find import UnitParentReads
 
 log = logging.getLogger(__name__)
 
@@ -1240,7 +1243,7 @@ def _lane(
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
-    parent_reads: Any = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1302,7 +1305,7 @@ def _units_lane(
     admit: Callable[[str, Any], bool] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
-    parent_reads: Any = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1428,7 +1431,7 @@ def _material_lane(
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
-    parent_reads: Any = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)

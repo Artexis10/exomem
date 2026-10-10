@@ -2640,7 +2640,11 @@ def search_semantic_units_result(
     """Typed exact-category unit query preserving every catalog outcome.
 
     `validated` keeps each row stamp's currency check for the caller's request,
-    so several queries over the same parents read each one once.
+    so several queries over the same parents read each one once. A request
+    shares it across its activation lanes, so a parent whose file changes
+    while its catalogue rows do not passes in every later query as it did in
+    the first: those lanes serve the parent as the request first read it. A
+    parent whose rows change has a new stamp and is checked again.
     """
     from .semantic_units import canonicalize_category
 
