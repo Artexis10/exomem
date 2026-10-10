@@ -1,8 +1,15 @@
 FROM docker.io/library/python:3.13-slim-bookworm@sha256:de89ed8283721548f7f9c8acfd19d638f435fa3870693a017890e94be5d37fc6 AS helm
 
+# BuildKit sets TARGETARCH to the platform being built, which names the
+# matching Helm release archive; each archive has its own published digest.
+# The mapping is closed over the platforms Exomem images are built for, so any
+# other architecture fails the build instead of fetching an unpinned archive.
+ARG TARGETARCH
 ARG HELM_VERSION=3.19.4
-ARG HELM_SHA256=759c656fbd9c11e6a47784ecbeac6ad1eb16a9e76d202e51163ab78504848862
-ENV HELM_VERSION=${HELM_VERSION} HELM_SHA256=${HELM_SHA256}
+ARG HELM_SHA256_AMD64=759c656fbd9c11e6a47784ecbeac6ad1eb16a9e76d202e51163ab78504848862
+ARG HELM_SHA256_ARM64=9e1064f5de43745bdedbff2722a1674d0397bc4b4d8d8196d52a2b730909fe62
+ENV TARGETARCH=${TARGETARCH} HELM_VERSION=${HELM_VERSION} \
+    HELM_SHA256_AMD64=${HELM_SHA256_AMD64} HELM_SHA256_ARM64=${HELM_SHA256_ARM64}
 RUN python - <<'PY'
 import hashlib
 import io
@@ -10,19 +17,22 @@ import os
 import tarfile
 import urllib.request
 
-version = os.environ.get("HELM_VERSION", "3.19.4")
-expected = os.environ.get(
-    "HELM_SHA256",
-    "759c656fbd9c11e6a47784ecbeac6ad1eb16a9e76d202e51163ab78504848862",
-)
+version = os.environ["HELM_VERSION"]
+arch = os.environ["TARGETARCH"]
+expected = {
+    "amd64": os.environ["HELM_SHA256_AMD64"],
+    "arm64": os.environ["HELM_SHA256_ARM64"],
+}.get(arch)
+if expected is None:
+    raise SystemExit(f"No pinned Helm archive for architecture {arch!r}")
 with urllib.request.urlopen(
-    f"https://get.helm.sh/helm-v{version}-linux-amd64.tar.gz", timeout=30
+    f"https://get.helm.sh/helm-v{version}-linux-{arch}.tar.gz", timeout=30
 ) as response:
     archive = response.read()
 if hashlib.sha256(archive).hexdigest() != expected:
     raise SystemExit("Helm archive checksum mismatch")
 with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
-    member = tar.getmember("linux-amd64/helm")
+    member = tar.getmember(f"linux-{arch}/helm")
     if not member.isfile() or member.size > 100 * 1024 * 1024:
         raise SystemExit("Helm archive member is invalid")
     source = tar.extractfile(member)
@@ -49,6 +59,9 @@ COPY --from=wheels /wheels /wheels
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels exomem-provisioner \
     && rm -rf /wheels
 
+# This digest is postgres's linux/amd64 manifest, not its multi-platform
+# index: the provisioner is published for linux/amd64 only. Pin the index
+# digest before building this image for any other platform.
 FROM docker.io/library/postgres:17-bookworm@sha256:67870dc097790edf2bd6726658db995dcc830f799d41bb2b78ef07c9a2d5f010
 COPY --from=python-runtime /usr/local /usr/local
 COPY --from=helm /helm /opt/exomem/bin/helm

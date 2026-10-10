@@ -169,19 +169,35 @@ print('offline load verified', MODEL_NAME, v.shape)"
 # restore Jobs (design D8). Fetched and verified in its own small stage, not
 # the final `cloud` image, so no curl/bzip2/apt residue ships in the runtime
 # layer that the image-pin admission policy trusts.
+#
+# The cloud image is published for linux/amd64 and linux/arm64. BuildKit sets
+# TARGETARCH to the platform being built, which names the matching restic
+# release asset; each asset has its own digest from that release's SHA256SUMS.
+# The case below is closed over the platforms the release publishes: any other
+# architecture fails the build instead of shipping a binary that cannot run.
+# The final `restic version` runs the binary on the build platform, so a
+# native build fails here rather than in a tenant's first backup Job.
 ########################################################################
 FROM debian:bookworm-slim AS restic-fetch
+ARG TARGETARCH
 ARG RESTIC_VERSION=0.19.1
-ARG RESTIC_SHA256=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
-RUN apt-get update \
+ARG RESTIC_SHA256_AMD64=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+ARG RESTIC_SHA256_ARM64=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465
+RUN case "${TARGETARCH}" in \
+      amd64) restic_sha256="${RESTIC_SHA256_AMD64}" ;; \
+      arm64) restic_sha256="${RESTIC_SHA256_ARM64}" ;; \
+      *) echo "restic-fetch: no pinned restic for architecture '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl bzip2 \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL -o /tmp/restic.bz2 \
-      "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2" \
- && echo "${RESTIC_SHA256}  /tmp/restic.bz2" | sha256sum -c - \
+      "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${TARGETARCH}.bz2" \
+ && echo "${restic_sha256}  /tmp/restic.bz2" | sha256sum -c - \
  && bunzip2 /tmp/restic.bz2 \
  && chmod 755 /tmp/restic \
- && mv /tmp/restic /usr/local/bin/restic
+ && mv /tmp/restic /usr/local/bin/restic \
+ && /usr/local/bin/restic version
 
 ########################################################################
 # Final: ml (target `ml`). Fresh slim base — no build tooling, no uv, no

@@ -51,12 +51,12 @@
 
 - name: Download the pinned K3s binary with checksum verification
   ansible.builtin.get_url:
-    url: "{{ k3s_release_url_amd64 }}"
+    url: "{{ k3s_binaries[ansible_facts['architecture']].url }}"
     dest: /usr/local/bin/k3s
     owner: root
     group: root
     mode: "0755"
-    checksum: "sha256:{{ k3s_sha256_amd64 }}"
+    checksum: "sha256:{{ k3s_binaries[ansible_facts['architecture']].sha256 }}"
     force: false
   notify: Restart K3s
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 ATTEST_ACTION = "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
 
@@ -115,15 +117,16 @@ def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> 
         "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted"
     ) == 2
     assert "ghcr.io/artexis10/exomem:hosted" in text
-    assert text.count('build_time=$(git show -s --format=%cI "$TAG")') == 2
+    # The automatic hosted job, the manual republish and the Cloud image legs.
+    assert text.count('build_time=$(git show -s --format=%cI "$TAG")') == 3
 
 
 def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> None:
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    automatic = _workflow_job(text, "publish-image", "build-cloud-images")
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
-    for job, image_attestations in ((automatic, 4), (manual, 2)):
+    for job, image_attestations in ((automatic, 2), (manual, 2)):
         proof_step = job.split(
             "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
         )[1].split("\n      - name:", 1)[0]
@@ -138,8 +141,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
             in job
         )
         assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-        # The hosted image and its candidate bundle, plus the cloud and cellctl
-        # images on release.
+        # The hosted image and its candidate file.
         assert job.count(ATTEST_ACTION) == image_attestations
         assert "subject-name: ghcr.io/artexis10/exomem" in job
         assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
@@ -173,19 +175,47 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
         assert "substrate-gateway-contract-selection" not in job
 
 
-def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
+def _cloud_release_jobs() -> tuple[dict, str, str]:
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
-    cloud = automatic.split("\n      - name: Build and push Exomem Cloud cell image", 1)[1]
+    jobs = yaml.safe_load(text)["jobs"]
+    legs = _workflow_job(text, "build-cloud-images", "publish-cloud-images")
+    join = _workflow_job(text, "publish-cloud-images", "publish-existing-image")
+    return jobs, legs, join
 
-    assert text.count("target: cloud") == 1
-    assert "id: cloud-build" in cloud
-    assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in cloud
-    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cloud" in cloud
-    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud" in cloud
-    assert "subject-digest: ${{ steps.cloud-build.outputs.digest }}" in cloud
-    assert 'cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"' in cloud
-    assert "gh release edit" in cloud
+
+def test_release_builds_cloud_images_natively_for_both_platforms() -> None:
+    jobs, legs, join = _cloud_release_jobs()
+    matrix = jobs["build-cloud-images"]["strategy"]["matrix"]["include"]
+
+    assert {(leg["arch"], leg["runner"]) for leg in matrix} == {
+        ("amd64", "ubuntu-latest"),
+        ("arm64", "ubuntu-24.04-arm"),
+    }
+    assert jobs["build-cloud-images"]["runs-on"] == "${{ matrix.runner }}"
+    assert "setup-qemu-action" not in legs
+    # Each leg pushes its platform by digest only; the join job owns the tags.
+    assert legs.count("platforms: linux/${{ matrix.arch }}") == 2
+    assert legs.count("push-by-digest=true") == 2
+    assert "tags:" not in legs
+    assert jobs["publish-cloud-images"]["needs"] == ["release-please", "build-cloud-images"]
+    assert "cloud-image-digests-amd64" in join and "cloud-image-digests-arm64" in join
+
+
+def test_release_publishes_attested_cloud_image_by_index_digest() -> None:
+    _, legs, join = _cloud_release_jobs()
+
+    assert "target: cloud" in legs
+    assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in legs
+    assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in legs
+    # The tags this release always published, now on the joined index.
+    assert 'join_index cloud ghcr.io/artexis10/exomem "${SOURCE_COMMIT}-cloud" cloud "${VERSION}-cloud"' in join
+    # The index must hold both platforms before it is attested and recorded.
+    assert 'test "$platforms" = "linux/amd64,linux/arm64"' in join
+    assert "subject-name: ghcr.io/artexis10/exomem\n" in join
+    assert "subject-digest: ${{ steps.index.outputs.cloud }}" in join
+    assert "CLOUD_DIGEST: ${{ steps.index.outputs.cloud }}" in join
+    assert 'cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"' in join
+    assert "gh release edit" in join
 
 
 def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
@@ -217,10 +247,11 @@ def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -
 
 def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() -> None:
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    automatic = _workflow_job(text, "publish-image", "build-cloud-images")
+    cloud_legs = _workflow_job(text, "build-cloud-images", "publish-cloud-images")
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
-    for job in (automatic, manual):
+    for job in (automatic, cloud_legs, manual):
         assert '[[ "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+' in job
         assert 'source_commit=$(git rev-parse "$TAG^{commit}")' in job
         assert 'test "$(git rev-parse HEAD)" = "$source_commit"' in job
@@ -228,6 +259,7 @@ def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() 
         assert 'echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"' in job
 
     assert 'test "$GITHUB_REF" = "refs/heads/main"' in automatic
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in cloud_legs
     assert 'expected_ref="refs/tags/$TAG"' in manual
     assert 'test "$GITHUB_REF" = "$expected_ref"' in manual
     assert 'gh release view "$TAG" --json tagName --jq .tagName' in manual
@@ -239,6 +271,7 @@ def test_release_publication_jobs_checkout_the_created_tag() -> None:
         _workflow_job(text, "build-artifacts", "sync-hosted-artifacts"),
         _workflow_job(text, "publish-pypi", "publish-mcp-registry"),
         _workflow_job(text, "publish-mcp-registry", "publish-image"),
+        _workflow_job(text, "build-cloud-images", "publish-cloud-images"),
     )
 
     for job in jobs:
@@ -466,22 +499,18 @@ def test_unix_upgrade_documents_why_it_skips_the_cuda_repair() -> None:
     assert "CUDA" in upgrade and "Windows" in upgrade
 
 
-def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
+def test_release_publishes_attested_cellctl_image_by_index_digest() -> None:
     # The platform chart consumes cellctl by digest (cellctl.image), on the
     # same release trigger as the Cloud cell image.
-    text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
-    cellctl = automatic.split("\n      - name: Build and push Exomem Cloud cellctl image", 1)[1]
+    _, legs, join = _cloud_release_jobs()
 
-    assert "id: cellctl-build" in cellctl
-    assert "context: infra/cellctl" in cellctl
-    assert "file: infra/cellctl/Dockerfile" in cellctl
-    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}" in cellctl
-    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}" in cellctl
-    assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
-    assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
-    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in cellctl
-    assert "gh release edit" in cellctl
+    assert "context: infra/cellctl" in legs
+    assert "file: infra/cellctl/Dockerfile" in legs
+    assert 'join_index cellctl ghcr.io/artexis10/exomem-cellctl "$SOURCE_COMMIT" "$VERSION"' in join
+    assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in join
+    assert "subject-digest: ${{ steps.index.outputs.cellctl }}" in join
+    assert "CELLCTL_DIGEST: ${{ steps.index.outputs.cellctl }}" in join
+    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in join
 
 
 def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:
