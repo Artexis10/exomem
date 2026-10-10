@@ -6,7 +6,7 @@ Investigation of origin/main 754e91006 found that the records needed to measure 
 
 ### D1. The upkeep reason is a closed enum from the process that knows
 
-`reason` takes one of four values that this response defines. The serving process reads the worker's live state. Any other process (the CLI, a client without the worker) reads what the worker recorded in its sidecar. The worker records its health at the end of a tick and, new here, within one poll of its gate holding it for a reason other than the one on record. It writes at most once per poll, so a gate that flips between reasons on every request costs one small write per poll. A missing sidecar therefore means no worker has run against this state root. A sidecar that exists but that no tick has written reports `no_tick_yet` with the recorded wait.
+`reason` takes one of four values that this response defines. The serving process reads the worker's live state. Any other process (the CLI, a client without the worker) reads what the worker recorded in its sidecar. The worker records its health at the end of a tick and, new here, within one poll of its gate holding it for a reason other than the one on record. It writes at most once per poll, so a gate that flips between reasons on every request costs one small write per poll. A missing sidecar therefore means no worker has run against this state root. A sidecar that exists but that no tick has written reports `no_tick_yet` with the recorded wait. Each record carries `recorded_at`, so a stopped worker's last wait never reads as a live one. A held lock reads as `unreadable` here, because this response names four reasons; the effect block names it `locked`.
 
 ### D2. Effect is counted from existing records over a fixed window
 
@@ -17,7 +17,7 @@ The window is seven days, stated in the response. The counts are:
 - `cleared`: surfaced in the window, no decision on the item, and absent from the family's current set.
 - `open`: surfaced in the window, no decision, still in the current set.
 
-The current set comes from the stored due-state projection and the Dreamer's open candidates. Building the block runs no audit. A family that neither holds reports `cleared` and `open` as `unknown`, never 0.
+The current set comes from the stored due-state projection and the Dreamer's open candidates. Building the block runs no audit. A family that neither holds reports `cleared` and `open` as `unknown`, never 0. When the Dreamer's sidecar cannot be read, the block names its state, and every upkeep family is listed with the counts the sidecar holds as `unknown`: an absent family would read as one that surfaced nothing.
 
 The count is named `cleared`, not `acted`: deleting or withholding a page clears an item too.
 
@@ -29,15 +29,17 @@ A ledger row written before this change carries no family. A fused attention ite
 
 Both the dismissal counts and the effect block reduce every decision record, withheld pages included. Another audience gets the `owner_only_aggregate` refusal instead of a number.
 
-### D5. A due-state reference addresses its own signal
+### D5. A due-state row's fingerprint addresses its own signal
 
-The due-state block publishes a reference whose stored entry names one page and one finding. Resolving it through the review surface ran three whole-vault audits. The resolver now reads the stored entry and re-runs that category's check on its page. It answers only when the re-check reproduces the stored id, a single category and the stored fingerprint; otherwise the whole-vault path runs.
+Each due-state row publishes the fingerprint of its stored entry. Supplied as `expected_fingerprint`, it already selects the due signal alone: the whole-vault resolution narrows a fused item to the component with that fingerprint. It did so only after three whole-vault audits.
 
-The trade-off: on the review surface, a page's unpartitioned signals (for example `relation_debt`) fold into the partitioned item. A decision through the due reference now records the due signal alone. The review surface keeps that item open for its page-level signals until someone triages it there. A caller that round-trips the review surface's fingerprint as `expected_fingerprint` still resolves the fused item, as before.
+The resolver now answers that request from the stored entry and a re-check of that category on its page. It answers only when the re-check reproduces the stored id, a single category and the stored fingerprint; otherwise the whole-vault path runs. A reference without a fingerprint resolves as before, to the fused item the review surface lists. So the CLI, the TUI and `review_memory(mode="item")`, which send no fingerprint, keep their behaviour and their cost.
+
+A reopen through the due signal's fingerprint clears only that signal's records. Otherwise it would also clear the fused record, and reopen an item the user dismissed on the review surface.
 
 The categories that one page settles are `prediction_window`, `question_aging`, the page-local half of `supersession_integrity`, and per-page `unreflected_observations` entries. `unfinished_experiments` carries no partition and shares its id with other page-level queues, so it keeps the whole-vault path.
 
 ## Risks
 
 - The wait record costs at most one small write to the Dreamer's sidecar per poll (30 s).
-- A due reference on a page with page-level signals now resolves to a narrower item than the review surface lists (D5).
+- Only a caller that round-trips the row's fingerprint gets the fast path. `review_memory(mode="item")` takes no fingerprint, so it keeps the whole-vault cost (D5).

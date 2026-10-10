@@ -478,6 +478,7 @@ def apply_for_item(
     until: str | None = None,
     why: str | None = None,
     now: dt.datetime | None = None,
+    fingerprint_bound: bool = False,
 ) -> dict[str, Any]:
     """Record one triage decision for a fused item AND each of its components.
 
@@ -493,14 +494,19 @@ def apply_for_item(
     cannot know which fused item a user was looking at, and guessing would let a
     dismissal leak across signals the user never saw.
 
-    `reopen` needs no fan-out -- `apply` clears every record under the item id,
-    component records included -- but it still routes through here so there is
-    exactly one place that knows this.
+    `reopen` clears every record under the item id, component records
+    included, and it still routes through here so there is exactly one place
+    that knows this. The exception is a `fingerprint_bound` reopen of a
+    single-category item, the due signal a due-state row's fingerprint names: it
+    clears only the records a decision on that item writes, so reopening the
+    due signal never reopens the fused item the review surface shows dismissed.
     """
     store = ReviewStateStore(vault_root)
     review_id = str(review_id or getattr(item, "item_id", None) or "")
     fused = str(getattr(item, "fingerprint", None) or "")
-    if str(action or "").strip().lower() == "reopen":
+    reopen = str(action or "").strip().lower() == "reopen"
+    one_signal = fingerprint_bound and len(getattr(item, "categories", None) or []) == 1
+    if reopen and not one_signal:
         # No fan-out and no attribution to compute: `apply` clears every record
         # under the item id, component records included.
         return store.apply(review_id, fused, action=action, until=until, why=why, now=now)
@@ -512,6 +518,16 @@ def apply_for_item(
     # published by a due-state count could be "dismissed" while the count that
     # published it carried on, or while a different signal was put down instead.
     pairs.extend(getattr(item, "triage_components", None) or [])
+    if reopen:
+        return store.apply(
+            review_id,
+            fused,
+            action=action,
+            until=until,
+            why=why,
+            now=now,
+            only=[fused, *(value for _category, value in pairs)],
+        )
     family_by_fingerprint: dict[str, str] = {}
     for category, value in pairs:
         if value not in family_by_fingerprint and category:
@@ -646,7 +662,13 @@ class ReviewStateStore:
         now: dt.datetime | None = None,
         origin: str = MANUAL,
         family: str | None = None,
+        only: Iterable[str] | None = None,
     ) -> dict[str, Any]:
+        """Record one decision, or clear one item's records on `reopen`.
+
+        A reopen clears every record under the id unless `only` names the
+        fingerprints whose records it clears (see `apply_for_item`).
+        """
         action = str(action or "").strip().lower()
         if action not in VALID_ACTIONS:
             raise ValueError(
@@ -666,10 +688,14 @@ class ReviewStateStore:
             payload = self.load()
             records = payload["records"]
             if action == "reopen":
+                scope = (
+                    None if only is None else {_record_key(review_id, value) for value in only}
+                )
                 for existing in [
                     record_key
                     for record_key in records
                     if record_key.startswith(f"{review_id}:")
+                    and (scope is None or record_key in scope)
                 ]:
                     records.pop(existing, None)
                 decision = None
@@ -1088,12 +1114,15 @@ def effect_counts(
     until: dt.datetime,
     current: Mapping[str, frozenset[str] | set[str]],
     extra_surfaced: Iterable[tuple[str, str, str, dt.datetime]] = (),
+    unknown: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """What each family surfaced, and what became of it, over one window. Pure.
 
     - `surfaced`: identities first stamped on the surfaced ledger in the window,
       plus `extra_surfaced` rows `(family, item_id, fingerprint, first_at)` from
-      a ledger kept elsewhere (the dreamer's deliveries).
+      a ledger kept elsewhere (the dreamer's deliveries). An identity is one
+      family's item id, first stamped at its earliest row, so a fingerprint
+      change inside the window does not count it twice.
     - `dismissed`, `snoozed`: items with a manual decision of that action and
       family updated in the window.
     - `cleared`: surfaced in the window, no decision on the item, and the item
@@ -1103,11 +1132,16 @@ def effect_counts(
 
     `current` holds the item ids of each family whose current set can be read
     without an audit; every other family's `cleared` and `open` are `unknown`.
+    `unknown` maps each family whose surfacings live in a ledger that could not
+    be read to the reason: it is always listed, its `surfaced`, `cleared` and
+    `open` are `unknown`, and its decisions are still counted.
     Rows that carry no family (written before families were stamped, or a
-    fused item two families share) are counted under `unattributed`.
+    fused item two families share) are counted under `unattributed`, unless
+    another row attributes the same item.
     """
     since = since.astimezone(dt.UTC)
     until = until.astimezone(dt.UTC)
+    unknown = dict(unknown or {})
     records = [
         record
         for record in ((payload or {}).get("records") or {}).values()
@@ -1118,6 +1152,18 @@ def effect_counts(
     unattributed = {"surfaced": 0, "dismissed": 0, "snoozed": 0}
 
     def row(family: str) -> dict[str, Any]:
+        if family in unknown:
+            return families.setdefault(
+                family,
+                {
+                    "surfaced": UNKNOWN,
+                    "dismissed": 0,
+                    "snoozed": 0,
+                    "cleared": UNKNOWN,
+                    "open": UNKNOWN,
+                    "unknown_reason": unknown[family],
+                },
+            )
         known = family in current
         return families.setdefault(
             family,
@@ -1133,20 +1179,33 @@ def effect_counts(
     def within(stamp: dt.datetime | None) -> bool:
         return stamp is not None and since <= stamp <= until
 
-    surfaced: list[tuple[str | None, str, dt.datetime | None]] = []
+    first: dict[tuple[str | None, str], dt.datetime] = {}
+
+    def note(family: str | None, item_id: str, stamp: dt.datetime | None) -> None:
+        held = first.get((family, item_id))
+        if stamp is not None and (held is None or stamp < held):
+            first[(family, item_id)] = stamp
+
     for key, entry in ((payload or {}).get("surfaced") or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        family = str(entry.get("family") or "") or None
-        surfaced.append((family, str(key).split(":", 1)[0], _parse_stamp(entry.get("first_surfaced_at"))))
-    surfaced.extend(
-        (family, item_id, at.astimezone(dt.UTC)) for family, item_id, _fp, at in extra_surfaced
-    )
-    for family, item_id, stamp in surfaced:
+        if isinstance(entry, dict):
+            note(
+                str(entry.get("family") or "") or None,
+                str(key).split(":", 1)[0],
+                _parse_stamp(entry.get("first_surfaced_at")),
+            )
+    for family, item_id, _fingerprint, at in extra_surfaced:
+        note(str(family or "") or None, str(item_id), at.astimezone(dt.UTC))
+    attributed_ids = {item_id for family, item_id in first if family is not None}
+    for family in unknown:
+        row(family)
+    for (family, item_id), stamp in first.items():
         if not within(stamp):
             continue
         if family is None:
-            unattributed["surfaced"] += 1
+            if item_id not in attributed_ids:
+                unattributed["surfaced"] += 1
+            continue
+        if family in unknown:
             continue
         counts = row(family)
         counts["surfaced"] += 1

@@ -189,7 +189,7 @@ def test_the_served_block_reports_totals_and_bounded_top_references(vault: Path)
     assert len(block["top"]) == 2
     assert len(block["top"]) <= due_state_module.TOP_LIMIT
     first = block["top"][0]
-    assert set(first) == {"category", "ref", "due_since"}
+    assert set(first) == {"category", "ref", "fingerprint", "due_since"}
     assert first["category"] == "prediction_window"
     assert first["ref"].startswith("exomem://review/")
     # Most-overdue first: the older check date leads.
@@ -689,9 +689,6 @@ def test_removing_the_egress_filter_fails_this_module(
 def _review_surface_item(vault: Path, rel: str, *, today: dt.date = TODAY):
     """The item exactly as the REVIEW SURFACE composes it: the default union, fused.
 
-    Triage on it round-trips its fused fingerprint, as review-surface callers
-    do; without one, the stored-entry resolver answers with the due signal alone.
-
     Deliberately not `categories=[one]`. `attention._rank` folds each page's
     unpartitioned page-level signals (relation_debt, stale_review, ...) into the
     partitioned item, so a single-category call is the ONE configuration in which
@@ -744,10 +741,7 @@ def test_a_dismissal_through_the_review_surface_stops_every_carrier_counting(
         "passes for the wrong reason"
     )
 
-    commands.op_triage_memory(
-        vault, ref=item.ref, action="dismiss", why="known",
-        expected_fingerprint=item.fingerprint,
-    )
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
 
     assert _served(vault) is None
 
@@ -763,8 +757,7 @@ def test_a_snooze_through_the_review_surface_is_quiet_only_until_it_lapses(
     _assert_fused(item)
 
     commands.op_triage_memory(
-        vault, ref=item.ref, action="snooze", until="2026-08-20", why="after the demo",
-        expected_fingerprint=item.fingerprint,
+        vault, ref=item.ref, action="snooze", until="2026-08-20", why="after the demo"
     )
 
     assert _served(vault, today=TODAY) is None
@@ -781,10 +774,7 @@ def test_a_reopen_through_the_review_surface_makes_it_count_again(vault: Path) -
     item = _review_surface_item(vault, rel)
     _assert_fused(item)
 
-    commands.op_triage_memory(
-        vault, ref=item.ref, action="dismiss", why="known",
-        expected_fingerprint=item.fingerprint,
-    )
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
     assert _served(vault) is None
 
     commands.op_triage_memory(vault, ref=item.ref, action="reopen")
@@ -804,10 +794,7 @@ def test_a_material_change_resurfaces_a_dismissed_item_under_a_new_fingerprint(
     item = _review_surface_item(vault, rel)
     before = due_state_module.served_entries(vault, today=TODAY)[0]["fingerprint"]
 
-    commands.op_triage_memory(
-        vault, ref=item.ref, action="dismiss", why="known",
-        expected_fingerprint=item.fingerprint,
-    )
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
     assert _served(vault) is None
 
     # The author edits the prediction itself -- new knowledge, not a reformat.
@@ -920,9 +907,6 @@ def test_removing_the_opt_in_fallback_fails_this_module(
     monkeypatch.setattr(
         attention_module, "_item_by_ref_fallback", lambda *a, **k: None
     )
-    # The stored-entry resolver answers these refs first; without it out of the
-    # way this would measure that resolver, not the fallback.
-    monkeypatch.setattr(attention_module, "_item_from_projection", lambda *a, **k: None)
 
     make(vault)
     due_state_module.reconcile(vault, today=TODAY)
@@ -960,27 +944,54 @@ def test_the_fallback_does_not_move_a_default_union_items_identity(
     from exomem import attention as attention_module
 
     rel = _prediction(vault, "one", check_by="2026-08-01")
-    due_state_module.reconcile(vault, today=TODAY)
     item = _review_surface_item(vault, rel)
     _assert_fused(item)
 
-    # The fused fingerprint the review surface showed, round-tripped as #555's
-    # callers do: the stored-entry resolver answers with the due signal alone,
-    # so it must step aside for it.
-    with_fallback = attention_module.item_by_ref(
-        vault, item.ref, expected_fingerprint=item.fingerprint, today=TODAY
-    )
+    with_fallback = attention_module.item_by_ref(vault, item.ref, today=TODAY)
 
     monkeypatch.setattr(
         attention_module, "_item_by_ref_fallback", lambda *a, **k: None
     )
-    without_fallback = attention_module.item_by_ref(
-        vault, item.ref, expected_fingerprint=item.fingerprint, today=TODAY
-    )
+    without_fallback = attention_module.item_by_ref(vault, item.ref, today=TODAY)
 
-    assert with_fallback.item_id == without_fallback.item_id == item.item_id
-    assert with_fallback.fingerprint == without_fallback.fingerprint == item.fingerprint
-    assert with_fallback.categories == without_fallback.categories == item.categories
+    assert with_fallback.item_id == without_fallback.item_id
+    assert with_fallback.fingerprint == without_fallback.fingerprint
+    assert with_fallback.categories == without_fallback.categories
+
+
+def _published(vault: Path, category: str) -> dict:
+    """The one row the served block publishes for `category`, as an agent reads it."""
+    rows = [row for row in _served(vault)["top"] if row["category"] == category]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_a_bare_due_ref_is_the_item_the_review_surface_lists(vault: Path) -> None:
+    """A ref with no fingerprint resolves the fused item the review surface lists.
+
+    `exomem review dismiss <ref>` and the TUI send no fingerprint. When the due
+    signal alone answered a bare ref, the item view dropped the page's other
+    reasons, and the dismissal left the fused item open on the review surface.
+    """
+    from exomem import attention as attention_module
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
+    ref = _published(vault, "prediction_window")["ref"]
+    assert ref == item.ref
+
+    viewed = commands.op_review_memory(vault, mode="item", ref=ref)
+    commands.op_triage_memory(vault, ref=ref, action="dismiss", why="known")
+
+    assert viewed["categories"] == item.categories
+    assert viewed["fingerprint"] == item.fingerprint
+    still_open = attention_module.attention(vault, limit=0, today=TODAY).items
+    assert rel not in [entry.path for entry in still_open], (
+        "a dismissal by the bare ref left the fused item open on the review surface"
+    )
 
 
 BOUNDED_CASES = [
@@ -993,38 +1004,66 @@ BOUNDED_CASES = [
 
 
 @pytest.mark.parametrize(("category", "make"), BOUNDED_CASES, ids=[c for c, _ in BOUNDED_CASES])
-def test_a_due_ref_is_read_and_put_down_without_a_whole_vault_audit(
+def test_a_due_row_with_its_fingerprint_is_read_and_put_down_without_an_audit(
     vault: Path, category: str, make, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Resolving one due ref ran attention, then activation, then a wider
-    attention pass: three whole-vault audits for one item. On the owner's vault
-    that outlived every client, so no agent could act on a due item at all."""
+    attention pass: whole-vault audits for one item. On the owner's vault that
+    outlived every client, so no agent could act on a due item at all."""
     from exomem import audit as audit_module
     from exomem import commands
 
     make(vault)
     due_state_module.reconcile(vault, today=TODAY)
-    ref = [
-        row
-        for row in due_state_module.served_entries(vault, today=TODAY)
-        if row["category"] == category
-    ][0]["ref"]
+    row = _published(vault, category)
     audits: list[object] = []
     real = audit_module.audit
     monkeypatch.setattr(
         audit_module, "audit", lambda *a, **k: (audits.append(a), real(*a, **k))[1]
     )
 
-    item = commands.op_review_memory(vault, mode="item", ref=ref)
+    context = commands.op_review_item_context(
+        vault, ref=row["ref"], expected_fingerprint=row["fingerprint"]
+    )
     commands.op_triage_memory(
-        vault, ref=ref, action="dismiss", why="known", expected_fingerprint=item["fingerprint"]
+        vault, ref=row["ref"], action="dismiss", why="known",
+        expected_fingerprint=row["fingerprint"],
     )
 
     assert audits == []
-    assert item["categories"] == [category]
+    assert context["item"]["categories"] == [category]
     served = _served(vault)
     assert served is None or category not in served["categories"], (
         f"a dismissed {category} item is still being counted"
+    )
+
+
+def test_reopening_a_due_row_by_its_fingerprint_leaves_the_fused_dismissal_alone(
+    vault: Path,
+) -> None:
+    """A reopen cleared every record under the id, so reopening the due signal by
+    its own fingerprint also reopened the fused item the user had dismissed on
+    the review surface."""
+    from exomem import attention as attention_module
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
+    row = _published(vault, "prediction_window")
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
+    assert _served(vault) is None
+
+    commands.op_triage_memory(
+        vault, ref=row["ref"], action="reopen", expected_fingerprint=row["fingerprint"]
+    )
+
+    reopened = _served(vault)
+    assert reopened is not None and reopened["total"] == 1
+    still_dismissed = attention_module.attention(vault, limit=0, today=TODAY).items
+    assert rel not in [entry.path for entry in still_dismissed], (
+        "reopening the due signal reopened the fused item as well"
     )
 
 
@@ -1068,10 +1107,7 @@ def test_removing_the_component_fanout_fails_this_module(
     rel = _prediction(vault, "one", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
     item = _review_surface_item(vault, rel)
-    commands.op_triage_memory(
-        vault, ref=item.ref, action="dismiss", why="known",
-        expected_fingerprint=item.fingerprint,
-    )
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
 
     still_counted = _served(vault)
     assert still_counted is not None and still_counted["total"] == 1

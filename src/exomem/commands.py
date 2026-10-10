@@ -9275,11 +9275,13 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
 
     The current set comes from the stored due-state projection and the
     dreamer's sidecar, never from an audit: a family neither holds reports
-    `cleared` and `open` as unknown.
+    `cleared` and `open` as unknown. When the sidecar cannot be read, every
+    upkeep family is listed with the counts it holds as unknown, and the block
+    says why: an absent family would read as one that surfaced nothing.
     """
     import datetime as dt
 
-    from . import dreamer_store, due_state
+    from . import dreamer_families, dreamer_store, due_state
 
     until = dt.datetime.now(dt.UTC)
     since = until - dt.timedelta(days=review_state_module.EFFECT_WINDOW_DAYS)
@@ -9293,8 +9295,12 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
                 for entry in due_state._unbucket(entries)
             }
     extra: list[tuple[str, str, str, dt.datetime]] = []
+    unknown: dict[str, str] = {}
     view = dreamer_store.read_view(vault_root)
-    if view is not None:
+    sidecar = "readable" if view is not None else dreamer_store.refused_condition(vault_root)
+    if view is None:
+        unknown = {family: sidecar for family in dreamer_families.family_names()}
+    else:
         family_of = {str(row["id"]): str(row.get("family") or "") for row in view.candidates}
         for row in view.candidates:
             if row.get("state") == "open":
@@ -9316,8 +9322,10 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
         until=until,
         current={family: frozenset(ids) for family, ids in current.items()},
         extra_surfaced=extra,
+        unknown=unknown,
     )
     return {
+        "dreamer_sidecar": sidecar,
         "window": {
             "since": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -9341,7 +9349,9 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             "Cleared is not acted: deleting or withholding a page clears an item too. "
             "Only surfaces that stamp the first-surfaced ledger or record a dreamer "
             "delivery are counted, and a family absent here surfaced nothing recorded "
-            "in the window. Rows written before families were stamped are unattributed."
+            "in the window. When the dreamer's sidecar is not readable, every upkeep "
+            "family is listed with what it holds as unknown and an unknown_reason. "
+            "Rows written before families were stamped are unattributed."
         ),
         **counts,
     }
@@ -9534,6 +9544,7 @@ def op_triage_memory(
         review_id=item.item_id or review_state_module.parse_review_ref(ref),
         until=until,
         why=why,
+        fingerprint_bound=bool(expected_fingerprint),
     )
     if normalized == "reopen":
         # Reopen is the complete inverse: an item-level record alone would leave a

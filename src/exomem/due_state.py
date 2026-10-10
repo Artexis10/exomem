@@ -1465,12 +1465,7 @@ def apply_write_delta(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
         # Page-local half of a split category: this page's own pointers only.
-        findings.extend(
-            finding
-            for finding in audit_module._check_supersession_integrity(vault_root, pages)
-            if str((finding.meta or {}).get("defect") or "")
-            in DELTA_DEFECTS["supersession_integrity"]
-        )
+        findings.extend(_page_local_supersession(vault_root, pages))
     grouped = _entries_from_findings(vault_root, findings)
 
     with _LOCK:
@@ -3062,7 +3057,8 @@ def stored_identity(vault_root: Path, review_id: str) -> tuple[str, str, str] | 
     return _fingerprints_for(vault_root).get(review_state_module.review_ref(review_id))
 
 
-def _recheck_supersession(vault_root: Path, pages: list[Any], **_dates: Any) -> list[Any]:
+def _page_local_supersession(vault_root: Path, pages: list[Any], **_dates: Any) -> list[Any]:
+    """The page-local half of `supersession_integrity` (`DELTA_DEFECTS`) on `pages`."""
     from . import audit as audit_module
 
     return [
@@ -3081,6 +3077,11 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
     partition and shares its id with other page-level queues, so it is not here.
     A grouped observation backfill entry spans many pages: one page never
     reproduces it, and its lookup takes the whole-vault path.
+
+    Not derived from `apply_write_delta`'s checks, which differ on purpose: the
+    delta stores every finding up to `_FAR_FUTURE` and owns
+    `unfinished_experiments`, while this reproduces today's item and only where
+    one page partitions it. They share the split category's page-local half.
     """
     from . import audit as audit_module
 
@@ -3091,7 +3092,7 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
         "question_aging": lambda root, pages, *, today, now: (
             audit_module._check_question_aging(root, pages, today=today)
         ),
-        "supersession_integrity": _recheck_supersession,
+        "supersession_integrity": _page_local_supersession,
         "unreflected_observations": lambda root, pages, *, today, now: (
             audit_module._check_unreflected_observations(root, pages, now=now)
         ),
@@ -3139,10 +3140,14 @@ def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             for category in PROJECTION_CATEGORIES
             if category in counts
         },
+        # The fingerprint is the row's own signal identity: round-tripped as
+        # `expected_fingerprint`, it addresses this due signal alone, and the
+        # resolver can answer from the stored entry without a whole-vault audit.
         "top": [
             {
                 "category": row["category"],
                 "ref": row["ref"],
+                "fingerprint": row["fingerprint"],
                 "due_since": row["due_since"],
             }
             for row in rows[:TOP_LIMIT]

@@ -223,7 +223,7 @@ def start(vault_root: Path) -> threading.Thread | None:
     upgraded in place and rarely restarted, so "on at the next restart" could
     mean never.
     """
-    global _thread, _stop, _host
+    global _host
     from . import mode
 
     with _LOCK:
@@ -233,20 +233,28 @@ def start(vault_root: Path) -> threading.Thread | None:
     if current == "off":
         return None
     with _LOCK:
-        if _thread is not None and _thread.is_alive():
-            return _thread
-        stop_event = threading.Event()
-        _stop = stop_event
-        _STATE.setting = current
-        _STATE.phase = current
-        _STATE.vault_changed_at = _time.monotonic()
-        thread = threading.Thread(
-            target=_run, args=(Path(vault_root), stop_event), name=THREAD_NAME, daemon=True
-        )
-        _thread = thread
-        thread.start()
-    log.info("dreamer started (%s)", current)
+        thread, started = _launch_locked(Path(vault_root), current)
+    if started:
+        log.info("dreamer started (%s)", current)
     return thread
+
+
+def _launch_locked(vault_root: Path, current: str) -> tuple[threading.Thread, bool]:
+    """The worker thread, started unless one runs, and whether it was. Holds `_LOCK`."""
+    global _thread, _stop
+    if _thread is not None and _thread.is_alive():
+        return _thread, False
+    stop_event = threading.Event()
+    _stop = stop_event
+    _STATE.setting = current
+    _STATE.phase = current
+    _STATE.vault_changed_at = _time.monotonic()
+    thread = threading.Thread(
+        target=_run, args=(vault_root, stop_event), name=THREAD_NAME, daemon=True
+    )
+    _thread = thread
+    thread.start()
+    return thread, True
 
 
 def stop(timeout: float = 2.0) -> None:
@@ -284,13 +292,23 @@ def reconcile_setting() -> None:
     lock and, while no worker runs, one config read.
     """
     with _LOCK:
-        host = _host
-        alive = _thread is not None and _thread.is_alive()
-    if host is None or alive:
-        return
+        if _host is None or (_thread is not None and _thread.is_alive()):
+            return
     try:
-        if setting() != "off":
-            start(host)
+        current = setting()
+        if current == "off":
+            return
+        # The host check and the start share one `_LOCK` hold, and this path
+        # never assigns `_host`: a `stop()` lands either before the hold (no host,
+        # nothing starts) or after the start (it stops the new worker), so a
+        # config poll racing shutdown cannot leave a worker running. No test
+        # forces that interleaving without pinning where this reads the setting.
+        with _LOCK:
+            if _host is None:
+                return
+            started = _launch_locked(_host, current)[1]
+        if started:
+            log.info("dreamer started (%s) after a setting change", current)
     except Exception:  # noqa: BLE001 - upkeep must never break the config poll
         log.warning("dreamer: start after a setting change failed", exc_info=True)
 
@@ -433,6 +451,7 @@ def _record_waiting(vault_root: Path, clock: Clock) -> None:
             "state": _STATE.phase,
             "waiting_reason": _STATE.waiting_reason,
             "waiting_since": _STATE.waiting_since,
+            "recorded_at": clock.time(),
         }
     store = dreamer_store.DreamerStore(vault_root)
     conn = None
@@ -828,6 +847,7 @@ def _record_tick(
             family.name: not (family.global_counts and partial)
             for family in dreamer_families.REGISTRY
         }
+        health["recorded_at"] = clock.time()
         with store.write(conn):
             store.set_health(conn, health)
     except Exception:  # noqa: BLE001 - health is best effort; the tick is recorded

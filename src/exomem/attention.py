@@ -682,24 +682,26 @@ def _item_by_ref_fallback(
 
 
 def _item_from_projection(
-    vault_root: Path, wanted: str, *, today=None
+    vault_root: Path, wanted: str, expected_fingerprint: str, *, today=None
 ) -> AttentionItem | None:
-    """Resolve a due-state ref from its stored entry, re-checking only its page.
+    """The due signal a due-state row published, from its stored entry and its page.
 
-    Separate and named so it is a mechanism a test can remove. The due-state
-    block hands out these refs, and resolving one through the whole union ran
-    attention, then activation, then a wider attention pass: three whole-vault
-    audits for one item, so no agent could act on a due item before its client
-    timed out.
+    Separate and named so it is a mechanism a test can remove. A caller that
+    round-trips the fingerprint a due-state row published asks for that one
+    signal, which the whole-vault path also answers (`item_by_ref` narrows to
+    the matching component), but only after attention, activation and a wider
+    attention pass: whole-vault audits for one item, so no agent could act on a
+    due item before its client timed out.
 
-    It answers only when the re-check reproduces the stored entry exactly: the
-    same id, one category, and the stored fingerprint. Anything else returns
-    None, and the caller takes the whole-vault path.
+    It answers only when the expected fingerprint is the stored entry's and the
+    page's own re-check reproduces that entry exactly: the same id, one
+    category, the same fingerprint. Anything else returns None, and the caller
+    takes the whole-vault path.
     """
     from . import due_state
 
     stored = due_state.stored_identity(vault_root, wanted)
-    if stored is None:
+    if stored is None or stored[0] != expected_fingerprint:
         return None
     fingerprint, category, rel_path = stored
     now = dt.datetime.now(dt.UTC)
@@ -781,13 +783,20 @@ def item_by_ref(
     item was reachable by no path at all — read on every carrier, impossible to
     dismiss. Widening the search only after a miss buys that without moving a
     single existing item's identity.
+
+    A caller holding the fingerprint a due-state row published gets that signal
+    from its stored entry first (`_item_from_projection`): the same item the
+    component narrowing below returns, without the whole-vault passes.
     """
     wanted = review_state_module.parse_review_ref(reference)
-    bounded = _item_from_projection(vault_root, wanted, today=today)
-    if bounded is not None and (
-        not expected_fingerprint or bounded.fingerprint == expected_fingerprint
-    ):
-        return bounded
+    if expected_fingerprint:
+        # Only a due row's own fingerprint selects the due signal alone; a bare
+        # ref keeps resolving the item the review surface lists, fused or not.
+        bounded = _item_from_projection(
+            vault_root, wanted, expected_fingerprint, today=today
+        )
+        if bounded is not None:
+            return bounded
     found: AttentionItem | None = None
     for resolver in (attention, activation):
         # A scan to resolve ONE reference. Stamping it would record a first

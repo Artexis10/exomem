@@ -189,7 +189,7 @@ def _sanitize_health(health: Mapping[str, Any]) -> dict[str, Any]:
     it does not recognise is dropped or replaced by `UNKNOWN`.
     """
     out: dict[str, Any] = {}
-    for key in ("last_tick_at", "hour_cpu_used", "waiting_since", "failed_since"):
+    for key in ("last_tick_at", "hour_cpu_used", "waiting_since", "failed_since", "recorded_at"):
         value = health.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             out[key] = float(value)
@@ -1122,23 +1122,42 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+#: SQLite's own primary result codes for a database another connection holds,
+#: a closed set the library documents.
+_LOCK_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _failure(exc: sqlite3.Error) -> str:
+    code = getattr(exc, "sqlite_errorcode", None)
+    # An extended result code keeps its primary code in its low 8 bits.
+    return "locked" if isinstance(code, int) and (code & 0xFF) in _LOCK_CODES else "unreadable"
+
+
 def sidecar_condition(vault_root: Path) -> str:
-    """Why `read_view` may answer None: `missing`, `schema_mismatch`, `unreadable`
-    or `readable`. Never creates the file and never waits on a lock."""
+    """Why `read_view` may answer None: `missing`, `schema_mismatch`, `locked`,
+    `unreadable` or `readable`. Never creates the file and never waits on a lock."""
     path = sidecar_path(Path(vault_root))
     if not path.is_file():
         return "missing"
     try:
         conn = _open_readonly(path)
-    except sqlite3.Error:
-        return "unreadable"
+    except sqlite3.Error as exc:
+        return _failure(exc)
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    except sqlite3.Error:
-        return "unreadable"
+    except sqlite3.Error as exc:
+        return _failure(exc)
     finally:
         conn.close()
     return "readable" if row is not None and row[0] == str(SCHEMA_VERSION) else "schema_mismatch"
+
+
+def refused_condition(vault_root: Path) -> str:
+    """Why `read_view` just answered None: `missing`, `schema_mismatch`, `locked`
+    or `unreadable`. A file that probes readable now was refused a moment ago (a
+    write in flight), so it reads as `unreadable`, never as nothing wrong."""
+    condition = sidecar_condition(vault_root)
+    return "unreadable" if condition == "readable" else condition
 
 
 def read_view(vault_root: Path) -> StoreView | None:

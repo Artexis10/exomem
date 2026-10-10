@@ -11,7 +11,9 @@
 - [ ] 2.3 Serve the `effect` block in the dispositions view, owner-only, with its window and sources.
 - [ ] 2.4 Prove the counts on a vault with an open, a dismissed, a deleted, an unattributed and an audit-only item.
 
-## 3. Due references resolve from the stored entry
+## 3. A due row's fingerprint addresses its own signal
 
-- [ ] 3.1 Resolve a due-state reference from its stored entry and one page re-check, falling back to the whole-vault path when the re-check does not reproduce it.
-- [ ] 3.2 Prove a due reference is read and triaged with no whole-vault audit, and that a round-tripped review-surface fingerprint keeps its fused identity.
+- [ ] 3.1 Publish each due-state row's stored fingerprint on the block and through the write terminal.
+- [ ] 3.2 Resolve a request carrying that fingerprint from the stored entry and one page re-check, falling back to the whole-vault path when the re-check does not reproduce it.
+- [ ] 3.3 Scope a fingerprint-bound reopen of a single-category item to that item's records.
+- [ ] 3.4 Prove a due row is read and triaged with its fingerprint with no whole-vault audit, a bare reference still resolves the fused item, and reopening the due signal leaves a fused dismissal alone.

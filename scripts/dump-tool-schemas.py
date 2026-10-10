@@ -60,10 +60,6 @@ def _build_server(vault_root: Path, state_root: Path):
     os.environ["EXOMEM_DISABLE_FILE_WATCHER"] = "1"
     os.environ.pop("EXOMEM_DISABLE_TIER2", None)  # tier-2 ON
     os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_root)
-    # Beside the scratch vault, never the caller's: run from an operator shell,
-    # the inherited root is the live service's, and each run left a
-    # `schema_vault-<digest>` directory in it.
-    os.environ["EXOMEM_STATE_ROOT"] = str(state_root.parent / "state")
     os.environ["EXOMEM_VAULT_PATH"] = str(vault_root)
     return server_module.build_server(require_auth=False)
 

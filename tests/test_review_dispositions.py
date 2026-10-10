@@ -831,6 +831,128 @@ def test_the_effect_block_counts_what_each_family_surfaced_and_what_became_of_it
     assert effect["unattributed"]["surfaced"] == 1
 
 
+def test_a_due_state_delivery_is_charged_to_its_family(vault: Path) -> None:
+    """The carrier stamped no family, so a family that reached the agent only on
+    a due-state block showed no effect at all."""
+    from exomem import due_state
+
+    overdue_prediction(vault, "nag-carried")
+    scratch_page(vault)
+    due_state.reset_emission_state()
+    assert due_state.should_emit(due_state.served(vault), vault_root=vault)
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["families"][FAMILY]["surfaced"] == 1
+    assert effect["unattributed"]["surfaced"] == 0
+
+
+def test_an_attention_surfacing_is_charged_to_its_family(vault: Path) -> None:
+    """The attention surface stamped no family, so a family the owner reviewed
+    only there showed no effect at all."""
+    overdue_prediction(vault, "nag-listed")
+    scratch_page(vault)
+    assert commands.op_attention(vault, categories=[FAMILY], limit=0)["items"]
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["families"][FAMILY]["surfaced"] == 1
+    assert effect["unattributed"]["surfaced"] == 0
+
+
+def test_a_fingerprint_change_inside_the_window_is_one_surfacing(vault: Path) -> None:
+    """The ledger keys a row by item and fingerprint, so an item whose signal
+    changed inside the window counted as two surfacings."""
+    review_state.record_surfaced(vault, [("2" * 24, "a" * 16, FAMILY)], surface="review")
+    review_state.record_surfaced(vault, [("2" * 24, "b" * 16, FAMILY)], surface="review")
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["families"][FAMILY]["surfaced"] == 1
+
+
+@pytest.mark.parametrize("state", ["unreadable", "locked"])
+def test_an_unreadable_dreamer_sidecar_leaves_every_upkeep_family_unknown(
+    vault: Path, state: str
+) -> None:
+    """A failed sidecar read dropped every upkeep family from the block, and the
+    note said an absent family surfaced nothing: a failed read shown as a
+    complete one. A lock is named apart from damage, so nobody deletes a
+    healthy sidecar that a write was holding."""
+    import sqlite3
+
+    from exomem import dreamer_families, dreamer_store
+
+    sidecar = dreamer_store.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    holder = None
+    if state == "locked":
+        holder = sqlite3.connect(sidecar)
+        holder.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        holder.execute("INSERT INTO meta VALUES ('schema', ?)", (str(dreamer_store.SCHEMA_VERSION),))
+        holder.commit()
+        holder.execute("BEGIN EXCLUSIVE")
+    else:
+        sidecar.write_bytes(b"not a database file " * 64)
+    try:
+        effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+    finally:
+        if holder is not None:
+            holder.rollback()
+            holder.close()
+
+    assert effect["dreamer_sidecar"] == state
+    for family in dreamer_families.family_names():
+        assert effect["families"][family] == {
+            "surfaced": "unknown",
+            "dismissed": 0,
+            "snoozed": 0,
+            "cleared": "unknown",
+            "open": "unknown",
+            "unknown_reason": state,
+        }
+
+
+def test_the_dismissal_and_effect_counts_are_served_to_the_owner_only(vault: Path) -> None:
+    """Both counts reduce every decision record, withheld pages' included, so a
+    count served to another audience moves with pages it may not see."""
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    commands.op_triage_memory(vault, ref=FAMILY_REF, action="quiet", why=WHY)
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "withheld.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Withheld\n"
+        'paths: ["Notes/Withheld/**"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "withheld-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        f"audience: external\nceiling: {egress.LEVEL_NONE}\n",
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    find_module.clear_cache()
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        restricted = commands.op_review_memory(vault, mode="dispositions")
+    with request_scope(owner_principal(surface="mcp")):
+        owner = commands.op_review_memory(vault, mode="dispositions")
+
+    refusal = {"available": False, "reason": "audience_restricted"}
+    assert restricted["effect"] == refusal
+    assert [row["manual_dismissals"] for row in restricted["dispositions"]] == [refusal]
+    assert owner["effect"]["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
+    assert [row["manual_dismissals"] for row in owner["dispositions"]] == [0]
+
+
 def test_the_dispositions_view_counts_dismissals_without_an_audit(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

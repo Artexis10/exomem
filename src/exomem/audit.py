@@ -6907,28 +6907,15 @@ _SWEEP_MEMO_LOCK = threading.Lock()
 _SWEEP_MEMO_CAP = 8
 
 
-def _vector_token(index: Any) -> tuple[Any, Any] | None:
-    """The resident matrix's (epoch, write generation), or None when none is cached."""
-    try:
-        status = index.cache_status()
-    except Exception:  # noqa: BLE001 - an unknown token only disables the memo
-        return None
-    if not status.get("loaded"):
-        return None
-    return (status.get("epoch"), status.get("generation"))
-
-
 def _swept_pairs(
     vault_root: Path, key: tuple[Any, ...], matrix: Any
 ) -> dict[tuple[str, str], float] | None:
     """The remembered sweep when nothing it read has changed, else None.
 
-    The same matrix object is required as well as the same generation: a
-    reload under a new recall policy keeps the generation and replaces the
-    vectors.
+    The vectors are identified by the matrix object alone, with no generation:
+    every catch-up and reload builds a new array (`_splice_path_blocks` is
+    copy-on-write) and nothing writes into a served one.
     """
-    if key[0] is None:
-        return None
     with _SWEEP_MEMO_LOCK:
         held = _SWEEP_MEMO.get(str(vault_root))
     if held is None or held[0] != key or held[1]() is not matrix:
@@ -6939,8 +6926,6 @@ def _swept_pairs(
 def _remember_sweep(
     vault_root: Path, key: tuple[Any, ...], matrix: Any, pairs: dict[tuple[str, str], float]
 ) -> None:
-    if key[0] is None:
-        return
     with _SWEEP_MEMO_LOCK:
         _SWEEP_MEMO.pop(str(vault_root), None)
         while len(_SWEEP_MEMO) >= _SWEEP_MEMO_CAP:
@@ -7096,7 +7081,6 @@ def _proximity_contradictions(
     excluded = exclude or set()
 
     sweep_key = (
-        _vector_token(idx),
         frozenset(eligible),
         frozenset(excluded),
         float(floor),

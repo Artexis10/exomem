@@ -220,6 +220,8 @@ def test_a_worker_held_by_its_gate_says_why_even_to_a_process_without_it(
     assert recorded["waiting"]["reason"] == "foreground"
     assert recorded["waiting"]["source"] == "sidecar"
     assert recorded["waiting"]["since"]
+    # When the wait was written, so a stopped service's record never reads as live.
+    assert recorded["waiting"]["recorded_at"]
 
 
 @pytest.mark.parametrize(

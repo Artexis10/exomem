@@ -412,12 +412,10 @@ def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict
         }
     if view is not None:
         recorded = view.health
-        return {
-            "reason": "no_tick_yet",
-            "waiting": _waiting(
-                recorded.get("waiting_reason"), recorded.get("waiting_since"), "sidecar"
-            ),
-        }
+        waiting = _waiting(recorded.get("waiting_reason"), recorded.get("waiting_since"), "sidecar")
+        # When it was written, so a stopped service's last wait never reads as live.
+        waiting["recorded_at"] = _stamp(recorded.get("recorded_at"))
+        return {"reason": "no_tick_yet", "waiting": waiting}
     condition = _condition(vault_root)
     # A running worker records its first wait, so no file means no worker has run.
     return {"reason": "worker_not_running" if condition == "missing" else condition}
@@ -426,19 +424,23 @@ def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict
 def _condition(vault_root: Path) -> str:
     """`missing`, `schema_mismatch` or `unreadable` for a sidecar `read_view` refused.
 
-    A file that probes readable here was refused a moment ago (a lock, a write
-    in flight), so it reads as `unreadable` rather than as nothing wrong.
+    This response's contract names those reasons, and a held lock is one way
+    the sidecar cannot be read, so `locked` reads as `unreadable` here.
     """
-    condition = dreamer_store.sidecar_condition(vault_root)
-    return "unreadable" if condition == "readable" else condition
+    condition = dreamer_store.refused_condition(vault_root)
+    return "unreadable" if condition == "locked" else condition
 
 
 def _waiting(reason: Any, since: Any, source: str) -> dict[str, Any]:
     """The gate's reason and since when (UTC), and whether it is live or recorded."""
-    stamp = None
-    if isinstance(since, (int, float)) and not isinstance(since, bool):
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(since)))
-    return {"reason": reason, "since": stamp, "source": source}
+    return {"reason": reason, "since": _stamp(since), "source": source}
+
+
+def _stamp(value: Any) -> str | None:
+    """A recorded epoch time as UTC ISO-8601, or None when none was recorded."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
+    return None
 
 
 def _order_time(row: dict[str, Any], *, withheld: bool) -> float:
