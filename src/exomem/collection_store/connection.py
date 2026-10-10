@@ -32,6 +32,13 @@ if TYPE_CHECKING:
 STORE_FILENAME = "collections.sqlite"
 MINIMUM_SQLITE_VERSION = (3, 38, 0)
 BUSY_TIMEOUT_MS = 5000
+#: What `describe` and the doctor probe tell the owner about writers without the lease (design §15 item 5).
+UNSUPPORTED_WRITERS = (
+    "Store collections take every write under the vault's writer lease. Running more than one collection "
+    "writer on one vault without that lease, such as a Windows and a WSL service on one synced vault, is "
+    "unsupported: once one finds the other's replica, its collection writes refuse with "
+    "COLLECTION_STORE_DIVERGED until the owner runs adopt-local, while reads and knowledge writes continue."
+)
 
 #: Connection class used for every store connection (a test seam for engines
 #: whose journal mode does not take effect).
@@ -299,6 +306,23 @@ class WriterConnection:
             return self.core.execute(statement, parameters)
         except DBAPIError as error:
             raise error.orig from error
+
+    def checkpoint(self, *, timeout_seconds: float) -> bool:
+        """Copy every WAL commit into the store file and empty the WAL (design §11).
+
+        Closing the writer does this only as the last connection: another open reader,
+        even an idle one, keeps the commits in the WAL beside a store file that lacks
+        them. Returns False when a reader's open read transaction held the copy back
+        past ``timeout_seconds``; the WAL then still holds every commit.
+        """
+        self.require_write_authority()
+        conn = self.connection
+        conn.execute(f"PRAGMA busy_timeout={max(0, int(timeout_seconds * 1000))}")
+        try:
+            blocked, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        return blocked == 0
 
     def close(self) -> None:
         if not self._closed:

@@ -612,6 +612,12 @@ class CollectionStoreRuntime:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_FLUSH_PENDING", "publication did not reach the committed head"
                 )
+            # Every orderly boundary also leaves the store file alone holding this head. A
+            # reader mid-transaction can hold that back; the replica already carries the head,
+            # so the flush stands and the WAL keeps the commits.
+            wait = min(connection.BUSY_TIMEOUT_MS / 1000, max(0.0, deadline - time.monotonic()))
+            if not writer.checkpoint(timeout_seconds=wait):
+                logger.warning("collection store WAL checkpoint was held back by an open reader")
             return head
 
 
