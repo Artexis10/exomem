@@ -21,9 +21,10 @@ from pathlib import Path
 
 import pytest
 import tzdata
-from test_collection_store_importer import CID, count, manifest_text, refused, setup
+from test_collection_store_importer import CID, call, count, manifest_text, refused, release, setup
 from test_collection_store_importer import run as run_jobs
 from test_collection_store_writer import store as store
+from test_governance_egress import _external
 
 from exomem import archive_members, commands
 from exomem import structured_collections as collections
@@ -301,6 +302,34 @@ def test_a_member_whose_bytes_differ_from_its_manifest_loses_authority(store):
     result = finish(store, job)
     assert (result["state"], result["reason"], result["rows"]["imported"]) == ("partial", "authority_lost", 0)
     assert count(store.connection) == 0
+
+
+COVERED = {**SAMPLES, "coverage": {path: {"classification": None} for path in ("$.device", "$.days[].date", "v", "t")}}
+
+
+def test_a_manifest_without_the_owners_raw_binding_opens_no_member_blob(store):
+    """An importer that takes any JSON its caller can read for a manifest reads owner-only blobs for anyone."""
+    collection(store)
+    manifest, _ = preserve_export(store, "first", {"samples/2026-10.json": AUTUMN})
+    document = json.loads((store.root / manifest).read_bytes())
+    release(store)
+    start = {"mode": "start", "format": "json-document", "members": "samples/*", "mapping": COVERED}
+    assert refused(call, store, source_ref=manifest, **start).code == "IMPORT_SOURCE_NOT_FOUND"
+    copy = {**document, "archive": {**document["archive"], "filename": "forged.zip"}}
+    with request_scope(_external()):
+        forged = commands.op_preserve_evidence(store.root, "device", "export", "forged.json", json.dumps(copy))["path"]
+    assert refused(call, store, source_ref=forged, **start).code == "IMPORT_MANIFEST_INVALID"
+    assert count(store.connection) == 0
+
+
+def test_a_manifest_over_its_size_cap_is_refused(store, monkeypatch):
+    """A manifest read whole before any bound holds a writer thread's memory hostage to its size."""
+    collection(store)
+    manifest, _ = preserve_export(store, "first", {"samples/2026-10.json": AUTUMN})
+    monkeypatch.setattr(archive_members, "MAX_MANIFEST_BYTES", (store.root / manifest).stat().st_size - 1)
+    error = refused(agent, store, mode="start", source_ref=manifest, format="json-document", members="samples/*",
+                    mapping=SAMPLES)
+    assert error.code == "IMPORT_MANIFEST_INVALID"
 
 
 def test_reimport_all_reads_members_already_imported_with_the_mapping(store):

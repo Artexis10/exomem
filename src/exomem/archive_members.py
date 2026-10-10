@@ -51,6 +51,9 @@ COPY_CHUNK_BYTES = 1024 * 1024
 POOL_DIRNAME = f"{raw_protection.PREFIX}members"
 MANIFEST_SUFFIX = ".export.json"
 MANIFEST_SCHEMA_VERSION = 1
+#: A manifest entry takes about 310 bytes plus its escaped path; 512 apiece leaves each
+#: of MAX_ENTRIES members a path of about 200 bytes on average.
+MAX_MANIFEST_BYTES = MAX_ENTRIES * 512
 #: Fixed so the same member always gzips to the same blob; 6 trades little size for speed.
 _GZIP_LEVEL = 6
 #: Bit 0 of a zip entry's general-purpose flags: the entry is encrypted (APPNOTE 4.4.4).
@@ -250,6 +253,73 @@ def _hash_stream(stream: BinaryIO, *, max_bytes: int) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+@dataclass(frozen=True)
+class Manifest:
+    """An export manifest that proved to be one: raw-bound bytes, parsed and checked."""
+
+    size: int
+    archive: dict[str, Any]
+    #: Each `{path, sha256, bytes, blob, ...}`, sorted by path, its blob in the member pool.
+    members: list[dict[str, Any]]
+    #: The raw-protection block of its companion; `artifact_sha256` is the manifest's SHA-256.
+    binding: dict[str, Any]
+    companion: str
+
+
+def read_manifest(vault_root: Path, path: str) -> Manifest | None:
+    """The export manifest at vault-relative `path`, or None when the file is not one.
+
+    Trust comes before parsing. The name carries the raw-protection prefix and the
+    manifest suffix, a companion binds the file under raw protection, and its bytes
+    stay within `MAX_MANIFEST_BYTES`, refused unread when larger, and hash to the bound
+    SHA-256. Raw protection keeps the manifest and every blob it names owner-only, so
+    a caller the owner lets read the manifest under raw protection may read its blobs.
+    """
+    from .vault import PathGuardError, read_bounded_guarded_bytes
+
+    leaf = path.rpartition("/")[2]
+    if not (leaf.startswith(raw_protection.PREFIX) and leaf.endswith(MANIFEST_SUFFIX)):
+        return None
+    found = raw_protection.binding(vault_root, path)
+    if found is None:
+        return None
+    block, companion, _companion_hash = found
+    try:
+        data, _guard = read_bounded_guarded_bytes(vault_root, path, limit=MAX_MANIFEST_BYTES)
+    except (OSError, PathGuardError):
+        return None
+    if hashlib.sha256(data).hexdigest() != block["artifact_sha256"]:
+        return None
+    try:
+        document = json.loads(data)
+    except (ValueError, RecursionError):
+        return None
+    if type(document) is not dict:
+        return None
+    version, archive, members = document.get("schema_version"), document.get("archive"), document.get("members")
+    if not (
+        type(version) is int and version == MANIFEST_SCHEMA_VERSION
+        and type(archive) is dict and type(members) is list and len(members) <= MAX_ENTRIES
+    ):
+        return None
+    previous = None
+    for member in members:
+        if not (
+            type(member) is dict
+            and type(member.get("path")) is str
+            and member["path"]
+            and (previous is None or member["path"] > previous)
+            and type(member.get("sha256")) is str
+            and _SHA256_HEX.fullmatch(member["sha256"])
+            and member.get("blob") == member_blob(member["sha256"])
+            and type(member.get("bytes")) is int
+            and member["bytes"] >= 0
+        ):
+            return None
+        previous = member["path"]
+    return Manifest(len(data), archive, members, block, companion)
+
+
 def _recorded(
     vault_root: Path, folder: Path, sha256: str
 ) -> tuple[dict[str, Any], int, list[Any]] | None:
@@ -258,39 +328,26 @@ def _recorded(
     A manifest's companion is a dataset card, which carries no governance
     companion block, so the pair is resolved through its raw-protection binding.
     """
-    from . import reserved_paths
-
     try:
         manifests = sorted(folder.glob(f"{raw_protection.PREFIX}*{MANIFEST_SUFFIX}"))
     except OSError:
         return None
     for manifest in manifests:
         relative = manifest.relative_to(vault_root).as_posix()
-        found = raw_protection.binding(vault_root, relative)
-        if found is None:
-            continue
-        block, companion, _companion_hash = found
-        try:
-            data = reserved_paths.read_generic_bytes(vault_root, relative).data
-            document = json.loads(data)
-            archive, members = document.get("archive"), document.get("members")
-        except (OSError, ValueError, AttributeError, reserved_paths.ReservedPathLeafError):
-            continue
-        if hashlib.sha256(data).hexdigest() != block["artifact_sha256"]:
-            continue
-        if isinstance(archive, dict) and archive.get("sha256") == sha256:
-            ref = block["original_ref"]
+        found = read_manifest(vault_root, relative)
+        if found is not None and found.archive.get("sha256") == sha256:
+            ref = found.binding["original_ref"]
             return (
                 {
                     "path": relative,
                     "stored_path": relative,
-                    "sidecar_path": companion,
+                    "sidecar_path": found.companion,
                     "ref": ref,
                     "duplicate_of": {"path": relative, "ref": ref},
-                    "hash": block["artifact_sha256"],
+                    "hash": found.binding["artifact_sha256"],
                 },
-                len(data),
-                members if isinstance(members, list) else [],
+                found.size,
+                found.members,
             )
     return None
 
@@ -310,15 +367,7 @@ def _restore(vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[An
     Returns how many blobs came back.
     """
     missing: dict[str, str] = {}
-    for member in recorded:
-        if not (
-            isinstance(member, dict)
-            and isinstance(member.get("path"), str)
-            and isinstance(member.get("sha256"), str)
-            and _SHA256_HEX.fullmatch(member["sha256"])
-            and member.get("blob") == member_blob(member["sha256"])
-        ):
-            raise ArchiveError(INVALID, "the archive's recorded manifest cannot be read")
+    for member in recorded:  # read_manifest checked each member and its blob path
         if not (folder / member["blob"]).exists():
             missing[member["path"]] = member["sha256"]
     if not missing:

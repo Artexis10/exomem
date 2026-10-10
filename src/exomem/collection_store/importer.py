@@ -78,7 +78,6 @@ MAX_REQUEST_BYTES = 16 << 10
 MAX_MAPPED_FIELDS = 64
 MAX_LISTED_MEMBERS = 256
 MAX_SAVED_IMPORTS = 16
-MAX_MANIFEST_BYTES = 64 << 20
 # nosemgrep: ep-word-set -- The scalar kinds a CSV cell coerces to; a subset of SCALAR_TYPES.
 CSV_TYPES = ("string", "integer", "number", "boolean")
 _CHUNK = 1 << 16
@@ -510,8 +509,11 @@ def _digest(root: Path, source: Source) -> tuple[str, int]:
 # An export manifest (OpenSpec bring-in-large-exports §2) lists each member's path,
 # SHA-256 and size and names its gzip blob in the same Evidence family, at the path
 # ``archive_members.member_blob`` gives. The manifest is the authority: it resolves
-# through ``resolve_source`` like any preserved file, and a member is read only from
-# blob bytes that prove to be that member.
+# through ``resolve_source`` like any preserved file, ``archive_members.read_manifest``
+# trusts only a raw-protected one, and a member is read only from blob bytes that
+# prove to be that member. Its blobs need no grant of their own: a principal that may
+# read the manifest under raw protection may read what it names, and every batch
+# re-proves that authority before it reads.
 
 @dataclass(frozen=True, slots=True)
 class _Member:
@@ -532,47 +534,15 @@ def _manifest_invalid() -> Never:
     )
 
 
-def _pooled(sha256: Any) -> str | None:
-    """The member-pool path a manifest member's ``sha256`` names, None when it names none."""
-    try:
-        return archive_members.member_blob(sha256)
-    except (TypeError, ValueError):
-        return None
+def _export(root: Path, source: Source, sha256: str, selector: Any) -> tuple[_Member, ...]:
+    """The members ``selector`` picks from the export manifest ``source``, in path order.
 
-
-def _export(root: Path, source: Source, size: int, selector: Any) -> tuple[_Member, ...]:
-    """The members ``selector`` picks from the export manifest ``source``, in path order."""
-    if size > MAX_MANIFEST_BYTES:
+    ``sha256`` is the digest ``resolve_source`` proved; the manifest's binding must name it.
+    """
+    manifest = archive_members.read_manifest(root, source.ref)
+    if manifest is None or manifest.binding["artifact_sha256"] != sha256:
         _manifest_invalid()
-    chunks, read = [], 0
-    with _open_source(source) as handle:
-        while read <= MAX_MANIFEST_BYTES and (chunk := handle.read(1 << 20)):
-            chunks.append(chunk)
-            read += len(chunk)
-    source.guard.recheck(root)
-    try:
-        document = json.loads(b"".join(chunks).decode("utf-8"), parse_constant=_reject_constant)
-    except (ValueError, RecursionError):
-        _manifest_invalid()
-    members = document.get("members") if type(document) is dict else None
-    if type(document.get("schema_version") if members is not None else None) is not int or (
-        document["schema_version"] != 1 or type(members) is not list
-    ):
-        _manifest_invalid()
-    previous = None
-    for member in members:
-        blob = _pooled(member.get("sha256")) if type(member) is dict else None
-        if (
-            blob is None
-            or type(member.get("path")) is not str
-            or not member["path"]
-            or type(member.get("bytes")) is not int
-            or member["bytes"] < 0
-            or member.get("blob") != blob
-            or (previous is not None and member["path"] <= previous)
-        ):
-            _manifest_invalid()
-        previous = member["path"]
+    members = manifest.members
     if type(selector) is str:
         chosen = [member for member in members if fnmatch.fnmatchcase(member["path"], selector)]
     else:
@@ -2167,7 +2137,7 @@ def _prove(writer, job: _Job, operation) -> Source:
         if (sha256, size) != (bound["sha256"], bound["bytes"]):
             raise _Lost
         if "members" in bound:
-            members = _export(writer.root, source, size, bound["members"]["select"])
+            members = _export(writer.root, source, sha256, bound["members"]["select"])
             if [member.sha256 for member in members] != bound["members"]["sha256"]:
                 raise _Lost
             source = Source(source.ref, source.path, source.guard, members)
@@ -2875,7 +2845,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             operation.require_collection(cid, complete=True)
             source, sha256, size = resolve_source(root, operation, request.source_ref)
             if request.members is not None:
-                members = _export(root, source, size, request.members)
+                members = _export(root, source, sha256, request.members)
                 source = Source(source.ref, source.path, source.guard, members)
         finally:
             operation.close()
@@ -3184,8 +3154,8 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         if not writer._operation.field_plan(manifest).owner:
             _source_not_found()
         request = _resolved(writer, row, manifest, request)
-        source, _, size = resolve_source(root, writer._operation, request.source_ref)
-        members = () if request.members is None else _export(root, source, size, request.members)
+        source, sha256, size = resolve_source(root, writer._operation, request.source_ref)
+        members = () if request.members is None else _export(root, source, sha256, request.members)
         plan, findings, rows = None, [], None
         if request.mapping is not None:
             try:
