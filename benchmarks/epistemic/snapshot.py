@@ -169,6 +169,25 @@ class Relation(StrictModel):
     declared: bool = True
 
 
+class TypedRelation(StrictModel):
+    """A provider-typed edge outside the neutral predicate set.
+
+    ``relation`` is the provider's own relation key and ``family`` the family its
+    registry declares for that key, empty when the registry does not define it.
+    Kept apart from :class:`Relation` because the neutral predicates are a closed
+    prior-art set, while f33 asks whether a person and a referent are joined by
+    an edge of a declared family, which only the provider's registry can answer.
+    Frozen so a run's edges can be compared with its seeded snapshot's as a set.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    subject: str = Field(min_length=1)
+    relation: str = Field(min_length=1)
+    object: str = Field(min_length=1)
+    family: str = ""
+
+
 class FieldDeclaration(StrictModel):
     """A projector's capability claim about one snapshot field.
 
@@ -300,6 +319,10 @@ class EpistemicStateSnapshot(StrictModel):
     #: Structured collections observed alongside the pages. Additive and
     #: default-empty, so a vault that holds none serialises exactly as before.
     collections: tuple[CollectionProjection, ...] = ()
+    #: Provider-typed edges, projected only by an opt-in entity-graph build.
+    #: Default-empty: earlier snapshots keep their content, but their bytes now
+    #: carry ``typed_relations: []``.
+    typed_relations: tuple[TypedRelation, ...] = ()
     projector: ProjectorMeta
     completeness_notes: str = ""
 

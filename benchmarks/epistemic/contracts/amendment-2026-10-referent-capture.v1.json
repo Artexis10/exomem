@@ -1,0 +1,36 @@
+{
+  "acknowledged_on": null,
+  "affected_sections": [
+    "\u00a71 Scenario families",
+    "\u00a72 Assertion registry",
+    "\u00a74 Acceptance predicates",
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-10-10",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "4144d9b96e7d9a5ab39e52d91bdc1a0696e54ddbb201371e71b824d58cf4ea2a",
+  "effective_policy": "Applies after founder acknowledgment. Until then f33 cannot support comparative runs, scores or claims, and every comparative result of the promote-referents-without-nudges measurement, including the gate of its task 5.2, reads as pending. A harness fault blocks its run and is never scored.",
+  "fixture_sha256": {
+    "benchmarks/epistemic/fixtures/sequence7/f33-answer-key.v1.json": "90cf2a482f510957bff03846ca44821c5f4f06e2ba4378dcb6efd7a54f7e2e83",
+    "benchmarks/epistemic/fixtures/sequence7/f33-community-membership-twin-v1.yaml": "0fb08981a618edfa88f1bda857508ad0fe7ea28c25c808ff2dc44c97d5b11c0d",
+    "benchmarks/epistemic/fixtures/sequence7/f33-community-membership-v1.yaml": "130c2d770cb5bcac9d0e4069b3b0e04cc9121a88a57d91ff1f5b7275873cac68",
+    "benchmarks/epistemic/fixtures/sequence7/f33-equipment-consumable-twin-v1.yaml": "613fcb6ba2e9700293bc9e289ffded14894a8c6a378b7882f5c1dcf932943330",
+    "benchmarks/epistemic/fixtures/sequence7/f33-equipment-consumable-v1.yaml": "d58086177e45627ab1e335bf5f2fa0784d61eaebd73fd91a043c9dc851af540a",
+    "benchmarks/epistemic/fixtures/sequence7/f33-person-kin-twin-v1.yaml": "422c8c8fe76fc1a5762d1f74cd338947dcef20c00f5059df41165c6edcee9b78",
+    "benchmarks/epistemic/fixtures/sequence7/f33-person-kin-v1.yaml": "00efb8583bd9a4d946e2564af9871d150d30964edd68666f0e7448c4a5a6a6ad",
+    "benchmarks/epistemic/fixtures/sequence7/f33-pet-owner-twin-v1.yaml": "7e9f9a627ee6f99ccbb5792441605406f5cc1fbf9050999307655c9f0958bebc",
+    "benchmarks/epistemic/fixtures/sequence7/f33-pet-owner-v1.yaml": "aa4ec43ce14b528f45611515caa0e80e23e60f4d0788cd243a6bf00d6fd6b400",
+    "benchmarks/epistemic/fixtures/sequence7/f33-seed-vault.v1.json": "8e36cfc3229456f81e46d03614ba981d59b659b528bfd71325ae029acbcb5320",
+    "benchmarks/epistemic/fixtures/sequence7/f33-sparse-existing-twin-v1.yaml": "cec9a25a39d0f5a73de24990d1c1e97464042ae9b1f8f6b4f9a2bb9d5863cbd3",
+    "benchmarks/epistemic/fixtures/sequence7/f33-sparse-existing-v1.yaml": "74b83acbb9311ce15c349948bc06d87f7a487a7f757d945a40b56edbfa4dc383",
+    "benchmarks/epistemic/fixtures/sequence7/f33-supplier-operator-twin-v1.yaml": "101cc725d4cbc9d243f2e932c5d24a4670ae17005d60e2b0215901f3666e40e2",
+    "benchmarks/epistemic/fixtures/sequence7/f33-supplier-operator-v1.yaml": "0074bb2fd5b1efa3818c5b5c1db0489e8a0b7673d0bcb8fa92e30fe3c6e08087"
+  },
+  "parent_contract_sha256": "7512190cf75c7fa5ec6e4ac80fef1eaf294fbc8de30ef219349d4adb0f2d7a41",
+  "ratifier": null,
+  "rationale": "Register f33 referent_capture_replay: six authored positives from the owner's list, each with a durability-matched twin and an owner-anchored fresh-session question, with an answer key of exact values authored from the turns. States the R6 pass line of the owner delegate, the arms, three repeats per case per client shape, the version pins, the per-case pass rule with its deterministic uses test and single judge-fallback case, the beats rule, the receipt-block keep rule and the escalation order. Freezes the case files, answer key and seed vault by SHA-256. Adds the opt-in entity-graph projection (projector 0.7.0) and an optional fixture-digest field on amendment receipts. No operation kind, catastrophic assertion or budget constant changes.",
+  "repository_revision": null,
+  "schema_version": 1,
+  "sequence": 7
+}
