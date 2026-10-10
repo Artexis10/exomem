@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import stat
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -81,11 +83,15 @@ def _capture_paths(value: object) -> tuple[str, ...]:
 
 
 _FileSignature = tuple[int, int, int, int, int] | None
-# Keyed by vault and maintenance mode, one entry per vault a process serves, as
-# policy's compile cache is. An entry is reused only while every input keeps its
-# stat signature: the configuration file, the requirement, the state manifest
-# and the compiled policy. A refusal is never cached; it is re-decided each call.
-_SNAPSHOTS: dict[tuple[str, bool], tuple[tuple, Snapshot | None]] = {}
+# Keyed by vault and maintenance mode. An entry is reused only while every input
+# keeps its stat signature: the configuration file, the requirement, the state
+# manifest and the compiled policy. A refusal is never cached; it is re-decided
+# each call. Least recently used entries go first, as in the governance store's
+# sidecar cache: a service needs two entries for its one vault, and 64 keeps a
+# multi-vault process warm without one entry for every vault root it ever saw.
+_SNAPSHOTS_MAX = 64
+_SNAPSHOTS: OrderedDict[tuple[str, bool], tuple[tuple, Snapshot | None]] = OrderedDict()
+_SNAPSHOTS_LOCK = threading.Lock()
 # Where the state manifest lives is placement: a function of the vault path and
 # the placement environment, both in the key. Only its contents are evidence,
 # and those are re-checked by stat signature on every call.
@@ -147,10 +153,15 @@ def _current_snapshot(
 ) -> tuple[str | None, Snapshot | None]:
     signature = _input_signature(root, configured)
     key = (str(root), maintenance)
-    cached = _SNAPSHOTS.get(key)
+    with _SNAPSHOTS_LOCK:
+        cached = _SNAPSHOTS.get(key)
     if cached is None or cached[0] != signature:
         cached = (signature, _read_snapshot(root, None, maintenance=maintenance))
+    with _SNAPSHOTS_LOCK:
         _SNAPSHOTS[key] = cached
+        _SNAPSHOTS.move_to_end(key)
+        while len(_SNAPSHOTS) > _SNAPSHOTS_MAX:
+            _SNAPSHOTS.popitem(last=False)
     return signature[-1], cached[1]
 
 
