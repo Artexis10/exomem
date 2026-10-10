@@ -811,6 +811,27 @@ class OperationAuthorization:
         varies = (self._summary_rows_vary(cid, prefix)
                   or any(identity.startswith(prefix) for identity in self.grants)
                   or any(cid in tombstone.casefold() for tombstone in self.tombstones))
+        derived = self.conn.execute("SELECT derived FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
+        if derived:
+            # A derived collection's rows are outside the store and carry no row metadata, so its
+            # release is collection-uniform: one representative row decides every logged row.
+            if varies:
+                raise collections.CollectionError(
+                    RELEASE_LIMIT, "a derived collection's rows are released whole or not at all",
+                    {"max_row_decisions": 0})
+            rows = self.conn.execute("SELECT COALESCE(MAX(row_count_after),0) FROM import_members "
+                                     "WHERE collection_id=? AND seq=(SELECT MAX(seq) FROM import_members "
+                                     "WHERE collection_id=?)", (cid, cid)).fetchone()[0]
+            row = replace(manifest.basis, identity=prefix + "derived", version=1, payload_hash="", domain="row",
+                          subject=replace(manifest.basis.subject, refs=(prefix + "derived",), tags=(),
+                                          types=(item_type.lower(),), classes=()))
+            released = rows if self.decision(replace(manifest, row_id=0, basis=row)).level >= 6 else 0
+            if released == rows:
+                visible.update(container.encode())
+            release = SummaryRelease(manifest, decision, prefix, rows, released, tuple(held), "")
+            release = replace(release, snapshot=container if release.complete else visible.hexdigest())
+            self.summary_memo = {memo: release}
+            return release
         if not varies:
             released = 0
             if rows:
@@ -1394,6 +1415,13 @@ class OperationAuthorization:
                 {"released_rows": release.released, "max_row_visits": limits.max_row_visits})
         deadline = time.monotonic() + limits.timeout_ms / 1000
         rows = []
+        if release.released and self.conn.execute("SELECT derived FROM collections WHERE collection_id=?",
+                                                  (cid,)).fetchone()[0]:
+            from .derived_rows import refused
+
+            # The store holds none of a derived collection's rows, so this read would answer none of them.
+            raise refused("a whole-collection row read", repair="read its rows with a collection query: "
+                          "record_memory action query with query={\"version\": 1}")
         if release.released:
             uniform = release.released == release.rows
             with closing(self.conn.execute("SELECT * FROM items WHERE collection_id=? ORDER BY row_id", (cid,))) as cursor:

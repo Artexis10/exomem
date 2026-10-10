@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -738,6 +738,28 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
 
 _TRIGGERS_V9 = _append_only_triggers("import_members")
 
+
+def _migrate_to_10(conn: sqlite3.Connection) -> None:
+    """Record whether each collection is derived: its rows rebuild from its import log.
+
+    A derived collection keeps its rows outside this store, in the derived file
+    (``derived_rows``). The flag is set at creation and never changes: a trigger
+    refuses any update that would change it.
+    """
+    conn.execute("ALTER TABLE collections ADD COLUMN derived INTEGER NOT NULL DEFAULT 0 "
+                 "CHECK (derived IN (0, 1))")
+    for statement in _TRIGGERS_V10:
+        conn.execute(statement)
+
+
+_TRIGGERS_V10 = (
+    """
+    CREATE TRIGGER IF NOT EXISTS collections_derived_fixed BEFORE UPDATE OF derived ON collections
+    WHEN NEW.derived IS NOT OLD.derived
+    BEGIN SELECT RAISE(ABORT, 'a collection is derived only at creation and never converted'); END
+    """,
+)
+
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
 # Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
 _ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
@@ -831,7 +853,7 @@ def ensure_schema(conn: Connection) -> int:
                     command.stamp(config, str(current))
                 command.upgrade(config, str(target))
             for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ()),
-                              *(_TRIGGERS_V9 if target >= 9 else ())):
+                              *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

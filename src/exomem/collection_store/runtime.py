@@ -623,6 +623,8 @@ _STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
 IMPORT_IDLE_SECONDS = 1.0
 #: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
 IMPORT_RETRY_SECONDS = 30.0
+#: How often a derived rebuild that waits on a missing source looks for it again.
+DERIVED_RETRY_SECONDS = 2.0
 #: Rows per derived backfill batch; each tick runs one batch for one building collection.
 BACKFILL_BATCH_ROWS = 128
 #: Paths per pending-view publication window: one collection's summary pages at their bounds.
@@ -889,7 +891,8 @@ class StoreServer:
         self._stack = self._scope = None
         self._retry_at = 0.0
         # When each maintenance tick is next due; between two requests the most overdue one runs.
-        self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0}
+        self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
+        self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last request
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
@@ -1151,6 +1154,38 @@ class StoreServer:
             logger.warning("derived backfill could not check out the store; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
         return 0.0
+
+    def _derived_tick(self):
+        """Reconcile a new writer handle's derived file and advance a rebuild one bounded step.
+
+        A restart or a takeover opens a new writer handle, whose first derived tick reconciles
+        each derived collection (``derived_rows``). After that, a plain read of the derived file
+        finds the rebuilds still running, so an idle store takes no checkout. A rebuild waiting
+        on a missing source retries after ``DERIVED_RETRY_SECONDS``; one that finishes lets the
+        import jobs it held continue at once.
+        """
+        from ..governance import principal
+        from . import capability, derived_rows
+        from .preview import preview_store
+
+        if self.runtime is None or not capability.records_summary_enabled(self.root):
+            return IMPORT_IDLE_SECONDS
+        try:
+            with closing(connection.open_reader(self.runtime.path)) as reader:
+                if reader.execute("SELECT 1 FROM collections WHERE derived=1 LIMIT 1").fetchone() is None:
+                    return IMPORT_IDLE_SECONDS
+            if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
+                    and not derived_rows.rebuilds_pending(self.runtime.path):
+                return IMPORT_IDLE_SECONDS
+            with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                outcome = derived_rows.step(self.root, writer)
+                self._derived_handle = writer.handle
+        except Exception:  # noqa: BLE001 - a refused step leaves the rebuild for a later tick
+            logger.warning("derived collection rows could not advance; retrying later", exc_info=True)
+            return IMPORT_RETRY_SECONDS
+        if outcome == "done":
+            self._ticks["import"] = 0.0
+        return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _views_tick(self):
         """Publish pending views, such as summary pages, a window at a time; returns the seconds until the next tick.

@@ -223,6 +223,9 @@ class WriterConnection:
         self.import_proofs: dict[str, Any] = {}
         self.import_blocked: dict[str, str] = {}
         self.import_readers: dict[str, Any] = {}
+        # This handle's connection to the derived-rows file (``derived_rows``), opened and
+        # reconciled on first use, so a new handle, as after a takeover, reconciles again.
+        self.derived: Any = None
 
     @property
     def release_cache(self):
@@ -303,6 +306,9 @@ class WriterConnection:
             for reader in self.import_readers.values():
                 reader.close()
             self.import_readers.clear()
+            if self.derived is not None:
+                self.derived.close()
+                self.derived = None
             self.core.close()
             self.core.engine.dispose()
             self._closed = True

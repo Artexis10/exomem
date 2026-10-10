@@ -37,6 +37,8 @@ _REPAIRS = {
                                   "query projection.", True),
     "QUERY_PROJECTION_FAILED": ("collection", "Revise the collection's declaration; its query projection failed "
                                 "on the declaration or on a stored value.", False),
+    "QUERY_REBUILDING": ("collection", "Retry once the rebuild ends; rollup queries and the summary page answer "
+                         "meanwhile. A stopped rebuild names its member and code in progress.stop.", True),
 }
 
 
@@ -55,7 +57,8 @@ def details(error: QueryError) -> dict:
         at, repair, retryable = _REPAIRS.get(
             error.code, ("query", "Revise the query; describe the collection for its fields.", False))
         finding = validation.Finding(error.code, at, error.message, (), repair, retryable)
-    return finding.as_dict()
+    found = finding.as_dict()
+    return found if error.progress is None else {**found, "progress": error.progress}
 
 
 def _profile(raw) -> str:
