@@ -321,8 +321,9 @@ def review(
         "truncated": False,
     }
     view = dreamer_store.read_view(Path(vault_root))
-    if view is None:
-        return {**base, "status": "unavailable"}
+    if view is None or view.health.get("last_tick_at") is None:
+        # A sidecar no tick has written yet holds only the worker's wait.
+        return {**base, "status": "unavailable", **_unavailable(Path(vault_root), view)}
     payload = _payload(Path(vault_root))
     if payload is None:
         return {**base, "status": "review_state_unavailable"}
@@ -387,6 +388,57 @@ def review(
         "integrity": integrity,
         "truncated": len(collected) > bound,
     }
+
+
+def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict[str, Any]:
+    """Why upkeep cannot be listed: a closed `reason`, and the wait when there is one.
+
+    The four reasons are this response's own closed enum, fixed by its contract,
+    not a reading of anyone's meaning (sound under C6). They come from the worker's live state in the process that hosts
+    it, else from what the worker recorded in its sidecar, never from the empty
+    state of a process that runs no worker.
+    """
+    from . import dreamer
+
+    if dreamer.hosting():
+        live = dreamer.status()
+        if not live["running"]:
+            return {"reason": "worker_not_running"}
+        if view is None and (condition := _condition(vault_root)) != "missing":
+            return {"reason": condition}
+        return {
+            "reason": "no_tick_yet",
+            "waiting": _waiting(live["waiting_reason"], live["waiting_since"], "worker"),
+        }
+    if view is not None:
+        recorded = view.health
+        return {
+            "reason": "no_tick_yet",
+            "waiting": _waiting(
+                recorded.get("waiting_reason"), recorded.get("waiting_since"), "sidecar"
+            ),
+        }
+    condition = _condition(vault_root)
+    # A running worker records its first wait, so no file means no worker has run.
+    return {"reason": "worker_not_running" if condition == "missing" else condition}
+
+
+def _condition(vault_root: Path) -> str:
+    """`missing`, `schema_mismatch` or `unreadable` for a sidecar `read_view` refused.
+
+    A file that probes readable here was refused a moment ago (a lock, a write
+    in flight), so it reads as `unreadable` rather than as nothing wrong.
+    """
+    condition = dreamer_store.sidecar_condition(vault_root)
+    return "unreadable" if condition == "readable" else condition
+
+
+def _waiting(reason: Any, since: Any, source: str) -> dict[str, Any]:
+    """The gate's reason and since when (UTC), and whether it is live or recorded."""
+    stamp = None
+    if isinstance(since, (int, float)) and not isinstance(since, bool):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(since)))
+    return {"reason": reason, "since": stamp, "source": source}
 
 
 def _order_time(row: dict[str, Any], *, withheld: bool) -> float:

@@ -359,7 +359,10 @@ class LocalRuntimeActivation:
                 if label == "semantic drain":
                     semantic_failure = error
                 log.warning("%s runtime shutdown failed", label, exc_info=True)
-        if self.dreamer is not None:
+        from . import dreamer
+
+        # Hosting covers a worker the setting started after this activation.
+        if self.dreamer is not None or dreamer.hosting():
             try:
                 _stop_dreamer()
             except Exception:  # noqa: BLE001 - shutdown still has to join activation

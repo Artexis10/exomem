@@ -1122,6 +1122,25 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def sidecar_condition(vault_root: Path) -> str:
+    """Why `read_view` may answer None: `missing`, `schema_mismatch`, `unreadable`
+    or `readable`. Never creates the file and never waits on a lock."""
+    path = sidecar_path(Path(vault_root))
+    if not path.is_file():
+        return "missing"
+    try:
+        conn = _open_readonly(path)
+    except sqlite3.Error:
+        return "unreadable"
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    except sqlite3.Error:
+        return "unreadable"
+    finally:
+        conn.close()
+    return "readable" if row is not None and row[0] == str(SCHEMA_VERSION) else "schema_mismatch"
+
+
 def read_view(vault_root: Path) -> StoreView | None:
     """The current view, or None when the sidecar is missing, locked or unreadable.
 

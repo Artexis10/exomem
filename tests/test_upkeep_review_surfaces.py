@@ -179,5 +179,75 @@ def test_an_absent_sidecar_reports_unavailable(tmp_path: Path) -> None:
     vault = fx.build(tmp_path)
     listed = commands.op_review_memory(vault, mode="upkeep")
     assert listed["status"] == "unavailable"
+    assert listed["reason"] == "worker_not_running"
     assert listed["items"] == []
     assert not dreamer_store.sidecar_path(vault).exists()
+
+
+def test_a_worker_held_by_its_gate_says_why_even_to_a_process_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Health was written only at the end of a tick, so a worker the gate held
+    from boot left nothing behind. Upkeep said only `unavailable`, and nobody
+    could tell a starved worker from one that never started."""
+    import time
+
+    from exomem import dreamer_policy
+
+    vault = fx.build(tmp_path)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    # Nothing in this process has been idle for an hour: the foreground gate holds.
+    monkeypatch.setattr(dreamer_policy, "IDLE_SECONDS", 3600.0)
+    dreamer.start(vault)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        view = dreamer_store.read_view(vault)
+        if view is not None and view.health.get("waiting_reason") == "foreground":
+            break
+        time.sleep(0.02)
+
+    live = commands.op_review_memory(vault, mode="upkeep")
+    assert live["status"] == "unavailable"
+    assert live["reason"] == "no_tick_yet"
+    assert live["waiting"]["reason"] == "foreground"
+    assert live["waiting"]["source"] == "worker"
+
+    # What a process with no worker of its own (the CLI) can read.
+    dreamer.stop(timeout=5)
+    recorded = commands.op_review_memory(vault, mode="upkeep")
+    assert recorded["status"] == "unavailable"
+    assert recorded["reason"] == "no_tick_yet"
+    assert recorded["waiting"]["reason"] == "foreground"
+    assert recorded["waiting"]["source"] == "sidecar"
+    assert recorded["waiting"]["since"]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        # An older release's file: the next tick wipes and reseeds it.
+        ("schema", "schema_mismatch"),
+        ("garbage", "unreadable"),
+    ],
+)
+def test_upkeep_names_a_sidecar_it_cannot_read(
+    tmp_path: Path, content: str, reason: str
+) -> None:
+    """Without a reason both read as a missing worker, so the owner restarts a
+    service when the sidecar is what needs a tick or attention."""
+    import sqlite3
+
+    vault = fx.build(tmp_path)
+    path = dreamer_store.sidecar_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if content == "schema":
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('schema', '1')")
+        conn.commit()
+        conn.close()
+    else:
+        path.write_bytes(b"not a database file " * 64)
+    listed = commands.op_review_memory(vault, mode="upkeep")
+    assert listed["status"] == "unavailable"
+    assert listed["reason"] == reason
