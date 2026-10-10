@@ -860,6 +860,35 @@ def test_an_attention_surfacing_is_charged_to_its_family(vault: Path) -> None:
     assert effect["unattributed"]["surfaced"] == 0
 
 
+def test_two_reads_a_second_apart_with_no_event_between_them_are_identical(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window was stated to the second, so the block's bytes changed every
+    second with no event behind the change, and a carrier compared across two
+    reads differed by the clock alone."""
+    import datetime as dt
+    import types
+
+    class _Clock(dt.datetime):
+        at = dt.datetime(2026, 10, 3, 12, 10, 55, tzinfo=dt.UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.at if tz is None else cls.at.astimezone(tz)
+
+    frozen = types.SimpleNamespace(**{**vars(dt), "datetime": _Clock})
+    monkeypatch.setattr(review_state, "dt", frozen)
+    review_state.record_surfaced(vault, [("3" * 24, "c" * 16, FAMILY)], surface="review")
+
+    first = commands.op_review_memory(vault, mode="dispositions")["effect"]
+    _Clock.at += dt.timedelta(seconds=1)
+    second = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert first["families"][FAMILY]["surfaced"] == 1
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+    assert first["window"] == {"days": 7, "since": "2026-09-27", "through": "2026-10-03"}
+
+
 def test_a_fingerprint_change_inside_the_window_is_one_surfacing(vault: Path) -> None:
     """The ledger keys a row by item and fingerprint, so an item whose signal
     changed inside the window counted as two surfacings."""

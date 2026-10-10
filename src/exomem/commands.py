@@ -1906,7 +1906,7 @@ def op_bootstrap(
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Pass a due row's fingerprint as expected_fingerprint to act on it, usually without an audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    "Read incoming counts; do not poll or interrupt. Consult review when useful. expected_fingerprint acts on due rows; usually no audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
                     if profile == "compact" and not frozen_profile
                     else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which usually resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
                 ),
@@ -9283,8 +9283,7 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
 
     from . import dreamer_families, dreamer_store, due_state
 
-    until = dt.datetime.now(dt.UTC)
-    since = until - dt.timedelta(days=review_state_module.EFFECT_WINDOW_DAYS)
+    since, until, window = review_state_module.effect_window()
     current: dict[str, set[str]] = {}
     projection = due_state.load(vault_root)
     for category, pages in ((projection or {}).get("categories") or {}).items():
@@ -9326,11 +9325,7 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
     )
     return {
         "dreamer_sidecar": sidecar,
-        "window": {
-            "since": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "days": review_state_module.EFFECT_WINDOW_DAYS,
-        },
+        "window": window,
         "sources": {
             "surfaced": (
                 "identities first stamped on the first-surfaced ledger in the window; "
@@ -9346,6 +9341,8 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             "open": "surfaced in the window, no decision recorded, still in the current set",
         },
         "note": (
+            "The window is whole UTC days, today included: events count from `since` "
+            "00:00Z through the time of this read. "
             "Cleared is not acted: deleting or withholding a page clears an item too. "
             "Only surfaces that stamp the first-surfaced ledger or record a dreamer "
             "delivery are counted, and a family absent here surfaced nothing recorded "

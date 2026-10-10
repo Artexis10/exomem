@@ -1081,6 +1081,23 @@ EFFECT_WINDOW_DAYS = 7
 UNKNOWN = "unknown"
 
 
+def effect_window() -> tuple[dt.datetime, dt.datetime, dict[str, Any]]:
+    """The effect window: whole UTC days, today included, as `(since, until, stated)`.
+
+    Events count from `since` 00:00Z through `until`, the time of the read. The
+    block states only the dates, so its bytes change when a count does or at a
+    UTC midnight; a window stated to the second changed them every second.
+    """
+    until = dt.datetime.now(dt.UTC)
+    first_day = until.date() - dt.timedelta(days=EFFECT_WINDOW_DAYS - 1)
+    since = dt.datetime.combine(first_day, dt.time(), dt.UTC)
+    return since, until, {
+        "days": EFFECT_WINDOW_DAYS,
+        "since": first_day.isoformat(),
+        "through": until.date().isoformat(),
+    }
+
+
 def effect_counts(
     payload: dict[str, Any] | None,
     *,
