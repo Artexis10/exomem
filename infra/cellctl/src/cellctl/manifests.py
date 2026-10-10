@@ -492,6 +492,9 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         "EXOMEM_KB_DIRNAME",
         # Rendered per cell from the media engine selection, never chart-wide.
         MEDIA_ENGINES_ENV,
+        # `inline` would run media extraction inside the serving process, which a
+        # cell must never do (cloud-multimodal-processing): media stays in its child.
+        "EXOMEM_MEDIA_WORKER_MODE",
         "EXOMEM_LEASE_COORDINATOR_DB",
         "EXOMEM_RANKING_CONFIG",
         "EXOMEM_HOOK_HOME",

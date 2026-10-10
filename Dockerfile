@@ -338,29 +338,43 @@ RUN usermod --home /data/host exomem
 # pack added there needs no code change: OCR reads each pack's script from its own
 # data. The same list is the default OCR reads with when a page names no script.
 #
-# The Python engines are the `media-cpu` extra, installed into the venv that
-# `cell-runtime` already holds, so the layer carries only what media adds. It has
-# no CUDA wheel and no torch; the gate below fails the build if either arrives.
+# The Python engines are the `media-cpu` extra at the versions uv.lock pins,
+# installed into the venv that `cell-runtime` already holds, so the layer carries
+# only what media adds. It has no CUDA wheel and no torch; the gate below fails the
+# build if either arrives.
+#
+# EXOMEM_OCR_INVENTORY: reading each OCR model's script reads every traineddata
+# file (about 350 MB), and every media child is fresh. The gate's first OCR run
+# writes that inventory here, read-only at run time, so a child reads one small file.
 #
 # OMP_THREAD_LIMIT=1: Tesseract otherwise starts one OpenMP thread per host CPU,
 # not per cell CPU, and each thread's stack counts against the media child's
 # data-segment limit.
 ARG EXOMEM_OCR_LANGS=eng+jpn+jpn_vert+est
+# The engines this image claims. The gate needs a passing sample of every media
+# kind they serve, so a claimed format cannot ship unproven.
+ARG EXOMEM_MEDIA_SHIPPED_ENGINES=documents,ocr
 RUN packs="$(echo "${EXOMEM_OCR_LANGS}" | tr '+_' ' -' | sed 's/[^ ][^ ]*/tesseract-ocr-&/g')" \
  && apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd 'tesseract-ocr-script-*' ${packs} \
  && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
     --mount=type=bind,from=builder-lean,source=/app,target=/src,rw \
-    uv pip install --python /app/.venv/bin/python --no-cache "/src[media-cpu]"
+    uv export --project /src --frozen --no-dev --no-emit-project --extra media-cpu \
+      --output-file /tmp/media-cpu.txt \
+ && uv pip install --python /app/.venv/bin/python --no-cache -r /tmp/media-cpu.txt \
+ && rm /tmp/media-cpu.txt
 ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
+    EXOMEM_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \
     OMP_THREAD_LIMIT=1
 # The support proof: with networking off, extract a real sample of every format
 # the image serves and find its phrase. A format that fails is not shipped.
 RUN --network=none \
     --mount=type=bind,source=tests/fixtures/media-samples,target=/samples \
     --mount=type=bind,source=scripts/check-media-samples.py,target=/media-gate.py \
-    HOME=/tmp python /media-gate.py /samples \
+    mkdir -p /opt/exomem-ocr \
+ && HOME=/tmp python /media-gate.py /samples "${EXOMEM_MEDIA_SHIPPED_ENGINES}" \
+ && test -s "${EXOMEM_OCR_INVENTORY}" \
  && find /tmp -mindepth 1 -delete
 
 # EXOMEM_LOG_DIR: no runtime log ever lands on the tenant volume D8 backs up,
@@ -378,7 +392,8 @@ RUN --network=none \
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
 #
-# EXOMEM_DISABLE_CLIP: this image carries no CLIP stack (no torch, no Pillow).
+# EXOMEM_DISABLE_CLIP: this image carries no CLIP stack (no torch, no CLIP model;
+# Pillow ships only for OCR).
 # Left enabled, every query reported image search as degraded and the media
 # worker tried, and warned, once per image.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \

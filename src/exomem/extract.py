@@ -118,6 +118,18 @@ class MediaMemoryExhausted(MemoryError):
     """A native engine could not allocate memory, such as under the media child's limit."""
 
 
+class EngineDisabled(Exception):
+    """The artifact needs an engine that this deployment switched off.
+
+    A PDF with no text layer needs OCR. Raised so that the media waits for that
+    engine instead of completing without its text.
+    """
+
+    def __init__(self, engine: str, message: str) -> None:
+        super().__init__(message)
+        self.engine = engine
+
+
 @dataclass(frozen=True)
 class _ResolvedSpeakerLabels:
     labels: dict[str, str]
@@ -1013,8 +1025,20 @@ def resolve_tesseract_cmd() -> str | None:
 
 def _save_png_for_ocr(image, target: Path) -> None:
     """Write a decoded Pillow image as PNG, as pytesseract did, so every Pillow-readable
-    format reaches Tesseract in a form Leptonica reads."""
-    if image.mode not in ("1", "L", "RGB"):
+    format reaches Tesseract in a form Leptonica reads.
+
+    Transparency is flattened onto white first, as pytesseract did: dropping the alpha
+    channel alone turns dark text on a transparent background into a solid dark page.
+    """
+    from PIL import Image
+
+    if image.mode == "P" and "transparency" in image.info:
+        image = image.convert("RGBA")
+    if "A" in image.getbands():
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image.convert("RGBA"), (0, 0), image.getchannel("A"))
+        image = background
+    elif image.mode not in ("1", "L", "RGB"):
         image = image.convert("RGB")
     image.save(target, format="PNG")
 
@@ -1192,17 +1216,19 @@ def _extract_pdf(path: Path) -> ExtractResult:
         import fitz  # PyMuPDF
     except ImportError as e:
         raise ExtractionUnavailable(f"pymupdf not installed: {e}") from e
-    from . import media_brakes
+    from . import media_engines
 
     warnings: list[str] = []
     parts: list[str] = []
     ocr_pages = 0
+    scanned_pages = 0
     try:
         with fitz.open(path) as doc:
             for page in doc:
                 page_text = page.get_text().strip()
                 if len(page_text) < _PDF_OCR_MIN_CHARS:
                     # Scanned/image-only page → rasterize and OCR it.
+                    scanned_pages += 1
                     ocr_text = _ocr_pdf_page(page)
                     if ocr_text:
                         page_text = ocr_text
@@ -1212,10 +1238,12 @@ def _extract_pdf(path: Path) -> ExtractResult:
     except MemoryError:
         raise
     except Exception as e:
-        # MuPDF reports a failed allocation as an error naming its allocator.
-        if media_brakes.names_allocation_failure(str(e)):
+        if _is_pymupdf_allocation_failure(e):
             raise MediaMemoryExhausted(f"pymupdf: {e}") from e
         raise
+    if not parts and scanned_pages and not media_engines.stage_enabled("image"):
+        # Completing now would store "no text" for good; waiting lets enabling OCR read it.
+        raise EngineDisabled(media_engines.OCR, "the PDF has no text layer and OCR is switched off")
     if ocr_pages:
         warnings.append(f"{ocr_pages} scanned page(s) recovered via OCR")
     engine = "pymupdf+tesseract" if ocr_pages else "pymupdf"
@@ -1229,17 +1257,55 @@ def _extract_document(path: Path, media_type: str) -> ExtractResult:
     here: markitdown's PDF path is weaker than PyMuPDF + our scanned-page OCR fallback.
     """
     try:
-        from markitdown import MarkItDown, MissingDependencyException
+        from markitdown import FileConversionException, MarkItDown, MissingDependencyException
     except ImportError as e:
         raise ExtractionUnavailable(f"markitdown not installed: {e}") from e
     try:
         result = MarkItDown(enable_plugins=False).convert(str(path))
-    except MissingDependencyException as e:
-        raise ExtractionUnavailable(f"markitdown cannot read {media_type}: {e}") from e
-    # Any other error is about this file: the worker records it as a failed artifact,
-    # so a malformed document is not retried as if its engine were missing.
+    except FileConversionException as e:
+        # MarkItDown wraps every converter's exception, even a MemoryError under the
+        # child's data limit, and records each one's type in `attempts`.
+        causes = _markitdown_attempt_types(e)
+        if any(issubclass(cause, MemoryError) for cause in causes):
+            raise MediaMemoryExhausted(f"markitdown: {e}") from e
+        if any(issubclass(cause, MissingDependencyException) for cause in causes):
+            raise ExtractionUnavailable(f"markitdown cannot read {media_type}: {e}") from e
+        # Any other error is about this file: the worker records it as a failed
+        # artifact, so a malformed document is not retried as if its engine were missing.
+        raise
     text = (getattr(result, "text_content", "") or "").strip()
     return ExtractResult(text=text, media_type=media_type, engine="markitdown")
+
+
+def _markitdown_attempt_types(error: BaseException) -> list[type]:
+    """The exception types inside a MarkItDown FileConversionException, nested ones included."""
+    found: list[type] = []
+    for attempt in getattr(error, "attempts", None) or ():
+        exc_info = getattr(attempt, "exc_info", None)
+        if not exc_info or exc_info[0] is None:
+            continue
+        found.append(exc_info[0])
+        if exc_info[1] is not None and getattr(exc_info[1], "attempts", None):
+            found.extend(_markitdown_attempt_types(exc_info[1]))
+    return found
+
+
+def _is_pymupdf_allocation_failure(error: BaseException) -> bool:
+    """Whether PyMuPDF reports that MuPDF's allocator failed.
+
+    MuPDF raises a failed allocation as FZ_ERROR_SYSTEM (PyMuPDF's `FzErrorSystem`)
+    with its own message, `malloc (N bytes) failed` or the calloc and realloc forms.
+    Matching that whole message, never a substring, keeps a file path out of it:
+    other system errors name the file.
+    """
+    import fitz
+
+    system_error = getattr(getattr(fitz, "mupdf", None), "FzErrorSystem", None)
+    if system_error is None or not isinstance(error, system_error):
+        return False
+    message = str(getattr(error, "m_text", "") or "")
+    # The format of MuPDF's allocator messages (source/fitz/memory.c), not prose.
+    return re.fullmatch(r"(?:malloc|calloc|realloc)(?: of array)? \(\d+(?: x \d+)? bytes\) failed", message) is not None
 
 
 def _extract_opendocument(path: Path, media_type: str) -> ExtractResult:
@@ -1324,5 +1390,7 @@ def _ocr_pdf_page(page) -> str:
     except MemoryError:
         raise  # a hard-limit failure is a memory stop, never a missing page
     except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort
+        if _is_pymupdf_allocation_failure(e):
+            raise MediaMemoryExhausted(f"pymupdf: {e}") from e
         log.warning("PDF page OCR fallback failed: %s", e)
         return ""

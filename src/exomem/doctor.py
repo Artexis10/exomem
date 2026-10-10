@@ -340,7 +340,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "pytesseract", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -1822,7 +1822,9 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
     counts = status["counts"]
     memory_blocked = int(status.get("memory_blocked_count", 0))
     over_budget = int(status.get("over_budget_count", 0))
-    blocked = int(counts.get("blocked", 0)) - memory_blocked - over_budget
+    engine_waiting = int(status.get("engine_waiting_count", 0))
+    # Memory-blocked and engine-waiting rows count as pending, as their rows show.
+    blocked = int(counts.get("blocked", 0)) - over_budget
     failed = int(counts.get("failed", 0))
     if blocked or failed:
         compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
@@ -1851,11 +1853,37 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             details=status,
         )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
+    waiting = f", {engine_waiting} waiting for a switched-off engine" if engine_waiting else ""
     return _check(
         "media.runtime",
         "pass",
-        f"Durable media runtime healthy ({queued} queued/running).",
+        f"Durable media runtime healthy ({queued} queued/running{waiting}).",
         details=status,
+    )
+
+
+def _check_media_brakes() -> DoctorCheck | None:
+    """The Cloud memory brakes, read from the cell's cgroup now; None without brakes."""
+    from . import media_brakes
+
+    state = media_brakes.status()
+    if state["state"] == "off":
+        return None
+    if state["state"] == "unavailable":
+        return _check(
+            "media.brakes",
+            "warn",
+            f"media brakes unavailable: {state['reason']}",
+            "Media waits until the cell's cgroup v2 memory files read as expected. Check "
+            "the pod's memory limit and the cgroup mount; media resumes by itself.",
+            details=state,
+        )
+    return _check(
+        "media.brakes",
+        "pass",
+        f"Media brakes on: anonymous memory {state['anon_bytes']} B against an "
+        f"admission ceiling of {state['ceiling_bytes']} B (cgroup, read now).",
+        details=state,
     )
 
 
@@ -3689,6 +3717,9 @@ def doctor(
     if media_runtime is not None:
         checks.append(media_runtime)
     checks.append(_check_media_engines())
+    media_brakes_check = _check_media_brakes()
+    if media_brakes_check is not None:
+        checks.append(media_brakes_check)
 
     if profile in ("hybrid", "standard", "media"):
         extra, requirements = _embedding_requirements()
@@ -3716,7 +3747,7 @@ def doctor(
     if profile in ("standard", "media"):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
-            _check_dependency("pytesseract", "media"),
+            _check_dependency("pillow", "media", import_name="PIL"),
             _check_dependency("pymupdf", "media", import_name="fitz"),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),

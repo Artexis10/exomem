@@ -2,7 +2,7 @@
 
 The samples live in `tests/fixtures/media-samples/`. `expected.json` maps each file
 to a phrase that its extracted text must contain. The Cloud image build
-(`Dockerfile`, stage `cloud-media`) and `scripts/check-media-samples.py` read it.
+(`Dockerfile`, stage `cloud`) and `scripts/check-media-samples.py` read it.
 
 The script needs the document libraries, Pillow, python-docx and a CJK font. Run it
 in a throwaway container, not on the host:

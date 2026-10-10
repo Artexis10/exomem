@@ -105,7 +105,7 @@ cd /path/to/exomem
 
 # Install Python deps (creates .venv automatically).
 #   --extra embeddings pulls torch + sentence-transformers for HYBRID search.
-#   --extra media pulls faster-whisper + pytesseract + pymupdf + markitdown for
+#   --extra media pulls faster-whisper + Pillow + pymupdf + markitdown for
 #   SERVER-SIDE media extraction (auto transcribe/OCR/parse uploaded binaries →
 #   searchable). On Windows the [media] extra also pins the CUDA-12 runtime
 #   (cublas/cudnn/cudart) that ctranslate2 needs alongside torch's cu132 build.
@@ -130,7 +130,9 @@ OCR detects each image's script with Tesseract's OSD model first. It then reads 
 image with the installed script models for that script and the installed language
 packs written in it. A page with too little text for detection reads with
 `EXOMEM_OCR_DEFAULT_LANGS` (for example `eng+jpn`), or with Tesseract's default
-English when the variable is unset. To read Japanese, install the `jpn` and
+English when the variable is unset. Tesseract 4.x does not name its model
+directory, so on it OCR skips script detection and reads each image once in
+Tesseract's default language. To read Japanese, install the `jpn` and
 `jpn_vert` packs and the Japanese script models (Debian: `tesseract-ocr-jpn`,
 `tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
 

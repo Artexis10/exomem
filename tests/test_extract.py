@@ -837,3 +837,141 @@ def test_ocr_reads_a_script_with_its_own_models_only() -> None:
     assert passes_for(installed, "Japanese") == [("Japanese+jpn", "3"), ("Japanese_vert+jpn_vert", "5")]
     # Kanji-only text that OSD calls Han is read with the Japanese packs, not Hangul.
     assert passes_for(installed, "Han") == [("HanS+jpn", "3"), ("HanS_vert+jpn_vert", "5")]
+
+
+def test_a_memory_error_inside_markitdown_is_a_memory_stop(monkeypatch) -> None:
+    # MarkItDown wraps a MemoryError under the child's data limit in its own exception.
+    # Read as a corrupt file, an oversized document would fail for good instead of
+    # counting towards "exceeds this deployment's processing budget".
+    pytest.importorskip("markitdown")
+    from markitdown.converters import HtmlConverter, PlainTextConverter
+
+    def exhausted(*_args, **_kwargs):
+        raise MemoryError
+
+    # Both converters that accept HTML run out, as each does on an oversized page.
+    monkeypatch.setattr(HtmlConverter, "convert", exhausted)
+    monkeypatch.setattr(PlainTextConverter, "convert", exhausted)
+
+    with pytest.raises(MemoryError):
+        extract.extract_text(_SAMPLES / "sample.html")
+
+
+def test_a_corrupt_pdf_in_a_folder_named_after_an_allocator_is_not_a_memory_stop(tmp_path) -> None:
+    # PyMuPDF's errors name the file, so a folder called realloc-notes must not turn a
+    # corrupt PDF into a memory stop that marks it over budget.
+    pytest.importorskip("fitz")
+    folder = tmp_path / "realloc-notes"
+    folder.mkdir()
+    (folder / "minutes.pdf").write_bytes(b"not a pdf at all")
+
+    with pytest.raises(Exception) as raised:
+        extract.extract_text(folder / "minutes.pdf")
+
+    assert not isinstance(raised.value, MemoryError)
+
+
+def test_dark_text_on_a_transparent_image_reaches_tesseract_dark_on_white(tmp_path, monkeypatch) -> None:
+    PIL = pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw
+
+    from exomem import ocr_models
+
+    source = Image.new("RGBA", (200, 60), (0, 0, 0, 0))
+    ImageDraw.Draw(source).rectangle((20, 20, 60, 40), fill=(0, 0, 0, 255))
+    source.save(tmp_path / "label.png")
+    seen: dict[str, tuple[int, int, int]] = {}
+
+    def read_image(_cmd: str, image: Path) -> str:
+        with PIL.Image.open(image) as page:
+            rgb = page.convert("RGB")
+            seen["background"] = rgb.getpixel((150, 50))
+            seen["text"] = rgb.getpixel((40, 30))
+        return "label"
+
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    monkeypatch.setattr(ocr_models, "read_image", read_image)
+
+    extract.extract_text(tmp_path / "label.png")
+
+    assert seen == {"background": (255, 255, 255), "text": (0, 0, 0)}
+
+
+_FAKE_TESSERACT = '''
+import pathlib, sys
+args = sys.argv[1:]
+if args == ["--list-langs"]:
+    print({listing!r})
+    sys.exit(0)
+if "--psm" in args and args[args.index("--psm") + 1] == "0":
+    sys.exit(1)  # OSD is not expected when the inventory is unreadable
+base = pathlib.Path(args[1])
+tab, newline = chr(9), chr(10)
+base.with_suffix(".txt").write_text("harbour lantern was repaired" + newline)
+rows = (("level", "conf", "text"), ("5", "91", "harbour"), ("5", "90", "lantern"))
+base.with_suffix(".tsv").write_text(newline.join(tab.join(row) for row in rows) + newline)
+'''
+
+
+def _fake_tesseract(tmp_path: Path, listing: str) -> str:
+    script = tmp_path / "tesseract"
+    script.write_text(f"#!{sys.executable}\n" + _FAKE_TESSERACT.format(listing=listing))
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
+def test_tesseract_4_without_a_tessdata_path_still_reads_the_image(tmp_path) -> None:
+    # Tesseract 4.1 (Ubuntu 22.04) lists its languages without their directory. Taken
+    # as "OCR unavailable", every image would block with install wording forever.
+    from exomem import ocr_models
+
+    tesseract = _fake_tesseract(tmp_path, "List of available languages (2):\neng\nosd")
+    image = tmp_path / "page.png"
+    image.write_bytes(b"png")
+
+    assert ocr_models.read_image(tesseract, image) == "harbour lantern was repaired"
+
+
+def _traineddata(path: Path, script: str) -> None:
+    """A minimal traineddata: an LSTM entry and an LSTM unicharset in `script`."""
+    import struct
+
+    unicharset = f"3\nNULL 0 Common 0\na 3 {script} 1\nb 3 {script} 2\n".encode()
+    header = 4 + 22 * 8
+    offsets = [-1] * 22
+    offsets[17] = header
+    offsets[21] = header + 4
+    path.write_bytes(struct.pack("<i", 22) + struct.pack("<22q", *offsets) + b"lstm" + unicharset)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
+def test_a_fresh_process_reads_the_ocr_inventory_from_its_cache(tmp_path) -> None:
+    # Every media child is fresh; re-reading each pack (hundreds of MB) per job is what
+    # the inventory cache avoids, while a changed pack set must still be seen.
+    import os
+    import subprocess
+
+    tessdata = tmp_path / "tessdata"
+    tessdata.mkdir()
+    _traineddata(tessdata / "eng.traineddata", "Latin")
+    env = {**os.environ, "EXOMEM_OCR_INVENTORY": str(tmp_path / "inventory.json")}
+    probe = "import sys; from exomem import ocr_models; print([(m.name, m.script) for m in ocr_models.installed_models(sys.argv[1])])"
+
+    def fresh_inventory(listing: str) -> str:
+        tesseract = _fake_tesseract(tmp_path, listing)
+        result = subprocess.run(
+            [sys.executable, "-c", probe, tesseract], env=env, capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+
+    listing = f'List of available languages in "{tessdata}/" (1):\neng'
+    assert fresh_inventory(listing) == "[('eng', 'Latin')]"
+    # Same name, size and mtime: a fresh process trusts the cache and reads no pack.
+    stat = (tessdata / "eng.traineddata").stat()
+    (tessdata / "eng.traineddata").write_bytes(b"\0" * stat.st_size)
+    os.utime(tessdata / "eng.traineddata", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert fresh_inventory(listing) == "[('eng', 'Latin')]"
+    # A pack added to the deployment changes the listing, so the inventory is read again.
+    _traineddata(tessdata / "est.traineddata", "Latin")
+    assert "('est', 'Latin')" in fresh_inventory(f'List of available languages in "{tessdata}/" (2):\neng\nest')

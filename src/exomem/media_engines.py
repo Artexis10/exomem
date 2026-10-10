@@ -80,10 +80,9 @@ def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
     from . import extract
 
     enabled = enabled_engines(env)
-    all_kinds = (*sorted(_DOCUMENT_KINDS), *sorted(_SPEECH_KINDS), "image")
     out: dict[str, str] = {}
     for engine in ENGINES:
-        kinds = [kind for kind in all_kinds if engine_for(kind) == engine]
+        kinds = [kind for kind in sorted(media_types.KINDS) if engine_for(kind) == engine]
         if engine not in enabled:
             out[engine] = DISABLED
         elif all(extract.dependencies_present(kind) for kind in kinds):

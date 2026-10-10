@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import media_brakes
 
 _GIB = 1 << 30
@@ -52,3 +54,45 @@ def test_pressure_stop_reads_psi_and_falls_back_to_the_ceiling(tmp_path: Path) -
     blind_high = media_brakes.read_cell(**_cell(tmp_path / "c", anon=int(2.5 * _GIB), current=3 * _GIB, high="max", pressure=None))
     assert not media_brakes.pressure_exceeded(blind_low, config)
     assert media_brakes.pressure_exceeded(blind_high, config)
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["cgroup v1", "garbage memory.max", "no anon", "no memory limit"],
+)
+def test_an_unexpected_cgroup_on_a_cloud_cell_admits_nothing_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    # Failing open here would let media run blind and take the serving process down.
+    paths = _cell(tmp_path, anon=_GIB, current=_GIB, high="max", pressure=None)
+    group = tmp_path / "sys/cell.scope"
+    if state == "cgroup v1":
+        (paths["proc"] / "self/cgroup").write_text("4:memory:/cell.scope\n", encoding="utf-8")
+    elif state == "garbage memory.max":
+        (group / "memory.max").write_text("lots\n", encoding="utf-8")
+    elif state == "no anon":
+        (group / "memory.stat").write_text("file 1024\n", encoding="utf-8")
+    else:
+        (group / "memory.max").write_text("max\n", encoding="utf-8")
+    config = media_brakes.settings({})
+    budget = media_brakes.Budget(anon_bytes=_MIB, vmdata_bytes=_GIB)
+
+    cell = media_brakes.read_cell(**paths)
+
+    assert not media_brakes.admits(cell, budget, config)
+    assert media_brakes.pressure_exceeded(cell, config)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setattr(media_brakes, "read_cell", lambda: cell)
+    status = media_brakes.status()
+    assert status["state"] == "unavailable" and status["reason"]
+
+
+def test_a_budget_outside_the_cell_falls_back_to_the_default(tmp_path: Path) -> None:
+    cell = media_brakes.read_cell(**_cell(tmp_path, anon=_GIB, current=_GIB, high="max", pressure=None))
+    raw = '{"ocr": {"anon_mib": 0, "vmdata_mib": 512}, "documents": {"anon_mib": 4096, "vmdata_mib": 512}}'
+
+    config = media_brakes.settings({media_brakes.BUDGETS_ENV: raw}, cell)
+
+    # A zero budget admits everything and one above memory.max can never be met.
+    assert config.budget_for("ocr") == config.default_budget
+    assert config.budget_for("documents") == config.default_budget

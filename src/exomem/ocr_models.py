@@ -10,23 +10,33 @@ is whatever the deployment put in the tessdata directory.
 Tesseract runs as a subprocess, so it inherits the media child's data-segment limit.
 Its allocation failures reach us only on stderr, and Leptonica can report one with
 exit status 0 and partial text, so this module reads stderr on every run.
+
+Reading each model's script means reading every traineddata file (hundreds of MB), so
+the result is cached in a small JSON file keyed by the tessdata directory's listing.
+The Cloud image writes that file at build time; a personal install writes it on first
+use and again whenever its packs change.
 """
 
 from __future__ import annotations
 
 import collections
+import contextlib
 import csv
 import functools
+import hashlib
+import json
+import logging
 import os
 import struct
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import media_brakes
+log = logging.getLogger(__name__)
 
 DEFAULT_LANGS_ENV = "EXOMEM_OCR_DEFAULT_LANGS"
+INVENTORY_ENV = "EXOMEM_OCR_INVENTORY"
 
 # traineddata layout (tessdatamanager.h): an int32 entry count, then one int64
 # offset per component, -1 when absent. These indexes are TessdataType values.
@@ -44,6 +54,11 @@ _VERTICAL_SUFFIX = "_vert"
 _PSM_OSD = "0"
 _PSM_AUTO = "3"
 _PSM_VERTICAL = "5"
+# The tokens Tesseract's libraries print on stderr when an allocation fails (Leptonica
+# "malloc fail", std::bad_alloc). Looking for them anywhere in stderr is safe because
+# Tesseract echoes only the arguments this module passes: its own temp file names and
+# the deployment's tessdata paths, never a tenant's file name.
+_ALLOCATOR_TOKENS = ("bad_alloc", "malloc", "calloc", "realloc")
 
 
 class OcrMemoryExhausted(MemoryError):
@@ -80,7 +95,7 @@ def _run(cmd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
         )
     except FileNotFoundError as error:
         raise OcrUnavailable(f"Tesseract binary not found: {cmd}") from error
-    if media_brakes.names_allocation_failure(result.stderr):
+    if any(token in result.stderr for token in _ALLOCATOR_TOKENS):
         raise OcrMemoryExhausted(f"Tesseract allocation failed: {result.stderr.strip()[-300:]}")
     if result.returncode != 0:
         raise OcrFailed(f"Tesseract exited {result.returncode}: {result.stderr.strip()[-300:]}")
@@ -113,17 +128,71 @@ def _plurality_script(path: Path) -> tuple[str | None, bool]:
     return None, has_lstm
 
 
+def _inventory_path() -> Path:
+    configured = (os.environ.get(INVENTORY_ENV) or "").strip()
+    return Path(configured) if configured else Path.home() / ".cache" / "exomem" / "ocr-inventory.json"
+
+
+def _inventory_key(tessdata: Path, names: list[str]) -> str:
+    """Name, size and mtime of each listed model: what changes when a pack changes."""
+    entries = [str(tessdata)]
+    for name in sorted(names):
+        try:
+            stat = (tessdata / f"{name}.traineddata").stat()
+        except OSError:
+            entries.append(f"{name} missing")
+            continue
+        entries.append(f"{name} {stat.st_size} {stat.st_mtime_ns}")
+    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
+
+
+def _cached_models(path: Path, key: str) -> tuple[Model, ...] | None:
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        if cached.get("key") != key:
+            return None
+        return tuple(Model(**entry) for entry in cached["models"])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _store_models(path: Path, key: str, models: tuple[Model, ...]) -> None:
+    """Best effort: a read-only image or home only costs the next process a re-read."""
+    temporary: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=".ocr-inventory-", delete=False
+        ) as handle:
+            temporary = handle.name
+            json.dump({"key": key, "models": [asdict(model) for model in models]}, handle)
+        # Model names only, no secret: the Cloud image writes it as root at build time
+        # and the cell's own user reads it.
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except OSError as error:
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+        log.debug("OCR inventory cache not written to %s: %s", path, error)
+
+
 @functools.lru_cache(maxsize=4)
-def _inventory(cmd: str) -> tuple[Model, ...]:
+def _inventory(cmd: str) -> tuple[Model, ...] | None:
+    """The installed models, or None when this Tesseract cannot name its tessdata."""
     listing = _run(cmd, ["--list-langs"]).stdout.splitlines()
     if not listing or '"' not in listing[0]:
-        raise OcrUnavailable("Tesseract did not name its tessdata directory")
+        return None  # Tesseract 4.x lists languages without their directory
     # The first line is `List of available languages in "<dir>/" (<n>):`.
     tessdata = Path(listing[0].split('"')[1])
+    names = [name for name in (line.strip() for line in listing[1:]) if name]
+    key = _inventory_key(tessdata, names)
+    path = _inventory_path()
+    cached = _cached_models(path, key)
+    if cached is not None:
+        return cached
     models: list[Model] = []
-    for name in (line.strip() for line in listing[1:]):
-        if not name:
-            continue
+    for name in names:
         try:
             script, has_lstm = _plurality_script(tessdata / f"{name}.traineddata")
         except (OSError, struct.error):
@@ -140,10 +209,11 @@ def _inventory(cmd: str) -> tuple[Model, ...]:
                 vertical=name.endswith(_VERTICAL_SUFFIX),
             )
         )
+    _store_models(path, key, tuple(models))
     return tuple(models)
 
 
-def installed_models(cmd: str) -> tuple[Model, ...]:
+def installed_models(cmd: str) -> tuple[Model, ...] | None:
     return _inventory(cmd)
 
 
@@ -218,7 +288,13 @@ def read_image(cmd: str, image: Path) -> str:
     A script with vertical models gets a horizontal and a vertical pass, and the
     pass Tesseract is more confident in wins.
     """
-    plans = passes_for(installed_models(cmd), _detect_script(cmd, image))
+    models = installed_models(cmd)
+    if models is None:
+        # Without its tessdata directory the models' scripts cannot be read: one pass in
+        # Tesseract's default language, as OCR read before script detection.
+        plans: list[tuple[str | None, str]] = [(None, _PSM_AUTO)]
+    else:
+        plans = passes_for(models, _detect_script(cmd, image))
     with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
         results = [_read(cmd, image, lang, psm, Path(tmp)) for lang, psm in plans]
     return max(results, key=lambda result: result[0])[1]

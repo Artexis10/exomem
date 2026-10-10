@@ -1713,6 +1713,8 @@ def test_a_pressure_stop_never_marks_a_file_over_budget(vault: Path) -> None:
     # The tenant sees the job only as waiting; the memory reason is the operator's.
     assert (row["state"], row["error"], row["retryable"]) == (media_jobs.PENDING, None, False)
     assert status["memory_blocked_count"] == 1
+    # Counted as its row shows it, so no operator sees a blocked job the row hides.
+    assert (status["counts"][media_jobs.PENDING], status["counts"][media_jobs.BLOCKED]) == (1, 0)
     assert store.recover_memory_verdicts(context_for=lambda _type: "limit-a", include_memory_blocked=False) == 0
     assert store.recover_memory_verdicts(context_for=lambda _type: "limit-a", include_memory_blocked=True) == 1
     assert store.claim_next() is not None

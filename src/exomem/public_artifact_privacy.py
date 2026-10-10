@@ -239,9 +239,31 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
         "plugins/cloud/generated/openai/assets/icon.png", "generated copy of the Cloud PNG icon"
     ),
     BinaryProvenance("assets/icon.png", "Cloud plugin archive copy of its repository-authored icon"),
-    BinaryProvenance(
-        "tests/fixtures/media-samples/*",
-        "synthetic media samples that scripts/make-media-samples.py writes from fixed phrases",
+    # Each committed sample in a binary or provenance-checked format is named: a glob
+    # here would also admit any file added under that folder later, and fnmatch's
+    # `*` crosses directories.
+    *(
+        BinaryProvenance(
+            f"tests/fixtures/media-samples/{name}",
+            "synthetic media sample that scripts/make-media-samples.py writes from a fixed phrase",
+        )
+        for name in (
+            "ocr-eng.png",
+            "ocr-est.png",
+            "ocr-jpn-vert.png",
+            "ocr-jpn.png",
+            "sample.docx",
+            "sample.eml",
+            "sample.epub",
+            "sample.ics",
+            "sample.odp",
+            "sample.ods",
+            "sample.odt",
+            "sample.pdf",
+            "sample.pptx",
+            "sample.rtf",
+            "sample.xlsx",
+        )
     ),
 )
 

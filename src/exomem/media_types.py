@@ -31,23 +31,20 @@ EMAIL_EXTS = frozenset({".eml"})
 CAL_EXTS = frozenset({".ics"})
 
 
+_KIND_BY_EXT: dict[str, str] = {
+    **dict.fromkeys(AUDIO_EXTS, "audio"),
+    **dict.fromkeys(VIDEO_EXTS, "video"),
+    **dict.fromkeys(IMAGE_EXTS, "image"),
+    **dict.fromkeys(PDF_EXTS, "pdf"),
+    **DOC_EXTS,
+    **dict.fromkeys(TEXT_EXTS, "text"),
+    **dict.fromkeys(EMAIL_EXTS, "email"),
+    **dict.fromkeys(CAL_EXTS, "calendar"),
+}
+#: Every extraction kind this registry assigns to an extension.
+KINDS = frozenset(_KIND_BY_EXT.values())
+
+
 def media_type_for(path: str | Path) -> str | None:
     """Return the deterministic extraction kind for a filename extension."""
-    ext = Path(path).suffix.lower()
-    if ext in AUDIO_EXTS:
-        return "audio"
-    if ext in VIDEO_EXTS:
-        return "video"
-    if ext in IMAGE_EXTS:
-        return "image"
-    if ext in PDF_EXTS:
-        return "pdf"
-    if ext in DOC_EXTS:
-        return DOC_EXTS[ext]
-    if ext in TEXT_EXTS:
-        return "text"
-    if ext in EMAIL_EXTS:
-        return "email"
-    if ext in CAL_EXTS:
-        return "calendar"
-    return None
+    return _KIND_BY_EXT.get(Path(path).suffix.lower())

@@ -137,8 +137,6 @@ media = [
     "exomem[media-cpu]",
     "faster-whisper>=1.0",
     "ctranslate2>=4.6.3,<5",
-    # Kept for doctor's media-profile probe; OCR now runs the Tesseract binary itself.
-    "pytesseract>=0.3.10",
     # CUDA-12 runtime owned by CTranslate2 on Linux and Windows. torch's cuBLAS
     # major is independent; the media parent discovers these wheel directories
     # and prepends them before the disposable child interpreter starts.
