@@ -73,6 +73,7 @@ Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.
 ## S9. Nudges (after S3 and S4b)
 
 - [ ] 9.1 Use the `activate-agent-led-vocabulary-evolution` work-item queue as the nudge channel: "you used X, the vault calls it Y" in the advisory slot; Dreamer upkeep families for recurring unregistered values, near-duplicate entries and per-registry debt.
+  Complemented by `promote-referents-without-nudges` task 3.3, which adds `specific_options` for a generic edge between entities to the same relation-advisory slot. Variant nudges stay with this task.
 
 ## S10. Planning (`add-planning-value-registry`)
 

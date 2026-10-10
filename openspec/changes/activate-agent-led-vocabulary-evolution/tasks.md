@@ -35,6 +35,10 @@ preserved evidence does not establish their requested red-before-implementation
 ordering. Their open boxes record that historical evidence gap; they do not
 require reimplementing the behavior already exercised by the shipped tests.
 
+Pointer: `promote-referents-without-nudges` design decision 2 reads the bootstrap scenario
+"Proactivity does not imply permission" as v2 delegation only. A v1 owner's additive
+promotion follows `proactive_capture`.
+
 ## 1. Protocol and evidence contract
 
 - [ ] 1.1 Add failing pure-logic tests for family descriptors, allowed outcomes, fingerprint/version binding, unknown-family refusal and non-inheritance of future actions; verify the tests fail for the missing behaviours before implementation.
@@ -45,6 +49,7 @@ require reimplementing the behavior already exercised by the shipped tests.
 ## 2. Ordinary-work guidance under existing v1 permissions
 
 - [ ] 2.1 Add failing tests for a resolved generic pair/edge supported by two independent origins, copy-equivalent origin negatives, explicit agent meaning questions, single keyword negatives and unavailable independence evidence; verify the current unknown-label-only advisory cannot satisfy the positive case and the runtime never labels a supplier/equivalence meaning.
+  Complemented by `promote-referents-without-nudges` task 3.3: a single write that authors the generic relation between two entities is offered predicates whose declared endpoints fit, with no origin count. The two-origin generic-pair signal stays here and waits on close-memory-loop task 4.3.
 - [x] 2.2 Connect current-write context and bounded indexed origin/pair evidence to vocabulary work items in mutation/review projections; verify one advisory of at most 1 KiB per write, four items per default review page, explicit continuation, and zero full-corpus scans or model calls on the write path.
 - [x] 2.3 Implement fingerprinted notification deduplication, deferral, family quiet and state-based resolution without moving original evidence; verify restart persistence, explicit access to quiet work, no re-notification from unrelated registry edits, and that linked non-quietable integrity findings remain visible until state repair.
 - [ ] 2.4 Add soft-failure and recovery tests before implementing optional guidance recovery; verify committed terminals keep their receipt/replay identity, unavailable is not empty, and bounded projection recovery reconstructs missed work without repeating the content mutation.
@@ -63,6 +68,7 @@ require reimplementing the behavior already exercised by the shipped tests.
 - [ ] 4.1 Add failing authorization tests for opt-in activation, default no grants, separate entity/type/edge actions, vault-wide type/entity creation grants, exact approval for narrower new entities and resolved project edge scope; verify v1 is unchanged, new entities cannot assert project membership and an older client cannot downgrade an activated vault.
 - [x] 4.2 Implement activation/grant records under external authority custody, reusing existing principal/session/secret-handling contracts; verify restart persistence, bounded expiry, generation validation and cross-principal/cross-vault isolation.
 - [ ] 4.3 Implement pending approval request/status variants and a trusted user-control approval ceremony distinct from ordinary agent credentials; verify agent self-approval, forged confirmation fields and retrieved permission text cannot mint approval, while an authenticated user approves the displayed exact effects. Inspect the real control surface with Chrome DevTools if rendered UI changes.
+  Not on the owner's path: `promote-referents-without-nudges` design decision 2 keeps v2 opt-in, and no upgrade or approval step gates a v1 owner's promotion.
 - [x] 4.4 Implement one-shot exact-action approval and scoped grant evaluation over canonical payloads/targets; verify single operation-identity reservation, proven pre-commit retry, uncertain-outcome recovery, refusal under a new identity, out-of-scope endpoints, project-label laundering, global registry effects, changed reviewed hashes and unsupported future actions.
 
 ## 5. Enforcement and recovery gates
@@ -83,6 +89,8 @@ require reimplementing the behavior already exercised by the shipped tests.
 - [ ] 6.6 After all non-optional integrations and acceptance tasks are evidenced as shipped, synchronize these deltas without discarding later scenarios and archive through OpenSpec; verify `openspec validate --all --strict` before and after archive. A planning PR alone does not complete or archive this change.
 
 ## 7. Closed-loop programme authority extension
+
+Superseded for the owner's vault by `promote-referents-without-nudges` design decision 2: an owner's agent creates entities and typed edges under `proactive_capture` with no vault-wide `edge.add` grant. Tasks 7.1 to 7.4 stay open only for a v2 delegate that needs that grant; they no longer gate the close-memory-loop programme.
 
 - [ ] 7.1 Add failing scope tests for explicit vault-wide `edge.add` over existing and future canonical endpoints; verify same-vault resolution, cross-vault refusal, no caller-label proof, separate entity/type authority and no widening of existing project-edge grants.
 - [ ] 7.2 Extend grant validation, scope matching and trusted owner review with the versioned vault-edge scope and compatible reader/writer floor; verify migration creates no grants and older runtimes cannot serve weaker structural writes.

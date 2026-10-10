@@ -35,6 +35,11 @@ replacements require measured ablations. See
 [vocabulary reconciliation](changes/reconcile-vocabulary-variants/tasks.md) and
 [vault-owned conventions](changes/make-activation-conventions-vault-owned/tasks.md).
 
+[Referent promotion](changes/promote-referents-without-nudges/tasks.md) lets the
+agent declare durable referents on ordinary writes. An owner's promotion of
+types, entities and typed edges needs no confirmation, appears once in the next
+session and reverts in one call. It does not wait for origin accounting.
+
 ## Governed vault consolidation
 
 [Vault consolidation](changes/add-governed-vault-consolidation/tasks.md) holds
