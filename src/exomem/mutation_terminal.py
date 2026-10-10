@@ -1137,8 +1137,9 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
                 break
             category = row.get("category")
             ref = row.get("ref")
+            fingerprint = row.get("fingerprint")
             due_since = row.get("due_since")
-            if not _due_state_token(category):
+            if not _due_state_token(category) or not _due_state_token(fingerprint):
                 break
             if (
                 not isinstance(ref, str)
@@ -1148,7 +1149,14 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
                 break
             if not _iso_date(due_since):
                 break
-            rows.append({"category": category, "ref": ref, "due_since": due_since})
+            rows.append(
+                {
+                    "category": category,
+                    "ref": ref,
+                    "fingerprint": fingerprint,
+                    "due_since": due_since,
+                }
+            )
         else:
             hint = value.get("_vault")
             return (
