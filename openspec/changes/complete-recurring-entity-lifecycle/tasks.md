@@ -55,4 +55,4 @@
 - [x] 7.3 Run `openspec validate --all --strict`.
 - [x] 7.4 Reconcile stale fixed-registry and prose-inference claims in `harden-write-and-entity-capture` before implementation delegation. Evidence: commit a8091216 removed the fixed-registry increment from harden-write-and-entity-capture/design.md.
 - [ ] 7.5 After shared v5 delivery and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
-  Before this archive, amend the `delegation-envelope` delta scenario "Unknown kind registration remains confirmed restructuring": `promote-referents-without-nudges` design decision 2 and the 2026-10-07 owner ruling make an owner's type save `proactive_capture`. Relation acceptance from the queue keeps `link_acceptance`.
+  The `delegation-envelope` delta's unknown-kind scenario is amended by `promote-referents-without-nudges` (design decision 2, owner decision O2): an owner's type save follows `proactive_capture`. Relation acceptance from the queue keeps `link_acceptance`.

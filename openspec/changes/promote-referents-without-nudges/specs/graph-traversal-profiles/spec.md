@@ -6,9 +6,12 @@ The system SHALL provide immutable built-in `epistemic`, `provenance`, `causal`,
 than defined in code. Each profile SHALL define relation families, edge
 directions, extension-parent expansion, deterministic priority, and bounded
 defaults, and MAY declare the activation anchor kinds it serves from the closed
-anchor-kind set. The `entity` profile SHALL hold the core families that relate
-entities, including ownership, membership and location. Omitting a profile SHALL
-preserve current broad context behavior by using `all`.
+anchor-kind set. The `entity` profile SHALL extend `epistemic` and add the core
+families that relate entities, including ownership, membership, location,
+kinship and affiliation. A traversal SHALL pass the selected profile's allowed
+relation keys to its neighbour-edge query, so that the row bound applies only to
+edges the profile can use. Omitting a profile SHALL preserve current broad
+context behavior by using `all`.
 
 #### Scenario: Epistemic lens excludes unrelated operational edges
 - **WHEN** context is requested with `traversal_profile="epistemic"`
@@ -23,6 +26,12 @@ preserve current broad context behavior by using `all`.
   whose parent is `owns`
 - **THEN** both edges are traversed within bounds and the response names the
   `entity` profile
+
+#### Scenario: A busy page keeps its typed edges
+- **WHEN** a person entity has more than 256 incident edges, most of them
+  outside the `entity` profile, and one `owns` edge
+- **THEN** context with `traversal_profile="entity"` still traverses the `owns`
+  edge
 
 #### Scenario: Pack and former code agree
 - **WHEN** the pack-defined built-in profiles are loaded on an unchanged vault

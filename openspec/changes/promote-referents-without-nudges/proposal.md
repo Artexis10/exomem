@@ -4,55 +4,47 @@
 
 An ordinary conversation names durable things: a person, their dog, a supplement the dog takes.
 Today an agent turns them into entities and typed edges only when the user tells it to.
-The tools exist, but nothing on the write path asks the agent which durable referents its write names.
-The served contract still says that vocabulary writers need confirmation.
+The compact core already tells the agent to wikilink named identities, and the failure happened under that text.
+Nothing on the write path tells the agent that a name it just linked has no entity.
+The served contract still says that vocabulary writers and relations need confirmation.
 Specific relations are never offered when an agent writes `relates_to`.
-Activation does not follow ownership, membership or location edges.
 
 The owner decided on 2026-10-10 that creation of entities, types, categories and typed edges is first class, needs no confirmation, and reaches every later session.
-This change specifies the slice that delivers that outcome without server-side nudges.
+This change measures the current behaviour first, then ships the smallest prompt, and adds larger mechanisms only when the measurement earns them.
 
 ## What Changes
 
-- Add one optional `referents` argument to `remember`, `observe_memory`, `edit_memory` and `capture_source`.
-  The agent declares each durable referent with a name, an optional type, optional relations and a verbatim evidence span.
-  The server resolves each referent, reuses an existing entity, or creates a new one through the existing entity writer.
-- Classify an owner's additive promotions as `proactive_capture`: entity type and category saves, relation extension saves, entity creation and agent-authored typed edges.
-  Each promotion carries provenance, appears once in the next session's counters, and reverts in one call.
-  The confirmation rule in the served contract is replaced.
-- Let `create-entity` take typed `connections`, and add one additive `add-relation` leaf for an ordinary typed edge.
-- Add relation `label`, `generic` and `endpoints` as registry data.
-  When a write authors the generic relation between two entities, the response offers the registered predicates whose endpoints fit.
-- Move the built-in traversal profiles into a vocabulary pack and add an `entity` profile.
-  Activation expands entity anchors through it.
+- Measure first: file a benchmark amendment, author six positive cases with durability-matched twins and an answer key, and run a baseline on `main` and three arms through the real agent driver.
+- Rewrite the six served texts that require confirmation, and make the owner's type, category and relation saves and authored typed edges `proactive_capture` through a MODIFIED envelope ceiling, ratified by owner decision O2.
+- Add an `undeclared_referents` block to every durable write's receipt: up to 3 names that the write newly links and that have no entity, each with the `create-entity` route.
+- Add typed `create-entity` connections and the `add-relation` and `remove-relation` leaves, with relation `generic` and `endpoints` data, kinship and affiliation core relations, and an offer that replaces a generic edge in place.
+- Gate a `referents` declaration argument on `remember` and `observe_memory`: it ships only if the arm with it beats the arm without it on the per-case table.
+- Add a `recent_promotions` due-state category that surfaces each promotion once in the next interactive session, and a revert route for each promotion.
 - Show relations by label, for example `has_pet (a kind of owns)`, through one formatter.
-  The namespaced key stays the machine identity.
-- Add a `recent_promotions` due-state category and a one-call revert route for each promotion.
-- Prove the outcome with an end-to-end replay of a rich turn about a person's dog, its supplement and its diet, plus negative twins and boundary tests.
+- Move the traversal profiles into a pack and add an `entity` profile only if the measurement shows an owner-anchored question failing.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `referent-promotion`: the declaration channel, resolution before creation, typed edges, provenance, surfacing, revert and disclosure.
+- `referent-promotion`: typed-edge leaves, provenance, surfacing, revert, disclosure, and the rule that the server creates only what the agent asks for.
+- `referent-declarations` (gated): the `referents` argument, its outcomes, pending completion and teaching. Task 5.2 removes it if the gate fails.
 
 ### Modified Capabilities
 
-- `delegation-envelope`: an owner's additive promotions follow `proactive_capture`.
+- `delegation-envelope`: the ceiling requirement adds the owner's promotions to `proactive_capture` and edge removal to `restructure_execution`.
+- `write-time-identity-candidates`: detection, not the server, never creates an entity; writes carry `undeclared_referents`.
 - `epistemic-relation-registry`: relation labels, the display formatter, endpoint families and the generic marker.
-- `relation-vocabulary-evolution`: a generic edge between entities offers fitting predicates.
-- `graph-traversal-profiles`: built-in profiles ship as pack data and include `entity`.
-- `context-activation`: an anchor expands through the profile that declares its kind.
+- `relation-vocabulary-evolution`: a generic edge between entities offers fitting predicates that replace it in place.
+- `graph-traversal-profiles` and `context-activation` (conditional): pack profiles, the `entity` profile and typed expansion of entity anchors.
 
 ## Impact
 
-- Code: `commands.py` (four write commands, `connect_memory`, bootstrap), `link.py`, `curation.py`, `relation_registry.py`, `traversal_profiles.py`, `working_set.py`, `due_state.py`, `mutation_terminal.py`, the core packs, and the scaffold.
-- Published surface: four tools gain `referents`; `connect_memory` gains the `add-relation` operation and typed `connections`.
-  The tool-surface pin moves once.
+- Code: `commands.py`, `prominence.py`, the scaffold, `capture_sweep.py`, `semantic_writes.py`, `link.py`, `curation.py`, `relation_registry.py`, `vocabulary/registry.py`, `due_state.py`, `mutation_terminal.py` and the core packs; `traversal_profiles.py`, `working_set.py` and `epistemic_graph.py` only on the D4 trigger.
+- Published surface: `connect_memory` gains two operations and typed `connections`, and needs a measured raise of its 4,300-byte ceiling.
+  `referents`, if earned, adds about 844 bytes on each of two tools and needs both per-tool ceilings and the 90,000-byte surface total raised.
   The ChatGPT connector needs a refresh after the release.
-- Vaults: no page is rewritten.
-  New registry fields are optional, so an older release reads every overlay.
-- Supersedes: the confirm-required classification of entity-type saves in the `complete-recurring-entity-lifecycle` envelope delta, and the served text "v1 writers retain confirmation".
-  Close-memory-loop task 5.3 and agent-led vocabulary tasks 7.1–7.4 stop gating the owner's promotion.
-- Ships before close-memory-loop task 4.3.
-  Origin accounting is needed only for recurrence-based promotion, which this change does not add.
+- Benchmarks: one new §7 amendment family; a comparative claim waits for its founder acknowledgment.
+- Vaults: no page is rewritten. New registry fields are optional.
+- Supersedes: the served confirmation texts, the confirm-required type save in the `complete-recurring-entity-lifecycle` envelope delta (amended here), and the gating role of close-memory-loop task 5.3 and agent-led vocabulary tasks 7.1–7.4 for the owner.
+- Does not wait for close-memory-loop task 4.3.
