@@ -1820,7 +1820,9 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             details=status,
         )
     counts = status["counts"]
-    blocked = int(counts.get("blocked", 0))
+    memory_blocked = int(status.get("memory_blocked_count", 0))
+    over_budget = int(status.get("over_budget_count", 0))
+    blocked = int(counts.get("blocked", 0)) - memory_blocked - over_budget
     failed = int(counts.get("failed", 0))
     if blocked or failed:
         compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
@@ -1836,6 +1838,18 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             remediation,
             details=status,
         )
+    if memory_blocked or over_budget:
+        # Operator-only: tenants see memory-blocked work as waiting.
+        return _check(
+            "media.runtime",
+            "warn",
+            f"Media work waits on memory: {memory_blocked} memory-blocked, "
+            f"{over_budget} over this deployment's processing budget.",
+            "Memory-blocked work resumes by itself when pressure stays low. Over-budget "
+            "files resume when the cell's memory limit or the engine's budget changes "
+            "(EXOMEM_MEDIA_BUDGETS).",
+            details=status,
+        )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
     return _check(
         "media.runtime",
@@ -1843,6 +1857,27 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
         f"Durable media runtime healthy ({queued} queued/running).",
         details=status,
     )
+
+
+def _check_media_engines() -> DoctorCheck:
+    """Each media engine as enabled, disabled or unavailable (EXOMEM_MEDIA_ENGINES)."""
+    from . import media_engines
+
+    states = media_engines.status()
+    summary = ", ".join(f"{engine} {state}" for engine, state in states.items())
+    unavailable = [engine for engine, state in states.items() if state == media_engines.UNAVAILABLE]
+    # Only a deployment that names its engines expects them all installed; a personal
+    # install's default set covers profiles without the media extra.
+    if unavailable and os.environ.get(media_engines.ENGINES_ENV) is not None:
+        return _check(
+            "media.engines",
+            "warn",
+            f"Media engines: {summary}.",
+            f"Install the software for {', '.join(unavailable)}, or switch the engine off "
+            f"in {media_engines.ENGINES_ENV}.",
+            details=states,
+        )
+    return _check("media.engines", "pass", f"Media engines: {summary}.", details=states)
 
 
 #: How long the process census may take before the check gives up on it.
@@ -2409,7 +2444,7 @@ def _check_tesseract(*, required: bool = True) -> DoctorCheck:
     """Report what the RUNTIME will resolve, not a narrower guess.
 
     Doctor checked only `EXOMEM_TESSERACT_CMD` and PATH, while
-    `extract._ensure_tesseract_cmd` also probes the standard install locations.
+    `extract.resolve_tesseract_cmd` also probes the standard install locations.
     The UB-Mannheim Windows package installs to one of those and does not touch
     PATH, so doctor reported FAIL on a host where OCR demonstrably worked — and
     `scripts/upgrade.ps1 -Profile media` then refused a safe service restart
@@ -3653,6 +3688,7 @@ def doctor(
     media_runtime = _check_media_runtime(vault_root)
     if media_runtime is not None:
         checks.append(media_runtime)
+    checks.append(_check_media_engines())
 
     if profile in ("hybrid", "standard", "media"):
         extra, requirements = _embedding_requirements()

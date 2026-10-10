@@ -20,6 +20,11 @@ DOC_EXTS: dict[str, str] = {
     ".pptx": "pptx",
     ".html": "html",
     ".htm": "html",
+    ".epub": "epub",
+    ".odt": "odt",
+    ".ods": "ods",
+    ".odp": "odp",
+    ".rtf": "rtf",
 }
 TEXT_EXTS = frozenset({".txt", ".text", ".log"})
 EMAIL_EXTS = frozenset({".eml"})

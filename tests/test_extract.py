@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -263,10 +264,11 @@ def test_extract_ics_pulls_vevent_fields(tmp_path) -> None:
     assert r.media_type == "calendar"
 
 
-def test_extract_document_soft_fails_on_bad_input(tmp_path) -> None:
-    # markitdown missing → ExtractionUnavailable; present but file missing → convert raises
-    # → still ExtractionUnavailable (wrapped). Either way, never a hard crash.
-    with pytest.raises(extract.ExtractionUnavailable):
+def test_unreadable_document_fails_as_the_file_not_as_a_missing_engine(tmp_path) -> None:
+    # automatic-media-processing: an unreadable artifact fails with its own reason. Read as
+    # a missing engine, it would block and requeue at every start once the engine exists.
+    pytest.importorskip("markitdown")
+    with pytest.raises(FileNotFoundError):
         extract._extract_document(tmp_path / "does-not-exist.docx", "docx")
 
 
@@ -794,3 +796,44 @@ def test_resolve_named_labels_prefers_explicit_vault_root(
     )
     assert out is None  # no profiles → anonymous
     assert seen == [tmp_path]
+
+
+_SAMPLES = Path(__file__).parent / "fixtures" / "media-samples"
+
+
+@pytest.mark.parametrize(
+    "name,library",
+    [
+        ("sample.epub", "markitdown"),
+        ("sample.odt", "odfdo"),
+        ("sample.ods", "odfdo"),
+        ("sample.odp", "odfdo"),
+        ("sample.rtf", "striprtf"),
+    ],
+)
+def test_new_document_formats_extract_their_text(name: str, library: str) -> None:
+    pytest.importorskip(library)
+    phrase = json.loads((_SAMPLES / "expected.json").read_text(encoding="utf-8"))[name]
+
+    result = extract.extract_text(_SAMPLES / name)
+
+    assert phrase.casefold() in " ".join(result.text.split()).casefold()
+    assert result.media_type == extract.media_type_for(name)
+
+
+def test_ocr_reads_a_script_with_its_own_models_only() -> None:
+    from exomem.ocr_models import Model, passes_for
+
+    def model(name: str, script: str) -> Model:
+        return Model(name, script, name[:1].isupper(), name.endswith("_vert"))
+
+    installed = (
+        model("Latin", "Latin"), model("Japanese", "Han"), model("Japanese_vert", "Han"),
+        model("HanS", "Han"), model("HanS_vert", "Han"), model("Hangul", "Hangul"),
+        model("eng", "Latin"), model("est", "Latin"), model("jpn", "Han"), model("jpn_vert", "Han"),
+    )
+
+    assert passes_for(installed, "Latin") == [("Latin+eng+est", "3")]
+    assert passes_for(installed, "Japanese") == [("Japanese+jpn", "3"), ("Japanese_vert+jpn_vert", "5")]
+    # Kanji-only text that OSD calls Han is read with the Japanese packs, not Hangul.
+    assert passes_for(installed, "Han") == [("HanS+jpn", "3"), ("HanS_vert+jpn_vert", "5")]

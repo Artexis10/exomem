@@ -3801,7 +3801,7 @@ def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypat
         "cuda_runtime_child_env",
         lambda parent: {**parent, "LD_LIBRARY_PATH": "/wheel/cublas:/system"},
     )
-    monkeypatch.setattr(media_worker.subprocess, "Popen", lambda args, env: captured.update(args=args, env=env))
+    monkeypatch.setattr(media_worker.subprocess, "Popen", lambda args, env, **_: captured.update(args=args, env=env))
 
     worker._launch_child()
 
@@ -3904,9 +3904,9 @@ def test_idle_child_stops_reopening_the_store_until_exit(
     claim_holds = []
     original = media_jobs.MediaJobStore.claim_next
 
-    def claim_next(store):
+    def claim_next(store, *args, **kwargs):
         before = len(taken)
-        job = original(store)
+        job = original(store, *args, **kwargs)
         claim_holds.extend(taken[before:])
         return job
 
@@ -3974,8 +3974,8 @@ def test_idle_child_claims_unwoken_work_and_hands_off_the_whole_burst(
 
     original_claim = media_jobs.MediaJobStore.claim_next
 
-    def claim_next(ledger):
-        job = original_claim(ledger)
+    def claim_next(ledger, *args, **kwargs):
+        job = original_claim(ledger, *args, **kwargs)
         if signature_mode == "folded" and not enqueued:
             assert job is None
             # A concurrent commit lands after the empty read, before its signature.
@@ -4485,3 +4485,186 @@ def test_an_in_process_enqueue_after_a_long_idle_still_starts_promptly(
         worker._wake.set()
         thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_child_exits_after_each_hard_limit_failure_until_the_file_is_over_budget(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_brakes
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
+    monkeypatch.setattr(media_brakes, "enabled", lambda env=None: True)
+    monkeypatch.setattr(
+        media_brakes,
+        "read_cell",
+        lambda **_: media_brakes.CellMemory(anon=0, max=3 << 30, high=None, pressure_avg10=0.0),
+    )
+    limited_runs: list[int] = []
+    monkeypatch.setattr(
+        media_brakes,
+        "apply_hard_limit",
+        lambda budget, config: limited_runs.append(budget.vmdata_bytes + config.margin_bytes),
+    )
+    monkeypatch.setattr(media_brakes, "lift_hard_limit", lambda: None)
+    result = _preserve_media_stub(vault, filename="panorama.mp3")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_process",
+        lambda _self, _job: (_ for _ in ()).throw(MemoryError()),
+    )
+
+    returncodes = [
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01)
+        for _ in range(3)
+    ]
+
+    # Each failure ends its child, so the next attempt starts with no earlier growth.
+    assert returncodes == [media_worker._MEMORY_RECYCLE_EXIT_CODE] * 3
+    assert len(limited_runs) == 3
+    [row] = media_jobs.status(vault)["jobs"]
+    assert row["state"] == media_jobs.BLOCKED
+    assert row["attempts"] == 0
+    assert row["next_action"] == media_jobs.OVER_BUDGET_ACTION
+    # The sidecar's over-budget presentation is handed to the parent to publish.
+    assert store.pending_result_count() == 1
+
+
+def test_pressure_stop_kills_the_child_and_its_tools_and_requeues_the_job(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import sys
+
+    from exomem import media_brakes
+
+    pressure = {"avg10": 0.0}
+    monkeypatch.setattr(media_brakes, "enabled", lambda env=None: True)
+    monkeypatch.setattr(
+        media_brakes,
+        "read_cell",
+        lambda **_: media_brakes.CellMemory(
+            anon=1 << 30, max=3 << 30, high=None, pressure_avg10=pressure["avg10"]
+        ),
+    )
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    result = _preserve_media_stub(vault, filename="busy.mp3")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    tool_pid_file = tmp_path / "tool.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "tool = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(tool_pid_file)!r}, 'w').write(str(tool.pid))\n"
+        "time.sleep(60)\n"
+    )
+
+    def launch_child(self):
+        # The child claims its job and starts a tool, as a media child running OCR does.
+        child = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+        assert self._store.claim_next() is not None
+        self._store.set_worker(child.pid, 1.0)
+        while not tool_pid_file.exists():
+            time.sleep(0.02)
+        pressure["avg10"] = 55.0
+        return child
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", launch_child)
+    # In a Cloud cell the server is PID 1 and inherits the orphaned tool; a subreaper
+    # test process inherits it the same way, so a tool left unreaped stays a zombie.
+    subreaper = sys.platform == "linux"
+    if subreaper:
+        import ctypes
+
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+        pr_set_child_subreaper = 36
+        assert prctl(pr_set_child_subreaper, 1, 0, 0, 0) == 0
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.start()
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            [row] = media_jobs.status(vault)["jobs"]
+            if row["state"] == media_jobs.PENDING and tool_pid_file.exists():
+                break
+            time.sleep(0.05)
+        tool_pid = int(tool_pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while media_jobs.pid_alive(tool_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        worker.stop()
+        if subreaper:
+            prctl(pr_set_child_subreaper, 0, 0, 0, 0)
+
+    [row] = media_jobs.status(vault)["jobs"]
+    assert (row["state"], row["attempts"], row["error"]) == (media_jobs.PENDING, 0, None)
+    assert not media_jobs.pid_alive(tool_pid)
+
+
+def test_supervisor_start_requeues_work_whose_engine_appeared(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda self: None)
+    result = _preserve_media_stub(vault, filename="scan.pdf")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="pdf",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+    installed = {"pdf": False}
+    monkeypatch.setattr(extract, "dependencies_present", lambda media_type: installed[media_type])
+
+    for engine_present in (False, True):
+        installed["pdf"] = engine_present
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        worker.start()
+        worker.stop()
+        [row] = media_jobs.status(vault)["jobs"]
+        assert row["state"] == (media_jobs.PENDING if engine_present else media_jobs.BLOCKED)
+
+
+def test_supervisor_start_drops_work_whose_engine_is_switched_off(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda self: None)
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr")
+    result = _preserve_media_stub(vault, filename="minutes.pdf")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="pdf",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.start()
+    worker.stop()
+
+    assert media_jobs.status(vault)["jobs"] == []

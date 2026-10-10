@@ -202,6 +202,8 @@ spec:
               value: {{ .Values.cellctl.sharedWorker | toJson | quote }}
             - name: CELLCTL_DEDICATED_CELL_IDS
               value: {{ .Values.cellctl.dedicatedCellIds | toJson | quote }}
+            - name: CELLCTL_MEDIA_ENGINE_CELL_IDS
+              value: {{ .Values.cellctl.mediaEngineCellIds | toJson | quote }}
             - name: CELLCTL_LOG_LEVEL
               value: INFO
             - name: CELLCTL_HEARTBEAT_PATH

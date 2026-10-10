@@ -239,6 +239,10 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
         "plugins/cloud/generated/openai/assets/icon.png", "generated copy of the Cloud PNG icon"
     ),
     BinaryProvenance("assets/icon.png", "Cloud plugin archive copy of its repository-authored icon"),
+    BinaryProvenance(
+        "tests/fixtures/media-samples/*",
+        "synthetic media samples that scripts/make-media-samples.py writes from fixed phrases",
+    ),
 )
 
 #: Named in every refusal, because this gate historically only ran on Linux

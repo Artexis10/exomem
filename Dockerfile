@@ -305,7 +305,9 @@ LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
 #
 # Derived from `cell-runtime`, as `hosted` is: the same offline ONNX model
 # environment, `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with
-# bge-m3 as its only pre-baked model. Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
+# bge-m3 as its only pre-baked model. It adds the media engines below, which
+# `hosted` never carries; each stays off until cellctl switches it on in a cell
+# (EXOMEM_MEDIA_ENGINES). Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
 # thin seam over the standalone runtime (D1), so this stage exists to add the
 # identity, backup tooling and command the cell pod needs — not a different
 # Python environment.
@@ -328,6 +330,38 @@ COPY --from=restic-fetch /usr/local/bin/restic /usr/local/bin/restic
 COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models
 USER root
 RUN usermod --home /data/host exomem
+
+# Media engines (change `add-cloud-multimodal-processing`, design D3–D5).
+#
+# Tesseract with every script model Debian packages from tessdata, the OSD model,
+# and the language packs EXOMEM_OCR_LANGS names (`+`-separated tessdata names). A
+# pack added there needs no code change: OCR reads each pack's script from its own
+# data. The same list is the default OCR reads with when a page names no script.
+#
+# The Python engines are the `media-cpu` extra, installed into the venv that
+# `cell-runtime` already holds, so the layer carries only what media adds. It has
+# no CUDA wheel and no torch; the gate below fails the build if either arrives.
+#
+# OMP_THREAD_LIMIT=1: Tesseract otherwise starts one OpenMP thread per host CPU,
+# not per cell CPU, and each thread's stack counts against the media child's
+# data-segment limit.
+ARG EXOMEM_OCR_LANGS=eng+jpn+jpn_vert+est
+RUN packs="$(echo "${EXOMEM_OCR_LANGS}" | tr '+_' ' -' | sed 's/[^ ][^ ]*/tesseract-ocr-&/g')" \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd 'tesseract-ocr-script-*' ${packs} \
+ && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=bind,from=builder-lean,source=/app,target=/src,rw \
+    uv pip install --python /app/.venv/bin/python --no-cache "/src[media-cpu]"
+ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
+    OMP_THREAD_LIMIT=1
+# The support proof: with networking off, extract a real sample of every format
+# the image serves and find its phrase. A format that fails is not shipped.
+RUN --network=none \
+    --mount=type=bind,source=tests/fixtures/media-samples,target=/samples \
+    --mount=type=bind,source=scripts/check-media-samples.py,target=/media-gate.py \
+    HOME=/tmp python /media-gate.py /samples \
+ && find /tmp -mindepth 1 -delete
 
 # EXOMEM_LOG_DIR: no runtime log ever lands on the tenant volume D8 backs up,
 # even without the manifest setting it (design D1.2 "Log directory"). D2's

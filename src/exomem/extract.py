@@ -76,10 +76,13 @@ def _semantic_segments_module():
 
     return semantic_segments
 
-# Documents → MarkItDown (Microsoft, MIT) renders office/html to markdown, fully local.
-# PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest). The rest are
-# tiny native parsers — no dependency. Only formats the vault actually holds.
-_MARKITDOWN_KINDS = frozenset(_DOC_EXTS.values())  # {"docx", "xlsx", "pptx", "html"}
+# Documents → MarkItDown (Microsoft, MIT) renders office/html/EPUB to markdown, fully
+# local. PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest).
+# MarkItDown reads no OpenDocument or RTF, so those use odfdo and striprtf. The rest
+# are tiny native parsers — no dependency. Only formats the vault actually holds.
+_OPENDOCUMENT_KINDS = frozenset({"odt", "ods", "odp"})
+_RTF_KIND = "rtf"
+_MARKITDOWN_KINDS = frozenset(_DOC_EXTS.values()) - _OPENDOCUMENT_KINDS - {_RTF_KIND}
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
 # A PDF page yielding fewer than this many characters of embedded text is treated as
@@ -109,6 +112,10 @@ class ExtractionUnavailable(Exception):
 
 class TimestampRenderingUnavailable(Exception):
     """ASR succeeded but the required canonical timestamp rendering did not."""
+
+
+class MediaMemoryExhausted(MemoryError):
+    """A native engine could not allocate memory, such as under the media child's limit."""
 
 
 @dataclass(frozen=True)
@@ -163,6 +170,10 @@ def extract_text(
         return _extract_pdf(p)
     if mt in _MARKITDOWN_KINDS:
         return _extract_document(p, mt)
+    if mt in _OPENDOCUMENT_KINDS:
+        return _extract_opendocument(p, mt)
+    if mt == _RTF_KIND:
+        return _extract_rtf(p)
     if mt == "text":
         return _extract_textfile(p)
     if mt == "email":
@@ -170,6 +181,29 @@ def extract_text(
     if mt == "calendar":
         return _extract_ics(p)
     raise ExtractionUnavailable(f"no extractor for media_type={mt!r} (path {p.name!r})")
+
+
+def dependencies_present(media_type: str | None) -> bool:
+    """Whether the extractor for `media_type` has what it imports. Loads nothing.
+
+    Mirrors the imports of the extractors below; the media worker uses it to requeue
+    work that waited for a missing engine once that engine is installed.
+    """
+    from importlib.util import find_spec
+
+    if media_type in ("audio", "video"):
+        return find_spec("faster_whisper") is not None or _mlx_available()
+    if media_type == "image":
+        return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
+    if media_type == "pdf":
+        return find_spec("fitz") is not None
+    if media_type in _OPENDOCUMENT_KINDS:
+        return find_spec("odfdo") is not None
+    if media_type == _RTF_KIND:
+        return find_spec("striprtf") is not None
+    if media_type in _MARKITDOWN_KINDS:
+        return find_spec("markitdown") is not None
+    return True
 
 
 # ---------------- engines (lazy singletons, soft-imported) ----------------
@@ -949,9 +983,6 @@ def _has_audio_stream(path: Path) -> bool:
         return True
 
 
-_TESSERACT_READY = False
-
-
 #: Standard install locations for the UB-Mannheim Windows package, which does
 #: not put the binary on PATH.
 TESSERACT_INSTALL_CANDIDATES: tuple[str, ...] = (
@@ -980,41 +1011,47 @@ def resolve_tesseract_cmd() -> str | None:
     return next((cand for cand in TESSERACT_INSTALL_CANDIDATES if Path(cand).is_file()), None)
 
 
-def _ensure_tesseract_cmd() -> None:
-    """Point pytesseract at the Tesseract binary when it isn't on PATH.
+def _save_png_for_ocr(image, target: Path) -> None:
+    """Write a decoded Pillow image as PNG, as pytesseract did, so every Pillow-readable
+    format reaches Tesseract in a form Leptonica reads."""
+    if image.mode not in ("1", "L", "RGB"):
+        image = image.convert("RGB")
+    image.save(target, format="PNG")
 
-    The UB-Mannheim Windows installer doesn't add Tesseract to PATH, and the
-    service process may not inherit a shell PATH that has it. Idempotent.
-    """
-    global _TESSERACT_READY
-    if _TESSERACT_READY:
-        return
-    import pytesseract
 
-    explicit = os.environ.get("EXOMEM_TESSERACT_CMD")
-    if explicit:
-        pytesseract.pytesseract.tesseract_cmd = explicit
-    elif not shutil.which("tesseract"):
-        # Same candidate set doctor probes — that shared tuple is the point.
-        for cand in TESSERACT_INSTALL_CANDIDATES:
-            if Path(cand).is_file():
-                pytesseract.pytesseract.tesseract_cmd = cand
-                break
-    _TESSERACT_READY = True
+def _ocr_png(source: Path) -> str:
+    """OCR a PNG through the script-first router (`ocr_models`)."""
+    from . import ocr_models
+
+    cmd = resolve_tesseract_cmd()
+    if cmd is None:
+        raise ExtractionUnavailable("Tesseract binary not found")
+    try:
+        return ocr_models.read_image(cmd, source).strip()
+    except ocr_models.OcrUnavailable as e:
+        raise ExtractionUnavailable(str(e)) from e
+
+
+def _ocr_file(image) -> str:
+    """OCR a decoded Pillow image (a rendered PDF page)."""
+    with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
+        source = Path(tmp) / "page.png"
+        _save_png_for_ocr(image, source)
+        return _ocr_png(source)
 
 
 def _ocr_image(path: Path) -> ExtractResult:
     try:
-        import pytesseract
         from PIL import Image
     except ImportError as e:
-        raise ExtractionUnavailable(f"pytesseract/Pillow not installed: {e}") from e
-    _ensure_tesseract_cmd()
-    try:
+        raise ExtractionUnavailable(f"Pillow not installed: {e}") from e
+    with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
+        source = Path(tmp) / "page.png"
         with Image.open(path) as img:
-            text = pytesseract.image_to_string(img).strip()
-    except pytesseract.TesseractNotFoundError as e:
-        raise ExtractionUnavailable(f"Tesseract binary not on PATH: {e}") from e
+            _save_png_for_ocr(img, source)
+        # The decoded image is closed before Tesseract starts: each process has its own
+        # VmData limit, so holding both would let one job take two budgets of the cell.
+        text = _ocr_png(source)
     # OPTIONAL frozen-model caption (EXOMEM_VISION_CAPTION, default OFF) prepended so
     # a photo with no on-image text is still findable. Soft-fails to OCR-only.
     text, engine = _maybe_caption(text, path)
@@ -1155,20 +1192,30 @@ def _extract_pdf(path: Path) -> ExtractResult:
         import fitz  # PyMuPDF
     except ImportError as e:
         raise ExtractionUnavailable(f"pymupdf not installed: {e}") from e
+    from . import media_brakes
+
     warnings: list[str] = []
     parts: list[str] = []
     ocr_pages = 0
-    with fitz.open(path) as doc:
-        for page in doc:
-            page_text = page.get_text().strip()
-            if len(page_text) < _PDF_OCR_MIN_CHARS:
-                # Scanned/image-only page → rasterize and OCR it.
-                ocr_text = _ocr_pdf_page(page)
-                if ocr_text:
-                    page_text = ocr_text
-                    ocr_pages += 1
-            if page_text:
-                parts.append(page_text)
+    try:
+        with fitz.open(path) as doc:
+            for page in doc:
+                page_text = page.get_text().strip()
+                if len(page_text) < _PDF_OCR_MIN_CHARS:
+                    # Scanned/image-only page → rasterize and OCR it.
+                    ocr_text = _ocr_pdf_page(page)
+                    if ocr_text:
+                        page_text = ocr_text
+                        ocr_pages += 1
+                if page_text:
+                    parts.append(page_text)
+    except MemoryError:
+        raise
+    except Exception as e:
+        # MuPDF reports a failed allocation as an error naming its allocator.
+        if media_brakes.names_allocation_failure(str(e)):
+            raise MediaMemoryExhausted(f"pymupdf: {e}") from e
+        raise
     if ocr_pages:
         warnings.append(f"{ocr_pages} scanned page(s) recovered via OCR")
     engine = "pymupdf+tesseract" if ocr_pages else "pymupdf"
@@ -1182,15 +1229,38 @@ def _extract_document(path: Path, media_type: str) -> ExtractResult:
     here: markitdown's PDF path is weaker than PyMuPDF + our scanned-page OCR fallback.
     """
     try:
-        from markitdown import MarkItDown
+        from markitdown import MarkItDown, MissingDependencyException
     except ImportError as e:
         raise ExtractionUnavailable(f"markitdown not installed: {e}") from e
     try:
         result = MarkItDown(enable_plugins=False).convert(str(path))
-    except Exception as e:  # noqa: BLE001 — a malformed doc must not crash the worker
-        raise ExtractionUnavailable(f"markitdown could not convert {path.name!r}: {e}") from e
+    except MissingDependencyException as e:
+        raise ExtractionUnavailable(f"markitdown cannot read {media_type}: {e}") from e
+    # Any other error is about this file: the worker records it as a failed artifact,
+    # so a malformed document is not retried as if its engine were missing.
     text = (getattr(result, "text_content", "") or "").strip()
     return ExtractResult(text=text, media_type=media_type, engine="markitdown")
+
+
+def _extract_opendocument(path: Path, media_type: str) -> ExtractResult:
+    """odt/ods/odp → text via odfdo (Apache-2.0), one line per paragraph or cell."""
+    try:
+        from odfdo import Document
+    except ImportError as e:
+        raise ExtractionUnavailable(f"odfdo not installed: {e}") from e
+    text = (Document(path).body.text_recursive or "").strip()
+    return ExtractResult(text=text, media_type=media_type, engine="odfdo")
+
+
+def _extract_rtf(path: Path) -> ExtractResult:
+    """RTF → plain text via striprtf (BSD-3-Clause)."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+    except ImportError as e:
+        raise ExtractionUnavailable(f"striprtf not installed: {e}") from e
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    text = rtf_to_text(raw, errors="replace").strip()
+    return ExtractResult(text=text, media_type=_RTF_KIND, engine="striprtf")
 
 
 def _extract_textfile(path: Path) -> ExtractResult:
@@ -1234,17 +1304,25 @@ def _extract_ics(path: Path) -> ExtractResult:
 
 
 def _ocr_pdf_page(page) -> str:
-    """Rasterize a PDF page to an image and OCR it. Empty string if OCR is unavailable."""
+    """Rasterize a PDF page to an image and OCR it. Empty string if OCR is unavailable.
+
+    A deployment whose OCR engine is switched off reads only the text layer.
+    """
+    from . import media_engines
+
+    if not media_engines.stage_enabled("image"):
+        return ""
     try:
         import io
 
-        import pytesseract
         from PIL import Image
 
-        _ensure_tesseract_cmd()
         pix = page.get_pixmap(dpi=200)
         with Image.open(io.BytesIO(pix.tobytes("png"))) as img:
-            return pytesseract.image_to_string(img).strip()
+            img.load()
+            return _ocr_file(img)
+    except MemoryError:
+        raise  # a hard-limit failure is a memory stop, never a missing page
     except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort
         log.warning("PDF page OCR fallback failed: %s", e)
         return ""

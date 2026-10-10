@@ -1670,3 +1670,64 @@ def test_blocked_compute_presentations_still_reach_needs_worker(
         media_jobs, "_blocked_presentation_is_current", lambda _content, _error: True
     )
     assert store.needs_worker() is False
+
+
+def test_consecutive_hard_limit_failures_mark_the_file_over_budget(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+
+    verdicts = []
+    for _ in range(3):
+        claimed = store.claim_next()
+        assert claimed is not None
+        verdicts.append(
+            store.record_memory_stop(claimed, kind="hard_limit", stop_limit=3, context="limit-a")
+        )
+
+    assert verdicts == [media_jobs.PENDING, media_jobs.PENDING, media_jobs.OVER_BUDGET]
+    [row] = media_jobs.status(vault)["jobs"]
+    assert row["state"] == media_jobs.BLOCKED
+    assert row["attempts"] == 0  # a memory stop never consumes an artifact attempt
+    assert row["next_action"] == media_jobs.OVER_BUDGET_ACTION
+    assert row["retryable"] is False
+    assert store.retry() == 0
+    assert store.recover_memory_verdicts(context_for=lambda _type: "limit-a", include_memory_blocked=True) == 0
+    # A changed cell limit or engine budget is what lets the file try again.
+    assert store.recover_memory_verdicts(context_for=lambda _type: "limit-b", include_memory_blocked=False) == 1
+    assert store.claim_next() is not None
+
+
+def test_a_pressure_stop_never_marks_a_file_over_budget(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+
+    verdicts = []
+    for kind in ("hard_limit", "pressure", "hard_limit"):
+        claimed = store.claim_next()
+        assert claimed is not None
+        verdicts.append(store.record_memory_stop(claimed, kind=kind, stop_limit=3, context="limit-a"))
+
+    assert verdicts == [media_jobs.PENDING, media_jobs.PENDING, media_jobs.MEMORY_BLOCKED]
+    status = media_jobs.status(vault)
+    [row] = status["jobs"]
+    # The tenant sees the job only as waiting; the memory reason is the operator's.
+    assert (row["state"], row["error"], row["retryable"]) == (media_jobs.PENDING, None, False)
+    assert status["memory_blocked_count"] == 1
+    assert store.recover_memory_verdicts(context_for=lambda _type: "limit-a", include_memory_blocked=False) == 0
+    assert store.recover_memory_verdicts(context_for=lambda _type: "limit-a", include_memory_blocked=True) == 1
+    assert store.claim_next() is not None
+
+
+def test_cloud_job_blocked_on_an_engine_names_no_install(vault: Path, monkeypatch) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    [row] = media_jobs.status(vault)["jobs"]
+
+    assert row["state"] == media_jobs.BLOCKED
+    assert "install" not in row["next_action"]
+    assert "unavailable on this deployment" in row["next_action"]
