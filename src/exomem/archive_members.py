@@ -31,7 +31,6 @@ import os
 import re
 import shutil
 import stat
-import struct
 import tempfile
 import unicodedata
 import zipfile
@@ -71,12 +70,6 @@ _GZIP_LEVEL = 6
 #: Bit 0 of a zip entry's general-purpose flags: the entry is encrypted (APPNOTE 4.4.4).
 _ZIP_FLAG_ENCRYPTED = 0x1
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")  # the format of a member's name in the pool
-#: APPNOTE 4.3.16, 4.3.15 and 4.3.14: the end record, the ZIP64 locator and the ZIP64 end record.
-_END_RECORD = struct.Struct("<4s4H2LH")
-_ZIP64_LOCATOR = struct.Struct("<4sLQL")
-_ZIP64_END_RECORD = struct.Struct("<4sQ2H2L4Q")
-#: The end record is the file's last 22 bytes, followed by a comment of at most 65,535 bytes.
-_END_SEARCH_BYTES = _END_RECORD.size + 0xFFFF
 
 
 def member_blob(sha256: str) -> str:
@@ -91,7 +84,7 @@ def member_blob(sha256: str) -> str:
 
 
 class ArchiveError(Exception):
-    """A content-free refusal of an archive: `code` is `INVALID` or `TOO_LARGE`."""
+    """A content-free refusal of an archive: `code` is `INVALID`, `TOO_LARGE` or `NO_SPACE`."""
 
     def __init__(self, code: str, reason: str) -> None:
         super().__init__(reason)
@@ -169,41 +162,25 @@ class _Entry:
     info: zipfile.ZipInfo
 
 
-def _declared_directories(stream: BinaryIO) -> list[tuple[int, int]]:
-    """The entry count and directory size each end record declares: the classic one and any ZIP64 one.
-
-    `zipfile` may take either, so the limits are checked against both.
-    """
-    stream.seek(0, io.SEEK_END)
-    start = max(0, stream.tell() - _END_SEARCH_BYTES)
-    stream.seek(start)
-    tail = stream.read()
-    at = tail.rfind(b"PK\x05\x06")
-    if at < 0 or len(tail) - at < _END_RECORD.size:
-        return []  # not a zip; `zipfile` refuses it
-    # Fields 4 and 5: the total entry count and the directory size.
-    declared = [tuple(_END_RECORD.unpack_from(tail, at)[4:6])]
-    # The ZIP64 end record sits right before its locator, which sits right before the end record.
-    locator_at = start + at - _ZIP64_LOCATOR.size
-    record_at = locator_at - _ZIP64_END_RECORD.size
-    if record_at >= 0:
-        stream.seek(record_at)
-        found = stream.read(_ZIP64_END_RECORD.size + _ZIP64_LOCATOR.size)
-        if found.startswith(b"PK\x06\x06") and found[_ZIP64_END_RECORD.size:].startswith(b"PK\x06\x07"):
-            # Fields 7 and 8: the total entry count and the directory size.
-            declared.append(tuple(_ZIP64_END_RECORD.unpack_from(found)[7:9]))
-    return declared
+def _declared_directory(stream: BinaryIO) -> tuple[int, int] | None:
+    """The entry count and directory size of the end record `zipfile` will trust, ZIP64 included."""
+    # zipfile's own locator, so the check reads exactly the record ZipFile() parses next; a
+    # search of our own can be steered to a different record than the one zipfile trusts.
+    record = zipfile._EndRecData(stream)
+    if record is None:
+        return None  # not a zip; `zipfile` refuses it
+    return record[zipfile._ECD_ENTRIES_TOTAL], record[zipfile._ECD_SIZE]
 
 
 def _open_zip(stream: BinaryIO) -> zipfile.ZipFile:
     """Open an uploaded zip once its end records declare a central directory within the limits."""
-    for entries, directory in _declared_directories(stream):
-        if entries > MAX_ENTRIES:
-            raise ArchiveError(TOO_LARGE, f"the archive declares more than {MAX_ENTRIES:,} entries")
-        if directory > MAX_DIRECTORY_BYTES:
-            raise ArchiveError(TOO_LARGE, "the archive's central directory is too large")
-    stream.seek(0)
     try:
+        declared = _declared_directory(stream)
+        if declared is not None and declared[0] > MAX_ENTRIES:
+            raise ArchiveError(TOO_LARGE, f"the archive declares more than {MAX_ENTRIES:,} entries")
+        if declared is not None and declared[1] > MAX_DIRECTORY_BYTES:
+            raise ArchiveError(TOO_LARGE, "the archive's central directory is too large")
+        stream.seek(0)
         return zipfile.ZipFile(stream)
     except (zipfile.BadZipFile, OSError) as exc:
         raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
@@ -398,10 +375,8 @@ def read_manifest(vault_root: Path, path: str) -> Manifest | None:
     return Manifest(len(data), archive, members, block, companion)
 
 
-def _recorded(
-    vault_root: Path, folder: Path, sha256: str
-) -> tuple[dict[str, Any], int, list[Any]] | None:
-    """The duplicate receipt fields, size and members of a family manifest recording this archive.
+def _recorded(vault_root: Path, folder: Path, sha256: str) -> tuple[Any, int, list[Any]] | None:
+    """The stored artifact, size and members of a family manifest recording this archive.
 
     A manifest's companion is a dataset card, which carries no governance
     companion block, so the pair is resolved through its raw-protection binding.
@@ -414,19 +389,11 @@ def _recorded(
         relative = manifest.relative_to(vault_root).as_posix()
         found = read_manifest(vault_root, relative)
         if found is not None and found.archive.get("sha256") == sha256:
-            ref = found.binding["original_ref"]
-            return (
-                {
-                    "path": relative,
-                    "stored_path": relative,
-                    "sidecar_path": found.companion,
-                    "ref": ref,
-                    "duplicate_of": {"path": relative, "ref": ref},
-                    "hash": found.binding["artifact_sha256"],
-                },
-                found.size,
-                found.members,
-            )
+            from .preserve import DuplicateArtifact
+
+            stored = DuplicateArtifact(found.binding["artifact_sha256"], relative, found.companion,
+                                       found.binding["original_ref"])
+            return stored, found.size, found.members
     return None
 
 
@@ -513,19 +480,10 @@ def preserve_members(
         found = _recorded(vault_root, folder, sha256)
         if found is None:
             return None
-        fields, manifest_size, recorded = found
+        stored, manifest_size, recorded = found
         restored = _restore(vault_root, folder, stream, recorded)
-        return {
-            **fields,
-            "state": "already_stored",
-            "outcome": "stored",
-            "warnings": [],
-            "size": manifest_size,
-            "hash_algorithm": "sha256",
-            "media_id": f"sha256:{fields['hash']}",
-            "content_type": "application/json",
-            "archive": {**archive, "restored": restored},
-        }, False
+        receipt = stored.receipt(size=manifest_size, content_type="application/json")
+        return {**receipt, "archive": {**archive, "restored": restored}}, False
 
     with _expansion_lock(vault_root):
         _sweep_pool(folder)

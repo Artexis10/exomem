@@ -468,6 +468,22 @@ def test_an_ancestor_after_its_row_array_is_a_row_error_that_preview_reports(sto
 
 
 @pytest.mark.parametrize(
+    "document",
+    [b'{"device": "unit\t1", "days": []}', b'{"device": "unit\xc0\xaf", "days": []}'],
+    ids=["raw-control-character", "overlong-utf8"],
+)
+def test_a_member_that_is_not_json_is_malformed_in_preview_and_in_the_job(store, document):
+    """A malformed member that escapes as an untyped error breaks the owner's preview and loses its location."""
+    collection(store)
+    manifest, _ = preserve_export(store, "bad", {"samples/bad.json": document})
+    request = {"source_ref": manifest, "format": "json-document", "members": "samples/*", "mapping": SAMPLES}
+    preview = agent(store, mode="preview", **request)
+    assert "IMPORT_SOURCE_MALFORMED" in [error["code"] for error in preview["errors"]]
+    result = finish(store, agent(store, mode="start", **request))
+    assert (result["state"], result["error"]["code"]) == ("failed", "IMPORT_SOURCE_MALFORMED")
+
+
+@pytest.mark.parametrize(
     ("change", "at"),
     [
         ({"rows": None}, "mapping.rows"),

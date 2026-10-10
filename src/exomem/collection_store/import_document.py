@@ -90,7 +90,7 @@ class Rows:
             for event, value in self.events:
                 yield from self._walk(event, value, 0, self.routes[0], self.wanted[0], ())
             # basic_parse refuses trailing values, so the document has ended here.
-        except ijson.JSONError as error:
+        except (ijson.JSONError, ValueError) as error:  # the exact re-read raises json.JSONDecodeError and UnicodeDecodeError
             raise Malformed from error
 
     def _walk(self, event, value, level, route, wanted, prefix):

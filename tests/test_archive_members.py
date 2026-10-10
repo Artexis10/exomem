@@ -133,16 +133,27 @@ def _end_record(entries: int, directory_bytes: int) -> bytes:
 
 
 def _zip64_end(entries: int, directory_bytes: int) -> bytes:
-    """A ZIP64 end record and its locator before a classic end record that defers to them."""
+    """A ZIP64 end record and its locator before a classic end record that defers to them.
+
+    The record follows a directory of the size it declares and the locator points at it, as
+    `zipfile` checks before it trusts the record."""
     record = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, entries, entries, directory_bytes, 0)
-    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, 0, 1)
-    return record + locator + _end_record(0xFFFF, 0xFFFFFFFF)
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, directory_bytes, 1)
+    return bytes(directory_bytes) + record + locator + _end_record(0xFFFF, 0xFFFFFFFF)
+
+
+def _forged_end_record(directory_bytes: int) -> bytes:
+    """An end record whose two entry counts spell a second signature: `PK` and `\\x05\\x06`.
+
+    A search from the end finds that inner signature first, while `zipfile` reads the file's
+    last 22 bytes as the record."""
+    return struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0x4B50, 0x0605, directory_bytes, 0, 0)
 
 
 @pytest.mark.parametrize(
     "archive",
-    [_zip64_end(22_000_000, 1024), _end_record(5, 1 << 30)],
-    ids=["zip64-entries", "directory-bytes"],
+    [_zip64_end(22_000_000, 1024), _end_record(5, 1 << 30), _forged_end_record(1 << 30)],
+    ids=["zip64-entries", "directory-bytes", "forged-end-record"],
 )
 def test_an_oversized_central_directory_is_refused_before_it_is_loaded(vault: Path, archive: bytes) -> None:
     """`zipfile` loads the whole directory before any count can be checked: about 12 GB of

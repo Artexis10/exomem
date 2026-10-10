@@ -494,6 +494,12 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
     record = _read_record(store, session_id)
     if record is None or record.get("state") not in _COMMITTABLE:
         return
+    record = {**record, "state": COMMITTING}
+    # A retry clears the refusal it recorded last time. The state is written before the
+    # re-hash, so a client polling a multi-gigabyte retry sees it running, not retryable.
+    record.pop("code", None)
+    record.pop("reason", None)
+    _write_record(store, record)
     part = store / f"{session_id}.part"
     size = _part_size(part)
     if running.size == size and running.digest is not None:
@@ -507,11 +513,6 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
     if size != int(record["length"]) or not hmac.compare_digest(digest, record["sha256"]):
         _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
         return
-    record = {**record, "state": COMMITTING}
-    # A retry clears the refusal it recorded last time.
-    record.pop("code", None)
-    record.pop("reason", None)
-    _write_record(store, record)
     try:
         receipt = committer(part, record)
     except CommitFailed as exc:
