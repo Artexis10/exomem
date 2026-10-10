@@ -50,7 +50,7 @@ from typing import Protocol
 
 from . import accel, asr_runtime, runtime_resources
 from .media_types import (
-    DOC_EXTS as _DOC_EXTS,
+    DOC_READERS as _DOC_READERS,
 )
 from .media_types import (
     media_type_for as _registry_media_type_for,
@@ -78,11 +78,9 @@ def _semantic_segments_module():
 
 # Documents → MarkItDown (Microsoft, MIT) renders office/html/EPUB to markdown, fully
 # local. PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest).
-# MarkItDown reads no OpenDocument or RTF, so those use odfdo and striprtf. The rest
-# are tiny native parsers — no dependency. Only formats the vault actually holds.
-_OPENDOCUMENT_KINDS = frozenset({"odt", "ods", "odp"})
-_RTF_KIND = "rtf"
-_MARKITDOWN_KINDS = frozenset(_DOC_EXTS.values()) - _OPENDOCUMENT_KINDS - {_RTF_KIND}
+# MarkItDown reads no OpenDocument or RTF, so those use odfdo and striprtf; the
+# registry (`media_types.DOC_READERS`) names the library for each kind. The rest are
+# tiny native parsers — no dependency. Only formats the vault actually holds.
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
 # A PDF page yielding fewer than this many characters of embedded text is treated as
@@ -180,12 +178,14 @@ def extract_text(
         return _ocr_image(p)
     if mt == "pdf":
         return _extract_pdf(p)
-    if mt in _MARKITDOWN_KINDS:
-        return _extract_document(p, mt)
-    if mt in _OPENDOCUMENT_KINDS:
-        return _extract_opendocument(p, mt)
-    if mt == _RTF_KIND:
-        return _extract_rtf(p)
+    # The registry names each document kind's library; each one has its own code here.
+    match _DOC_READERS.get(mt):
+        case "markitdown":
+            return _extract_document(p, mt)
+        case "odfdo":
+            return _extract_opendocument(p, mt)
+        case "striprtf":
+            return _extract_rtf(p, mt)
     if mt == "text":
         return _extract_textfile(p)
     if mt == "email":
@@ -209,12 +209,8 @@ def dependencies_present(media_type: str | None) -> bool:
         return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
     if media_type == "pdf":
         return find_spec("fitz") is not None
-    if media_type in _OPENDOCUMENT_KINDS:
-        return find_spec("odfdo") is not None
-    if media_type == _RTF_KIND:
-        return find_spec("striprtf") is not None
-    if media_type in _MARKITDOWN_KINDS:
-        return find_spec("markitdown") is not None
+    if media_type in _DOC_READERS:
+        return find_spec(_DOC_READERS[media_type]) is not None
     return True
 
 
@@ -1304,7 +1300,7 @@ def _is_pymupdf_allocation_failure(error: BaseException) -> bool:
     if system_error is None or not isinstance(error, system_error):
         return False
     message = str(getattr(error, "m_text", "") or "")
-    # The format of MuPDF's allocator messages (source/fitz/memory.c), not prose.
+    # nosemgrep: ep-word-search -- MuPDF's own allocator message format (source/fitz/memory.c).
     return re.fullmatch(r"(?:malloc|calloc|realloc)(?: of array)? \(\d+(?: x \d+)? bytes\) failed", message) is not None
 
 
@@ -1318,7 +1314,7 @@ def _extract_opendocument(path: Path, media_type: str) -> ExtractResult:
     return ExtractResult(text=text, media_type=media_type, engine="odfdo")
 
 
-def _extract_rtf(path: Path) -> ExtractResult:
+def _extract_rtf(path: Path, media_type: str) -> ExtractResult:
     """RTF → plain text via striprtf (BSD-3-Clause)."""
     try:
         from striprtf.striprtf import rtf_to_text
@@ -1326,7 +1322,7 @@ def _extract_rtf(path: Path) -> ExtractResult:
         raise ExtractionUnavailable(f"striprtf not installed: {e}") from e
     raw = path.read_text(encoding="utf-8", errors="replace")
     text = rtf_to_text(raw, errors="replace").strip()
-    return ExtractResult(text=text, media_type=_RTF_KIND, engine="striprtf")
+    return ExtractResult(text=text, media_type=media_type, engine="striprtf")
 
 
 def _extract_textfile(path: Path) -> ExtractResult:

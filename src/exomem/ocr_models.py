@@ -121,6 +121,7 @@ def _plurality_script(path: Path) -> tuple[str | None, bool]:
             if len(fields) < 3:
                 continue
             script = fields[3] if "," in fields[2] and len(fields) > 3 else fields[2]
+            # nosemgrep: ep-lexical-intent -- UAX #24 fixes these script values; unicharset data.
             if script not in _NEUTRAL_SCRIPTS:
                 scripts[script] += 1
         top = scripts.most_common(1)

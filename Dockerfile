@@ -338,9 +338,12 @@ RUN usermod --home /data/host exomem
 # pack added there needs no code change: OCR reads each pack's script from its own
 # data. The same list is the default OCR reads with when a page names no script.
 #
-# The Python engines are the `media-cpu` extra at the versions uv.lock pins,
-# installed into the venv that `cell-runtime` already holds, so the layer carries
-# only what media adds. It has no CUDA wheel and no torch; the gate below fails the
+# The Python engines are the packages the `media-cpu` extra adds to the venv that
+# `cell-runtime` already holds, at the versions and hashes uv.lock pins. The export
+# skips every package the venv has, so the serving runtime (onnxruntime, protobuf,
+# click) keeps the versions production runs; `--no-deps` stops uv from changing one
+# to satisfy a media package, and `uv pip check` fails the build when that leaves a
+# requirement unmet. It has no CUDA wheel and no torch; the gate below fails the
 # build if either arrives.
 #
 # EXOMEM_OCR_INVENTORY: reading each OCR model's script reads every traineddata
@@ -361,8 +364,10 @@ RUN packs="$(echo "${EXOMEM_OCR_LANGS}" | tr '+_' ' -' | sed 's/[^ ][^ ]*/tesser
 RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
     --mount=type=bind,from=builder-lean,source=/app,target=/src,rw \
     uv export --project /src --frozen --no-dev --no-emit-project --extra media-cpu \
+      $(/app/.venv/bin/python -c 'import importlib.metadata as m; print(*{"--no-emit-package=" + d.metadata["Name"] for d in m.distributions()})') \
       --output-file /tmp/media-cpu.txt \
- && uv pip install --python /app/.venv/bin/python --no-cache -r /tmp/media-cpu.txt \
+ && uv pip install --python /app/.venv/bin/python --no-cache --require-hashes --no-deps -r /tmp/media-cpu.txt \
+ && uv pip check --python /app/.venv/bin/python \
  && rm /tmp/media-cpu.txt
 ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
     EXOMEM_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \

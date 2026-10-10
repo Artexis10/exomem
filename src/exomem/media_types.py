@@ -14,18 +14,23 @@ IMAGE_EXTS = frozenset(
     {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".heic"}
 )
 PDF_EXTS = frozenset({".pdf"})
-DOC_EXTS: dict[str, str] = {
-    ".docx": "docx",
-    ".xlsx": "xlsx",
-    ".pptx": "pptx",
-    ".html": "html",
-    ".htm": "html",
-    ".epub": "epub",
-    ".odt": "odt",
-    ".ods": "ods",
-    ".odp": "odp",
-    ".rtf": "rtf",
-}
+# Each document extension, the kind it extracts as, and the library that reads that
+# kind, by its import name: `extract` dispatches on it and checks that it imports.
+_DOCUMENTS = (
+    (".docx", "docx", "markitdown"),
+    (".xlsx", "xlsx", "markitdown"),
+    (".pptx", "pptx", "markitdown"),
+    (".html", "html", "markitdown"),
+    (".htm", "html", "markitdown"),
+    (".epub", "epub", "markitdown"),
+    (".odt", "odt", "odfdo"),
+    (".ods", "ods", "odfdo"),
+    (".odp", "odp", "odfdo"),
+    (".rtf", "rtf", "striprtf"),
+)
+DOC_EXTS: dict[str, str] = {ext: kind for ext, kind, _reader in _DOCUMENTS}
+#: The library that reads each document kind.
+DOC_READERS: dict[str, str] = {kind: reader for _ext, kind, reader in _DOCUMENTS}
 TEXT_EXTS = frozenset({".txt", ".text", ".log"})
 EMAIL_EXTS = frozenset({".eml"})
 CAL_EXTS = frozenset({".ics"})
