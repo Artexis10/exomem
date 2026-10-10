@@ -1,7 +1,15 @@
 ---
 k3s_version: "v1.35.6+k3s1"
-k3s_sha256_amd64: 2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432
-k3s_release_url_amd64: https://github.com/k3s-io/k3s/releases/download/v1.35.6%2Bk3s1/k3s
+# The pinned K3s binary for each node architecture Exomem Cloud images run on,
+# keyed by the Ansible `architecture` fact. Each sha256 is the entry in that
+# release's sha256sum-<arch>.txt. One cluster runs one architecture.
+k3s_binaries:
+  x86_64:
+    url: https://github.com/k3s-io/k3s/releases/download/v1.35.6%2Bk3s1/k3s
+    sha256: 2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432
+  aarch64:
+    url: https://github.com/k3s-io/k3s/releases/download/v1.35.6%2Bk3s1/k3s-arm64
+    sha256: 64c71644eb83d48f54da43c86ee8ba0ddff69db87e11d96a48fec7a965b1bc80
 # Node-wide opt-in, independently adopted from any cell image rollout.
 k3s_memory_qos_enabled: false
 k3s_private_interface: ""

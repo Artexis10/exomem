@@ -12,7 +12,7 @@ Run the `kubectl` steps as break-glass ([cloud operator access](cloud-operator-a
 
 Relocation restores each cell on the lost agent from its last hourly backup onto other capacity. It loses the writes since that backup, at most an hour's. Never start it for a node that is only unreachable: a cell still running there would keep writing to a volume nobody reads again.
 
-1. Make sure replacement capacity exists: a surviving agent with free slots, or a new or recovery agent that has joined.
+1. Make sure replacement capacity exists: a surviving agent with free slots, or a new or recovery agent that has joined. It must run the cluster's CPU architecture ([one cluster, one architecture](hosted/node-replacement.md#change-the-cpu-architecture)).
 2. Confirm the agent stopped, by the rule node removal uses: the host is reachable and shows no container process, no pod or CSI mount and no open storage mapping, or you have confirmed the server is destroyed.
 3. Tell the cluster, with Kubernetes' own out-of-service taint. cellctl acts on it only while the node is not Ready:
 

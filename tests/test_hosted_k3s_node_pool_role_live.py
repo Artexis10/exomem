@@ -179,7 +179,10 @@ def _inventory(path: Path, agents: list[str]) -> None:
                 "k3s_etcd_s3_bucket": "invalid",
                 "k3s_etcd_s3_access_key": "invalid",
                 "k3s_etcd_s3_secret_key": "invalid",
-                "k3s_release_url_amd64": "file:///opt/k3s-release",
+                # The rig is x86_64; the file:// copy keeps the role's pin.
+                "k3s_binaries": {
+                    "x86_64": {"url": "file:///opt/k3s-release", "sha256": _pinned_k3s_sha256()}
+                },
                 "k3s_join_retries": 60,
                 "k3s_join_delay": 5,
             },
@@ -188,6 +191,11 @@ def _inventory(path: Path, agents: list[str]) -> None:
     }
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     path.chmod(0o600)
+
+
+def _pinned_k3s_sha256() -> str:
+    defaults = yaml.safe_load((ANSIBLE / "roles/k3s/defaults/main.yml").read_text())
+    return defaults["k3s_binaries"]["x86_64"]["sha256"]
 
 
 def _playbook(inventory: Path, playbook: str, *extra: str) -> tuple[int, dict, str]:
@@ -242,11 +250,8 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
 
 def test_node_pool_join_rerun_second_agent_preflight_removal_and_rejoin_refusal(rig: Path) -> None:
     # The file:// binary is the exact release the role pins.
-    pinned = yaml.safe_load((ANSIBLE / "roles/k3s/defaults/main.yml").read_text())[
-        "k3s_sha256_amd64"
-    ]
     binary = _exec(SERVER, "sha256sum", "/opt/k3s-release").stdout.split()[0]
-    assert binary == pinned
+    assert binary == _pinned_k3s_sha256()
 
     one_agent = rig / "one-agent.yml"
     two_agents = rig / "two-agents.yml"

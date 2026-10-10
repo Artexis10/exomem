@@ -59,8 +59,9 @@ output "access_service_token_client_secret" {
 output "estimated_fixed_monthly_eur_ex_vat" {
   # 8.49 (cx33, fsn1) + 0.50 (primary IPv4), from the Hetzner pricing API.
   # Hetzner reverse-charges VAT to the Estonian entity, so net equals gross.
-  description = "CX33 plus primary IPv4 estimate; excludes usage-priced B2 and tenant volumes."
-  value       = 8.99
+  # Null for any other server type: this output carries no price for it.
+  description = "CX33 plus primary IPv4 estimate, null for other server types; excludes usage-priced B2 and tenant volumes."
+  value       = var.server_type == "cx33" ? 8.99 : null
 }
 
 output "control_db_server_id" {
