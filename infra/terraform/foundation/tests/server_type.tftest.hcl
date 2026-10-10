@@ -47,3 +47,16 @@ run "x86_type_other_than_cx33_is_rejected" {
 
   expect_failures = [var.server_type]
 }
+
+run "arm64_fleet_server_refuses_x86_agents" {
+  command = plan
+
+  variables {
+    server_type = "cax21"
+    k3s_agent_nodes = {
+      "01" = { private_ip = "10.50.1.31", server_type = "cpx42" }
+    }
+  }
+
+  expect_failures = [var.server_type]
+}

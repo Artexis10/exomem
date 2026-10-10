@@ -26,9 +26,11 @@ The hosted runtime and provisioner belong to the legacy hosted platform, whose c
 
 ### One cluster, one architecture
 
-Images run on both architectures, but a cell's vectors do not move between them unchanged. The fleet server type admits `cx33` or a Hetzner CAX type (the family prefix is the architecture check); agents keep the x86 allow-list. The runbook rebuilds each moved cell's vector index with `maintain_memory --mode fix --rebuild-embeddings`, the documented full rebuild for a machine swap.
+Images run on both architectures, but a cell's vectors do not move between them unchanged. The fleet server type admits `cx33` or a Hetzner CAX type (the family prefix is the architecture check); agents keep the x86 allow-list. Two checks enforce one architecture per cluster: Terraform refuses agents beside a CAX fleet server, and the K3s role refuses an agent whose architecture differs from the server's. The Exomem images are not the whole cluster: the platform chart also runs the Substrate gateway, published for `linux/amd64` only today, so the runbook checks every image the cluster runs for the target platform before any node changes.
+
+To rebuild a moved cell's vectors, the operator stops the cell, moves the recall sidecar files (`.embeddings.*` in the cell's derived state) aside on its volume, and starts it. The cell's own initial build recreates the index and serves during the build. Doctor's `embeddings.reembed` and `embeddings.sidecar` checks show when it is done. `maintain_memory --mode fix --rebuild-embeddings` is not used: fix mode also rewrites notes, and it reports success when the rebuild fails.
 
 ## Risks / Trade-offs
 
 - An arm64 runner outage blocks Cloud image publication for a release. Mitigation: rerun the failed leg; the hosted and OSS images publish independently.
-- The vector rebuild in the runbook ran against the cloud image on a test vault, not on a real moved cell.
+- The runbook's move, doctor reader and delete ran against the amd64 cloud image under Docker, not on a real moved cell, and its `kubectl` steps have not run against a cluster.

@@ -12,9 +12,11 @@ on:
       - ".dockerignore"
       - "pyproject.toml"
       - "uv.lock"
+      - "src/**"
       - "infra/cellctl/Dockerfile"
       - "infra/cellctl/pyproject.toml"
       - "infra/cellctl/uv.lock"
+      - "infra/cellctl/src/**"
       - "tests/test_cloud_image_container.py"
       - ".github/workflows/cloud-images.yml"
   push:
@@ -24,9 +26,11 @@ on:
       - ".dockerignore"
       - "pyproject.toml"
       - "uv.lock"
+      - "src/**"
       - "infra/cellctl/Dockerfile"
       - "infra/cellctl/pyproject.toml"
       - "infra/cellctl/uv.lock"
+      - "infra/cellctl/src/**"
       - "tests/test_cloud_image_container.py"
       - ".github/workflows/cloud-images.yml"
   workflow_dispatch:

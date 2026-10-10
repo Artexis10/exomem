@@ -54,12 +54,16 @@
       - k3s_server_hosts | length == 1
       - inventory_hostname not in k3s_server_hosts
       - hostvars[k3s_server_hosts[0]]['private_node_ip'] | default('') | length > 0
+      # One cluster runs one CPU architecture. The server's facts come from the
+      # earlier plays of the same run; without them the agent does not join.
+      - ansible_facts['architecture'] == hostvars[k3s_server_hosts[0]]['ansible_facts']['architecture'] | default('')
       - k3s_agent_token | length >= 32
       - k3s_agent_token != k3s_server_token
     fail_msg: >-
-      An agent needs a K3s binary pinned for its architecture, exactly one
-      inventoried server with a private address, and a dedicated agent token of
-      at least 32 characters that differs from the server token.
+      An agent needs a K3s binary pinned for its architecture, the server's CPU
+      architecture, exactly one inventoried server with a private address, and a
+      dedicated agent token of at least 32 characters that differs from the
+      server token.
   no_log: true
   when: k3s_node_role == 'agent'
 

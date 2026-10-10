@@ -282,6 +282,35 @@ def _governed_write(
     raise AssertionError(f"governed write never left MUTATION_WARMING: {last}")
 
 
+def _ask_once_embeddings_serve(
+    client: httpx.Client, *, query: str, request_id: int, timeout: float = 120.0
+) -> dict:
+    """An `ask_memory` call, repeated until its answer no longer reports
+    `embeddings` warming.
+
+    `/health/ready` admits the cell once lexical retrieval is proven, and the
+    cell then serves while its encoder warms and its initial embedding build
+    runs (#1657). An answer from that window is lexical-only, with `embeddings`
+    in `warming.components`, so a paraphrase cannot match yet. The wait is
+    bounded; on timeout the last answer is the evidence.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        result = _mcp_call_tool(
+            client, name="ask_memory", arguments={"query": query}, request_id=request_id
+        )
+        # FastMCP wraps ask_memory's answer, a list or an envelope, in `result`.
+        answer = result["structuredContent"]["result"]
+        warming = answer.get("warming") if isinstance(answer, dict) else None
+        if "embeddings" not in (warming or {}).get("components", []):
+            return result
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"embeddings still warming after {timeout:.0f}s; last answer: {result}"
+            )
+        time.sleep(1.0)
+
+
 def _assert_no_phrase_leak(server_container: str, phrases: list[str]) -> None:
     """Task 2.8 step 9: zero hits in every log and journal the cell writes.
 
@@ -467,12 +496,9 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
             )
             assert PHRASE_REMEMBER in json.dumps(exact["structuredContent"]), exact
 
-            paraphrase = _mcp_call_tool(
+            paraphrase = _ask_once_embeddings_serve(
                 client,
-                name="ask_memory",
-                arguments={
-                    "query": "what does the container test note say happened here"
-                },
+                query="what does the container test note say happened here",
                 request_id=3,
             )
             assert PHRASE_REMEMBER in json.dumps(paraphrase["structuredContent"]), paraphrase

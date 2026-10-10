@@ -27,7 +27,9 @@ server with encrypted local cell storage), follow
   cost authority before purchase; a list price does not prove stock.
 - Every agent runs the fleet server's CPU architecture: one cluster runs one
   architecture ([node replacement](node-replacement.md#change-the-cpu-architecture)).
-  The allow-list above is x86 only.
+  The allow-list above is x86 only, so Terraform refuses agents beside a CAX
+  fleet server, and the k3s role refuses an agent whose architecture differs
+  from the server's.
 - Before a removal, confirm that no cell row carries a hold. The playbook sees
   holds on StatefulSets, but not a hold recorded only on a row whose
   StatefulSet is gone:

@@ -105,6 +105,13 @@ variable "server_type" {
     condition     = var.server_type == "cx33" || startswith(var.server_type, "cax")
     error_message = "The fleet server is cx33 (x86) or a Hetzner CAX (Arm64) type."
   }
+
+  validation {
+    # One cluster runs one CPU architecture, and every agent type the
+    # k3s-agents module admits is x86, so an Arm64 fleet server runs alone.
+    condition     = var.server_type == "cx33" || length(var.k3s_agent_nodes) == 0
+    error_message = "A CAX (Arm64) fleet server takes no agents: agent types are x86, and one cluster runs one CPU architecture."
+  }
 }
 
 variable "server_location" {

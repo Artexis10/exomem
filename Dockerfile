@@ -175,8 +175,10 @@ print('offline load verified', MODEL_NAME, v.shape)"
 # release asset; each asset has its own digest from that release's SHA256SUMS.
 # The case below is closed over the platforms the release publishes: any other
 # architecture fails the build instead of shipping a binary that cannot run.
-# The final `restic version` runs the binary on the build platform, so a
-# native build fails here rather than in a tenant's first backup Job.
+# The final `restic version` runs the binary in this stage, which runs on the
+# target platform. On a native build, as in the release and the pull-request
+# check, a binary for another architecture fails here rather than in a
+# tenant's first backup Job.
 ########################################################################
 FROM debian:bookworm-slim AS restic-fetch
 ARG TARGETARCH
