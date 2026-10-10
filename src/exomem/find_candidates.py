@@ -204,6 +204,7 @@ def collect_candidates(
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
+    filtered: bool = False,
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -218,6 +219,11 @@ def collect_candidates(
     frame collapsing, eligibility, graph seeding, fusion and every lane cap
     consume it. The keyword lane is excluded because it arrives from the
     caller's own provider already shadowed. Default None is a strict no-op.
+
+    `filtered` says `eligible_paths` holds the caller's own filters, so the pool
+    reaches their whole eligible set. Admission alone never deepens it: every
+    lane already ranks only `eligible_paths`, so each hands fusion its top
+    `candidate_k` admitted pages, as it would over a corpus without the rest.
     """
     from . import (
         bm25,
@@ -238,7 +244,7 @@ def collect_candidates(
     candidate_k = max(
         limit * config.candidate_multiplier,
         config.candidate_floor,
-        len(eligible_paths) if eligible_paths is not None else 0,
+        len(eligible_paths) if filtered and eligible_paths is not None else 0,
     )
     semantic_paths = (
         recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
