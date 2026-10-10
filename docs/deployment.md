@@ -1157,7 +1157,9 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   redeems it. A direct preserve on the local listener never crosses the proxy
   edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
   public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
-  file stays within the 100 MB that `preserve_artifacts` can fetch.
+  file stays within what `preserve_artifacts` can fetch, which on this server is
+  the session maximum below. One local token keeps at most 256 MiB of held files
+  at a time.
 - A file over 64 MiB, a file that the listener refuses as too large, or any
   file with `--resumable` goes through a resumable upload session. The
   listener's cap is in the service's environment, so `exomem attach` does not
@@ -1199,6 +1201,62 @@ Their use on a Cloudflare-transited request is logged as
 `event=owner_credential_transit`, so a later release can refuse them there once
 no remote client uses them. It is kept out of `/metrics.json`, which is served
 without authentication.
+
+### Resumable uploads from a shell
+
+An agent with a shell, such as a coding agent, can send a file of several
+gigabytes through the public URL. The proxy edge caps one request at 100 MB, so
+the agent sends the file in parts through an upload session. For the Evidence
+lane, `transfer_artifact(operation="upload")` returns a `resumable` object
+beside `upload_url`. It names the session creation URL (`create_url`), the
+protocol, the header to resend, the most bytes per request (`max_part_bytes`)
+and per session (`max_bytes`), and the `Upload-Metadata` keys that creation
+requires. The minted `token` opens a session as it authorizes `/upload`. Later
+requests carry only the session secret, so an upload can outlast the token.
+
+1. Call `transfer_artifact(operation="upload")` and keep `token` and `resumable.create_url`.
+2. Save the script below as `exomem-upload.sh`.
+3. Run `CREATE_URL=<create_url> TOKEN=<token> SCOPE=Device CATEGORY=Exports sh exomem-upload.sh device_days.zip`.
+4. If the script stops, run the same command again. It continues from the offset that the service holds.
+5. Run it again until it prints `"state": "committed"`, then delete `device_days.zip.exomem-session`.
+
+The script prints the session state. Once the state is `committed`, the
+`receipt` names the stored path and the SHA-256 of the whole file.
+
+```sh
+#!/bin/sh
+# Send FILE to Evidence through an Exomem upload session; run it again to resume.
+set -eu
+FILE=$1 STATE=$1.exomem-session
+SIZE=$(wc -c < "$FILE" | tr -d ' ')
+header() { grep -i "^$1:" | tr -d '\r' | cut -d' ' -f2; }
+b64() { printf %s "$1" | base64 | tr -d '\n'; }
+if [ ! -s "$STATE" ]; then
+  SHA=$(sha256sum "$FILE" | cut -d' ' -f1)  # on macOS: shasum -a 256
+  CREATED=$(curl -sS -D - -o /dev/null -X POST "$CREATE_URL" \
+    -H "Authorization: Bearer $TOKEN" -H "Tus-Resumable: 1.0.0" -H "Upload-Length: $SIZE" \
+    -H "Upload-Metadata: filename $(b64 "${FILE##*/}"),sha256 $(b64 "$SHA"),scope $(b64 "$SCOPE"),category $(b64 "$CATEGORY")")
+  SECRET=$(printf %s "$CREATED" | header exomem-upload-secret)
+  [ -n "$SECRET" ] || { printf %s "$CREATED" | head -n 1; exit 1; }
+  LOCATION=$(printf %s "$CREATED" | header location)
+  (umask 077; echo "${CREATE_URL%/upload/sessions}$LOCATION $SECRET" > "$STATE")
+fi
+read -r SESSION SECRET < "$STATE"
+tus() { curl -sS -H "Tus-Resumable: 1.0.0" -H "Exomem-Upload-Secret: $SECRET" "$@"; }
+while OFFSET=$(tus -I "$SESSION" | header upload-offset) && [ -n "$OFFSET" ] && [ "$OFFSET" -lt "$SIZE" ]; do
+  tail -c +"$((OFFSET + 1))" "$FILE" | head -c $((64 * 1024 * 1024)) | tus -o /dev/null -X PATCH "$SESSION" \
+    -H "Upload-Offset: $OFFSET" -H "Content-Type: application/offset+octet-stream" --data-binary @- || true
+done
+tus "$SESSION"; echo
+```
+
+A part that fails, for example because the connection drops, is sent again
+from the offset that the service reports. The state `failed` names a code: for
+example, the bytes did not match their SHA-256. A session that has expired
+answers `UPLOAD_SESSION_EXPIRED`. In both cases, delete the `.exomem-session`
+file, call `transfer_artifact` for a new token and run the script again. To keep
+the original owner-only, or to keep a zip as its members, add `raw_protection 1`
+or `archive members` to `Upload-Metadata`, each value base64-encoded.
 
 ## Deploying a new version
 

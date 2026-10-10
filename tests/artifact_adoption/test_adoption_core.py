@@ -398,7 +398,7 @@ def test_oversized_receipt_is_rejected_before_canonical_artifact_read(
     committed = client_artifacts.preserve_artifacts(vault, **kwargs)
     receipt = _receipt_from_result(committed)
     page = vault / receipt["page_path"]
-    _replace_receipt_scalar(page, "size", len(data), client_artifacts.MAX_FILE_BYTES + 1)
+    _replace_receipt_scalar(page, "size", len(data), client_artifacts.fetch_budget().max_file_bytes + 1)
     monkeypatch.setattr(
         client_artifacts,
         "read_bounded_guarded_bytes",

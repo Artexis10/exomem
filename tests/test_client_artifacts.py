@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import http.server
 import json
 import shutil
 import socket
@@ -11,7 +12,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -2080,3 +2081,140 @@ def test_media_fanout_does_not_retire_readded_background_demand(
             next(vault.rglob("proof.png.md")).relative_to(vault).as_posix(), 1
         )
     ]
+
+
+# --------------------------------------------------------------------------
+# A standalone server pulls file handles as large as an upload session
+# --------------------------------------------------------------------------
+
+_MIB = 1024 * 1024
+
+
+def _paced(parts: int, size: int, pause: float):
+    """A download body of `parts` parts of `size` bytes, `pause` seconds apart."""
+
+    def send(handler: http.server.BaseHTTPRequestHandler) -> None:
+        handler.send_response(200)
+        handler.send_header("Content-Length", str(parts * size))
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.end_headers()
+        try:
+            for _ in range(parts):
+                handler.wfile.write(b"\0" * size)
+                time.sleep(pause)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the pull stopped reading
+
+    return send
+
+
+@contextmanager
+def _download_url(monkeypatch: pytest.MonkeyPatch, send):  # noqa: ANN001, ANN202
+    """A loopback listener standing in for a host's download URL.
+
+    Only the public-address check and TLS are swapped for a plain connection to
+    it, so the real streaming loop, budget and deadlines read from a real socket.
+    It answers in HTTP/1.1, as a host does: an HTTP/1.0 answer hands the socket to
+    the response, and each read's timeout would then stay the one set at connect.
+    """
+    from exomem import client_artifacts
+
+    handler = type("Handler", (http.server.BaseHTTPRequestHandler,), {
+        "protocol_version": "HTTP/1.1", "do_GET": send, "log_message": lambda *_args: None,
+    })
+    listener = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = listener.server_address[1]
+    threading.Thread(target=listener.serve_forever, daemon=True).start()
+    monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args, **_kwargs: ("127.0.0.1",))
+    monkeypatch.setattr(
+        client_artifacts,
+        "_PinnedHTTPSConnection",
+        lambda address, _port, *, server_hostname, timeout: http.client.HTTPConnection(
+            address, port, timeout=timeout
+        ),
+    )
+    try:
+        yield {"download_url": "https://files.example/device_days.bin", "file_id": "device-days"}
+    finally:
+        listener.shutdown()
+        listener.server_close()
+
+
+def test_a_standalone_server_preserves_a_file_handle_over_the_cell_cap(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every runtime used to refuse a client file handle over 100 MiB, the cap a Cloud
+    cell's broker grant carries. A desktop takes one as large as an upload session. The
+    file is real, 1 MiB over that cap, so the pull and the commit both have to admit it."""
+    from exomem import client_artifacts
+
+    size = client_artifacts.MAX_FILE_BYTES + _MIB
+    with _download_url(monkeypatch, _paced(size // _MIB, _MIB, 0)) as handle:
+        result = commands.op_preserve_artifacts(vault, scope="Device", category="Exports", files=[handle])
+
+    [outcome] = result["files"]
+    assert outcome["outcome"] == "stored", outcome
+    assert outcome["size"] == size
+    assert (vault / outcome["stored_path"]).stat().st_size == size
+
+
+def test_a_slow_but_healthy_desktop_pull_earns_time_with_each_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fixed deadline stops any pull that takes longer, however healthy, so a
+    multi-gigabyte pull never finished. Scaled down: a 1 s allowance for the file and
+    for the call, a 1,000 B/s minimum rate, and reads of one 1,000-byte part, as a real
+    pull reads 1 MiB at a time. Ten parts at 5,000 B/s take twice the allowance and
+    must finish."""
+    # `held_uploads` too: staging imports it, and a cold import would spend the allowance.
+    from exomem import client_artifacts, held_uploads  # noqa: F401
+
+    monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(client_artifacts, "_MIN_BYTES_PER_SECOND", 1000)
+    monkeypatch.setattr(client_artifacts, "_CHUNK_SIZE", 1000)
+    original_mkstemp = tempfile.mkstemp
+    monkeypatch.setattr(client_artifacts.tempfile, "mkstemp", lambda **_kwargs: original_mkstemp(dir=tmp_path))
+
+    with _download_url(monkeypatch, _paced(10, 1000, 0.2)) as handle:
+        staged = client_artifacts.stage_artifact(
+            handle, client_artifacts.fetch_budget(), batch_deadline=client_artifacts._monotonic() + 1.0
+        )
+
+    assert staged.size == 10 * 1000
+
+
+def test_a_trickling_desktop_pull_still_stops_and_leaves_no_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rate floor is what still stops a pull once each byte earns time: without it a
+    trickle runs as long as it keeps sending. Scaled down as above, with reads of one
+    100-byte part so each part earns its time: five parts at 50 B/s would take eight
+    seconds and must stop at the first gap."""
+    # `held_uploads` too: staging imports it, and a cold import would spend the allowance.
+    from exomem import client_artifacts, held_uploads  # noqa: F401
+
+    monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(client_artifacts, "_MIN_BYTES_PER_SECOND", 1000)
+    monkeypatch.setattr(client_artifacts, "_CHUNK_SIZE", 100)
+    original_mkstemp = tempfile.mkstemp
+    monkeypatch.setattr(client_artifacts.tempfile, "mkstemp", lambda **_kwargs: original_mkstemp(dir=tmp_path))
+
+    with _download_url(monkeypatch, _paced(5, 100, 2.0)) as handle, pytest.raises(
+        client_artifacts.SafeFetchError, match="timed out"
+    ):
+        client_artifacts.stage_artifact(
+            handle, client_artifacts.fetch_budget(), batch_deadline=client_artifacts._monotonic() + 1.0
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("flag", ["EXOMEM_CLOUD_CELL", "EXOMEM_HOSTED_CELL"])
+def test_a_cell_keeps_the_broker_cap_and_fixed_deadlines(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    """A Cloud cell's broker grant carries the 100 MiB cap and a hosted cell serves no
+    upload session, so neither takes a desktop's larger, rate-bounded pulls."""
+    from exomem import client_artifacts
+
+    monkeypatch.setenv(flag, "1")
+
+    assert client_artifacts.fetch_budget() == client_artifacts.FetchBudget()
