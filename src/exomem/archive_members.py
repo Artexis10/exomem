@@ -12,7 +12,9 @@ Every path in the family carries the raw-protection prefix, so each is
 owner-only before its first byte exists. Blobs land outside the vault mutation
 guard and only when absent; the manifest is the commit point, written last
 through the ordinary Evidence write path. A crash before it leaves blobs that no
-manifest names, and the next expansion reuses them.
+manifest names, and the next expansion reuses them. An archive a family manifest
+already records writes nothing, except that any blob the manifest names and the
+pool lost comes back from the uploaded archive.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -52,6 +55,18 @@ MANIFEST_SCHEMA_VERSION = 1
 _GZIP_LEVEL = 6
 #: Bit 0 of a zip entry's general-purpose flags: the entry is encrypted (APPNOTE 4.4.4).
 _ZIP_FLAG_ENCRYPTED = 0x1
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")  # the format of a member's name in the pool
+
+
+def member_blob(sha256: str) -> str:
+    """A member's blob path relative to its Evidence family: the one member-pool layout.
+
+    The name is the SHA-256 of the member's uncompressed bytes, under a directory of
+    its first two hex digits. Expansion writes blobs here and imports read them here.
+    """
+    if not _SHA256_HEX.fullmatch(sha256):
+        raise ValueError("a member blob is named by a lowercase hex SHA-256")
+    return f"{POOL_DIRNAME}/{sha256[:2]}/{sha256}.gz"
 
 
 class ArchiveError(Exception):
@@ -196,7 +211,7 @@ def _write_blob(zip_file: zipfile.ZipFile, entry: _Entry, blob: Path, sha256: st
             sink.flush()
             os.fsync(sink.fileno())
         if digest.hexdigest() != sha256:
-            raise ArchiveError(INVALID, "an archive member changed while it was read")
+            raise ArchiveError(INVALID, "an archive member does not match its recorded SHA-256")
         # Same name, same uncompressed bytes: a concurrent expansion that lands
         # the blob first is as good as this one.
         if not blob.exists():
@@ -235,8 +250,10 @@ def _hash_stream(stream: BinaryIO, *, max_bytes: int) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def _recorded(vault_root: Path, folder: Path, sha256: str) -> tuple[dict[str, Any], int] | None:
-    """The duplicate receipt fields of a family manifest that records this archive.
+def _recorded(
+    vault_root: Path, folder: Path, sha256: str
+) -> tuple[dict[str, Any], int, list[Any]] | None:
+    """The duplicate receipt fields, size and members of a family manifest recording this archive.
 
     A manifest's companion is a dataset card, which carries no governance
     companion block, so the pair is resolved through its raw-protection binding.
@@ -255,7 +272,8 @@ def _recorded(vault_root: Path, folder: Path, sha256: str) -> tuple[dict[str, An
         block, companion, _companion_hash = found
         try:
             data = reserved_paths.read_generic_bytes(vault_root, relative).data
-            archive = json.loads(data).get("archive")
+            document = json.loads(data)
+            archive, members = document.get("archive"), document.get("members")
         except (OSError, ValueError, AttributeError, reserved_paths.ReservedPathLeafError):
             continue
         if hashlib.sha256(data).hexdigest() != block["artifact_sha256"]:
@@ -272,8 +290,52 @@ def _recorded(vault_root: Path, folder: Path, sha256: str) -> tuple[dict[str, An
                     "hash": block["artifact_sha256"],
                 },
                 len(data),
+                members if isinstance(members, list) else [],
             )
     return None
+
+
+def _free_bytes(vault_root: Path, folder: Path) -> int:
+    probe = folder
+    while not probe.exists() and probe != vault_root:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
+
+
+def _restore(vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[Any]) -> int:
+    """Re-expand only the members a recorded manifest names whose blobs left the pool.
+
+    Each comes back from the uploaded archive, verified against its recorded SHA-256
+    as it is gzipped, and lands only where no blob exists; nothing else is written.
+    Returns how many blobs came back.
+    """
+    missing: dict[str, str] = {}
+    for member in recorded:
+        if not (
+            isinstance(member, dict)
+            and isinstance(member.get("path"), str)
+            and isinstance(member.get("sha256"), str)
+            and _SHA256_HEX.fullmatch(member["sha256"])
+            and member.get("blob") == member_blob(member["sha256"])
+        ):
+            raise ArchiveError(INVALID, "the archive's recorded manifest cannot be read")
+        if not (folder / member["blob"]).exists():
+            missing[member["path"]] = member["sha256"]
+    if not missing:
+        return 0
+    try:
+        zip_file = zipfile.ZipFile(stream)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
+    with zip_file:
+        entries = {entry.path: entry for entry in _central_directory(zip_file)[0]}
+        if any(path not in entries for path in missing):
+            raise ArchiveError(INVALID, "the archive lacks a member its manifest records")
+        if sum(entries[path].info.file_size for path in missing) > _free_bytes(vault_root, folder):
+            raise ArchiveError(TOO_LARGE, "the archive's lost members exceed the free disk space")
+        for path, sha256 in sorted(missing.items()):
+            _write_blob(zip_file, entries[path], folder / member_blob(sha256), sha256)
+    return len(missing)
 
 
 def preserve_members(
@@ -330,7 +392,8 @@ def preserve_members(
         found = _recorded(vault_root, folder, sha256)
         if found is None:
             return None
-        fields, manifest_size = found
+        fields, manifest_size, recorded = found
+        restored = _restore(vault_root, folder, stream, recorded)
         return {
             **fields,
             "state": "already_stored",
@@ -340,7 +403,7 @@ def preserve_members(
             "hash_algorithm": "sha256",
             "media_id": f"sha256:{fields['hash']}",
             "content_type": "application/json",
-            "archive": archive,
+            "archive": {**archive, "restored": restored},
         }, False
 
     # Before any member is read: the same archive into the same family is one fact.
@@ -352,17 +415,13 @@ def preserve_members(
         raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
     with zip_file:
         entries, total = _central_directory(zip_file)
-        probe = folder
-        while not probe.exists() and probe != vault_root:
-            probe = probe.parent
-        if total > shutil.disk_usage(probe).free:
+        if total > _free_bytes(vault_root, folder):
             raise ArchiveError(TOO_LARGE, "the archive's members exceed the free disk space")
-        pool = folder / POOL_DIRNAME
         members: list[dict[str, Any]] = []
         written = 0
         for entry in entries:
             digest = _member_digest(zip_file, entry)
-            blob = pool / digest[:2] / f"{digest}.gz"
+            blob = folder / member_blob(digest)
             if not blob.exists():
                 _write_blob(zip_file, entry, blob, digest)
                 written += 1
@@ -372,7 +431,7 @@ def preserve_members(
                     "sha256": digest,
                     "bytes": entry.info.file_size,
                     "modified": _modified(entry.info),
-                    "blob": blob.relative_to(folder).as_posix(),
+                    "blob": member_blob(digest),
                     "stored_bytes": blob.stat().st_size,
                 }
             )

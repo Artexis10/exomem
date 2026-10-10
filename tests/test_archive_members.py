@@ -8,6 +8,8 @@ is invented.
 from __future__ import annotations
 
 import contextlib
+import gzip
+import hashlib
 import io
 import stat
 import zipfile
@@ -73,3 +75,32 @@ def test_a_hostile_archive_writes_nothing(
 
     assert refused.value.code == code
     assert not family.exists() or not any(path.is_file() for path in family.rglob("*"))
+
+
+def test_preserving_a_recorded_archive_again_restores_a_lost_blob_and_nothing_else(vault: Path) -> None:
+    """An `already_stored` that trusts its manifest leaves a member it names unreadable for good."""
+    archive = _zip([("export/device_days/day-01.json", b'{"samples": [{"heart_rate": 61}]}'),
+                    ("export/profile.json", b'{"units": "metric"}')])
+    family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
+
+    def preserve() -> tuple[dict, bool]:
+        return archive_members.preserve_members(
+            vault, guard=contextlib.nullcontext, scope="Device", category="Exports", filename="export.zip",
+            stream=io.BytesIO(archive), max_bytes=1024 * 1024, verified="upload",
+        )
+
+    def tree() -> dict[Path, bytes]:
+        return {path: path.read_bytes() for path in family.rglob("*") if path.is_file()}
+
+    _, stored = preserve()
+    before = tree()
+    lost = sorted(path for path in before if path.suffix == ".gz")[0]
+    lost.unlink()
+
+    receipt, stored_again = preserve()
+
+    assert (stored, stored_again, receipt["state"], receipt["archive"]["restored"]) == (
+        True, False, "already_stored", 1
+    )
+    assert hashlib.sha256(gzip.decompress(lost.read_bytes())).hexdigest() == lost.name.removesuffix(".gz")
+    assert tree() == before
