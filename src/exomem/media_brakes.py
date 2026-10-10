@@ -35,7 +35,7 @@ BUDGETS_ENV = "EXOMEM_MEDIA_BUDGETS"
 MARGIN_ENV = "EXOMEM_MEDIA_VMDATA_MARGIN_MIB"
 FRACTION_ENV = "EXOMEM_MEDIA_ADMISSION_FRACTION"
 PRESSURE_ENV = "EXOMEM_MEDIA_PRESSURE_AVG10"
-STOP_LIMIT_ENV = "EXOMEM_MEDIA_MEMORY_STOP_LIMIT"
+STOP_LIMIT_ENV = "EXOMEM_MEDIA_STOP_LIMIT"
 JOB_TIMEOUT_ENV = "EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS"
 #: The budget entry that applies to media whose kind needs no engine.
 DEFAULT_BUDGET_KEY = "default"
@@ -53,11 +53,11 @@ _MIB = 1024 * 1024
 # Defaults until each engine's acceptance pins its own values (docs/runbooks/cloud-media.md).
 # VmData: about 3x the largest measured need of a small sample (329 MiB, MarkItDown).
 _DEFAULT_VMDATA_MIB = 1024
-# The child and each Tesseract it starts have their own data limit. For an image the
-# child closes the decoded image before Tesseract starts (extract._ocr_image), so the job
-# holds one hard limit at a time and stays under a 3 GiB memory.max:
-# 0.80 x 3072 - 640 + 1024 + 128 = 2970 MiB. A scanned PDF keeps its document and the
-# rendered page open while Tesseract reads that page, so there the two can overlap.
+# The child and each Tesseract it starts have their own data limit. The child releases
+# the decoded image, or a scanned PDF page's raster and decoded scan, before Tesseract
+# starts (extract._ocr_image, extract._ocr_pdf_page); a PDF keeps only its open document.
+# So the job holds one hard limit at a time and stays under a 3 GiB memory.max:
+# 0.80 x 3072 - 640 + 1024 + 128 = 2970 MiB.
 _DEFAULT_ANON_MIB = 640
 # Covers the allocator's own arenas above the engine's budget.
 _DEFAULT_MARGIN_MIB = 128

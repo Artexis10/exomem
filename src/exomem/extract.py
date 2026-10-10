@@ -1052,14 +1052,6 @@ def _ocr_png(source: Path) -> str:
         raise ExtractionUnavailable(str(e)) from e
 
 
-def _ocr_file(image) -> str:
-    """OCR a decoded Pillow image (a rendered PDF page)."""
-    with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
-        source = Path(tmp) / "page.png"
-        _save_png_for_ocr(image, source)
-        return _ocr_png(source)
-
-
 def _ocr_image(path: Path) -> ExtractResult:
     try:
         from PIL import Image
@@ -1375,14 +1367,18 @@ def _ocr_pdf_page(page) -> str:
     if not media_engines.stage_enabled("image"):
         return ""
     try:
-        import io
+        import fitz
 
-        from PIL import Image
-
-        pix = page.get_pixmap(dpi=200)
-        with Image.open(io.BytesIO(pix.tobytes("png"))) as img:
-            img.load()
-            return _ocr_file(img)
+        with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
+            source = Path(tmp) / "page.png"
+            pix = page.get_pixmap(dpi=200)  # no alpha channel, so no flattening is needed
+            pix.save(source)
+            del pix
+            # MuPDF's store keeps the page's decoded scan after rendering; empty it too.
+            fitz.TOOLS.store_shrink(100)
+            # The raster is released before Tesseract starts: each process has its own
+            # VmData limit, so holding both would let one job take two budgets of the cell.
+            return _ocr_png(source)
     except MemoryError:
         raise  # a hard-limit failure is a memory stop, never a missing page
     except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort

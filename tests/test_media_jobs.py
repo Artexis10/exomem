@@ -1735,6 +1735,36 @@ def test_only_a_longer_job_timeout_returns_a_file_that_outran_the_watchdog(
     assert store.claim_next() is not None
 
 
+def test_a_memory_blocked_return_keeps_the_files_watchdog_count(vault: Path) -> None:
+    # The watchdog bounds a file at the stop limit times the timeout. A file that also
+    # meets memory pressure must not get a fresh count each time it returns from it.
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    exceeded = '{"job_timeout_seconds": 900.0}'
+
+    for _ in range(2):
+        claimed = store.claim_next()
+        assert claimed is not None
+        assert store.record_timeout_stop(claimed, stop_limit=3, context=exceeded) == media_jobs.PENDING
+    pressure = []
+    for _ in range(3):
+        claimed = store.claim_next()
+        assert claimed is not None
+        pressure.append(store.record_memory_stop(claimed, kind="pressure", stop_limit=3, context="limit-a"))
+    assert pressure[-1] == media_jobs.MEMORY_BLOCKED
+    assert store.recover_memory_verdicts(lifted=lambda _type, _recorded: False, include_memory_blocked=True) == 1
+
+    conn = store._connect()
+    try:
+        [timeout_stops] = conn.execute("SELECT timeout_stops FROM jobs").fetchone()
+    finally:
+        conn.close()
+    assert timeout_stops == 2
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_timeout_stop(claimed, stop_limit=3, context=exceeded) == media_jobs.OVER_BUDGET
+
+
 def test_a_pressure_stop_never_marks_a_file_over_budget(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))

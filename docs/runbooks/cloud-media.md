@@ -54,7 +54,7 @@ Each value is deployment configuration. Set it in the cell's environment.
 | `EXOMEM_MEDIA_VMDATA_MARGIN_MIB` | 128 | Covers the allocator's own arenas above the engine's budget. |
 | `EXOMEM_MEDIA_ADMISSION_FRACTION` | 0.80 | The service-v1 profile's 80% cgroup peak gate. |
 | `EXOMEM_MEDIA_PRESSURE_AVG10` | 10.0 | Sustained reclaim, well above an idle cell and below the stalls that come before an OOM kill. |
-| `EXOMEM_MEDIA_MEMORY_STOP_LIMIT` | 3 | Consecutive memory stops before a job leaves the stop cycle. Watchdog stops count apart, against the same limit. |
+| `EXOMEM_MEDIA_STOP_LIMIT` | 3 | Consecutive memory stops before a job leaves the stop cycle. Watchdog stops count apart, against the same limit. |
 | `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS` | 900 | Far above the samples' sub-second times, with room for a long scanned PDF. A file costs at most the stop limit times this before it is over budget. |
 
 `EXOMEM_MEDIA_BUDGETS` is a JSON object from engine to budget, for example `{"ocr": {"anon_mib": 640, "vmdata_mib": 1024}, "default": {"anon_mib": 512, "vmdata_mib": 768}}`. The `default` entry covers the kinds without an engine. An entry at or below zero, or above the cell's `memory.max`, keeps the default budget. An unknown engine name is ignored. Each of these cases, and any malformed value, logs one warning that names it.

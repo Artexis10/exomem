@@ -871,6 +871,43 @@ def test_a_corrupt_pdf_in_a_folder_named_after_an_allocator_is_not_a_memory_stop
     assert not isinstance(raised.value, MemoryError)
 
 
+def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path, monkeypatch) -> None:
+    # Tesseract runs under its own data limit beside the media child. A rendered A0 page
+    # at 200 dpi is about 186 MB; a child that keeps it during OCR holds two budgets.
+    fitz = pytest.importorskip("fitz")
+    import gc
+    import weakref
+
+    from exomem import ocr_models
+
+    with fitz.open() as doc:
+        doc.new_page()  # no text layer, as a scanned page has none
+        doc.save(tmp_path / "scan.pdf")
+    rendered: list[weakref.ref] = []
+    render = fitz.Page.get_pixmap
+
+    def get_pixmap(page, *args, **kwargs):
+        pixmap = render(page, *args, **kwargs)
+        rendered.append(weakref.ref(pixmap))
+        return pixmap
+
+    alive_when_tesseract_starts: list[int] = []
+
+    def read_image(_cmd: str, image: Path) -> str:
+        gc.collect()
+        alive_when_tesseract_starts.append(sum(ref() is not None for ref in rendered))
+        return "harbour lantern was repaired"
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", get_pixmap)
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    monkeypatch.setattr(ocr_models, "read_image", read_image)
+
+    result = extract.extract_text(tmp_path / "scan.pdf")
+
+    assert result.text == "harbour lantern was repaired"
+    assert alive_when_tesseract_starts == [0]
+
+
 def test_dark_text_on_a_transparent_image_reaches_tesseract_dark_on_white(tmp_path, monkeypatch) -> None:
     PIL = pytest.importorskip("PIL")
     from PIL import Image, ImageDraw
