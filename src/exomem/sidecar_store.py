@@ -92,15 +92,22 @@ def ensure_meta_table(
             )
 
 
-def read_meta_token(conn: sqlite3.Connection) -> tuple[int, int, int]:
-    """Return `(epoch, generation, instance)` from a sidecar meta table."""
+def read_meta_token(
+    conn: sqlite3.Connection, *, generation_key: str = "generation"
+) -> tuple[int, int, int]:
+    """Return `(epoch, generation, instance)` from a sidecar meta table.
+
+    `generation_key` names the write counter: a sidecar holding a second table
+    with its own counter keys a cache of that table on it instead.
+    """
     rows = conn.execute(
-        "SELECT key, value FROM meta WHERE key IN ('epoch', 'generation', 'instance')"
+        "SELECT key, value FROM meta WHERE key IN ('epoch', ?, 'instance')",
+        (generation_key,),
     ).fetchall()
     d = {k: v for k, v in rows}
     return (
         int(d.get("epoch") or 0),
-        int(d.get("generation") or 0),
+        int(d.get(generation_key) or 0),
         int(d.get("instance") or 0),
     )
 
@@ -395,7 +402,9 @@ def catchup_is_eligible(
     return (gen - c.generation) <= max_generations
 
 
-def peek_sidecar_token(path: Path) -> tuple[int, int, int] | None:
+def peek_sidecar_token(
+    path: Path, *, generation_key: str = "generation"
+) -> tuple[int, int, int] | None:
     """Read `(epoch, generation, instance)` without creating or migrating a sidecar."""
     if not path.exists():
         return (0, 0, 0)
@@ -408,7 +417,11 @@ def peek_sidecar_token(path: Path) -> tuple[int, int, int] | None:
                 ).fetchone()
                 is not None
             )
-            return read_meta_token(conn) if has_meta else (0, 0, 0)
+            return (
+                read_meta_token(conn, generation_key=generation_key)
+                if has_meta
+                else (0, 0, 0)
+            )
         finally:
             conn.close()
     except sqlite3.Error:
@@ -430,9 +443,9 @@ def cache_is_fresh(c, path: Path, epoch: int, gen: int, instance: int) -> bool:
         return False
 
 
-def try_serve_cached(c, path: Path):
+def try_serve_cached(c, path: Path, *, generation_key: str = "generation"):
     """Return `c` if it can serve the current sidecar token, else None."""
-    token = peek_sidecar_token(path)
+    token = peek_sidecar_token(path, generation_key=generation_key)
     if token is None:
         if c is not None:
             log.warning(

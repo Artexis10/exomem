@@ -251,6 +251,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `embeddings.encode` | Encoding text to vectors. |
 | `embeddings.matrix_load` | A full vector-matrix load from the sidecar; the log line `embedding matrix full load: … rows=… cached_gen=…` names the reason. |
 | `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
+| `embeddings.unit_matrix_load` | A full load of the semantic-unit vectors into the resident unit matrix: the first unit query in a process, and the first after each unit write; the log line `semantic-unit matrix full load: … rows=…` names the reason. |
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
 | `derived.advisory_execute`, `derived.component_dispatch`, `derived.component_completion` | The derived drain. |
 | `recall.*` | Retrieval phases, named by `find`'s own timings. |
