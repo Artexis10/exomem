@@ -2988,6 +2988,7 @@ def op_find(
                         purpose=purpose,
                         cue=referent_cue,
                         expected_recall_checkpoints=catalog_proof or None,
+                        keep=admit_path,
                     )
                 except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None

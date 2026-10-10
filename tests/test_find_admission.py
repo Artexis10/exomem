@@ -140,17 +140,29 @@ def test_admitting_every_page_recalls_what_an_unrestricted_caller_recalls(
 LINKED = "Knowledge Base/Notes/Shared Name.md"
 
 
-def _namesake_vault(root: Path, *, linker: str, hidden_namesakes: bool, sidecar: bool) -> None:
+def _namesake_vault(
+    root: Path,
+    *,
+    linker: str,
+    hidden_namesakes: bool,
+    sidecar: bool,
+    relation: bool,
+    inbound_linker: str | None,
+) -> None:
     """A visible page links `[[Shared Name]]` and `[[Shared Hub]]`, each the
-    stem of one visible page. The hidden pages, when present, share both stems.
-    "Shared Hub" matches the query, so its in-degree is a served signal."""
+    stem of one visible page, and with `relation` also `supports [[Shared Name]]`.
+    The hidden pages, when present, share both stems. "Shared Hub" matches the
+    query, so its in-degree is a served signal. An `inbound_linker`, when given,
+    links the linker."""
     pages = {
-        linker: "Quince grafting on dwarf rootstock. See [[Shared Name]] and [[Shared Hub]].\n\n"
-        "## Relations\n\n- supports [[Shared Name]]\n",
+        linker: "Quince grafting on dwarf rootstock. See [[Shared Name]] and [[Shared Hub]].\n"
+        + ("\n## Relations\n\n- supports [[Shared Name]]\n" if relation else ""),
         LINKED: "Catalogue of rootstock entries.\n",
         "Knowledge Base/Notes/Shared Hub.md": "Quince grafting hub.\n",
         **{f"Knowledge Base/Notes/quince-{i}.md": f"Quince grafting note {i}.\n" for i in range(4)},
     }
+    if inbound_linker is not None:
+        pages[inbound_linker] = f"Catalogue entry for [[{Path(linker).stem}]].\n"
     if hidden_namesakes:
         pages["Knowledge Base/Private/Shared Name.md"] = "Private ledger.\n"
         pages["Knowledge Base/Private/Shared Hub.md"] = "Private ledger.\n"
@@ -164,27 +176,45 @@ def _namesake_vault(root: Path, *, linker: str, hidden_namesakes: bool, sidecar:
 
 
 @pytest.mark.parametrize(
-    ("linker", "scope", "sidecar"),
+    ("linker", "scope", "sidecar", "relation", "inbound_linker"),
     [
-        ("Knowledge Base/Notes/quince-linker.md", "kb", True),
-        ("Knowledge Base/Notes/quince-linker.md", "kb", False),
+        ("Knowledge Base/Notes/quince-linker.md", "kb", True, True, None),
+        ("Knowledge Base/Notes/quince-linker.md", "kb", False, True, None),
         # The sidecar indexes only the KB, so this seed takes the legacy expansion.
-        ("Reference/quince-linker.md", "vault", True),
+        ("Reference/quince-linker.md", "vault", True, True, None),
+        # Over the whole vault every link of this linker is ambiguous, so the
+        # sidecar stores none of them. Its re-resolved `[[Shared Name]]` and the
+        # inbound link from a page after it then tie on tier.
+        ("Knowledge Base/Notes/aaa-linker.md", "kb", True, False, "Knowledge Base/Notes/zzz-linker.md"),
     ],
-    ids=["typed-sidecar", "wikilink-fallback", "out-of-kb-seed"],
+    ids=["typed-sidecar", "wikilink-fallback", "out-of-kb-seed", "two-target-tie"],
 )
 def test_a_hidden_namesake_never_changes_how_a_restricted_callers_links_resolve(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linker: str, scope: str, sidecar: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    linker: str,
+    scope: str,
+    sidecar: bool,
+    relation: bool,
+    inbound_linker: str | None,
 ) -> None:
     """The graph lane resolves a visible page's links over the caller's view.
     Over the whole vault a hidden namesake makes `[[Shared Name]]` ambiguous,
     so the visible target leaves the graph lane and `[[Shared Hub]]` stops
-    counting toward a served hit's in-degree: both reveal the hidden page."""
+    counting toward a served hit's in-degree: both reveal the hidden page. Tied
+    graph targets keep one order, whichever page the sidecar wrote first."""
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     present, absent = tmp_path / "present", tmp_path / "absent"
-    _namesake_vault(present, linker=linker, hidden_namesakes=True, sidecar=sidecar)
-    _namesake_vault(absent, linker=linker, hidden_namesakes=False, sidecar=sidecar)
+    for root, hidden_namesakes in ((present, True), (absent, False)):
+        _namesake_vault(
+            root,
+            linker=linker,
+            hidden_namesakes=hidden_namesakes,
+            sidecar=sidecar,
+            relation=relation,
+            inbound_linker=inbound_linker,
+        )
 
     def admit(path: str) -> bool:
         return not path.startswith("Knowledge Base/Private/")

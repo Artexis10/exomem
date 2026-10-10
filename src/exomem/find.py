@@ -1481,6 +1481,7 @@ def find(
         relations=relations,
         relation_of=relation_of,
         relation_direction=relation_direction,
+        keep=admit_path,
     )
 
     # One freshness snapshot + one parsed-page memo per request: every
@@ -3326,9 +3327,11 @@ def _resolve_relation_filter(
     relations: list[str] | None,
     relation_of: str | None,
     relation_direction: str,
+    keep: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
-    plus per-path provenance and advisory findings.
+    plus per-path provenance and advisory findings. `keep` is a restricted
+    caller's admission (`None` for the owner): its edges resolve in that view.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -3362,7 +3365,7 @@ def _resolve_relation_filter(
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     result = graph_index.relation_participants(
-        relations or (), anchor=relation_of, direction=relation_direction
+        relations or (), anchor=relation_of, direction=relation_direction, keep=keep
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
