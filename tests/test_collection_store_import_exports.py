@@ -20,17 +20,27 @@ import zipfile
 import zoneinfo
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import tzdata
 from test_collection_store_importer import CID, call, count, manifest_text, refused, release, setup
 from test_collection_store_importer import run as run_jobs
+from test_collection_store_s1_gate import _until
+from test_collection_store_service import (  # noqa: F401 - the service fixture
+    ON,
+    Service,
+    imported,
+    service,
+)
+from test_collection_store_service import call as served
+from test_collection_store_writer import manifest_path
 from test_collection_store_writer import store as store
 from test_governance_egress import _external
 
 from exomem import __version__, archive_members, commands
 from exomem import structured_collections as collections
-from exomem.collection_store import connection, importer, typed_storage
+from exomem.collection_store import capability, connection, importer, typed_storage
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import owner_principal, request_scope
@@ -391,6 +401,35 @@ def test_a_member_identical_to_an_earlier_one_in_the_same_job_still_wins_by_path
                 mapping=SAMPLES)
     assert finish(store, job)["members"] == {"selected": 3, "read": 3, "skipped": 0}
     assert stored(store.connection)[("samples", "2026-11-01T07:00:00Z")]["value"] == 0.1
+
+
+def test_a_served_export_imports_members_that_start_on_later_store_checkouts(
+    service: Service,  # noqa: F811 - the imported fixture, by name
+    monkeypatch,
+):
+    """Defect: the open member reader keeps the skip check of the store checkout that opened it, so a member
+    that starts in a later batch, on a later checkout of the served writer, fails and the import never
+    completes."""
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
+    served_cid = "77777777-7777-4777-8777-777777777777"
+    text = manifest_text(served_cid, "Served", FIELDS).replace("lifecycle: active\n", "lifecycle: active\nview_mode: summary\n")
+    served(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Served"),
+           manifest_text=text, why="served samples")
+    members = {"samples/1-autumn.json": AUTUMN, "samples/2-november.json": NOVEMBER}
+    source, _ = preserve_export(SimpleNamespace(root=service.root), "served", members)
+    job = imported(service.root, collection=served_cid, mode="start", source_ref=source, format="json-document",
+                   members="samples/*", mapping=SAMPLES)
+
+    def status():
+        return imported(service.root, collection=served_cid, mode="status", continuation=job["continuation"])
+
+    _until(lambda: status()["state"] != "running", 30)
+    assert status()["state"] == "complete"
+    rows = served(service.root, "record_memory", action="query", collection=served_cid)["rows"]
+    first = len(AUTUMN["days"][0]["samples"])
+    assert first > importer.MAX_BATCH_ROWS  # the second member starts in a later batch
+    assert len(rows) == first + len(NOVEMBER["days"][0]["samples"])
 
 
 def test_numbers_beyond_int64_or_a_float_cost_only_their_own_rows(tmp_path):

@@ -2176,6 +2176,7 @@ def _live(writer, job: _Job, proof: Source, plan: Plan) -> _Streams:
     readers = writer.handle.import_readers
     reader = readers.get(job.id)
     if reader is not None and reader.marked == _cursor(job.checkpoint):
+        reader.skip = _skipper(writer, job)  # a served writer is bound to one checkout, so rebind per batch
         return reader
     if reader is not None:
         reader.close()
@@ -2187,23 +2188,29 @@ def _live(writer, job: _Job, proof: Source, plan: Plan) -> _Streams:
         )
     else:
         streams = (_Stream(None, bound["bytes"], lambda: (_open_source(proof), None)),)
-    skip = None
-    if "members" in bound and bound["members"]["reimport"] is None:
-        key = (job.collection_id, job.binding["mapping"]["sha256"])
-
-        def skip(stream: _Stream) -> bool:
-            # Only earlier jobs count: a member this job already read with the same bytes
-            # sits earlier in path order, and the later one must still win.
-            return writer.connection.execute(
-                "SELECT EXISTS(SELECT 1 FROM import_members WHERE collection_id=? "
-                "AND mapping_sha256=? AND member_sha256=? AND job_id<>?)",
-                (*key, stream.sha256, job.id),
-            ).fetchone()[0] == 1
-
     reader = readers[job.id] = _Streams(
-        streams, job.binding["mapping"]["format"], plan.rows, job.checkpoint, skip, bounded=True
+        streams, job.binding["mapping"]["format"], plan.rows, job.checkpoint, _skipper(writer, job), bounded=True
     )
     return reader
+
+
+def _skipper(writer, job: _Job):
+    """Whether this checkout's store already logs a member for the job's collection and mapping."""
+    bound = job.binding["source"]
+    if "members" not in bound or bound["members"]["reimport"] is not None:
+        return None
+    key = (job.collection_id, job.binding["mapping"]["sha256"])
+
+    def skip(stream: _Stream) -> bool:
+        # Only earlier jobs count: a member this job already read with the same bytes
+        # sits earlier in path order, and the later one must still win.
+        return writer.connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM import_members WHERE collection_id=? "
+            "AND mapping_sha256=? AND member_sha256=? AND job_id<>?)",
+            (*key, stream.sha256, job.id),
+        ).fetchone()[0] == 1
+
+    return skip
 
 
 def _json(value: Any) -> str:
