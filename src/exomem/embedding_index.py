@@ -1974,11 +1974,15 @@ class EmbeddingIndex:
                 previous = self._unit_cache
                 served = serve(previous)
                 if served is None:
+                    # Release the stale matrix before reading its replacement, so
+                    # a reload holds one matrix, not two; the log needs its epoch.
+                    stale = None if previous is None else SimpleNamespace(epoch=previous.epoch)
+                    previous = self._unit_cache = None
                     with call_spans.span("embeddings.unit_matrix_load"):
                         served = self._unit_cache = self._load_unit_rows()
                     log.info(
                         "semantic-unit matrix full load: reason=%s rows=%d gen=%d epoch=%d",
-                        sidecar_store.reload_reason(previous, served.epoch, served.generation),
+                        sidecar_store.reload_reason(stale, served.epoch, served.generation),
                         len(served.block.rows),
                         served.generation,
                         served.epoch,
