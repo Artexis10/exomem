@@ -478,7 +478,6 @@ def apply_for_item(
     until: str | None = None,
     why: str | None = None,
     now: dt.datetime | None = None,
-    fingerprint_bound: bool = False,
 ) -> dict[str, Any]:
     """Record one triage decision for a fused item AND each of its components.
 
@@ -494,19 +493,14 @@ def apply_for_item(
     cannot know which fused item a user was looking at, and guessing would let a
     dismissal leak across signals the user never saw.
 
-    `reopen` clears every record under the item id, component records
-    included, and it still routes through here so there is exactly one place
-    that knows this. The exception is a `fingerprint_bound` reopen of a
-    single-category item, the due signal a due-state row's fingerprint names: it
-    clears only the records a decision on that item writes, so reopening the
-    due signal never reopens the fused item the review surface shows dismissed.
+    `reopen` needs no fan-out -- `apply` clears every record under the item id,
+    component records included -- but it still routes through here so there is
+    exactly one place that knows this.
     """
     store = ReviewStateStore(vault_root)
     review_id = str(review_id or getattr(item, "item_id", None) or "")
     fused = str(getattr(item, "fingerprint", None) or "")
-    reopen = str(action or "").strip().lower() == "reopen"
-    one_signal = fingerprint_bound and len(getattr(item, "categories", None) or []) == 1
-    if reopen and not one_signal:
+    if str(action or "").strip().lower() == "reopen":
         # No fan-out and no attribution to compute: `apply` clears every record
         # under the item id, component records included.
         return store.apply(review_id, fused, action=action, until=until, why=why, now=now)
@@ -518,16 +512,6 @@ def apply_for_item(
     # published by a due-state count could be "dismissed" while the count that
     # published it carried on, or while a different signal was put down instead.
     pairs.extend(getattr(item, "triage_components", None) or [])
-    if reopen:
-        return store.apply(
-            review_id,
-            fused,
-            action=action,
-            until=until,
-            why=why,
-            now=now,
-            only=[fused, *(value for _category, value in pairs)],
-        )
     family_by_fingerprint: dict[str, str] = {}
     for category, value in pairs:
         if value not in family_by_fingerprint and category:
@@ -662,13 +646,7 @@ class ReviewStateStore:
         now: dt.datetime | None = None,
         origin: str = MANUAL,
         family: str | None = None,
-        only: Iterable[str] | None = None,
     ) -> dict[str, Any]:
-        """Record one decision, or clear one item's records on `reopen`.
-
-        A reopen clears every record under the id unless `only` names the
-        fingerprints whose records it clears (see `apply_for_item`).
-        """
         action = str(action or "").strip().lower()
         if action not in VALID_ACTIONS:
             raise ValueError(
@@ -688,14 +666,10 @@ class ReviewStateStore:
             payload = self.load()
             records = payload["records"]
             if action == "reopen":
-                scope = (
-                    None if only is None else {_record_key(review_id, value) for value in only}
-                )
                 for existing in [
                     record_key
                     for record_key in records
                     if record_key.startswith(f"{review_id}:")
-                    and (scope is None or record_key in scope)
                 ]:
                     records.pop(existing, None)
                 decision = None

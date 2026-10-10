@@ -320,10 +320,10 @@ def review(
         "integrity": {},
         "truncated": False,
     }
-    view = dreamer_store.read_view(Path(vault_root))
+    view, refusal = dreamer_store.read_view_or_refusal(Path(vault_root))
     if view is None or view.health.get("last_tick_at") is None:
         # A sidecar no tick has written yet holds only the worker's wait.
-        return {**base, "status": "unavailable", **_unavailable(Path(vault_root), view)}
+        return {**base, "status": "unavailable", **_unavailable(view, refusal)}
     payload = _payload(Path(vault_root))
     if payload is None:
         return {**base, "status": "review_state_unavailable"}
@@ -390,7 +390,7 @@ def review(
     }
 
 
-def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict[str, Any]:
+def _unavailable(view: dreamer_store.StoreView | None, refusal: str | None) -> dict[str, Any]:
     """Why upkeep cannot be listed: a closed `reason`, and the wait when there is one.
 
     The five reasons are this response's own closed enum, fixed by its contract,
@@ -404,8 +404,8 @@ def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict
         live = dreamer.status()
         if not live["running"]:
             return {"reason": "worker_not_running"}
-        if view is None and (condition := _condition(vault_root)) != "missing":
-            return {"reason": condition}
+        if view is None and refusal != "missing":
+            return {"reason": refusal}
         return {
             "reason": "no_tick_yet",
             "waiting": _waiting(live["waiting_reason"], live["waiting_since"], "worker"),
@@ -416,17 +416,8 @@ def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict
         # When it was written, so a stopped service's last wait never reads as live.
         waiting["recorded_at"] = _stamp(recorded.get("recorded_at"))
         return {"reason": "no_tick_yet", "waiting": waiting}
-    condition = _condition(vault_root)
     # A running worker records its first wait, so no file means no worker has run.
-    return {"reason": "worker_not_running" if condition == "missing" else condition}
-
-
-def _condition(vault_root: Path) -> str:
-    """`missing`, `schema_mismatch`, `locked` or `unreadable` for a refused `read_view`.
-
-    The effect block names the same sidecar states, so one state has one name.
-    """
-    return dreamer_store.refused_condition(vault_root)
+    return {"reason": "worker_not_running" if refusal == "missing" else refusal}
 
 
 def _waiting(reason: Any, since: Any, source: str) -> dict[str, Any]:

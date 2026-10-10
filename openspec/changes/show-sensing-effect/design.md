@@ -31,11 +31,9 @@ Both the dismissal counts and the effect block reduce every decision record, wit
 
 ### D5. A due-state row's fingerprint addresses its own signal
 
-Each due-state row publishes the fingerprint of its stored entry. Supplied as `expected_fingerprint`, it already selects the due signal alone: the whole-vault resolution narrows a fused item to the component with that fingerprint. It did so only after three whole-vault audits.
+Each due-state row publishes its served fingerprint: the stored entry's, or the one recomposed for an audience that a policy restricts. Supplied as `expected_fingerprint`, it already selects the due signal alone: the whole-vault resolution narrows a fused item to the component with that fingerprint. It did so only after three whole-vault audits.
 
-The resolver now answers that request from the stored entry and a re-check of that category on its page. It answers only when the re-check reproduces the stored id, a single category and the stored fingerprint; otherwise the whole-vault path runs. A reference without a fingerprint resolves as before, to the fused item the review surface lists. So the CLI, the TUI and `review_memory(mode="item")`, which send no fingerprint, keep their behaviour and their cost.
-
-A reopen through the due signal's fingerprint clears only that signal's records. Otherwise it would also clear the fused record, and reopen an item the user dismissed on the review surface.
+The resolver now answers that request from the stored entry and a re-check of that category on its page. It answers only when the served fingerprint is the stored one, and the re-check reproduces the stored id, a single category and the stored fingerprint; otherwise the whole-vault path runs. A reference without a fingerprint resolves as before, to the fused item the review surface lists. So the CLI, the TUI and `review_memory(mode="item")`, which send no fingerprint, keep their behaviour and their cost.
 
 The categories that one page settles are `prediction_window`, `question_aging`, the page-local half of `supersession_integrity`, and per-page `unreflected_observations` entries. `unfinished_experiments` carries no partition and shares its id with other page-level queues, so it keeps the whole-vault path.
 

@@ -1906,9 +1906,9 @@ def op_bootstrap(
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Pass a due row's fingerprint as expected_fingerprint to act on it without an audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
                     if profile == "compact" and not frozen_profile
-                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
                 ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
@@ -9296,8 +9296,8 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             }
     extra: list[tuple[str, str, str, dt.datetime]] = []
     unknown: dict[str, str] = {}
-    view = dreamer_store.read_view(vault_root)
-    sidecar = "readable" if view is not None else dreamer_store.refused_condition(vault_root)
+    view, refusal = dreamer_store.read_view_or_refusal(vault_root)
+    sidecar = refusal or "readable"
     if view is None:
         unknown = {family: sidecar for family in dreamer_families.family_names()}
     else:
@@ -9544,7 +9544,6 @@ def op_triage_memory(
         review_id=item.item_id or review_state_module.parse_review_ref(ref),
         until=until,
         why=why,
-        fingerprint_bound=bool(expected_fingerprint),
     )
     if normalized == "reopen":
         # Reopen is the complete inverse: an item-level record alone would leave a

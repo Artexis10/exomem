@@ -226,14 +226,16 @@ def start(vault_root: Path) -> threading.Thread | None:
     global _host
     from . import mode
 
-    with _LOCK:
-        _host = Path(vault_root)
     mode.add_config_listener(reconcile_setting)
     current = setting()
-    if current == "off":
-        return None
+    # Hosting and the start share one `_LOCK` hold, as in `reconcile_setting`: a
+    # `stop()` lands before it (this start then hosts and runs) or after it (it
+    # stops the new worker), never between, which launched a worker after `stop()`.
     with _LOCK:
-        thread, started = _launch_locked(Path(vault_root), current)
+        _host = Path(vault_root)
+        if current == "off":
+            return None
+        thread, started = _launch_locked(_host, current)
     if started:
         log.info("dreamer started (%s)", current)
     return thread

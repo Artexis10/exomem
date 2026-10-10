@@ -1038,33 +1038,52 @@ def test_a_due_row_with_its_fingerprint_is_read_and_put_down_without_an_audit(
     )
 
 
-def test_reopening_a_due_row_by_its_fingerprint_leaves_the_fused_dismissal_alone(
+def test_a_reopen_with_a_fingerprint_leaves_no_earlier_dismissal_behind(
     vault: Path,
 ) -> None:
-    """A reopen cleared every record under the id, so reopening the due signal by
-    its own fingerprint also reopened the fused item the user had dismissed on
-    the review surface."""
-    from exomem import attention as attention_module
+    """Studio and the TUI send `expected_fingerprint` on every triage. A reopen
+    that cleared only the sent fingerprint's records kept the dismissal from
+    before an edit, so reverting the edit brought the reopened item back
+    dismissed."""
     from exomem import commands
+    from exomem import review_state as review_state_module
 
-    rel = _prediction(vault, "one", check_by="2026-08-01")
+    # An experiment's item id is its page, and its fingerprint is the page's
+    # content, so an edit moves the fingerprint and keeps the id.
+    rel = _experiment(vault, "pool-sizing", started="2026-01-01", duration="30 days")
+    original = (vault / rel).read_text(encoding="utf-8")
     due_state_module.reconcile(vault, today=TODAY)
-    item = _review_surface_item(vault, rel)
-    _assert_fused(item)
-    row = _published(vault, "prediction_window")
-    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
-    assert _served(vault) is None
-
+    at_a = _published(vault, "unfinished_experiments")
     commands.op_triage_memory(
-        vault, ref=row["ref"], action="reopen", expected_fingerprint=row["fingerprint"]
+        vault, ref=at_a["ref"], action="dismiss", why="known",
+        expected_fingerprint=at_a["fingerprint"],
     )
 
-    reopened = _served(vault)
-    assert reopened is not None and reopened["total"] == 1
-    still_dismissed = attention_module.attention(vault, limit=0, today=TODAY).items
-    assert rel not in [entry.path for entry in still_dismissed], (
-        "reopening the due signal reopened the fused item as well"
+    _write(vault, rel, original.replace("It will work.", "It will work at twice the load."))
+    due_state_module.reconcile(vault, today=TODAY)
+    at_b = _published(vault, "unfinished_experiments")
+    assert (at_b["ref"], at_b["fingerprint"]) != (at_a["ref"], at_a["fingerprint"])
+    assert at_b["ref"] == at_a["ref"]
+    commands.op_triage_memory(
+        vault, ref=at_b["ref"], action="dismiss", why="still known",
+        expected_fingerprint=at_b["fingerprint"],
     )
+    commands.op_triage_memory(
+        vault, ref=at_b["ref"], action="reopen", expected_fingerprint=at_b["fingerprint"]
+    )
+
+    item_id = review_state_module.parse_review_ref(at_b["ref"])
+    records = review_state_module.ReviewStateStore(vault).load()["records"].values()
+    assert [record for record in records if record.get("item_id") == item_id] == [], (
+        "the reopen left an earlier dismissal of the item behind"
+    )
+    _write(vault, rel, original)
+    due_state_module.reconcile(vault, today=TODAY)
+    served = _served(vault)
+    assert served is not None and served["categories"].get("unfinished_experiments") == 1, (
+        "reverting the edit brought the reopened item back dismissed"
+    )
+    assert _published(vault, "unfinished_experiments")["fingerprint"] == at_a["fingerprint"]
 
 
 def test_the_fallback_never_widens_to_every_audit_category(vault: Path) -> None:

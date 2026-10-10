@@ -13,7 +13,6 @@
 
 ## 3. A due row's fingerprint addresses its own signal
 
-- [ ] 3.1 Publish each due-state row's stored fingerprint on the block and through the write terminal.
+- [ ] 3.1 Publish each due-state row's served fingerprint on the block and through the write terminal.
 - [ ] 3.2 Resolve a request carrying that fingerprint from the stored entry and one page re-check, falling back to the whole-vault path when the re-check does not reproduce it.
-- [ ] 3.3 Scope a fingerprint-bound reopen of a single-category item to that item's records.
-- [ ] 3.4 Prove a due row is read and triaged with its fingerprint with no whole-vault audit, a bare reference still resolves the fused item, and reopening the due signal leaves a fused dismissal alone.
+- [ ] 3.3 Prove a due row is read and triaged with its fingerprint with no whole-vault audit, a bare reference still resolves the fused item, and a reopen with a fingerprint clears every earlier dismissal of the item.

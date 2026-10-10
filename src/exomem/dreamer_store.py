@@ -1133,47 +1133,30 @@ def _failure(exc: sqlite3.Error) -> str:
     return "locked" if isinstance(code, int) and (code & 0xFF) in _LOCK_CODES else "unreadable"
 
 
-def sidecar_condition(vault_root: Path) -> str:
-    """Why `read_view` may answer None: `missing`, `schema_mismatch`, `locked`,
-    `unreadable` or `readable`. Never creates the file and never waits on a lock."""
-    path = sidecar_path(Path(vault_root))
-    if not path.is_file():
-        return "missing"
-    try:
-        conn = _open_readonly(path)
-    except sqlite3.Error as exc:
-        return _failure(exc)
-    try:
-        row = conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    except sqlite3.Error as exc:
-        return _failure(exc)
-    finally:
-        conn.close()
-    return "readable" if row is not None and row[0] == str(SCHEMA_VERSION) else "schema_mismatch"
-
-
-def refused_condition(vault_root: Path) -> str:
-    """Why `read_view` just answered None: `missing`, `schema_mismatch`, `locked`
-    or `unreadable`. A file that probes readable now was refused a moment ago (a
-    write in flight), so it reads as `unreadable`, never as nothing wrong."""
-    condition = sidecar_condition(vault_root)
-    return "unreadable" if condition == "readable" else condition
-
-
 def read_view(vault_root: Path) -> StoreView | None:
     """The current view, or None when the sidecar is missing, locked or unreadable.
 
     Never creates the file and never waits: a carrier that finds nothing to
     read attaches nothing.
     """
+    return read_view_or_refusal(vault_root)[0]
+
+
+def read_view_or_refusal(vault_root: Path) -> tuple[StoreView | None, str | None]:
+    """`read_view`, and when it refuses, why at that moment: `missing`,
+    `schema_mismatch`, `locked` or `unreadable`.
+
+    The reason is the failed read's own. A second probe would report a lock
+    released in between as damage.
+    """
     path = sidecar_path(Path(vault_root))
     if not path.is_file():
-        return None
+        return None, "missing"
     key = str(path)
     try:
         conn = _open_readonly(path)
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        return None, _failure(exc)
     try:
         meta = dict(
             conn.execute(
@@ -1182,13 +1165,13 @@ def read_view(vault_root: Path) -> StoreView | None:
             ).fetchall()
         )
         if meta.get("schema") != str(SCHEMA_VERSION):
-            return None
+            return None, "schema_mismatch"
         generation = int(meta.get("generation") or 0)
         instance = str(meta.get("instance") or "")
         with _MEMO_LOCK:
             held = _MEMO.get(key)
         if held is not None and held.generation == generation and held.instance == instance:
-            return held
+            return held, None
         conn.row_factory = sqlite3.Row
         candidates = tuple(
             _row_dict(row)
@@ -1220,10 +1203,12 @@ def read_view(vault_root: Path) -> StoreView | None:
             deliveries=deliveries,
             integrity=integrity,
         )
-    except (sqlite3.Error, ValueError, TypeError):
-        return None
+    except sqlite3.Error as exc:
+        return None, _failure(exc)
+    except (ValueError, TypeError):
+        return None, "unreadable"
     finally:
         conn.close()
     with _MEMO_LOCK:
         _MEMO[key] = view
-    return view
+    return view, None

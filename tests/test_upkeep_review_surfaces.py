@@ -269,3 +269,37 @@ def test_upkeep_names_a_sidecar_it_cannot_read(
             holder.close()
     assert listed["status"] == "unavailable"
     assert listed["reason"] == reason
+
+
+@pytest.mark.parametrize("mode", ["upkeep", "dispositions"])
+def test_a_lock_released_after_the_failed_read_still_reads_as_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """The report probed the sidecar again after the read failed, so a write
+    that finished in between turned a lock into `unreadable`, and the owner
+    was told to repair a healthy sidecar."""
+    import sqlite3
+
+    vault = fx.build(tmp_path)
+    path = dreamer_store.sidecar_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    holder = sqlite3.connect(path)
+    holder.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    holder.execute("INSERT INTO meta VALUES ('schema', ?)", (str(dreamer_store.SCHEMA_VERSION),))
+    holder.commit()
+    holder.execute("BEGIN EXCLUSIVE")
+    real = dreamer_store.read_view_or_refusal
+
+    def read_then_release(vault_root):
+        answer = real(vault_root)
+        holder.rollback()  # the write that held the sidecar finishes
+        return answer
+
+    monkeypatch.setattr(dreamer_store, "read_view_or_refusal", read_then_release)
+    try:
+        listed = commands.op_review_memory(vault, mode=mode)
+    finally:
+        holder.close()
+
+    reported = listed["reason"] if mode == "upkeep" else listed["effect"]["dreamer_sidecar"]
+    assert reported == "locked"

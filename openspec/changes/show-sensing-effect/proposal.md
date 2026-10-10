@@ -7,7 +7,7 @@ The owner cannot tell whether sensing or the Dreamer has any effect. No record s
 - `review_memory(mode="upkeep")` adds a closed `reason` to `status: "unavailable"`: `worker_not_running`, `no_tick_yet` (with the waiting reason, since when, and whether it is live or recorded), `schema_mismatch`, `locked` or `unreadable`.
 - The dispositions view adds an `effect` block: per family, over a stated seven-day window, the counts `surfaced`, `dismissed`, `snoozed`, `cleared` and `open`, each with its source. `cleared` and `open` are `unknown` for a family whose current set only an audit can list. Rows without a family count under `unattributed`.
 - Both surfacing calls (the due-state carrier and the attention surface) stamp the family on the first-surfaced ledger.
-- Each due-state row carries its stored fingerprint. A caller that supplies it resolves the due signal from its stored entry and a re-check of its own page, without a whole-vault audit. A reference without it resolves as it does today.
+- Each due-state row carries its served fingerprint. A caller that supplies it resolves the due signal from its stored entry and a re-check of its own page, without a whole-vault audit. A reference without it resolves as it does today.
 
 ## Capabilities
 

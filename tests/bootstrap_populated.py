@@ -56,7 +56,7 @@ def maximal_due_state() -> dict:
         {
             "category": category,
             "ref": f"{LONG_REF}-{index}",
-            "fingerprint": f"{index:016x}",
+            "fingerprint": f"{index:024x}",
             "due_since": "2026-09-01",
         }
         for index, category in enumerate(due_state.PROJECTION_CATEGORIES * 4)
