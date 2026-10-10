@@ -284,24 +284,27 @@ def _unit_block(rows: Iterable[tuple], count: int, width: int) -> _UnitBlock:
     kept: list[tuple[str, str, str, str, int]] = []
     parents: list[str] = []
     slots: dict[str, int] = {}
+    # Share repeated strings within this load only: sys.intern never frees on 3.12.
+    shared: dict[str, str] = {}
     for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
         if len(blob) != width * 4:
             continue
         if len(kept) == count:
             raise ValueError("semantic-unit row count differs from snapshot")
-        path = sys.intern(str(parent_path))
+        path = str(parent_path)
         slot = slots.get(path)
         if slot is None:
             slot = slots[path] = len(parents)
             parents.append(path)
         matrix[len(kept)] = np.frombuffer(blob, dtype=np.float32)
         parent_of[len(kept)] = slot
+        generation, source_hash = str(generation), str(source_hash)
         kept.append(
             (
                 str(unit_ref),
-                path,
-                sys.intern(str(generation)),
-                sys.intern(str(source_hash)),
+                parents[slot],
+                shared.setdefault(generation, generation),
+                shared.setdefault(source_hash, source_hash),
                 int(parser_version),
             )
         )
