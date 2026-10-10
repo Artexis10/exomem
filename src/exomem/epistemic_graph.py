@@ -10048,7 +10048,10 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
 
 
 def _producer_type_basis(vault_root: Path) -> note_types.Basis:
-    """One indexing pass's note types: the stored bit is never served, so it reads the owner's view."""
+    """One indexing pass's note types.
+
+    The stored bit is never served, so it reads the owner's view.
+    """
     return note_types.Basis(vault_root, owner_local=True)
 
 
