@@ -644,9 +644,9 @@ class MediaJobStore:
         """Typed blocked reasons and the memory-stop counters.
 
         `memory_stops` counts consecutive memory stops and `memory_soft_stops` those
-        of them that were not the child's own hard-limit failure (a pressure or
-        watchdog stop). `blocked_reason` and `blocked_context` say why a row is
-        blocked and what that verdict depended on.
+        of them that were pressure stops, not the child's own hard-limit failure.
+        `timeout_stops` counts the watchdog's stops apart from both. `blocked_reason`
+        and `blocked_context` say why a row is blocked and what that verdict depended on.
         """
         columns = {
             str(row["name"])
@@ -658,6 +658,8 @@ class MediaJobStore:
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN memory_soft_stops INTEGER NOT NULL DEFAULT 0"
             )
+        if "timeout_stops" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN timeout_stops INTEGER NOT NULL DEFAULT 0")
         if "blocked_context" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN blocked_context TEXT")
         if "blocked_reason" not in columns:
@@ -1093,41 +1095,77 @@ class MediaJobStore:
 
         After `stop_limit` consecutive stops the job is blocked instead: over budget
         when every stop was a hard-limit failure, memory-blocked when any was a
-        pressure or watchdog stop. Returns PENDING, MEMORY_BLOCKED, OVER_BUDGET, or
-        None when the claim is no longer this job's.
+        pressure stop. Returns PENDING, MEMORY_BLOCKED, OVER_BUDGET, or None when the
+        claim is no longer this job's.
+        """
+        soft = 0 if kind == media_brakes.HARD_LIMIT else 1
+        blocked_error = "MemoryBlocked: waiting for memory after repeated memory stops"
+        return self._record_stop(
+            job,
+            """
+            memory_stops = memory_stops + 1,
+            memory_soft_stops = memory_soft_stops + ?,
+            state = CASE WHEN memory_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
+            blocked_reason = CASE WHEN memory_stops + 1 >= ? THEN
+                CASE WHEN memory_soft_stops + ? = 0 THEN ? ELSE ? END
+                ELSE NULL END,
+            last_error = CASE WHEN memory_stops + 1 >= ? THEN
+                CASE WHEN memory_soft_stops + ? = 0 THEN ? ELSE ? END
+                ELSE NULL END,
+            blocked_context = CASE WHEN memory_stops + 1 >= ? THEN ? ELSE NULL END
+            """,
+            (
+                soft, stop_limit,
+                stop_limit, soft, OVER_BUDGET, MEMORY_BLOCKED,
+                stop_limit, soft, OVER_BUDGET_ERROR, blocked_error,
+                stop_limit, context,
+            ),
+        )
+
+    def record_timeout_stop(self, job: MediaJob, *, stop_limit: int, context: str) -> str | None:
+        """Return a job the watchdog stopped to pending, refunding its attempt.
+
+        A watchdog stop spends the time budget, not memory, so it counts apart from
+        memory stops and a memory-blocked return does not reset it. After `stop_limit`
+        of them the file is over budget, with `context` naming the timeout it exceeded:
+        a file costs at most `stop_limit` timeouts before it leaves the queue. Returns
+        PENDING, OVER_BUDGET, or None when the claim is no longer this job's.
+        """
+        return self._record_stop(
+            job,
+            """
+            timeout_stops = timeout_stops + 1,
+            state = CASE WHEN timeout_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
+            blocked_reason = CASE WHEN timeout_stops + 1 >= ? THEN ? ELSE NULL END,
+            last_error = CASE WHEN timeout_stops + 1 >= ? THEN ? ELSE NULL END,
+            blocked_context = CASE WHEN timeout_stops + 1 >= ? THEN ? ELSE NULL END
+            """,
+            (
+                stop_limit,
+                stop_limit, OVER_BUDGET,
+                stop_limit, OVER_BUDGET_ERROR,
+                stop_limit, context,
+            ),
+        )
+
+    def _record_stop(self, job: MediaJob, assignments: str, params: tuple[object, ...]) -> str | None:
+        """Apply a stop's counter `assignments` to the still-claimed running job.
+
+        Every stop refunds the job's attempt. Returns PENDING or the blocked reason the
+        stop left, or None when the claim is no longer this job's.
         """
         if job.id is None:
             return None
-        soft = 0 if kind == media_brakes.HARD_LIMIT else 1
-        blocked_error = "MemoryBlocked: waiting for memory after repeated memory stops"
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             changed = conn.execute(
-                """
-                UPDATE jobs SET
-                    memory_stops = memory_stops + 1,
-                    memory_soft_stops = memory_soft_stops + ?,
-                    attempts = MAX(0, attempts - 1),
-                    state = CASE WHEN memory_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
-                    blocked_reason = CASE WHEN memory_stops + 1 >= ? THEN
-                        CASE WHEN memory_soft_stops + ? = 0 THEN ? ELSE ? END
-                        ELSE NULL END,
-                    last_error = CASE WHEN memory_stops + 1 >= ? THEN
-                        CASE WHEN memory_soft_stops + ? = 0 THEN ? ELSE ? END
-                        ELSE NULL END,
-                    blocked_context = CASE WHEN memory_stops + 1 >= ? THEN ? ELSE NULL END,
-                    updated_at = ?
-                WHERE id = ? AND state = 'running' AND claim_revision = ?
-                    AND NOT EXISTS (SELECT 1 FROM media_job_results
-                        WHERE media_job_results.job_id = jobs.id)
-                """,
-                (
-                    soft, stop_limit,
-                    stop_limit, soft, OVER_BUDGET, MEMORY_BLOCKED,
-                    stop_limit, soft, OVER_BUDGET_ERROR, blocked_error,
-                    stop_limit, context, time.time(), job.id, job.claim_revision,
-                ),
+                "UPDATE jobs SET attempts = MAX(0, attempts - 1), updated_at = ?, "
+                + assignments
+                + " WHERE id = ? AND state = 'running' AND claim_revision = ? "
+                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id)",
+                (time.time(), *params, job.id, job.claim_revision),
             ).rowcount
             row = conn.execute(
                 "SELECT state, blocked_reason FROM jobs WHERE id = ?", (job.id,)
@@ -1157,13 +1195,15 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def recover_memory_verdicts(self, *, context_for: Any, include_memory_blocked: bool) -> int:
+    def recover_memory_verdicts(self, *, lifted: Any, include_memory_blocked: bool) -> int:
         """Return memory-blocked and over-budget jobs to pending when they may now fit.
 
-        Both return when the cell's limit or the engine's budget changed, which
-        `context_for(media_type)` reports. Memory-blocked jobs also return when
-        `include_memory_blocked` is set: at supervisor start, and on the periodic
-        retry while memory pressure is low.
+        Both return when `lifted(media_type, blocked_context)` reports that what their
+        verdict depended on changed: the cell's limit, the engine's budget, or a longer
+        job timeout. Memory-blocked jobs also return when `include_memory_blocked` is
+        set: at supervisor start, and on the periodic retry while memory pressure is low.
+        An over-budget job returns with fresh stop counts; a memory-blocked one keeps
+        its watchdog count, so the watchdog's bound per file holds across its returns.
         """
         conn = self._connect()
         try:
@@ -1177,7 +1217,7 @@ class MediaJobStore:
             due = [
                 (int(row["id"]), row["blocked_reason"])
                 for row in rows
-                if context_for(str(row["media_type"])) != row["blocked_context"]
+                if lifted(str(row["media_type"]), row["blocked_context"])
                 or (include_memory_blocked and row["blocked_reason"] == MEMORY_BLOCKED)
             ]
             changed = 0
@@ -1185,9 +1225,11 @@ class MediaJobStore:
                 for job_id, reason in due:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, memory_stops = 0, "
-                        "memory_soft_stops = 0, blocked_reason = NULL, blocked_context = NULL, "
+                        "memory_soft_stops = 0, "
+                        "timeout_stops = CASE WHEN ? THEN 0 ELSE timeout_stops END, "
+                        "blocked_reason = NULL, blocked_context = NULL, "
                         "updated_at = ? WHERE id = ? AND state = 'blocked' AND blocked_reason IS ?",
-                        (time.time(), job_id, reason),
+                        (reason == OVER_BUDGET, time.time(), job_id, reason),
                     ).rowcount
             return changed
         finally:
@@ -1698,8 +1740,8 @@ class MediaJobStore:
         conn = self._connect()
         try:
             # Waiting and over-budget rows return by themselves, when memory, the
-            # cell's limit, the engine's budget or the engine switch changes; a retry
-            # would only repeat their verdict.
+            # cell's limit, the engine's budget, the job timeout or the engine switch
+            # changes; a retry would only repeat their verdict.
             candidates = conn.execute(
                 f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
                 f"{target_clause} AND NOT (state = 'blocked' AND coalesce(blocked_reason, '') "
@@ -1721,7 +1763,8 @@ class MediaJobStore:
                 for job_id, state, error in admitted:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
-                        "memory_stops = 0, memory_soft_stops = 0, blocked_reason = NULL, "
+                        "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
+                        "blocked_reason = NULL, "
                         "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                         "WHERE media_job_results.job_id = jobs.id)",

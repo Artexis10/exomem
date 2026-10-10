@@ -719,7 +719,8 @@ class MediaWorker:
     def publish_over_budget(self, job: _Job, context: str) -> bool:
         """Show the tenant that the file exceeds this deployment's processing budget.
 
-        `context` is what the verdict depended on (`media_brakes.context`).
+        `context` is what the verdict depended on (`media_brakes.context`, or
+        `media_brakes.timeout_context` for a file that outran the watchdog).
         """
         expected_sidecar = _content_digest(job.sidecar_path)
         expected_binary = _binary_identity(job.binary_path)
@@ -732,8 +733,8 @@ class MediaWorker:
             state=BLOCKED,
             error=media_jobs.OVER_BUDGET_ERROR,
             next_action=media_jobs.OVER_BUDGET_ACTION,
-            # Only a changed cell limit or engine budget lets it try again, so the
-            # sidecar must not offer a retry the ledger refuses.
+            # Only a changed cell limit, engine budget or longer job timeout lets it
+            # try again, so the sidecar must not offer a retry the ledger refuses.
             retryable=False,
             blocked_reason=media_jobs.OVER_BUDGET,
             blocked_context=context,
@@ -811,6 +812,14 @@ class MediaWorker:
 
         return context
 
+    def _verdict_lifted(self, cell: media_brakes.CellMemory, config: media_brakes.Settings):
+        context = self._context_for(cell, config)
+
+        def lifted(media_type: str, recorded: str | None) -> bool:
+            return media_brakes.verdict_lifted(recorded, current=context(media_type), config=config)
+
+        return lifted
+
     def _recover_memory_verdicts(self) -> tuple[int, bool]:
         """Return jobs whose memory verdict may no longer hold; report the pressure.
 
@@ -826,7 +835,7 @@ class MediaWorker:
         config = media_brakes.settings(cell=cell)
         pressure = media_brakes.pressure_exceeded(cell, config)
         recovered = self._store.recover_memory_verdicts(
-            context_for=self._context_for(cell, config),
+            lifted=self._verdict_lifted(cell, config),
             include_memory_blocked=not pressure,
         )
         if recovered:
@@ -846,10 +855,11 @@ class MediaWorker:
         self._memory_recovery_at = min(self._memory_recovery_at, _clock() + _MEMORY_RECOVERY_SECONDS)
 
     def _stop_child(self, child: subprocess.Popen, kind: str) -> None:
-        """Stop the media child and its tools; record a memory stop of `kind` for its job.
+        """Stop the media child and its tools; record a stop of `kind` for its job.
 
-        A watchdog stop counts as a memory stop that is not a hard-limit failure: a
-        child that hangs under its data limit can still never mark a file over budget.
+        A pressure stop is a memory stop. A watchdog stop spends the time budget
+        instead: it counts apart, waits for no memory, and after the stop limit the
+        file is over budget, shown to the tenant as the memory over-budget outcome is.
         """
         assert self._store is not None
         cell = media_brakes.read_cell()
@@ -872,6 +882,18 @@ class MediaWorker:
             child.wait(timeout=5)
         if child.returncode is not None:
             _reap_group(child.pid)
+        if kind == media_brakes.TIMEOUT:
+            exceeded = media_brakes.timeout_context(config)
+            for job in self._store.running_jobs():
+                verdict = self._store.record_timeout_stop(job, stop_limit=config.stop_limit, context=exceeded)
+                if verdict == media_jobs.OVER_BUDGET:
+                    log.warning(
+                        "media worker: %s ran past the job timeout %d times; now over budget",
+                        job.binary_path.name,
+                        config.stop_limit,
+                    )
+                    self.publish_over_budget(job, exceeded)
+            return
         context = self._context_for(cell, config)
         for job in self._store.running_jobs():
             self._store.record_memory_stop(
@@ -1390,7 +1412,8 @@ class MediaWorker:
                     if self._pressure_high:
                         self._stop_child(child, media_brakes.PRESSURE)
                     elif _clock() - self._child_started_at >= config.job_timeout_seconds:
-                        # A hang must not hold the queue: the job waits as memory-blocked.
+                        # A hang or a file too long for the timeout must not hold the
+                        # queue: after the stop limit it is over budget.
                         self._stop_child(child, media_brakes.TIMEOUT)
                 if brakes and _clock() >= self._memory_recovery_at:
                     pressure = True

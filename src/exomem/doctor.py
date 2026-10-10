@@ -1845,11 +1845,12 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
         return _check(
             "media.runtime",
             "warn",
-            f"Media work waits on memory: {memory_blocked} memory-blocked, "
+            f"Media work waits: {memory_blocked} memory-blocked, "
             f"{over_budget} over this deployment's processing budget.",
             "Memory-blocked work resumes by itself when pressure stays low. Over-budget "
             "files resume when the cell's memory limit or the engine's budget changes "
-            "(EXOMEM_MEDIA_BUDGETS).",
+            "(EXOMEM_MEDIA_BUDGETS), or, for a file that ran past the job timeout, when "
+            "that timeout grows (EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS).",
             details=status,
         )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))

@@ -40,18 +40,24 @@ JOB_TIMEOUT_ENV = "EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS"
 #: The budget entry that applies to media whose kind needs no engine.
 DEFAULT_BUDGET_KEY = "default"
 
-#: Stop kinds the job ledger records. Only hard-limit failures can mark a file over
-#: budget; a pressure stop or a watchdog stop never does.
+#: Stop kinds the job ledger records. Hard-limit failures can mark a file over the
+#: memory budget and watchdog stops over the time budget; a pressure stop never marks
+#: a file over budget. A watchdog stop is not a memory stop and counts apart.
 HARD_LIMIT = "hard_limit"
 PRESSURE = "pressure"
 TIMEOUT = "timeout"
+#: The key of a watchdog verdict's context: the job timeout, in seconds, it exceeded.
+_TIMEOUT_CONTEXT_KEY = "job_timeout_seconds"
 
 _MIB = 1024 * 1024
 # Defaults until each engine's acceptance pins its own values (docs/runbooks/cloud-media.md).
 # VmData: about 3x the largest measured need of a small sample (329 MiB, MarkItDown).
 _DEFAULT_VMDATA_MIB = 1024
-# Kept with the VmData limit so that a child admitted at the ceiling and grown to its hard
-# limit still stays under a 3 GiB memory.max: 0.80 x 3072 - 640 + 1024 + 128 = 2970 MiB.
+# The child and each Tesseract it starts have their own data limit. For an image the
+# child closes the decoded image before Tesseract starts (extract._ocr_image), so the job
+# holds one hard limit at a time and stays under a 3 GiB memory.max:
+# 0.80 x 3072 - 640 + 1024 + 128 = 2970 MiB. A scanned PDF keeps its document and the
+# rendered page open while Tesseract reads that page, so there the two can overlap.
 _DEFAULT_ANON_MIB = 640
 # Covers the allocator's own arenas above the engine's budget.
 _DEFAULT_MARGIN_MIB = 128
@@ -60,11 +66,11 @@ _DEFAULT_ADMISSION_FRACTION = 0.80
 # Percent of the last 10 s that tasks stalled on memory; 10% is sustained reclaim,
 # well above the idle cell's ~0%, and below the stalls that precede an OOM kill.
 _DEFAULT_PRESSURE_AVG10 = 10.0
-# Consecutive memory stops before a job leaves the stop cycle.
+# Memory stops, and apart from them watchdog stops, before a job leaves the stop cycle.
 _DEFAULT_STOP_LIMIT = 3
 # A media child runs one job. Fifteen minutes is far above the small samples'
-# sub-second times and leaves room for a long scanned PDF; a hang under the data
-# limit costs at most this much per attempt before the queue moves on.
+# sub-second times and leaves room for a long scanned PDF. A file that outruns it, or
+# hangs, costs at most the stop limit times this before it is over budget.
 _DEFAULT_JOB_TIMEOUT_SECONDS = 900.0
 
 _warned: set[str] = set()
@@ -338,6 +344,28 @@ def context(cell: CellMemory, budget: Budget, config: Settings) -> str:
         },
         sort_keys=True,
     )
+
+
+def timeout_context(config: Settings) -> str:
+    """What a watchdog over-budget verdict depended on: the job timeout it exceeded."""
+    return json.dumps({_TIMEOUT_CONTEXT_KEY: config.job_timeout_seconds})
+
+
+def verdict_lifted(recorded: str | None, *, current: str, config: Settings) -> bool:
+    """Whether a memory or watchdog verdict recorded with context `recorded` has lifted.
+
+    A memory verdict lifts when its `context` differs from `current`, this reading's:
+    the cell's limit or the engine's budget changed. A watchdog verdict lifts only when
+    the job timeout grew, since an equal or shorter one would stop the file again.
+    """
+    try:
+        parsed = json.loads(recorded or "null")
+    except ValueError:
+        parsed = None
+    exceeded = parsed.get(_TIMEOUT_CONTEXT_KEY) if isinstance(parsed, dict) else None
+    if isinstance(exceeded, int | float):
+        return config.job_timeout_seconds > exceeded
+    return recorded != current
 
 
 def apply_hard_limit(budget: Budget, config: Settings) -> None:

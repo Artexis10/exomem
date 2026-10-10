@@ -4780,57 +4780,67 @@ def test_a_child_under_the_brakes_runs_one_job_then_exits(vault, monkeypatch: py
     assert media_jobs.status(vault)["counts"][media_jobs.PENDING] == 1
 
 
-def _sleeping_child_launcher(tool_pid_file: Path):
+def test_a_job_that_always_outruns_the_watchdog_ends_over_budget_and_the_queue_moves_on(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import subprocess
     import sys
 
-    script = (
-        "import subprocess, sys, time\n"
-        "tool = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-        f"open({str(tool_pid_file)!r}, 'w').write(str(tool.pid))\n"
-        "time.sleep(60)\n"
-    )
+    # A scanned book that takes longer than any attempt is allowed. Were each watchdog
+    # stop memory pressure, the job would cycle through memory-blocked recovery for
+    # good and, as the lowest id, win every claim over the file queued behind it.
+    _cloud_brakes(monkeypatch, {"anon": 1 << 30, "pressure": 0.0})
+    monkeypatch.setenv("EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(media_worker, "_MEMORY_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(media_worker, "_MEMORY_RECOVERY_SECONDS", 1.0)
+    store = media_jobs.MediaJobStore(vault)
+    sidecars = {}
+    for name in ("long-scan.mp3", "quick.mp3"):
+        result = _preserve_media_stub(vault, filename=name)
+        sidecars[name] = vault / result.sidecar_path
+        store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=vault / result.path, sidecar_path=sidecars[name], media_type="audio"
+            )
+        )
+    claims: list[str] = []
 
     def launch_child(self):
-        # The child claims its job and starts a tool that hangs, as a stuck engine does.
-        child = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
-        assert self._store.claim_next() is not None
+        job = self._store.claim_next()
+        assert job is not None
+        claims.append(job.binary_path.name)
+        if job.binary_path.name == "quick.mp3":
+            self._store.complete(job)
+            child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        else:
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+            )
         self._store.set_worker(child.pid, 1.0)
         return child
 
-    return launch_child
-
-
-def test_a_hung_media_child_is_stopped_and_its_job_waits_as_memory_blocked(
-    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _cloud_brakes(monkeypatch, {"anon": 1 << 30, "pressure": 0.0})
-    monkeypatch.setenv("EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS", "1")
-    monkeypatch.setenv("EXOMEM_MEDIA_MEMORY_STOP_LIMIT", "1")
-    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
-    tool_pid_file = tmp_path / "tool.pid"
-    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", _sleeping_child_launcher(tool_pid_file))
-    result = _preserve_media_stub(vault, filename="hangs.mp3")
-    media_jobs.MediaJobStore(vault).enqueue(
-        media_jobs.MediaJob(
-            binary_path=vault / result.path,
-            sidecar_path=vault / result.sidecar_path,
-            media_type="audio",
-        )
-    )
-
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", launch_child)
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     worker.start()
     try:
-        stopped = _wait_until(lambda: media_jobs.status(vault)["memory_blocked_count"] == 1)
+        settled = _wait_until(
+            lambda: "quick.mp3" in claims and store.pending_result_count() == 0
+            and media_jobs.status(vault)["over_budget_count"] == 1,
+            seconds=30.0,
+        )
     finally:
         worker.stop()
 
-    assert stopped, "the supervisor never stopped the hung child"
-    status = media_jobs.status(vault)
-    # A hang is never evidence about the file: it waits, and is never over budget.
-    assert (status["over_budget_count"], status["jobs"][0]["state"]) == (0, media_jobs.PENDING)
-    assert _wait_until(lambda: not media_jobs.pid_alive(int(tool_pid_file.read_text())), seconds=5)
+    assert settled, f"claims {claims}; jobs {media_jobs.status(vault)['jobs']}"
+    # The default stop count of watchdog stops, each in a fresh child, then never again.
+    assert claims.count("long-scan.mp3") == 3
+    [row] = media_jobs.status(vault)["jobs"]
+    assert (row["state"], row["next_action"]) == (media_jobs.BLOCKED, media_jobs.OVER_BUDGET_ACTION)
+    # The tenant sees the memory over-budget outcome: no retry the ledger would refuse.
+    shown = _parsed_frontmatter(sidecars["long-scan.mp3"])
+    assert (shown["processing_state"], shown["processing_retryable"]) == (media_jobs.BLOCKED, False)
 
 
 def test_no_child_starts_when_the_next_job_does_not_fit(vault, monkeypatch: pytest.MonkeyPatch) -> None:

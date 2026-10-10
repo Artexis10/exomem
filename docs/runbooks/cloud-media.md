@@ -42,7 +42,7 @@ The brakes stop media from taking the serving process down. They run only in Clo
 - **One job per child.** Each media child runs one job and exits. Every job, and every counted hard-limit failure, starts in a fresh child with no growth from an earlier job. A child start costs about 1-2 seconds.
 - **Hard limit.** The child runs its job under a data-segment limit (`RLIMIT_DATA`): the engine's VmData budget plus the margin. Tesseract and the other native tools inherit it. An allocation past the limit fails inside the child, not in the serving process.
 - **Pressure stop.** While a child runs, the supervisor reads the `memory.pressure` 10-second averages. Above the threshold, it kills the child and the tools it started, and returns the job to the queue. Where pressure is unreadable, the supervisor stops the child when anonymous memory reaches the admission ceiling.
-- **Watchdog.** The supervisor kills a child that runs longer than the job timeout. The stop counts like a pressure stop: a hung engine never marks a file over budget, and it cannot hold the queue.
+- **Watchdog.** The supervisor kills a child that runs longer than the job timeout. A watchdog stop spends the file's time budget, not memory, so it counts apart from memory stops. After the stop limit of watchdog stops, each in a fresh child, the file is over budget. A file that hangs or outruns the timeout holds the queue for at most the stop limit times the job timeout, 45 minutes with the defaults. The watchdog cannot tell a long job that makes progress from a hang; a progress signal from the child would let such a job finish.
 
 The brakes fail closed. When the cgroup does not read as a Cloud cell's (cgroup v1, a missing file, no `anon` entry, an unreadable `memory.max`, or no memory limit), no media child starts. Runtime status shows `media_brakes` as `unavailable` with the reason, and `exomem doctor` warns "media brakes unavailable: <reason>". Media waits until the cgroup reads correctly again. Personal installs have no brakes, and runtime status shows them as `off`.
 
@@ -54,12 +54,12 @@ Each value is deployment configuration. Set it in the cell's environment.
 | `EXOMEM_MEDIA_VMDATA_MARGIN_MIB` | 128 | Covers the allocator's own arenas above the engine's budget. |
 | `EXOMEM_MEDIA_ADMISSION_FRACTION` | 0.80 | The service-v1 profile's 80% cgroup peak gate. |
 | `EXOMEM_MEDIA_PRESSURE_AVG10` | 10.0 | Sustained reclaim, well above an idle cell and below the stalls that come before an OOM kill. |
-| `EXOMEM_MEDIA_MEMORY_STOP_LIMIT` | 3 | Consecutive memory stops before a job leaves the stop cycle. |
-| `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS` | 900 | Far above the samples' sub-second times, with room for a long scanned PDF. A hang costs at most this much per attempt. |
+| `EXOMEM_MEDIA_MEMORY_STOP_LIMIT` | 3 | Consecutive memory stops before a job leaves the stop cycle. Watchdog stops count apart, against the same limit. |
+| `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS` | 900 | Far above the samples' sub-second times, with room for a long scanned PDF. A file costs at most the stop limit times this before it is over budget. |
 
 `EXOMEM_MEDIA_BUDGETS` is a JSON object from engine to budget, for example `{"ocr": {"anon_mib": 640, "vmdata_mib": 1024}, "default": {"anon_mib": 512, "vmdata_mib": 768}}`. The `default` entry covers the kinds without an engine. An entry at or below zero, or above the cell's `memory.max`, keeps the default budget. An unknown engine name is ignored. Each of these cases, and any malformed value, logs one warning that names it.
 
-Do not set a `documents` VmData budget below 384 MiB. MarkItDown loads an ONNX Runtime model to detect file types, and that session hangs, without failing, when the limit blocks its thread stacks. Probes hung at 203 and 265 MiB. The watchdog now stops such a hang, but the file never extracts.
+Do not set a `documents` VmData budget below 384 MiB. MarkItDown loads an ONNX Runtime model to detect file types, and that session hangs, without failing, when the limit blocks its thread stacks. Probes hung at 203 and 265 MiB. The watchdog stops such a hang, and the file ends over budget without extracting.
 
 ## Measurements
 
@@ -89,8 +89,8 @@ A local cell container with 2 CPUs and 3 GiB ran with the default budgets in thi
 Memory stops never count as attempts. A job that the brakes stop moves through these states:
 
 - **Pending.** A pressure stop, a watchdog stop or a single hard-limit failure returns the job to the queue.
-- **Memory-blocked.** The job reached the stop limit and at least one stop was a pressure or watchdog stop, so other work or a hang caused it. The tenant sees the job as pending. The supervisor returns it to the queue by itself: at its start, and then on a timer. The timer starts at 60 seconds and doubles to 30 minutes while pressure stays high. It goes back to 60 seconds as soon as pressure clears or a job completes.
-- **Over budget.** The job reached the stop limit and every stop was a hard-limit failure, so the file itself needs more memory than the engine's budget. The tenant sees "the file exceeds this deployment's processing budget" with no next action, and the sidecar offers no retry. The job returns to the queue only after the cell's limit or the engine's budget changes. A manual retry does not return it.
+- **Memory-blocked.** The job reached the stop limit of memory stops and at least one was a pressure stop, so other work caused it. The tenant sees the job as pending. The supervisor returns it to the queue by itself: at its start, and then on a timer. The timer starts at 60 seconds and doubles to 30 minutes while pressure stays high. It goes back to 60 seconds as soon as pressure clears or a job completes.
+- **Over budget.** The job reached the stop limit of memory stops and every one was a hard-limit failure, so the file itself needs more memory than the engine's budget. Or the job reached the stop limit of watchdog stops, so the file needs more time than the job timeout. The tenant sees "the file exceeds this deployment's processing budget" with no next action, and the sidecar offers no retry. A memory verdict returns to the queue only after the cell's limit or the engine's budget changes. A time verdict returns only after the job timeout grows past the one it exceeded. A manual retry returns neither.
 
 The ledger stores each reason in its `blocked_reason` column. Runtime status reports `media.memory_blocked_count`, `media.over_budget_count` and `media.engine_waiting_count`. `media.counts` counts each job as its own row shows it, so memory-blocked and waiting jobs count as pending. `exomem doctor` reports memory-blocked and over-budget work to the operator, never to the tenant.
 
