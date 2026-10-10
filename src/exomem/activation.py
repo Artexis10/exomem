@@ -264,10 +264,27 @@ def structurally_eligible(
     The type value is casefolded and stripped before the registry lookup. A
     type whose definition the caller cannot admit matches no predicate.
     """
+    # The path check runs first so a page outside the governed tree never
+    # reads the caller's note-type overlay.
     if not is_managed_governed_path(vault_root, page.path):
         return False
     basis = type_basis or note_types.Basis(vault_root)
     if not basis.selects(normalized_page_type(page.page_type), selects):
+        return False
+    return structurally_placed(vault_root, page, tiers=tiers)
+
+
+def structurally_placed(
+    vault_root: Path,
+    page: Any,
+    *,
+    tiers: frozenset[str] = frozenset({access.TIER_READ_WRITE}),
+) -> bool:
+    """Every eligibility rule that no caller's note-type registry decides.
+
+    A shared parse may cache this; the type predicate stays per caller.
+    """
+    if not is_managed_governed_path(vault_root, page.path):
         return False
     if page.path.name.casefold() in {"index.md", "log.md"}:
         return False

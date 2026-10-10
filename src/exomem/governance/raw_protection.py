@@ -29,6 +29,11 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 def marked(path: str) -> bool:
     """Recognize the copy-stable floor without reading any file or registry."""
+    # Exact fast refusal: without an escape, unquoting changes nothing, and a
+    # component whose casefold starts with the prefix puts it in the whole
+    # path's casefold, because casefold maps each code point independently.
+    if "%" not in path and PREFIX not in path.casefold():
+        return False
     return any(part.casefold().startswith(PREFIX) for part in unquote(path).replace("\\", "/").split("/"))
 
 
