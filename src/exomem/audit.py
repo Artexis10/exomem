@@ -101,6 +101,7 @@ from . import (
     indexes,
     lifecycle_statuses,
     logging_config,
+    note_types,
     relation_registry,
     reserved_paths,
     semantic_language_registry,
@@ -2389,16 +2390,12 @@ def _check_unresolved_source_citations(
     root = Path(vault_root)
     authorize = record_governance.full_release_filter(root)
     resolver = find_module.writer_resolver_snapshot(root)
+    type_basis = note_types.Basis(root)
     findings: list[AuditFinding] = []
     for page in sorted(pages, key=lambda item: item.rel_path.encode("utf-8")):
-        if page.page_type not in {
-            "research-note",
-            "insight",
-            "failure",
-            "pattern",
-            "experiment",
-            "production-log",
-        } or not page.frontmatter.get("sources"):
+        if not type_basis.selects(page.page_type, note_types.compiled) or not page.frontmatter.get(
+            "sources"
+        ):
             continue
         try:
             markdown, _guard = vault_module.read_guarded_text(root, page.path)
@@ -2826,7 +2823,9 @@ def _check_frontmatter_compliance(
 ) -> list[AuditFinding]:
     """Surface per-page-type frontmatter problems.
 
-    Three classes of finding:
+    Classes of finding:
+    - A `type:` value that no admitted note-type entry defines (debt; the page
+      keeps its bytes).
     - Missing required field for the declared `type:`.
     - `tenant:` set on a page whose project the registry does not declare
       `tenant_scoped: true` in `_Schema/project-keys.yaml`.
@@ -2838,6 +2837,7 @@ def _check_frontmatter_compliance(
     from . import project_keys as project_keys_module
 
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
     tenant_scoped = project_keys_module.load_project_registry(vault_root).tenant_scoped
     for page in pages:
         fm = page.frontmatter
@@ -2893,7 +2893,22 @@ def _check_frontmatter_compliance(
                     proposed_fix=proposed_fix,
                     )
                 )
-        if activation.normalized_page_type(page_type) in activation._CONNECTABLE_TYPES:
+        note_type = type_basis.resolve(activation.normalized_page_type(page_type))
+        if note_type.unregistered:
+            findings.append(
+                AuditFinding(
+                    category="frontmatter_compliance",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=f"Unregistered note type {page_type!r} matches no note-type role.",
+                    proposed_fix=(
+                        "Inspect the note-types registry; use a registered type or "
+                        "propose a justified definition."
+                    ),
+                    meta={"code": "unregistered_note_type"},
+                )
+            )
+        if note_type.selects(note_types.connectable):
             classification = status_basis.classify(fm.get("status"))
             if classification.unregistered:
                 findings.append(
@@ -3353,19 +3368,6 @@ def _check_relevance_pairs_pending(
 
 # ---------------- check: relation_debt ----------------
 
-_RELATION_DEBT_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "pattern",
-        "failure",
-        "experiment",
-        "production-log",
-        "entity",
-    }
-)
-
-
 def relation_debt_eligible(
     vault_root: Path,
     *,
@@ -3374,10 +3376,12 @@ def relation_debt_eligible(
     status: object,
     tags: list[str] | tuple[str, ...] | set[str] | frozenset[str],
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
     """Whether one page participates in the shared relation-debt predicate."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    if page_type not in _RELATION_DEBT_TYPES:
+    type_basis = type_basis or note_types.Basis(vault_root)
+    if not type_basis.selects(page_type, note_types.governed_endpoint):
         return False
     path = PurePosixPath(str(rel_path).replace("\\", "/"))
     if path.name in ("index.md", "log.md"):
@@ -3400,6 +3404,7 @@ def _check_relation_debt(
 ) -> list[AuditFinding]:
     """Surface active compiled pages with no explicit outbound Markdown edges."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
     findings: list[AuditFinding] = []
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
@@ -3411,6 +3416,7 @@ def _check_relation_debt(
             status=page.frontmatter.get("status"),
             tags=page.tags,
             status_basis=status_basis,
+            type_basis=type_basis,
         ):
             continue
 
@@ -3455,13 +3461,12 @@ def _check_relation_debt(
 
 # ---------------- check: missing_sources ----------------
 
-# `_Schema/references/frontmatter.md` marks `sources:` required for these four
-# compiled types. Deliberately NOT expressed through `_REQUIRED_FIELDS_BY_TYPE`:
+# A note type's `sources: required` attribute marks the pages that must cite
+# provenance. Deliberately NOT expressed through `_REQUIRED_FIELDS_BY_TYPE`:
 # that table is `warn` severity (overstating a chronic, often-honest condition),
 # it would swamp `frontmatter_compliance` — whose job is structural integrity —
 # with hundreds of findings, and `audit_fix` iterates it to backfill inferable
 # values. Provenance is exactly the field that must never be inferred.
-_SOURCES_REQUIRED_TYPES = frozenset({"research-note", "insight", "failure", "pattern"})
 
 
 def _check_missing_sources(
@@ -3472,9 +3477,10 @@ def _check_missing_sources(
 ) -> list[AuditFinding]:
     """Surface active compiled pages that should cite provenance and cite none."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
     findings: list[AuditFinding] = []
     for page in pages:
-        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+        if not type_basis.selects(page.page_type, note_types.sources_required):
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
@@ -3735,6 +3741,7 @@ def _check_derivation_double_counting(
     `error`.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
     direct_sources, raw_by_key = _derivation_direct_sources(pages)
     pages_by_canon = {_relevance_canon(page.rel_path): page for page in pages}
     max_depth, max_edges = _derivation_traversal_limits()
@@ -3802,7 +3809,7 @@ def _check_derivation_double_counting(
     # snapshot page is EXPECTED to fan its `sources:` out from a shared root
     # and would otherwise dominate this queue with non-actionable noise.
     for page in pages:
-        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+        if not type_basis.selects(page.page_type, note_types.sources_required):
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
@@ -5855,15 +5862,14 @@ def _multi_headed_chain_findings(
 
 # ---------------- check: stale_review ----------------
 
-# Staleness review targets living CONCLUSIONS only. Raw sources have their own
-# `unprocessed_source` check, and a time-bounded `experiment` has its own
-# `unfinished_experiments` lifecycle check — "is this still true?" is the wrong
-# question for either. `production-log` is excluded for the same time-bounded
-# reason, but honestly: it has NO lifecycle check yet. (The scaffold's
-# "unfinished production lifecycles" entry is still an unbacked claim; closing it
-# is filed as a named follow-up in
+# Staleness review targets living CONCLUSIONS only (`note_types.stale_reviewed`).
+# Raw sources have their own `unprocessed_source` check, and a time-bounded
+# `experiment` has its own `unfinished_experiments` lifecycle check — "is this
+# still true?" is the wrong question for either. `production-log` is excluded
+# for the same time-bounded reason, but honestly: it has NO lifecycle check yet.
+# (The scaffold's "unfinished production lifecycles" entry is still an unbacked
+# claim; closing it is filed as a named follow-up in
 # `openspec/changes/close-experiment-lifecycle/design.md`.)
-_STALE_REVIEW_TYPES = frozenset({"research-note", "insight", "pattern", "failure", "entity"})
 # Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag.
 _STALE_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _STALE_SKIP_TAGS = frozenset({"hub", "snapshot"})
@@ -6059,10 +6065,11 @@ def _check_stale_review(
     access_counts = _stale_access_counts()  # None when unavailable/gated
     events_map = _stale_access_events(today=today)  # None when unavailable/gated
     d, *_ = _stale_activation_params()
+    type_basis = note_types.Basis(vault_root)
 
     rows: list[tuple[float, int, AuditFinding]] = []
     for page in pages:
-        if page.page_type not in _STALE_REVIEW_TYPES:
+        if not type_basis.selects(page.page_type, note_types.stale_reviewed):
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
@@ -6219,15 +6226,18 @@ def _is_active_compiled_rw(
     page: find_module.ParsedPage,
     *,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
 ) -> bool:
     """An active, read-write, COMPILED conclusion — the only pages a contradiction
     can actually be reconciled against (edit/replace/supersede). Mirrors the scope
-    of `corpus_aware.detect_contradictions` + `_check_stale_review`: a compiled type
-    (`find._COMPILED_TYPES`), not an index/log hub, not superseded/archived/draft,
-    and in a writeable (read-write) tree (auto-excludes readonly curated trees,
-    append-only Sources/Evidence, and excluded subtrees)."""
+    of `corpus_aware.detect_contradictions` + `_check_stale_review`: a type that
+    ranks as compiled material (`note_types.ranks_as_compiled`), not an index/log
+    hub, not superseded/archived/draft, and in a writeable (read-write) tree
+    (auto-excludes readonly curated trees, append-only Sources/Evidence, and
+    excluded subtrees)."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    if page.page_type not in find_module._COMPILED_TYPES:
+    type_basis = type_basis or note_types.Basis(vault_root)
+    if not type_basis.selects(page.page_type, note_types.ranks_as_compiled):
         return False
     if page.path.name in ("index.md", "log.md"):
         return False
@@ -6522,10 +6532,13 @@ def _check_scope_divergence_semantic(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return []
+    type_basis = note_types.Basis(vault_root)
     eligible = {
         page.rel_path: page
         for page in pages
-        if _is_active_compiled_rw(vault_root, page, status_basis=status_basis)
+        if _is_active_compiled_rw(
+            vault_root, page, status_basis=status_basis, type_basis=type_basis
+        )
     }
     if not eligible:
         return []
@@ -6907,10 +6920,13 @@ def _check_corpus_contradictions(
         # torch-less fast path — one indexed graph query and out, without paying
         # the eligibility walk this category used to skip entirely.
         return []
+    type_basis = note_types.Basis(vault_root)
     eligible: dict[str, find_module.ParsedPage] = {
         page.rel_path: page
         for page in pages
-        if _is_active_compiled_rw(vault_root, page, status_basis=status_basis)
+        if _is_active_compiled_rw(
+            vault_root, page, status_basis=status_basis, type_basis=type_basis
+        )
     }
     asserted, asserted_keys = _asserted_contradictions(eligible, pairs)
     return asserted + _proximity_contradictions(

@@ -1,8 +1,9 @@
 """Usage counts for vocabulary registries, read from maintained projections.
 
 Counts come only from projections the indexer already keeps current: the
-published graph snapshot (entity types, relations, semantic categories) and
-the lexical catalogue (source kinds, domains). Nothing here parses Markdown.
+published graph snapshot (entity types, note types, relations, semantic
+categories) and the lexical catalogue (source kinds, domains). Nothing here
+parses Markdown.
 
 A projection that is absent, warming, stale or refused makes the registry's
 counts `unavailable` with a reason; a zero is only ever a counted zero. Under a
@@ -107,6 +108,24 @@ def entity_types(vault_root: Path, snapshot: Snapshot) -> Usage:
         )
 
     return _guarded(vault_root, "graph entity pages", read)
+
+
+def note_types(vault_root: Path, snapshot: Snapshot) -> Usage:
+    """Pages per registered note type, from the graph's file nodes."""
+
+    def read() -> Usage:
+        rows = _graph_rows(
+            vault_root,
+            "SELECT page_type, COUNT(*) FROM graph_nodes "
+            "WHERE kind = 'file' AND page_type IS NOT NULL GROUP BY 1",
+        )
+        if isinstance(rows, str):
+            return _unavailable(rows, "graph file pages")
+        return Usage(
+            True, _canonical_counts(rows, snapshot, lambda value: value), source="graph file pages"
+        )
+
+    return _guarded(vault_root, "graph file pages", read)
 
 
 def relations(vault_root: Path, snapshot: Snapshot) -> Usage:

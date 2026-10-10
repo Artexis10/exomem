@@ -15,6 +15,7 @@ from . import (
     access,
     edit,
     kbdir,
+    note_types,
     origin_bindings,
     provenance,
     semantic_contract,
@@ -30,16 +31,6 @@ from .mutation_timings import MutationTimings, write_timings_enabled
 ObserveOperation = Literal["add", "update", "remove", "validate"]
 
 _OPERATIONS = frozenset({"add", "update", "remove", "validate"})
-_COMPILED_PAGE_TYPES = frozenset(
-    {
-        "experiment",
-        "failure",
-        "insight",
-        "pattern",
-        "production-log",
-        "research-note",
-    }
-)
 _COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
@@ -400,7 +391,9 @@ def observe_memory(
             "policy-protected; observe_memory has no override for it, "
             "regardless of the page's compiled type.",
         )
-    if preflight.before.page_type not in _COMPILED_PAGE_TYPES:
+    # The authored type is looked up as written; a withheld definition refuses.
+    note_type = note_types.Basis(vault_root).resolve(preflight.before.page_type).require()
+    if note_type is None or not note_types.compiled(note_type):
         resolution = _legacy_dated_child_resolution(
             editable.rel_path,
             title_source=_legacy_title_source(content, frontmatter),

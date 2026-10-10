@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, memory_refs, reserved_paths
+from .. import find_corpus, memory_refs, note_types, reserved_paths
 from . import membership
 from .policy import Policy, ReleaseGrant
 
@@ -31,9 +31,6 @@ SOURCE_UNAVAILABLE_OR_AMBIGUOUS = "SOURCE_UNAVAILABLE_OR_AMBIGUOUS"
 
 _BRIDGE_REQUIRED = frozenset({"bridge_of", "bridge_scope", "bridge_review"})
 _BRIDGE_PREFIX = "bridge_"
-_COMPILED_TYPES = frozenset(
-    {"experiment", "failure", "insight", "pattern", "production-log", "research-note"}
-)
 _SCOPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _BRIDGE_BYTES_RE = re.compile(
     rb"(?m)^(?:bridge_[A-Za-z0-9_-]+|['\"]bridge_[A-Za-z0-9_-]+['\"])\s*:"
@@ -560,15 +557,23 @@ def strip_provenance(
     return payload if cleaned is _REMOVE else cleaned
 
 
-def parse_bridge_frontmatter(frontmatter: Mapping[str, Any]) -> tuple[BridgeMetadata | None, str | None]:
-    """Parse the all-or-none bridge shape without resolving any references."""
+def parse_bridge_frontmatter(
+    frontmatter: Mapping[str, Any], type_basis: note_types.Basis | None = None
+) -> tuple[BridgeMetadata | None, str | None]:
+    """Parse the all-or-none bridge shape without resolving any references.
+
+    A bridge is the owner's release instrument, so the vault's callers pass the
+    owner's note types; without a basis only shipped types are known.
+    """
     bridge_keys = {str(key) for key in frontmatter if str(key).startswith(_BRIDGE_PREFIX)}
     present = bridge_keys | ({"bridge_of"} if "bridge_of" in frontmatter else set())
     if not present:
         return None, None
     if present != _BRIDGE_REQUIRED:
         return None, "bridge frontmatter must contain exactly bridge_of, bridge_scope, bridge_review"
-    if str(frontmatter.get("type") or "") not in _COMPILED_TYPES:
+    if not (type_basis or note_types.Basis(None)).selects(
+        str(frontmatter.get("type") or ""), note_types.compiled
+    ):
         return None, "a bridge must be an ordinary compiled note"
     identity = memory_refs.normalize_id(frontmatter.get("exomem_id"))
     if identity is None:
@@ -832,7 +837,9 @@ def admit(
     if snapshot is None or snapshot[1] is None:
         return BridgeAdmission(True, False, RELEASE_STALE)
     _raw, parsed = snapshot
-    metadata, error = parse_bridge_frontmatter(parsed.frontmatter)
+    metadata, error = parse_bridge_frontmatter(
+        parsed.frontmatter, note_types.Basis(Path(vault_root), owner_local=True)
+    )
     bridge_shaped = metadata is not None or error is not None
     if not bridge_shaped:
         return BridgeAdmission(False, True)
@@ -986,7 +993,9 @@ def review_signal(
     bridge_hash = hashlib.sha256(raw).hexdigest() if raw is not None else unavailable_hash
     metadata: BridgeMetadata | None = None
     if parsed is not None:
-        metadata, _error = parse_bridge_frontmatter(parsed.frontmatter)
+        metadata, _error = parse_bridge_frontmatter(
+            parsed.frontmatter, note_types.Basis(vault_root, owner_local=True)
+        )
 
     dependency_rows: list[dict[str, Any]] = []
     unavailable = False

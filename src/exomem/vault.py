@@ -4651,14 +4651,14 @@ def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> Non
         log.warning("graph dirty-path enqueue failed; reconcile will repair", exc_info=True)
 
 
-def _advisory_applies_to_page_type(page_type: str | None) -> bool:
+def _advisory_applies_to_page_type(page_type: str | None, root: Path) -> bool:
     """Whether the default duplicate/overlap sweep can say anything about this page.
 
     Design section 6 scopes the deferred advisory to an *applicable compiled
     page*, and the sweep's own vocabulary is what makes a page applicable: it
     compares a written page against active compiled conclusions, and the three
-    synchronous routes that own it pass exactly the compiled types and
-    ``source``. A page whose declared type is outside that vocabulary -- a
+    synchronous routes that own it pass exactly the types that rank as compiled
+    material and the source role. A page whose declared type is outside that vocabulary -- a
     dataset, a plan, an index -- is one the advisory can never produce a
     candidate for, so preparing custody for it would mint a component that is
     guaranteed to converge to nothing.
@@ -4671,9 +4671,12 @@ def _advisory_applies_to_page_type(page_type: str | None) -> bool:
     """
     if page_type is None:
         return True
-    from .find_policy import COMPILED_TYPES, SOURCE_TYPES
+    from . import note_types
 
-    return page_type in COMPILED_TYPES or page_type in SOURCE_TYPES
+    resolution = note_types.Basis(root).resolve(page_type)
+    return resolution.selects(note_types.ranks_as_compiled) or resolution.selects(
+        note_types.ranks_as_source
+    )
 
 
 def _planned_page_types(
@@ -4748,7 +4751,7 @@ def _governed_advisory_target(
     # advisory custody, and its terminal says `not_required` rather than
     # promising a result that would only ever be empty.
     if page_types is not None and not _advisory_applies_to_page_type(
-        page_types.get(target)
+        page_types.get(target), root
     ):
         return None
     return target

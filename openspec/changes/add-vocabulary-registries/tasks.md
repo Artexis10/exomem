@@ -34,7 +34,7 @@ Task 2.1 is delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/163
 The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, ingest, curate and review skills link it.
 
 - [x] 2.1 Add `references/vocabulary.md` and link it from SKILL.md and the capture, ingest, curate and review skills. Teach the loop: read the live set, reuse or alias, promote under a parent only when nothing fits, know it takes effect at once, report the promotion with its revert route.
-- [ ] 2.2 Remove hard-coded vocabulary from the skills: the `COMPILED_TYPES` sentences in `semantic-authoring.md` and nine workflow skills, and the inactive-status list. Proof: skill-contract validation, the no-leak scan and the plugin sync.
+- [ ] 2.2 Remove hard-coded vocabulary from the skills: the `COMPILED_TYPES` sentences in `semantic-authoring.md` and nine workflow skills, and the inactive-status list. Proof: skill-contract validation, the no-leak scan and the plugin sync. S4a (`add-note-type-registry`, task 1.10) delivers the `COMPILED_TYPES` sentence removal.
 
 ## S3. Lifecycle statuses (`add-lifecycle-status-registry`)
 
@@ -43,9 +43,13 @@ The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, inges
 
 ## S4a. Note types, read side (`add-note-type-registry`)
 
+Tasks 1.1 to 1.13 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4a. `folder`, `time_bounded` and `sources` join S4a there.
+
 - [ ] 4.1 Add the note-type registry with `role`, move the ranking multipliers into `ranking_config`, and move the semantic contract, audit, claims and the skills' role text onto role predicates. Proof: the suites pass unchanged; run the full suite.
 
-## S4b. Note types, write side and promotion
+## S4b. Note types, write side and promotion (`add-note-type-registry`)
+
+Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4b, including the type-key debt that S4a defers.
 
 - [ ] 4.2 Move `folder`, `partition`, `stem`, `required_fields`, `statuses`, typed fields, `sections`, `claim_sections`, `sources` and `time_bounded` into the registry for `note.py`, `create_file`, `indexes`, `adoption_proposals`, `hosted_plugins` and `commands`.
 - [ ] 4.3 Proof: promote `meeting-note` under `insight`; `note()` lands it in `Notes/Meetings` with compiled behaviour; `restore` removes it. Run the full suite at the completion boundary.
