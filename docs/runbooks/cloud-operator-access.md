@@ -588,6 +588,14 @@ rejected. Keep the `model_env` forbidden-prefix checks: that tenant-facing map
 must not select `EXOMEM_CLOUD_*` policy or change state placement. Offline jobs
 using the Cloud image retain `EXOMEM_CLOUD_CELL=1`, as the existing init job does.
 
+The `cloud` image sets `EXOMEM_DISABLE_CLIP=1` because it carries no CLIP stack.
+Recall then reports no image-search degradation, and the media worker does not
+attempt CLIP, also for jobs queued before the switch. During an initial
+embedding build, recall answers from the pages built so far and adds
+`embeddings` to `warming.components`. The resource status `recall_reembed`
+block and doctor report the build's progress. The encoder keeps one CPU thread,
+so a build leaves the second CPU to queries.
+
 At the unchanged 2 CPU / 3 GiB cell limit, measure cgroup peak during warmup,
 saves, import competition and restart; require at most 80% of the limit and no
 OOM. For node capacity, charge each cell the greater of its memory request and
