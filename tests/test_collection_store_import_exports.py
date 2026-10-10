@@ -1,8 +1,8 @@
 """Imports from export members and nested JSON documents (OpenSpec bring-in-large-exports §3).
 
-Each test names the defect only it catches. An export here is built the way archive
-expansion lays one out: a manifest preserved through the ordinary owner-only preserve
-path, and one gzip blob per member beside it. The data is invented: a device's days of
+Each test names the defect only it catches. An export here is an invented zip that the
+real archive expansion preserves as members: an owner-only manifest and one gzip blob
+per distinct member, pooled across the family. The data is invented: a device's days of
 unzoned local samples and a positional series, crossing the Europe/Tallinn autumn fold
 (2026-10-25, 04:00 EEST back to 03:00 EET) and spring gap (2026-03-29, 03:00 EET to
 04:00 EEST). Every expected instant below is computed by hand from those two rules.
@@ -10,9 +10,12 @@ unzoned local samples and a positional series, crossing the Europe/Tallinn autum
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
+import io
 import json
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -22,7 +25,7 @@ from test_collection_store_importer import CID, count, manifest_text, refused, s
 from test_collection_store_importer import run as run_jobs
 from test_collection_store_writer import store as store
 
-from exomem import commands
+from exomem import archive_members, commands
 from exomem import structured_collections as collections
 from exomem.collection_store import connection, importer, typed_storage
 from exomem.collection_store.preview import preview_store
@@ -117,28 +120,17 @@ DAILY = {
 
 
 def preserve_export(store, name, members):
-    """Preserve an export as archive expansion does: an owner-only manifest and gzip blobs."""
-    entries, blobs = [], {}
-    for path, document in sorted(members.items()):
-        data = document if type(document) is bytes else json.dumps(document).encode()
-        sha256 = hashlib.sha256(data).hexdigest()
-        blob = f"__exomem_raw_v1__members/{sha256[:2]}/{sha256}.gz"
-        blobs[blob] = gzip.compress(data)
-        entries.append({"path": path, "sha256": sha256, "bytes": len(data), "modified": None,
-                        "blob": blob, "stored_bytes": len(blobs[blob])})
-    archive = hashlib.sha256(b"".join(entry["sha256"].encode() for entry in entries)).hexdigest()
-    manifest = {"schema_version": 1, "members": entries,
-                "archive": {"filename": f"{name}.zip", "sha256": archive, "bytes": 1, "verified": "upload"}}
-    with request_scope(OWNER):
-        receipt = commands.op_preserve_evidence(
-            store.root, "device", "export", f"{name}.export.json", json.dumps(manifest, sort_keys=True),
-            raw_protection=True,
-        )
-    family = (store.root / receipt["path"]).parent
-    for blob, data in blobs.items():
-        (family / blob).parent.mkdir(parents=True, exist_ok=True)
-        (family / blob).write_bytes(data)
-    return receipt["path"], family
+    """Zip the invented member documents and preserve the zip through archive expansion."""
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+        for path, document in members.items():
+            zipped.writestr(path, document if type(document) is bytes else json.dumps(document))
+    receipt, stored = archive_members.preserve_members(
+        store.root, guard=contextlib.nullcontext, scope="device", category="export", filename=f"{name}.zip",
+        stream=archive, max_bytes=archive.getbuffer().nbytes, verified="upload",
+    )
+    assert stored
+    return receipt["path"], (store.root / receipt["path"]).parent
 
 
 def collection(store):
