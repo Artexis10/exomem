@@ -413,13 +413,7 @@ def _pass(
                 shadow.upsert_file(rel, chunks, vectors[offset : offset + count], mtime)
                 encoded_paths += 1
             offset += count
-        _note_progress(
-            vault_root,
-            len(flat),
-            time.monotonic() - started,
-            done=len(batch),
-            encoded=sum(text not in held for text in flat),
-        )
+        _note_progress(vault_root, len(flat), time.monotonic() - started, done=len(batch))
 
     for batch in batches(
         pending_units,
@@ -474,6 +468,10 @@ def _encode_one_by_one(texts: list[str], held: dict[str, Any]) -> Any:
 
     from . import embeddings
 
+    if not texts:
+        # A batch of pages that lost every unit writes no rows; vstack refuses
+        # an empty list, which would fail every later start at this batch.
+        return np.empty((0, 0), dtype=np.float32)
     return np.vstack(
         [
             held[text] if text in held else embeddings.embed_texts([text], is_query=False)
@@ -482,13 +480,12 @@ def _encode_one_by_one(texts: list[str], held: dict[str, Any]) -> Any:
     )
 
 
-def _note_progress(
-    vault_root: Path, chunks: int, seconds: float, *, done: int, encoded: int
-) -> None:
-    """Count `chunks` written, `encoded` of them by the encoder, the rest copied."""
+def _note_progress(vault_root: Path, chunks: int, seconds: float, *, done: int) -> None:
+    """Count `chunks` written, encoded or copied, against the time they took, so
+    the rate and estimate describe the build as it actually runs."""
     with _LOCK:
         status = _STATUS.setdefault(_key(vault_root), {})
-        status["chunks_encoded"] = int(status.get("chunks_encoded") or 0) + encoded
+        status["chunks_encoded"] = int(status.get("chunks_encoded") or 0) + chunks
         status["encode_seconds"] = float(status.get("encode_seconds") or 0.0) + seconds
         status["chunks_pending"] = max(0, int(status.get("chunks_pending") or 0) - chunks)
         status["paths_done"] = int(status.get("paths_done") or 0) + done

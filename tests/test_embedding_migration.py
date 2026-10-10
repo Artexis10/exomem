@@ -665,6 +665,8 @@ def test_a_legacy_sidecar_with_one_stale_page_encodes_only_that_page(preseeded_w
     find_module.clear_cache()
     page = find_module._CACHE.get(edited, vault)
     page_chunks = embeddings._chunks_for_page(vault, page)
+    unchanged = f"{kb_dirname()}/{list(_PAGES)[0]}"
+    legacy_vectors = embeddings._stored_text_vectors(embeddings.get_embedding_index(vault), unchanged)[0]
     log.clear()
 
     assert recall_migration.run(vault, threading.Event()) == "current"
@@ -672,6 +674,9 @@ def test_a_legacy_sidecar_with_one_stale_page_encodes_only_that_page(preseeded_w
     encoded = _passages_by(log, NEW)
     assert any("offline edit" in text for text in encoded)
     assert set(encoded) <= set(page_chunks)
+    copied = embeddings._stored_text_vectors(embeddings.get_embedding_index(vault), unchanged)[0]
+    assert copied.keys() == legacy_vectors.keys()
+    assert all(np.array_equal(copied[text], legacy_vectors[text]) for text in copied)
     active = embeddings.get_embedding_index(vault)
     assert active.stored_chunks_for(page.rel_path) == (page_chunks, page.mtime)
     units = active.semantic_unit_parent_states()
@@ -1281,3 +1286,23 @@ def test_doctor_reports_a_cells_refused_sidecar_as_dense_recall_off(world, monke
     assert check.status == "warn"
     assert "EXOMEM_RECALL_REEMBED=off keeps it off" in check.message
 
+
+def test_a_page_that_loses_every_unit_mid_build_does_not_stall_the_build(preseeded_world, monkeypatch) -> None:
+    # A batch made only of a page with no units left once raised from
+    # np.vstack([]), and every later start failed at the same batch.
+    vault, _log, _loads = preseeded_world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving is None
+    assert recall_migration.build(vault, plan) is True
+    edited = vault / kb_dirname() / list(_PAGES)[0]
+    edited.write_text(edited.read_text(encoding="utf-8").split("## Observations")[0] + "Edited.\n", encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [edited]).status == "completed"
+    assert index_paths.active_sidecar_name(vault) is None
+    embeddings.unload_model()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+
+    assert recall_migration.run(vault, threading.Event()) == "current"
+    assert index_paths.active_sidecar_name(vault) is not None
