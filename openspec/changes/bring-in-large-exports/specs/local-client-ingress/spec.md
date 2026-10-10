@@ -35,8 +35,11 @@ and a session's length SHALL be bounded by `EXOMEM_UPLOAD_SESSION_MAX_BYTES`. A 
 SHALL resume after a lost connection or a service restart at the offset the server
 reports. Exomem SHALL preserve the bytes only after their SHA-256 equals the declared one,
 SHALL fail the session and delete its bytes on a mismatch, and SHALL delete a session's
-bytes when the session is cancelled or expires. `exomem attach` SHALL use a session when a
-file exceeds the single-request cap and SHALL resume an interrupted upload on its next run.
+bytes when the session is cancelled or expires. A commit that fails for a reason other than
+the bytes SHALL keep them and leave the session retryable. Exomem SHALL commit a session in
+one process at a time, and only a serving runtime SHALL resume an interrupted commit.
+`exomem attach` SHALL use a session when a file exceeds the single-request cap and SHALL
+resume an interrupted upload on its next run.
 
 #### Scenario: An interrupted upload resumes
 - **WHEN** the connection drops after part of a file is sent and the client asks for the offset
@@ -45,6 +48,10 @@ file exceeds the single-request cap and SHALL resume an interrupted upload on it
 #### Scenario: The bytes do not match the declared hash
 - **WHEN** the last chunk arrives and the file's SHA-256 differs from the declared one
 - **THEN** the session fails with a stable code, nothing is preserved and the bytes are deleted
+
+#### Scenario: The commit fails for want of disk space
+- **WHEN** every byte has arrived and matches, and the commit fails because the disk is full
+- **THEN** the session reports `retryable`, the bytes stay, and the next request on the session retries the commit without the client sending them again
 
 #### Scenario: A request without the session secret
 - **WHEN** a request names an existing session but omits its secret or presents another
