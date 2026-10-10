@@ -58,7 +58,9 @@ A parentless entity type's entry SHALL carry `new_family` and SHALL be served fi
 The session that created an entry SHALL NOT count it.
 A promotion's entry SHALL settle at its first delivery to an interactive conversation session other than the creator's; a hook process or a CLI or REST call SHALL NOT settle it.
 The server MAY also exclude a session that a wire field identifies as a delegated agent lane.
-A revert or a dismissal SHALL settle any entry.
+A dismissal SHALL settle any entry.
+An entry SHALL also settle by state when its promotion no longer holds: the edge is absent, the entity page is in the trash, or the registry key is removed or deprecated.
+The entry's review fingerprint SHALL stay the promotion's stable identity for dismissal and settlement, and SHALL NOT fold in content hashes or dependants.
 Family dispositions SHALL apply, and a withheld promotion SHALL contribute nothing to a restricted audience's count.
 
 #### Scenario: A promotion is seen once, in the next session
@@ -79,16 +81,18 @@ Family dispositions SHALL apply, and a withheld promotion SHALL contribute nothi
 ### Requirement: Each promotion reverts in one call
 
 Every `recent_promotions` entry SHALL revert through one call keyed by its ref on a tool that is already destructive, and its item context SHALL name that call.
-Every revert SHALL require the entry's current fingerprint, which SHALL cover the entry's dependant list and the content hash of each page or registry entry that the revert changes; a stale fingerprint SHALL refuse the call and change nothing.
-A typed edge or an entity creation SHALL revert through `maintain_memory(mode="curation", curation_action="revert", review_ref=<entry ref>, expected_plan_fingerprint=<entry fingerprint>, why)`.
-That call SHALL seal the revert plan from the entry and apply it in the same call, and the sealed plan's fingerprint SHALL be the entry's fingerprint, so that curation apply's plan-fingerprint approval stays required.
+The item context SHALL serve a `revert_fingerprint`, computed at read time and separate from the entry's review fingerprint.
+Every revert SHALL require that `revert_fingerprint`; a stale value SHALL refuse the call and change nothing.
+A typed edge or an entity creation SHALL revert through `maintain_memory(mode="curation", curation_action="revert", review_ref=<entry ref>, expected_plan_fingerprint=<revert_fingerprint>, why)`.
+For these entries the `revert_fingerprint` SHALL be `curation.plan_fingerprint` of the deterministic revert plan, whose binding manifest carries the dependant list and the content hash of each page that the plan changes.
+The call SHALL recompute that plan from current state, seal it and apply it in the same call, so that curation apply's plan-fingerprint approval runs unchanged.
 For a typed edge, the plan SHALL hold one `remove_relation` step; for an entity creation, its steps SHALL remove the promotion's own edges and then trash the entity.
 The entry's item context SHALL list every other inbound link to the entity as a dependant.
 A link from the promotion's originating write SHALL NOT be a dependant, because after the revert it is an unresolved wikilink again, as it was before the promotion.
-A registry addition SHALL revert through one `schema_memory` save of that key, carrying `expected_hash`, `why`, `vocabulary_ref=<entry ref>` and `vocabulary_fingerprint=<entry fingerprint>`.
-The save SHALL remove the key through a `remove` delta verb when the key is vault-added and nothing uses it.
+A registry addition SHALL revert through one `schema_memory` save of that key with a `remove` delta, `expected_hash=<revert_fingerprint>` and `why`, where the `revert_fingerprint` is the registry's current `expected_hash`.
+The save SHALL take no `vocabulary_ref` or `vocabulary_fingerprint`.
+The server SHALL decide at save time from current usage: it SHALL remove the key when the key is vault-added and nothing uses it, and otherwise SHALL deprecate the key, to its parent for a relation, and list the dependants.
 The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check, which today means entity types, relations and semantic categories, and every other registry SHALL refuse it.
-Otherwise the save SHALL deprecate the key, to its parent for a relation, and SHALL list the dependants.
 No revert SHALL land on `triage_memory` or `connect_memory`.
 A revert SHALL NOT restore an older registry version or drop a later save.
 A revert SHALL run only on the user's request, which is its confirmation, and history and logs SHALL keep both the promotion and its revert.
@@ -103,11 +107,21 @@ A revert SHALL run only on the user's request, which is its confirmation, and hi
 - **WHEN** the user asks to undo a promoted entity that only the promotion's own edges and its originating note link to
 - **THEN** one call removes those edges and moves the entity page to the trash, with no separate preview or apply call
 
-#### Scenario: A revert needs the entry's current fingerprint
+#### Scenario: A revert needs the current revert fingerprint
 
-- **WHEN** the agent runs an entity revert without a fingerprint, or with a fingerprint read before a later note linked the entity
+- **WHEN** the agent runs an entity revert without a `revert_fingerprint`, or with one read before a later note linked the entity
 - **THEN** the call refuses, changes nothing, and the entry's item context lists the later note as a dependant
-- **AND** after the user has seen and named that dependant, the same call with the entry's current fingerprint reverts the entity
+- **AND** after the user has seen and named that dependant, the same call with the newly read `revert_fingerprint` reverts the entity
+
+#### Scenario: A busy page does not re-raise a dismissed promotion
+
+- **WHEN** the agent dismisses a promotion entry, and later writes edit the promoted entity's page and add inbound links to it
+- **THEN** the entry's review fingerprint is unchanged and the entry stays dismissed, while its `revert_fingerprint` changes
+
+#### Scenario: A removal by another route settles the entry
+
+- **WHEN** the promoted edge is removed through an `edit_memory` `remove_relation` operation rather than the revert call
+- **THEN** the entry settles because the edge is absent
 
 #### Scenario: A used type is deprecated, not removed
 

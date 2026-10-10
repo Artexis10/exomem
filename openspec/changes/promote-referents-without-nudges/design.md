@@ -10,6 +10,7 @@ Evidence pointers below are verified against `origin/main` at `42c807797`.
 Revision 2 follows an adversarial critique (REQUEST_CHANGES, 2 blocking and 7 major findings): it measures before it builds, ships the smallest prompt first, and gates the declaration argument on evidence.
 Revision 3 follows the recheck (REQUEST_CHANGES, 1 blocking and 5 major findings): it preregisters the pass line that closes the change, splits the shipped arm so that the receipt block must earn its place, and makes the entity revert one call.
 Revision 4 follows a third recheck (0 blocking and 2 major findings): it moves removal and revert onto tools that are already destructive, and counts twin false positives per repeat.
+Revision 5 separates the revert fingerprint from the entry's review fingerprint, so a revert binds to the state the user saw while dismissal identity stays stable.
 
 ## Owner decisions (decided 2026-10-10)
 
@@ -232,9 +233,13 @@ When every miss is such an activation miss, it runs before decision 1B; otherwis
 - Per-edge provenance today is the authoring write's log entry (`tests/test_operator_site_cohort.py:70-103`).
 - `manage_memory_file` delete moves a page to `_trash` (`commands.py:5894-5930`); the curation `delete` step takes `expected_dead_inbound` (`curation.py:203-213`).
 - A due-state entry carries a review ref and a fingerprint (`due_state.py:478-486`).
+  Review fingerprints are 24 hex characters (`review_state.py:338-370`), and `review_state.component_fingerprint` is the one shared composer of dismissal identity (`review_state.py:374-401`).
 - Curation apply refuses unless the caller passes the stored plan's fingerprint (`curation.py:2829-2853`); the MODIFIED ceiling keeps that gate required.
+  That fingerprint is a 64-hex SHA-256 over the plan, its binding manifest and its registry ids (`curation.py:265-266`, `curation.py:309-318`), so a review fingerprint can never match it.
 - `maintain_memory` curation already takes `curation_action`, `review_ref`, `expected_plan_fingerprint` and `why` (`commands.py:10057-10100`), and curation cannot target schema or admin state (`commands.py:10110`).
-- `schema_memory` saves a registry delta with `expected_hash` and `why`, and binds a save to a reviewed decision through `vocabulary_ref` and `vocabulary_fingerprint` (`commands.py:10515-10579`).
+- `schema_memory` saves a registry delta with `expected_hash` and `why` (`commands.py:10515-10579`).
+  Its `vocabulary_ref` and `vocabulary_fingerprint` binding accepts only a vocabulary review ref with a 64-hex fingerprint and grants no write (`commands.py:9535-9551`), so it cannot bind a promotion entry.
+- The pinned Hosted profile refuses curation when its `maintain_memory` schema has no `curation_action` (`server_hosted.py:1441-1448`).
 - `edit_memory`, `maintain_memory` and `schema_memory` are already destructive tools; `triage_memory` and `connect_memory` are not (`command_surface.py:240-264`), and their marketplace text says so (`hosted_plugins.py:927-934`).
 
 **Decision.**
@@ -250,27 +255,34 @@ When every miss is such an activation miss, it runs before decision 1B; otherwis
    A hook process or a CLI or REST call never settles it. A stdio MCP session is a conversation and can settle it.
    The server may also exclude a delegated agent lane once a wire field identifies one; no such field exists today (Open items).
    A pending declaration's entry settles only when it completes or the agent dismisses it, never on delivery.
-   A revert or a dismissal settles any entry. A withheld promotion adds nothing to a restricted audience's count.
-4. Every entry reverts by one call on a tool that is already destructive, and the entry's item context names that call.
-   Every revert requires the entry's current fingerprint.
-   The fingerprint covers the entry's dependant list and the content hash of each page or registry entry that the revert changes, so a change to either refuses the call.
-   - A typed edge or an entity creation: `maintain_memory(mode="curation", curation_action="revert", review_ref=<entry ref>, expected_plan_fingerprint=<entry fingerprint>, why=<the user's request>)`.
-     The server seals the revert plan from the entry and applies it in that one call.
-     The sealed plan's fingerprint is the entry's fingerprint, so the existing plan-fingerprint approval of curation apply runs unchanged.
+   A dismissal settles any entry.
+   An entry also settles by state, when its promotion no longer holds: the edge is absent, the entity page is in the trash, or the registry key is removed or deprecated.
+   A revert therefore settles its entry without a record of its own, and so does an equivalent change made by any other route.
+   A withheld promotion adds nothing to a restricted audience's count.
+4. Two fingerprints do two jobs:
+   - The entry's review fingerprint is the promotion's stable identity, for dismissal and settlement.
+     It never folds in content hashes or dependants, so an edit to a busy page never re-raises a settled or dismissed promotion.
+   - The item context serves a separate `revert_fingerprint`, computed at read time, which binds the revert to the state the user saw.
+5. Every entry reverts by one call on a tool that is already destructive, and the entry's item context names that call with its `revert_fingerprint`.
+   - A typed edge or an entity creation: `maintain_memory(mode="curation", curation_action="revert", review_ref=<entry ref>, expected_plan_fingerprint=<revert_fingerprint>, why=<the user's request>)`.
+     The `revert_fingerprint` is `curation.plan_fingerprint` of the deterministic revert plan, computed at read time.
+     Its binding manifest carries the dependant list and the content hash of each page that the plan changes.
+     The call recomputes the plan from current state, seals it and applies it, and curation apply runs unchanged: a changed dependant list or content hash gives another fingerprint, so the call refuses.
      For an edge, the plan holds one `remove_relation` step. For an entity, its steps remove the promotion's own edges and then trash the entity.
-   - An entity's dependants: the item context lists every other inbound link as a dependant, and the fingerprint covers that list.
+   - An entity's dependants: the item context lists every other inbound link as a dependant.
      A link from the originating write is not a dependant: after the revert it is an unresolved wikilink again, as before the promotion.
-     The agent passes the fingerprint only after the user has seen and named the dependants; a changed list changes the fingerprint, so the call refuses.
-   - A registry addition: one `schema_memory` save of one key, with `expected_hash`, `why`, `vocabulary_ref=<entry ref>` and `vocabulary_fingerprint=<entry fingerprint>`.
+     The agent passes the `revert_fingerprint` only after the user has seen and named the dependants.
+   - A registry addition: one `schema_memory` save of one key with a `remove` delta, `expected_hash=<revert_fingerprint>` and `why`.
+     The `revert_fingerprint` is the registry's current `expected_hash`; the save takes no `vocabulary_ref` or `vocabulary_fingerprint`.
      Curation cannot target schema state, so the registry's own destructive door carries this revert.
-     With no dependants the key is removed through a new `remove` delta verb.
-     The verb is allowed only in a registry whose adapter declares a usage check (today entity types, relations and semantic categories) and only for a vault-added entry that nothing uses; every other registry refuses it.
-     With dependants the key is deprecated (a relation to its parent), and the result lists the dependants.
+     The server decides at save time from current usage: with no dependants it removes the key; with dependants it deprecates the key (a relation to its parent), and the result lists the dependants.
+     The `remove` verb is allowed only in a registry whose adapter declares a usage check (today entity types, relations and semantic categories) and only for a vault-added entry; every other registry refuses it.
      A revert never restores an older version and never rolls back a later save.
-5. A revert is `restructure_execution`. It runs on the user's request, which is its confirmation; the entry's item context is its preview.
+6. A revert is `restructure_execution`. It runs on the user's request, which is its confirmation; the entry's item context is its preview.
    History and logs keep both the promotion and its revert.
    The leaves stay callable on their own: the `edit_memory` `remove_relation` operation for any edge, and an ordinary curation plan for any wider undo.
-6. No revert or removal lands on `triage_memory` or `connect_memory`, so both stay non-destructive and their marketplace text stays true.
+7. No revert or removal lands on `triage_memory` or `connect_memory`, so both stay non-destructive and their marketplace text stays true.
+8. The pinned Hosted profile must admit `curation_action="revert"` on `maintain_memory`; otherwise a Cloud user's revert is refused (`server_hosted.py:1441-1448`).
 
 ### 6. One display label (T5)
 
@@ -391,7 +403,7 @@ The highest-level check is the agent-track measurement of group 4, and it runs f
 - Served text (task 9.1): the case-authoring lane checks that no case wording appears in a changed core line, tool description or scaffold text. Only a lane that holds the cases can check this.
 - Authority (task 1.2): a non-owner or v2 vault cannot use the new routes to bypass its gate.
 - Disclosure twin (task 3.3): a withheld same-name entity at another path, and at the same path, gives a restricted caller the same receipt block, advisory and notices as a vault without it, read through MCP egress. The existing `create-entity` same-path refusal (`link.py:232-248`) stays reported debt until R4.
-- Revert (task 6.2): each entry reverts with one call on a destructive tool, only with its current fingerprint, and leaves history; a changed dependant list or content hash refuses the call.
+- Revert (task 6.2): each entry reverts with one call on a destructive tool, only with its current `revert_fingerprint`, and leaves history; a changed dependant list or content hash refuses the call, while the entry's review fingerprint stays stable.
 - Surfacing (task 6.1): an entry is counted once, in the right session, and a hook never settles it.
 
 ## Risks / Trade-offs
@@ -400,7 +412,7 @@ The highest-level check is the agent-track measurement of group 4, and it runs f
 - The measurement costs agent runs → the baseline, B1 and B2 take 216 runs (3 arms × 12 cases × 2 client shapes × 3 repeats), and escalation adds 144.
   They run serially on the laptop, one at a time, on the subscription: roughly a day of wall-clock time, an estimate rather than a measurement.
 - `referents` could be built and then dropped → it is built only when the shipped arm misses the pass line, and its budget raise is never taken without the gate.
-- A revert can strand dependants → the item context lists them, and the fingerprint that the revert requires covers them.
+- A revert can strand dependants → the item context lists them, and the `revert_fingerprint` that the revert requires covers them.
 - Bootstrap bytes are nearly spent → task 1.1 pays for `promotion_classes` by trimming the confirm-first texts it replaces, on both the compact core ceiling and the compact reference bound, and raises neither (decision 2, item 9).
 
 ## Migration Plan

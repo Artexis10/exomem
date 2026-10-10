@@ -27,9 +27,10 @@ authors, not an edge removal, and any other `edit_memory` operation that drops
 a `## Relations` bullet from the page it writes is part of that write, not an
 edge removal. A promotion revert is `restructure_execution` whose confirmation
 is the user's request; it seals and applies its own curation plan in one call,
-the promotion's item context is its preview, and it requires the promotion's
-current fingerprint, which covers the dependants and the content it changes and
-serves as the plan-fingerprint approval that curation apply requires. Edge
+the promotion's item context is its preview, and it requires the revert
+fingerprint that the item context serves, which covers the dependants and the
+content it changes and, for a curation revert, is the plan fingerprint that
+curation apply requires. Edge
 removal and promotion revert SHALL run only on tools that are already marked
 destructive. A resolved
 non-owner's registry save remains a pending item for the owner. An
