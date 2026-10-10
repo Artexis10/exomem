@@ -13,7 +13,9 @@ symlink entries, duplicate names, encrypted entries, and member counts or sizes 
 documented limits, writing no manifest. A blob SHALL be written only when the pool lacks
 it, and the manifest SHALL be written last, as the commit point. Preserving an archive
 whose SHA-256 a manifest in the same family already records SHALL return `already_stored`
-and write nothing.
+and write nothing, except that Exomem SHALL restore each blob that manifest names and the
+pool lacks. It SHALL take each such member from the uploaded archive, verify its SHA-256
+against the manifest, and report how many blobs it restored.
 
 #### Scenario: A second archive shares most members
 - **WHEN** an owner preserves an archive whose members the family already holds, except two
@@ -22,6 +24,10 @@ and write nothing.
 #### Scenario: The same archive is preserved twice
 - **WHEN** an owner preserves an archive with the same SHA-256 into the same family again
 - **THEN** the outcome is `already_stored` and no blob or manifest is written
+
+#### Scenario: Preserving an archive again heals a lost member blob
+- **WHEN** a blob that a recorded manifest names is missing and the owner preserves the same archive again
+- **THEN** the outcome is `already_stored`, the blob is back with its recorded SHA-256, the outcome reports one restored blob, and nothing else is written
 
 #### Scenario: A hostile archive
 - **WHEN** an archive contains a member path that leaves the pool, or a symlink entry
