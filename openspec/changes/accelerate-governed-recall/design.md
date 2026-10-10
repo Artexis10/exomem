@@ -39,10 +39,11 @@ design has to respect:
 - Read-side caches that survive governed writes through exact receipt custody.
 - A measured, ratcheting latency contract on the live cell.
 - Result identity: every index-backed path returns the set the scan oracle would.
-- Warm search p95 at or below 200 ms on a two-CPU cell of 6,500 pages, with a
-  budget for every stage, a pull-request gate that sees per-candidate work grow
-  before merge, a full-CI comparison of head with the most recent release tag,
-  and an absolute verdict recorded for each release that gates nothing.
+- Warm hybrid search p95 at or below 100 ms on a two-CPU cell of 6,500 pages,
+  with a 50 ms p50 target and a budget for every stage along the request's
+  critical path, a pull-request gate that sees per-candidate work grow before
+  merge, a full-CI comparison of head with the most recent release tag, and an
+  absolute verdict recorded for each release that gates nothing.
 
 **Non-Goals:**
 - Approximate retrieval, dropped features, ANN, or any quality-for-speed trade.
@@ -173,18 +174,21 @@ live cell for the first time. Each tranche is a lane with its own
 author-independent reviewer and mutation proofs, after the pattern that
 delivered the write-side change.
 
-### 7. Warm search costs at most 200 ms at p95 on a two-CPU cell
+### 7. Warm hybrid search costs at most 100 ms at p95 on a two-CPU cell
 
-The owner set the target on 2026-10-09: every search mode subsecond and well
-under, 100 to 200 ms acceptable. The contract takes the top of that range as
-the p95 ceiling and the bottom as the p50 target. The reference is 6,500
-pages, about the size of the owner's vault, on two CPUs, the allocation of a
-Cloud cell. The personal service has more CPUs, so meeting the contract on two
-leaves it headroom there. Only the reference-corpus runs are pinned to two
-CPUs; the live personal service is measured as it is served. The measured
-quantity
-is the elapsed time of the `ask_memory` call, which is what a client waits for
-before transport. The live-cell gate measures the same call at the REST facade.
+On 2026-10-09 the owner set the target for every search mode: subsecond and
+well under, 100 to 200 ms acceptable. The owner then asked why search cannot
+run under 100 ms, and the bar became 100 ms. Every warm series holds p95 at or
+below 100 ms. The p50 target is 50 ms. The report shows it and it gates
+nothing, because the query encode alone takes about 30 ms at p50 (encode
+evidence, below), which leaves about 20 ms at the median for every other
+stage. The reference is 6,500 pages, about the size of the owner's vault, on
+two CPUs, the allocation of a Cloud cell. The personal service has more CPUs,
+so meeting the contract on two leaves it headroom there. Only the
+reference-corpus runs are pinned to two CPUs; the live personal service is
+measured as it is served. The measured quantity is the elapsed time of the
+`ask_memory` call, which is what a client waits for before transport. The
+live-cell gate measures the same call at the REST facade.
 
 The measured principal is the vault owner, identified through the product's
 owner-authority path. The reproduction did not do that: it patched
@@ -194,9 +198,22 @@ runs the same series, reported apart. It gates once admission no longer sizes
 the candidate pool; today that path runs Python BM25 over the admitted pages. The model-free A1 run, which took the in-process
 principal's RAW admission predicate, measured that path at 6.8 s p50.
 
-The old keyword p50 ceiling of 120 ms stays. It is the contract's only p50
-ceiling, and dropping it would loosen the keyword bound. The empty-query browse
-stays outside the ceilings, as the shipped gate already treats it.
+Keyword recall runs no query encode, so the contract holds it to a lower
+ceiling: p95 at or below 50 ms. Its budgeted path is 23 ms, or 29 ms with a
+structured filter (the arithmetic below). The remaining 21 ms covers keyword
+work that no budget row bounds: the trigram doclist intersection, which the
+structural gate cannot see (decision 9), and the reference mix's query whose
+tokens are all under three characters, which scans every KB row by design.
+That ceiling replaces keyword's old p50 ceiling of 120 ms. A series whose p95
+is at most 50 ms has a p50 under 120 ms, so the old ceiling no longer bounds
+anything.
+
+A hybrid request served without the encoder, where embeddings are disabled,
+gets no lower ceiling. It skips only the encode branch and still runs every
+stage after the lanes, so its budgeted path is 47 to 78 ms. That is not far
+enough under 100 ms to be a separate bound, and no reference series runs
+without the served encoder. It holds the 100 ms ceiling. The empty-query
+browse stays outside the ceilings, as the shipped gate already treats it.
 
 `baseline.md` records the reproduction. Its third run (R3: 76 samples, load
 average 16-17 on a shared 20-CPU laptop, process pinned to two CPUs) is the
@@ -206,46 +223,108 @@ stages at one to four times these values. Every number was taken under load, so
 a quiescent cell is expected to be faster; the gate, not this table, decides
 the verdict.
 
-| Stage | p50 / p95 ms | Cause | Budget |
-|---|---|---|---|
-| Request setup | 9 / 28 | projection and pending-visibility checks | 5 |
-| Admission | not run (patched owner) | non-owner path: 214 / 440 ms model-free, sized by the other lane | 15 |
-| Query encode | 33 / 116 | bge-m3 int8 on two contended CPUs | 40, a target under the 250 ms bound of `multilingual-recall` |
-| Dense search | 33 / 52 | chunk text for 3 x `candidate_k` rows (`embedding_index.py:1822`) | 15 |
-| BM25 | 29 / 56 | FTS5 `bm25()`; the rest is connection setup and readiness | 10 |
-| Keyword | 39 / 91 (up to 177 / 342) | trigram query plus connection setup and readiness | 10 |
-| Unit lanes (`mixed`) | 647 / 2,143 | per-candidate parent re-parse and policy load; the unspanned query encode runs inside it | 30 |
-| Parent hints | 85 / 132 | the plan scans `json_each` once per KB page (`lexstore.py:8382`) | 2 |
-| Graph | 26 / 135 | seeds 6 / 30 through Markdown reads; expand 14 / 31; resolver 5 / 16 | 15 |
-| Temporal | 44 / 124 | `updated` read from Markdown per candidate | 5 |
-| Fusion and multipliers | 24 / 66 | type and status read from Markdown per candidate | 10 |
-| Hydration and response | 30 / 79 | due-state block outside `total_ms`, serialization | 20 |
-| CLIP | not run (`EXOMEM_DISABLE_CLIP=1`) | 37 ms warm on the live cell (`baseline.md`, 2026-09-03) | 10, where CLIP is enabled |
+| Stage | p50 / p95 ms | Cause | Budget | Runs |
+|---|---|---|---|---|
+| Request setup | 9 / 28 | projection and pending-visibility checks | 4 | before the lanes |
+| Admission and eligibility | not run (patched owner) | non-owner path: 214 / 440 ms model-free, sized by the other lane | 6 | before the lanes, with a filter or admission |
+| Query encode | 33 / 116 | bge-m3 int8 on two contended CPUs | 40, a target under the 250 ms bound of `multilingual-recall` | encode branch |
+| Dense search | 33 / 52 | chunk text for 3 x `candidate_k` rows (`embedding_index.py:1822`) | 15 | encode branch, after the encode |
+| BM25 | 29 / 56 | FTS5 `bm25()`; the rest is connection setup and readiness | 8 | lexical branch |
+| Keyword | 39 / 91 (up to 177 / 342) | trigram query plus connection setup and readiness | 8 | lexical branch |
+| CLIP | not run (`EXOMEM_DISABLE_CLIP=1`) | 37 ms warm on the live cell (`baseline.md`, 2026-09-03) | 10, where CLIP is enabled | lexical branch |
+| Unit lanes (`mixed`) | 647 / 2,143 | per-candidate parent re-parse and policy load; the unspanned query encode runs inside it | 12 | lexical branch; vector search after the encode |
+| Parent hints | 85 / 132 | the plan scans `json_each` once per KB page (`lexstore.py:8382`) | 2 | after the lanes |
+| Graph | 26 / 135 | seeds 6 / 30 through Markdown reads; expand 14 / 31; resolver 5 / 16 | 9 | after the lanes |
+| Temporal | 44 / 124 | `updated` read from Markdown per candidate | 3 | after the lanes, when it runs |
+| Fusion and multipliers | 24 / 66 | type and status read from Markdown per candidate | 5 | after the lanes |
+| Hydration | 30 / 79, the due-state block included | hit construction, excerpts, serialization | 8 | after the lanes |
+| Due state | 21 / 58 | role state read once per hit, outside `total_ms` | 3 | after the lanes |
 
-The budgets sum to 187 ms, so a request that runs every stage still has
-headroom. A default page-level request for the owner runs at most ten of them,
-132 ms in total when the temporal lane runs.
+**Critical path.** ONNX Runtime releases the GIL while it encodes, and SQLite
+while it steps, so the query encode can run beside the BM25, keyword and unit
+lanes (decision 12, slice 6.13). The budgets therefore compose along the
+request's critical path, not as a sum. Stages that run one after another add,
+and of two branches that run at the same time only the longer counts.
 
-Every stage is over its budget today, at p95 by two to sixty times. Slices 6.3
-to 6.8 remove named per-request work from most of them. Three rows have no
-removable work named yet, and for 200 ms at p95 to hold they need
+```
+Before the lanes:  setup 4 + eligibility 6                          = 10
+Encode branch:     encode 40 + dense search 15                      = 55
+Lexical branch:    max(BM25 8 + keyword 8 + CLIP 10, encode 40)
+                   + unit lanes 12                                  = 52
+After the lanes:   parent hints 2 + graph 9 + temporal 3 + fusion 5
+                   + hydration 8 + due state 3                      = 30
+Critical path:     10 + max(55, 52) + 30                            = 95
+```
+
+The lexical-branch line counts all of the unit lanes as if they started after
+the encode. Their vector search needs the query vector, so it waits for the
+encode; their lexical lane runs earlier, so the line overstates the branch.
+The encode branch is still the longer one, so whenever the encoder runs, the
+encode and dense search are on the critical path. A request that runs every
+stage, with a filter, the temporal lane, the unit lanes and CLIP, has a 95 ms
+path, 5 ms under the ceiling. The arithmetic adds p95 budgets, as the old sum
+did; the gate's measured percentiles, not this arithmetic, decide the verdict.
+
+| Series | Path | ms |
+|---|---|---|
+| Hybrid, owner, page level | 4 + 55 + 27 | 86 |
+| Hybrid with the temporal lane, and the temporal series | 4 + 55 + 30 | 89 |
+| Filtered hybrid | 10 + 55 + 27, or 10 + 55 + 30 with the temporal lane | 92 or 95 |
+| `mixed` and `unit` levels | as hybrid, because the lexical branch's 52 ms ends before the encode branch's 55 | 86 to 95 |
+| Keyword | setup 4 + keyword 8 + hydration 8 + due state 3, plus eligibility 6 with a filter | 23 or 29 |
+| Hybrid without the encoder | 4 + BM25 8 + keyword 8 + 27, up to 10 + 38 + 30 with every lane | 47 to 78 |
+
+Run one after another, the same budgets sum to 133 ms, and a default hybrid
+request to 102 ms (4 + 40 + 15 + 8 + 8 + 2 + 9 + 5 + 8 + 3). The ceiling is
+reachable only with the encode beside the lexical lanes.
+
+Two rows rest on direct evidence. The 8 ms BM25 and keyword budgets match a
+replay on one retained connection at 6,500 pages: BM25 3.7 / 7.6 ms and
+keyword 2.6 / 6.5 ms p50 / p95 over 50 queries
+(`verification/subsecond-2026-10-09/sqlcheck.txt`). That replay ran on SQLite
+3.53.1, not on a reference SQLite (decision 8). Dense search
+keeps its 15 ms: the exact scan reads the whole float32 chunk matrix, about
+184 MB at 45,000 chunks of 1,024 dimensions, so memory bandwidth sets its
+floor, and ANN is a non-goal.
+
+Every stage is over its budget today, at p95 by about three times (query
+encode, 116 ms against 40) to about 180 times (unit lanes, 2,143 ms against
+12). Slices 6.3 to 6.8 remove named per-request work from most of them. Three
+rows have no removable work named yet, and for 100 ms at p95 to hold they need
 constant-factor speed:
 
-- Request setup, 9.4 ms at p50 and 28.1 at p95 against a 5 ms budget, must at
-  least halve at p50 and fall about sixfold at p95 (slice 6.11).
+- Request setup, 9.4 ms at p50 and 28.1 at p95 against a 4 ms budget, must
+  fall by more than half at p50 and about sevenfold at p95 (slice 6.11).
 - Graph expand and resolver, 13.9 and 5.1 ms at p50 and 31.4 and 16.3 at p95,
-  must fit the lane's 15 ms once 6.5 moves the seeds. That means at least
-  halving at p50 and falling to about a third at p95 (slice 6.12).
+  must fit the lane's 9 ms once 6.5 moves the seeds. That means falling to
+  under half at p50 and to about a fifth at p95 (slice 6.12).
 - Query encode must fall to about a third at p95, from 116 ms to 40.
 
-Encode is the one this change cannot buy with code: the Cloud lane measured
-45 ms on one thread, and the laptop 33 ms p50 on two. `multilingual-recall`
-already bounds encode p95 at 250 ms, so the 40 ms row is a diagnostic target
-that cites that bound, not a second bound on one quantity. If a quiescent cell
-cannot hold 40 ms at p95, the next step is an evaluation of a smaller served
-encoder, not a wider ceiling. The CPU spin slice (decision 11) comes first,
-because a request that keeps a second core busy slows every stage on a two-CPU
-cell.
+**Encode evidence.** The archived `make-recall-multilingual` D7 table records
+short-query encode at 30 / 43 ms p50 / p95, and bge-m3 int8 whole queries at
+42 / 57 ms at load 22.2. Encode during a one-text-at-a-time build measured
+75 / 178 ms, which is why a request during an index build stays outside the
+warm series. The record does not say whether those runs were pinned to two
+CPUs. The Cloud lane measured 45 ms on one thread, and R3 33 / 116 ms pinned to
+two CPUs at load 16-17. At the D7 whole-query p95 of 57 ms, a request that runs
+every stage would have a 112 ms path (10 + 57 + 15 + 30). The encode decides
+whether the ceiling is reachable, and code in this change cannot buy it. The
+rule for the encode is therefore:
+
+1. The quiet reference run re-measures the encode on the pinned profile.
+2. If the encode p95 alone exceeds its 40 ms budget there, the acceptance run
+   records that p95 as the measured floor, beside the budget.
+3. Neither the ceiling nor the encode budget widens to fit the floor. The
+   lever is the encoder runtime: the thread policy of slice 6.10.
+4. If the floor still exceeds the budget after 6.10, the next step is an
+   evaluation of a smaller served encoder, not a wider ceiling.
+
+`multilingual-recall` already bounds encode p95 at 250 ms, so the 40 ms row is
+a diagnostic target that cites that bound, not a second bound on one
+quantity, and the twice-budget rule does not apply to it. The 100 ms ceiling
+bounds it in practice. The CPU spin slice (decision 11) comes first, because a
+request that keeps a second core busy slows every stage on a two-CPU cell, the
+encode most.
 
 ### 8. The catalogue generation is the unit of precomputation
 
@@ -275,6 +354,21 @@ it with the current path on the reference corpus.
   confirms each plan with `EXPLAIN QUERY PLAN`. It lands after the admission
   candidate-sizing work, which edits `_eligibility_metadata_query`
   (decision 10).
+- **The SQLite that deployments link.** CI's `retrieval-latency` job runs
+  system Python 3.12.3 with SQLite 3.45.1, and Cloud cells link 3.46.1
+  (`python:3.12-slim` on trixie). Without `ANALYZE`, both plan an unordered
+  `fts JOIN pages` from `pages_kb`, which is linear in the KB, while the 3.53
+  that a local uv venv bundles drives the join from `MATCH`. The replays above
+  and `sqlcheck.txt` ran on 3.53.1. #1649 pins every FTS5 `MATCH` join with
+  `CROSS JOIN` (`lexstore._FTS_PAGES`). The keyword lane's `_substring_query`
+  (`lexstore.py:8441`) still uses `tri JOIN pages`, so slice 6.3 pins its
+  `MATCH` branch with `CROSS JOIN` the same way. Its branch without a `MATCH`,
+  where every token is under three characters, scans `pages_kb` by design and
+  stays. A *reference SQLite* is therefore the one that CI's system Python or
+  a Cloud cell links, 3.45.1 or 3.46.1 today. The reference runs link one, and
+  the structural gate and every plan check also run on 3.45.1, the older
+  (decision 9). No verdict then rests on a plan that neither CI nor a Cloud
+  cell runs.
 - **One catalogue read session per request.** Each catalogue query
   (`_serve_from_ready_catalog_result`, `lexstore.py:7770`) runs a readiness proof
   on its own connection, then opens a second connection and proves the
@@ -322,6 +416,13 @@ it with the current path on the reference corpus.
   (`embedding_index.py:1765`). The unit sidecar already holds the parent
   generation and unit metadata for the current generation, the policy is one
   snapshot per request, and the unit matrix is built once per generation.
+  The admitted branch of `search_semantic_units_result`
+  (`lexstore.py:7980-7989`) loads every admitted unit's stemmed text and
+  rebuilds the term frequencies on each call, with no cache. That is the
+  pattern #1649 removes for pages, so a restricted unit search pays for every
+  admitted unit on every query. It is old debt from the #1649 review, and
+  slice 6.6 computes those statistics once per catalogue generation and
+  admitted set.
 - **Dense search.** The vector lane asks for 3 x `candidate_k` chunk rows and
   hydrates the text of every row with an OR of primary-key pairs
   (`embedding_index.py:1822`), but it keeps only the best chunk per file. Three
@@ -393,6 +494,11 @@ threshold, and compares work between two corpus sizes as ratios.
 - *Excluded: dense search.* Exact search is a linear scan of the chunk matrix
   by design, ANN is a non-goal, and the structural gate is model-free; the
   wall-clock instruments bound it.
+- *SQLite versions.* The gate runs on SQLite 3.45.1, the older reference
+  SQLite, from CI's system Python 3.12.3, as well as on the
+  pull-request tier's own SQLite, and its report names each version. A plan
+  that is linear on 3.45 and bounded on 3.53 then fails where it would ship
+  (decision 8).
 - *Not observed.* Python work over in-memory structures, such as graph
   expansion and the carry's scoring loop. The wall-clock ratio checks in
   `tests/test_latency_gate.py` keep covering those.
@@ -442,7 +548,7 @@ absolute threshold.
   with fewer than 20 paired cases reports "insufficient samples".
 - *Stages.* Stage comparisons use the same statistic, name where the time
   moved, and fail nothing. One verdict per series keeps the false-fire rate at
-  the interval's level instead of multiplying it by thirteen stages. A stage
+  the interval's level instead of multiplying it by fourteen stages. A stage
   with fewer than 20 paired cases reports "insufficient samples". A stage that
   the pairing base does not span yet, such as `parent_hints` before 6.3,
   reports "not comparable".
@@ -482,12 +588,20 @@ Control justification:
   record (`benchmarks/recall-latency/accept.json`, beside the gate's other
   inputs, so archiving this change does not move it). The record names
   the release tag it accepts against, the series, a maximum paired ratio per
-  series, the reason and the pull request. A pull request adds it, so the same
+  series, the full-CI run that measured the slowdown, the reason and the pull
+  request. Each maximum ratio is that run's upper confidence bound for the
+  series, rounded up to the next 0.05, so the reviewer can see that the
+  allowance is not padded. A pull request adds it, so the same
   independent review that checks every change checks the waiver; no person
   approves it separately. The job reads it on scheduled and dispatched runs
   alike, so nightly runs stay green for the accepted series. It bounds the
   waiver: an uncovered series, or a covered series beyond its maximum ratio,
-  still fails. It expires by itself when a newer tag exists. There is no run
+  still fails. It expires by itself when a newer tag exists: the job then
+  ignores it, reports it as expired, and the slowdown it covered fails again.
+  An expired record has no effect, so deleting it is housekeeping, not a
+  gate. The agent or operator who drives the release deletes it in a pull
+  request, as a step of `docs/release.md`, unless the next accept record's
+  pull request replaces it first. There is no run
   input that waives the comparison, because a self-granted waiver at dispatch
   time would be the only unreviewed decision in the release path.
 
@@ -500,6 +614,13 @@ code change controls either.
 - *States.* Each verdict is recorded as one of four visible states: passed,
   failed, refused or not measured. A refused verdict holds no ceiling
   comparison, and the operator can repeat it on a quiet cell.
+- *SQLite.* The workstation run links a reference SQLite, 3.45.1 or 3.46.1
+  today, not a local uv venv's 3.53, and it records the version. A run on
+  another version gives no ceiling verdict, as a corpus below the profile
+  gives none. This prevents a passed verdict on plans that neither CI nor a
+  Cloud cell runs (decision 8). When CI or the Cloud image moves to a newer
+  SQLite, the version list beside the accept record changes in one line, and
+  a run that fired wrongly is repeated.
 - *Acceptance.* The workstation state is this change's acceptance check
   (6.9). The change is complete only when a quiet-workstation run on the
   reference corpus records passed. That run's summary is stored under
@@ -565,8 +686,11 @@ gate's question.
 The gate and the structural counters land first, so every slice reports a
 before and an after on the same instrument. The CPU spin slice goes next. The
 other slices then follow the measured saving on a default hybrid request, with
-the unit lanes placed by their saving on `mixed` requests. Tasks section 6
-lists them.
+the unit lanes placed by their saving on `mixed` requests. The concurrent
+encode (6.13) lands last, before the close. It needs one catalogue session per
+request (6.4), the unit lanes' new shape (6.6) and the thread policy (6.10).
+Its saving, the shorter branch, is known only once the lanes are fast. Tasks
+section 6 lists them.
 
 Slices 6.3 to 6.8 land after three changes that touch the same functions:
 
@@ -587,11 +711,12 @@ Runtime's intra-op pool spinning between runs, because
 (`runtime_resources.py:155-169`), or OpenBLAS spinning while idle. Neither is
 verified.
 
-Every span therefore records process CPU time (`cpu_ms`) beside its wall time.
-The value is process-wide, so it includes another thread's spin during the
-span, and stage values overlap when stages run at the same time. Outside query
-encode and the matrix products of dense and unit search, the request path runs
-on one thread. Another stage whose `cpu_ms` exceeds its wall time therefore
+Every span therefore records CPU time (`cpu_ms`) beside its wall time. While
+no other stage overlaps a span, its `cpu_ms` is the process CPU over it, so it
+includes another thread's spin during the span; decision 12 says how
+overlapping stages are counted. Until slice 6.13, outside query encode and the
+matrix products of dense and unit search, the request path runs on one thread.
+Another stage whose `cpu_ms` exceeds its wall time therefore
 shows a second thread at work: a spinning pool, or a background rebuild such as
 the recall resolver's (`find.py:5703`). Slice 6.10 attributes and removes the spin before
 the other slices are measured.
@@ -601,6 +726,68 @@ spinning, and `session.disable_prepacking=1`, which cells that share weights
 set, Cloud cells among them (`embedding_backend.py:543`). Spinning trades CPU
 for wake-up latency, so the slice shows encode latency on the paired instrument
 and keeps encoder output identical.
+
+### 12. The query encode runs beside the lexical lanes
+
+The 100 ms ceiling needs the encode off the serial path (decision 7). After
+eligibility, the request runs two branches at the same time, and the stages
+after the lanes start when both have ended:
+
+- The *encode branch* runs the query encode, then dense search.
+- The *lexical branch* runs BM25, keyword, CLIP where it is enabled, and the
+  unit lanes. The unit lanes' vector search starts when the encode has
+  produced the query vector.
+
+CLIP runs on the lexical branch because it encodes the query text with its
+own model and does not need the bge-m3 vector. On the encode branch it would
+add its 10 ms to the critical path. ONNX Runtime releases the GIL while it
+encodes, SQLite while it steps, and NumPy during matrix products. Python work
+on either branch still takes the GIL in turn, so slice 6.13 measures the
+overlap instead of assuming it.
+
+*Identical results.* Each lane computes its ranking from the query and the
+eligible set alone, and fusion reads the rankings in a fixed lane order, so
+the order in which the branches finish cannot change a result. Lane statuses,
+the degraded and failed lists and the retrieval trace keep the serial order.
+Each branch uses its own connections, and no connection crosses threads; the
+lexical branch owns the request's catalogue session (decision 8). An identity
+test compares fused order, hits, excerpts and lane statuses with the serial
+path on the reference corpus.
+
+*CPU contention.* On two CPUs, the encoder's intra-op pool and the lexical
+thread compete for the same cores, and dense search and the unit lanes'
+vector search compete for memory bandwidth. Slice 6.13 runs the reference
+series both ways, serial and concurrent, on the pinned profile. It keeps the
+concurrency only if the concurrent encode p95 stays within its 40 ms budget.
+Where the serial encode is already above the budget, at its measured floor
+(decision 7), the concurrent encode must stay within 10% of the serial one on
+the paired cases. The thread policy of slice 6.10 and this slice are decided
+on the same instrument.
+
+*Overlapping spans.* Every span keeps its own interval, on the thread that ran
+it, and the timing table keeps one row per stage:
+
+- *Wall time.* A row's wall time is the union of the intervals it counts, so
+  overlap with the other branch neither shortens nor lengthens it. Wherever
+  intervals are added up, at the root or inside a parent, overlapping
+  intervals count once: the covered time is their union, and
+  `unattributed_ms` is `total_ms` less the union of the root-level intervals.
+- *Critical path.* Each request records its critical path: the stages that
+  ran one after another, plus the branch that ended last. Each row reports
+  the share of the series' requests in which its stage lay on the critical
+  path. A stage off the critical path still answers to its budget, because
+  its branch becomes the critical one when it overruns the other.
+- *CPU time per stage.* For each part of a span that no other stage
+  overlaps, `cpu_ms` counts the process CPU, as decision 11 uses it. For each
+  part that another stage overlaps, it counts only the CPU of the threads that
+  the stage owns: the thread that opened the span and the native pool threads
+  it drives. Each thread's CPU comes from `/proc/self/task/<tid>/stat` at the
+  span's boundaries, read only while timing diagnostics are on. A pool that
+  two overlapping stages drive belongs to neither over the overlap. Two
+  concurrent stages therefore never count each other's CPU.
+- *Unattributed CPU.* The request records its process CPU over `total_ms`.
+  The CPU of an overlap that no stage owns, such as a shared pool or a spin,
+  is reported once per request as `unattributed_cpu_ms`.
 
 ## Risks / Trade-offs
 
@@ -631,9 +818,16 @@ and keeps encoder output identical.
 - **[Risk] Seeded corpus vectors hide a dense-search cost.** → Dense cost is a
   function of the matrix size and the candidate counts, which the seeded corpus
   keeps; the live-cell series after each release runs on real vectors.
-- **[Risk] The encode target is wrong for a slower CPU.** → It was measured under
-  load, not on a quiescent cell. The gate reports encode against its target, and
-  a miss leads to an encoder evaluation, not a wider ceiling.
+- **[Risk] The encode budget is below what the pinned profile can do.** → The
+  D7 whole-query p95 of 57 ms already exceeds it, and whether that run was
+  pinned is not recorded. The quiet reference run re-measures the encode and
+  records a miss as the measured floor; the lever is the thread policy of 6.10
+  and then an encoder evaluation, never a wider ceiling (decision 7).
+- **[Risk] The concurrent branches slow each other on two CPUs.** → Slice 6.13
+  keeps the concurrency only when the encode holds its budget, or its serial
+  floor within 10%, on the pinned profile (decision 12). Without the
+  concurrency the budgets sum to 133 ms, so a failed check means the ceiling is
+  out of reach, and the gate records failed rather than a wider ceiling.
 - **[Risk] The filler corpus hides growth that a real vault has.** → In a real
   vault, matches grow with the corpus. The contract bounds that work per
   matched row, and the absolute verdict on the reference corpus and on the live

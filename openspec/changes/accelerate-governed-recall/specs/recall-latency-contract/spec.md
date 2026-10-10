@@ -11,15 +11,15 @@ numbers are measured so a contended box cannot be mistaken for a regression.
 
 On the reference corpus in a process restricted to two CPUs, and on the live
 cell as it is served, quiescent and with warm caches, every warm search series
-SHALL have p95 at or below 200 ms. The two-CPU restriction applies to the
+SHALL have p95 at or below 100 ms, and keyword recall, which runs no query
+encode, SHALL have p95 at or below 50 ms. The two-CPU restriction applies to the
 reference-corpus runs only; the live personal service is not pinned. This covers
 hybrid recall (semantic, BM25, keyword, graph and fusion), keyword recall,
 hybrid recall with one supported structured filter, hybrid recall that runs the
 temporal lane, and the `mixed` and `unit` result levels. Every report shows each
-series' p50 beside a 100 ms target, and keyword recall keeps its p50 ceiling of
-120 ms. The ceilings are the capability's contract, not calibrated from any
-runner, and a gate MUST NOT loosen them. The empty-query browse is outside these
-ceilings.
+series' p50 beside a 50 ms target, which gates nothing. The ceilings are the
+capability's contract, not calibrated from any runner, and a gate MUST NOT
+loosen them. The empty-query browse is outside these ceilings.
 
 The measured principal SHALL be the vault owner, identified through the
 product's owner-authority path with nothing patched. An admitted non-owner
@@ -47,16 +47,22 @@ governed write changed is not an index build.
 #### Scenario: Warm hybrid search on the reference corpus
 
 - **WHEN** thirty or more hybrid requests from the reference query mix run back to back through `ask_memory` as the vault owner, against the warm reference corpus, in a process restricted to two CPUs, after the quiescence check passed
-- **THEN** the p95 of the elapsed time of the `ask_memory` call is at or below 200 ms
-- **AND** the report shows the p50 beside the 100 ms target
+- **THEN** the p95 of the elapsed time of the `ask_memory` call is at or below 100 ms
+- **AND** the report shows the p50 beside the 50 ms target
 - **AND** no request in the series reports a corpus walk in any stage
 
-#### Scenario: Every search shape holds the same ceiling
+#### Scenario: Every search shape holds its ceiling
 
 - **WHEN** the series repeats as keyword recall, as hybrid recall with a `projects` filter that the index can answer, as the dedicated temporal series, and at `result_level="mixed"`
-- **THEN** the p95 of each series is at or below 200 ms
-- **AND** the p50 of the keyword series is at or below 120 ms
+- **THEN** the p95 of each hybrid series is at or below 100 ms
+- **AND** the p95 of the keyword series is at or below 50 ms
 - **AND** the eligibility stage of the filtered series reports an index outcome within its stage budget
+
+#### Scenario: The p50 target gates nothing
+
+- **WHEN** a hybrid series has a p95 of 90 ms and a p50 of 62 ms
+- **THEN** the report shows the p50 over its 50 ms target
+- **AND** the series passes its ceiling
 
 #### Scenario: The owner is real and the admitted principal is reported apart
 
@@ -99,47 +105,89 @@ governed write changed is not an index build.
 
 ### Requirement: Warm Search Stages Stay Within Their Budgets
 
-Each stage of a warm search request SHALL have the fixed p95 budget below, and
-the budgets SHALL sum below the 200 ms ceiling. Each row names the timing span
-keys it counts. A row counts its keys and their children, excluding any
-descendant interval that another row names. The query encode SHALL be spanned
-as `vector.embed` wherever it first runs, inside `semantic_units` included, so
-that no other row absorbs it. A span key that no row counts, by name or as a
-descendant, SHALL be reported as "unbudgeted" with its own p50 and p95, net of
-any descendant interval that a row names, so time cannot hide in an unlisted
-key. Examples are `outside_kb`, `matched_units`, `referents` and the part of
-`semantic.search` that no child covers. A stage that a request does not run is
-reported as not run and is excluded from that stage's percentiles. A gate SHALL
-report the p50 and p95 of each stage's wall time and of its process CPU time
-(`cpu_ms`) beside its budget.
+Each stage of a warm search request SHALL have the fixed p95 budget below.
+Budgets compose along the request's critical path: stages that run one after
+another add, and of branches that run at the same time only the longest
+counts. The encode branch runs the query encode and then dense search. The
+lexical branch runs BM25, keyword, CLIP where it is enabled, and the unit
+lanes, whose vector search waits for the query vector. For a request that runs
+every stage, the critical path of the budgets SHALL be at most 95 ms, under the
+100 ms ceiling. Each row names the timing span keys it counts. A row counts its
+keys and their children, excluding any descendant interval that another row
+names. The query encode SHALL be spanned as `vector.embed` wherever it first
+runs, inside `semantic_units` included, so that no other row absorbs it. A span
+key that no row counts, by name or as a descendant, SHALL be reported as
+"unbudgeted" with its own p50 and p95, net of any descendant interval that a
+row names, so time cannot hide in an unlisted key. Examples are `outside_kb`,
+`matched_units`, `referents` and the part of `semantic.search` that no child
+covers. A stage that a request does not run is reported as not run and is
+excluded from that stage's percentiles.
+
+Spans on different threads can overlap. A row's wall time SHALL be the union
+of the intervals it counts, so overlap neither shortens nor lengthens it. Each
+request SHALL record its critical path: the stages that ran one after another,
+plus the concurrent branch that ended last. A gate SHALL report, for each row,
+the p50 and p95 of its wall time and of its CPU time (`cpu_ms`) beside its
+budget, and the share of the series' requests in which the stage lay on the
+critical path. A stage off the critical path still answers to its budget.
+For each part of a span that no other stage overlaps, `cpu_ms` SHALL count the
+process CPU. For each part that another stage overlaps, it SHALL count only the
+CPU of the threads that the stage owns: the thread that opened the span and
+the native pool threads it drives. A pool that two overlapping stages drive
+belongs to neither over the overlap. The request SHALL record its process CPU
+over `total_ms`, and the CPU of an overlap that no stage owns SHALL be reported
+once per request as `unattributed_cpu_ms`.
 
 A stage verdict SHALL need at least 20 samples that ran the stage. With fewer,
 the gate reports the stage as "insufficient samples", never as a pass or a
 fail. A gate SHALL fail a series in which a stage with enough samples has a p95
 above twice its budget. Query encode is a diagnostic target: its bound is the
 encode p95 of 250 ms in `multilingual-recall`, and the twice-budget rule does
-not apply to it. A budget changes only through this requirement.
+not apply to it. When the encode p95 alone exceeds its budget on the reference
+profile, the acceptance run SHALL record that p95 as the measured floor beside
+the budget, and neither the ceiling nor the budget widens to fit it. A budget
+changes only through this requirement.
 
-| Stage | Span keys | p95 budget |
-|---|---|---|
-| Request setup: recall projection, freshness, pending visibility | `recall_projection`, `pending_visibility`, `freshness`, `cache_lookup` | 5 ms |
-| Admission and structured-filter eligibility | `filter_eligibility` | 15 ms |
-| Query encode (diagnostic target) | `vector.embed`, wherever the encode first runs | 40 ms |
-| Dense search, chunk text included | `vector.index`, `vector.search` | 15 ms |
-| BM25 lane | `bm25` | 10 ms |
-| Keyword lane | `keyword` | 10 ms |
-| Unit lanes (`mixed` and `unit` result levels) | `semantic_units` | 30 ms |
-| Parent hints | `parent_hints`, inside `semantic.search` | 2 ms |
-| Graph lane | `graph`, with `graph.seeds`, `graph.resolver` and `graph.expand` inside it | 15 ms |
-| Temporal lane, when the temporal lane runs | `temporal` | 5 ms |
-| Fusion and multipliers, lexical guard included | `fusion`, `lexical_guard` | 10 ms |
-| Hydration: hit construction, excerpts, release gate, serialization, response blocks | `filter_hits`, `release_gate`, `serialize`, `due_state` | 20 ms |
-| CLIP lane, where CLIP is enabled | `clip` | 10 ms |
+| Stage | Span keys | Runs | p95 budget |
+|---|---|---|---|
+| Request setup: recall projection, freshness, pending visibility | `recall_projection`, `pending_visibility`, `freshness`, `cache_lookup` | before the lanes | 4 ms |
+| Admission and structured-filter eligibility | `filter_eligibility` | before the lanes | 6 ms |
+| Query encode (diagnostic target) | `vector.embed`, wherever the encode first runs | encode branch | 40 ms |
+| Dense search, chunk text included | `vector.index`, `vector.search` | encode branch | 15 ms |
+| BM25 lane | `bm25` | lexical branch | 8 ms |
+| Keyword lane | `keyword` | lexical branch, or alone in keyword recall | 8 ms |
+| CLIP lane, where CLIP is enabled | `clip` | lexical branch | 10 ms |
+| Unit lanes (`mixed` and `unit` result levels) | `semantic_units` | lexical branch; vector search after the encode | 12 ms |
+| Parent hints | `parent_hints`, inside `semantic.search` | after the lanes | 2 ms |
+| Graph lane | `graph`, with `graph.seeds`, `graph.resolver` and `graph.expand` inside it | after the lanes | 9 ms |
+| Temporal lane, when the temporal lane runs | `temporal` | after the lanes | 3 ms |
+| Fusion and multipliers, lexical guard included | `fusion`, `lexical_guard` | after the lanes | 5 ms |
+| Hydration: hit construction, excerpts, release gate, serialization | `filter_hits`, `release_gate`, `serialize` | after the lanes | 8 ms |
+| Due-state response block | `due_state` | after the lanes | 3 ms |
 
 #### Scenario: A stage over its budget is named
 
-- **WHEN** a series meets the 200 ms ceiling but the keyword stage's p95 is more than twice its 10 ms budget
+- **WHEN** a series meets the 100 ms ceiling but the keyword stage's p95 is more than twice its 8 ms budget
 - **THEN** the gate fails and names the keyword stage, its p95 and its budget
+
+#### Scenario: The budgets fit the ceiling on the critical path
+
+- **WHEN** a request runs every stage, with a structured filter, the temporal lane, the unit lanes and CLIP
+- **THEN** its budgeted critical path is 10 ms before the lanes, plus the longer branch, 55 ms, plus 30 ms after the lanes
+- **AND** that path, 95 ms, is under the 100 ms ceiling
+
+#### Scenario: Overlapping stages are counted once
+
+- **WHEN** the query encode and the BM25 lane run at the same time for 8 ms
+- **THEN** each row reports its own wall time
+- **AND** the covered time of their parent counts those 8 ms once
+- **AND** the BM25 row's `cpu_ms` counts only the lexical thread's CPU over the overlap, and the encode row's counts only its own thread and the encoder's pool
+
+#### Scenario: A stage off the critical path still answers to its budget
+
+- **WHEN** the encode branch ends after the lexical branch in every request, and the keyword stage's p95 is more than twice its budget
+- **THEN** the report shows the keyword stage off the critical path
+- **AND** the gate still fails the series and names the keyword stage
 
 #### Scenario: A stage a request did not run is not a zero
 
@@ -177,6 +225,13 @@ not apply to it. A budget changes only through this requirement.
 - **WHEN** query encode p95 is above 80 ms and at or below 250 ms
 - **THEN** the gate reports encode over its 40 ms target
 - **AND** the encode stage does not fail the series
+- **AND** the series still answers to its 100 ms ceiling
+
+#### Scenario: An encode floor above the budget is recorded, not absorbed
+
+- **WHEN** the quiet reference run measures the encode p95 alone at 48 ms on the pinned profile
+- **THEN** the acceptance summary records 48 ms as the measured floor beside the 40 ms budget
+- **AND** the ceiling stays 100 ms and the encode budget stays 40 ms
 
 ### Requirement: Warm Search Work Is Bounded Per Candidate And Per Matched Row
 
@@ -195,7 +250,10 @@ at most one readiness proof per scope per request. Ranking, temporal,
 graph-seed and unit-lane stages SHALL read page and unit metadata from the
 maintained catalogue and sidecars for the current generation, not from
 Markdown. A gate SHALL check the work bounds as ratios between two corpus sizes
-that hold the same candidate set, and SHALL NOT pin absolute work counts.
+that hold the same candidate set, and SHALL NOT pin absolute work counts. The
+gate and every query-plan check SHALL also run on the older reference
+SQLite (see `The Reference Corpus And Query Mix Are Fixed`), and the gate's
+report SHALL name each SQLite version it ran on.
 
 #### Scenario: Corpus growth cannot hide per-candidate work
 
@@ -223,6 +281,12 @@ that hold the same candidate set, and SHALL NOT pin absolute work counts.
 - **AND** it drives `ask_memory` and `activate_context` as the vault owner and as one admitted principal
 - **AND** the admitted principal's bounds fail the gate only once admission no longer sizes the candidate pool, and are reported until then
 
+#### Scenario: A plan is checked on the older reference SQLite
+
+- **WHEN** a catalogue join plans from `MATCH` on the pull-request tier's SQLite but from `pages_kb` on SQLite 3.45.1, which CI's system Python links
+- **THEN** the structural gate fails on 3.45.1 and names the stage of that query
+- **AND** its report names both SQLite versions
+
 ### Requirement: Search Latency Is Gated Before Release
 
 In the scheduled and dispatched full CI, the `retrieval-latency` job SHALL
@@ -243,13 +307,19 @@ to the margin slower than the release before it.
 A deliberate slowdown SHALL be accepted only through a committed accept
 record, which a pull request adds and the normal independent review checks.
 The record SHALL name the release tag it accepts against, each series it
-covers, a maximum paired ratio for each, the reason and the pull request. The
-job SHALL read it on scheduled and dispatched runs alike. A covered series
-whose interval's lower bound stays at or below its maximum ratio SHALL report
+covers, a maximum paired ratio for each, the full-CI run that measured the
+slowdown, the reason and the pull request. Each maximum ratio SHALL be that
+run's upper confidence bound for the series, rounded up to the next 0.05, so
+the reviewer can check the allowance against the run. The job SHALL read the
+record on scheduled and dispatched runs alike. A covered series whose
+interval's lower bound stays at or below its maximum ratio SHALL report
 "accepted" with the reason and SHALL NOT fail. Any other series beyond the
 margin, and a covered series beyond its maximum ratio, SHALL fail. A record
 whose tag is not the most recent release tag SHALL be ignored and reported as
-expired. No run input SHALL waive the comparison.
+expired, and it no longer excuses the slowdown it covered. An expired record
+has no other effect. The agent or operator who drives the release deletes it,
+unless the next accept record replaces it first. No run input SHALL waive the
+comparison.
 
 The absolute verdict on the ceilings and the stage budgets SHALL come from a
 run on a quiet workstation, on the reference corpus in a process restricted to
@@ -274,7 +344,7 @@ Release. A release with no attached summary SHALL show
 #### Scenario: A deliberate slowdown ships through a reviewed accept record
 
 - **WHEN** a merged correctness fix makes warm hybrid requests 15% slower than the most recent release tag
-- **AND** a merged accept record names that tag, the hybrid series, a maximum ratio of 1.20 and the fix
+- **AND** a merged accept record names that tag, the hybrid series, the full-CI run whose upper bound for that series was 1.17, a maximum ratio of 1.20 and the fix
 - **THEN** scheduled and dispatched runs report the hybrid series as accepted, with the reason and the paired ratios, and do not fail
 
 #### Scenario: An accept record does not cover another regression
@@ -287,6 +357,7 @@ Release. A release with no attached summary SHALL show
 
 - **WHEN** a new release is tagged after an accept record was merged
 - **THEN** the job pairs with the new tag, ignores the record and reports it as expired
+- **AND** a covered series that is still beyond the margin against the new tag fails
 
 #### Scenario: A failed or refused live-cell verdict opens work and blocks nothing
 
@@ -323,7 +394,8 @@ Release. A release with no attached summary SHALL show
 ### Requirement: The Reference Corpus And Query Mix Are Fixed
 
 The workstation run and the full-CI paired comparison SHALL measure a
-deterministic generated reference corpus with:
+deterministic generated reference corpus, in a process that links a
+reference SQLite, with:
 
 - at least 6,500 governed pages, with typed frontmatter and 5 to 25 wikilinks per page;
 - realistic prose with a vocabulary of at least 5,000 terms and a median page of 2 to 3 KB;
@@ -339,11 +411,23 @@ all run the temporal lane, SHALL give the temporal stage its samples. The
 live-cell series uses the owner's vault and reports its page, chunk and unit
 counts in buckets of 500.
 
+A reference SQLite is the one that CI's system Python or a Cloud cell links:
+today 3.45.1 in CI's system Python 3.12.3, and 3.46.1 on Cloud cells
+(`python:3.12-slim` on trixie). Every run SHALL record its SQLite version. A
+workstation run on another SQLite, such as the 3.53 that a local uv venv
+bundles, SHALL give no ceiling verdict.
+
 #### Scenario: A corpus below the profile is not the reference
 
 - **WHEN** a gate runs on a generated corpus with fewer pages, chunks or units than the profile names
 - **THEN** it reports the counts it measured
 - **AND** it gives no ceiling verdict for that corpus
+
+#### Scenario: A SQLite outside the reference is not the reference
+
+- **WHEN** a workstation run links SQLite 3.53 from a local uv venv
+- **THEN** it reports that version
+- **AND** it gives no ceiling verdict, because its query plans are not the plans that CI or a Cloud cell runs
 
 ### Requirement: The Read Path Never Walks The Corpus
 
@@ -369,25 +453,33 @@ reappears is visible without a benchmark.
 
 ### Requirement: Timing Attribution Is Complete
 
-For a real recall with timing diagnostics enabled, the sum of stage durations
-plus `unattributed_ms` SHALL NOT exceed `total_ms`, and `unattributed_ms` SHALL
-NOT exceed fifteen percent of `total_ms`. Inside a parent stage, time that no
-child stage covers SHALL stay within the larger of fifteen percent of the
-parent and 10 ms. Every stage that reports a duration SHALL be an interval
+For a real recall with timing diagnostics enabled, the time that the
+root-level stage intervals cover, plus `unattributed_ms`, SHALL NOT exceed
+`total_ms`, and `unattributed_ms` SHALL NOT exceed fifteen percent of
+`total_ms`. Wherever intervals are added up, at the root or inside a parent,
+intervals that overlap SHALL count once: the covered time is their union.
+Inside a parent stage, time that no child stage covers SHALL stay within the
+larger of fifteen percent of the parent and 10 ms. Every stage that reports a duration SHALL be an interval
 registered with the timing merge, never a manual difference written into the
 table.
 
 #### Scenario: A real recall satisfies the attribution bound
 
 - **WHEN** an opt-in timed hybrid recall runs through the public leaf, not a hand-built timing object
-- **THEN** the sum of the root-level stages plus `unattributed_ms` does not exceed `total_ms`,
+- **THEN** the time that the root-level stages cover, overlapping intervals counted once, plus `unattributed_ms` does not exceed `total_ms`,
   nested stages being reported under their parent rather than counted again at the root
 - **AND** `unattributed_ms <= 0.15 * total_ms` holds
 
 #### Scenario: A costly step cannot hide inside a parent stage
 
-- **WHEN** a sub-step inside a 200 ms `semantic.search` takes 85 ms and registers no interval of its own
+- **WHEN** a sub-step inside a 90 ms `semantic.search` takes 40 ms and registers no interval of its own
 - **THEN** the completeness check fails and names `semantic.search` with its uncovered time
+
+#### Scenario: Concurrent branches are not uncovered time
+
+- **WHEN** the encode branch and the lexical branch inside a 70 ms `semantic.search` overlap for 30 ms
+- **THEN** the covered time of `semantic.search` counts those 30 ms once
+- **AND** its uncovered time is its duration less the union of its children's intervals
 
 #### Scenario: Fixed overhead in a small parent is not a hidden step
 

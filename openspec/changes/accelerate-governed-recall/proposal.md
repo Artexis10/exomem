@@ -23,9 +23,11 @@ and there is no gate that would notice if any of them regressed. The
 floor; this change removes the read-side one.
 
 On 2026-10-09 the owner set the target for every search mode (semantic, BM25,
-keyword): subsecond and well under, with 100 to 200 ms acceptable. The 300/600 ms
-ceilings this change first set do not meet that, and the Cloud service gate (p95
-at or below 3 s in `cloud-service-resource-policy`) is fifteen times looser. A
+keyword): subsecond and well under, with 100 to 200 ms acceptable. The owner then
+asked why search cannot run under 100 ms, and the bar became 100 ms at p95. The
+300/600 ms ceilings this change first set do not meet that, and the Cloud service
+gate (p95 at or below 3 s in `cloud-service-resource-policy`) is thirty times
+looser. A
 reproduction on a 6,500-page synthetic vault in a process pinned to two CPUs
 measured warm hybrid `ask_memory` at p50 363-700 ms and p95 636-1,799 ms over
 three runs, and the `mixed` result level at p50 871 ms and p95 2,460 ms
@@ -70,18 +72,24 @@ its read entry points.
 - The graph rebuild's whole-vault optimistic check stays out of scope; it is
   owned by `converge-graph-incrementally`. This change only ensures a rebuild in
   flight cannot invalidate the read-side caches.
-- The latency contract tightens to warm search p95 at or below 200 ms, with a
-  100 ms p50 target, on a two-CPU cell of at least 6,500 pages. It covers hybrid,
-  keyword, filtered and `mixed`/`unit` requests, measured as the elapsed time of
-  the `ask_memory` call. Keyword recall keeps its 120 ms p50 ceiling, and the
-  empty-query browse stays outside the ceilings.
+- The latency contract tightens to warm search p95 at or below 100 ms, with a
+  50 ms p50 target that gates nothing, on a two-CPU cell of at least 6,500
+  pages. It covers hybrid, keyword, filtered and `mixed`/`unit` requests,
+  measured as the elapsed time of the `ask_memory` call. Keyword recall, which
+  runs no query encode, holds p95 at or below 50 ms, which replaces its 120 ms
+  p50 ceiling. The empty-query browse stays outside the ceilings.
 - The measured principal is the real vault owner, with nothing patched. An
   admitted non-owner series is reported apart and gates once admission no
   longer sizes the candidate pool.
-- Each stage of the request gets a p95 budget, named by its timing span keys,
-  and the budgets sum below the ceiling. The gate names a stage that exceeds
-  twice its budget, and reports process CPU per stage. Query encode keeps the
-  bound that `multilingual-recall` already sets; its stage budget is a target.
+- Each stage of the request gets a p95 budget, named by its timing span keys.
+  The query encode runs beside the BM25, keyword and unit lanes, so the budgets
+  compose along the request's critical path: at most 95 ms for a request that
+  runs every stage, where the serial sum would be 133 ms. The gate names a
+  stage that exceeds twice its budget. It reports wall time, CPU time and the
+  critical path per stage, and counts overlapping stages once. Query encode
+  keeps the bound that `multilingual-recall` already sets, and its stage budget
+  is a target. A measured encode floor above that target is recorded and moves
+  the encoder runtime, not the contract.
 - Search work is bounded per candidate and per matched row. Catalogue queries
   keyed by the candidate set do work that does not grow with the corpus for a
   fixed candidate set. BM25 and keyword do bounded work per matched row.
@@ -101,7 +109,9 @@ its read entry points.
   load cannot fire it. CI does not bound drift across releases: each release
   can be up to 10% slower than the one before it. A quiet workstation run and
   the live-cell series after each release record the absolute verdict on the
-  ceilings and budgets as passed, failed, refused or not measured. The agent or
+  ceilings and budgets as passed, failed, refused or not measured. The
+  workstation run links the SQLite that CI or a Cloud cell links, not a local
+  venv's newer one. The agent or
   operator who rolls the live cell attaches that record to the release's GitHub
   Release. The record never gates CI or a release, and a failed or refused
   state opens follow-up work. The workstation record is this change's
@@ -162,7 +172,9 @@ its read entry points.
   catalogue columns, unit-lane hydration), `src/exomem/embedding_index.py` (chunk
   text after fusion, unit matrix per generation), `src/exomem/commands.py` and
   `src/exomem/due_state.py` (response blocks inside the timings),
-  `src/exomem/find_types.py` (`cpu_ms` per span), `src/exomem/runtime_resources.py`
+  `src/exomem/find.py` and `src/exomem/find_candidates.py` (the query encode
+  beside the lexical lanes), `src/exomem/find_types.py` (`cpu_ms` per span,
+  overlapping spans counted once), `src/exomem/runtime_resources.py`
   and `src/exomem/embedding_backend.py` (the cell thread policy),
   `scripts/synth_vault.py` (reference corpus), `scripts/recall_latency_gate.py`
   and its test (new ceilings and budgets, the paired mode), a new pull-request
