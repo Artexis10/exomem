@@ -31,7 +31,11 @@ def private_instances(configured_boundary, vault):
         "destinations": {},
         "selections": {},
     }
-    data["capture_paths"] += ["Knowledge Base/_Schema/public", "Knowledge Base/_Schema/history/public"]
+    # A limited client creates only under capture paths, so one entity folder is one.
+    data["capture_paths"] += [
+        "Knowledge Base/_Schema/public", "Knowledge Base/_Schema/history/public",
+        "Knowledge Base/Entities/Venues",
+    ]
     config.write_text(json.dumps(data))
     authority = state_migration.assert_offline_migration_authority(source="private vocabulary fixture")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
@@ -587,7 +591,6 @@ def test_a_legacy_armed_vault_refuses_an_unassigned_planning_value_and_keeps_shi
     assert refused.value.code == "PLANNING_VALUES_UNAVAILABLE"
 
 
-
 MEETING_TYPE_OVERLAY = (
     "schema_version: 1\nentries:\n  meeting-note:\n"
     "    attributes: {role: compiled, folder: Notes/Meetings}\n"
@@ -651,6 +654,8 @@ def test_a_legacy_armed_vault_refuses_an_unassigned_note_type_and_keeps_shipped_
             _blocking_codes(vault, "Knowledge Base/Notes/Meetings/2026-10-sync.md", "meeting-note")
     assert "missing_semantic_unit" in shipped
     assert refused.value.code == "NOTE_TYPE_DEFINITION_UNAVAILABLE"
+    # The overlay itself is valid: the remedy is assignment, not its inspect findings.
+    assert "arming" in refused.value.remediation
 
 
 def test_a_legacy_armed_vault_reports_unassigned_registries_instead_of_failing_bootstrap(
@@ -709,3 +714,88 @@ def test_a_limited_client_reads_entity_types_from_the_bound_public_overlay(priva
         )
     assert "venue" in [item["id"] for item in bootstrap["entity_registry"]["types"]]
     assert [match["id"] for match in resolved["exact_matches"]] == ["venue"]
+
+
+def test_a_limited_client_resolves_and_observes_the_bound_public_registries(
+    private_instances, vault
+):
+    """Relation and entity resolution, entity creation and review hashes admit the bound overlays.
+
+    They used to admit the unbound default paths, which a limited client cannot
+    read, and so refused registries that the public instance defines.
+    """
+    from exomem import commands, vocabulary_review
+    from exomem.governance import principal
+
+    full, limited = private_instances("full"), private_instances("limited")
+    with principal.request_scope(full):
+        for subject, proposal in (
+            ("entity-types", {"upsert": {"venue": {
+                "label": "Venue", "guidance": "A place for recurring meetings.",
+                "parent": "concept", "attributes": {"folder": "Venues"},
+            }}}),
+            ("relations", {"upsert": {"vault.hosts": {
+                "parent": "relates_to", "description": "A venue hosts an event.",
+            }}}),
+        ):
+            inspected = commands.op_schema_memory(vault, "inspect", subject=subject)
+            saved = commands.op_schema_memory(
+                vault, "save", subject=subject, proposal=proposal,
+                expected_hash=inspected["content_hash"], why="Public meeting places",
+            )
+            assert saved["valid"]
+        relation_for_full = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="vault.hosts"
+        )
+        hashes_for_full = vocabulary_review.registry_hashes(vault)
+    with principal.request_scope(limited):
+        relation = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="vault.hosts"
+        )
+        created = commands.op_connect_memory(
+            vault, "create-entity", entity_type="venue", name="Harbour Hall",
+            summary="A hall by the harbour.", registry_scope="public",
+        )
+        entity = commands.op_connect_memory(
+            vault, "resolve-entity", name="Harbour Hall", entity_type="venue"
+        )
+        hashes = vocabulary_review.registry_hashes(vault)
+    assert relation == relation_for_full
+    assert [match["canonical"] for match in relation["exact_matches"]] == ["vault.hosts"]
+    assert entity["status"] == "match"
+    assert entity["candidates"][0]["path"] == created["path"]
+    assert hashes == hashes_for_full
+
+
+def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_instances, vault):
+    """Each response names the overlay that the bound public instance reads and writes.
+
+    They used to name the unbound default path while the bytes went to the bound
+    path, and the relation save gated a limited client on that default path.
+    """
+    from exomem import commands, relation_registry
+    from exomem.governance import principal
+
+    venue = {"schema_version": 1, "entity_types": {"venue": {
+        "parent": "concept", "folder": "Venues", "label": "Venue", "aliases": [],
+        "capture_guidance": "A place for recurring meetings.", "status": "active",
+    }}}
+    with principal.request_scope(private_instances("full")):
+        entities = commands.op_schema_memory(
+            vault, operation="save-entity-types", proposal=venue, why="Public meeting places",
+        )
+    with principal.request_scope(private_instances("limited")):
+        relations = commands.op_schema_memory(
+            vault, subject="relations", operation="save-relations", why="Public meeting places",
+            expected_hash=relation_registry.load_registry(vault).extension_hash,
+            proposal={"upsert": {"vault.hosts": {
+                "parent": "relates_to", "description": "A venue hosts an event.",
+            }}},
+        )
+        bootstrap = commands.op_bootstrap(vault, profile="full")
+    assert entities["saved"]["path"] == "Knowledge Base/_Schema/public/entity-types.yaml"
+    assert "venue" in (vault / entities["saved"]["path"]).read_text(encoding="utf-8")
+    assert relations["saved"]["path"] == "Knowledge Base/_Schema/public/relation-registry.yaml"
+    assert "vault.hosts" in (vault / relations["saved"]["path"]).read_text(encoding="utf-8")
+    taxonomy_path = bootstrap["source_taxonomy"]["registry"]
+    assert taxonomy_path == "Knowledge Base/_Schema/public/source-taxonomy.yaml"

@@ -222,6 +222,12 @@ def select(root: Path, spec: RegistrySpec, scope: str | None = None, *,
                    overlay=lambda vault: Path(vault) / overlay, stem=stem)
 
 
+def selected_overlay(root: Path, spec: RegistrySpec, *, authoring: bool = False) -> str:
+    """The vault-relative overlay of the public instance that a read or write of `spec` selects."""
+    root = Path(root)
+    return select(root, spec, authoring=authoring).overlay(root).relative_to(root).as_posix()
+
+
 def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
     """Supply assigned registry membership without decoding its definitions."""
     from .. import registry_history

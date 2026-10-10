@@ -117,6 +117,8 @@ def selected_admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str
     A selection or binding error makes the registry unavailable instead of
     escaping the caller.
     """
+    if not Path(vault_root).is_dir():
+        return None  # A vault that does not exist holds no overlay to withhold; reads get the pack.
     try:
         spec = instances.select(Path(vault_root), spec)
     except RegistryError as error:

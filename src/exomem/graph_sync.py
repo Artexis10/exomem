@@ -2763,9 +2763,14 @@ class GraphRebuildCoordinator:
                 return
             deferred_index.mark_graph_full_rebuild(self.vault_root, generation=generation)
         except Exception:  # noqa: BLE001 - the stop must still reach waiters; a later write or reconcile recovers
-            logger.warning("graph rebuild stopped with no sidecar; could not queue a full rebuild", exc_info=True)
+            logger.warning(
+                "graph rebuild stopped with no sidecar; could not queue a full rebuild",
+                exc_info=True,
+            )
             return
-        logger.info("graph rebuild stopped with no sidecar; queued a full rebuild generation=%s", generation)
+        logger.info(
+            "graph rebuild stopped with no sidecar; queued a full rebuild generation=%s", generation
+        )
 
     def _run(self, shutdown: threading.Event | None = None) -> None:
         attempts = 0

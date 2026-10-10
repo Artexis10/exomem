@@ -348,10 +348,18 @@ def shipped(predicate: Predicate | None = None) -> tuple[NoteType, ...]:
 
 
 class NoteTypeUnavailable(OpError):
-    """A write needs a note-type definition, and the admitted overlay is invalid."""
+    """A write needs a note-type definition that the vault's registry cannot supply."""
 
 
-def unavailable_error() -> NoteTypeUnavailable:
+def unavailable_error(*, unassigned: bool = False) -> NoteTypeUnavailable:
+    if unassigned:
+        return NoteTypeUnavailable(
+            "NOTE_TYPE_DEFINITION_UNAVAILABLE",
+            "The note-type registry needs assignment through connector-boundary arming, "
+            "so the definition this write needs is unavailable.",
+            "Assign the registry's namespace through stopped connector-boundary arming, "
+            "or use a shipped note type.",
+        )
     return NoteTypeUnavailable(
         "NOTE_TYPE_DEFINITION_UNAVAILABLE",
         "The note-type overlay is invalid, so the definition this write needs is unavailable.",
@@ -367,11 +375,12 @@ class Resolution:
     note_type: NoteType | None = None
     available: bool = True
     unregistered: bool = False
+    unassigned: bool = False
 
     def require(self) -> NoteType | None:
         """The definition, None when unregistered, untyped or withheld; raises when unavailable."""
         if not self.available:
-            raise unavailable_error()
+            raise unavailable_error(unassigned=self.unassigned)
         return self.note_type
 
     def selects(self, predicate: Predicate) -> bool:
@@ -381,6 +390,7 @@ class Resolution:
 
 _UNTYPED = Resolution()
 _UNAVAILABLE = Resolution(available=False)
+_UNASSIGNED = Resolution(available=False, unassigned=True)
 _UNREGISTERED = Resolution(unregistered=True)
 
 
@@ -416,11 +426,11 @@ class Basis:
     refuses: bool = True
     _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
-    _unselected: bool = field(default=False, init=False, repr=False)
+    _selection_error: registry.RegistryError | None = field(default=None, init=False, repr=False)
 
     def _load(self) -> None:
         self._attempted = True
-        self._snapshot, self._unselected = None, False
+        self._snapshot, self._selection_error = None, None
         if self.root is None:
             return
         if not self.root.is_dir():
@@ -443,8 +453,8 @@ class Basis:
             spec = instances.select(root, SPEC)
             if admission_refusal(root, spec) is None:
                 self._snapshot = registry.load(spec, root)
-        except registry.RegistryError:
-            self._unselected = True
+        except registry.RegistryError as error:
+            self._selection_error = error
 
     def _extension(self) -> NoteTypeRegistry | None:
         if not self._attempted:
@@ -460,12 +470,15 @@ class Basis:
 
     def _withheld(self) -> Resolution:
         from .governance.principal import current_principal
+        from .vocabulary import instances
 
         # Without admission the value has no definition, as before the registry.
         # A library call that no surface bound has no audience to refuse for.
-        withheld = self._snapshot is None and not self._unselected
+        withheld = self._snapshot is None and self._selection_error is None
         if withheld or not self.refuses or current_principal() is None:
             return _UNTYPED
+        if isinstance(self._selection_error, instances.AssignmentRequired):
+            return _UNASSIGNED
         return _UNAVAILABLE
 
     def resolve(self, value: object) -> Resolution:

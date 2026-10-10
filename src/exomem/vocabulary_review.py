@@ -69,10 +69,10 @@ def _read_registry_overlay(vault_root: Path, spec: Any, ref: str) -> dict[str, A
 def _require_registry_observation(vault_root: Path) -> None:
     # Currency and collision outcomes depend on whole registries; private domains
     # must exist before a limited caller can observe their private definitions.
-    who = effective_principal()
-    for path in (relation_registry.extension_registry_path(vault_root),
-                 entity_types.extension_registry_path(vault_root)):
-        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+    from .vocabulary.contract import selected_admission_refusal
+
+    for spec in (relation_registry.SPEC, entity_types.SPEC):
+        if selected_admission_refusal(vault_root, spec) is not None:
             raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
 
 

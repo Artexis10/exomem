@@ -592,12 +592,12 @@ def save_registry(
 ) -> dict[str, Any]:
     """Replace the overlay with one reviewed document, keeping history."""
     from .governance import connector_boundary, principal
+    from .vocabulary import instances
 
-    path = extension_registry_path(vault_root)
+    path = instances.selected_overlay(vault_root, SPEC, authoring=True)
     # Saved continuity is safe only when the whole extension registry is admitted.
     # Otherwise a collision or stale guard would expose a private definition.
-    rel = path.relative_to(vault_root).as_posix()
-    if not connector_boundary.permits(vault_root, rel, principal.effective_principal()):
+    if not connector_boundary.permits(vault_root, path, principal.effective_principal()):
         raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry is unavailable")
     registry = load_registry(vault_root, proposal=proposal)
     if _blocking(registry):
@@ -633,7 +633,7 @@ def save_registry(
         ),
     )
     return {
-        "path": path.relative_to(vault_root).as_posix(),
+        "path": path,
         "content_hash": _content_hash(rendered),
         "previous_hash": current_hash,
         "created": current_hash is None,

@@ -411,7 +411,9 @@ def save_registry(
             "OBSERVED_ENTITY_TYPE_DELETION: deprecate observed ids instead: "
             f"{removed}"
         )
-    path = extension_registry_path(vault_root)
+    from .vocabulary import instances
+
+    path = instances.selected_overlay(vault_root, SPEC, authoring=True)
     inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     current_hash: str | None = None
     if inspected.overlay_text is not None:
@@ -437,7 +439,7 @@ def save_registry(
         ),
     )
     return {
-        "path": path.relative_to(vault_root).as_posix(),
+        "path": path,
         "content_hash": _content_hash(rendered),
         "previous_hash": current_hash,
         "created": current_hash is None,

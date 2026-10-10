@@ -684,6 +684,7 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     agent that never sees the lists still classifies correctly.
     """
     from . import source_taxonomy as source_taxonomy_module
+    from .vocabulary import instances
     from .vocabulary.contract import selected_admission_refusal
 
     refusal = selected_admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
@@ -713,8 +714,8 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
             "this metadata, not the model itself. A captured source keeps its path so "
             "provenance references stay valid; classification applies to new captures."
         )
-        projection["registry"] = (
-            source_taxonomy_module.registry_path(vault_root).relative_to(vault_root).as_posix()
+        projection["registry"] = instances.selected_overlay(
+            vault_root, source_taxonomy_module.KIND_SPEC
         )
         projection["source_kinds"] = [
             taxonomy.kinds[key].as_dict() for key in sorted(taxonomy.kinds)
@@ -9633,11 +9634,11 @@ def op_connect_memory(
         supported=operation in {"create-entity", "accept-relation"},
     )
     if operation == "resolve-relation":
-        if not egress_module.content_permits(
-            vault_root, relation_registry_module.extension_registry_path(vault_root).relative_to(vault_root).as_posix(),
-            principal_module.effective_principal(),
-        ):
-            return {"available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
+        from .vocabulary.contract import selected_admission_refusal
+
+        refusal = selected_admission_refusal(vault_root, relation_registry_module.SPEC)
+        if refusal is not None:
+            return {"available": False, "reason": refusal["reason"]}
         supplied = locals()
         unrelated_defaults = {
             "unit_ref": None,

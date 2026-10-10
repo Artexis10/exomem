@@ -156,14 +156,13 @@ def resolve_entity_candidate(
     holds answers exactly as `no_match`. (A write that creates such an entity
     then proceeds; reconciling the duplicate is the owner's work.)
     """
-    from .entity_types import extension_registry_path
+    from .entity_types import SPEC
     from .governance import egress
-    from .governance.principal import effective_principal
+    from .vocabulary.contract import selected_admission_refusal
 
-    registry_path = extension_registry_path(vault_root).relative_to(vault_root).as_posix()
     # Private registry aliases and folders cannot influence public resolution;
-    # this operation is unavailable until its whole registry is admitted.
-    if not egress.content_permits(vault_root, registry_path, effective_principal()):
+    # this operation is unavailable until the whole selected registry is admitted.
+    if selected_admission_refusal(vault_root, SPEC) is not None:
         raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
 
     needle = identity_key(name)
