@@ -470,6 +470,17 @@ scratch to hash, hold, or replace — the failure class that has caused
 whole-vault rebuild chains and warm-up stalls when live state synced between
 machines.
 
+The structured collection store checks this before it writes its live
+database. Store custody stays unverified while the vault or the state directory
+is inside a file-sync root. Custody recognizes a root from the evidence in the
+`sync-providers` vocabulary registry: client metadata files, cloud document
+paths, platform variables, Windows sync folder names and vault sync plugins.
+If your sync client is not in the shipped pack, add it with
+`schema_memory(subject="sync-providers", operation="save")` or in
+`_Schema/sync-providers.yaml`. You can also list sync roots as absolute paths
+in `EXOMEM_COLLECTION_STORE_SYNC_ROOTS`. A vault entry can only add evidence;
+it cannot change or remove a shipped entry.
+
 Ordinary service and stateful CLI startup is read-only at this boundary. It
 never creates the state root, copies or removes a legacy file, resumes an
 interrupted transition, or upgrades a manifest. Until an explicit offline

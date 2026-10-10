@@ -2515,6 +2515,38 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     assert embeddings.ClipIndex(vault).has(res.path)
 
 
+def test_a_clip_job_queued_before_clip_was_disabled_skips_clip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A durable job outlives the switch: on the Cloud image every one of them
+    # tried CLIP and warned, and with a CLIP stack it would still embed.
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    res = preserve.preserve_bytes(
+        vault,
+        scope="Yolo",
+        category="photos",
+        filename="p.jpg",
+        data=b"\xff\xd8\xff",
+        text="beach",
+    )
+    attempts: list[Path] = []
+    monkeypatch.setattr(
+        embeddings,
+        "embed_image",
+        lambda p: attempts.append(p) or np.ones(embeddings.CLIP_DIM, dtype=np.float32),
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    media_worker.MediaWorker(vault)._process(
+        media_worker._Job(
+            binary_path=vault / res.path,
+            sidecar_path=vault / res.sidecar_path,
+            media_type="image",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+    assert attempts == []
+    assert not embeddings.ClipIndex(vault).has(res.path)
+
+
 def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
