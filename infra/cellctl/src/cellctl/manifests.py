@@ -187,6 +187,9 @@ class CellManifestSpec:
     # otherwise-0.0.0.0/0 rule to object storage on 443.
     job_egress_except: tuple[str, ...] = ()
     artifact_broker_url: str = ""
+    # cloud-multimodal-processing D7: the media engines switched on in this cell,
+    # comma-separated, or "" to leave the image's default (every engine off).
+    media_engines: str = ""
 
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
@@ -464,6 +467,11 @@ def _container_security_context() -> dict:
     }
 
 
+# The per-cell media engine switch (cloud-multimodal-processing D7). It is the
+# variable the runtime's media_engines module reads.
+MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
+
+
 # NEW-2: model_env is operator-only chart configuration, so this stays a
 # denylist rather than an allowlist (which would make every new model setting
 # a cellctl change). It refuses what relocates state, config or a writable
@@ -482,6 +490,11 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         "EXOMEM_CONFIG_PATH",
         "EXOMEM_CALL_LEDGER_DIR",
         "EXOMEM_KB_DIRNAME",
+        # Rendered per cell from the media engine selection, never chart-wide.
+        MEDIA_ENGINES_ENV,
+        # `inline` would run media extraction inside the serving process, which a
+        # cell must never do (cloud-multimodal-processing): media stays in its child.
+        "EXOMEM_MEDIA_WORKER_MODE",
         "EXOMEM_LEASE_COORDINATOR_DB",
         "EXOMEM_RANKING_CONFIG",
         "EXOMEM_HOOK_HOME",
@@ -586,6 +599,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     check_model_env(spec.model_env)
     for key, value in sorted(spec.model_env.items()):
         env.append({"name": key, "value": value})
+    if spec.media_engines:
+        env.append({"name": MEDIA_ENGINES_ENV, "value": spec.media_engines})
     return env
 
 

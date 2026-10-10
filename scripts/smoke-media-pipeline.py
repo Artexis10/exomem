@@ -38,7 +38,7 @@ def _wait(predicate, *, timeout=120.0, what="condition"):
 
 
 def _missing_dependencies() -> list[str]:
-    modules = ("PIL", "fitz", "pytesseract", "faster_whisper", "sentence_transformers", "av")
+    modules = ("PIL", "fitz", "faster_whisper", "sentence_transformers", "av")
     missing = [name for name in modules if importlib.util.find_spec(name) is None]
     missing.extend(name for name in ("tesseract", "espeak", "ffmpeg") if not shutil.which(name))
     return missing

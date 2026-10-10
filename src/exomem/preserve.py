@@ -1575,26 +1575,32 @@ def render_sidecar_processing_failure(
     return content
 
 
-def update_sidecar_processing_pending(
-    vault_root: Path,
-    sidecar_path: Path,
-    *,
-    attempts: int,
-    expected_hash: str | None = None,
-) -> bool:
-    """Keep changed-in-flight media automatic and actionable until reconciliation."""
-    before = sidecar_path.read_text(encoding="utf-8")
-    content = before
+def render_sidecar_processing_pending(content: str, *, attempts: int, next_action: str) -> str:
+    """Render the pending presentation: no error, and the media waits for processing."""
     fields = (
         ("extracted_by", "pending"),
         ("processing_state", "pending"),
         ("processing_attempts", str(attempts)),
         ("processing_error", "null"),
         ("processing_retryable", "true"),
-        ("processing_next_action", "wait for media reconciliation"),
+        ("processing_next_action", yaml_scalar(next_action)),
     )
     for field, value in fields:
         content = _set_frontmatter_field(content, field, value)
+    return content
+
+
+def update_sidecar_processing_pending(
+    vault_root: Path,
+    sidecar_path: Path,
+    *,
+    attempts: int,
+    expected_hash: str | None = None,
+    next_action: str = "wait for media reconciliation",
+) -> bool:
+    """Keep changed-in-flight media automatic and actionable until reconciliation."""
+    before = sidecar_path.read_text(encoding="utf-8")
+    content = render_sidecar_processing_pending(before, attempts=attempts, next_action=next_action)
     try:
         commit_media_sidecar_writes(
             vault_root,

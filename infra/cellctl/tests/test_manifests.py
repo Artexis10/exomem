@@ -332,6 +332,13 @@ def test_model_env_may_not_relocate_state_config_or_a_writable_directory() -> No
     render_statefulset(_spec(model_env={"EXOMEM_EMBED_BACKEND": "onnx", "EXOMEM_WHISPER_MODEL": "base"}))
 
 
+def test_model_env_may_not_move_media_extraction_into_the_serving_process() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="EXOMEM_MEDIA_WORKER_MODE"):
+        render_statefulset(_spec(model_env={"EXOMEM_MEDIA_WORKER_MODE": "inline"}))
+
+
 def test_the_previous_bearer_reference_is_optional_so_a_refused_secret_never_blocks_the_pod() -> None:
     # Inside a hold the StatefulSet is applied even when this pass's Secret
     # was refused. A required reference to a key the live Secret lacks would

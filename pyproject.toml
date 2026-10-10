@@ -113,6 +113,18 @@ nli = [
     "sentence-transformers>=3.0",
     "torch>=2.12",
 ]
+# The CPU-only document and OCR engines: what the Exomem Cloud image ships, with no
+# CUDA wheel. System dep NOT pip-installable: the Tesseract binary and its models.
+media-cpu = [
+    "pillow>=10.0",  # images are decoded and normalised for Tesseract through PIL
+    "pymupdf>=1.24",
+    # docx/xlsx/pptx/html/epub → markdown (Microsoft MarkItDown, MIT). The per-format extras
+    # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
+    # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
+    "markitdown[docx,xlsx,pptx]>=0.1.1",
+    "odfdo>=3.26",       # OpenDocument text, spreadsheet and presentation (Apache-2.0)
+    "striprtf>=0.0.33",  # RTF (BSD-3-Clause)
+]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box
 # runs without it — the code
@@ -122,15 +134,9 @@ nli = [
 # The media extra owns CTranslate2's CUDA 12 wheel runtime; PyAV (pulled by
 # faster-whisper) bundles ffmpeg for audio/video decode. See README for sm_120.
 media = [
+    "exomem[media-cpu]",
     "faster-whisper>=1.0",
     "ctranslate2>=4.6.3,<5",
-    "pytesseract>=0.3.10",
-    "pillow>=10.0",  # pytesseract opens images via PIL for OCR
-    "pymupdf>=1.24",
-    # docx/xlsx/pptx/html → markdown (Microsoft MarkItDown, MIT). The per-format extras
-    # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
-    # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
-    "markitdown[docx,xlsx,pptx]>=0.1.1",
     # CUDA-12 runtime owned by CTranslate2 on Linux and Windows. torch's cuBLAS
     # major is independent; the media parent discovers these wheel directories
     # and prepends them before the disposable child interpreter starts.

@@ -23,6 +23,7 @@ from . import (
     access,
     deferred_index,
     held_fs,
+    media_engines,
     media_jobs,
     media_types,
     memory_refs,
@@ -476,16 +477,21 @@ def reconcile_media(
             requested_clip = media_type in {"image", "video"} and not os.environ.get(
                 "EXOMEM_DISABLE_CLIP"
             )
-            needs_ocr = durable_job is None or not durable_job.do_ocr
+            # A switched-off engine gets no stage, so no job bound to fail; the
+            # pending sidecar waits and reconciliation queues it once it is enabled.
+            extraction_on = media_engines.stage_enabled(media_type)
+            needs_ocr = extraction_on and (durable_job is None or not durable_job.do_ocr)
             needs_clip = requested_clip and (durable_job is None or not durable_job.do_clip)
-            if original != pending or needs_ocr or needs_clip:
+            do_ocr = extraction_on and (original != pending or needs_ocr)
+            do_clip = requested_clip if original != pending else needs_clip
+            if do_ocr or do_clip:
                 job_id = store.enqueue(
                     media_jobs.MediaJob(
                         binary_path=binary,
                         sidecar_path=sidecar,
                         media_type=media_type,
-                        do_ocr=original != pending or needs_ocr,
-                        do_clip=requested_clip if original != pending else needs_clip,
+                        do_ocr=do_ocr,
+                        do_clip=do_clip,
                     )
                 )
                 durable_job = store.get(job_id)
@@ -686,6 +692,8 @@ def _needs_reconciliation(
     if _is_completed_sidecar_shape(vault, binary, frontmatter, body, media_type):
         return store is not None and store.has_binary(binary)
     if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):
+        if not media_engines.stage_enabled(media_type):
+            return False  # waits for its engine; nothing to queue until it is enabled
         return store is None or not store.has_binary(binary)
     return True
 
