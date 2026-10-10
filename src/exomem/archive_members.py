@@ -15,6 +15,9 @@ through the ordinary Evidence write path. A crash before it leaves blobs that no
 manifest names, and the next expansion reuses them. An archive a family manifest
 already records writes nothing, except that any blob the manifest names and the
 pool lost comes back from the uploaded archive.
+
+One expansion at a time runs in a vault, under a file lock, so each one can
+first remove the member temps that a killed expansion left in the pool.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import tempfile
 import unicodedata
 import zipfile
@@ -38,15 +42,23 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
 
+from filelock import FileLock
+
 from .governance import raw_protection
 
 INVALID = "ARCHIVE_INVALID"
 TOO_LARGE = "ARCHIVE_TOO_LARGE"
+#: The disk lacks room for a blob: nothing about the archive is wrong, so it may succeed later.
+NO_SPACE = "ARCHIVE_NO_SPACE"
 
 #: Central-directory entries one archive may declare.
 MAX_ENTRIES = 65_536
 #: Uncompressed bytes one member may declare.
 MAX_MEMBER_BYTES = 2 * 1024**3
+#: Bytes the central directory may declare. `zipfile` reads it whole and builds an entry
+#: per 46-byte record before any count can be checked; 16 MiB holds 65,536 entries with
+#: paths near 200 bytes and caps that build near 365,000 entries.
+MAX_DIRECTORY_BYTES = 16 * 1024**2
 COPY_CHUNK_BYTES = 1024 * 1024
 POOL_DIRNAME = f"{raw_protection.PREFIX}members"
 MANIFEST_SUFFIX = ".export.json"
@@ -56,6 +68,12 @@ _GZIP_LEVEL = 6
 #: Bit 0 of a zip entry's general-purpose flags: the entry is encrypted (APPNOTE 4.4.4).
 _ZIP_FLAG_ENCRYPTED = 0x1
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")  # the format of a member's name in the pool
+#: APPNOTE 4.3.16, 4.3.15 and 4.3.14: the end record, the ZIP64 locator and the ZIP64 end record.
+_END_RECORD = struct.Struct("<4s4H2LH")
+_ZIP64_LOCATOR = struct.Struct("<4sLQL")
+_ZIP64_END_RECORD = struct.Struct("<4sQ2H2L4Q")
+#: The end record is the file's last 22 bytes, followed by a comment of at most 65,535 bytes.
+_END_SEARCH_BYTES = _END_RECORD.size + 0xFFFF
 
 
 def member_blob(sha256: str) -> str:
@@ -148,13 +166,54 @@ class _Entry:
     info: zipfile.ZipInfo
 
 
-def _central_directory(zip_file: zipfile.ZipFile) -> tuple[list[_Entry], int]:
+def _declared_directories(stream: BinaryIO) -> list[tuple[int, int]]:
+    """The entry count and directory size each end record declares: the classic one and any ZIP64 one.
+
+    `zipfile` may take either, so the limits are checked against both.
+    """
+    stream.seek(0, io.SEEK_END)
+    start = max(0, stream.tell() - _END_SEARCH_BYTES)
+    stream.seek(start)
+    tail = stream.read()
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or len(tail) - at < _END_RECORD.size:
+        return []  # not a zip; `zipfile` refuses it
+    # Fields 4 and 5: the total entry count and the directory size.
+    declared = [tuple(_END_RECORD.unpack_from(tail, at)[4:6])]
+    # The ZIP64 end record sits right before its locator, which sits right before the end record.
+    locator_at = start + at - _ZIP64_LOCATOR.size
+    record_at = locator_at - _ZIP64_END_RECORD.size
+    if record_at >= 0:
+        stream.seek(record_at)
+        found = stream.read(_ZIP64_END_RECORD.size + _ZIP64_LOCATOR.size)
+        if found.startswith(b"PK\x06\x06") and found[_ZIP64_END_RECORD.size:].startswith(b"PK\x06\x07"):
+            # Fields 7 and 8: the total entry count and the directory size.
+            declared.append(tuple(_ZIP64_END_RECORD.unpack_from(found)[7:9]))
+    return declared
+
+
+def _open_zip(stream: BinaryIO) -> zipfile.ZipFile:
+    """Open an uploaded zip once its end records declare a central directory within the limits."""
+    for entries, directory in _declared_directories(stream):
+        if entries > MAX_ENTRIES:
+            raise ArchiveError(TOO_LARGE, f"the archive declares more than {MAX_ENTRIES:,} entries")
+        if directory > MAX_DIRECTORY_BYTES:
+            raise ArchiveError(TOO_LARGE, "the archive's central directory is too large")
+    stream.seek(0)
+    try:
+        return zipfile.ZipFile(stream)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
+    except UnicodeDecodeError as exc:
+        raise ArchiveError(INVALID, "an archive entry's name is not valid UTF-8") from exc
+
+
+def _central_directory(zip_file: zipfile.ZipFile) -> list[_Entry]:
     """Validate every entry before any member is read; members sorted by path."""
     infos = zip_file.infolist()
     if len(infos) > MAX_ENTRIES:
         raise ArchiveError(TOO_LARGE, f"the archive declares more than {MAX_ENTRIES:,} entries")
     entries: dict[str, _Entry] = {}
-    total = 0
     for info in infos:
         if info.is_dir():
             continue
@@ -170,8 +229,7 @@ def _central_directory(zip_file: zipfile.ZipFile) -> tuple[list[_Entry], int]:
         if info.file_size > MAX_MEMBER_BYTES:
             raise ArchiveError(TOO_LARGE, "an archive member exceeds 2 GiB")
         entries[path] = _Entry(path, info)
-        total += info.file_size
-    return [entries[path] for path in sorted(entries)], total
+    return [entries[path] for path in sorted(entries)]
 
 
 def _member_chunks(zip_file: zipfile.ZipFile, entry: _Entry) -> Iterator[bytes]:
@@ -198,7 +256,10 @@ def _member_digest(zip_file: zipfile.ZipFile, entry: _Entry) -> str:
 def _write_blob(zip_file: zipfile.ZipFile, entry: _Entry, blob: Path, sha256: str) -> None:
     """Gzip one member into the pool, landing it only when no blob of its name exists."""
     blob.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, raw = tempfile.mkstemp(prefix=".", suffix=".part", dir=blob.parent)
+    # Checked per blob, so a re-export needs room only for what it adds; a blob is about its member's size.
+    if entry.info.file_size > shutil.disk_usage(blob.parent).free:
+        raise ArchiveError(NO_SPACE, "the archive's new members exceed the free disk space")
+    descriptor, raw = tempfile.mkstemp(prefix=".", suffix=_TEMP_SUFFIX, dir=blob.parent)
     staged = Path(raw)
     try:
         digest = hashlib.sha256()
@@ -218,6 +279,23 @@ def _write_blob(zip_file: zipfile.ZipFile, entry: _Entry, blob: Path, sha256: st
             os.replace(staged, blob)
     finally:
         staged.unlink(missing_ok=True)
+
+
+#: A member's temp in the pool: `.<random><suffix>` beside the blob it becomes.
+_TEMP_SUFFIX = ".part"
+
+
+def _expansion_lock(vault_root: Path) -> FileLock:
+    """Held by the one expansion that runs in this vault; the pool sweep relies on it."""
+    from . import private_state
+
+    return FileLock(private_state.store(vault_root, "archive-members") / "expansion.lock")
+
+
+def _sweep_pool(folder: Path) -> None:
+    """Remove the member temps a killed expansion left; under the lock, no live one owns any."""
+    for leftover in (folder / POOL_DIRNAME).glob(f"*/.*{_TEMP_SUFFIX}"):
+        leftover.unlink(missing_ok=True)
 
 
 def _modified(info: zipfile.ZipInfo) -> str | None:
@@ -323,16 +401,10 @@ def _restore(vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[An
             missing[member["path"]] = member["sha256"]
     if not missing:
         return 0
-    try:
-        zip_file = zipfile.ZipFile(stream)
-    except (zipfile.BadZipFile, OSError) as exc:
-        raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
-    with zip_file:
-        entries = {entry.path: entry for entry in _central_directory(zip_file)[0]}
+    with _open_zip(stream) as zip_file:
+        entries = {entry.path: entry for entry in _central_directory(zip_file)}
         if any(path not in entries for path in missing):
             raise ArchiveError(INVALID, "the archive lacks a member its manifest records")
-        if sum(entries[path].info.file_size for path in missing) > _free_bytes(vault_root, folder):
-            raise ArchiveError(TOO_LARGE, "the archive's lost members exceed the free disk space")
         for path, sha256 in sorted(missing.items()):
             _write_blob(zip_file, entries[path], folder / member_blob(sha256), sha256)
     return len(missing)
@@ -406,52 +478,51 @@ def preserve_members(
             "archive": {**archive, "restored": restored},
         }, False
 
-    # Before any member is read: the same archive into the same family is one fact.
-    if (receipt := already_stored()) is not None:
-        return receipt
-    try:
-        zip_file = zipfile.ZipFile(stream)
-    except (zipfile.BadZipFile, OSError) as exc:
-        raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
-    with zip_file:
-        entries, total = _central_directory(zip_file)
-        if total > _free_bytes(vault_root, folder):
-            raise ArchiveError(TOO_LARGE, "the archive's members exceed the free disk space")
-        members: list[dict[str, Any]] = []
-        written = 0
-        for entry in entries:
-            digest = _member_digest(zip_file, entry)
-            blob = folder / member_blob(digest)
-            if not blob.exists():
-                _write_blob(zip_file, entry, blob, digest)
-                written += 1
-            members.append(
-                {
-                    "path": entry.path,
-                    "sha256": digest,
-                    "bytes": entry.info.file_size,
-                    "modified": _modified(entry.info),
-                    "blob": member_blob(digest),
-                    "stored_bytes": blob.stat().st_size,
-                }
-            )
-    manifest = {"schema_version": MANIFEST_SCHEMA_VERSION, "archive": archive, "members": members}
-    data = (json.dumps(manifest, sort_keys=True, ensure_ascii=True, indent=1) + "\n").encode("ascii")
-    with guard():
+    with _expansion_lock(vault_root):
+        _sweep_pool(folder)
+        # Before any member is read: the same archive into the same family is one fact.
         if (receipt := already_stored()) is not None:
             return receipt
-        result = preserve_module.preserve(
-            vault_root,
-            scope=scope,
-            category=category,
-            filename=_manifest_name(archive["filename"], sha256),
-            content_stream=io.BytesIO(data),
-            content_type="application/json",
-            description=description
-            or f"Archive {archive['filename']} preserved as {len(members):,} members.",
-            max_stream_bytes=len(data),
-            raw_protection=True,
-        )
-    receipt = result.as_dict()
-    receipt["archive"] = {**archive, "members": len(members), "new_blobs": written}
-    return receipt, True
+        with _open_zip(stream) as zip_file:
+            entries = _central_directory(zip_file)
+            # A small check before any member is read; each new blob checks its own room.
+            if max((entry.info.file_size for entry in entries), default=0) > _free_bytes(vault_root, folder):
+                raise ArchiveError(NO_SPACE, "the archive's largest member exceeds the free disk space")
+            members: list[dict[str, Any]] = []
+            written = 0
+            for entry in entries:
+                digest = _member_digest(zip_file, entry)
+                blob = folder / member_blob(digest)
+                if not blob.exists():
+                    _write_blob(zip_file, entry, blob, digest)
+                    written += 1
+                members.append(
+                    {
+                        "path": entry.path,
+                        "sha256": digest,
+                        "bytes": entry.info.file_size,
+                        "modified": _modified(entry.info),
+                        "blob": member_blob(digest),
+                        "stored_bytes": blob.stat().st_size,
+                    }
+                )
+        manifest = {"schema_version": MANIFEST_SCHEMA_VERSION, "archive": archive, "members": members}
+        data = (json.dumps(manifest, sort_keys=True, ensure_ascii=True, indent=1) + "\n").encode("ascii")
+        with guard():
+            if (receipt := already_stored()) is not None:
+                return receipt
+            result = preserve_module.preserve(
+                vault_root,
+                scope=scope,
+                category=category,
+                filename=_manifest_name(archive["filename"], sha256),
+                content_stream=io.BytesIO(data),
+                content_type="application/json",
+                description=description
+                or f"Archive {archive['filename']} preserved as {len(members):,} members.",
+                max_stream_bytes=len(data),
+                raw_protection=True,
+            )
+        receipt = result.as_dict()
+        receipt["archive"] = {**archive, "members": len(members), "new_blobs": written}
+        return receipt, True
