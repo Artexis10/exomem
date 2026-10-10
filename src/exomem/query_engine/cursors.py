@@ -90,7 +90,7 @@ def _visible(admitted, dependencies):
     session._estimated_visits += count
     digest = hashlib.sha256(b"exomem.typed-visible-dependencies.v1\0")
     cursor = session.connection.execute(
-        f"SELECT i.row_id,i.item_key FROM main.items i WHERE i.collection_id=? AND {base.membership_sql} "
+        f"SELECT i.row_id,i.item_key FROM {base.items} i WHERE i.collection_id=? AND {base.membership_sql} "
         "ORDER BY i.row_id", (admitted.query.source.ref,),
     )
     with closing(session.fetch(cursor)) as batches:
@@ -171,7 +171,7 @@ def _resume(admitted, payload):
     if not compiled.page_bound:
         count = admitted.released_count
         if count is None:
-            count = conn.execute("SELECT count(*) FROM (SELECT 1 FROM items WHERE collection_id=? LIMIT ?)",
+            count = conn.execute(f"SELECT count(*) FROM (SELECT 1 FROM {admitted.items} WHERE collection_id=? LIMIT ?)",
                                  (admitted.query.source.ref, session.limits.max_row_visits + 1)).fetchone()[0]
         cost = count * 2
         if cost + session._estimated_visits > session.limits.max_row_visits:

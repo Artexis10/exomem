@@ -35,6 +35,7 @@ from ..query_engine.indexes import IndexDeclarationError
 from . import (
     chain,
     connection,
+    derived_rows,
     governance,
     index_migrations,
     rollups,
@@ -264,6 +265,12 @@ class CollectionWriter:
                 f"{profile.title()} collection is required",
             )
         return row, manifest, declared
+
+    @staticmethod
+    def _rows_writable(manifest, action):
+        """The one gate on row mutations: a derived collection's rows change only through its imports."""
+        if manifest.derived:
+            raise derived_rows.refused(action)
 
     def _collection_manifest(self, row):
         self._require_operation_context()
@@ -548,6 +555,10 @@ class CollectionWriter:
             # Items mode stays wire-identical to file collections; summary names its own bounds.
             payload["contract"]["view_mode"] = manifest.view_mode
             payload["capacity"] = summary.capacity()
+        if manifest.derived:
+            payload["contract"]["derived"] = True
+            payload["derived_rows"] = derived_rows.rebuild_status(self.connection, self.handle.path,
+                                                                  manifest.collection_id)
         if release is None and (manifest.item_presentation or manifest.record_presentation or manifest.item_filename):
             payload["presentation"] = record_governance._presentation_inspection(inspection.presentation, manifest)
         if declared.kind == "intended" and facade_profile != "records":
@@ -849,10 +860,10 @@ class CollectionWriter:
             ).fetchone()
         elif projection["kind"] == "summary":
             # Generated read-only output: hold any edit with its bytes, never parse it into rows.
-            generation = self.connection.execute(
-                "SELECT generation FROM collections WHERE collection_id=?", (projection["collection_id"],)
-            ).fetchone()[0]
-            return "SUMMARY_VIEW_READ_ONLY", view_stamp, generation
+            generation, derived = self.connection.execute(
+                "SELECT generation,derived FROM collections WHERE collection_id=?", (projection["collection_id"],)
+            ).fetchone()
+            return derived_rows.COLLECTION_DERIVED if derived else "SUMMARY_VIEW_READ_ONLY", view_stamp, generation
         else:
             return "VIEW_INVALID", view_stamp, projection["pending_row_version"]
         version, payload = current
@@ -877,8 +888,8 @@ class CollectionWriter:
                 self._validate(manifest, declared, key, values, operation="update", validate_graph=False)
             else:
                 proposed = collections.parse_manifest_bytes(self.root, projection["path"], raw)
-                if proposed.view_mode != manifest.view_mode and summary.populated(
-                        self.connection, manifest.collection_id):
+                if proposed.derived != manifest.derived or (proposed.view_mode != manifest.view_mode and
+                                                            summary.populated(self.connection, manifest.collection_id)):
                     return summary.MODE_CHANGE_UNSUPPORTED, view_stamp, version
         except collections.CollectionError:
             return "VIEW_INVALID", view_stamp, version
@@ -1367,8 +1378,8 @@ class CollectionWriter:
             types.register_builtins(self.connection, txn_id=txn["txn_id"])
             self._execute(
                 "INSERT INTO collections (collection_id, type_name, type_version, manifest_path, source_path, layout, "
-                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?)",
+                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode, "
+                "derived) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?, ?)",
                 (
                     manifest.collection_id,
                     declared.name,
@@ -1380,6 +1391,7 @@ class CollectionWriter:
                     txn["txn_id"],
                     txn["txn_id"],
                     manifest.view_mode,
+                    int(manifest.derived),
                 ),
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
@@ -1789,6 +1801,7 @@ class CollectionWriter:
             if replay is not None:
                 return replay
             row, manifest, _ = self._collection(collection, facade_profile="records")
+            self._rows_writable(manifest, "bulk_upsert")
             current_hash = self._container(row)
             records._expect_hash(expected_container_hash, current_hash, "container")
             batch_id = uuid.uuid4().hex[:12]
@@ -1961,6 +1974,7 @@ class CollectionWriter:
             if replay is not None:
                 return replay
             row, manifest, declared = self._collection(collection)
+            self._rows_writable(manifest, "append")
             resumed = self._held(manifest.collection_id, held)
             if (item is None and resumed is None) or (
                 item is not None and not isinstance(item, Mapping)
@@ -2144,6 +2158,7 @@ class CollectionWriter:
             if replay is not None:
                 return replay
             row, manifest, declared = self._collection(collection)
+            self._rows_writable(manifest, operation)
             key = records._validate_item_key(item_key, manifest=manifest, candidate=changes)
             before = self._item(manifest.collection_id, key)
             if before is None:
@@ -2356,6 +2371,8 @@ class CollectionWriter:
                 )
             # A populated collection never changes view mode in place; refuse
             # before any manifest, mapping, file, guard or cursor work.
+            if proposed.derived != current.derived:
+                raise derived_rows.conversion_refused(current.derived)
             mode_change = proposed.view_mode != current.view_mode
             if mode_change and summary.populated(self.connection, current.collection_id):
                 raise summary.mode_change_refused(current.view_mode, proposed.view_mode)

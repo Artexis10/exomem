@@ -249,8 +249,8 @@ def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple
                         values[name] = decode_value(tag, value, row[at + 2])
             return values
 
-        return (f"SELECT i.item_key,i.row_version,t.row_version{selected} FROM items i "
-                f"LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id "
+        return (f"SELECT i.item_key,i.row_version,t.row_version{selected} FROM {layout.items} i "
+                f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id "
                 f"WHERE i.collection_id=? AND {predicate}"), decode_typed
 
     def decode(row):
@@ -354,7 +354,7 @@ def _binding(session, query, collection_id: str, manifest, shape: _Shape, unifor
         session._estimated_visits += admitted.visible_count
         digest = hashlib.sha256(b"exomem.group-visible-dependencies.v1\0")
         with closing(session.connection.execute(
-                f"SELECT i.row_id,i.item_key FROM items i WHERE i.collection_id=? AND {admitted.membership_sql} "
+                f"SELECT i.row_id,i.item_key FROM {admitted.items} i WHERE i.collection_id=? AND {admitted.membership_sql} "
                 "ORDER BY i.row_id", (collection_id,))) as rows:
             for row_id, key in rows:
                 values = session.selected_values(row_id, admitted.layout, read,
