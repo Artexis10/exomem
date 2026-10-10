@@ -289,6 +289,10 @@ _DEPTH_SHAPES = (
     ("mixed with a unit filter", {
         "query": "metabolism", "categories": ["rule"], "result_level": "mixed",
     }),
+    # The unit half and the page lanes both read the admitted set.
+    ("mixed with admission", {
+        "query": "metabolism", "result_level": "mixed", "admit_path": lambda _path: True,
+    }),
     ("keyword", {"query": "metabolism", "mode": "keyword", "graph": False}),
     ("empty query with a tag filter", {"query": "", "tags": ["metabolism"]}),
 )

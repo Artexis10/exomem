@@ -204,6 +204,7 @@ def collect_candidates(
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
+    filtered: bool = False,
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -219,6 +220,11 @@ def collect_candidates(
     frame collapsing, eligibility, graph seeding, fusion and every lane cap
     consume it. The keyword lane is excluded because it arrives from the
     caller's own provider already shadowed. Default None is a strict no-op.
+
+    `filtered` says `eligible_paths` holds the caller's own filters, so the pool
+    reaches their whole eligible set. Admission alone never deepens it: every
+    lane already ranks only `eligible_paths`, so each hands fusion its top
+    `candidate_k` admitted pages, as it would over a corpus without the rest.
     """
     from . import (
         bm25,
@@ -240,7 +246,7 @@ def collect_candidates(
     candidate_k = max(
         limit * config.candidate_multiplier,
         config.candidate_floor,
-        len(eligible_paths) if eligible_paths is not None else 0,
+        len(eligible_paths) if filtered and eligible_paths is not None else 0,
     )
     semantic_paths = (
         recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
@@ -715,6 +721,10 @@ def collect_candidates(
                 "reason": "request_disabled",
             }
     if graph:
+        # A restricted caller resolves links over the pages it may see, as in a
+        # vault without the others; `recall_paths` is already that view. The
+        # owner keeps the whole-vault resolution and its cost.
+        link_view = recall_paths.__contains__ if admitted_paths is not None else None
         with _span(timings, "graph"):
             primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
             vector_set: set[str] = set(vector_ranking)
@@ -764,7 +774,21 @@ def collect_candidates(
                     indexed = graph_index.indexed_paths(graph_seeds)
                     typed_seeds = [s for s in graph_seeds if s in indexed]
                     legacy_seeds = [s for s in graph_seeds if s not in indexed]
-                    neighbors = graph_index.neighbors_for(typed_seeds) if typed_seeds else []
+                    # The view re-resolves typed links with the request's resolver.
+                    # Without one it cannot, so those seeds wait like legacy ones.
+                    view_resolver = None
+                    if link_view is not None and typed_seeds:
+                        view_resolver = get_query_resolver(
+                            vault_root, freshness=snapshot.projection_key("vault")
+                        )
+                        graph_resolver_deferred = view_resolver is None
+                    neighbors = (
+                        graph_index.neighbors_for(
+                            typed_seeds, keep=link_view, resolver=view_resolver
+                        )
+                        if typed_seeds and not graph_resolver_deferred
+                        else []
+                    )
 
                 # Family precedence MUST be decided BEFORE target dedup: when a
                 # target is reached by both a typed relation and a plain
@@ -810,8 +834,12 @@ def collect_candidates(
 
                     legacy_targets: list[str] = []
                     if legacy_seeds:
-                        resolver = get_query_resolver(
-                            vault_root, freshness=snapshot.projection_key("vault")
+                        resolver = (
+                            view_resolver
+                            if link_view is not None and typed_seeds
+                            else get_query_resolver(
+                                vault_root, freshness=snapshot.projection_key("vault")
+                            )
                         )
                         graph_resolver_deferred = resolver is None
                         # Passing None to the legacy helper would construct a
@@ -825,6 +853,7 @@ def collect_candidates(
                                 vault_root,
                                 resolver=resolver,
                                 allowed_paths=recall_paths,
+                                visible=link_view,
                             ):
                                 if target_rel not in recall_paths:
                                     continue
@@ -875,6 +904,7 @@ def collect_candidates(
                             vault_root,
                             resolver=resolver,
                             allowed_paths=recall_paths,
+                            visible=link_view,
                         ):
                             if target_rel not in recall_paths:
                                 continue

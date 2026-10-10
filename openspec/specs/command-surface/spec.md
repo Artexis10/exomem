@@ -2625,3 +2625,101 @@ The suggestion SHALL reach the caller through the committed-mutation response, a
 - **WHEN** a resolved hosted caller captures a source in a vault that holds classification debt
 - **THEN** the capture follows its ordinary authorization rules
 - **AND** the result omits the classification-debt advisory unless that caller is the verified owner
+
+### Requirement: Existing Edit Remediation Matches Its Public Schema
+
+An `edit_memory` relation-disposition remediation SHALL reference only parameters exposed by the selected edit kind and SHALL identify `relation_review_hash` as the exact validation response value to send back. Creation-only draft parameters MUST NOT appear in existing-edit remediation.
+
+#### Scenario: Edit remediation is checked against discovery
+- **WHEN** a blocking relation-disposition finding is rendered for `edit_memory`
+- **THEN** every named call parameter exists in that kind's public discovery schema
+- **AND** the text describes the validate-then-commit call sequence
+
+### Requirement: Edit Memory Documents Typed Relation Authoring
+
+The `edit_memory` description SHALL include a copy-pasteable note-level typed-relation example using a bullet under `## Relations`, and SHALL state that Dataview inline-field syntax is not parsed as a typed relation.
+
+#### Scenario: Generic client reads edit discovery
+- **WHEN** a generic MCP client inspects `edit_memory`
+- **THEN** it can author `- supports [[Knowledge Base/Notes/Research/example-target]]` under `## Relations`
+- **AND** it is not led to use `supports:: [[...]]`
+
+### Requirement: Semantic Errors Do Not Claim Arguments Are Missing
+
+The edit adapter SHALL append a `(missing: [...])` suffix only when argument validation identified actual missing or invalid fields. Semantic governance and transition errors MUST preserve their code and reason without the suffix.
+
+#### Scenario: Transition token mismatches
+- **WHEN** an edit fails with `LIFECYCLE_TRANSITION_MISMATCH`
+- **THEN** the error does not contain a `missing` suffix
+
+### Requirement: Persisted Configuration Failures Are Loud
+
+A command that persists configuration SHALL NOT report or imply success unless the persisted
+state changed. When the write fails, the command SHALL exit non-zero, SHALL report one
+operator-readable line naming the configuration path and the remediation, and SHALL NOT
+leave a temporary artifact behind.
+
+This applies to `exomem mode`, whose configuration file is written by the service account on
+a service-managed install and is therefore not always writable by the invoking user.
+
+#### Scenario: Unwritable config fails visibly
+
+- **WHEN** `exomem mode <target>` is run and the configuration file cannot be replaced
+- **THEN** the command exits non-zero
+- **AND** the output names the configuration path and how to remediate the permission
+- **AND** the output is not a bare interpreter traceback
+
+#### Scenario: A failed write leaves no orphaned temporary
+
+- **WHEN** persisting the mode fails after a temporary file was created
+- **THEN** that temporary file is removed
+- **AND** a later successful run is not blocked by residue from the failed one
+
+#### Scenario: Reported mode reflects persisted state
+
+- **WHEN** `exomem mode` reports the mode after a set operation
+- **THEN** the reported value is read back from the persisted configuration
+- **AND** it is never an echo of the requested value that was not written
+
+#### Scenario: Status reflects the effective mode
+
+- **WHEN** a mode change did not persist
+- **THEN** no surface reports the requested mode as active
+
+### Requirement: The MCP tool surface has a size budget
+
+The generated MCP tool surface SHALL stay within a committed byte budget so that clients which resend every tool schema each turn do not pay for prose an agent does not need. The budget SHALL be measured as the compact UTF-8 JSON size of each registered tool's complete wire object (name, title, description, input schema, output schema, annotations and metadata) and SHALL apply to the total and to each tool. A tool description SHALL keep every refusal code, guard flag and destructive-operation requirement that the tool's callers depend on; long reference material SHALL be reachable from the skill references or an on-demand bootstrap profile rather than repeated in schemas. A contract that is shared by several tools SHALL be projected once per tool that needs it and SHALL NOT be repeated in parameter descriptions.
+
+#### Scenario: The surface regrows past the budget
+
+- **WHEN** a change adds description or parameter prose that takes the total, or any one tool, over its committed budget
+- **THEN** the budget test fails and names the tool and the excess
+
+#### Scenario: Shrinking preserves published behaviour
+
+- **WHEN** the tool descriptions are shortened
+- **THEN** no tool, parameter, enum value or refusal code is removed, and the tool-surface fingerprint and schema-fidelity baseline are regenerated together in one change
+
+#### Scenario: Frozen hosted profiles are unaffected
+
+- **WHEN** the live tool surface is shortened
+- **THEN** hosted candidates v1 to v4 and the command-binding candidate resolve their pinned legacy schemas and stay byte-identical
+
+#### Scenario: Optional parameters accept an explicit null the schema no longer advertises
+
+- **WHEN** a client sends an explicit null for a nullable optional parameter of any tool
+- **THEN** argument validation accepts it, because validation is built from the function signature and the published schema omits the null arm and the null default
+
+### Requirement: Compact tools remain usable through the public interface
+
+The compact surface SHALL preserve enough public guidance to choose an operation and construct a legal call without a provider-specific skill or private harness instruction. Current-turn activation and targeted retrieval SHALL have distinct descriptions consistent with saved engagement. Action-dependent Planning arguments SHALL explain the returned identity/version guards and the inspect/query-to-update/triage sequence. Runtime concurrency, authorization, source preservation and confirmation rules SHALL remain unchanged. This delivery SHALL retain existing tool names; shortening schemas SHALL NOT by itself establish a claim of improved agent performance.
+
+#### Scenario: An unfamiliar agent updates a plan
+
+- **WHEN** an agent uses the published tool/schema guidance to inspect a plan and update or transition it
+- **THEN** it can identify and supply the returned guards, and a stale guard still refuses without overwriting newer state
+
+#### Scenario: Interface and compiler failures are distinguished
+
+- **WHEN** an ordinary-agent workflow selects activation or retrieval and receives a result
+- **THEN** acceptance retains the actual invocation, result and subsequent answer, distinguishing wrong selection or arguments from wrong compiled context and never treating a forced call as proof of spontaneous initiation

@@ -107,7 +107,7 @@ cd /path/to/exomem
 
 # Install Python deps (creates .venv automatically).
 #   --extra embeddings pulls torch + sentence-transformers for HYBRID search.
-#   --extra media pulls faster-whisper + pytesseract + pymupdf + markitdown for
+#   --extra media pulls faster-whisper + Pillow + pymupdf + markitdown for
 #   SERVER-SIDE media extraction (auto transcribe/OCR/parse uploaded binaries →
 #   searchable). On Windows the [media] extra also pins the CUDA-12 runtime
 #   (cublas/cudnn/cudart) that ctranslate2 needs alongside torch's cu132 build.
@@ -123,6 +123,24 @@ Media extraction needs two **system** tools (not pip-installable):
   works without a separate install.
 
 Verify the GPU media path: `uv run python scripts/verify-media-gpu.py`.
+
+The `media` extra reads PDF, Word, Excel, PowerPoint, HTML, EPUB, OpenDocument
+(text, spreadsheet, presentation) and RTF files. Plain text, email and calendar
+files need no extra.
+
+OCR detects each image's script with Tesseract's OSD model first. It then reads the
+image with the installed script models for that script and the installed language
+packs written in it. A page with too little text for detection reads with
+`EXOMEM_OCR_DEFAULT_LANGS` (for example `eng+jpn`), or with Tesseract's default
+English when the variable is unset. Tesseract 4.x does not name its model
+directory, so on it OCR skips script detection and reads each image once in
+Tesseract's default language. To read Japanese, install the `jpn` and
+`jpn_vert` packs and the Japanese script models (Debian: `tesseract-ocr-jpn`,
+`tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
+
+`EXOMEM_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
+Unset, a personal install runs every engine. HEIC photos are not decoded; see
+`docs/runbooks/cloud-media.md`.
 
 Lean / CPU-only boxes can skip all of this — set
 `EXOMEM_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side

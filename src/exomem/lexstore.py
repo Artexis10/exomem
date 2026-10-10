@@ -2176,6 +2176,8 @@ def _term_units(units) -> list[list[object]]:
 #: Stems one catalogue generation's frequency cache may hold before it
 #: starts again; a vault's working vocabulary sits far below it.
 _TERM_FREQUENCY_CACHE_MAX = 50_000
+#: Admitted corpora retained per store: one per distinct admitted page set.
+_ADMITTED_STATISTICS_MAX = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -2545,6 +2547,32 @@ def term_document_paths(
         exclude_raw_material=exclude_raw_material,
         exclude_statuses=tuple(sorted({str(status) for status in exclude_statuses})),
     )
+
+
+#: A full-text MATCH drives every join to its catalogue table. Without ANALYZE
+#: statistics, SQLite 3.45 (and older system builds) plans an unordered
+#: `fts JOIN pages` from the `in_kb`/`in_vault` index and probes the index once
+#: per page, so the work grows with the corpus. CROSS JOIN fixes the loop order
+#: and never changes the rows.
+_FTS_PAGES = "fts CROSS JOIN pages p ON p.rowid = fts.rowid"
+_UNIT_FTS_UNITS = "unit_fts CROSS JOIN semantic_units u ON u.rowid = unit_fts.rowid"
+
+
+def _page_carryable(
+    status_basis: Any, status: object, path: str, shipped: dict[object, bool]
+) -> bool:
+    """Whether one page's status label carries, memoizing only page-independent labels.
+
+    A shipped label has one class on every page, so `shipped` keeps it. Any other
+    label classifies through its page's own selected instance.
+    """
+    from . import lifecycle_statuses
+
+    pack = lifecycle_statuses.Basis(None).classify(status)
+    if pack.lifecycle_class is not None:
+        shipped[status] = pack.carryable
+        return pack.carryable
+    return status_basis.classify(status, path=path).carryable
 
 
 def _excluded_rows_clause(
@@ -3057,30 +3085,41 @@ def eligibility_metadata_result(
     scope: str,
     freshness: tuple | None,
     include_units: bool = False,
+    parents_only: bool = False,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
-    """Exact filter views and parent hints from one proven catalogue snapshot."""
+    """Exact filter views and parent hints from one proven catalogue snapshot.
+
+    `parents_only` reads no filter view: its rows carry only the parent and
+    `updated`, for a caller that decides on parents alone (recall admission).
+    """
     if not _catalog_usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     return get_store(vault_root)._serve_from_ready_catalog_result(
         scope,
         freshness,
         lambda conn: _eligibility_metadata_query(
-            vault_root, conn, paths, include_units=include_units
+            vault_root, conn, paths, include_units=include_units, parents_only=parents_only
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
     )
 
 
 def _eligibility_metadata_query(
-    vault_root: Path, conn: sqlite3.Connection, paths: set[str], *, include_units: bool
+    vault_root: Path,
+    conn: sqlite3.Connection,
+    paths: set[str],
+    *,
+    include_units: bool,
+    parents_only: bool = False,
 ) -> dict[str, EligibilityMetadata]:
     from .vocabulary.registry import RegistryError
 
+    view = "NULL" if parents_only else "eligibility_view_json"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        "SELECT path, eligibility_view_json, emitted_parent_path, updated FROM pages "
+        f"SELECT path, {view}, emitted_parent_path, updated FROM pages "
         "WHERE in_vault = 1 AND path IN (SELECT path FROM wanted)",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
@@ -3583,6 +3622,10 @@ class LexicalStore:
         # scope) for bounded queries; see `_catalogue_term_frequencies`.
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         self._filtered_term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
+        # (scope, catalogue generation, admitted-set digest) -> that admitted
+        # corpus's Okapi figures, so a warm restricted ranking reads only its
+        # candidates. Few entries: each holds one vocabulary-sized mapping.
+        self._admitted_statistics: dict[tuple, Any] = {}
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -7140,26 +7183,33 @@ class LexicalStore:
             }
             pages = len(admitted)
             limit = path_limit(pages)
-            paths_json = json.dumps(sorted(admitted), ensure_ascii=False)
             excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
+            # One classification per distinct shipped label in this snapshot; a
+            # hidden row is dropped before its label is read.
+            carryable: dict[object, bool] = {}
             frequencies: dict[str, int] = {}
             paths: dict[str, tuple[str, ...]] = {}
             for token in stemmed_tokens:
                 count = 0
                 bounded: list[str] = []
                 rows = conn.execute(
-                    "SELECT p.path, p.status FROM fts JOIN pages p ON p.rowid = fts.rowid "
-                    "WHERE fts MATCH ? AND p.in_kb = 1 "
-                    "AND p.path IN (SELECT value FROM json_each(?))"
+                    f"SELECT p.path, p.status FROM {_FTS_PAGES} "
+                    "WHERE fts MATCH ? AND p.in_kb = 1"
                     + excluded
                     + " ORDER BY p.path",
-                    (f'"{token}"', paths_json, *params),
+                    (f'"{token}"', *params),
                 )
                 for path, status in rows:
-                    if status_basis.classify(status, path=path).carryable:
+                    path = str(path)
+                    if path not in admitted:
+                        continue
+                    allowed = carryable.get(status)
+                    if allowed is None:
+                        allowed = _page_carryable(status_basis, status, path, carryable)
+                    if allowed:
                         count += 1
                         if len(bounded) < limit:
-                            bounded.append(str(path))
+                            bounded.append(path)
                 frequencies[token] = count
                 paths[token] = tuple(bounded)
             return frequencies, pages, paths, admitted
@@ -7224,7 +7274,7 @@ class LexicalStore:
             out: dict[str, tuple[str, ...]] = {}
             for token in dict.fromkeys(stemmed_tokens):
                 rows = conn.execute(
-                    "SELECT p.path FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    f"SELECT p.path FROM {_FTS_PAGES} "
                     f"WHERE fts MATCH ? AND p.{col} = 1" + clause + " ORDER BY p.path LIMIT ?",
                     (f'"{token}"', *params, limit),
                 ).fetchall()
@@ -7275,7 +7325,7 @@ class LexicalStore:
             # Tokens are runs of letters, numbers and marks — no FTS5 syntax
             # can hide in them, but quote anyway, exactly as `_bm25_query` does.
             row = conn.execute(
-                "SELECT COUNT(*) FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"SELECT COUNT(*) FROM {_FTS_PAGES} "
                 f"WHERE fts MATCH ? AND p.{col} = 1" + excluded_clause,
                 (f'"{token}"', *excluded_params),
             ).fetchone()
@@ -7299,17 +7349,12 @@ class LexicalStore:
         if owns_snapshot:
             conn.execute("BEGIN")
         try:
-            revision = self._frequency_revision(conn)
             generation = (
                 scope,
                 exclude_navigation,
                 exclude_raw_material,
                 exclude_statuses,
-                revision,
-                *conn.execute(
-                    "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
-                    "OR key = 'catalog_identity' ORDER BY key"
-                ).fetchall(),
+                *self._snapshot_generation(conn),
             )
             # Keep carry filters separate from ranking's unfiltered counts.
             filtered = exclude_navigation or exclude_raw_material or bool(exclude_statuses)
@@ -7348,6 +7393,52 @@ class LexicalStore:
                 )
                 return response, pages
             return {token: int(known[token]) for token in tokens}, pages
+        finally:
+            if owns_snapshot:
+                conn.rollback()
+
+    def _snapshot_generation(self, conn: sqlite3.Connection) -> tuple:
+        """The pinned snapshot's revision, recall checkpoints and catalogue identity."""
+        return (
+            self._frequency_revision(conn),
+            *conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
+                "OR key = 'catalog_identity' ORDER BY key"
+            ).fetchall(),
+        )
+
+    def _admitted_corpus_statistics(
+        self, conn: sqlite3.Connection, scope: str, admitted_paths: set[str]
+    ) -> Any:
+        """Okapi figures over the admitted pages, reused while the snapshot holds."""
+        from . import bm25 as bm25_module
+
+        owns_snapshot = not conn.in_transaction
+        if owns_snapshot:
+            conn.execute("BEGIN")
+        try:
+            digest = hashlib.blake2b(
+                "\0".join(sorted(admitted_paths)).encode("utf-8", "surrogatepass"),
+                digest_size=16,
+            ).hexdigest()
+            key = (scope, *self._snapshot_generation(conn), digest)
+            with self._term_frequency_cache_lock:
+                cached = self._admitted_statistics.get(key)
+            if cached is not None:
+                return cached
+            col = "in_vault" if scope == "vault" else "in_kb"
+            statistics = bm25_module.CorpusStatistics.of({
+                path: stemmed.split() for path, stemmed in conn.execute(
+                    "SELECT p.path, fts.stemmed FROM pages p JOIN fts ON fts.rowid = p.rowid "
+                    f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
+                )
+            })
+            with self._term_frequency_cache_lock:
+                if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
+                    self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
+                self._admitted_statistics[key] = statistics
+            return statistics
         finally:
             if owns_snapshot:
                 conn.rollback()
@@ -7394,18 +7485,11 @@ class LexicalStore:
         query_units: list | None = None,
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
-        from . import bm25 as bm25_module
-
-        admitted_corpus = None
-        if admitted_paths is not None:
-            col = "in_vault" if scope == "vault" else "in_kb"
-            admitted_corpus = {
-                path: stemmed.split() for path, stemmed in conn.execute(
-                    "SELECT p.path, fts.stemmed FROM pages p JOIN fts ON fts.rowid = p.rowid "
-                    f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
-                )
-            }
+        admitted = (
+            self._admitted_corpus_statistics(conn, scope, admitted_paths)
+            if admitted_paths is not None
+            else None
+        )
         if term_budget is not None and query_units is not None:
             from . import bm25 as bm25_module
 
@@ -7416,12 +7500,13 @@ class LexicalStore:
                     bm25_module.run_content_stems(unit.stems) if unit.run else unit.stems
                 )
             ]
-            if admitted_corpus is None:
+            if admitted is None:
                 frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
             else:
-                document_tokens = [set(doc) for doc in admitted_corpus.values()]
-                frequencies = {token: sum(token in doc for doc in document_tokens) for token in measured}
-                pages = len(admitted_corpus)
+                frequencies = {
+                    token: admitted.document_frequency.get(token, 0) for token in measured
+                }
+                pages = admitted.pages
             kept, counted, dropped = select_query_units(
                 query_units,
                 frequencies,
@@ -7510,15 +7595,16 @@ class LexicalStore:
         )
         allowed_clause += excluded_clause
         params.extend(excluded_params)
-        if admitted_corpus is not None:
-            candidates = {row[0] for row in conn.execute(
-                "SELECT p.path FROM fts JOIN pages p ON p.rowid = fts.rowid "
-                f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause,
-                params,
-            )}
-            return bm25_module.score_token_corpus(
-                admitted_corpus, tokens, k, allowed_paths=candidates,
-            )
+        if admitted is not None:
+            candidates = {
+                path: stemmed.split() for path, stemmed in conn.execute(
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
+                    f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause,
+                    params,
+                )
+                if path in admitted_paths
+            }
+            return admitted.score(candidates, tokens, k)
         if term_budget is not None and corroborated:
             # Bounded: rank every row the kept units match that passes the
             # scope, path and exclusion filters, then run the corroboration
@@ -7530,7 +7616,7 @@ class LexicalStore:
             rows = conn.execute(
                 "SELECT c.path, -c.bm25 FROM ("
                 "SELECT p.path AS path, fts.rowid AS rid, bm25(fts) AS bm25 "
-                "FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"FROM {_FTS_PAGES} "
                 f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause + excluded_clause
                 + " ORDER BY bm25(fts), p.path LIMIT -1"
                 ") AS c JOIN fts ON fts.rowid = c.rid "
@@ -7547,7 +7633,7 @@ class LexicalStore:
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
-            "FROM fts JOIN pages p ON p.rowid = fts.rowid "
+            f"FROM {_FTS_PAGES} "
             f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause + " "
             "ORDER BY bm25(fts), p.path LIMIT ?",
             params,
@@ -8351,7 +8437,7 @@ class LexicalStore:
                 match = " OR ".join(f'"{token}"' for token in tokens)
                 rows = conn.execute(
                     f"SELECT {_OCCURRENCE_COLUMNS}, -bm25(unit_fts) AS lexical_score "
-                    "FROM unit_fts JOIN semantic_units u ON u.rowid = unit_fts.rowid "
+                    f"FROM {_UNIT_FTS_UNITS} "
                     f"WHERE unit_fts MATCH ? AND {where} "
                     "ORDER BY bm25(unit_fts), u.parent_path, u.source_order",
                     [match, *params],

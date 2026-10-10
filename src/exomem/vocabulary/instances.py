@@ -63,6 +63,35 @@ def page_definitions(root: Path, path: str, frontmatter: dict, subjects: tuple[s
     return PageDefinitions(scope or PUBLIC_INSTANCE, binding, snapshots, path, frontmatter)
 
 
+def definitions_dependency(root: Path, subjects: tuple[str, ...]) -> tuple:
+    """Everything that `page_definitions` reads for `subjects`, except the page itself.
+
+    A cache of interpreted pages may reuse a page only while this stays equal.
+    """
+    from ..governance import policy
+    from . import registry, registry_spec
+
+    root = Path(root)
+    try:
+        document = configuration(root)
+    except AssignmentRequired:
+        document = None
+    scopes = (None,) if document is None else (None, *sorted(document["private"]))
+    # Page membership selects the instance only in a bound vault.
+    entries: list[object] = [None if document is None else policy.load(root).fingerprint]
+    for subject in subjects:
+        for scope in scopes:
+            try:
+                spec = select(root, registry_spec(subject), scope)
+                snapshot = registry.load(spec, root)
+            except RegistryError as error:
+                entries.append((subject, scope, type(error).__name__))
+            else:
+                entries.append((subject, scope, spec.binding_revision,
+                                snapshot.content_hash, snapshot.effective_digest))
+    return tuple(entries)
+
+
 def _path(value: object) -> str:
     if not isinstance(value, str):
         raise RegistryError("INVALID_REGISTRY_BINDING: path must be a string")

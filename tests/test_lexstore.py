@@ -1940,3 +1940,30 @@ def test_vocabulary_axis_counts_refuse_a_stale_catalog(tmp_path):
         assert store.page_axis_counts("source_kind") is None
     finally:
         freshness.clear()
+
+
+def test_a_restricted_ranking_never_reuses_a_wider_admissions_statistics(tmp_path):
+    """Hidden pages never shape a restricted caller's scores, even after a wider
+    admission ranked the same catalogue snapshot first."""
+    visible = {f"Knowledge Base/Notes/zorvane-{index}.md" for index in range(4)}
+    hidden = {f"Knowledge Base/Private/hidden-{index}.md" for index in range(12)}
+    for index, rel in enumerate(sorted(visible)):
+        _write_page(tmp_path, rel, "zorvane quill " + "filler " * index)
+    for rel in hidden:
+        _write_page(tmp_path, rel, "zorvane " * 30)
+    lexstore.ensure_fresh(tmp_path)
+
+    def rank(admitted: set[str]) -> list[tuple[str, float]]:
+        result = lexstore.search_bm25_result(
+            tmp_path, "zorvane quill", 20, scope="kb", allow_delta=False,
+            admitted_paths=admitted,
+        )
+        assert result.readiness.complete
+        return result.value
+
+    alone = rank(visible)
+    lexstore.clear_stores()
+    wider = rank(visible | hidden)
+
+    assert {path for path, _ in wider} > visible
+    assert rank(visible) == alone

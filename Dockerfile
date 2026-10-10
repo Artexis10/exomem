@@ -305,7 +305,9 @@ LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
 #
 # Derived from `cell-runtime`, as `hosted` is: the same offline ONNX model
 # environment, `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with
-# bge-m3 as its only pre-baked model. Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
+# bge-m3 as its only pre-baked model. It adds the media engines below, which
+# `hosted` never carries; each stays off until cellctl switches it on in a cell
+# (EXOMEM_MEDIA_ENGINES). Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
 # thin seam over the standalone runtime (D1), so this stage exists to add the
 # identity, backup tooling and command the cell pod needs — not a different
 # Python environment.
@@ -329,6 +331,57 @@ COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models
 USER root
 RUN usermod --home /data/host exomem
 
+# Media engines (change `add-cloud-multimodal-processing`, design D3–D5).
+#
+# Tesseract with every script model Debian packages from tessdata, the OSD model,
+# and the language packs EXOMEM_OCR_LANGS names (`+`-separated tessdata names). A
+# pack added there needs no code change: OCR reads each pack's script from its own
+# data. The same list is the default OCR reads with when a page names no script.
+#
+# The Python engines are the packages the `media-cpu` extra adds to the venv that
+# `cell-runtime` already holds, at the versions and hashes uv.lock pins. The export
+# skips every package the venv has, so the serving runtime (onnxruntime, protobuf,
+# click) keeps the versions production runs; `--no-deps` stops uv from changing one
+# to satisfy a media package, and `uv pip check` fails the build when that leaves a
+# requirement unmet. It has no CUDA wheel and no torch; the gate below fails the
+# build if either arrives.
+#
+# EXOMEM_OCR_INVENTORY: reading each OCR model's script reads every traineddata
+# file (about 350 MB), and every media child is fresh. The gate's first OCR run
+# writes that inventory here, read-only at run time, so a child reads one small file.
+#
+# OMP_THREAD_LIMIT=1: Tesseract otherwise starts one OpenMP thread per host CPU,
+# not per cell CPU, and each thread's stack counts against the media child's
+# data-segment limit.
+ARG EXOMEM_OCR_LANGS=eng+jpn+jpn_vert+est
+# The engines this image claims. The gate needs a passing sample of every media
+# kind they serve, so a claimed format cannot ship unproven.
+ARG EXOMEM_MEDIA_SHIPPED_ENGINES=documents,ocr
+RUN packs="$(echo "${EXOMEM_OCR_LANGS}" | tr '+_' ' -' | sed 's/[^ ][^ ]*/tesseract-ocr-&/g')" \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd 'tesseract-ocr-script-*' ${packs} \
+ && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=bind,from=builder-lean,source=/app,target=/src,rw \
+    uv export --project /src --frozen --no-dev --no-emit-project --extra media-cpu \
+      $(/app/.venv/bin/python -c 'import importlib.metadata as m; print(*{"--no-emit-package=" + d.metadata["Name"] for d in m.distributions()})') \
+      --output-file /tmp/media-cpu.txt \
+ && uv pip install --python /app/.venv/bin/python --no-cache --require-hashes --no-deps -r /tmp/media-cpu.txt \
+ && uv pip check --python /app/.venv/bin/python \
+ && rm /tmp/media-cpu.txt
+ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
+    EXOMEM_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \
+    OMP_THREAD_LIMIT=1
+# The support proof: with networking off, extract a real sample of every format
+# the image serves and find its phrase. A format that fails is not shipped.
+RUN --network=none \
+    --mount=type=bind,source=tests/fixtures/media-samples,target=/samples \
+    --mount=type=bind,source=scripts/check-media-samples.py,target=/media-gate.py \
+    mkdir -p /opt/exomem-ocr \
+ && HOME=/tmp python /media-gate.py /samples "${EXOMEM_MEDIA_SHIPPED_ENGINES}" \
+ && test -s "${EXOMEM_OCR_INVENTORY}" \
+ && find /tmp -mindepth 1 -delete
+
 # EXOMEM_LOG_DIR: no runtime log ever lands on the tenant volume D8 backs up,
 # even without the manifest setting it (design D1.2 "Log directory"). D2's
 # writable `/tmp` emptyDir is where this actually lands at runtime.
@@ -344,7 +397,8 @@ RUN usermod --home /data/host exomem
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
 #
-# EXOMEM_DISABLE_CLIP: this image carries no CLIP stack (no torch, no Pillow).
+# EXOMEM_DISABLE_CLIP: this image carries no CLIP stack (no torch, no CLIP model;
+# Pillow ships only for OCR).
 # Left enabled, every query reported image search as degraded and the media
 # worker tried, and warned, once per image.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
