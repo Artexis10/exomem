@@ -229,6 +229,8 @@ def test_a_worker_held_by_its_gate_says_why_even_to_a_process_without_it(
     [
         # An older release's file: the next tick wipes and reseeds it.
         ("schema", "schema_mismatch"),
+        # A held lock is named apart from damage, as the effect block names it.
+        ("lock", "locked"),
         ("garbage", "unreadable"),
     ],
 )
@@ -242,14 +244,28 @@ def test_upkeep_names_a_sidecar_it_cannot_read(
     vault = fx.build(tmp_path)
     path = dreamer_store.sidecar_path(vault)
     path.parent.mkdir(parents=True, exist_ok=True)
+    holder = None
     if content == "schema":
         conn = sqlite3.connect(path)
         conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT INTO meta VALUES ('schema', '1')")
         conn.commit()
         conn.close()
+    elif content == "lock":
+        holder = sqlite3.connect(path)
+        holder.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        holder.execute(
+            "INSERT INTO meta VALUES ('schema', ?)", (str(dreamer_store.SCHEMA_VERSION),)
+        )
+        holder.commit()
+        holder.execute("BEGIN EXCLUSIVE")
     else:
         path.write_bytes(b"not a database file " * 64)
-    listed = commands.op_review_memory(vault, mode="upkeep")
+    try:
+        listed = commands.op_review_memory(vault, mode="upkeep")
+    finally:
+        if holder is not None:
+            holder.rollback()
+            holder.close()
     assert listed["status"] == "unavailable"
     assert listed["reason"] == reason

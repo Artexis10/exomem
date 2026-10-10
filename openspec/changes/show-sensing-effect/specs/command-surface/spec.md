@@ -2,7 +2,7 @@
 
 ### Requirement: The upkeep review states why it is unavailable
 
-When `review_memory(mode="upkeep")` answers `status: "unavailable"`, the response SHALL carry a `reason` drawn from exactly `worker_not_running`, `no_tick_yet`, `schema_mismatch` and `unreadable`. A `no_tick_yet` response SHALL carry a `waiting` object with the gate's reason code, the UTC time it began, and a `source` of `worker` (the serving process's live state) or `sidecar` (the state the worker last recorded). A `sidecar` wait SHALL also carry `recorded_at`, the UTC time the worker wrote it, so a stopped worker's last record never reads as a live wait. The reason SHALL come from the worker's live state in the process that hosts the worker, and otherwise from what the worker recorded in its own sidecar, never from the empty state of a process that runs no worker. The worker SHALL record its health at the end of a tick and, within one poll, whenever its gate holds it for a reason other than the one on record, writing at most once per poll, so a process without the worker can read why no tick has run. A sidecar that no tick has written SHALL report `no_tick_yet`, not `available`. Off, paused and standby workers SHALL create no sidecar for this record.
+When `review_memory(mode="upkeep")` answers `status: "unavailable"`, the response SHALL carry a `reason` drawn from exactly `worker_not_running`, `no_tick_yet`, `schema_mismatch`, `locked` and `unreadable`. The sidecar states SHALL carry the same names as the effect block's `dreamer_sidecar`. A `no_tick_yet` response SHALL carry a `waiting` object with the gate's reason code, the UTC time it began, and a `source` of `worker` (the serving process's live state) or `sidecar` (the state the worker last recorded). A `sidecar` wait SHALL also carry `recorded_at`, the UTC time the worker wrote it, so a stopped worker's last record never reads as a live wait. The reason SHALL come from the worker's live state in the process that hosts the worker, and otherwise from what the worker recorded in its own sidecar, never from the empty state of a process that runs no worker. The worker SHALL record its health at the end of a tick and, within one poll, whenever its gate holds it for a reason other than the one on record, writing at most once per poll, so a process without the worker can read why no tick has run. A sidecar that no tick has written SHALL report `no_tick_yet`, not `available`. Off, paused and standby workers SHALL create no sidecar for this record.
 
 #### Scenario: A worker held by its gate says why to another process
 
@@ -17,8 +17,8 @@ When `review_memory(mode="upkeep")` answers `status: "unavailable"`, the respons
 
 #### Scenario: A sidecar the reviewer cannot read names itself
 
-- **WHEN** the sidecar exists with an older schema, or cannot be read
-- **THEN** the reason is `schema_mismatch` or `unreadable` respectively
+- **WHEN** the sidecar exists with an older schema, is held by another writer's lock, or cannot be read
+- **THEN** the reason is `schema_mismatch`, `locked` or `unreadable` respectively
 
 ### Requirement: The dispositions view reports each family's effect
 

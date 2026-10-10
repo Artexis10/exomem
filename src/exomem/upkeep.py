@@ -393,7 +393,7 @@ def review(
 def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict[str, Any]:
     """Why upkeep cannot be listed: a closed `reason`, and the wait when there is one.
 
-    The four reasons are this response's own closed enum, fixed by its contract,
+    The five reasons are this response's own closed enum, fixed by its contract,
     not a reading of anyone's meaning (sound under C6). They come from the worker's live state in the process that hosts
     it, else from what the worker recorded in its sidecar, never from the empty
     state of a process that runs no worker.
@@ -422,13 +422,11 @@ def _unavailable(vault_root: Path, view: dreamer_store.StoreView | None) -> dict
 
 
 def _condition(vault_root: Path) -> str:
-    """`missing`, `schema_mismatch` or `unreadable` for a sidecar `read_view` refused.
+    """`missing`, `schema_mismatch`, `locked` or `unreadable` for a refused `read_view`.
 
-    This response's contract names those reasons, and a held lock is one way
-    the sidecar cannot be read, so `locked` reads as `unreadable` here.
+    The effect block names the same sidecar states, so one state has one name.
     """
-    condition = dreamer_store.refused_condition(vault_root)
-    return "unreadable" if condition == "locked" else condition
+    return dreamer_store.refused_condition(vault_root)
 
 
 def _waiting(reason: Any, since: Any, source: str) -> dict[str, Any]:
