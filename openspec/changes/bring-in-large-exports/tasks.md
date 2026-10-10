@@ -14,7 +14,7 @@
 - [x] 2.2 `exomem attach` resumes through a session.
   Evidence: `test_attach_resumes_an_interrupted_archive_upload_on_its_next_run` turns red when the CLI ignores its saved session record or writes it group-readable.
 - [x] 2.3 Prove: an interrupted upload resumes through the real listener and worker; a hash mismatch, a wrong secret, cancel and expiry leave no bytes.
-  Evidence: the e2e turns red when the running digest restarts per part; `tests/test_upload_sessions.py` cases turn red when a mismatch keeps the `.part`, a wrong secret answers 403, or a cancel or an expiry keeps the `.part`.
+  Evidence: the e2e turns red when the running digest restarts per part; `tests/test_upload_sessions.py` cases turn red when a mismatch keeps the `.part`, a wrong secret answers 403, or a cancel or an expiry keeps the `.part`. `test_a_part_whose_client_drops_mid_body_keeps_what_arrived_and_the_upload_resumes` drops a part mid-body on a real uvicorn listener; it turns red (offset 40, not 70) when a disconnect discards the buffered bytes or hashes them without writing them.
 
 ## 3. Import grammar (C)
 

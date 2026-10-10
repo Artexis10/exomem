@@ -3,15 +3,18 @@
 The interrupted upload that resumes through the real listener and worker is in
 `test_local_ingress_e2e.py`. These cases cover what only a session can get
 wrong: bytes that do not match their declared hash, a secret that must not
-reveal a session, and bytes left behind after a cancel or an expiry. All data
-is invented.
+reveal a session, bytes left behind after a cancel or an expiry, and the bytes
+a part keeps when its client drops mid-body. All data is invented.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
+import socket
+import threading
 import time
 from pathlib import Path
 
@@ -43,18 +46,43 @@ class _ASGIClient:
         return asyncio.run(send())
 
 
+def _app(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("EXOMEM_UPLOAD_MAX_BYTES", raising=False)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "sekret")
+    return server.build_server(require_auth=False).http_app()
+
+
 def _client(vault: Path, monkeypatch: pytest.MonkeyPatch) -> _ASGIClient:
     from exomem import server_transfer
-
-    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
 
     async def inline_threadpool(function, *args, **kwargs):
         return function(*args, **kwargs)
 
     monkeypatch.setattr(server_transfer, "run_in_threadpool", inline_threadpool)
-    monkeypatch.delenv("EXOMEM_UPLOAD_MAX_BYTES", raising=False)
-    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "sekret")
-    return _ASGIClient(server.build_server(require_auth=False).http_app())
+    return _ASGIClient(_app(monkeypatch))
+
+
+@contextlib.contextmanager
+def _listening(app):
+    """`app` behind a real uvicorn listener on a loopback port that the OS picks."""
+    import uvicorn
+
+    bound = socket.socket()
+    bound.bind(("127.0.0.1", 0))
+    listener = uvicorn.Server(uvicorn.Config(app, log_level="error", ws="none"))
+    thread = threading.Thread(target=listener.run, kwargs={"sockets": [bound]}, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 30
+    while not listener.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "the listener never started"
+        time.sleep(0.01)
+    try:
+        yield bound.getsockname()
+    finally:
+        listener.should_exit = True
+        thread.join(30)
+        bound.close()
 
 
 def _create(client: _ASGIClient, data: bytes, *, sha256: str | None = None) -> tuple[str, str]:
@@ -204,3 +232,38 @@ def test_one_credential_keeps_at_most_four_open_sessions(vault, monkeypatch) -> 
 
     assert refused.status_code == 429 and refused.json()["code"] == "UPLOAD_SESSION_QUOTA"
     assert len(_parts(vault)) == 4
+
+
+def test_a_part_whose_client_drops_mid_body_keeps_what_arrived_and_the_upload_resumes(
+    vault, monkeypatch
+) -> None:
+    """A server that loses the bytes a cut-off part delivered makes the client send them again,
+    and one that hashes them without writing them fails the whole file's SHA-256 at commit.
+    Only a real listener reports a client that leaves mid-body."""
+    data = b"device_days" * 10
+    with _listening(_app(monkeypatch)) as (host, port), httpx.Client(
+        base_url=f"http://{host}:{port}", trust_env=False, timeout=30
+    ) as client:
+        location, secret = _create(client, data)
+        assert _patch(client, location, secret, 0, data[:40]).status_code == 204
+        with socket.create_connection((host, port), timeout=30) as raw:
+            raw.sendall(
+                f"PATCH {location} HTTP/1.1\r\nHost: {host}:{port}\r\nTus-Resumable: 1.0.0\r\n"
+                f"Authorization: Bearer sekret\r\nExomem-Upload-Secret: {secret}\r\nUpload-Offset: 40\r\n"
+                f"Content-Type: application/offset+octet-stream\r\nContent-Length: {len(data) - 40}\r\n"
+                "Expect: 100-continue\r\n\r\n".encode()
+            )
+            # Uvicorn answers 100 once the handler first reads the body, so the bytes below
+            # reach a reader that is already waiting for them.
+            assert raw.recv(64).startswith(b"HTTP/1.1 100 ")
+            raw.sendall(data[40:70])
+            time.sleep(0.5)  # let the reader take them before the connection goes
+        held = client.request("HEAD", location, headers={**TUS, "Exomem-Upload-Secret": secret})
+        [part] = _parts(vault)
+
+        assert held.status_code == 200 and held.headers["upload-offset"] == "70"
+        assert part.read_bytes() == data[:70]
+        assert _patch(client, location, secret, 70, data[70:]).status_code == 204
+        state = _settled(client, location, secret)
+        assert state["state"] == "committed", state
+        assert state["receipt"]["hash"] == hashlib.sha256(data).hexdigest()
