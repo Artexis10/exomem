@@ -1531,37 +1531,6 @@ def _admit_epoch_inputs(
     raise GraphEpochUnreadable()
 
 
-def registry_epoch_writes(
-    vault_root: Path,
-) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None]:
-    """Build the full-scope epoch owned by an exact registry replacement."""
-    from .vault import PlannedWrite
-
-    root = Path(vault_root)
-    epoch = _admit_epoch_inputs(root)
-    checkpoint = next_checkpoint(
-        current=epoch.checkpoint,
-        acknowledged_generation=(
-            epoch.acknowledgement.generation
-            if epoch.acknowledgement is not None
-            else 0
-        ),
-        floor_generation=epoch.floor.generation if epoch.floor is not None else 0,
-        mutation_id=_checkpoint_mutation_id(),
-        paths=[],
-        created_paths=[],
-        force_full_scope=True,
-    )
-    return (
-        PlannedWrite(
-            floor_path(root),
-            GraphSyncGenerationFloor.create(checkpoint.generation).render(),
-        ),
-        PlannedWrite(checkpoint_path(root), checkpoint.render()),
-        epoch.checkpoint,
-    )
-
-
 def _is_utf8_stream(stream: BinaryIO) -> bool:
     """Whether a seekable staged payload is strict UTF-8, leaving its position."""
     import codecs
@@ -1587,7 +1556,7 @@ def _epoch_writes_with_predecessor(
 
     The import stays here to keep the vault writer free of a module cycle.
     """
-    from . import recall_policy, relation_registry
+    from . import recall_policy
     from .kbdir import kb_dirname
     from .vault import (
         PlannedWrite,
@@ -1603,21 +1572,6 @@ def _epoch_writes_with_predecessor(
     root = Path(vault_root)
     resolved_root = root.resolve()
     caller_writes = tuple(writes)
-    registry_target = relation_registry.extension_registry_path(root).resolve(
-        strict=False
-    )
-    registry_write = next(
-        (
-            write
-            for write in caller_writes
-            if write.path.resolve(strict=False) == registry_target
-        ),
-        None,
-    )
-    if registry_write is not None and not isinstance(registry_write.content, str):
-        raise GraphEpochIncoherent("relation registry batch content is not textual")
-    if registry_write is not None:
-        return registry_epoch_writes(root)
     paths: list[tuple[str, str | None]] = []
     created_paths: list[str] = []
     for write in caller_writes:
@@ -1649,7 +1603,7 @@ def _epoch_writes_with_predecessor(
         paths.append((relative, digest))
         if not write.path.exists():
             created_paths.append(relative)
-    if registry_write is None and not paths:
+    if not paths:
         return None
     mutation_id = _checkpoint_mutation_id()
     epoch = _admit_epoch_inputs(root)
@@ -1662,7 +1616,7 @@ def _epoch_writes_with_predecessor(
         mutation_id=mutation_id,
         paths=paths,
         created_paths=created_paths,
-        force_full_scope=(registry_write is not None or epoch.requires_full_recovery),
+        force_full_scope=epoch.requires_full_recovery,
     )
     return (
         PlannedWrite(floor_path(root), GraphSyncGenerationFloor.create(checkpoint.generation).render()),
@@ -1676,11 +1630,9 @@ def epoch_writes(
 ) -> tuple[PlannedWrite, PlannedWrite] | None:
     """Build ordered internal epoch replacements for canonical graph inputs.
 
-    In addition to ordinary admitted Markdown, the exact governed relation
-    registry target is a graph input.  It always receives a full checkpoint:
-    changing relation meaning can affect every stored raw observation even
-    though no Markdown path changed.  Detection lives here so callers provide
-    only registry YAML and cannot omit or handcraft the recovery epoch.
+    Only admitted Markdown is a graph input. Stored rows hold raw relation
+    observations that each reader resolves with its own definitions, so a
+    vocabulary registry save changes no stored row and owes the graph nothing.
     """
     result = _epoch_writes_with_predecessor(vault_root, writes)
     return None if result is None else result[:2]
@@ -2766,6 +2718,55 @@ class GraphRebuildCoordinator:
         projection.__cause__ = error
         return projection
 
+    def _newer_after_failure(
+        self, error: BaseException, required: GraphSyncCheckpoint, attempts: int,
+        shutdown: threading.Event | None,
+    ) -> GraphSyncCheckpoint | None:
+        """The registration that arrived during a failed pass, when it should be built.
+
+        `ensure_started` only records a registration while a pass runs, so stopping
+        here would drop it until some later write. Shutdown and cancellation (not
+        `Exception`) stop, and so does a live external owner. Lineage errors stop
+        too: a newer pass builds on the same lineage, which only a graph rebuild
+        reconcile repairs.
+        """
+        if (
+            attempts >= MAX_GRAPH_REBUILD_ATTEMPTS
+            or not isinstance(error, Exception)
+            or isinstance(error, GraphRebuildInProgress | GraphEpochIncoherent | GraphResetFailed)
+            or (shutdown is not None and shutdown.is_set())
+        ):
+            return None
+        with self._condition:
+            newer, recorded = self._required, self._error
+        assert newer is not None
+        return newer if recorded is None and newer.generation > required.generation else None
+
+    def _record_unbuilt_graph(self, shutdown: threading.Event | None) -> None:
+        """Leave the drain a whole-vault marker when a stopped flight left no sidecar.
+
+        With a sidecar, the drain finds a stopped rebuild through its barrier or its
+        availability check. Without one, it defers incremental repair, so nothing
+        would build the graph until an unrelated write. The marker states the debt
+        and the drain's full convergence owns the retry.
+        """
+        from . import deferred_index
+        from .epistemic_graph import sidecar_path
+
+        if shutdown is not None and shutdown.is_set():
+            return  # The service is stopping; its next start registers its own rebuild.
+        with self._condition:
+            assert self._required is not None
+            generation = int(self._required.generation)
+        try:
+            if sidecar_path(self.vault_root).exists():
+                return
+            deferred_index.mark_graph_full_rebuild(self.vault_root, generation=generation)
+        except Exception:  # noqa: BLE001 - the stop must still reach waiters; a later write or reconcile recovers
+            logger.warning("graph rebuild stopped with no sidecar; could not queue a full rebuild", exc_info=True)
+            return
+        logger.info("graph rebuild stopped with no sidecar; queued a full rebuild generation=%s", generation)
+
     def _run(self, shutdown: threading.Event | None = None) -> None:
         attempts = 0
         while attempts < MAX_GRAPH_REBUILD_ATTEMPTS:
@@ -2786,6 +2787,15 @@ class GraphRebuildCoordinator:
                     ):
                         outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
+                newer = self._newer_after_failure(error, required, attempts, shutdown)
+                if newer is not None:
+                    logger.info(
+                        "graph rebuild failed generation=%s; building newer generation=%s",
+                        required.generation,
+                        newer.generation,
+                        exc_info=True,
+                    )
+                    continue
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(
                         "graph rebuild coalesced with active external owner "
@@ -2819,6 +2829,8 @@ class GraphRebuildCoordinator:
                     required.checkpoint_sha256,
                     required.generation,
                 )
+                if isinstance(error, Exception):  # Cancellation is a stopping service.
+                    self._record_unbuilt_graph(shutdown)
                 with self._condition:
                     self._error = projection
                     self._running = False
@@ -2838,6 +2850,7 @@ class GraphRebuildCoordinator:
                 self._running = False
                 self._condition.notify_all()
                 return
+        self._record_unbuilt_graph(shutdown)
         with self._condition:
             self._error = GraphRebuildRegistrationError(
                 "GRAPH_SYNC_STABILIZATION_EXHAUSTED",

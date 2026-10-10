@@ -2426,7 +2426,7 @@ def inspect_embedding_freshness(
     if not sidecar.is_file():
         return result
     try:
-        from . import access, embeddings, find, semantic_index
+        from . import access, embedding_index, embeddings, find, semantic_index
 
         before_sidecar = _sidecar_state(sidecar)
         wal_exists = before_sidecar[1][0]
@@ -2499,22 +2499,7 @@ def inspect_embedding_freshness(
                 "AND name = 'semantic_unit_vectors'"
             ).fetchone()
             if has_unit_table:
-                for offset in range(0, len(rels), 400):
-                    batch = rels[offset : offset + 400]
-                    rows = conn.execute(
-                        "SELECT parent_path, parent_generation, unit_ref "
-                        "FROM semantic_unit_vectors WHERE parent_path IN "
-                        f"({','.join('?' for _ in batch)})",
-                        batch,
-                    ).fetchall()
-                    for parent_path, generation, unit_ref in rows:
-                        generations, unit_refs = stored_units.setdefault(
-                            str(parent_path), (frozenset(), frozenset())
-                        )
-                        stored_units[str(parent_path)] = (
-                            generations | {str(generation)},
-                            unit_refs | {str(unit_ref)},
-                        )
+                stored_units = embedding_index.stored_parent_states(conn, rels)
         finally:
             conn.close()
             if snapshot_dir is not None:
@@ -2545,14 +2530,10 @@ def inspect_embedding_freshness(
             if parent_state is None:
                 unit_current = rel not in stored_units
             else:
-                expected_refs = frozenset(
-                    unit.unit_ref
-                    for unit in parent_state.document.units
-                    if unit.unit_ref is not None
+                # Every parsed parent owes a coverage record, even with no occurrence.
+                unit_current = stored_units.get(rel) == embedding_index.expected_parent_state(
+                    parent_state
                 )
-                expected = (frozenset({parent_state.parent_generation}), expected_refs)
-                actual = stored_units.get(rel)
-                unit_current = actual == expected or (actual is None and not expected_refs)
             result[rel] = (
                 EmbeddingFreshness.CURRENT
                 if file_current and unit_current

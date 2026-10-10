@@ -31,7 +31,7 @@ from exomem import (
     runtime_resources,
 )
 from exomem import find as find_module
-from exomem.embedding_index import EmbeddingIndex
+from exomem.embedding_index import EmbeddingIndex, expected_parent_state
 from exomem.kbdir import kb_dirname
 
 OLD = "fake/old-space"
@@ -255,21 +255,20 @@ def test_cell_builds_preseeded_vault_without_sidecar(preseeded_world, monkeypatc
     assert active.path != index_paths.legacy_sidecar_path(vault)
     metadata, vectors = active.all_vectors()
     expected_chunks = []
+    expected_occurrences = 0
     for rel in _PAGES:
         path = vault / kb_dirname() / rel
         page = find_module._CACHE.get(path, vault)
         expected_chunks.extend(embeddings._chunks_for_page(vault, page))
         state = semantic_index.build_parent_index_state(vault, path)
         assert state is not None
-        refs = frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
-        assert refs
-        assert active.semantic_unit_parent_states()[page.rel_path] == (
-            frozenset({state.parent_generation}), refs
-        )
+        assert state.occurrences
+        expected_occurrences += len(state.occurrences)
+        assert active.semantic_unit_parent_states()[page.rel_path] == expected_parent_state(state)
     assert len(metadata) == len(expected_chunks)
     assert vectors.shape == (len(expected_chunks), _DIMS[NEW])
     unit_vectors = active.all_semantic_unit_vectors()
-    assert sum(len(rows) for rows in unit_vectors.values()) == len(_PAGES)
+    assert sum(len(rows) for rows in unit_vectors.values()) == expected_occurrences
     assert all(row.vector.shape == (_DIMS[NEW],) for rows in unit_vectors.values() for row in rows)
     assert sorted(chunk for chunks in _chunk_texts(vault).values() for chunk in chunks) == sorted(
         expected_chunks
@@ -370,7 +369,7 @@ def test_initial_build_resumes_after_a_live_write_and_restart(preseeded_world, m
     assert set(active.file_mtimes()) == {
         f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
     }
-    assert len(active.semantic_unit_parent_states()) == len(_PAGES)
+    assert set(active.semantic_unit_parent_states()) == set(active.file_mtimes())
     assert all(_passages_by(log, NEW).count(text) == 1 for text in committed)
     assert _vector_lane(vault)["status"] == "participated"
 
@@ -417,7 +416,7 @@ def test_initial_build_resumes_after_first_encode_fails_and_a_live_write(
         assert set(shadow.file_mtimes()) == {
             f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
         }
-        assert len(shadow.semantic_unit_parent_states()) == len(_PAGES)
+        assert set(shadow.semantic_unit_parent_states()) == set(shadow.file_mtimes())
         publish(vault_root, name)
 
     monkeypatch.setattr(index_paths, "publish_active_sidecar", publish_after_build)
@@ -428,7 +427,7 @@ def test_initial_build_resumes_after_first_encode_fails_and_a_live_write(
     assert set(active.file_mtimes()) == {
         f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
     }
-    assert len(active.semantic_unit_parent_states()) == len(_PAGES)
+    assert set(active.semantic_unit_parent_states()) == set(active.file_mtimes())
     assert _vector_lane(vault)["status"] == "participated"
 
 

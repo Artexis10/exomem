@@ -15,7 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .. import reserved_paths, semantic_contract
+from .. import held_fs, reserved_paths, semantic_contract
 from . import catalog_publication, graph_producer
 from . import policy as policy_module
 from . import receipts, schema_v4, store
@@ -525,7 +525,7 @@ def _proposal_guard_actual(
         if proposal is None or not isinstance(proposal[0], str):
             return {"status": "invalid"}
         payload = json.loads(proposal[0])
-        from .tool import _canonical_documents, _membership_manifest, _proposal_guard_value
+        from .tool import _canonical_documents, _proposal_evidence, _proposal_guard_value
 
         documents = _canonical_documents(payload["documents"])
         archive_rows = conn.execute(
@@ -549,15 +549,18 @@ def _proposal_guard_actual(
             prior_documents[path] = prior_bytes.decode("utf-8")
         if set(prior_documents) != set(documents):
             return {"status": "invalid"}
+        journal = _validated_persisted_journal(conn, event_id)
+        # Closed restore retries verify the same components without inventing a pending operation.
+        pending_event_id = None if journal is not None and journal["phase"] == "closed" else event_id
         prior_compile = policy_module.compile_prospective(
             vault_root,
             prior_documents,
-            _expected_pending_event_id=event_id,
+            _expected_pending_event_id=pending_event_id,
         )
         prospective_compile = policy_module.compile_prospective(
             vault_root,
             documents,
-            _expected_pending_event_id=event_id,
+            _expected_pending_event_id=pending_event_id,
         )
         if prior_compile is None or prospective_compile is None:
             return {"status": "invalid"}
@@ -568,7 +571,7 @@ def _proposal_guard_actual(
         # Ignored authoring files do not create policy; recognized inputs retain their exact prior fingerprint.
         if not any(policy_module._document_kind(path) is not None for path, _ in prior_compile.target_documents):
             prior = policy_module.EMPTY_POLICY
-        manifest = _membership_manifest(vault_root, prior, prospective, set(documents))
+        manifest = _proposal_evidence(vault_root, prior, prospective, documents, payload)
         return _proposal_guard_value(prior.fingerprint, canonical_json(manifest))
     except (
         GovernanceError,
@@ -678,18 +681,27 @@ def _required_intents_match(
     return True
 
 
-def _validated_marker(vault_root: Path, journal: Mapping[str, Any]) -> bool:
-    marker = _marker_path(vault_root)
+def _validated_marker(vault_root: Path, journal: Mapping[str, Any], *, evidence_root: Path | None = None) -> bool:
+    marker = _marker_path(vault_root if evidence_root is None else evidence_root)
     try:
         marker_stat = marker.lstat()
-        if not stat.S_ISREG(marker_stat.st_mode):
+        if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_nlink != 1:
             return False
-        value = json.loads(marker.read_text(encoding="utf-8"))
+        physical_root = vault_root if evidence_root is None else evidence_root
+        with held_fs.acquire(physical_root).require() as filesystem:
+            relative = marker.relative_to(physical_root)
+            with filesystem.parent(relative.parent.as_posix()).require() as parent:
+                with filesystem.file(parent, relative.name).require() as opened:
+                    if opened.identity.link_count != 1:
+                        return False
+                    value = json.loads(filesystem.read(opened).require())
     except FileNotFoundError:
         return True
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, held_fs.HeldFsError):
         return False
-    conn = store.open_connection(vault_root)
+    conn = store.open_readonly_connection(vault_root)
+    if conn is None:
+        return False
     try:
         paths = [
             row["component_key"]

@@ -1522,6 +1522,36 @@ def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waite
     assert observed == [1, 2]
 
 
+def test_a_pass_that_fails_while_a_newer_registration_arrives_builds_that_registration(
+    tmp_path: Path,
+) -> None:
+    """A write that registers during a failing pass still gets its graph.
+
+    `ensure_started` only records a registration while a pass runs. A failed pass
+    used to stop the flight, which dropped the newer registration until a later write.
+    """
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    observed: list[int] = []
+
+    def build(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        observed.append(checkpoint.generation)
+        if checkpoint.generation == 1:
+            entered.set()
+            assert release.wait(_HOLD_SECONDS)
+            raise RuntimeError("the vault moved while the pass sampled it")
+        return graph_sync.GraphBuildOutcome.covering(checkpoint)
+
+    coordinator.ensure_started(_checkpoint(1), build)
+    assert entered.wait(_OBSERVE_SECONDS)
+    newer = coordinator.start_or_join(_checkpoint(2), build)
+    release.set()
+
+    assert newer.wait(_OBSERVE_SECONDS).covers(_checkpoint(2))
+    assert observed == [1, 2]
+
+
 @pytest.mark.parametrize(
     ("state", "expected_remediation"),
     [

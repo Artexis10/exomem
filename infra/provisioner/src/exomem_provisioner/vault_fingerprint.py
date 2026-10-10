@@ -67,6 +67,7 @@ _RESERVED_EXACT = {
     ".review-state.json",
     ".due-state.json",
     ".due-state-emission.json",
+    ".connector-boundary.json",
 }
 _RESERVED_TREES = {
     "_governance",
@@ -150,6 +151,10 @@ def _classification(path: str) -> str | None:
     lowered = tuple(part.casefold() for part in parts)
     basename = lowered[-1] if lowered else ""
     kb_dir = os.environ.get("EXOMEM_KB_DIRNAME", "").strip().strip("/") or "Knowledge Base"
+    if path == f"{kb_dir}/.connector-boundary.json":
+        # The connector requirement carries the protective Scope selectors
+        # across restore, so it is canonical before it is registered state.
+        return "canonical"
     if path == "Knowledge Base/.review-state.json":
         return "portable-derived"
     if re.fullmatch(rf"{re.escape(kb_dir)}/\.graph-commit-receipts/[0-9a-f]{{24}}\.json", path):

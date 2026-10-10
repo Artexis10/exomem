@@ -978,6 +978,10 @@
           "type": "string",
           "description": "Registry family: resolve-entity matches its leaf types; context and graph-context keep only its entity neighbours."
         },
+        "registry_scope": {
+          "type": "string",
+          "description": "create-entity instance selector; public or a canonical private Scope ID."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -3656,6 +3660,10 @@
         "version": {
           "type": "string",
           "description": "Kept version from `history`, for `restore`."
+        },
+        "registry_scope": {
+          "type": "string",
+          "description": "Public instance token or canonical private Scope ID; grants no authority."
         },
         "response_detail": {
           "default": "compact",

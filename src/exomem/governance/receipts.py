@@ -1744,11 +1744,13 @@ def _scanned_locator_matches(
 
 def _active_sidecar_anchor(
     vault_root: Path,
+    *,
+    evidence_root: Path | None = None,
 ) -> tuple[str, Path, tuple[int, str, int, str, str | None, int | None]] | None:
     instance_id = _read_sidecar_instance_id(vault_root)
     if instance_id is None:
         return None
-    instance_dir = _instance_dir(vault_root, instance_id)
+    instance_dir = _instance_dir(evidence_root if evidence_root is not None else vault_root, instance_id)
     anchor = _read_sidecar_head(vault_root, instance_id)
     if anchor is None:
         raise ReceiptError("receipt sidecar is missing its active anchor")
@@ -1793,8 +1795,13 @@ def _anchor_issues(
     return issues
 
 
-def verify_chain(vault_root: Path) -> dict[str, Any]:
-    """Read the JSONL evidence and anchors without creating or changing either."""
+def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dict[str, Any]:
+    """Verify physical evidence against its authority without changing either.
+
+    Restore staging may hold destination evidence after rollback. Its separate
+    authority root requires anchored instances: an invented chain must not gain
+    restore admission, at the cost of refusing an unprovable stopped retry.
+    """
     instances: dict[str, dict[str, Any]] = {}
     all_issues: list[dict[str, str]] = []
     root = _events_root(vault_root)
@@ -1807,8 +1814,11 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
             "instances": instances,
         }
     active_anchor: tuple[str, Path, tuple[int, str, int, str, str | None, int | None]] | None = None
+    anchor_root = authority_root if authority_root is not None else vault_root
     try:
-        active_anchor = _active_sidecar_anchor(vault_root)
+        active_anchor = _active_sidecar_anchor(anchor_root, evidence_root=vault_root)
+        if authority_root is not None and active_anchor is None:
+            raise ReceiptError("destination receipt authority is absent")
     except ReceiptError as exc:
         code = (
             "invalid_instance_id"
@@ -1837,9 +1847,11 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
             anchor = active_anchor[2] if active_anchor is not None and instance_dir.name == active_anchor[0] else None
             if anchor is None:
                 try:
-                    anchor = _read_sidecar_head(vault_root, instance_dir.name)
+                    anchor = _read_sidecar_head(anchor_root, instance_dir.name)
                 except ReceiptError as exc:
                     issues.append({"code": "sidecar_read_error", "path": str(instance_dir), "detail": str(exc)})
+            if authority_root is not None and anchor is None:
+                issues.append({"code": "anchor_absent", "path": str(instance_dir), "detail": "destination has no durable head for this instance"})
             if anchor is not None:
                 issues.extend(_anchor_issues(vault_root, instance_dir, records, anchor))
             terminals = {str(item.get("causation_id")) for item in records if item.get("phase") in {"committed", "aborted"}}
@@ -1861,6 +1873,27 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
         instances[instance_id] = {"tail_seq": 0, "tail_hash": GENESIS_HASH, "issues": issues}
         all_issues.extend(issues)
     return {"valid": not all_issues, "issues": all_issues, "instances": instances}
+
+
+def restore_evidence_paths(evidence_root: Path, *, authority_root: Path,
+                           event_ids: frozenset[str]) -> set[str]:
+    """Admit only destination-anchored evidence from the linked restore proposal."""
+    result = verify_chain(evidence_root, authority_root=authority_root)
+    if any(issue["code"] != "unresolved_intent" or issue["detail"] not in event_ids
+           for issue in result["issues"]):
+        raise ReceiptError("restore evidence has no exact destination authority")
+    records = event_records(evidence_root)
+    if any((record.get("event_id") if record.get("phase") == "intent"
+            else record.get("causation_id")) not in event_ids for record in records):
+        raise ReceiptError("restore evidence belongs to another proposal")
+    paths = set()
+    for instance_id in result["instances"]:
+        instance = _instance_dir(evidence_root, instance_id)
+        for path in instance.glob("*.jsonl"):
+            if path.stat().st_nlink != 1:
+                raise ReceiptError("restore evidence has another filesystem owner")
+            paths.add(path.relative_to(evidence_root).as_posix())
+    return paths
 
 
 def register_state_resolver(operation: str, resolver: Callable[[Mapping[str, Any]], Any]) -> None:

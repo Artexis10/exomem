@@ -93,9 +93,10 @@ def entity_types(vault_root: Path, snapshot: Snapshot) -> Usage:
     """Entity pages per registered type, from the graph's file nodes."""
 
     def read() -> Usage:
+        # Stored rows hold the authored label; this snapshot resolves it.
         rows = _graph_rows(
             vault_root,
-            "SELECT json_extract(metadata, '$.entity_type'), COUNT(*) FROM graph_nodes "
+            "SELECT json_extract(metadata, '$.entity_type_raw'), COUNT(*) FROM graph_nodes "
             "WHERE kind = 'file' AND page_type = 'entity' GROUP BY 1",
         )
         if isinstance(rows, str):
@@ -132,17 +133,23 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
     """Authored edges per canonical relation, from the graph's edges."""
 
     def read() -> Usage:
+        from ..epistemic_graph import CANDIDATE_STATUS
+
         origins = ", ".join(f"'{origin}'" for origin in _AUTHORED_EDGE_ORIGINS)
+        # Stored rows type only core meanings; a candidate row counts under the
+        # key its authored label names in this snapshot, like category labels.
         rows = _graph_rows(
             vault_root,
-            "SELECT relation_type, COUNT(*) FROM graph_edges "
-            f"WHERE relation_type IS NOT NULL AND origin IN ({origins}) GROUP BY 1",
+            "SELECT COALESCE(relation_type, raw_relation), COUNT(*) FROM graph_edges "
+            f"WHERE (relation_type IS NOT NULL OR registry_status = '{CANDIDATE_STATUS}') "
+            f"AND origin IN ({origins}) GROUP BY 1",
         )
         if isinstance(rows, str):
             return _unavailable(rows, "graph authored edges")
+        resolve = snapshot.typed.resolve
         return Usage(
             True,
-            _canonical_counts(rows, snapshot, lambda value: value),
+            _canonical_counts(rows, snapshot, lambda value: resolve(value).canonical),
             source="graph authored edges",
         )
 

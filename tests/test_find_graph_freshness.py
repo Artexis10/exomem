@@ -15,6 +15,7 @@ import pytest
 
 from exomem import epistemic_graph
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +37,7 @@ def _count_semantic(monkeypatch: pytest.MonkeyPatch) -> dict:
     return calls
 
 
+@library_scope()
 def test_relation_adding_write_invalidates(vault: Path, monkeypatch) -> None:
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     calls = _count_semantic(monkeypatch)
@@ -56,6 +58,7 @@ def test_relation_adding_write_invalidates(vault: Path, monkeypatch) -> None:
     assert calls["n"] == 2  # graph content changed -> re-ranked
 
 
+@library_scope()
 def test_wal_mtime_change_does_not_evict(vault: Path, monkeypatch) -> None:
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     calls = _count_semantic(monkeypatch)

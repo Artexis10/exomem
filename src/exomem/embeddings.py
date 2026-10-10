@@ -48,7 +48,7 @@ from . import (
 )
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM as VECTOR_DIM  # the legacy width, re-exported
-from .embedding_index import EmbeddingIndex
+from .embedding_index import EmbeddingIndex, expected_parent_state
 from .vector_index_common import vec_gate as _vec_gate
 
 log = logging.getLogger(__name__)
@@ -1730,7 +1730,7 @@ def reconstruct_publication(vault_root: Path, path: Path) -> EmbeddingPublicatio
             if chunks is None:
                 return None  # The existing segmenter needs inference: replay instead.
             state = semantic_index.current_parent_index_state(vault_root, path, source=prepared.source)
-            units = [unit for unit in state.document.units if unit.unit_ref is not None]
+            units = state.occurrences
             prepared.check_projections(chunks, units, vector_dim=identity.dim)
             token = index.parent_publication_from_source(chunks, state, identity=identity)
             if token is None:
@@ -2020,7 +2020,7 @@ def _upsert_after_write_status(
                 vault_root, md, source=preparation.source,
             )
             preparation.check_projections(
-                chunks or [], [unit for unit in prepared_state.document.units if unit.unit_ref is not None],
+                chunks or [], prepared_state.occurrences,
                 vector_dim=identity.dim if identity else recall_space.current_dim(),
             )
         per_file.append((md, page, chunks, mtime, signature, prepared_state))
@@ -2086,11 +2086,8 @@ def _upsert_after_write_status(
                         else:
                             index.delete_file(rel)
                         if unit is not None:
-                            state, unit_vectors, unit_mtime = unit
-                            if len(unit_vectors):
-                                index.upsert_semantic_units(state, unit_vectors, unit_mtime)
-                            else:
-                                index.delete_semantic_units(rel)
+                            # An empty set still publishes the parent's coverage record.
+                            index.upsert_semantic_units(*unit)
                 published_paths.extend(item[0] for item in current)
             except Exception as error:  # noqa: BLE001 - failed batches retain receipts
                 drifted = not all(item[3]() for item in current)
@@ -2149,7 +2146,7 @@ def _upsert_after_write_status(
         unit_replacement = None
         try:
             state = prepared_state or semantic_index.current_parent_index_state(vault_root, md)
-            units = [unit for unit in state.document.units if unit.unit_ref is not None]
+            units = state.occurrences
             with recall_space.encoding_for(index):
                 unit_vectors, unit_producer = _encode_prepared(
                     lambda units=units, stored_units=stored_units, producer=producer: (
@@ -2690,15 +2687,8 @@ def index_incremental(
             unit_state = None
         if unit_state is not None:
             unit_seen_on_disk.add(page.rel_path)
-            expected_refs = frozenset(
-                unit.unit_ref for unit in unit_state.document.units if unit.unit_ref is not None
-            )
-            stored = unit_parent_states.get(page.rel_path)
-            expected_stored = (
-                frozenset({unit_state.parent_generation}),
-                expected_refs,
-            )
-            if stored != expected_stored and (stored is not None or expected_refs):
+            # Every parsed parent owes a coverage record, even with no occurrence.
+            if unit_parent_states.get(page.rel_path) != expected_parent_state(unit_state):
                 pending_units.append((unit_state, page.mtime))
         chunks = _chunks_for_page(vault_root, page)
         if not chunks:
@@ -2782,24 +2772,21 @@ def index_incremental(
     ) -> None:
         if not group:
             return
-        texts = [
-            unit.content
-            for state, _mtime in group
-            for unit in state.document.units
-            if unit.unit_ref is not None
-        ]
-        with recall_space.encoding_for(index, load=True):
+        occurrences = [state.occurrences for state, _mtime in group]
+        texts = [occurrence.content for items in occurrences for occurrence in items]
+        if texts:
+            with recall_space.encoding_for(index, load=True):
+                vectors, producer = _encode_prepared(lambda: embed_texts(texts, is_query=False))
+        else:
+            # Coverage records alone need no model.
             vectors, producer = _encode_prepared(
-                lambda: (
-                    embed_texts(texts, is_query=False)
-                    if texts
-                    else np.zeros((0, index.dim), dtype=np.float32)
-                )
+                lambda: np.zeros((0, index.dim), dtype=np.float32),
+                fallback=getattr(index, "identity", None),
             )
         offset = 0
         replacements = []
-        for state, mtime in group:
-            count = sum(unit.unit_ref is not None for unit in state.document.units)
+        for (state, mtime), items in zip(group, occurrences, strict=True):
+            count = len(items)
             replacements.append((state, vectors[offset : offset + count], mtime))
             offset += count
         index.upsert_batch([], replacements, identity=producer)
@@ -2807,7 +2794,7 @@ def index_incremental(
 
     for item in pending_units:
         unit_batch.append(item)
-        unit_batch_size += sum(unit.unit_ref is not None for unit in item[0].document.units)
+        unit_batch_size += len(item[0].occurrences)
         if unit_batch_size >= batch_size:
             _flush_units(unit_batch)
             unit_batch = []

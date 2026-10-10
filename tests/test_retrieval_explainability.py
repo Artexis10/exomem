@@ -613,6 +613,7 @@ def test_unit_vector_success_marks_lexical_non_applicable(
             allowed_unit_refs: set[str],
             allowed_parent_paths: set[str],
             validate: bool,
+            incomplete_out: list[str] | None = None,
         ):
             assert validate is False
             assert allowed_parent_paths == {rel}
@@ -679,6 +680,7 @@ def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
             allowed_unit_refs: set[str],
             allowed_parent_paths: set[str],
             validate: bool,
+            incomplete_out: list[str] | None = None,
         ):
             assert validate is False
             assert allowed_parent_paths == {rel}

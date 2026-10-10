@@ -404,14 +404,14 @@ def test_index_path_rechecks_manifest_before_graph_publication(
     resolver = find_module.recall_resolver_snapshot(
         vault, freshness=epistemic_graph._disk_vault_freshness(vault)
     )
-    real_edges = epistemic_graph._edges_for_page
+    real_edges = epistemic_graph._structural_edges_for_page
 
     def replace_with_raw(*args, **kwargs):
         result = real_edges(*args, **kwargs)
         manifest.write_text("# raw private workout\n", encoding="utf-8")
         return result
 
-    monkeypatch.setattr(epistemic_graph, "_edges_for_page", replace_with_raw)
+    monkeypatch.setattr(epistemic_graph, "_structural_edges_for_page", replace_with_raw)
     conn = index._connect()
     try:
         assert index._index_path(conn, manifest, resolver=resolver) is False
@@ -507,44 +507,5 @@ def test_suppressed_path_purge_keeps_other_source_unit_collision_proof(
             "SELECT edge_key FROM graph_edges WHERE edge_key = 'visible-proof'"
         ).fetchone()
         assert remaining == ("visible-proof",)
-    finally:
-        conn.close()
-
-
-def test_collision_override_allows_only_proven_current_endpoint(tmp_path: Path) -> None:
-    vault = tmp_path / "vault"
-    raw_rel = "Knowledge Base/Records/Health/raw.md"
-    visible_rel = "Knowledge Base/Notes/Visible.md"
-    _write(vault, raw_rel, "# raw\n")
-    _write(vault, visible_rel, "# visible\n")
-    index = epistemic_graph.EpistemicGraphIndex(vault)
-    shared_unit = "unit:shared-unit-ref"
-    edge = {
-        "source_path": visible_rel,
-        "src_key": shared_unit,
-        "dst_key": epistemic_graph._file_key(visible_rel),
-    }
-    conn = index._connect()
-    try:
-        with conn:
-            epistemic_graph._insert_node(
-                conn,
-                epistemic_graph.GraphNode(
-                    node_key=shared_unit, kind="finding", path=raw_rel,
-                    anchor="unit", title="raw", text="raw", source_hash="hash",
-                ),
-            )
-        assert not epistemic_graph._edge_recall_allowed(conn, vault, edge)
-        assert epistemic_graph._edge_recall_allowed(
-            conn,
-            vault,
-            edge,
-            endpoint_overrides={
-                shared_unit: {
-                    "node_key": shared_unit,
-                    "path": visible_rel,
-                }
-            },
-        )
     finally:
         conn.close()

@@ -411,6 +411,13 @@ def register_rest_facade(
                     admission,
                     rule,
                 )
+                from . import auth_sessions
+                from .governance import connector_boundary
+
+                if not await auth_sessions.origin_session_active(bound_principal):
+                    raise authorization_request.AuthorizationContextUnavailable
+                boundary_revision = connector_boundary.cache_identity(vault_root, bound_principal)
+                unrestricted = connector_boundary.unrestricted(vault_root, bound_principal)
                 if _cmd.name == "edit_memory":
                     body = edit_operations.normalize_edit_surface_arguments(body)
                 kwargs = cli_ops.coerce(
@@ -439,6 +446,10 @@ def register_rest_facade(
                         )
 
                 result = await run_in_threadpool(invoke_bound)
+                changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
+                limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)
+                if not await auth_sessions.origin_session_active(bound_principal) or changed and limited:
+                    raise authorization_request.AuthorizationContextUnavailable
             except runtime_resources.ModelBusyError as exc:
                 err = cli_ops.error_dict(exc)
                 _log_rest_failure(

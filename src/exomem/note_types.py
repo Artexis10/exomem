@@ -49,6 +49,16 @@ def registry_path(root: Path) -> Path:
     return kb_root(root) / "_Schema" / "note-types.yaml"
 
 
+def overlay_path(root: Path) -> Path:
+    """The overlay the selected public instance reads; the default path when none is selected."""
+    from .vocabulary import instances
+
+    try:
+        return instances.select(Path(root), SPEC).overlay(Path(root))
+    except registry.RegistryError:
+        return registry_path(root)
+
+
 @dataclass(frozen=True, slots=True)
 class NoteType:
     """One registered type's closed note-type role and attributes."""
@@ -395,6 +405,10 @@ class Basis:
     `refuses` is False for a page the operation only reads or rewrites links in
     (see `reading`): an invalid overlay then leaves the value without a
     definition, as on the read side, instead of refusing.
+
+    The overlay is the one the selected public instance reads, the same one
+    `registry.load` reads. A selection or binding error makes the vault's types
+    unavailable, as an invalid overlay does.
     """
 
     root: Path | None
@@ -402,26 +416,35 @@ class Basis:
     refuses: bool = True
     _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
-
-    def _admitted(self) -> bool:
-        if self.root is None:
-            return False
-        if not self.owner_local:
-            return _admitted(self.root)
-        from .governance.principal import owner_local_producer
-
-        with owner_local_producer(self.root, "note_type_definitions"):
-            return _admitted(self.root)
+    _unselected: bool = field(default=False, init=False, repr=False)
 
     def _load(self) -> None:
         self._attempted = True
-        if self.root is not None and not self.root.is_dir():
+        self._snapshot, self._unselected = None, False
+        if self.root is None:
+            return
+        if not self.root.is_dir():
             # A vault that does not exist has no overlay to admit or read.
             self._snapshot = registry.load(SPEC, None)
-        elif self._admitted():
-            self._snapshot = registry.load(SPEC, self.root)
+        elif not self.owner_local:
+            self._load_selected(self.root)
         else:
-            self._snapshot = None
+            from .governance.principal import owner_local_producer
+
+            with owner_local_producer(self.root, "note_type_definitions"):
+                self._load_selected(self.root)
+
+    def _load_selected(self, root: Path) -> None:
+        from .vocabulary import instances
+        from .vocabulary.contract import admission_refusal
+
+        # Admit the instance the read selects, then read it under the same admission.
+        try:
+            spec = instances.select(root, SPEC)
+            if admission_refusal(root, spec) is None:
+                self._snapshot = registry.load(spec, root)
+        except registry.RegistryError:
+            self._unselected = True
 
     def _extension(self) -> NoteTypeRegistry | None:
         if not self._attempted:
@@ -440,7 +463,8 @@ class Basis:
 
         # Without admission the value has no definition, as before the registry.
         # A library call that no surface bound has no audience to refuse for.
-        if self._snapshot is None or not self.refuses or current_principal() is None:
+        withheld = self._snapshot is None and not self._unselected
+        if withheld or not self.refuses or current_principal() is None:
             return _UNTYPED
         return _UNAVAILABLE
 
@@ -491,15 +515,15 @@ class Basis:
             )
         return ("public", registry.load(SPEC, None).effective_digest)
 
+    def loaded_dependency(self) -> tuple[str, str]:
+        """The dependency after admitting the overlay, for state every audience shares."""
+        if not self._attempted:
+            self._load()
+        return self.dependency
+
     def matches(self, dependency: tuple[str, str]) -> bool:
         """Re-admit before comparing a cached result's private dependency."""
         if dependency[0] == "public":
             return dependency == ("public", registry.load(SPEC, None).effective_digest)
         self._load()
         return self._snapshot is not None and dependency == self.dependency
-
-
-def _admitted(root: Path) -> bool:
-    from .vocabulary.contract import admission_refusal
-
-    return admission_refusal(root, SPEC) is None

@@ -1,198 +1,118 @@
 ## ADDED Requirements
 
-### Requirement: The consolidation seal is an owner-inclusive outer release floor
+### Requirement: Connector ceilings are an independent content admission floor
 
-Once a destination enters durable `sealed` state, the release boundary SHALL
-intercept every ordinary content response before retrieval, projection, raw-byte
-serialization, enumeration, resource exposure, or error assembly and SHALL
-return one stable content-free sealed outcome. The rule SHALL apply to every
-ordinary principal, including the owner, and to MCP, REST, CLI, Hosted, search,
-ask, read/get/raw read, browse/list, graph/context, review, history, Records,
-media, export/download, resource/template, upload, mutation, and background
-product branches. A normal owner session, full-release grant, exact-release
-approval, empty-policy fast path, escalation token, or standing rule SHALL NOT
-override the seal.
+An armed destination SHALL meet its configured connector ceiling with existing governance decisions before empty-policy or owner shortcuts. The host SHALL define denied canonical Scope IDs and a restrictive default. Owner identity, purpose, grants, bridges, and exact releases SHALL NOT widen that ceiling. RAW authority SHALL remain a separate requirement.
 
-The public sealed outcome SHALL reveal no run id, phase, conflict, path, title,
-reference, snippet, count, score, source/destination identity, policy state,
-principal policy, item existence, recovery classification, or timing-dependent
-branch detail. Errors and successes SHALL cross the same terminal scrubber and
-shall be normalized so a hidden item, absent item, policy transition, and
-recovery branch do not become distinguishable through content. The seal SHALL
-remain active throughout restrictive-policy activation, every content batch,
-derived rebuild, verification, abort, rollback, and crash/retry recovery, and
-SHALL be removed for ordinary routing only after the expected census, mandatory
-in-process and exact-cell transport probes, routing proof, and terminal evidence
-have all reached their durable verified state. The sole earlier suspension is
-the exact operation's phase-bound `transport-verifying` window under trusted
-control while public ingress/routing is durably stopped/drained; it grants no
-ordinary public admission and must re-seal on failure/restart.
+#### Scenario: Empty policy meets a denied Scope
 
-#### Scenario: Owner uses an ordinary read while content is publishing
+- **WHEN** an owner connector requests content in its denied Scope while ordinary policy is empty
+- **THEN** the ceiling excludes that content before decode or response construction
+- **AND** ordinary owner and empty-policy shortcuts cannot release it
 
-- **WHEN** the authenticated destination owner invokes a normal ask, raw read, browse, graph, media, review, history, Record query, export, or resource route while the destination is sealed
-- **THEN** it returns the same stable content-free sealed outcome as any other ordinary principal
-- **AND** neither pre-cutover nor partially published content, paths, counts, policy facts, or phase facts cross the boundary
+#### Scenario: RAW authority is valid but the connector is restricted
 
-#### Scenario: Empty-policy or full-release path is present
+- **WHEN** a request has current RAW authority but its connector ceiling excludes the target
+- **THEN** the target remains unavailable
+- **AND** the hosted RAW exemption does not exempt the connector ceiling
 
-- **WHEN** an ordinary request would otherwise use the empty-policy fast path, an L6 grant, an exact-release approval, or a standing scrubber rule while sealed
-- **THEN** the outer seal wins before that path can emit content
-- **AND** no ordinary authorization state weakens partial-state invisibility
+### Requirement: Scope membership is consistent across canonical references and paths
 
-#### Scenario: A content command raises during recovery
+Markdown and canonical rows SHALL use the same Scope membership semantics for valid canonical references. Existing path-reference inclusion and exclusion SHALL remain effective. Malformed governed identity SHALL NOT create an alternate membership interpretation.
 
-- **WHEN** a normal content command reaches a sealed destination whose recovery journal is missing, mixed, or malformed
-- **THEN** its public error is the stable sealed outcome rather than the internal recovery error
-- **AND** the caller cannot infer which recovery state or stored item caused the refusal
+#### Scenario: Canonical-reference inclusion protects a Markdown page
 
-### Requirement: Only the trusted consolidation control plane may cross the outer seal
+- **WHEN** a protective Scope includes the page's valid canonical reference
+- **THEN** Markdown and canonical-row admission both recognize its membership
+- **AND** a denied connector cannot escape through a path-based read
 
-The only seal exception SHALL be an unforgeable in-process
-`ConsolidationAuthority` created by trusted consolidation control code and bound
-to destination vault, run, operation journal, exact phase, and allowed action.
-It SHALL admit only owner-authorized reserved-run inspection, exact approved
-publication or preimage restoration, and named verification probes. It SHALL
-not be accepted from a command argument, authentication claim, persisted token,
-serialized retry value, or ordinary owner session, and it SHALL not grant a
-general read of the destination.
+#### Scenario: Canonical-reference exclusion and path rules remain effective
 
-After a named probe crosses the outer seal, canonical identity resolution,
-authorization-session binding, governance decision, disclosure-level
-projection, terminal scrubbing, response adaptation, and evidence collection
-SHALL all execute normally for the probe's freshly attested representative
-principal and purpose. The capability SHALL NOT force an allow decision,
-increase a disclosure level, reveal source-only provenance, or bypass terminal
-filtering. Pre-unseal probes SHALL call those adapter/serializer functions
-in-process; the authority object SHALL never cross or be reconstructed from an
-MCP, REST, CLI, Hosted, retry, or other black-box request. Supplemental
-transport parity SHALL be proven on disposable/cloned cells after an equivalent
-seal/unseal lifecycle with normal surface authentication and no internal
-authority. Real cutover SHALL also satisfy the exact-destination gate below;
-clone evidence never substitutes for it. Owner-only consolidation status MAY
-return bounded reserved run details through this control plane; it SHALL not
-turn those details into ordinary recallable knowledge.
+- **WHEN** a Scope excludes a valid canonical reference or uses a path rule
+- **THEN** the shared membership result honors that rule on both representations
+- **AND** malformed identity is handled under the existing identity validation contract
 
-#### Scenario: Named negative probe runs while sealed
+### Requirement: Hidden contributors cannot influence returned observations
 
-- **WHEN** the trusted coordinator invokes an approved negative probe with phase-bound internal authority
-- **THEN** the probe crosses only the outer seal and receives the ordinary governance/projector/scrubber result for its resolved principal and purpose
-- **AND** any leaked body, metadata, error, or timing oracle fails verification and keeps the seal active
+Content producers SHALL admit contributors before decoding, candidate cuts, ranking, graph traversal, aggregation, or other observable derivation. Hidden bodies, paths, references, scores, links, counts, hashes, and existence SHALL NOT influence returned observations. A producer unable to compute an admitted view SHALL use its existing honest unavailable result.
 
-#### Scenario: Owner session lacks internal authority
+#### Scenario: Protected canaries differ between twin vaults
 
-- **WHEN** a normal owner-authenticated request presents a run id, approval token, or capability-shaped request field to a content route
-- **THEN** it cannot cross the outer seal
-- **AND** the public response contains no indication whether the supplied run or token exists
+- **WHEN** equivalent requests use the same connector ceiling over identical allowed content and different protected canaries
+- **THEN** search, recall, graph, context, continuity, and canonical-state observations are equivalent
+- **AND** useful allowed results remain available rather than becoming a blanket empty response
 
-#### Scenario: Supplemental black-box parity runs after seal and unseal
+#### Scenario: A collection contains hidden rows
 
-- **WHEN** a disposable or cloned cell completes the sealed verification lifecycle and MCP, REST, CLI, or Hosted is exercised externally
-- **THEN** the request contains only normal authenticated principal/session context and traverses the real transport
-- **AND** no consolidation authority is serialized or treated as transport authentication
+- **WHEN** a restricted connector queries or summarizes a collection with hidden rows
+- **THEN** denied rows are excluded before their values are decoded or inspected
+- **AND** summaries, counts, inspection seals, and errors depend only on admitted rows
 
-### Requirement: Exact-cell transport verification precedes public routing
+#### Scenario: Hidden provenance or history references allowed content
 
-After sealed in-process verification and before public routing admission, the
-real cutover SHALL enter durable `transport-stopping -> transport-verifying ->
-transport-verified -> routing-opening`. The transport basis SHALL bind exact
-destination post-cutover census, release/build digest, selected Hosted surface
-profile/descriptor, configuration/trust/principal-mapping fingerprints, and a
-trusted proof that public ingress/routing is stopped and all prior public
-transport work drained.
+- **WHEN** a hidden history, alias, citation, or provenance contributor references an allowed object
+- **THEN** it cannot alter the restricted connector's returned structures or identifiers
+- **AND** the allowed object remains useful through its admitted contributors
 
-For a Hosted exact cell, the transport basis SHALL also bind the validated
-signed `HostedProfileSelection/v1` record and its current verifier-registry
-generation, including the selected v3 descriptor hash and the record's bound
-owner-entitlement-verifier and exact-cell transport-supervisor readiness
-digests. The release gate SHALL revalidate the selection signature, signer
-status/validity/revocation, and both readiness components before transport-stop
-and again before routing-open. A cached startup decision, inferred lifecycle
-flag, unsigned profile name, or readiness tuple from another cell SHALL not
-satisfy the exact-cell gate.
+### Requirement: Unavailable definitions withhold only dependent semantics
 
-Only under trusted control-plane supervision MAY the exact operation remove or
-bypass its consolidation seal sufficiently for normal adapters while routing
-remains durably stopped. Real MCP, REST, Hosted, and CLI calls SHALL use normal
-authentication, the selected real configuration/principal mapping, and no
-serialized `ConsolidationAuthority` or special principal shortcut. Positive and
-negative outcomes SHALL bind the transport basis and exact plan. The supervisor
-SHALL reach normal adapters through an OS/control-plane-owned isolated test
-listener or equivalent route that is absent from request/authentication data and
-admits only the precommitted probe set; public ingress, arbitrary local clients,
-and non-probe commands remain stopped. Clone evidence
-SHALL remain rehearsal evidence and SHALL not substitute for this exact-cell
-gate.
+An operation without a page's selected extension definitions SHALL keep serving admitted raw reads of that page. It SHALL serve a core-interpreted unit only when every ancestor heading of that unit is core-recognized or absent. It SHALL report every other unit of that page as unavailable and the page's unit coverage as incomplete. Vector serving SHALL treat a parent without current structural coverage as incomplete, never as a non-matching parent.
 
-Public routing SHALL open only after the transport terminal and all bound
-fingerprints revalidate. Probe failure, basis drift, receipt failure, or restart
-SHALL never open traffic; it SHALL deterministically restore the same
-consolidation seal or retain owner-only recovery with rollback reachable.
+#### Scenario: A hidden custom heading encloses a core unit
 
-#### Scenario: Exact cell passes normal-auth transports
+- **WHEN** a denied extension heading encloses a nested core heading and the caller can read the page
+- **THEN** the raw page read succeeds
+- **AND** the nested unit is unavailable rather than served from a core fallback
 
-- **WHEN** routing is stopped/drained and every bound MCP, REST, Hosted, and CLI positive/negative probe passes on the exact post-cutover census
-- **THEN** the transport-verified terminal may authorize routing-opening
-- **AND** no clone result, internal capability, or privileged test principal substitutes for real-cell behavior
+#### Scenario: Vector coverage is missing for a parent
 
-#### Scenario: Restart interrupts transport verification
+- **WHEN** a vector query reaches a parent with no current structural coverage record
+- **THEN** the result reports incomplete coverage through the existing profile
+- **AND** the parent is not counted as available and non-matching
 
-- **WHEN** the process restarts after the consolidation seal was temporarily removed but before transport-verified/routing-opening terminal
-- **THEN** startup keeps public routing stopped and re-establishes the exact consolidation seal or owner-only recovery
-- **AND** no ordinary traffic is admitted from an incomplete transport proof
+#### Scenario: Suppressed and hidden candidates compete for results
 
-#### Scenario: Ordinary local client races the transport window
+- **WHEN** hidden, suppressed, duplicate, or reference-less occurrences rank above admitted units
+- **THEN** they spend no result slot
+- **AND** the admitted units fill the requested limit
 
-- **WHEN** a normal owner or other local client that is not the supervisor-owned precommitted probe tries to use the temporarily unsealed exact cell
-- **THEN** lifecycle/routing admission refuses it before the adapter while the supervisor's request still uses normal authentication inside the adapter
-- **AND** no request field, principal shortcut, or serialized consolidation authority can turn that client into a transport probe
+### Requirement: Every content exit and cache respects current admission
 
-#### Scenario: Hosted transport supervisor readiness drifts
+Commands, raw reads, media, frames, resources, artifacts, and transfers SHALL apply the current ceiling. Release and summary caches SHALL distinguish client and configuration revision. Result and capability consumption SHALL recheck current configuration and originating authentication. Cached intermediate packets SHALL NOT bypass admission before observable derivation.
 
-- **WHEN** the selected v3 record's signer is revoked or its bound owner-entitlement or transport-supervisor readiness digest changes before routing-open
-- **THEN** exact-cell transport verification fails closed and public routing remains stopped
-- **AND** v1/v2 behavior is not widened or promoted as a fallback
+#### Scenario: Configuration changes during a live session
 
-### Requirement: Seal coverage is registered, closed-world, and restart-safe
+- **WHEN** the host narrows a client's ceiling after a result or capability was cached
+- **THEN** its next consumption applies the new ceiling
+- **AND** neither an old cache entry nor an old capability releases newly denied content
 
-Every product branch capable of returning or changing vault-derived content
-SHALL be registered in one seal/release coverage inventory used by command
-registry validation, Hosted admission, and tests. Adding a command, selector
-action, REST/MCP resource, transfer endpoint, error adapter, or background
-writer without an explicit sealed-state disposition SHALL fail startup or the
-release gate; it SHALL NOT default open. The persisted seal and phase SHALL load
-before any surface is advertised ready after restart.
+#### Scenario: A hidden media artifact is requested directly
 
-Coverage gates SHALL test success, not-found, validation, collision, busy,
-timeout, cancellation, and internal-error paths under the seal and SHALL compare
-principal/item-state pairs for content, metadata, count, error-shape, length,
-and bounded timing equivalence. Existing per-level projectors and the terminal
-scrubber remain required beneath the seal.
+- **WHEN** a restricted connector requests hidden binary bytes, a frame, resource, or artifact handle
+- **THEN** the corresponding exit applies the same ceiling before release
+- **AND** direct addressing does not expose the artifact's existence or metadata
 
-#### Scenario: A new raw or resource route lacks a seal disposition
+### Requirement: Whole-corpus surfaces cannot disclose hidden state
 
-- **WHEN** registry/coverage validation discovers a content-capable route that is absent from the closed-world seal inventory
-- **THEN** validation fails and the route cannot ship or default to ordinary release behavior
-- **AND** adding a projector without seal admission does not satisfy the gate
+Bootstrap, registries, classification advisories, refusal counts, aggregates, receipts, provenance, and errors SHALL derive output from admitted contributors or return an existing unavailable result. They SHALL NOT expose hidden global keys, hashes, counts, or conflict facts. Denied-target and absent-target responses SHALL remain indistinguishable apart from caller-supplied information.
 
-#### Scenario: Server restarts with a durable seal
+#### Scenario: Hidden content changes a global fingerprint
 
-- **WHEN** a process starts after an interruption in policy activation, publication, verification, abort, or rollback
-- **THEN** the destination is sealed before MCP, REST, CLI, Hosted, transfer, resource, or background admission becomes ready
-- **AND** only trusted owner control/recovery can classify and advance the run
+- **WHEN** hidden content changes a whole-corpus hash, registry entry, or count
+- **THEN** a restricted connector observes neither that change nor a private-dependent derivative
+- **AND** the producer uses an admitted calculation or its existing unavailable outcome
 
-### Requirement: Release claims stop at Exomem-mediated surfaces
+#### Scenario: A private definition would cause a collision
 
-The release gate and consolidation seal SHALL state their enforcement boundary
-as the registered Exomem product surfaces and internal writers. Direct
-filesystem or block-device access, manual copy/paste, direct private-artifact or
-object-store access, and upload to an external model outside Exomem SHALL remain
-outside the enforcement claim. Documentation, verification reports, receipts,
-and source-retirement clearance SHALL NOT imply that those bypasses were
-intercepted or audited by the release gate.
+- **WHEN** a registry operation would validate against hidden global definitions before private domains are implemented
+- **THEN** it remains unavailable to the restricted connector
+- **AND** success or conflict cannot reveal the hidden definition
 
-#### Scenario: Content is copied outside an Exomem command
+### Requirement: Enforcement claims name the Exomem boundary
 
-- **WHEN** an operator reads a vault or staging file directly and pastes or uploads it outside Exomem
-- **THEN** no consolidation result represents the action as release-gated, sealed, projected, scrubbed, or verified
-- **AND** operational output continues to name that boundary limitation explicitly
+Connector admission SHALL cover Exomem-mediated product operations. Documentation and evidence SHALL NOT claim that it intercepts direct filesystem access, manual copying, direct object-store access, or uploads outside Exomem.
+
+#### Scenario: Content leaves through an external filesystem action
+
+- **WHEN** an operator copies bytes without using an Exomem product operation
+- **THEN** product evidence does not represent that action as admission-checked or verified

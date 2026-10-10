@@ -5,8 +5,8 @@ import sqlite3
 import numpy as np
 import pytest
 
-from exomem import embeddings, recall_space, sidecar_store
-from exomem.embedding_index import CHUNK_PATH_LOG, EmbeddingIndex
+from exomem import embeddings, recall_space, semantic_index, sidecar_store
+from exomem.embedding_index import CHUNK_PATH_LOG, EmbeddingIndex, occurrence_rows
 
 
 @pytest.fixture
@@ -128,7 +128,8 @@ def test_rebuild_refuses_intervening_serving_publication(root, monkeypatch, muta
         if mutation == "chunk":
             writer.upsert_file("winner.md", ["winner"], vectors(1, 3), 2)
         elif mutation == "unit":
-            writer.delete_semantic_units("absent.md")
+            state = semantic_index.current_parent_index_state(root, "Knowledge Base/one.md")
+            writer.upsert_semantic_units(state, vectors(len(occurrence_rows(state)), 3), 2)
         else:
             assert writer.rebuild_all(batch_size=2) == 1
         return vectors(len(texts), 2)

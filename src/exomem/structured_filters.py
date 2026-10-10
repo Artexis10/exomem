@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, Literal, TypeAlias, cast
 
 from . import semantic_language_registry, semantic_units, temporal
+from .vocabulary.registry import PUBLIC_INSTANCE
 
 MAX_PLAN_BYTES = 16 * 1024
 MAX_POINTER_BYTES = 512
@@ -206,6 +207,10 @@ class FilterPlan:
     has_unit_predicate: bool
     leaf_count: int
     collection_value_count: int
+    #: The vocabulary instance whose entries the plan's `unit.category` and
+    #: `unit.kind` values name. A unit holds the same entry only when the value
+    #: is core or its page selected this instance.
+    unit_instance: str = PUBLIC_INSTANCE
 
     def to_dict(self) -> dict[str, Any]:
         return _node_to_dict(self.root) if self.root is not None else {}
@@ -224,14 +229,36 @@ class _Missing:
 MISSING = _Missing()
 
 
+class _ForeignEntry:
+    """A unit value that is another instance's extension entry: present, never equal.
+
+    A sentinel object, not a vocabulary value, so no spelling can collide with it.
+    """
+
+    __slots__ = ()
+
+
+FOREIGN_ENTRY = _ForeignEntry()
+
+#: The unit axes whose values are vocabulary entries rather than authored spelling:
+#: each is a selected meaning, so stored rows can only propose candidates on it.
+#: Closed filter field names that the filter schema declares, not vocabulary.
+ENTRY_AXES: Final = frozenset({"unit.category", "unit.kind"})
+
+
 def compile_filter(
     expression: Any,
     *,
     shortcuts: FilterShortcuts | None = None,
     resolve_category: CategoryResolver | None = None,
     resolve_kind: KindResolver | None = None,
+    unit_instance: str = PUBLIC_INSTANCE,
 ) -> FilterPlan:
-    """Validate and normalize a generic expression plus legacy shortcuts."""
+    """Validate and normalize a generic expression plus legacy shortcuts.
+
+    `unit_instance` is the instance the resolvers read; unit values compile
+    to its entries.
+    """
     generic = {} if expression is None else expression
     if not isinstance(generic, Mapping):
         raise _error(
@@ -304,6 +331,7 @@ def compile_filter(
         has_unit_predicate=_has_unit_predicate(resolved),
         leaf_count=state.leaf_count,
         collection_value_count=state.collection_value_count,
+        unit_instance=unit_instance,
     )
 
 
@@ -316,7 +344,7 @@ def evaluate_filter(
     """Evaluate one normalized plan against one parent/unit pair."""
     if plan.root is None:
         return True
-    return _evaluate_node(plan.root, page=page, unit=unit) is True
+    return _evaluate_node(plan.root, page=page, unit=unit, instance=plan.unit_instance) is True
 
 
 def resolve_result_level(requested: str, plan: FilterPlan) -> str:
@@ -1153,8 +1181,11 @@ def page_view(page: Any) -> dict[str, Any]:
     return out
 
 
-def unit_view(unit: Any) -> dict[str, Any]:
+def unit_view(unit: Any, *, instance: str | None = None) -> dict[str, Any]:
     """Adapt one normalized ``SemanticUnit`` for predicate evaluation.
+
+    `instance` is the vocabulary instance the unit's page selected, or None
+    when its definitions are unavailable; only core values match then.
 
     The governed metadata keys are *omitted* when absent rather than present as
     null, because for them absence is the meaningful state — "no verdict yet",
@@ -1171,6 +1202,7 @@ def unit_view(unit: Any) -> dict[str, Any]:
         "tags": list(unit.tags),
         "context": unit.context,
         "form": unit.form,
+        "instance": instance,
     }
     verdict = getattr(unit, "verdict", None)
     if verdict is not None:
@@ -1857,26 +1889,33 @@ def _evaluate_node(
     *,
     page: Mapping[str, Any],
     unit: Mapping[str, Any] | None,
+    instance: str,
 ) -> bool | None:
     if isinstance(node, Predicate):
         if node.field.namespace == "unit" and unit is None:
             return None
-        runtime = _resolve_runtime_field(node.field, page=page, unit=unit)
+        runtime = _resolve_runtime_field(node.field, page=page, unit=unit, instance=instance)
         return all(
             _evaluate_operator(node.field, runtime, operator, operand)
             for operator, operand in node.operators
         )
     if isinstance(node, AllOf):
-        values = [_evaluate_node(child, page=page, unit=unit) for child in node.children]
+        values = [
+            _evaluate_node(child, page=page, unit=unit, instance=instance)
+            for child in node.children
+        ]
         if False in values:
             return False
         return None if None in values else True
     if isinstance(node, AnyOf):
-        values = [_evaluate_node(child, page=page, unit=unit) for child in node.children]
+        values = [
+            _evaluate_node(child, page=page, unit=unit, instance=instance)
+            for child in node.children
+        ]
         if True in values:
             return True
         return None if None in values else False
-    value = _evaluate_node(node.child, page=page, unit=unit)
+    value = _evaluate_node(node.child, page=page, unit=unit, instance=instance)
     return None if value is None else not value
 
 
@@ -1885,6 +1924,7 @@ def _resolve_runtime_field(
     *,
     page: Mapping[str, Any],
     unit: Mapping[str, Any] | None,
+    instance: str,
 ) -> Any:
     if field.pointer is not None:
         current: Any = page.get("frontmatter", MISSING)
@@ -1898,7 +1938,13 @@ def _resolve_runtime_field(
     if field.namespace == "unit":
         if unit is None:
             return MISSING
-        return unit.get(field.name.removeprefix("unit."), MISSING)
+        value = unit.get(field.name.removeprefix("unit."), MISSING)
+        if field.name in ENTRY_AXES and value is not MISSING and unit.get("instance") != instance:
+            core = semantic_language_registry.core_registry()
+            shared = core.core_categories if field.name == "unit.category" else core.core_kinds
+            if value not in shared:
+                return FOREIGN_ENTRY
+        return value
     return page.get(field.name.removeprefix("page."), MISSING)
 
 
@@ -1913,6 +1959,9 @@ def _evaluate_operator(
         return (runtime is not MISSING) is operand
     if runtime is MISSING:
         return False
+    if runtime is FOREIGN_ENTRY:
+        # A distinct entry equals, contains and belongs to no operand value.
+        return operator == "$ne"
     if field.name in _KNOWN_ARRAY_FIELDS and not isinstance(runtime, (list, tuple)):
         return False
     if operator in {"$in", "$all", "$between"}:

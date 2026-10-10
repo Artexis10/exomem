@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from .vault import kb_root
-from .vocabulary import registry
+from .vocabulary import instances, registry
 
 PACK = "planning-values.yaml"
 # nosemgrep: ep-word-set -- The planning class protocol fixes these three classes.
@@ -208,11 +208,17 @@ class PlanningValues:
             from .vocabulary.contract import admission_refusal
 
             self._attempted = True
-            if self.root is not None and (
-                self.server_side or admission_refusal(self.root, SPEC) is None
-            ):
-                snapshot = registry.load(SPEC, self.root)
-                self._snapshot = None if snapshot.findings else snapshot
+            if self.root is None:
+                return None
+            # Admit the instance the read selects. A selection or binding error makes
+            # the vault's values unavailable, as the bootstrap vocabulary block does.
+            try:
+                spec = instances.select(self.root, SPEC)
+                if self.server_side or admission_refusal(self.root, spec) is None:
+                    snapshot = registry.load(spec, self.root)
+                    self._snapshot = None if snapshot.findings else snapshot
+            except registry.RegistryError:
+                self._snapshot = None
         return self._snapshot
 
     def find(self, name: str, value: object) -> registry.Entry | None:

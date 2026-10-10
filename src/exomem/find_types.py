@@ -46,6 +46,8 @@ class ParsedPage:
     # Whether an authored frontmatter block parsed as a YAML mapping. This is
     # private classification state, not part of any public result shape.
     frontmatter_valid: bool = True
+    # Parser-owned root lets canonical membership retain portable storage bindings.
+    vault_root: Path | None = None
 
     @property
     def page_type(self) -> str | None:

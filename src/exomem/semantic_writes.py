@@ -689,6 +689,8 @@ def evaluate_posthoc_batch(
     evaluations: list[PosthocPageEvaluation] = []
     for rel_path in selected:
         state = corpus.pages.get(rel_path)
+        # Each selected page is this operation's own; its eligibility needs its class.
+        semantic_contract.require_page_status(state)
         if state is None or not state.eligible_governed:
             continue
         # A posthoc pass reads the page; it never refuses for a withheld definition.
@@ -2128,6 +2130,7 @@ def _preflight_existing(
             entry_generation,
             corpus_census=before_corpus_census,
             status_dependencies=after_corpus.status_dependencies,
+            definitions=semantic_contract.page_definitions_witnesses(before, after),
         )
     return ExistingPreflight(
         applicability,
@@ -3086,9 +3089,14 @@ def _move_dependency_signature(
     )
 
     def fact_signature(fact: semantic_contract.RelationFact) -> tuple[Any, ...]:
-        qualification = semantic_contract.qualify_relation(
-            fact, registry=corpus.registry, corpus=corpus
-        )
+        try:
+            qualification = semantic_contract.qualify_relation(
+                fact, registry=corpus.registry, corpus=corpus
+            )
+            outcome: tuple[Any, ...] = (qualification.qualifies, qualification.reasons)
+        except lifecycle_statuses.ClassificationUnavailable:
+            # Unknown alike before and after; the fact's own fields still show a change.
+            outcome = ("status_unavailable",)
         return (
             fact.identity,
             fact.logical_source_path,
@@ -3098,8 +3106,7 @@ def _move_dependency_signature(
             fact.canonical_relation,
             fact.registry_status,
             fact.target_page_type,
-            qualification.qualifies,
-            qualification.reasons,
+            *outcome,
         )
 
     return (
@@ -3199,9 +3206,10 @@ def _move_evaluation_pairs(
                 after_corpus.vault_root, after_corpus.resolver_entries
             ),
         }
+    candidates = after_corpus.eligible_compiled_paths | after_corpus.status_unavailable_paths
     for _ in range(len(after_corpus.pages) + 1):
         added = False
-        for path in sorted(after_corpus.eligible_compiled_paths):
+        for path in sorted(candidates):
             if path in pairs or path not in before_corpus.pages:
                 continue
             if _move_dependency_signature(
@@ -3209,6 +3217,8 @@ def _move_evaluation_pairs(
             ) != _move_dependency_signature(
                 after_corpus, path, visible=visible, resolver=resolvers["after"]
             ):
+                # A dependent whose standing changes needs its own class to be judged.
+                semantic_contract.require_page_status(after_corpus.pages[path])
                 pairs[path] = path
                 added = True
         if not added:
@@ -4131,18 +4141,14 @@ def _evaluate_structural(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(root)
     source = _place_origin_source(destination, source)
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
     before, before_census = semantic_contract.build_corpus_context_with_census(
-        root, registry=registry, language_registry=language, status_basis=status_basis
+        root, status_basis=status_basis
     )
     candidate = semantic_contract.build_page_state(
         root,
         destination,
         source,
-        relation_registry=registry,
-        language_registry=language,
         status_basis=status_basis,
     )
     normalized_source = _normalize_origin_source(
@@ -4154,10 +4160,10 @@ def _evaluate_structural(
             root,
             destination,
             source,
-            relation_registry=registry,
-            language_registry=language,
             status_basis=status_basis,
         )
+    language = (candidate.definitions.snapshots["categories"].typed if candidate.definitions is not None
+                else semantic_language_registry.core_registry())
     resolved = memory_schema.resolve_contracts(
         contracts,
         projects=candidate.projects,
@@ -4258,6 +4264,7 @@ def preflight_creation(
             status_dependencies=tuple(
                 sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
             ),
+            definitions=semantic_contract.page_definitions_witnesses(state),
         )
         return CreationPreflight(
             "full",
@@ -4291,6 +4298,7 @@ def preflight_creation(
         status_dependencies=tuple(
             sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
         ),
+        definitions=semantic_contract.page_definitions_witnesses(state),
     )
     return CreationPreflight(
         applicability,
@@ -4329,6 +4337,7 @@ def _capture_validity_stamp(
     *,
     corpus_census: tuple | None = None,
     status_dependencies: tuple[tuple[str, str], ...] | None = None,
+    definitions: tuple[Any, ...] = (),
 ) -> tuple | None:
     """Assemble the preflight validity stamp WITHOUT a second corpus walk.
 
@@ -4349,6 +4358,7 @@ def _capture_validity_stamp(
     sc_token = semantic_contract.corpus_validity_token(
         root,
         status_dependencies=status_dependencies,
+        definitions=definitions,
         corpus_census=(
             corpus_census
             if corpus_census is not None

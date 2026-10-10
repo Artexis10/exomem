@@ -1929,7 +1929,7 @@ def _complete_semantic_category_summary(
 
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
     """Parse the admitted Markdown pages in the knowledge base."""
-    from .governance import egress, raw_protection
+    from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
@@ -1937,7 +1937,7 @@ def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
         rel = path.relative_to(vault_root).as_posix()
-        if not raw_protection.permits(vault_root, rel, who):
+        if not egress.content_permits(vault_root, rel, who):
             continue
         if admitted is not None and not admitted(rel):
             continue
@@ -2909,7 +2909,7 @@ def _check_frontmatter_compliance(
                 )
             )
         if note_type.selects(note_types.connectable):
-            classification = status_basis.classify(fm.get("status"))
+            classification = status_basis.classify(fm.get("status"), path=page.rel_path, frontmatter=fm)
             if classification.unregistered:
                 findings.append(
                     AuditFinding(
@@ -3386,7 +3386,7 @@ def relation_debt_eligible(
     path = PurePosixPath(str(rel_path).replace("\\", "/"))
     if path.name in ("index.md", "log.md"):
         return False
-    if not status_basis.classify(status).live:
+    if not status_basis.classify(status, path=path.as_posix()).live:
         return False
     if access.access_tier(vault_root, path.as_posix()) != access.TIER_READ_WRITE:
         return False
@@ -3484,7 +3484,7 @@ def _check_missing_sources(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).live:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -3813,7 +3813,7 @@ def _check_derivation_double_counting(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).live:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -3988,7 +3988,7 @@ def _check_unfinished_experiments(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).live:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -4114,7 +4114,7 @@ def _check_prediction_window(
     for page in pages:
         if page.path.name in ("index.md", "log.md"):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).live:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -5033,7 +5033,7 @@ def _check_unreflected_observations(
             continue
         if (
             not authorize(page.rel_path)
-            or not status_basis.classify(page.frontmatter.get("status")).live
+            or not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live
         ):
             continue
         exomem_id = str(page.frontmatter.get("exomem_id") or "")
@@ -5299,7 +5299,7 @@ def _check_collection_candidate(
             page.rel_path
         ):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).live:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
         moment = temporal.parse(page.frontmatter.get("created") or page.frontmatter.get("updated"))
         if moment is None:
@@ -5535,7 +5535,7 @@ def _check_question_aging(
     for page in pages:
         if page.path.name in ("index.md", "log.md"):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).live:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -6073,7 +6073,7 @@ def _check_stale_review(
             continue
         if page.path.name in ("index.md", "log.md"):
             continue
-        if not status_basis.classify(page.frontmatter.get("status")).recurrence_evidence:
+        if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).recurrence_evidence:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
@@ -6241,7 +6241,7 @@ def _is_active_compiled_rw(
         return False
     if page.path.name in ("index.md", "log.md"):
         return False
-    if not status_basis.classify(page.frontmatter.get("status")).recurrence_evidence:
+    if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).recurrence_evidence:
         return False
     if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
         return False
@@ -6544,7 +6544,7 @@ def _check_scope_divergence_semantic(
         return []
     try:
         from . import embeddings as embeddings_module
-        from . import semantic_index
+        from . import semantic_index, semantic_units
         from . import structure_promotion_semantic as sensor
     except ImportError as e:  # numpy is core, but stay defensive
         log.debug("scope_divergence_semantic sweep unavailable (%s)", e)
@@ -6569,29 +6569,31 @@ def _check_scope_divergence_semantic(
         if not rows:
             continue  # no stored geometry -> not judged, never advised about
         try:
-            state = semantic_index.build_parent_index_state(vault_root, rel_path)
+            # The page's own selected meaning decides which occurrences are units.
+            state = semantic_index.selected_parent_index_state(vault_root, rel_path)
         except (OSError, ValueError):
             # Unreadable or unparseable here means unjudgeable, not divergent.
             continue
-        # Geometry may only be read against the parse it was written for. An
-        # anchored `unit_ref` is `{parent_ref}#{anchor}` and carries no content,
-        # so a page rewritten in place without reindexing still JOINS perfectly
-        # while its vectors describe deleted text — the sensor would relabel the
-        # group from stale geometry and new vocabulary, and because the label set
-        # is the fingerprint, that fabricated change REOPENS settled dismissals.
-        # The generation binds `parent_source_hash`, so any edit moves it. It also
-        # covers partial coverage: units added without reindexing shift the
-        # generation, and judging the vectored subset would measure mass and
-        # retained scope over a fraction of the page and call it the page's shape.
-        # Not judged until the pipeline catches up — absence semantics, D1.
+        # Geometry may only be read against the parse it was written for. The
+        # generation binds `parent_source_hash`, so any edit moves it. Judging
+        # the vectored subset of an edited page would measure mass and retained
+        # scope over a fraction of the page and call it the page's shape, and a
+        # fabricated label change REOPENS settled dismissals. Not judged until
+        # the pipeline catches up — absence semantics, D1.
         if any(row.parent_generation != state.parent_generation for row in rows):
             continue
+        by_key = {row.unit_key: row.vector for row in rows}
         advisory = sensor.detect(
             sensor.shape_from_parse(
                 path=rel_path,
                 frontmatter=eligible[rel_path].frontmatter,
                 units=state.document.units,
-                vectors_by_ref={row.unit_ref: row.vector for row in rows},
+                vectors_by_ref={
+                    unit.unit_ref: by_key[key]
+                    for unit in state.document.units
+                    if (key := semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash))
+                    in by_key
+                },
             ),
             corpus=corpus,
         )

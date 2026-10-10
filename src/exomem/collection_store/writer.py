@@ -30,6 +30,7 @@ from .. import (
     writer_lease,
 )
 from .. import structured_collections as collections
+from ..governance import connector_boundary
 from ..governance.principal import effective_principal
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
@@ -509,10 +510,15 @@ class CollectionWriter:
         )
         saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
         catalog = selection.catalog
+        # Global guards and audit state cannot depend on whether hidden rows
+        # happen to exist. Limited callers receive the admitted snapshot only.
+        unrestricted = connector_boundary.unrestricted(self.root, self._operation.who)
         if release is not None:
-            complete, committed = release.complete, release.released
+            complete, committed = unrestricted and release.complete, release.released
         else:
-            complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
+            complete = unrestricted and len(allowed_rows) == sum(
+                isinstance(subject.row_id, int) for subject in catalog
+            )
             committed = len(allowed_rows)
         held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
         pending = sum(
@@ -1345,6 +1351,11 @@ class CollectionWriter:
             if manifest.view_diagnostics:
                 diagnostic = manifest.view_diagnostics[0]
                 raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+            try:
+                connector_boundary.require_create(self.root, manifest.path)
+                connector_boundary.require_create(self.root, manifest.storage.source)
+            except ValueError as error:
+                raise collections.CollectionError("WRITE_REFUSED", "target is unavailable") from error
             conflicts = self.connection.execute(
                 "SELECT collection_id FROM collections WHERE collection_id = ? OR manifest_path = ? OR source_path = ?",
                 (manifest.collection_id, manifest.path, manifest.storage.source),

@@ -209,7 +209,10 @@ def apply_status_demotion(
     for path, score in fused:
         page = page_of(path)
         mult = status_multiplier(
-            status_basis.classify(_authored_status(page)).require(), config
+            status_basis.classify(
+                _authored_status(page), path=path, frontmatter=getattr(page, "frontmatter", None)
+            ).require(),
+            config,
         )
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
@@ -351,7 +354,12 @@ def apply_post_rrf_multipliers(
                 )
         if prefer_active:
             factor = status_multiplier(
-                status_basis.classify(_authored_status(page)).require(), config
+                status_basis.classify(
+                    _authored_status(page),
+                    path=path,
+                    frontmatter=getattr(page, "frontmatter", None),
+                ).require(),
+                config,
             )
             if chain is None:
                 score *= factor

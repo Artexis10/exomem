@@ -23,6 +23,7 @@ from ..find_types import ParsedPage
 from ..governance import authorization_session_authority as authority
 from ..governance import (
     authorization_session_lifecycle,
+    connector_boundary,
     egress,
     lifecycle,
     membership,
@@ -718,7 +719,8 @@ class OperationAuthorization:
 
     def _decision_key(self, subject: CanonicalSubject):
         return (_bound(subject, "unbound").basis, self.policy.fingerprint,
-                self.who.audience_id, self.purpose)
+                self.who.audience_id, self.purpose,
+                connector_boundary.cache_identity(self.root, self.who, self.policy))
 
     def decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
         basis = subject.basis
@@ -735,11 +737,18 @@ class OperationAuthorization:
             if self.mutation and (access._matches(self.access["readonly"], relative)
                                   or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY}):
                 return Decision(0)
-        key = self._decision_key(subject)
+        scope_ids = self.cache.scopes(subject, self.policy)
+        ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
+                                                   mutation=self.mutation, path=path)
+        if ceiling.level == 0:
+            return ceiling
+        try:
+            key = self._decision_key(subject)
+        except connector_boundary.BoundaryUnavailable:
+            return Decision(0)
         active = self.grants.get(basis.identity, ()) if session else ()
         if not active and key in self.cache.decisions:
             return self.cache.decisions[key]
-        scope_ids = self.cache.scopes(subject, self.policy)
         grants = list(self.policy.grants)
         if active:
             basis = _bound(subject, self.logical_vault_id).basis
@@ -763,7 +772,8 @@ class OperationAuthorization:
 
     def _release_dependency(self):
         return (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
-                self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation)
+                self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation,
+                connector_boundary.cache_identity(self.root, self.who, self.policy))
 
     def uniform_release(self) -> bool:
         """No row-varying policy, grant, exclusion, tombstone or session: one decision per path and audience."""
@@ -1088,6 +1098,16 @@ class OperationAuthorization:
     def visible_snapshot(self, cid: str, allowed: tuple[CanonicalSubject, ...]) -> str:
         state = self.cache.state(cid, full=True)
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
+        if not connector_boundary.unrestricted(self.root, self.who):
+            # Hidden SQL allocations and store history cannot change a limited
+            # snapshot; canonical admitted identities own this projection.
+            return hashlib.sha256(b"exomem.collection-visible.v2\0" + _json([
+                cid, manifest.basis.subject.path, manifest.basis.version,
+                manifest.basis.payload_hash, manifest.basis.declaration_hash,
+                sorted((subject.basis.subject.refs, subject.basis.subject.path,
+                        subject.basis.version, subject.basis.payload_hash)
+                       for subject in allowed if subject.row_id is not None),
+            ]).encode()).hexdigest()
         current_count = len(state.subjects) - 1
         for identity, subject in self.cache.overlay(cid).items():
             current_count += (subject is not None) - (identity in state.subjects)
@@ -1251,10 +1271,10 @@ class OperationAuthorization:
                     parsed, self.policy, content_hash=hashlib.sha256(content).hexdigest(),
                 )) - set(decision.scope_ids)
                 if extra:
-                    decision = egress._meet_decisions((decision, decide(
-                        extra, audience=self.who.audience_id, purpose=self.purpose,
-                        policy=self.policy, active_grants=self.policy.grants,
-                    )))
+                    decision = egress._meet_decisions((decision,
+                        connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy),
+                        decide(extra, audience=self.who.audience_id, purpose=self.purpose,
+                               policy=self.policy, active_grants=self.policy.grants)))
             return decision
         except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
                 TypeError, KeyError, sqlite3.Error):
@@ -1293,6 +1313,8 @@ class OperationAuthorization:
     def _allows_path_metadata(
         self, path: str, content_sha256: str | Callable[[], str] | None = None
     ) -> bool:
+        if not connector_boundary.permits(self.root, path, self.who):
+            return False
         # A digest proved on demand belongs to one call, so that decision is not cached.
         key = (
             path

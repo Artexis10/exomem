@@ -16,7 +16,7 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import cf_access, local_ingress, reserved_paths, upload_tokens
+from . import auth_sessions, cf_access, local_ingress, reserved_paths, upload_tokens
 from .governance import egress
 from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
@@ -510,6 +510,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},
                 status_code=401,
             )
+        who = download_principal(request, config)
+        if not await auth_sessions.origin_session_active(who):
+            return JSONResponse(
+                {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},
+                status_code=401,
+            )
         path = request.query_params.get("path", "")
         if not path.strip():
             return JSONResponse(
@@ -533,15 +539,20 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             # withheld artifact is byte-identical to one that never existed:
             # a distinct "forbidden" reply would itself be an existence oracle.
             if not egress.release_allows_download(
-                vault_root, rel, principal=download_principal(request, config)
+                vault_root, rel, principal=who
             ):
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
             try:
                 snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            if not await auth_sessions.origin_session_active(who):
+                return JSONResponse(
+                    {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},
+                    status_code=401,
+                )
             if not egress.release_allows_download(
-                vault_root, rel, principal=download_principal(request, config), snapshot=snapshot.data
+                vault_root, rel, principal=who, snapshot=snapshot.data
             ):
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
         except VaultPathError as exc:

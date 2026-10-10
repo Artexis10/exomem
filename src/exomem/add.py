@@ -160,7 +160,7 @@ class SourceArtifact:
     content_type: str | None = None
 
 
-def _artifact_pair(folder: Path, stem: str, suffix: str) -> tuple[Path, Path]:
+def _artifact_pair(folder: Path, stem: str, suffix: str, *, vault_root: Path) -> tuple[Path, Path]:
     """A free `<stem><suffix>` / `<stem><suffix>.md` pair under `folder`.
 
     `unique_path` guarantees one free name; a captured artifact needs two, and
@@ -171,7 +171,7 @@ def _artifact_pair(folder: Path, stem: str, suffix: str) -> tuple[Path, Path]:
     """
     for attempt in range(1, 51):
         seed = stem if attempt == 1 else f"{stem}-{attempt}"
-        page = unique_path(folder, seed, suffix=f"{suffix}.md")
+        page = unique_path(folder, seed, suffix=f"{suffix}.md", vault_root=vault_root)
         artifact = page.with_name(page.name[:-3])
         if not artifact.exists():
             return artifact, page
@@ -395,6 +395,12 @@ def add(
     )
     folder_name = segments[1]
     folder_path = kb_root(vault_root).joinpath(*segments)
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, (folder_path / f"{date_iso}-{filename_slug}.md").relative_to(vault_root).as_posix())
+    except ValueError as error:
+        raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
     if adoption_seed is not None:
         actual_destination = folder_path.relative_to(vault_root).as_posix()
         if adoption_seed.get("destination") != actual_destination:
@@ -438,12 +444,12 @@ def add(
     # and removes it again if the commit is refused.
     if artifact is None:
         artifact_path: Path | None = None
-        source_path = unique_path(folder_path, stem)
+        source_path = unique_path(folder_path, stem, vault_root=vault_root)
     else:
         # The page is `<stem><ext>.md` beside `<stem><ext>`, the same convention
         # Evidence uses, so the media pipeline addresses both lanes with no
         # change and the citation resolver is fixed once rather than per layout.
-        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix)
+        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix, vault_root=vault_root)
 
     adoption_receipt: dict[str, object] | None = None
     if adoption_seed is not None:
@@ -804,17 +810,17 @@ def _classification_suggestion(
     """Advisory: this vault holds sources nobody has given a kind yet.
 
     Reads the per-folder counts this capture already took for the source
-    index, so it adds no scan, model call or persistent state. A caller other
-    than the owner gets no advisory, because those counts include pages it may
-    not see. Wrapped so a fault here can never fail a committed capture.
+    index, so it adds no scan, model call or persistent state. Only an owner
+    with whole-corpus access gets this advisory; its counts can include hidden
+    pages. Wrapped so a fault here can never fail a committed capture.
     """
     try:
-        from .governance import principal, raw_protection
+        from .governance import egress, principal, raw_protection
 
         who = principal.effective_principal()
         if not (
             raw_protection.is_owner(who)
-            and raw_protection.has_unrestricted_access(vault_root, who)
+            and egress.unrestricted_content_access(vault_root, who)
         ):
             return None
         by_folder = {name.casefold(): count for name, count in counts.items()}

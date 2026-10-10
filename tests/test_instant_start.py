@@ -47,6 +47,7 @@ from exomem import (
 from exomem import doctor as doctor_module
 from exomem import find as find_module
 from exomem.__main__ import main
+from exomem.governance.principal import library_scope
 
 
 @pytest.fixture(autouse=True)
@@ -1754,6 +1755,7 @@ def test_corpus_sweep_skipped_mid_warm_without_touching_model(
     assert out == {}
 
 
+@library_scope()
 def test_degraded_find_never_cached_even_without_degraded_out(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

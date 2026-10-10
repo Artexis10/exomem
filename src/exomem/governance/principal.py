@@ -98,6 +98,33 @@ class RemoteOwnerBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientBinding:
+    """The authenticated client, independent of its owner's audience."""
+
+    issuer: str
+    client_id: str
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.issuer, self.client_id)):
+            raise ValueError("invalid client binding")
+
+
+@dataclass(frozen=True, slots=True)
+class OriginSessionBinding:
+    """Bearer-free login identity for live delegated-capability validation."""
+
+    session_id: str
+    generation: str
+    audience: str
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.session_id, self.generation, self.audience)):
+            raise ValueError("invalid origin session binding")
+
+
+@dataclass(frozen=True, slots=True)
 class RequestPrincipal:
     """Who is asking, in the one id space the release decision compares against."""
 
@@ -115,6 +142,9 @@ class RequestPrincipal:
     # True only for the owner audience reached with a local client token over
     # the supervisor's local listener. A label, like `remote_owner`.
     local_owner: bool = False
+    client_binding: ClientBinding | None = None
+    origin_session: OriginSessionBinding | None = None
+    administrative_ingress: bool = False
 
     @property
     def principal_kind(self) -> str:
@@ -189,6 +219,8 @@ def owner_principal(*, surface: str = "cli", purpose: str | None = None) -> Requ
         purpose=purpose,
         resolved=True,
         issuer_family=_LOCAL_OWNER_ISSUER_FAMILIES.get(surface),
+        # Closed ingress names identify actual local administration, not owner identity.
+        administrative_ingress=surface in {"cli", "mcp", "library"},  # nosemgrep: ep-word-membership -- closed local ingress surfaces, not a vocabulary
     )
 
 
@@ -204,12 +236,18 @@ def local_owner_principal(*, surface: str) -> RequestPrincipal:
     Its own issuer family keeps session authority from crossing between this
     door and the stdio, REST-key or remote doors.
     """
+    from .. import local_ingress
+
+    grant = local_ingress.current_grant()
     return RequestPrincipal(
         audience_id=OWNER_AUDIENCE,
         surface=surface,
         resolved=True,
         issuer_family=LOCAL_INGRESS_ISSUER_FAMILY,
         local_owner=True,
+        client_binding=(ClientBinding(local_ingress.LOCAL_ISSUER, grant.client_id)
+                        if grant is not None else None),
+        origin_session=grant.origin_session if grant is not None else None,
     )
 
 
@@ -347,7 +385,9 @@ def _is_bound_remote_owner(token: object, binding: RemoteOwnerBinding | None) ->
     """
     if binding is None or token is None:
         return False
-    if getattr(type(token), "EXOMEM_SESSION_PROVENANCE", False) is not True:
+    from ..session_oauth import ExomemSessionAccessToken
+
+    if not isinstance(token, ExomemSessionAccessToken):
         return False
     claims = getattr(token, "claims", None)
     if not isinstance(claims, Mapping):
@@ -386,10 +426,16 @@ def resolve_mcp_principal() -> RequestPrincipal:
         if audience != MOST_RESTRICTIVE_AUDIENCE:
             issuer = str(claims.get("iss") or "verified-principal").strip()
             issuer_digest = hashlib.sha256(issuer.encode()).hexdigest()
+            from ..session_oauth import ExomemSessionAccessToken
+
+            token = _verified_access_token()
+            client_binding = None
+            origin_session = None
+            if isinstance(token, ExomemSessionAccessToken) and token.client_id:
+                client_binding = ClientBinding(issuer, token.client_id)
+                origin_session = token.origin_session
             binding = remote_owner_binding()
-            if binding is not None and _is_bound_remote_owner(
-                _verified_access_token(), binding
-            ):
+            if binding is not None and _is_bound_remote_owner(token, binding):
                 # One more explicit owner entry point, not a normalisation: the
                 # remote issuer family is kept so session authority never
                 # crosses between the owner's local and remote doors.
@@ -399,12 +445,16 @@ def resolve_mcp_principal() -> RequestPrincipal:
                     resolved=True,
                     issuer_family=f"mcp-oauth:{issuer_digest}",
                     remote_owner=True,
+                    client_binding=client_binding,
+                    origin_session=origin_session,
                 )
             return RequestPrincipal(
                 audience_id=audience,
                 surface="mcp",
                 resolved=True,
                 issuer_family=f"mcp-oauth:{issuer_digest}",
+                client_binding=client_binding,
+                origin_session=origin_session,
             )
         return most_restrictive_principal(surface="mcp")
     if expectation is not None:

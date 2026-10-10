@@ -1034,3 +1034,44 @@ def test_non_markdown_membership_memo_never_replays_changed_companion_bytes(
 
     assert first.scope_ids == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
     assert second.scope_ids == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAW"})
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_canonical_reference_controls_markdown_membership(vault: Path, excluded: bool) -> None:
+    reference = "exomem://memory/7949d372-138b-4afe-8f6f-6d49e1ea551d"
+    selector = (
+        f'paths: ["Notes/**"]\nexclude:\n  refs: ["{reference}"]\n'
+        if excluded else f'refs: ["{reference}"]\n'
+    )
+    _write_scope(vault, "canonical", "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n" + selector)
+    _write_page(
+        vault, "Knowledge Base/Notes/canonical.md",
+        "type: insight\nexomem_id: 7949d372-138b-4afe-8f6f-6d49e1ea551d",
+    )
+    parsed = _parse(vault, "Knowledge Base/Notes/canonical.md")
+    scopes = membership.evaluate(parsed, policy.load(vault))
+    assert ("01ARZ3NDEKTSV4RRFFQ69G5FAV" in scopes) is not excluded
+
+
+@pytest.mark.parametrize("identity", ["malformed", "[broken"])
+def test_malformed_identity_cannot_escape_canonical_reference_membership(
+    vault: Path, identity: str,
+) -> None:
+    _write_scope(
+        vault, "canonical",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n'
+        'refs: ["exomem://memory/7949d372-138b-4afe-8f6f-6d49e1ea551d"]\n',
+    )
+    _write_page(vault, "Knowledge Base/Notes/canonical.md", f"type: insight\nexomem_id: {identity}")
+    parsed = _parse(vault, "Knowledge Base/Notes/canonical.md")
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate(parsed, policy.load(vault))
+
+
+@pytest.mark.parametrize("selector", ['paths: ["Notes/**"]', 'projects: ["alpha"]', 'tags: ["alpha"]'])
+def test_legacy_identity_does_not_change_nonidentity_membership(vault: Path, selector: str) -> None:
+    _write_scope(vault, "legacy", "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n" + selector)
+    _write_page(vault, "Knowledge Base/Notes/legacy.md",
+                "exomem_id: legacy-id\nproject: alpha\ntags: [alpha]")
+    parsed = _parse(vault, "Knowledge Base/Notes/legacy.md")
+    assert membership.evaluate(parsed, policy.load(vault)) == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})

@@ -59,15 +59,15 @@ def scan(vault_root: Path) -> ActivationScan:
     Each page is admitted through RAW before it is counted, as the audit's
     page walk is, so a protected capture counts for the owner only.
     """
-    from .governance import raw_protection
+    from . import semantic_index
+    from .governance import egress
     from .governance.principal import effective_principal
 
     vault_root = Path(vault_root)
     who = effective_principal()
     status_basis = lifecycle_statuses.Basis(vault_root)
+    interpretations = semantic_index.Interpretations(vault_root)
     type_basis = note_types.Basis(vault_root)
-    registry = relation_registry.load_registry(vault_root)
-    language_registry = semantic_language_registry.load_registry(vault_root)
     findings: list[AuditFinding] = []
     coverage = {
         "eligible_pages": 0,
@@ -78,6 +78,7 @@ def scan(vault_root: Path) -> ActivationScan:
         "provenance_candidate_pages": 0,
         "provenance_linked_pages": 0,
         "unregistered_relation_observations": 0,
+        "definitions_unavailable_pages": 0,
     }
 
     kb = kb_root(vault_root)
@@ -85,7 +86,7 @@ def scan(vault_root: Path) -> ActivationScan:
         return ActivationScan(findings=findings, coverage=coverage)
 
     for path in find_module._walk_md(kb):
-        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
             continue
         try:
             page = find_module._parse_page(path, path.stat().st_mtime, vault_root)
@@ -97,7 +98,19 @@ def scan(vault_root: Path) -> ActivationScan:
             continue
 
         coverage["eligible_pages"] += 1
-        measurement = _measure_page(page, registry, language_registry=language_registry)
+        definitions = interpretations.definitions(page.rel_path, page.frontmatter)
+        if definitions is None:
+            # Its selected relations are unknown here: count, never measure.
+            coverage["definitions_unavailable_pages"] += 1
+            continue
+        measurement = _measure_page(
+            page,
+            definitions.snapshots["relations"].typed,
+            language_registry=semantic_language_registry.for_attached_projects(
+                definitions.snapshots["categories"].typed,
+                semantic_index.page_projects(page.frontmatter),
+            ),
+        )
         meta = {
             "signal_version": _signal_version(page),
             "typed_relations": measurement["typed_relations"],
@@ -244,7 +257,7 @@ def _eligible_for(
     ):
         return False
     basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    return basis.classify(page.frontmatter.get("status")).live
+    return basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live
 
 
 #: Access tiers a connectable target may sit in: a cited append-only Source counts.
@@ -302,13 +315,32 @@ def _measure_page(
         page_type=page.page_type,
     )
 
+    return measure_document(
+        document, registry, project=project, page_type=page.page_type,
+        body_wikilinks=len(find_body_wikilinks(page.body)),
+        frontmatter_counts=frontmatter_link_counts(page.frontmatter),
+    )
+
+
+def frontmatter_link_counts(frontmatter: dict[str, Any]) -> dict[str, int]:
+    """Keep each fixed field separate so summaries preserve provenance counts."""
+    return {field: len(_frontmatter_links(frontmatter.get(field)))
+            for field in (*_FRONTMATTER_TYPED_FIELDS, "related")}
+
+
+def measure_document(
+    document: semantic_units.SemanticUnitDocument | semantic_units.SelectedStructure,
+    registry: relation_registry.RelationRegistry, *, project: str | None,
+    page_type: str | None, body_wikilinks: int, frontmatter_counts: dict[str, int],
+) -> dict[str, Any]:
+    """Reduce selected authored occurrences through one activation arithmetic owner."""
     registered: list[str] = []
     unregistered: list[dict[str, str | int]] = []
     for relation in document.note_relations:
         resolution = registry.resolve(
             relation.kind,
             project=project,
-            page_type=page.page_type,
+            page_type=page_type,
             source_kind="file",
             origin="semantic_relation",
         )
@@ -325,7 +357,7 @@ def _measure_page(
             resolution = registry.resolve(
                 raw,
                 project=project,
-                page_type=page.page_type,
+                page_type=page_type,
                 source_kind=unit.kind,
                 origin="semantic_relation",
             )
@@ -341,13 +373,12 @@ def _measure_page(
 
     frontmatter_links = 0
     for field, relation_kind in _FRONTMATTER_TYPED_FIELDS.items():
-        count = len(_frontmatter_links(page.frontmatter.get(field)))
+        count = frontmatter_counts.get(field, 0)
         frontmatter_links += count
         registered.extend([relation_kind] * count)
-    related_count = len(_frontmatter_links(page.frontmatter.get("related")))
+    related_count = frontmatter_counts.get("related", 0)
     frontmatter_links += related_count
 
-    body_wikilinks = sum(1 for _ in find_body_wikilinks(page.body))
     assertion_blocks = sum(
         1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
     )

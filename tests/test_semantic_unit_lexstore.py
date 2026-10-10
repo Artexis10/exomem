@@ -106,9 +106,17 @@ Use SQLite for the index.
     assert {hit.category for hit in same_text} == {"config", "rule"}
     assert len({hit.unit_ref for hit in same_text}) == 2
 
+    # Shared rows are selection-free occurrences: the `## Observations` heading
+    # is stored as a candidate some instance could recognize, yet no public
+    # read above served it.
     rows = _rows(tmp_path)
-    assert len(rows) == 3
-    assert {row["record_type"] for row in rows} == {"semantic_unit"}
+    assert [(row["form"], row["category_raw"]) for row in rows] == [
+        ("rich", "Observations"),
+        ("compact", "config"),
+        ("compact", "rule"),
+        ("rich", "config"),
+    ]
+    assert {row["record_type"] for row in rows} == {"structural_occurrence"}
     assert {row["parent_path"] for row in rows} == {"Knowledge Base/Notes/units.md"}
     assert {row["parent_ref"] for row in rows} == {_PARENT_REF}
     # Normalized, unlike the file `content_hash` the drift guard uses: a unit's

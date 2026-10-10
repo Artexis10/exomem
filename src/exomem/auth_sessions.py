@@ -1197,6 +1197,31 @@ class SessionAuthority:
         if record is None:
             logger.info("event=session_rejected reason=no_matching_record")
             return None
+        return await self._validate_record_authoritatively(record)
+
+    async def validate_binding(
+        self, *, session_id: str, generation: str, client_id: str,
+    ) -> SessionRecord | None:
+        """Recheck a server-authenticated delegation without retaining its bearer.
+
+        Callers authenticate the delegation before supplying this binding.
+        Current authoritative state prevents a revoked login outliving its
+        download; a store failure costs only that delegated request.
+        """
+        raw = await self._storage.get(session_id, collection=self.sessions_collection)
+        if raw is None:
+            return None
+        try:
+            record = SessionRecord.from_dict(raw)
+        except ValueError:
+            return None
+        if record.session_id != session_id:
+            raise SessionStoreUnavailable("session record does not match its authoritative storage key")
+        if record.generation != generation or record.client_id != client_id:
+            return None
+        return await self._validate_record_authoritatively(record)
+
+    async def _validate_record_authoritatively(self, record: SessionRecord) -> SessionRecord | None:
         if record.status != "active":
             logger.info(
                 "event=session_rejected reason=status status=%s", record.status
@@ -1423,3 +1448,57 @@ class SessionAuthority:
                 )
             records.append(record)
         return sorted(records, key=lambda record: (record.issued_at, record.session_id))
+
+
+def _request_verifier(origin: Any) -> tuple[SessionAuthority, str] | None:
+    """The authority and bearer that verified this request's origin, if it carries them."""
+    from .governance.principal import _verified_access_token
+
+    token = _verified_access_token()
+    verifier = getattr(token, "_verifier", None)
+    if not isinstance(verifier, SessionAuthority) or getattr(token, "origin_session", None) != origin:
+        return None
+    return verifier, token.token
+
+
+async def origin_session_active(who: Any) -> bool:
+    """Revalidate origin facts through the authority that verified them.
+
+    A live request revalidates its own bearer through the authority that
+    verified it, with that authority's stale-grace cache. A delegated
+    capability carries no bearer, so it rechecks the binding through the
+    configured authority.
+    """
+    origin = who.origin_session
+    if origin is None:
+        return True
+    client = who.client_binding
+    if client is None:
+        return False
+    from . import local_ingress, server_auth
+
+    try:
+        verified = _request_verifier(origin)
+        if verified is not None:
+            authority, bearer = verified
+            record = await authority.validate(bearer)
+            return (
+                record is not None
+                and client.issuer == authority.issuer
+                and (record.session_id, record.generation, record.audience, record.client_id)
+                == (origin.session_id, origin.generation, origin.audience, client.client_id)
+            )
+        if client.issuer == local_ingress.LOCAL_ISSUER:
+            authority = server_auth.build_local_session_authority()
+        else:
+            base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+            if not base_url or client.issuer != base_url:
+                return False
+            authority = server_auth.build_session_authority(base_url=base_url)
+        if client.issuer != authority.issuer or origin.audience != authority.audience:
+            return False
+        return await authority.validate_binding(
+            session_id=origin.session_id, generation=origin.generation, client_id=client.client_id,
+        ) is not None
+    except (RuntimeError, ValueError, OSError, SessionStoreUnavailable):
+        return False

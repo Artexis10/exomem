@@ -44,7 +44,6 @@ from exomem import (
     freshness,
     graph_sync,
     index_sync,
-    relation_registry,
     semantic_contract,
     state_paths,
 )
@@ -54,11 +53,6 @@ from exomem.cli_ops import OpError
 
 _PAGE_REL = "Knowledge Base/Notes/Insights/one.md"
 _OTHER_REL = "Knowledge Base/Notes/Insights/two.md"
-_REGISTRY_REL = "Knowledge Base/_Schema/relation-registry.yaml"
-_EXTENDED_REGISTRY = (
-    "schema_version: 1\nextensions:\n  science.replicates:\n"
-    "    parent: supports\n    description: Independent reproduction\n"
-)
 
 
 def _corpus_page(*, title: str = "Page", body: str = "Body.\n") -> str:
@@ -408,52 +402,6 @@ class TestCorpusHalf:
         context = semantic_contract.build_corpus_context(vault)
         assert context.pages[_PAGE_REL].title == "One changed"
         assert context.pages[_OTHER_REL].title == "Two leapfrogged"
-
-
-    def test_populate_on_miss_never_stamps_a_context_built_with_a_superseded_registry(
-        self,
-        vault: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The populate loads its registries BEFORE its walk, so it must re-prove
-        them against disk before installing.
-
-        `_corpus_census` stats the two `_Schema` registry files at the END of its
-        walk. A registry rewritten between the load and that stat therefore yields
-        a census that records the NEW file captioning a context built with the OLD
-        registry. The event-hit gate would refuse such an entry -- it re-checks the
-        registry identity -- but the census-reuse path admits on census equality
-        alone, and would hand that context back as current.
-
-        Every other install site guards with `_registries_match_disk`; this pins
-        that the populate does too.
-        """
-        page = vault / _PAGE_REL
-        page.write_text(_corpus_page(title="One changed"), encoding="utf-8")
-        registry_path = vault / _REGISTRY_REL
-        superseded = relation_registry.load_registry(vault)
-
-        real_census = semantic_contract._corpus_census
-        walks: list[str] = []
-
-        def census_with_a_registry_rewrite(root: Path):
-            walks.append(str(root))
-            if len(walks) == 1:
-                # Interleaved into the populate's own walk window: the registry
-                # this census is about to stat is no longer the one in hand.
-                registry_path.parent.mkdir(parents=True, exist_ok=True)
-                registry_path.write_text(_EXTENDED_REGISTRY, encoding="utf-8")
-            return real_census(root)
-
-        monkeypatch.setattr(semantic_contract, "_corpus_census", census_with_a_registry_rewrite)
-
-        semantic_contract.publish_corpus_files_changed(vault, changed=(page,))
-
-        assert walks, "the populate must have walked for this to be a real discard"
-        assert relation_registry.load_registry(vault).extension_hash != superseded.extension_hash
-        cache_key = semantic_contract._corpus_cache_key(vault)
-        assert cache_key not in semantic_contract._CORPUS_CONTEXT_CACHE
-        assert cache_key not in semantic_contract._CORPUS_CONTEXT_EVENT_TOKENS
-        assert cache_key not in semantic_contract._CORPUS_CONTEXT_LANGUAGE_HASHES
 
 
     def test_populate_on_miss_never_overwrites_a_slot_a_competitor_filled(

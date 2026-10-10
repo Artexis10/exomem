@@ -73,7 +73,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
             "INSERT INTO semantic_units(record_type, unit_ref, parent_path, parent_generation, "
             "parent_source_hash, parser_version, form, category_raw, category_key, category, "
             "kind, content, tags_json, unit_source_hash, line, end_line, source_order) "
-            "VALUES ('semantic_unit', 'raw-unit', ?, 'generation', 'hash', 1, 'fact', "
+            "VALUES ('structural_occurrence', 'raw-unit', ?, 'generation', 'hash', 1, 'fact', "
             "'config', 'config', 'config', 'fact', 'private', '[]', 'unit-hash', 1, 1, 0)",
             (rel,),
         )
@@ -86,11 +86,11 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
             (rel,),
         )
         conn.execute(
-            "INSERT INTO semantic_unit_vectors(unit_key, record_type, unit_ref, parent_path, "
-            "parent_generation, parent_source_hash, parser_version, form, category, kind, content, "
+            "INSERT INTO semantic_unit_vectors(unit_key, record_type, parent_path, "
+            "parent_generation, parent_source_hash, parser_version, form, content, "
             "unit_source_hash, source_order, vector, file_mtime) "
-            "VALUES ('raw-unit', 'semantic_unit', 'raw-unit', ?, 'generation', 'hash', 1, "
-            "'fact', 'config', 'fact', 'private', 'unit-hash', 0, X'00', 0)",
+            "VALUES ('raw-unit', 'structural_occurrence', ?, 'generation', 'hash', 1, "
+            "'fact', 'private', 'unit-hash', 0, X'00', 0)",
             (rel,),
         )
 
@@ -258,11 +258,11 @@ def test_disabled_features_purge_unit_only_vector_without_creating_absent_sideca
     index = embedding_index.EmbeddingIndex(tmp_path)
     with _committed(index._connect()) as conn:
         conn.execute(
-            "INSERT INTO semantic_unit_vectors(unit_key, record_type, unit_ref, parent_path, "
-            "parent_generation, parent_source_hash, parser_version, form, category, kind, content, "
+            "INSERT INTO semantic_unit_vectors(unit_key, record_type, parent_path, "
+            "parent_generation, parent_source_hash, parser_version, form, content, "
             "unit_source_hash, source_order, vector, file_mtime) "
-            "VALUES ('raw-unit', 'semantic_unit', 'raw-unit', ?, 'generation', 'hash', 1, "
-            "'fact', 'config', 'fact', 'private', 'unit-hash', 0, X'00', 0)",
+            "VALUES ('raw-unit', 'structural_occurrence', ?, 'generation', 'hash', 1, "
+            "'fact', 'private', 'unit-hash', 0, X'00', 0)",
             (rel,),
         )
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")

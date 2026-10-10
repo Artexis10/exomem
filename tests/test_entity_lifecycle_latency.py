@@ -76,18 +76,20 @@ def test_entity_family_graph_query_and_traversal_are_bounded_at_scale(
         "---\ntype: insight\ntitle: Family Seed\nstatus: active\n---\n\n# Family Seed\n",
         encoding="utf-8",
     )
-    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
-    index.rebuild_all()
-
     leaves = ("organization", "community", "concept", "community", "organization")
     seed_key = f"file:{seed_rel}"
     connected_root = tmp_path / "Knowledge Base/Entities/Synthetic"
     connected_root.mkdir(parents=True)
+    # The traversed pages are real producer rows: each reader interprets a
+    # page's entity family from its stored structural summary.
     for item_index in range(120):
         (connected_root / f"entity-{item_index:04d}.md").write_text(
-            "---\ntype: entity\nstatus: active\n---\n",
+            "---\ntype: entity\nstatus: active\n"
+            f"entity_type: {leaves[item_index % len(leaves)]}\n---\n",
             encoding="utf-8",
         )
+    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    index.rebuild_all()
     conn = index._connect()
     try:
         with conn:
@@ -95,25 +97,26 @@ def test_entity_family_graph_query_and_traversal_are_bounded_at_scale(
                 leaf = leaves[item_index % len(leaves)]
                 rel = f"Knowledge Base/Entities/Synthetic/entity-{item_index:04d}.md"
                 node_key = f"file:{rel}"
-                epistemic_graph._insert_node(
-                    conn,
-                    epistemic_graph.GraphNode(
-                        node_key=node_key,
-                        kind="file",
-                        path=rel,
-                        anchor="page",
-                        title=f"Entity {item_index}",
-                        text=f"Entity {item_index}",
-                        source_hash=f"hash-{item_index}",
-                        metadata={
-                            "page_type": "entity",
-                            "status": "active",
-                            "scope": leaf,
-                            "entity_type": leaf,
-                            "origin": "file",
-                        },
-                    ),
-                )
+                if item_index >= 120:
+                    epistemic_graph._insert_node(
+                        conn,
+                        epistemic_graph.GraphNode(
+                            node_key=node_key,
+                            kind="file",
+                            path=rel,
+                            anchor="page",
+                            title=f"Entity {item_index}",
+                            text=f"Entity {item_index}",
+                            source_hash=f"hash-{item_index}",
+                            metadata={
+                                "page_type": "entity",
+                                "status": "active",
+                                "scope": leaf,
+                                "entity_type": leaf,
+                                "origin": "file",
+                            },
+                        ),
+                    )
                 if item_index < 120:
                     epistemic_graph._insert_edge(
                         conn,

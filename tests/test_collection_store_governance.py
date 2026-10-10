@@ -931,3 +931,108 @@ def test_manifest_grant_uses_its_own_basis_and_does_not_release_a_row(store, mon
         assert inspection["coverage"]["state"] == "complete"
         redeem(store, who, inspection_token(store, who))
         assert store.inspect_collection(CID)["coverage"]["committed"] == 1
+
+
+def test_owner_connector_ceiling_filters_canonical_rows_and_live_summary_cache(store, tmp_path, monkeypatch):
+    """Owner normalization cannot expose hidden row counts, values, or cached inspection seals."""
+    from exomem.governance.principal import ClientBinding, OriginSessionBinding
+
+    create(store)
+    store.append_record(CID, item={"title": "Allowed"}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Protected canary"}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths=f"Records/**/{OTHER}.md")
+    scope_id = next(iter(policy.load(store.root).scopes))
+    config = tmp_path / "host-boundary.json"
+    document = {"version": 1, "default_denied_scope_ids": [scope_id], "clients": [{
+        "issuer": "urn:fixture:issuer", "client_id": "configured-client", "denied_scope_ids": [scope_id],
+    }]}
+    config.write_text(json.dumps(document))
+    monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
+    who = RequestPrincipal("owner", surface="mcp", issuer_family="mcp-oauth:fixture", remote_owner=True,
+        client_binding=ClientBinding("urn:fixture:issuer", "configured-client"),
+        origin_session=OriginSessionBinding("fixture-session", "fixture-generation", "fixture-audience"))
+    with preview_store(store.root, store.handle), request_scope(who):
+        limited = record_memory(store.root, "query", collection=CID)
+        assert limited["total_matched"] == 1
+        assert [row["title"] for row in limited["rows"]] == ["Allowed"]
+        inspection = store.inspect_collection(CID)
+        assert inspection["coverage"]["committed"] == 1
+        assert "Protected canary" not in str(inspection)
+        document["clients"][0]["denied_scope_ids"] = []
+        config.write_text(json.dumps(document))
+        assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
+        document["clients"][0]["denied_scope_ids"] = [scope_id]
+        config.write_text(json.dumps(document))
+        assert record_memory(store.root, "query", collection=CID)["snapshot"] == limited["snapshot"]
+        assert store.inspect_collection(CID)["snapshot"] == inspection["snapshot"]
+
+
+def test_hidden_sibling_presence_cannot_change_limited_inspection_guards_or_audit(store, tmp_path, monkeypatch):
+    """An empty hidden subset must not expose the full container's hash or history status."""
+    create(store)
+    store.append_record(CID, item={"title": "Allowed"}, item_key=KEY, why="capture")
+    write_scope(store.root, paths=f"Records/**/{OTHER}.md")
+    scope_id = next(iter(policy.load(store.root).scopes))
+    config = tmp_path / "host-boundary.json"
+    config.write_text(json.dumps({"version": 1, "default_denied_scope_ids": [scope_id], "clients": []}))
+    monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
+    who = owner_principal(surface="rest")
+    with preview_store(store.root, store.handle), request_scope(who):
+        before = store.inspect_collection(CID)
+    with request_scope(owner_principal(surface="library")):
+        store.append_record(CID, item={"title": "Hidden sibling"}, item_key=OTHER, why="capture")
+    with preview_store(store.root, store.handle), request_scope(who):
+        after = store.inspect_collection(CID)
+    assert after == before
+    assert after["coverage"]["committed"] == 1
+    assert after["lifecycle_guards"]["expected_container_hash"] == after["snapshot"]
+    assert after["audit"] == {"status": "history_incomplete", "gaps": []}
+
+
+def test_hidden_row_allocation_cannot_change_limited_collection_observations(tmp_path, monkeypatch):
+    """Hidden rows before or after admitted rows cannot change snapshots, queries, or inspection."""
+    import datetime as dt
+
+    from exomem.collection_store import connection
+    from exomem.collection_store.writer import CollectionWriter
+
+    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
+    observations = []
+    for hidden_position in (None, "before", "after"):
+        root = tmp_path / str(hidden_position)
+        (root / "Knowledge Base").mkdir(parents=True)
+        (root / "Knowledge Base/log.md").write_text("# Existing log\n")
+        with connection.open_writer(tmp_path / f"{hidden_position}.sqlite", lease_check=lambda: True) as handle:
+            writer = CollectionWriter(root, handle)
+            with request_scope(owner_principal(surface="library")):
+                create(writer)
+                if hidden_position == "before":
+                    writer.append_record(CID, item={"title": "Hidden sibling"}, item_key=OTHER, why="capture")
+                writer.append_record(CID, item={"title": "Allowed"}, item_key=KEY, why="capture")
+                if hidden_position == "after":
+                    writer.append_record(CID, item={"title": "Hidden sibling"}, item_key=OTHER, why="capture")
+            write_scope(root, paths=f"Records/**/{OTHER}.md")
+            scope_id = next(iter(policy.load(root).scopes))
+            config = tmp_path / "host-boundary.json"
+            config.write_text(json.dumps({"version": 1, "default_denied_scope_ids": [scope_id], "clients": []}))
+            monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
+            with preview_store(root, handle), request_scope(owner_principal(surface="rest")):
+                observed_at = dt.datetime.now(dt.UTC)
+                query = record_memory(root, "query", collection=CID)
+                rendered = json.loads(query["rendered"])
+                # record_formats._render_query owns this wall-clock value;
+                # source versions and all stored history remain in the comparison.
+                generated_at = dt.datetime.fromisoformat(rendered.pop("generated_at"))
+                assert observed_at <= generated_at <= dt.datetime.now(dt.UTC)
+                query["rendered"] = rendered
+                inspection = writer.inspect_collection(CID)
+                # Each twin is its own store, and the field release basis names that
+                # store's random identity; field admission derives it without reading rows.
+                for key in ("store_id", "classification_basis"):
+                    inspection["field_release_basis"].pop(key)
+                observations.append((query, inspection))
+        monkeypatch.delenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG")
+    assert observations[0] == observations[1] == observations[2]
+    query, inspection = observations[0]
+    assert [row["title"] for row in query["rows"]] == ["Allowed"]
+    assert inspection["coverage"]["committed"] == 1

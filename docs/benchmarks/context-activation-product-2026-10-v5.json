@@ -2557,9 +2557,9 @@
         "T8"
       ],
       "graph": {
-        "edges": 265,
+        "edges": 458,
         "indexed_files": 148,
-        "nodes": 395
+        "nodes": 588
       },
       "indexed_pages": 147,
       "logical_corpus_digest": "dc2792a1551aaafdb46289376ac21c0a23aeb9fbc7d7c4ca38e28c28620c40b1",
@@ -2616,9 +2616,9 @@
         "T9"
       ],
       "graph": {
-        "edges": 265,
+        "edges": 458,
         "indexed_files": 348,
-        "nodes": 595
+        "nodes": 788
       },
       "indexed_pages": 147,
       "logical_corpus_digest": "76eb939a34717807addf25eb9c8378dd7a3ab4119f892fbe9a3bee7c31ba0e84",

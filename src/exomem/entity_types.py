@@ -349,6 +349,7 @@ def load_entity_types(
     vault_root: Path | None = None,
     *,
     proposal: dict[str, Any] | None = None,
+    registry_scope: str | None = None,
 ) -> EntityTypeRegistry:
     """Load the core registry plus the valid remainder of one vault extension."""
     core = core_registry()
@@ -357,7 +358,10 @@ def load_entity_types(
         return _parse_extension_data(proposal, _content_hash(raw), core)
     if vault_root is None:
         return core
-    return vocabulary_registry.load(SPEC, Path(vault_root)).typed
+    from .vocabulary import instances
+
+    selected = instances.select(Path(vault_root), SPEC, registry_scope)
+    return vocabulary_registry.load(selected, Path(vault_root)).typed
 
 
 def clear_cache() -> None:
@@ -395,6 +399,9 @@ def save_registry(
     operation: str = "save-entity-types",
 ) -> dict[str, Any]:
     """Replace the overlay with one complete reviewed document, keeping history."""
+    from .governance import connector_boundary
+
+    connector_boundary.require_global_observation(vault_root)
     registry = load_entity_types(proposal=proposal)
     if registry.findings:
         raise ValueError(f"INVALID_ENTITY_TYPE_REGISTRY: {list(registry.findings)!r}")
@@ -444,6 +451,9 @@ def empty_proposal() -> dict[str, Any]:
 
 def observed_extension_ids(vault_root: Path) -> frozenset[str]:
     """Return currently registered extension IDs authored under ``Entities``."""
+    from .governance import connector_boundary
+
+    connector_boundary.require_global_observation(vault_root)
     entities = Path(vault_root) / kb_dirname() / "Entities"
     registry = load_entity_types(vault_root)
     observed: set[str] = set()

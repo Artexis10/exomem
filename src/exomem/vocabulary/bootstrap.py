@@ -75,10 +75,16 @@ def recently_added(
 def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None) -> dict[str, Any]:
     """The bootstrap's view of every vocabulary registry."""
     since = (today or dt.datetime.now(dt.UTC).date()) - dt.timedelta(days=NEW_WINDOW_DAYS)
-    from .contract import admission_refusal, history_refusal
+    from . import instances
+    from .contract import _usage, admission_refusal, history_refusal, selection_refusal
 
     registries: dict[str, Any] = {}
     for name, spec in registry_specs().items():
+        try:
+            spec = instances.select(vault_root, spec)
+        except registry.RegistryError as error:
+            registries[name] = {"unavailable": selection_refusal(name, error)["reason"]}
+            continue
         refusal = admission_refusal(vault_root, spec)
         if refusal is not None:
             registries[name] = {"unavailable": refusal["reason"]}
@@ -87,7 +93,7 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
         row: dict[str, Any] = {}
         if spec.summarize_keys:
             active = [entry for entry in snapshot.entries.values() if entry.status == "active"]
-            usage = spec.usage(vault_root, snapshot) if spec.usage is not None else None
+            usage = _usage(vault_root, spec, snapshot)
             if usage is not None and usage.available:
                 ordered = sorted(
                     active, key=lambda entry: (-usage.counts.get(entry.key, 0), entry.key)

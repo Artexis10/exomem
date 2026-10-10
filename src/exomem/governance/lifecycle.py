@@ -868,7 +868,7 @@ def direct_residue(
     rels = tuple(
         dict.fromkeys([*(item.source_path for item in manifest), *residue_paths])
     )
-    from .. import epistemic_graph, lexstore, memory_refs
+    from .. import embedding_index, epistemic_graph, lexstore, memory_refs
 
     lexical = _query_path(
         lexstore.lexical_path(Path(vault_root)),
@@ -896,6 +896,11 @@ def direct_residue(
         (
             ("SELECT 1 FROM chunks WHERE file_path = ? LIMIT 1", rels),
             ("SELECT 1 FROM semantic_unit_vectors WHERE parent_path = ? LIMIT 1", rels),
+            # A coverage record holds the page's titles and frontmatter.
+            (
+                "SELECT 1 FROM meta WHERE key = ? LIMIT 1",
+                tuple(embedding_index.COVERAGE_PREFIX + rel for rel in rels),
+            ),
         ),
     )
     clip = _query_path(

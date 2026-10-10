@@ -61,9 +61,9 @@ def test_unit_vectors_store_keys_generation_and_parent_linkage(tmp_path: Path) -
 
     rows = _unit_rows(tmp_path)
     assert [row["unit_key"] for row in rows] == [
-        unit.unit_ref for unit in state.document.units
+        occurrence.key for occurrence in state.occurrences
     ]
-    assert {row["record_type"] for row in rows} == {"semantic_unit"}
+    assert {row["record_type"] for row in rows} == {"structural_occurrence"}
     assert {row["parent_path"] for row in rows} == {state.path}
     assert {row["parent_ref"] for row in rows} == {state.parent_ref}
     assert {row["parent_generation"] for row in rows} == {
@@ -90,7 +90,7 @@ def test_unit_vector_replacement_and_file_delete_remove_old_rows(tmp_path: Path)
     index.upsert_semantic_units(current, _vectors(1, 9.0), page.stat().st_mtime)
 
     rows = _unit_rows(tmp_path)
-    assert [row["unit_key"] for row in rows] == [current.document.units[0].unit_ref]
+    assert [row["unit_key"] for row in rows] == [current.occurrences[0].key]
     assert rows[0]["content"] == "current vector"
     assert rows[0]["parent_generation"] != before.parent_generation
 
@@ -140,7 +140,7 @@ def test_unit_vector_rebuild_uses_current_markdown_generation(
     state = semantic_index.build_parent_index_state(tmp_path, page)
     rows = _unit_rows(tmp_path)
     assert len(rows) == 1
-    assert rows[0]["unit_key"] == state.document.units[0].unit_ref
+    assert rows[0]["unit_key"] == state.occurrences[0].key
     assert rows[0]["parent_generation"] == state.parent_generation
 
 
@@ -167,7 +167,9 @@ Nested recognized content.
         ("rich", "finding")
     ]
     index = embedding_index.EmbeddingIndex(tmp_path)
-    index.upsert_semantic_units(current, _vectors(1), page.stat().st_mtime)
+    index.upsert_semantic_units(
+        current, _vectors(len(current.occurrences)), page.stat().st_mtime
+    )
 
     conn = sqlite3.connect(embedding_index.index_paths.sidecar_path(tmp_path))
     try:
@@ -184,7 +186,6 @@ Nested recognized content.
         old_parent.update(
             {
                 "unit_key": "old-parent-ref",
-                "unit_ref": "old-parent-ref",
                 "parent_generation": "pre-hierarchy",
                 "parser_version": semantic_index.PARSER_VERSION - 1,
             }
@@ -192,7 +193,6 @@ Nested recognized content.
         old_nested = {
             **old_parent,
             "unit_key": "old-nested-ref",
-            "unit_ref": "old-nested-ref",
             "content": "Nested recognized content.",
             "source_order": 1,
         }
@@ -226,10 +226,11 @@ Nested recognized content.
 
     rows = _unit_rows(tmp_path)
     assert page.read_bytes() == source
-    assert len(rows) == 1
-    assert rows[0]["unit_key"] == current.document.units[0].unit_ref
-    assert rows[0]["parent_generation"] == current.parent_generation
-    assert rows[0]["parser_version"] == semantic_index.PARSER_VERSION
+    assert [row["unit_key"] for row in rows] == [
+        occurrence.key for occurrence in current.occurrences
+    ]
+    assert {row["parent_generation"] for row in rows} == {current.parent_generation}
+    assert {row["parser_version"] for row in rows} == {semantic_index.PARSER_VERSION}
 
 
 def test_incremental_index_repairs_unit_rows_even_when_page_chunks_are_current(
@@ -249,9 +250,13 @@ def test_incremental_index_repairs_unit_rows_even_when_page_chunks_are_current(
     assert first["unit_parents_to_embed"] == 1
     assert len(_unit_rows(tmp_path)) == 1
 
-    index = embeddings.get_embedding_index(tmp_path)
-    index.delete_semantic_units("Knowledge Base/Notes/vectors.md")
-    assert _unit_rows(tmp_path) == []
+    # Lost occurrence rows under an intact coverage record are incomplete coverage.
+    conn = sqlite3.connect(embedding_index.index_paths.sidecar_path(tmp_path))
+    try:
+        conn.execute("DELETE FROM semantic_unit_vectors")
+        conn.commit()
+    finally:
+        conn.close()
 
     second = embeddings.index_incremental(tmp_path, log_fn=lambda *_args: None)
     assert second["files_to_embed"] == 0

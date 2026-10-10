@@ -358,7 +358,10 @@ def _validate_supersession_target(root: Path, old_path: Any, findings: list[dict
     if frontmatter is None:
         findings.append(_finding("OLD_NOT_FOUND", "old_path", f"{clean} does not exist"))
     elif (
-        lifecycle_statuses.Basis(root).classify(frontmatter.get("status")).require() == "superseded"
+        lifecycle_statuses.Basis(root).classify(
+            frontmatter.get("status"), path=clean, frontmatter=frontmatter
+        ).require()
+        == "superseded"
     ):
         findings.append(
             _finding("ALREADY_SUPERSEDED", "old_path", f"{clean} is already superseded")

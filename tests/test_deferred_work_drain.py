@@ -269,8 +269,9 @@ def test_freshness_requires_semantic_unit_parity_not_only_current_chunks(
         )
         connection.execute(
             "CREATE TABLE semantic_unit_vectors ("
-            "parent_path TEXT, parent_generation TEXT, unit_ref TEXT)"
+            "parent_path TEXT, parent_generation TEXT, unit_key TEXT)"
         )
+        connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         connection.execute(
             "INSERT INTO chunks(file_path, chunk_idx, file_mtime) VALUES (?, 0, ?)",
             (rel, target.stat().st_mtime),

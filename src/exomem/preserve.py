@@ -321,6 +321,12 @@ def destination_duplicate_index(
     """
     index: dict[str, DuplicateArtifact] = {}
     folder = kb_root(vault_root) / "Evidence" / scope / category
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, folder.relative_to(vault_root).as_posix(), directory=True)
+    except ValueError:
+        return _raise("WRITE_REFUSED", [], "target is unavailable")
     try:
         sidecars = sorted(folder.glob("*.md"))
     except OSError:
@@ -445,6 +451,13 @@ def preserve(
     kb = kb_root(vault_root)
     folder = kb / "Evidence" / scope_safe / category_safe
     artifact_path = folder / filename_safe
+
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, artifact_path.relative_to(vault_root).as_posix())
+    except ValueError:
+        return _raise("WRITE_REFUSED", [], "target is unavailable")
 
     if artifact_path.exists():
         return _raise(
@@ -1240,6 +1253,9 @@ def ensure_media_sidecar(
         sidecar = binary_path.with_name(name[:-3] + "-notes.md")
     else:
         sidecar = binary_path.with_name(name + ".md")
+    from .governance import connector_boundary
+
+    connector_boundary.require_create(vault_root, sidecar.relative_to(vault_root).as_posix(), replace_existing=True)
     if sidecar.exists():
         return sidecar, False
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
@@ -1294,6 +1310,9 @@ def ensure_artifact_page(
         page = binary_path.with_name(f"{name[:-3]}-notes.md")
     else:
         page = binary_path.with_name(f"{name}.md")
+    from .governance import connector_boundary
+
+    connector_boundary.require_create(vault_root, page.relative_to(vault_root).as_posix(), replace_existing=True)
     if page.exists():
         return page, False
 

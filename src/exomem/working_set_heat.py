@@ -58,6 +58,9 @@ RING_MAX = 4096
 ATTRIBUTED_MAX = 4096
 #: Pages a cold seed turns into events. It ranks the newest; more buys nothing.
 SEED_MAX = 256
+#: Seed candidates the sidecar keeps, uncut, so each reader applies the seed's
+#: burst rule over the pages it may see: twice what any one view keeps.
+SEED_CANDIDATES_MAX = 2 * SEED_MAX
 #: A larger external delta is a sync or a batch by definition, and is folded as
 #: one burst: string work only.
 MAX_FOLD_PATHS = 2048
@@ -250,6 +253,14 @@ class HeatProfile:
     #: Every row's latest contact, newest first: the vault tier of `recent`,
     #: sorted once per profile rather than once per reader.
     vault_contacts: tuple[Contact, ...] = ()
+    #: The persisted cold-seed candidates before the seed's burst rule, which
+    #: `events` has already applied for this profile's own view.
+    seed_candidates: tuple[HeatEvent, ...] = ()
+
+    @property
+    def ring(self) -> tuple[HeatEvent, ...]:
+        """The events as persisted: seed candidates uncut, then everything else."""
+        return (*self.seed_candidates, *(event for event in self.events if event.origin != "seed"))
 
 
 # --------------------------------------------------------------------------- #
@@ -311,8 +322,16 @@ def build_profile(
     tombstones: frozenset[str] = frozenset(),
     meta: Mapping[str, str] | None = None,
 ) -> HeatProfile:
-    """Aggregate `events` (oldest first) into the profile every reader shares."""
+    """Aggregate `events` (oldest first) into the profile every reader shares.
+
+    Cold-seed events may arrive uncut: the seed's burst rule runs here, over
+    exactly the seed events this view holds.
+    """
     kept = tuple(event for event in events if event.path not in tombstones)
+    seeds = tuple(event for event in kept if event.origin == "seed")
+    if seeds:
+        survivors = set(seed_cut(seeds))
+        kept = tuple(event for event in kept if event.origin != "seed" or event in survivors)
     marks = sessions.values() if isinstance(sessions, Mapping) else sessions
     by_session = {mark.session: mark for mark in marks if mark.session}
     start = session_start(kept)
@@ -335,6 +354,7 @@ def build_profile(
         tombstones=frozenset(tombstones),
         meta=dict(meta or {}),
         vault_contacts=tuple(_contacts(everything, TIER_VAULT)),
+        seed_candidates=seeds,
     )
     return _with_digest(profile)
 
@@ -932,37 +952,65 @@ def fold_external_events(
     return FoldResult(tuple(events), frozenset(deferred), tombstones)
 
 
-def seed_events(
+def seed_candidates(
     mtimes: Mapping[str, int],
     *,
     reason_for: Callable[[str], str] | None = None,
-    limit: int = SEED_MAX,
+    limit: int | None = None,
 ) -> tuple[HeatEvent, ...]:
-    """The cold seed: today's rules exactly, once per sidecar.
+    """Every page the cold seed's burst rule reads, uncut, newest `limit`, oldest first.
 
-    A seed has no history to consult, so it is the one place R-N2's cutoff
-    survives: a burst's members carry no edit, and neither does any edit at
-    or before the latest burst's newest one, which may have taken the user's
-    own page with it. A captured session and an episode recap are exempt, as
-    the recent-context block always exempted them. The newest `limit` become
-    `origin="seed"` events, oldest first.
+    A page with no working-context reason keeps an empty channel: it can
+    make a burst, and it ranks nothing.
     """
     reason_of = reason_for or default_reason_for(mtimes)
-    burst = burst_paths(mtimes)
-    after_burst = max((int(mtimes[path]) for path in burst), default=0)
     chosen: list[HeatEvent] = []
     for path, mtime in mtimes.items():
         stamp = int(mtime)
         if stamp <= 0:
             continue
         channel = _EXTERNAL_CHANNEL.get(reason_of(path))
-        if channel is None:
+        if channel is None and not counts_toward_burst(path):
             continue
-        if channel == "work" and (path in burst or stamp <= after_burst):
-            continue
-        chosen.append(HeatEvent(stamp, path, channel, origin="seed"))
+        chosen.append(HeatEvent(stamp, path, channel or "", origin="seed"))
+    chosen.sort(key=lambda event: (-event.ts_ns, event.path))
+    if limit is not None:
+        chosen = chosen[: max(0, limit)]
+    return tuple(sorted(chosen, key=lambda event: (event.ts_ns, event.path)))
+
+
+def seed_cut(candidates: Iterable[HeatEvent], *, limit: int = SEED_MAX) -> tuple[HeatEvent, ...]:
+    """R-N2's cutoff over exactly `candidates`, the newest `limit` kept, oldest first.
+
+    A seed has no history to consult, so it is the one place the cutoff
+    survives: a burst's members carry no edit, and neither does any edit at
+    or before the latest burst's newest one, which may have taken the user's
+    own page with it. A captured session and an episode recap are exempt, as
+    the recent-context block always exempted them. A reader decides it over
+    the seeded pages it may see, so a withheld burst cuts nothing it sees.
+    """
+    seeds = [event for event in candidates if event.origin == "seed"]
+    stamps = {event.path: event.ts_ns for event in seeds}
+    burst = burst_paths(stamps)
+    after_burst = max((stamps[path] for path in burst), default=0)
+    chosen = [
+        event
+        for event in seeds
+        if event.channel in CHANNELS
+        and not (event.channel == "work" and (event.path in burst or event.ts_ns <= after_burst))
+    ]
     chosen.sort(key=lambda event: (-event.ts_ns, event.path))
     return tuple(sorted(chosen[: max(0, limit)], key=lambda event: (event.ts_ns, event.path)))
+
+
+def seed_events(
+    mtimes: Mapping[str, int],
+    *,
+    reason_for: Callable[[str], str] | None = None,
+    limit: int = SEED_MAX,
+) -> tuple[HeatEvent, ...]:
+    """The cold seed as the whole vault sees it: today's rules exactly."""
+    return seed_cut(seed_candidates(mtimes, reason_for=reason_for), limit=limit)
 
 
 # =========================================================================== #
@@ -2090,7 +2138,10 @@ def _seed(vault_root: Path, fold: _Fold) -> bool:
     if live is None:
         return False
     now = time.time_ns()
-    events = seed_events({path: signature[0] for path, signature in live.items()})
+    # Stored uncut: each profile applies the burst rule over its own view.
+    events = seed_candidates(
+        {path: signature[0] for path, signature in live.items()}, limit=SEED_CANDIDATES_MAX
+    )
 
     def work(conn: sqlite3.Connection) -> None:
         if events:
@@ -2264,7 +2315,7 @@ def profile(vault_root: Path) -> HeatProfile:
         gone = frozenset(fold.tombstones)
     if pending or gone:
         base = build_profile(
-            (*persisted.events, *pending),
+            (*persisted.ring, *pending),
             sessions=persisted.sessions,
             state=persisted.state,
             salt=persisted.salt,
@@ -2321,10 +2372,21 @@ def released_view(
     pages' events. A withheld page is skipped without being counted, so every ranking, the
     session start, the state and the digest are exactly what they would be
     had the withheld page never been touched."""
+    decided: dict[str, bool] = {}
+
+    def visible(path: str) -> bool:
+        if path not in decided:
+            decided[path] = bool(released(path))
+        return decided[path]
+
+    # The seed's burst rule runs over the seeded pages this caller may see, so
+    # a withheld burst cuts none of its pages (bounded by SEED_CANDIDATES_MAX).
+    seeds = seed_cut(event for event in profile.seed_candidates if visible(event.path))
+    events = (*seeds, *(event for event in profile.events if event.origin != "seed"))
     latest = sorted(
         (
             (max(row.deliberate_ns, row.selection_ns, row.contact_ns, row.episode_ns), path)
-            for path, row in profile.all_rows.items()
+            for path, row in aggregate(events).items()
         ),
         key=lambda item: (-item[0], item[1]),
     )
@@ -2332,13 +2394,13 @@ def released_view(
     for _stamp, path in latest:
         if len(kept) >= limit:
             break
-        if released(path):
+        if visible(path):
             kept.add(path)
     # Served threads are not cut here: every reader ranks them only through
     # the caller's own `marks`, which `working_set_runtime.visible_marks`
     # cuts to released pages with the same decision.
     view = build_profile(
-        (event for event in profile.events if event.path in kept),
+        (event for event in events if event.path in kept),
         sessions=profile.sessions,
         state=profile.state,
         salt=profile.salt,

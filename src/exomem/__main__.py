@@ -3722,6 +3722,7 @@ def _run_offline_state_migration(
     *,
     vault: str | None,
     adopt: str | None,
+    arm_connector_boundary: bool = False,
 ):
     """Run the sole state-mutating entrypoint under explicit offline authority."""
 
@@ -3757,6 +3758,8 @@ def _run_offline_state_migration(
             authority = state_migration.assert_offline_migration_authority(
                 source="hosted target-image offline migration job",
             )
+            if arm_connector_boundary:
+                return state_migration.arm_connector_boundary_offline(config.vault_root, authority=authority)
             return state_migration.migrate_vault_state_offline(
                 config.vault_root,
                 authority=authority,
@@ -3769,6 +3772,8 @@ def _run_offline_state_migration(
     authority = state_migration.assert_offline_migration_authority(
         source="exomem maintain --migrate-state --offline",
     )
+    if arm_connector_boundary:
+        return state_migration.arm_connector_boundary_offline(vault_root, authority=authority)
     return state_migration.migrate_vault_state_offline(
         vault_root,
         authority=authority,
@@ -3828,6 +3833,11 @@ def _simple_maintain_main(argv: list[str]) -> int:
         help="assert that every legacy writer has been stopped and proven gone",
     )
     parser.add_argument(
+        "--arm-connector-boundary",
+        action="store_true",
+        help="validate capture namespaces and durably enroll the configured connector ceiling",
+    )
+    parser.add_argument(
         "--adopt-state",
         dest="adopt_state",
         choices=("vault", "external", "governance-store=vault"),
@@ -3853,6 +3863,8 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("--vault requires --migrate-state --offline")
     if args.adopt_state and not args.migrate_state:
         parser.error("--adopt-state requires --migrate-state --offline")
+    if args.arm_connector_boundary and (not args.migrate_state or args.adopt_state):
+        parser.error("--arm-connector-boundary requires --migrate-state --offline without --adopt-state")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
@@ -3862,6 +3874,7 @@ def _simple_maintain_main(argv: list[str]) -> int:
             resolution = _run_offline_state_migration(
                 vault=args.vault,
                 adopt=args.adopt_state,
+                arm_connector_boundary=args.arm_connector_boundary,
             )
         except (OSError, RuntimeError, ValueError) as error:
             if args.json:

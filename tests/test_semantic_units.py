@@ -17,6 +17,114 @@ from exomem.semantic_units import canonicalize_category, parse_semantic_units
 STABLE_PARENT_REF = "exomem://memory/12345678-1234-5678-1234-567812345678"
 
 
+def test_neutral_units_keep_compact_fallback_before_private_heading_recognition() -> None:
+    source = (
+        "## Private procedure\n- category: Rule\n- category: invalid!\n"
+        "- id: private\n- relations: private_link: Bare target\n"
+        "- [rule] Nested observation ^nested\n"
+        "## Ordinary\n- [rule] Public observation ^public\n"
+    )
+    candidates = semantic_units.scan_semantic_units(source, path="example.md")
+    language = semantic_language_registry.load_registry(proposal={
+        "schema_version": 1, "categories": {},
+        "kinds": {"private_procedure": {
+            "description": "A private procedure", "scope": {"projects": ["alpha"]},
+        }},
+    })
+    public = parse_semantic_units(source, path="example.md")
+    private = parse_semantic_units(source, path="example.md", language_registry=language, project="alpha")
+    outside_project = parse_semantic_units(source, path="example.md", language_registry=language, project="beta")
+
+    assert [item.anchor for item in candidates.compact] == ["nested", "public"]
+    assert all(item.unit_ref is None and item.fingerprint is None for item in candidates.compact)
+    assert candidates.rich[0].category_raw == "invalid!"
+    assert candidates.rich[0].category_valid is False
+    assert candidates.rich[0].heading.metadata["id"] == "private"
+    assert candidates.rich[0].heading.relations[0].target == "Bare target"
+    assert [unit.anchor for unit in public.units] == ["nested", "public"]
+    assert public.errors == ()
+    assert [(unit.form, unit.anchor) for unit in private.units] == [("rich", "private"), ("compact", "public")]
+    assert "invalid_rich_category" in {error.code for error in private.errors}
+    assert [unit.anchor for unit in outside_project.units] == ["nested", "public"]
+
+
+@pytest.mark.parametrize("project", ["alpha", "beta"])
+def test_structural_summary_matches_selected_parser_and_activation_without_body(project) -> None:
+    from exomem import activation
+
+    source = (
+        "## Background\n### Private procedure\n- category: invalid!\n"
+        "- relations: cites: Bare source\n- [rule] Retained compact\n"
+        "- [rule] Independent observation\n"
+        "## Claim\n### Finding\n- id: empty\n"
+        "## Private procedure\nSubstantive.\n"
+        "## Ordinary\n- [rule] Independent observation\n"
+        "- private_link [[Without colon]]\n- private_link: [[With colon]]\n"
+        "## Relations\n- cites [[Canonical source]]\n"
+    )
+    language = semantic_language_registry.load_registry(proposal={
+        "schema_version": 1, "categories": {},
+        "kinds": {"private_procedure": {
+            "description": "A private procedure", "scope": {"projects": ["alpha"]},
+        }},
+    })
+    relations = relation_registry.core_registry()
+    document = parse_semantic_units(
+        source, language_registry=language, relation_registry=relations,
+        include_legacy_relations=True, retain_unknown_relations=True, project=project,
+        parent_ref=STABLE_PARENT_REF,
+    )
+    summary = semantic_units.structural_summary(semantic_units.scan_semantic_units(source))
+    selected = semantic_units.interpret_structural_summary(
+        json.loads(json.dumps(summary)), language_registry=language,
+        relation_registry=relations, project=project, parent_ref=STABLE_PARENT_REF,
+    )
+    # The repeated anonymous observation binds a different public ref per project.
+    assert [
+        (unit.form, unit.kind, unit.category, unit.line, unit.end_line, unit.unit_ref, unit.fingerprint)
+        for unit in selected.units
+    ] == [
+        (unit.form, unit.kind, unit.category, unit.line, unit.end_line, unit.unit_ref, unit.fingerprint)
+        for unit in document.units
+    ]
+    counts = activation.frontmatter_link_counts({"sources": ["First", "Second"], "related": "Other"})
+    expected = activation.measure_document(
+        document, relations, project=project, page_type=None,
+        body_wikilinks=3, frontmatter_counts=counts,
+    )
+    actual = activation.measure_document(
+        selected, relations, project=project, page_type=None,
+        body_wikilinks=3, frontmatter_counts=counts,
+    )
+    assert actual == expected
+    assert actual["provenance_relations"] >= 3
+
+
+def test_unavailable_definitions_serve_only_units_no_custom_heading_encloses() -> None:
+    source = (
+        "- [rule] Top observation ^top\n"
+        "## Decision\nWe decided.\n"
+        "## Custom section\n### Claim\nNested core claim.\n- [rule] Nested ^top\n"
+        "- [rule] Shared text\n"
+        "# Appendix\n- [rule] Shared text\n- [rule] Plain appendix note\n"
+    )
+    candidates = semantic_units.scan_semantic_units(source)
+    selected = semantic_units.interpret_structural_summary(
+        semantic_units.structural_summary(candidates),
+        language_registry=semantic_language_registry.core_registry(),
+        relation_registry=relation_registry.core_registry(),
+        parent_ref=STABLE_PARENT_REF, definitions_available=False,
+    )
+
+    # A custom heading could become a hidden block that suppresses the nested
+    # claim, owns the duplicate anchor, or shifts the anonymous occurrence.
+    assert [(unit.kind, unit.line) for unit in selected.units] == [("decision", 2), ("observation", 11)]
+    assert selected.complete is False
+    assert semantic_units.core_safe_occurrences(candidates) == {
+        unit.occurrence_key for unit in selected.units
+    }
+
+
 def test_unicode_categories_preserve_raw_and_share_a_canonical_key() -> None:
     document = parse_semantic_units(
         "- [Äri Reegel] First\n- [äri-reegel] Second\n",

@@ -230,7 +230,8 @@ def _blocking(registry: RelationRegistry) -> list[dict[str, str]]:
 
 
 def load_registry(
-    vault_root: Path | None = None, *, proposal: dict[str, Any] | None = None
+    vault_root: Path | None = None, *, proposal: dict[str, Any] | None = None,
+    registry_scope: str | None = None,
 ) -> RelationRegistry:
     """Load the saved registry, or parse a proposal.
 
@@ -249,7 +250,10 @@ def load_registry(
         )
     if vault_root is None:
         return core
-    return vocabulary_registry.load(SPEC, Path(vault_root)).typed
+    from .vocabulary import instances
+
+    selected = instances.select(Path(vault_root), SPEC, registry_scope)
+    return vocabulary_registry.load(selected, Path(vault_root)).typed
 
 
 def clear_cache() -> None:
@@ -587,6 +591,14 @@ def save_registry(
     operation: str = "save-relations",
 ) -> dict[str, Any]:
     """Replace the overlay with one reviewed document, keeping history."""
+    from .governance import connector_boundary, principal
+
+    path = extension_registry_path(vault_root)
+    # Saved continuity is safe only when the whole extension registry is admitted.
+    # Otherwise a collision or stale guard would expose a private definition.
+    rel = path.relative_to(vault_root).as_posix()
+    if not connector_boundary.permits(vault_root, rel, principal.effective_principal()):
+        raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry is unavailable")
     registry = load_registry(vault_root, proposal=proposal)
     if _blocking(registry):
         raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
@@ -594,7 +606,6 @@ def save_registry(
     removed = sorted(set(observed_keys) - proposed_keys - set(registry.core))
     if removed:
         raise ValueError(f"OBSERVED_RELATION_DELETION: deprecate observed keys instead: {removed}")
-    path = extension_registry_path(vault_root)
     inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     current_hash: str | None = None
     if inspected.overlay_text is not None:
