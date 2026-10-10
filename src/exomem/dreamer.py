@@ -138,7 +138,7 @@ class _State:
     ledger: CpuLedger = field(default_factory=CpuLedger)
     #: The waiting reason last written to the sidecar, and when (monotonic).
     recorded_reason: str | None = None
-    recorded_at: float | None = None
+    recorded_mono: float | None = None
 
 
 _LOCK = threading.Lock()
@@ -445,7 +445,7 @@ def _record_waiting(vault_root: Path, clock: Clock) -> None:
     with _LOCK:
         if _STATE.waiting_reason == _STATE.recorded_reason:
             return
-        if _STATE.recorded_at is not None and now - _STATE.recorded_at < policy.POLL_SECONDS:
+        if _STATE.recorded_mono is not None and now - _STATE.recorded_mono < policy.POLL_SECONDS:
             return
         waiting = {
             "state": _STATE.phase,
@@ -467,7 +467,7 @@ def _record_waiting(vault_root: Path, clock: Clock) -> None:
             store.close(conn)
     with _LOCK:
         _STATE.recorded_reason = waiting["waiting_reason"]
-        _STATE.recorded_at = now
+        _STATE.recorded_mono = now
 
 
 def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickSignals:
@@ -855,7 +855,7 @@ def _record_tick(
         return
     with _LOCK:
         _STATE.recorded_reason = health["waiting_reason"]
-        _STATE.recorded_at = now_mono
+        _STATE.recorded_mono = now_mono
 
 
 def _health_locked(now_mono: float) -> dict[str, Any]:
