@@ -633,7 +633,10 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     the command prints the handle the service returns. With `--scope` and
     `--category` the bytes are preserved as Evidence at once; without them the
     service holds them and the printed `file` handle is what `preserve_artifacts`
-    (or, with `--lane source`, `capture_source`) takes in `files`.
+    (or, with `--lane source`, `capture_source`) takes in `files`. A file larger
+    than one session part, one the listener refuses as too large, or any file with
+    `--resumable` goes through a resumable upload session that the next run of
+    the same command continues.
     """
     import mimetypes
 
@@ -653,6 +656,17 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         "--raw-protection",
         action="store_true",
         help="with --scope/--category: keep the original owner-only until a whole-artifact release",
+    )
+    parser.add_argument(
+        "--archive",
+        choices=("members",),
+        default="",
+        help="with --scope/--category: keep a zip as its members, each stored once in the family",
+    )
+    parser.add_argument(
+        "--resumable",
+        action="store_true",
+        help="with --scope/--category: send the file in resumable parts even under the request cap",
     )
     parser.add_argument(
         "--lane",
@@ -693,6 +707,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
     if hold and args.raw_protection:
         parser.error("--raw-protection needs --scope/--category; a held file takes it when redeemed")
+    if hold and (args.archive or args.resumable):
+        parser.error("--archive and --resumable need --scope/--category")
     fields = {
         key: value
         for key, value in {
@@ -703,54 +719,187 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
             "hold": "1" if hold else "",
             "lane": args.lane if hold else "",
             "raw_protection": "1" if args.raw_protection else "",
+            "archive": args.archive,
         }.items()
         if value
     }
 
     import httpx
 
-    url = f"http://127.0.0.1:{int(raw_port)}/upload"
+    from .upload_sessions import MAX_PATCH_BYTES
+
+    base = f"http://127.0.0.1:{int(raw_port)}"
+    timeout = httpx.Timeout(30.0, read=300.0, write=300.0)
+    if hold or not (args.resumable or source.stat().st_size > MAX_PATCH_BYTES):
+        try:
+            with httpx.Client(
+                transport=transport, trust_env=False, follow_redirects=False, timeout=timeout
+            ) as client, source.open("rb") as handle:
+                response = client.post(
+                    f"{base}/upload",
+                    headers={"Authorization": f"Bearer {token}"},
+                    files={
+                        "file": (
+                            name,
+                            handle,
+                            mimetypes.guess_type(name)[0] or "application/octet-stream",
+                        )
+                    },
+                    data=fields,
+                )
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+            return 1
+        except httpx.HTTPError:
+            # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
+            # and a hold retried makes a second hold that expires unused.
+            print("attach: the upload was sent but no acknowledgement arrived; check the vault "
+                  "before retrying", file=sys.stderr)
+            return 1
+        # The listener's cap is in the service's environment, which this command cannot read:
+        # its 413 is the signal to send the file as a session instead. A hold has no session.
+        if hold or response.status_code != 413:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if response.status_code not in (200, 201) or not isinstance(payload, dict):
+                return _attach_refused(response, payload)
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
     try:
         with httpx.Client(
-            transport=transport,
-            trust_env=False,
-            follow_redirects=False,
-            timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
-        ) as client, source.open("rb") as handle:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                files={
-                    "file": (
-                        name,
-                        handle,
-                        mimetypes.guess_type(name)[0] or "application/octet-stream",
-                    )
-                },
-                data=fields,
-            )
+            transport=transport, trust_env=False, follow_redirects=False, timeout=timeout
+        ) as client:
+            return _attach_resumable(client, base, token, source, name, fields)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
         return 1
     except httpx.HTTPError:
-        # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
-        # and a hold retried makes a second hold that expires unused.
-        print("attach: the upload was sent but no acknowledgement arrived; check the vault "
-              "before retrying", file=sys.stderr)
+        print("attach: the upload was interrupted; run the same command again to resume",
+              file=sys.stderr)
         return 1
+
+
+def _attach_refused(response, payload: object) -> int:
+    code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
+    print(
+        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
+    """Send `source` through an upload session, continuing one an earlier run left open.
+
+    The session's URL and secret are kept in a 0600 file under the user's state
+    directory, keyed by the file's SHA-256 and its destination, until the
+    service reports the session settled.
+    """
+    import base64
+    import hashlib
+
+    from . import upload_sessions
+    from .state_paths import state_store_root
+
+    # Half the bytes one part may carry, so a part never meets the service's cap.
+    part_bytes = upload_sessions.MAX_PATCH_BYTES // 2
+
+    digest = hashlib.sha256()
+    with source.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+    size = source.stat().st_size
+    # nosemgrep: ep-word-set -- the session metadata keys that `/upload/sessions` defines.
+    destination = {key: fields[key] for key in ("scope", "category", "description",
+                                                "raw_protection", "archive") if key in fields}
+    key = hashlib.sha256(json.dumps(
+        {"sha256": sha256, "target": base, "filename": name, **destination}, sort_keys=True
+    ).encode()).hexdigest()
+    records = state_store_root() / "attach-sessions"
+    record_path = records / f"{key}.json"
+    tus = {"Authorization": f"Bearer {token}", "Tus-Resumable": "1.0.0"}
+
+    session = None
+    offset = 0
     try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if response.status_code != 201 or not isinstance(payload, dict):
-        code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
-        print(
-            f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
-            file=sys.stderr,
+        session = json.loads(record_path.read_text(encoding="utf-8"))
+        url, secret = str(session["url"]), str(session["secret"])
+    except (OSError, ValueError, KeyError, TypeError):
+        session = None
+    if session is not None:
+        held = client.head(url, headers={**tus, "Exomem-Upload-Secret": secret})
+        if held.status_code in (404, 410):
+            record_path.unlink(missing_ok=True)
+            session = None
+        elif held.status_code != 200:
+            return _attach_refused(held, None)
+        else:
+            offset = int(held.headers["upload-offset"])
+    if session is None:
+        metadata = {"filename": name, "sha256": sha256, **destination}
+        created = client.post(
+            f"{base}/upload/sessions",
+            headers={
+                **tus,
+                "Upload-Length": str(size),
+                "Upload-Metadata": ",".join(
+                    f"{field} {base64.b64encode(str(value).encode()).decode()}"
+                    for field, value in metadata.items()
+                ),
+            },
         )
-        return 1
-    print(json.dumps(payload, ensure_ascii=False))
-    return 0
+        if created.status_code != 201:
+            try:
+                payload = created.json()
+            except ValueError:
+                payload = None
+            return _attach_refused(created, payload)
+        url, secret = base + created.headers["location"], created.headers["exomem-upload-secret"]
+        records.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(record_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
+            json.dump({"url": url, "secret": secret}, sink)
+    headers = {**tus, "Exomem-Upload-Secret": secret}
+    with source.open("rb") as handle:
+        while offset < size:
+            handle.seek(offset)
+            sent = client.patch(
+                url,
+                headers={
+                    **headers,
+                    "Upload-Offset": str(offset),
+                    "Content-Type": "application/offset+octet-stream",
+                },
+                content=handle.read(part_bytes),
+            )
+            if sent.status_code != 204:
+                return _attach_refused(sent, None)
+            offset = int(sent.headers["upload-offset"])
+    while True:
+        state = client.get(url, headers=headers)
+        try:
+            payload = state.json()
+        except ValueError:
+            payload = None
+        if state.status_code != 200 or not isinstance(payload, dict):
+            return _attach_refused(state, payload)
+        if payload.get("state") == upload_sessions.COMMITTED:
+            record_path.unlink(missing_ok=True)
+            print(json.dumps(payload.get("receipt"), ensure_ascii=False))
+            return 0
+        if payload.get("state") == upload_sessions.FAILED:
+            record_path.unlink(missing_ok=True)
+            print(f"attach: the upload failed ({payload.get('code')})", file=sys.stderr)
+            return 1
+        if payload.get("state") == upload_sessions.RETRYABLE:
+            # The service holds every byte; the session record stays so the next run retries the commit.
+            print(f"attach: the upload is held but not preserved yet ({payload.get('code')}); "
+                  "run the same command again to retry", file=sys.stderr)
+            return 1
+        time.sleep(0.25)
 
 
 def _serve_main(argv: list[str]) -> int:

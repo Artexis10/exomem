@@ -5193,26 +5193,13 @@ def op_preserve(
         mark_active_mutation_committed()
         # Nothing is handed to the ledger: this call committed nothing, and the
         # path it resolved to was recorded by the call that did.
-        return {
-            "path": duplicate.path,
-            "stored_path": duplicate.path,
-            "sidecar_path": duplicate.sidecar_path,
-            "ref": duplicate.ref,
-            "state": "already_stored",
-            "outcome": "stored",
-            "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
-            "warnings": [],
-            "size": len(content.encode("utf-8")) if isinstance(content, str) else None,
-            "hash": digest or None,
-            "hash_algorithm": "sha256",
-            "media_id": f"sha256:{digest}" if digest else None,
+        return duplicate.receipt(
+            size=len(content.encode("utf-8")) if isinstance(content, str) else None,
             # The same derivation the stored branch uses, from the sanitized
             # filename: a name whose sanitized form has a different extension
             # must not yield two content types for one set of bytes.
-            "content_type": mimetypes.guess_type(
-                preserve_module._sanitize_filename(filename)
-            )[0],
-        }
+            content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
+        )
     try:
         result = preserve_module.preserve(
             vault_root,

@@ -54,6 +54,7 @@ dependencies = [
     "filelock>=3.29,<4",
     "SQLAlchemy>=2.1.4,<3",
     "alembic>=1.20,<2",
+    "tzdata>=2026.2",           # import time zones: the same IANA rules on every platform, versioned per job
 ]
 
 # Rendered by PyPI as the "Project links" sidebar block. Without this table the
