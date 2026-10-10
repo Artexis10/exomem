@@ -633,9 +633,10 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     the command prints the handle the service returns. With `--scope` and
     `--category` the bytes are preserved as Evidence at once; without them the
     service holds them and the printed `file` handle is what `preserve_artifacts`
-    (or, with `--lane source`, `capture_source`) takes in `files`. A file over the
-    listener's single-request cap, or any file with `--resumable`, goes through a
-    resumable upload session that the next run of the same command continues.
+    (or, with `--lane source`, `capture_source`) takes in `files`. A file larger
+    than one session part, one the listener refuses as too large, or any file with
+    `--resumable` goes through a resumable upload session that the next run of
+    the same command continues.
     """
     import mimetypes
 
@@ -725,60 +726,59 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
 
     import httpx
 
+    from .upload_sessions import MAX_PATCH_BYTES
+
     base = f"http://127.0.0.1:{int(raw_port)}"
-    if not hold and (args.resumable or source.stat().st_size > _local_upload_cap()):
+    timeout = httpx.Timeout(30.0, read=300.0, write=300.0)
+    if hold or not (args.resumable or source.stat().st_size > MAX_PATCH_BYTES):
         try:
             with httpx.Client(
-                transport=transport,
-                trust_env=False,
-                follow_redirects=False,
-                timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
-            ) as client:
-                return _attach_resumable(client, base, token, source, name, fields)
+                transport=transport, trust_env=False, follow_redirects=False, timeout=timeout
+            ) as client, source.open("rb") as handle:
+                response = client.post(
+                    f"{base}/upload",
+                    headers={"Authorization": f"Bearer {token}"},
+                    files={
+                        "file": (
+                            name,
+                            handle,
+                            mimetypes.guess_type(name)[0] or "application/octet-stream",
+                        )
+                    },
+                    data=fields,
+                )
         except (httpx.ConnectError, httpx.ConnectTimeout):
             print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
             return 1
         except httpx.HTTPError:
-            print("attach: the upload was interrupted; run the same command again to resume",
-                  file=sys.stderr)
+            # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
+            # and a hold retried makes a second hold that expires unused.
+            print("attach: the upload was sent but no acknowledgement arrived; check the vault "
+                  "before retrying", file=sys.stderr)
             return 1
-    url = f"{base}/upload"
+        # The listener's cap is in the service's environment, which this command cannot read:
+        # its 413 is the signal to send the file as a session instead. A hold has no session.
+        if hold or response.status_code != 413:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if response.status_code not in (200, 201) or not isinstance(payload, dict):
+                return _attach_refused(response, payload)
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
     try:
         with httpx.Client(
-            transport=transport,
-            trust_env=False,
-            follow_redirects=False,
-            timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
-        ) as client, source.open("rb") as handle:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                files={
-                    "file": (
-                        name,
-                        handle,
-                        mimetypes.guess_type(name)[0] or "application/octet-stream",
-                    )
-                },
-                data=fields,
-            )
+            transport=transport, trust_env=False, follow_redirects=False, timeout=timeout
+        ) as client:
+            return _attach_resumable(client, base, token, source, name, fields)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
         return 1
     except httpx.HTTPError:
-        # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
-        # and a hold retried makes a second hold that expires unused.
-        print("attach: the upload was sent but no acknowledgement arrived; check the vault "
-              "before retrying", file=sys.stderr)
+        print("attach: the upload was interrupted; run the same command again to resume",
+              file=sys.stderr)
         return 1
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if response.status_code not in (200, 201) or not isinstance(payload, dict):
-        return _attach_refused(response, payload)
-    print(json.dumps(payload, ensure_ascii=False))
-    return 0
 
 
 def _attach_refused(response, payload: object) -> int:
@@ -788,18 +788,6 @@ def _attach_refused(response, payload: object) -> int:
         file=sys.stderr,
     )
     return 1
-
-
-def _local_upload_cap() -> int:
-    """The local listener's single-request cap, as the service reads it."""
-    from .server_transfer import DEFAULT_LOCAL_UPLOAD_MAX_BYTES
-
-    raw = os.environ.get("EXOMEM_LOCAL_UPLOAD_MAX_BYTES", "").strip()
-    return int(raw) if raw.isascii() and raw.isdigit() else DEFAULT_LOCAL_UPLOAD_MAX_BYTES
-
-
-#: Bytes per resumable part: half the service's per-request cap.
-_ATTACH_PART_BYTES = 32 * 1024 * 1024
 
 
 def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
@@ -812,7 +800,11 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
     import base64
     import hashlib
 
+    from . import upload_sessions
     from .state_paths import state_store_root
+
+    # Half the bytes one part may carry, so a part never meets the service's cap.
+    part_bytes = upload_sessions.MAX_PATCH_BYTES // 2
 
     digest = hashlib.sha256()
     with source.open("rb") as handle:
@@ -881,7 +873,7 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
                     "Upload-Offset": str(offset),
                     "Content-Type": "application/offset+octet-stream",
                 },
-                content=handle.read(_ATTACH_PART_BYTES),
+                content=handle.read(part_bytes),
             )
             if sent.status_code != 204:
                 return _attach_refused(sent, None)
@@ -894,13 +886,18 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
             payload = None
         if state.status_code != 200 or not isinstance(payload, dict):
             return _attach_refused(state, payload)
-        if payload.get("state") == "committed":
+        if payload.get("state") == upload_sessions.COMMITTED:
             record_path.unlink(missing_ok=True)
             print(json.dumps(payload.get("receipt"), ensure_ascii=False))
             return 0
-        if payload.get("state") == "failed":
+        if payload.get("state") == upload_sessions.FAILED:
             record_path.unlink(missing_ok=True)
             print(f"attach: the upload failed ({payload.get('code')})", file=sys.stderr)
+            return 1
+        if payload.get("state") == upload_sessions.RETRYABLE:
+            # The service holds every byte; the session record stays so the next run retries the commit.
+            print(f"attach: the upload is held but not preserved yet ({payload.get('code')}); "
+                  "run the same command again to retry", file=sys.stderr)
             return 1
         time.sleep(0.25)
 

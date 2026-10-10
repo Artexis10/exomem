@@ -6,6 +6,8 @@
   Evidence: `test_archive_members_upload_stores_each_distinct_member_once` turns red when the recorded-archive lookup never matches; `test_preserving_a_recorded_archive_again_restores_a_lost_blob_and_nothing_else` turns red (0 restored) when `already_stored` skips the restore.
 - [x] 1.3 Prove: real-shaped invented archive expands, re-expands with no new blob, and hostile archives write nothing.
   Evidence: the same test turns red when blobs are pooled per archive; each `test_a_hostile_archive_writes_nothing` case turns red when its own check is removed.
+  - Evidence (review round 2): `test_an_oversized_central_directory_is_refused_before_it_is_loaded` turns red (`ARCHIVE_INVALID`) when the end-record check is skipped; the `undecodable-name` case turns red (`UnicodeDecodeError`) without its mapping.
+  - Evidence (review round 2): `test_an_expansion_removes_the_temp_a_killed_expansion_left_in_the_pool` turns red without the pool sweep; `test_an_expansion_needs_room_only_for_the_blobs_it_writes` turns red with the up-front sum restored and with the per-blob check removed.
 
 ## 2. Upload sessions (A, local and public listeners)
 
@@ -13,8 +15,11 @@
   Evidence: `test_local_ingress_e2e.py` turns red when the local allowlist drops `/upload/sessions/` or `HEAD` reports the declared length; `test_local_refusal_*` turn red when that prefix is dropped or widened to `/upload/`.
 - [x] 2.2 `exomem attach` resumes through a session.
   Evidence: `test_attach_resumes_an_interrupted_archive_upload_on_its_next_run` turns red when the CLI ignores its saved session record or writes it group-readable.
+  - Evidence (review round 2): `test_attach_sends_a_file_the_listener_refuses_as_too_large_through_a_session` turns red when a 413 does not fall back to a session; `test_attach_keeps_an_upload_whose_commit_found_the_disk_full_and_commits_it_on_the_next_run` turns red when a transient failure fails the session or the CLI ignores `retryable`.
 - [x] 2.3 Prove: an interrupted upload resumes through the real listener and worker; a hash mismatch, a wrong secret, cancel and expiry leave no bytes.
   Evidence: the e2e turns red when the running digest restarts per part; `tests/test_upload_sessions.py` cases turn red when a mismatch keeps the `.part`, a wrong secret answers 403, or a cancel or an expiry keeps the `.part`. `test_a_part_whose_client_drops_mid_body_keeps_what_arrived_and_the_upload_resumes` drops a part mid-body on a real uvicorn listener; it turns red (offset 40, not 70) when a disconnect discards the buffered bytes or hashes them without writing them.
+  - Evidence (review round 2): `test_only_the_serving_runtime_finishes_a_commit_that_a_stop_interrupted` builds each process kind in a real subprocess; standby turns red with the resume at route registration, stdio without the HTTP-app guard, serving without the activation step. `test_a_second_process_never_commits_a_session_already_being_committed` turns red without the commit lock.
+  - Evidence (review round 2): `test_a_commit_resumed_after_its_file_landed_answers_already_stored` turns red (`ARTIFACT_EXISTS`) without the stored-artifact lookup; `test_a_session_whose_file_cannot_land_is_refused_before_any_byte_is_sent` turns red without the creation check; `test_concurrent_creates_never_open_more_than_the_per_credential_limit` (12 opened, not 4) without the creation lock; `test_a_cancel_read_before_the_final_part_never_deletes_the_verified_upload` without the re-read; `test_a_number_too_long_to_parse_is_a_bad_request` with the digit bound raised past 4300.
 
 ## 3. Import grammar (C)
 
