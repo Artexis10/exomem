@@ -199,9 +199,9 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
         )
         conn.execute(
             "INSERT INTO import_members(collection_id, seq, txn_id, job_id, member_index, member_sha256,"
-            " mapping_sha256, accepted, rejected, rows_digest, row_count_after)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (COLLECTION_ID, 1, 1, "0" * 32, 0, H, H, 1, 0, H, 1),
+            " manifest_sha256, mapping_sha256, accepted, rejected, rows_digest, row_count_after,"
+            " importer_version, zone_rules) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (COLLECTION_ID, 1, 1, "0" * 32, 0, H, H, H, 1, 0, H, 1, "0.0.0", None),
         )
     return {"row_id": row_id}
 

@@ -11,11 +11,13 @@ unzoned local samples and a positional series, crossing the Europe/Tallinn autum
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import gzip
 import hashlib
 import io
 import json
 import zipfile
+import zoneinfo
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,10 +28,11 @@ from test_collection_store_importer import run as run_jobs
 from test_collection_store_writer import store as store
 from test_governance_egress import _external
 
-from exomem import archive_members, commands
+from exomem import __version__, archive_members, commands
 from exomem import structured_collections as collections
 from exomem.collection_store import connection, importer, typed_storage
 from exomem.collection_store.preview import preview_store
+from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import owner_principal, request_scope
 
 OWNER = owner_principal(surface="mcp")
@@ -160,13 +163,19 @@ def stored(conn):
 
 
 def logged(conn):
-    """The import log: each member's sequence, index, hash, counts, digest, row count and transition."""
+    """The import log: each member's sequence, index, member and manifest hashes, counts, digest,
+    row count and transition."""
     return conn.execute(
-        "SELECT m.seq, m.member_index, m.member_sha256, m.accepted, m.rejected, m.rows_digest, "
-        "m.row_count_after, t.operation FROM import_members m JOIN txns t ON t.txn_id=m.txn_id "
+        "SELECT m.seq, m.member_index, m.member_sha256, m.manifest_sha256, m.accepted, m.rejected, "
+        "m.rows_digest, m.row_count_after, t.operation FROM import_members m JOIN txns t ON t.txn_id=m.txn_id "
         "WHERE m.collection_id=? ORDER BY m.seq",
         (CID,),
     ).fetchall()
+
+
+def versions(conn):
+    """The importer and zone-rules versions the import log records."""
+    return set(conn.execute("SELECT importer_version, zone_rules FROM import_members WHERE collection_id=?", (CID,)))
 
 
 def digest(conn, series, instants):
@@ -183,6 +192,10 @@ def digest(conn, series, instants):
 
 def sha256(document):
     return hashlib.sha256(json.dumps(document).encode()).hexdigest()
+
+
+def file_sha256(store, path):
+    return hashlib.sha256((store.root / path).read_bytes()).hexdigest()
 
 
 def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_members(store, monkeypatch):
@@ -235,6 +248,10 @@ def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_me
             daily[(name, values["local_date"])].append(values["value"])
         assert {key: (len(found), pytest.approx(sum(found))) for key, found in daily.items()} == DAILY
 
+        # A row written outside any import still counts in the next member's row count.
+        CollectionWriter(store.root, handle).append_record(
+            CID, item={"series": "manual", "at": "2026-11-02T08:00:00Z"}, why="a row of the owner's own"
+        )
         again, _ = preserve_export(
             store, "second",
             {"samples/2026-03.json": SPRING, "samples/2026-10.json": AUTUMN, "samples/2026-11.json": NOVEMBER},
@@ -247,12 +264,16 @@ def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_me
         assert stored(handle.connection)[("samples", "2026-11-01T07:00:00Z")]["utc_offset"] == "+02:00"
         spring, autumn = list(EXPECTED_SAMPLES)[:3], list(EXPECTED_SAMPLES)[3:]
         conn = handle.connection
+        first, second = file_sha256(store, manifest), file_sha256(store, again)
         assert logged(conn) == [
-            (1, 0, sha256(SPRING), 3, 1, digest(conn, "samples", spring), 3, "import_member"),
-            (2, 1, sha256(AUTUMN), 6, 0, digest(conn, "samples", autumn), 9, "import_member"),
-            (3, 0, sha256(SHORT_DAY), 23, 0, digest(conn, "positions", SHORT_DAY_INSTANTS), 32, "import_member"),
-            (4, 2, sha256(NOVEMBER), 1, 0, digest(conn, "samples", ["2026-11-01T07:00:00Z"]), 33, "import_member"),
+            (1, 0, sha256(SPRING), first, 3, 1, digest(conn, "samples", spring), 3, "import_member"),
+            (2, 1, sha256(AUTUMN), first, 6, 0, digest(conn, "samples", autumn), 9, "import_member"),
+            (3, 0, sha256(SHORT_DAY), first, 23, 0, digest(conn, "positions", SHORT_DAY_INSTANTS), 32,
+             "import_member"),
+            (4, 2, sha256(NOVEMBER), second, 1, 0, digest(conn, "samples", ["2026-11-01T07:00:00Z"]), 34,
+             "import_member"),
         ]
+        assert versions(conn) == {(__version__, tzdata.IANA_VERSION)}
 
 
 class _Crash(BaseException):
@@ -287,7 +308,8 @@ def test_a_crash_at_a_members_end_logs_it_exactly_once_on_resume(store, monkeypa
     assert finish(store, job)["state"] == "complete"
     instants = ["2026-11-01T07:00:00Z", "2026-11-01T08:00:00Z"]
     assert logged(store.connection) == [
-        (1, 0, sha256(day), 2, 0, digest(store.connection, "samples", instants), 2, "import_member")
+        (1, 0, sha256(day), file_sha256(store, manifest), 2, 0, digest(store.connection, "samples", instants), 2,
+         "import_member")
     ]
 
 
@@ -358,6 +380,39 @@ def test_listed_members_import_in_path_order_so_the_later_path_wins(store):
     assert stored(store.connection)[("samples", "2026-11-01T07:00:00Z")]["value"] == 0.2
 
 
+def test_a_member_identical_to_an_earlier_one_in_the_same_job_still_wins_by_path(store):
+    """A skip that counts the job's own log rows drops a later member whose bytes an earlier one had."""
+    collection(store)
+    first = samples(("2026-11-01", at("2026-11-01", ("09:00", 1))))
+    second = samples(("2026-11-01", at("2026-11-01", ("09:00", 2))))
+    manifest, _ = preserve_export(store, "first", {"samples/a.json": first, "samples/b.json": second,
+                                                   "samples/c.json": first})
+    job = agent(store, mode="start", source_ref=manifest, format="json-document", members="samples/*",
+                mapping=SAMPLES)
+    assert finish(store, job)["members"] == {"selected": 3, "read": 3, "skipped": 0}
+    assert stored(store.connection)[("samples", "2026-11-01T07:00:00Z")]["value"] == 0.1
+
+
+def test_numbers_beyond_int64_or_a_float_cost_only_their_own_rows(tmp_path):
+    """A fast JSON parser that refuses 64-bit unsigned IDs fails whole members of real exports, and an
+    interval or value beyond a float fails the job instead of rejecting its row."""
+    (tmp_path / "Knowledge Base").mkdir()
+    document = {"device_id": 2**64 - 1, "date": "2026-01-10", "values": [1, 2, 10**310]}
+    mapping = {
+        "rows": "values[]",
+        "fields": {"series": {"const": "positions"}, "value": {"from": "$value", "scale": 0.5}},
+        "time": {"from": [{"date": "$.date", "zone": ZONE, "fold": "earlier", "index": "$index",
+                           "every": {"s": 10**309}, "clock": "elapsed"}], **TIMES},
+        "on_invalid": "skip",
+    }
+    compiled = importer.compile_mapping(mapping, manifest(tmp_path), "json-document")
+    [batch] = importer.iter_batches(io.BytesIO(json.dumps(document).encode()), "json-document", compiled)
+    assert [(values["value"], values["at"]) for _, values in batch.rows] == [(0.5, "2026-01-09T22:00:00Z")]
+    assert [(row.ordinal, code) for row, code, _ in batch.rejections] == [
+        (1, "TIME_BASIS_INVALID"), (2, "IMPORT_VALUE_INVALID")
+    ]
+
+
 def test_an_ancestor_after_its_row_array_is_a_row_error_that_preview_reports(store):
     """An ancestor captured after its rows were taken leaves those rows silently without it."""
     collection(store)
@@ -385,6 +440,8 @@ def test_an_ancestor_after_its_row_array_is_a_row_error_that_preview_reports(sto
         ({"time": {"from": [{"instant": "t", "zone": ZONE}], **TIMES}}, "mapping.time.from[0].fold"),
         ({"time": {"from": [{"instant": "t", "zone": "Nowhere/Else", "fold": "order"}], **TIMES}},
          "mapping.time.from[0].zone"),
+        ({"time": {"from": [{"instant": "t", "zone": [ZONE], "fold": "order"}], **TIMES}},
+         "mapping.time.from[0].zone"),
         ({"time": {"from": [{"date": "$.days[].date", "zone": ZONE, "fold": "order", "seconds": "s"}], **TIMES}},
          "mapping.time.from[0].clock"),
         ({"time": {"from": [{"date": "$.days[].date", "seconds": "s"}], **TIMES}}, "mapping.time.from[0]"),
@@ -394,7 +451,7 @@ def test_an_ancestor_after_its_row_array_is_a_row_error_that_preview_reports(sto
                              "clock": "wall"}], **TIMES}}, "mapping.time.from[0].every"),
     ],
     ids=["rows-missing", "rows-not-an-array", "ancestor-holds-rows", "array-in-row-path", "const-with-path",
-         "scale-not-number", "zone-without-fold", "zone-unknown", "zone-increment-without-clock",
+         "scale-not-number", "zone-without-fold", "zone-unknown", "zone-not-a-name", "zone-increment-without-clock",
          "date-increment-without-place", "two-places", "index-without-every"],
 )
 def test_a_bad_document_or_time_mapping_refuses_at_its_location(store, change, at):
@@ -409,13 +466,16 @@ def test_a_bad_document_or_time_mapping_refuses_at_its_location(store, change, a
     assert tuple(store.connection.iterdump()) == before
 
 
-def plan(time, root):
+def manifest(root):
     text = f"---\ntype: collection\nexomem_id: {CID}\ntitle: T\nsemantic_profile: records\ncollection_version: 1\n" \
            "schema_version: 1\nlifecycle: active\nstorage:\n  strategy: markdown-items\n  source: Items\n" \
            f"  format_version: 1\nitem_schema:\n{FIELDS}---\n"
-    manifest = collections.parse_manifest_bytes(root, root / "Knowledge Base/Records/T/_collection.md", text.encode())
-    mapping = {"fields": {"series": {"const": "x"}}, "time": {"from": [time], **TIMES}}
-    return importer.compile_mapping(mapping, manifest, "ndjson")
+    return collections.parse_manifest_bytes(root, root / "Knowledge Base/Records/T/_collection.md", text.encode())
+
+
+def plan(time, root, fmt="ndjson", series=None):
+    mapping = {"fields": {"series": series or {"const": "x"}}, "time": {"from": [time], **TIMES}}
+    return importer.compile_mapping(mapping, manifest(root), fmt)
 
 
 @pytest.mark.parametrize(
@@ -443,6 +503,44 @@ def test_a_time_basis_places_a_wall_clock_by_its_zone_offset_and_clock(tmp_path,
         assert error[0] == expected
     else:
         assert error is None and (values["at"], values["utc_offset"], values["local_date"]) == expected
+
+
+def test_a_csv_integer_too_long_to_read_is_a_row_error(tmp_path):
+    """Python refuses to read an integer of over 4,300 digits from text; unguarded, one such
+    cell fails the whole job instead of its row."""
+    (tmp_path / "Knowledge Base").mkdir()
+    compiled = plan({"instant": "t"}, tmp_path, "csv", {"from": "n", "type": "integer"})
+    assert compiled.apply({"n": "9" * 5000, "t": "2026-01-10T00:00:00Z"}) == (
+        None, ("IMPORT_VALUE_INVALID", "mapping.fields.series")
+    )
+
+
+# The wall clocks of one autumn day: before, twice through and after the repeated hour.
+FOLD_DAY = (("02:30", 0), ("03:10", 0), ("03:40", 0), ("03:10", 1), ("03:40", 1), ("04:10", 0))
+
+
+@pytest.mark.parametrize(
+    ("fmt", "series"),
+    [("ndjson", [("samples", "2025-10-26"), ("samples", "2026-10-25")]),
+     ("csv", [("a", "2026-10-25"), ("b", "2026-10-25")])],
+    ids=["one-series-over-two-autumns", "two-series-sorted-by-series"],
+)
+def test_fold_order_starts_over_after_each_repeated_hour(tmp_path, fmt, series):
+    """A fold that stays on the later offset after its repeated hour gives the next fold's first
+    pass the winter offset, so it collides with the second pass and their values are lost."""
+    (tmp_path / "Knowledge Base").mkdir()
+    rows = [(name, f"{day}T{clock}:00", fold) for name, day in series for clock, fold in FOLD_DAY]
+    if fmt == "ndjson":
+        data = "".join(json.dumps({"series": name, "t": wall}) + "\n" for name, wall, _ in rows)
+    else:
+        data = "series,t\n" + "".join(f"{name},{wall}\n" for name, wall, _ in rows)
+    compiled = plan({"instant": "t", "zone": ZONE, "fold": "order"}, tmp_path, fmt, "series")
+    [batch] = importer.iter_batches(io.BytesIO(data.encode()), fmt, compiled)
+    zone = zoneinfo.ZoneInfo(ZONE)
+    assert [values["at"] for _, values in batch.rows] == [
+        dt.datetime.fromisoformat(wall).replace(tzinfo=zone, fold=fold).astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for _, wall, fold in rows
+    ]
 
 
 def test_a_saved_import_is_checked_at_revise_and_named_at_start(store):

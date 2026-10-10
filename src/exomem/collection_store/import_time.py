@@ -32,11 +32,15 @@ def _names() -> frozenset[str]:
     return frozenset(listing.split())
 
 
-@functools.lru_cache(maxsize=32)
 def zone(name: Any) -> zoneinfo.ZoneInfo | None:
     """The named zone from the pinned rules, or None when they hold no such zone."""
     if type(name) is not str or len(name.encode()) > _MAX_NAME_BYTES or name not in _names():
         return None
+    return _load(name)  # checked first: the cache hashes its argument, and a mapping may hold anything
+
+
+@functools.lru_cache(maxsize=32)
+def _load(name: str) -> zoneinfo.ZoneInfo:
     resource = importlib.resources.files("tzdata.zoneinfo").joinpath(*name.split("/"))
     with resource.open("rb") as handle:
         return zoneinfo.ZoneInfo.from_file(handle, key=name)
@@ -46,9 +50,11 @@ class Fold:
     """The ``order`` fold rule's progress through one innermost array.
 
     A repeated local hour takes the earlier offset until the wall clock steps
-    backwards inside it, then the later one. The state travels in the job's
-    checkpoint, so a resumed job resolves the rest of an array as an uninterrupted
-    one would.
+    backwards inside it, then the later one. A wall time outside a repeated hour
+    starts the rule over, so the next repeated hour of the same array, a later
+    year's or another series', begins on the earlier offset again. The state
+    travels in the job's checkpoint, so a resumed job resolves the rest of an array
+    as an uninterrupted one would.
     """
 
     __slots__ = ("array", "later", "wall")
@@ -66,9 +72,12 @@ class Fold:
             "later": self.later,
         }
 
-    def takes_later(self, array: Any, wall: dt.datetime) -> bool:
-        if array != self.array:
+    def takes_later(self, array: Any, wall: dt.datetime, repeated: bool) -> bool:
+        """Whether ``wall`` takes the later offset; ``repeated`` says it falls in a repeated hour."""
+        if array != self.array or not repeated:
             self.array, self.wall, self.later = array, None, False
+        if not repeated:
+            return False
         if self.wall is not None and wall < self.wall:
             self.later = True
         self.wall = wall
@@ -81,10 +90,9 @@ def resolve(
     """The aware instant of naive ``wall`` in ``where``, or None inside a gap."""
     first, second = wall.replace(tzinfo=where, fold=0), wall.replace(tzinfo=where, fold=1)
     before, after = first.utcoffset(), second.utcoffset()
+    later = fold == "later" or (fold == "order" and order.takes_later(array, wall, before > after))
     if before == after:
         return first
     if before < after:
         return None  # PEP 495: a skipped wall time maps fold 0 to the earlier, smaller offset
-    if fold == "later" or (fold == "order" and order.takes_later(array, wall)):
-        return second
-    return first
+    return second if later else first

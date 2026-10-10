@@ -704,10 +704,13 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
 
     A row is written once, in the transaction that advances its job's checkpoint past
     the member, and never changed. ``seq`` counts a collection's members from 1 and
-    ``txn_id`` is the member's ``import_member`` transition. ``rows_digest`` chains each
-    accepted row's item key and payload hash in member order (``importer``), and
-    ``row_count_after`` is the collection's row count once the member is in. A later
-    job with the same mapping skips a member the log records.
+    ``txn_id`` is the member's ``import_member`` transition. ``manifest_sha256`` names
+    the export manifest the member came from. ``rows_digest`` chains each accepted
+    row's item key and payload hash in member order (``importer``), and
+    ``row_count_after`` is the collection's row count once the member is in.
+    ``importer_version`` is the Exomem release that imported the member and
+    ``zone_rules`` the zone rules' release, NULL when the mapping names no zone. A
+    later job with the same mapping skips a member the log records.
     """
     conn.execute("""CREATE TABLE import_members(
       collection_id TEXT NOT NULL REFERENCES collections(collection_id),
@@ -716,15 +719,19 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
       job_id TEXT NOT NULL REFERENCES import_jobs(job_id),
       member_index INTEGER NOT NULL CHECK (member_index >= 0),
       member_sha256 TEXT NOT NULL,
+      manifest_sha256 TEXT NOT NULL,
       mapping_sha256 TEXT NOT NULL,
       accepted INTEGER NOT NULL CHECK (accepted >= 0),
       rejected INTEGER NOT NULL CHECK (rejected >= 0),
       rows_digest TEXT NOT NULL,
       row_count_after INTEGER NOT NULL CHECK (row_count_after >= 0),
+      importer_version TEXT NOT NULL,
+      zone_rules TEXT,
       PRIMARY KEY (collection_id, seq)
     ) STRICT, WITHOUT ROWID""")
+    # The job completes the skip question (an earlier job's log row), so the index answers it alone.
     conn.execute("CREATE INDEX import_members_by_member "
-                 "ON import_members(collection_id, mapping_sha256, member_sha256)")
+                 "ON import_members(collection_id, mapping_sha256, member_sha256, job_id)")
     for statement in _TRIGGERS_V9:
         conn.execute(statement)
 

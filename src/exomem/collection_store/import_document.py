@@ -22,6 +22,8 @@ _TOO_LARGE = "IMPORT_ROW_TOO_LARGE"
 _TOO_DEEP = "IMPORT_ROW_TOO_DEEP"
 # nosemgrep: ep-word-set -- ijson's basic_parse fixes these container event names.
 _OPENS, _CLOSES = ("start_map", "start_array"), ("end_map", "end_array")
+# The pure-Python parser holds any integer; the default C one refuses those beyond int64.
+_EXACT = ijson.get_backend("python")
 
 
 class Malformed(Exception):
@@ -63,7 +65,7 @@ class Rows:
 
     Scope 0 is the document and scope n the current element of the nth crossed array;
     ``wanted[n]`` maps each declared key path within scope n to the mapping location
-    that names it.
+    that names it. ``exact`` reads with the slower parser that holds integers of any size.
     """
 
     def __init__(
@@ -74,8 +76,10 @@ class Rows:
         *,
         row_bytes: int,
         depth: int,
+        exact: bool = False,
     ) -> None:
-        self.events = ijson.basic_parse(_Unmarked(handle), use_float=True)
+        parse = _EXACT.basic_parse if exact else ijson.basic_parse
+        self.events = parse(_Unmarked(handle), use_float=True)
         self.routes, self.wanted = routes, wanted
         self.row_bytes, self.depth = row_bytes, depth
         self.scopes: list[dict] = [{} for _ in routes]

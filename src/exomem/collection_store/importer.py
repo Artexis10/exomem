@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Never
 
-from .. import archive_members, records, vault
+from .. import __version__, archive_members, records, vault
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
@@ -1019,12 +1019,15 @@ class _Streams:
     the next stream's start, so a batch records it once its checkpoint is past it.
     A ``bounded`` reader, a job's, returns ``_MEMBER_END`` when it leaves a stream it
     read, so a batch never holds rows of two members and the batch that ends a member
-    commits its import log row.
+    commits its import log row. A json-document stream the fast parser refuses is read
+    again from its start with the exact one before it counts as malformed: exports carry
+    64-bit unsigned IDs, and the fast parser refuses any integer beyond int64.
     """
 
     def __init__(self, streams, fmt, rows, checkpoint, skip=None, *, bounded=False) -> None:
         self.streams, self.fmt, self.rows, self.skip = streams, fmt, rows, skip
         self.bounded = bounded
+        self.exact = False  # whether the open stream reads with the exact parser
         self.ordinal, self.base = int(checkpoint["row"]), int(checkpoint["byte"])
         self.member, self.member_row = int(checkpoint["member"]), int(checkpoint["member_row"])
         self.handle = self.inner = self.guard = None
@@ -1055,6 +1058,9 @@ class _Streams:
             try:
                 item = next(self.inner, None)
             except import_document.Malformed:
+                if not self.exact:
+                    self._start(exact=True)
+                    continue
                 item = (None, ("IMPORT_SOURCE_MALFORMED", ""), True, 0)
             except (OSError, EOFError, zlib.error) as error:
                 raise _Lost from error
@@ -1075,7 +1081,8 @@ class _Streams:
         member = self.member
         if self.fmt == "json-document":
             for found in import_document.Rows(
-                handle, self.rows.routes, self.rows.wanted, row_bytes=MAX_ROW_BYTES, depth=MAX_DEPTH
+                handle, self.rows.routes, self.rows.wanted, row_bytes=MAX_ROW_BYTES, depth=MAX_DEPTH,
+                exact=self.exact,
             ):
                 context = (
                     None if found.error
@@ -1092,12 +1099,23 @@ class _Streams:
         self.handle, self.guard = stream.open()
         if self.guard is not None:
             self.opened.append(self.guard)
-        self.inner = self._items(self.handle)
+        self._start(exact=False)
+
+    def _start(self, *, exact: bool) -> None:
+        """Read the open stream from its start, past the rows already taken from it."""
         try:
+            if exact:
+                self.handle.seek(0)
+            self.exact = exact
+            self.inner = self._items(self.handle)
             for _ in range(self.member_row):
                 if next(self.inner, None) is None:
                     raise _Lost  # verified bytes hold fewer rows than the checkpoint took
-        except (import_document.Malformed, OSError, EOFError, zlib.error) as error:
+        except import_document.Malformed as error:
+            if exact:
+                raise _Lost from error
+            self._start(exact=True)
+        except (OSError, EOFError, zlib.error) as error:
             raise _Lost from error
 
     def _leave(self, kind: str, stream: _Stream) -> None:
@@ -1420,18 +1438,20 @@ def _coerce(text: Any, kind: str) -> Any:
         return text
     if kind == "boolean":
         return {"true": True, "false": False}.get(text, _ABSENT)
-    if kind == "integer":
-        return int(text) if _INTEGER.fullmatch(text) else _ABSENT
-    if not _NUMBER.fullmatch(text):
-        return _ABSENT
     if _INTEGER.fullmatch(text):
-        return int(text)
+        try:
+            return int(text)
+        except ValueError:  # more digits than Python reads from text
+            return _ABSENT
+    if kind == "integer" or not _NUMBER.fullmatch(text):
+        return _ABSENT
     number = float(text)
     return number if number == number and abs(number) != float("inf") else _ABSENT
 
 
 def _finite(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+    # Every int is finite; math.isfinite would convert one beyond a float and raise.
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def _scaled(value: Any, scale: int | float) -> Any:
@@ -2172,10 +2192,12 @@ def _live(writer, job: _Job, proof: Source, plan: Plan) -> _Streams:
         key = (job.collection_id, job.binding["mapping"]["sha256"])
 
         def skip(stream: _Stream) -> bool:
+            # Only earlier jobs count: a member this job already read with the same bytes
+            # sits earlier in path order, and the later one must still win.
             return writer.connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM import_members WHERE collection_id=? "
-                "AND mapping_sha256=? AND member_sha256=?)",
-                (*key, stream.sha256),
+                "AND mapping_sha256=? AND member_sha256=? AND job_id<>?)",
+                (*key, stream.sha256, job.id),
             ).fetchone()[0] == 1
 
     reader = readers[job.id] = _Streams(
@@ -2390,11 +2412,13 @@ def _tally() -> dict[str, Any]:
 
 
 def _log_member(writer, job: _Job, index: int, sha256: str, tally: Mapping[str, Any]) -> None:
-    """Append one member's import log row, named by its own ``import_member`` transition."""
+    """Append one member's import log row, named by its own ``import_member`` transition.
+
+    The row records the versions that produced the member's rows, the running importer's
+    and, for a zoned mapping, its zone rules', so a rebuild can name what changed.
+    """
     cid = job.collection_id
-    rows = writer.connection.execute(
-        "SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)
-    ).fetchone()[0]
+    rows = _row_count(writer.connection, cid)
     counts = {"member_index": index, "accepted": tally["accepted"], "rejected": tally["rejected"],
               "row_count_after": rows}
     ids = {"import_job_ids": [job.id], "member_sha256": [sha256], "rows_digest": [tally["rows_digest"]]}
@@ -2404,13 +2428,42 @@ def _log_member(writer, job: _Job, index: int, sha256: str, tally: Mapping[str, 
     [txn_id] = writer.connection.execute(
         "SELECT txn_id FROM txns WHERE transition_id=?", (receipt["transition_id"],)
     ).fetchone()
+    zone_rules = import_time.version() if "zone_rules" in job.binding["mapping"] else None
     writer._execute(
-        "INSERT INTO import_members(collection_id,seq,txn_id,job_id,member_index,member_sha256,"
-        "mapping_sha256,accepted,rejected,rows_digest,row_count_after) VALUES "
-        "(?,(SELECT COALESCE(MAX(seq),0)+1 FROM import_members WHERE collection_id=?),?,?,?,?,?,?,?,?,?)",
-        (cid, cid, txn_id, job.id, index, sha256, job.binding["mapping"]["sha256"], tally["accepted"],
-         tally["rejected"], tally["rows_digest"], rows),
+        "INSERT INTO import_members(collection_id,seq,txn_id,job_id,member_index,member_sha256,manifest_sha256,"
+        "mapping_sha256,accepted,rejected,rows_digest,row_count_after,importer_version,zone_rules) VALUES "
+        "(?,(SELECT COALESCE(MAX(seq),0)+1 FROM import_members WHERE collection_id=?),?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, cid, txn_id, job.id, index, sha256, job.binding["source"]["sha256"], job.binding["mapping"]["sha256"],
+         tally["accepted"], tally["rejected"], tally["rows_digest"], rows, __version__, zone_rules),
     )
+
+
+def _row_count(conn, cid: str) -> int:
+    """The collection's row count, read from its last import log row forward.
+
+    Items are never deleted and a new item's row id exceeds every earlier one, so the
+    rows created since that log row's transaction are the newest by row id: the walk
+    reads those, whatever wrote them, and stops. Only a collection's first log row counts
+    the whole collection.
+    """
+    last = conn.execute(
+        "SELECT row_count_after, txn_id FROM import_members WHERE collection_id=? ORDER BY seq DESC LIMIT 1",
+        (cid,),
+    ).fetchone()
+    if last is None:
+        return conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]
+    count, logged = last
+    newest = conn.execute(
+        "SELECT created_txn FROM items WHERE collection_id=? ORDER BY row_id DESC", (cid,)
+    )
+    try:
+        for (created,) in newest:
+            if created <= logged:
+                break
+            count += 1
+    finally:
+        newest.close()
+    return count
 
 
 def _control(
