@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses
+from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses, note_types
 from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
@@ -85,9 +85,11 @@ class Context:
     _members: list[sqlite3.Connection] = field(default_factory=list)
 
     status_basis: lifecycle_statuses.Basis = field(init=False)
+    type_basis: note_types.Basis = field(init=False)
 
     def __post_init__(self) -> None:
         self.status_basis = lifecycle_statuses.Basis(self.vault_root)
+        self.type_basis = note_types.Basis(self.vault_root)
 
     def live_status(self, value: object) -> bool:
         """An unavailable dependent classification defers this page's proposal."""
@@ -587,16 +589,6 @@ _HYDRATION_ROUTE_PAGES = 7
 #: Unit refs folded into the signal per contributing page.
 _HYDRATION_UNITS_PER_PAGE = 8
 
-#: Compiled page types whose units count as facts about an entity. Sources and
-#: Evidence are compile material, not hydration.
-_HYDRATION_TYPES = (
-    "research-note",
-    "insight",
-    "pattern",
-    "failure",
-    "experiment",
-    "production-log",
-)
 
 _ENTITY_TARGETS_SQL = (
     "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
@@ -613,19 +605,26 @@ _NEWER_THAN = (
     "substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) > ?"
 )
 
-_CONTRIBUTORS_SQL = (
-    "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id, "
-    "f.title, f.lifecycle_status "
-    "FROM graph_edges e JOIN graph_nodes f "
-    "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_page_key = ? AND e.source_path <> ? "
-    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
-    f"AND {_NEWER_THAN} "
-    f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
-    "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
-    "AND b.dst_page_key = ('file:' || e.source_path)) "
-    "ORDER BY e.source_path, e.src_key"
-)
+def _contributors_sql(type_count: int) -> str:
+    """Contributors whose page type is one of `type_count` bound type keys.
+
+    The graph stores the type key and no role, so each query expands the
+    note-type role into keys. Only compiled conclusions count as facts about
+    an entity; Sources and Evidence are compile material, not hydration.
+    """
+    return (
+        "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, "
+        "f.exomem_id, f.title, f.lifecycle_status "
+        "FROM graph_edges e JOIN graph_nodes f "
+        "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
+        "WHERE e.dst_page_key = ? AND e.source_path <> ? "
+        "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+        f"AND {_NEWER_THAN} "
+        f"AND f.page_type IN ({','.join('?' for _ in range(type_count))}) "
+        "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
+        "AND b.dst_page_key = ('file:' || e.source_path)) "
+        "ORDER BY e.source_path, e.src_key"
+    )
 
 
 def _memory_or_path_ref(rel_path: str, exomem_id: str | None) -> str:
@@ -708,13 +707,14 @@ def _hydration_detect(ctx: Context, entity: str, keep=None) -> dict[str, Any] | 
     if not ctx.live_status(node[1]):
         return None
     entity_date = _date(node[2], node[3])
+    hydration_types = ctx.type_basis.keys(note_types.compiled)
     rows = graph.execute(
-        _CONTRIBUTORS_SQL,
+        _contributors_sql(len(hydration_types)),
         (
             f"file:{entity}",
             entity,
             entity_date,
-            *_HYDRATION_TYPES,
+            *hydration_types,
             entity,
         ),
     )
@@ -941,7 +941,7 @@ def _governed(ctx: Context, rel_path: str, keep=None) -> Any | None:
         return None
     try:
         eligible = activation.is_eligible_governed_page(
-            ctx.vault_root, page, status_basis=ctx.status_basis
+            ctx.vault_root, page, status_basis=ctx.status_basis, type_basis=ctx.type_basis
         )
     except lifecycle_statuses.ClassificationUnavailable as error:
         raise Deferred("status_unavailable") from error

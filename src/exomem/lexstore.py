@@ -1033,7 +1033,7 @@ def _remove_lexical_rebuild_artifact(
         )
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v3"
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v4"
 _REGISTRY_ABSENT_MARKER = "absent"
 
 
@@ -1050,16 +1050,20 @@ def catalog_semantic_identity(vault_root: Path) -> str:
       current core category/authoring identity seam;
     * the exact content hash of the extension semantic-language registry at
       ``semantic_language_registry.registry_path`` (an explicit stable marker
-      when the registry is absent).
+      when the registry is absent);
+    * the effective digest of the note-type registry, so a save or restore
+      that changes what a type means retires rows parsed under the old meaning.
 
     Recall policy and access membership deliberately do not participate here:
     ``RecallFreshnessCheckpoint`` attests that independent projection boundary.
     Serialization is a canonical, sorted, separator-fixed JSON payload hashed
-    with SHA-256. No Markdown corpus is walked, no YAML is interpreted, and no
-    file is mutated; the registry is read only to hash its bytes, so neither
-    personal vocabulary nor raw registry bytes appear in the returned identity.
+    with SHA-256. No Markdown corpus is walked and no file is mutated. The
+    language registry is read only to hash its bytes, and the note-type
+    registry contributes only its cached effective digest, so neither personal
+    vocabulary nor raw registry bytes appear in the returned identity.
     """
-    from . import semantic_authoring, semantic_index, semantic_language_registry
+    from . import note_types, semantic_authoring, semantic_index, semantic_language_registry
+    from .vocabulary import registry as vocabulary_registry
 
     contract = semantic_authoring.get_semantic_authoring_contract()
     registry_file = semantic_language_registry.registry_path(Path(vault_root))
@@ -1078,6 +1082,10 @@ def catalog_semantic_identity(vault_root: Path) -> str:
         "authoring_contract_version": contract.version,
         "authoring_contract_digest": contract.content_digest,
         "extension_registry_hash": registry_marker,
+        # The catalogue is shared by every audience, so it binds the owner's meaning.
+        "note_type_registry_digest": vocabulary_registry.load(
+            note_types.SPEC, Path(vault_root)
+        ).effective_digest,
     }
     canonical = json.dumps(
         payload,

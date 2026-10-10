@@ -69,8 +69,10 @@ collected whether or not diagnostics were requested and SHALL be mirrored into t
 `recall.<stage>` spans carrying names and milliseconds only; response inclusion remains opt-in.
 
 Every reported stage SHALL be a registered interval so the unattributed remainder
-is computed from real intervals, and each stage SHALL carry its source (`index`,
-`cache`, `declined` or `computed`) so a corpus walk is visible in the diagnostics.
+is computed from real intervals: `total_ms` less the union of the root-level
+intervals, overlapping intervals counted once. Each stage SHALL carry its source
+(`index`, `cache`, `declined` or `computed`) so a corpus walk is visible in the
+diagnostics.
 
 #### Scenario: Timing diagnostics are returned when requested
 
@@ -102,7 +104,7 @@ is computed from real intervals, and each stage SHALL carry its source (`index`,
 
 - **WHEN** a timed `find` runs through the public leaf
 - **THEN** every stage entry carries a duration produced by a registered interval and a source value
-- **AND** the sum of the root-level stages plus `unattributed_ms` does not exceed `total_ms`,
+- **AND** the time that the root-level stages cover, overlapping intervals counted once, plus `unattributed_ms` does not exceed `total_ms`,
   nested stages being reported under their parent rather than counted again at the root
 
 ## ADDED Requirements

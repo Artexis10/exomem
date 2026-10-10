@@ -22,11 +22,10 @@ from exomem import find as find_module
 def test_default_config_matches_legacy_constants() -> None:
     cfg = find_module.RankingConfig()
     # The field defaults must equal the historical literals so DEFAULT is a
-    # faithful no-op. _COMPILED_BOOST / _SOURCE_PENALTY are kept as the
-    # canonical source values; this binds them together.
-    assert cfg.compiled_boost == find_module._COMPILED_BOOST
-    assert cfg.source_penalty == find_module._SOURCE_PENALTY
-    assert cfg.superseded_penalty == find_module._SUPERSEDED_PENALTY
+    # faithful no-op.
+    assert cfg.compiled_boost == 1.15
+    assert cfg.source_penalty == 0.85
+    assert cfg.superseded_penalty == 0.5
     assert cfg.rrf_k == 60
     assert cfg.candidate_multiplier == 5
     assert cfg.candidate_floor == 50

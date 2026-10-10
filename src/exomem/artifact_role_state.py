@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from . import activation, find_corpus, lifecycle_statuses
+from . import activation, find_corpus, lifecycle_statuses, note_types
 from . import artifact_role_review as sensor
 from .find_types import ParsedPage
 
@@ -116,7 +116,8 @@ def describe(root: Path, state: Any) -> dict[str, Any]:
         "identity": state.identity,
         "parent_ref": state.document.parent_ref,
         "type": state.page_type,
-        "eligible": activation.structurally_eligible_for_types(
+        # Serving rechecks eligibility with the caller's bases; the stored bit is the owner's.
+        "eligible": activation.structurally_eligible(
             root,
             ParsedPage(
                 path=root / state.path,
@@ -126,7 +127,8 @@ def describe(root: Path, state: Any) -> dict[str, Any]:
                 title=state.title,
                 mtime=0.0,
             ),
-            page_types=activation._COMPILED_PAGE_TYPES,
+            selects=note_types.compiled,
+            type_basis=note_types.Basis(root, owner_local=True),
         ),
         "status": state.frontmatter.get("status"),
         "n": state.frontmatter.get("n"),

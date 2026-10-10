@@ -17,7 +17,8 @@ treating the registry as empty.
 The `subject` argument of `schema_memory` names the current registry subjects.
 They are `schema_memory` subjects, not a list of allowed vocabulary entries. Compiled applicability comes from
 `semantic_authoring.minimum_semantic_unit` in the authoring bootstrap section,
-or the full-profile fallback. Note types have no registry subject here.
+or the full-profile fallback. A page type is compiled when its `note-types` entry
+has note-type role `compiled`.
 
 ## Reuse before promotion
 

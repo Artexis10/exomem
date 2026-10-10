@@ -42,8 +42,8 @@ These are engineering inferences, not measured capacity or throughput claims.
 
 | Capability | Hardware contribution | Evidence still needed |
 |---|---|---|
-| More isolated cells with CPU embeddings | More RAM and CPU permit more resident cell state. Cells can share immutable mapped weights. | Occupancy, private memory, CPU contention, query latency, and headroom on the actual host. |
-| Shared sensing and larger rerankers | GPU memory permits central workers with compatible model runtimes. | Model fit, governed tenant requests, queue latency, failure isolation, and cost at measured concurrency. |
+| More isolated cells with CPU embeddings | More RAM and CPU permit more resident cell state. Cells can use shared read-only model weights. | Occupancy, private memory, CPU contention, query latency, and headroom on the actual host. |
+| Per-cell sensing and larger rerankers | More RAM and CPU let each cell run its own instruments on shared read-only model weights. GPU memory permits larger models, but no GPU process may receive two cells' text. | Model fit, per-cell activation memory, CPU contention between cells, failure isolation, and cost at measured concurrency. |
 | Media transcription | Compatible GPU workers can run transcription off the request path. | Accuracy, job throughput, tenant isolation, and interruption recovery on representative media. |
 | Faster local restore | Dedicated NVMe permits local restore and index rebuild without network block storage. | Recovery time, writes at risk, free space for restore, and node-loss acceptance. Scratch storage supplies no durable custody. |
 
@@ -52,26 +52,26 @@ Extra RAM also does not establish cells per host: requests, warm peaks, filesyst
 The accepted 512 MiB / 125m request pair still needs the occupancy qualification in [resource policy task 3.9](../openspec/changes/add-cloud-service-resource-policy/tasks.md).
 No candidate machine has an accepted cells-per-host measurement.
 
-## Embedding isolation and shared sensing
+## Embedding isolation and per-cell sensing
 
 The [ONNX proposal](../openspec/changes/swap-embedding-runtime-to-onnx/proposal.md) rejects shared embedding inference for its runtime change.
-That choice keeps embedding requests inside each cell and shares immutable weights without pooling tenant text.
+That choice keeps embedding requests inside each cell and uses shared read-only model weights without pooling tenant text.
 It remains the shipped embedding path.
 
-[R4 and D9](../openspec/changes/add-sensed-epistemic-model/design.md) separately choose an in-cluster shared sensing plane scoped to each cell.
+[R4 and D9](../openspec/changes/add-sensed-epistemic-model/design.md) apply the same boundary to sensing: each cell senses with its own instruments on shared read-only model weights.
 The dreamer stays deterministic in the cell, and each vault retains its own readings ledger.
 Models act as instruments; they never author canon. Third-party APIs receive vault text only after the tenant opts in.
 The [hosted inference measures](hosted-inference-boundary.md) govern latency, memory, failure isolation, and privacy evidence for each proposed job.
 
-The older embedding proposal's process-boundary argument does not veto R4's shared sensing design.
-R4 also does not move ordinary embedding or retrieval requests into a shared worker.
-Any such extension needs its own explicit contract and measured benefit.
-This memo implements neither plane and grants no content access or provisioning authority.
+D9 rejects a shared inference process, so no process receives text from two cells.
+A worker shared between cells, for any job, needs its own explicit contract and measured benefit.
+This memo implements neither path and grants no content access or provisioning authority.
 
 ## Recommendation
 
 Keep the current CPU embedding path and defer hardware until demand arrives.
-Use the existing shared sensing design for its future implementation, with GPU placement decided from workload evidence.
+Implement sensing as per-cell instruments on shared read-only model weights, as R4 and D9 specify.
+Decide any GPU placement from workload evidence.
 GEX45 is a useful monthly GPU reference; short GPU experiments can use the hourly offers only after a budget is agreed.
 Do not select a provider from advertised RAM, VRAM, or price alone.
 

@@ -25,10 +25,20 @@ of this job retires it, so a failed or regretted cutover can fall back to it.
 its own encoder.
 
 A hosted or cloud cell holds one encoder, so it never serves the old sidecar
-with the model that wrote it: that sidecar is refused (the vector lane reports
-`vector_space_mismatch` and the lexical lanes answer) until this job cuts over
+with the model that wrote it: that sidecar is refused until this job cuts over
 to the sidecar it builds with the cell's own encoder. A write meanwhile cannot
 land in the refused sidecar and is built by the job's catch-up.
+
+Until the cutover, the vector lane reads the new sidecar whenever the
+recall encoder cannot answer from the serving one (`building_sidecar`): on an
+initial build, whose serving sidecar holds nothing or only live writes; on a
+cell, whose serving sidecar is refused; and on a personal server whose serving
+sidecar another build of the same model wrote. The query is then encoded for
+the new sidecar. A failed build keeps serving the pages it built; a restart
+retries it. A page the build encoded and that changed since does not answer
+from it (`current_in_build`) until a catch-up pass encodes it again. Only a
+personal server migrating from another model keeps reading the old, complete
+sidecar with that model's encoder.
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterator
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -191,6 +202,21 @@ def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, 
     return False
 
 
+def _resumes_initial_build(
+    vault_root: Path, active: Any, shadow_path: Path, pages: list[tuple[Path, Any]] | None = None
+) -> bool:
+    """Whether a shadow beside a serving sidecar in its own space is an interrupted
+    initial build that the job resumes, rather than a sidecar left over.
+
+    Only a separate target-space shadow is evidence of an interrupted initial
+    build, and only while the serving sidecar does not cover the vault: ordinary
+    legacy drift belongs to incremental reconcile. Loads no model.
+    """
+    if shadow_path == active.path or not shadow_path.exists():
+        return False
+    return _coverage_incomplete(vault_root, active, list(_eligible_pages(vault_root)) if pages is None else pages)
+
+
 def plan(vault_root: Path) -> MigrationPlan | None:
     """The migration the serving sidecar needs now, or None when it needs none.
 
@@ -210,16 +236,51 @@ def plan(vault_root: Path) -> MigrationPlan | None:
     key = target.fingerprint or f"{target.model}|{target.dim}"
     shadow_path = active.path.parent / index_paths.space_sidecar_name(key)
     if serving is not None and serving.accepts(target.model, target.fingerprint):
-        if published or shadow_path == active.path or not shadow_path.exists():
-            return None
-        # Only a separate target-space shadow is evidence of an interrupted
-        # initial build. Ordinary legacy drift belongs to incremental reconcile.
-        if not _coverage_incomplete(vault_root, active, list(_eligible_pages(vault_root))):
+        if published or not _resumes_initial_build(vault_root, active, shadow_path):
             return None
         serving = None  # Resume the initial shadow build despite live writes to legacy.
     if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
+
+
+def building_sidecar(vault_root: Path) -> Path | None:
+    """The sidecar this process's job is building, or failed to finish, that the
+    vector lane reads now.
+
+    None when no build ran here, when the active pointer already names the
+    build's sidecar, or on a personal server whose serving sidecar another
+    model wrote: that sidecar is complete and its own encoder serves it. Every
+    other build (an initial one, one on a cell whose serving sidecar is
+    refused, or one for another build of the same model) is in the recall
+    encoder's own space, which the serving sidecar cannot answer for. A failed build keeps
+    serving what it built. Read from the job's status and two `stat` calls; it
+    never walks the vault.
+    """
+    key = _key(vault_root)
+    with _LOCK:
+        current = _STATUS.get(key) or {}
+        target, serving = current.get("target"), current.get("serving")
+    if not isinstance(target, dict) or not target.get("sidecar"):
+        return None
+    if isinstance(serving, dict) and not _hosted() and serving.get("model") != recall_space.recall_model():
+        return None
+    active = index_paths.sidecar_path(vault_root)
+    shadow = active.parent / str(target["sidecar"])
+    # The job records the target before its first write creates the file.
+    return shadow if shadow != active and shadow.exists() else None
+
+
+def current_in_build(vault_root: Path, index: Any, rel_paths: AbstractSet[str]) -> set[str]:
+    """The pages among `rel_paths` whose rows in the build's sidecar still say what
+    the page says.
+
+    The build keeps a changed page's old rows until a catch-up pass encodes it
+    again. A row is current by the rule that decides what the build has done: it
+    carries the page's mtime now. One read of the sidecar and one `stat` per page.
+    """
+    built = index.file_mtimes(rel_paths)
+    return {rel for rel, at in built.items() if _mtime(Path(vault_root) / rel) == at}
 
 
 def preload_serving_encoder(vault_root: Path) -> bool:
@@ -558,8 +619,13 @@ def run(vault_root: Path, stop: threading.Event) -> str:
 
 
 def _run_logged(vault_root: Path, stop: threading.Event) -> None:
+    from . import runtime_resources
+
     try:
-        run(vault_root, stop)
+        # Bulk work: on a service cell's fair model gate a query's encode goes
+        # ahead of the build's next passage, so it waits for at most one.
+        with runtime_resources.model_work("bulk"):
+            run(vault_root, stop)
     except Exception as error:  # noqa: BLE001 - the job must never take the service down
         log.warning("recall re-embed stopped: %s", error, exc_info=True)
         _update(vault_root, state="failed", error=type(error).__name__)
@@ -603,10 +669,16 @@ def disk_status(vault_root: Path) -> dict[str, Any]:
         identity = shadow.identity
         if identity is None:
             continue
+        pages = list(_eligible_pages(vault_root))
         described = _space(identity, candidate)
         described["paths_done"] = len(shadow.file_mtimes())
+        # Live writes give an interrupted initial build's serving sidecar the
+        # build's own space; the job resumes that build only by plan()'s rule.
+        described["same_space_as_serving"] = identity == serving
+        if described["same_space_as_serving"]:
+            described["resumes"] = _resumes_initial_build(vault_root, active, candidate, pages)
         result["building"] = described
-        result["paths_total"] = sum(1 for _page in _eligible_pages(vault_root))
+        result["paths_total"] = len(pages)
         break
     return result
 

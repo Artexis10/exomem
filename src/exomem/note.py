@@ -44,6 +44,7 @@ from . import (
     corpus_aware,
     indexes,
     memory_refs,
+    note_types,
     relation_registry,
     relation_review,
     semantic_units,
@@ -85,14 +86,9 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 
-NOTE_TYPES = (
-    "research-note",
-    "insight",
-    "failure",
-    "pattern",
-    "experiment",
-    "production-log",
-)
+# The typed writer places only the shipped compiled types until it reads folders,
+# partitions and fields from the registry (S4b of `add-note-type-registry`).
+NOTE_TYPES = tuple(note_type.key for note_type in note_types.shipped(note_types.compiled))
 
 
 def _load_keys(vault_root: Path) -> project_keys_module.ProjectRegistry:
@@ -216,11 +212,16 @@ STATUS_PRODUCTION = (
     "archived",
 )
 
-# Types whose frontmatter spec marks `sources:` required. Omitting provenance on
-# one of these returns a warning, never an error: a conclusion drawn from live
-# work with nothing captured is an honest empty list, and inventing a source to
-# silence a gate would be strictly worse than leaving it empty.
-SOURCES_REQUIRED_TYPES = ("research-note", "insight", "failure", "pattern")
+# Typed-writer types whose registry entry marks `sources:` required. Omitting
+# provenance on one of these returns a warning, never an error: a conclusion
+# drawn from live work with nothing captured is an honest empty list, and
+# inventing a source to silence a gate would be strictly worse than leaving it
+# empty.
+SOURCES_REQUIRED_TYPES = tuple(
+    note_type.key
+    for note_type in note_types.shipped(note_types.compiled)
+    if note_types.sources_required(note_type)
+)
 
 
 def _empty_sources_warning(note_type: str) -> str | None:

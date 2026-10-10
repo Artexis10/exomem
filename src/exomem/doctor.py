@@ -2215,21 +2215,31 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     from . import recall_space
 
     recall = recall_space.recall_model()
-    if serving is None:
+    initial = serving is None or bool(building and building.get("same_space_as_serving"))
+    if initial:
         if state.get("paths_total", 0) == 0:
             return _check(
                 "embeddings.reembed", "pass", "No eligible pages need a dense index.", details=state,
             )
         if state.get("reembed") == "off":
             return None
+        if serving is not None and not building.get("resumes"):
+            return _check(
+                "embeddings.reembed",
+                "warn",
+                f"{building['sidecar']} is left over from an initial dense index build that "
+                f"will not resume: {serving['sidecar']} covers the vault and serves recall, "
+                "and nothing reads the leftover sidecar.",
+                details=state,
+            )
         built = building["paths_done"] if building else 0
         phase = "in progress" if building else "pending"
         return _check(
             "embeddings.reembed",
             "warn",
             f"The initial dense index build for {recall} is {phase}: "
-            f"{built}/{state.get('paths_total', 0)} pages built; lexical recall serves "
-            "until the service cuts over.",
+            f"{built}/{state.get('paths_total', 0)} pages built; dense recall covers only "
+            "the built pages until the service cuts over.",
             details=state,
         )
     if recall_space.cell_mode() and serving["model"] != recall:
@@ -2253,7 +2263,11 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
             "embeddings.reembed",
             "warn",
             f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
-            f"dense recall is off until the re-embed cuts over ({built}).",
+            + (
+                f"dense recall covers only the pages the re-embed has built until it cuts over ({built})."
+                if building
+                else f"dense recall is off until the re-embed builds its sidecar ({built})."
+            ),
             details=state,
         )
     if not building:

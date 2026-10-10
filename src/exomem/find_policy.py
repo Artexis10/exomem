@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any, NamedTuple
 
-from . import lifecycle_statuses
+from . import lifecycle_statuses, note_types
 from .find_types import Hit
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 
@@ -21,22 +21,6 @@ from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .temporal import Moment, Order
 from .temporal import compare as compare_moments
 from .temporal import parse as parse_moment
-
-COMPILED_TYPES = frozenset(
-    {
-        "insight",
-        "pattern",
-        "failure",
-        "research-note",
-        "entity",
-        "production-log",
-        "experiment",
-    }
-)
-SOURCE_TYPES = frozenset({"source"})
-COMPILED_BOOST = 1.15
-SOURCE_PENALTY = 0.85
-SUPERSEDED_PENALTY = 0.5
 
 TEMPORAL_MARKERS = re.compile(
     r"\b(recent|recently|latest|newest|today|yesterday|tonight|"
@@ -160,13 +144,17 @@ def stem_word_coverage(
 
 
 def type_multiplier(
-    page_type: str | None, config: RankingConfig = DEFAULT_RANKING
+    page_type: str | None,
+    config: RankingConfig = DEFAULT_RANKING,
+    type_basis: note_types.Basis | None = None,
 ) -> float:
-    if page_type in COMPILED_TYPES:
-        return config.compiled_boost
-    if page_type in SOURCE_TYPES:
-        return config.source_penalty
-    return 1.0
+    """The ranking knob of the page type's note-type role.
+
+    The authored value is looked up as written. A type whose definition the
+    caller cannot admit, or that no entry defines, ranks neutral.
+    """
+    note_type = (type_basis or note_types.Basis(None)).resolve(page_type).note_type
+    return config.note_type_factor(note_type.role if note_type is not None else None)
 
 
 def status_multiplier(
@@ -182,6 +170,8 @@ def apply_type_boost(
     fused: list[tuple[str, float]],
     page_of: PageOf,
     config: RankingConfig = DEFAULT_RANKING,
+    *,
+    type_basis: note_types.Basis | None = None,
 ) -> list[tuple[str, float]]:
     """Re-sort fused `(path, score)` pairs after applying per-type multipliers."""
     adjusted: list[tuple[str, float]] = []
@@ -193,6 +183,7 @@ def apply_type_boost(
             mult = type_multiplier(
                 getattr(page, "page_type", None) if page is not None else None,
                 config,
+                type_basis,
             )
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
@@ -238,7 +229,9 @@ def multiplier_bounds(
     Each factor is bounded by a declared config value, which is what makes the
     bounded pass below exact rather than approximate:
 
-    * ``type_multiplier``   -> ``compiled_boost`` high, ``source_penalty`` low
+    * ``type_multiplier``   -> ``compiled_boost`` high, ``source_penalty`` low,
+      because ``RankingConfig.note_type_factor`` maps every role to one of
+      those knobs or to 1.0
     * ``status_multiplier`` -> 1.0 high, ``superseded_penalty`` low (penalty only)
     * ``recency_multiplier``-> ``temporal_boost`` at zero days, 1.0 at infinity
     * ``usage_multiplier``  -> ``usage_boost`` high, 1.0 low (never a penalty)
@@ -271,6 +264,7 @@ def apply_post_rrf_multipliers(
     temporal: bool,
     page_of: PageOf,
     status_basis: lifecycle_statuses.Basis | None = None,
+    type_basis: note_types.Basis | None = None,
     usage_map: dict[str, float] | None = None,
     evidence_out: dict[str, list[dict[str, float | str]]] | None = None,
     top_n: int | None = None,
@@ -340,6 +334,7 @@ def apply_post_rrf_multipliers(
                 factor = type_multiplier(
                     getattr(page, "page_type", None) if page is not None else None,
                     config,
+                    type_basis,
                 )
             if chain is None:
                 score *= factor
