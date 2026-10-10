@@ -3,8 +3,9 @@
 The interrupted upload that resumes through the real listener and worker is in
 `test_local_ingress_e2e.py`. These cases cover what only a session can get
 wrong: bytes that do not match their declared hash, a secret that must not
-reveal a session, bytes left behind after a cancel or an expiry, and the bytes
-a part keeps when its client drops mid-body. All data is invented.
+reveal a session, bytes left behind after a cancel or an expiry, the bytes a
+part keeps when its client drops mid-body, and which process may commit a
+session that a stop interrupted. All data is invented.
 """
 
 from __future__ import annotations
@@ -13,7 +14,11 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import io
+import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -129,6 +134,28 @@ def _settled(client: _ASGIClient, location: str, secret: str) -> dict:
             return state
         time.sleep(0.05)
     pytest.fail("the session never settled")
+
+
+def _open(vault: Path, data: bytes, *, binding: str = "bearer:test") -> tuple[upload_sessions.Session, str]:
+    """A session for `data` opened through the store, as the creation route opens one."""
+    return upload_sessions.create(
+        vault,
+        binding=binding,
+        length=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        target={"filename": "samples.json", "scope": "Device", "category": "Uploads",
+                "description": None, "raw_protection": False, "archive": None},
+        max_bytes=upload_sessions.DEFAULT_MAX_BYTES,
+    )
+
+
+def _verified(vault: Path, data: bytes) -> tuple[upload_sessions.Session, str]:
+    """A session holding all of `data`, whose commit nothing has started: what a stop leaves."""
+    session, secret = _open(vault, data)
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    assert patch.close() == (len(data), True)
+    return session, secret
 
 
 def _parts(vault: Path) -> list[Path]:
@@ -267,3 +294,218 @@ def test_a_part_whose_client_drops_mid_body_keeps_what_arrived_and_the_upload_re
         state = _settled(client, location, secret)
         assert state["state"] == "committed", state
         assert state["receipt"]["hash"] == hashlib.sha256(data).hexdigest()
+
+
+#: One process of a given kind built against the test's vault and state, run to quiescence:
+#: its activation finished and any commit it started joined.
+_PROCESS = """
+import sys
+import threading
+
+from exomem import server, service_standby
+
+kind = sys.argv[1]
+if kind == "standby":
+    service_standby.enter_standby()
+mcp = server.build_server(require_auth=False)
+if kind != "stdio":
+    mcp.http_app()  # what an HTTP listener serves; a stdio server never builds it
+activation = mcp._exomem_local_runtime_activation
+activation.start()  # what liveness or the fallback timer does; a standby defers it
+if activation._thread is not None:
+    activation._thread.join(120)
+for thread in threading.enumerate():
+    if thread.name.startswith("upload-session-commit"):
+        thread.join(120)
+"""
+
+
+@pytest.mark.parametrize(
+    ("kind", "settles"), [("serving", "committed"), ("standby", "verifying"), ("stdio", "verifying")]
+)
+def test_only_the_serving_runtime_finishes_a_commit_that_a_stop_interrupted(
+    vault, tmp_path, monkeypatch, kind, settles
+) -> None:
+    """A standby owns nothing until promotion and a stdio server serves no session route.
+    One that commits writes Evidence beside the worker that owns it, which then finds the
+    bytes gone and fails an upload whose file is already in the vault."""
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "sekret")
+    data = b'{"device_days": [{"samples": 1440}]}'
+    session, secret = _verified(vault, data)
+
+    ran = subprocess.run(
+        [sys.executable, "-c", _PROCESS, kind], cwd=tmp_path, capture_output=True, text=True, timeout=300
+    )
+
+    assert ran.returncode == 0, ran.stderr[-4000:]
+    assert upload_sessions.open_session(vault, session.id, secret).record["state"] == settles
+    stored = vault / "Knowledge Base" / "Evidence" / "Device" / "Uploads" / "samples.json"
+    assert stored.exists() == (settles == "committed")
+
+
+_SECOND_COMMITTER = """
+import sys
+import threading
+from pathlib import Path
+
+from exomem import upload_sessions
+
+ran = []
+for pending in upload_sessions.startup_sweep(Path(sys.argv[1])):
+    upload_sessions.start_commit(pending, lambda part, record: ran.append(1) or {"hash": "second"})
+for thread in threading.enumerate():
+    if thread.name.startswith("upload-session-commit"):
+        thread.join(60)
+print(len(ran))
+"""
+
+
+def test_a_second_process_never_commits_a_session_already_being_committed(vault, tmp_path) -> None:
+    """Two processes committing one session both preserve it; the slower one then fails on the
+    deleted `.part` and leaves `failed` over evidence that exists."""
+    session, secret = _verified(vault, b"device_days" * 20)
+    entered, release = threading.Event(), threading.Event()
+
+    def first(part: Path, record: dict) -> dict:
+        entered.set()
+        release.wait(60)
+        return {"hash": "first"}
+
+    upload_sessions.start_commit(session, first)
+    assert entered.wait(30)
+    try:
+        second = subprocess.run(
+            [sys.executable, "-c", _SECOND_COMMITTER, str(vault)],
+            cwd=tmp_path, capture_output=True, text=True, timeout=300,
+        )
+    finally:
+        release.set()
+    deadline = time.monotonic() + 30
+    while (record := upload_sessions.open_session(vault, session.id, secret).record)["state"] != "committed":
+        assert time.monotonic() < deadline, record
+        time.sleep(0.05)
+
+    assert second.returncode == 0, second.stderr[-4000:]
+    assert second.stdout.split() == ["0"]
+    assert record["receipt"] == {"hash": "first"}
+
+
+def test_a_commit_resumed_after_its_file_landed_answers_already_stored(vault, monkeypatch) -> None:
+    """A commit stopped after the preserve but before its `committed` record fails ARTIFACT_EXISTS
+    on every retry, so the client never gets a receipt for a file that is stored."""
+    from exomem import preserve
+
+    client = _client(vault, monkeypatch)
+    data = b'{"device_days": [{"samples": 1440}]}'
+    session, secret = _verified(vault, data)
+    # What the stopped commit had already done: the file and its page are in the vault.
+    landed = preserve.preserve_stream(
+        vault, scope="Device", category="Uploads", filename="samples.json", stream=io.BytesIO(data)
+    )
+
+    state = _settled(client, f"/upload/sessions/{session.id}", secret)
+
+    assert state["state"] == "committed", state
+    assert (state["receipt"]["state"], state["receipt"]["path"]) == ("already_stored", landed.path)
+    folder = vault / "Knowledge Base" / "Evidence" / "Device" / "Uploads"
+    assert sorted(path.name for path in folder.iterdir()) == ["samples.json", "samples.json.md"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "status", "code"), [("???", 400, "INVALID_PRESERVE"), ("samples.json", 409, "ARTIFACT_EXISTS")]
+)
+def test_a_session_whose_file_cannot_land_is_refused_before_any_byte_is_sent(
+    vault, monkeypatch, filename, status, code
+) -> None:
+    """Checked only at commit, a bad name or a taken one fails after the whole upload."""
+    from exomem import preserve
+
+    client = _client(vault, monkeypatch)
+    preserve.preserve_stream(
+        vault, scope="Device", category="Uploads", filename="samples.json", stream=io.BytesIO(b"{}")
+    )
+    metadata = {"filename": filename, "scope": "Device", "category": "Uploads",
+                "sha256": hashlib.sha256(b"device_days").hexdigest()}
+
+    refused = client.request(
+        "POST",
+        "/upload/sessions",
+        headers={
+            **TUS,
+            "Upload-Length": "11",
+            "Upload-Metadata": ",".join(
+                f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()
+            ),
+        },
+    )
+
+    assert (refused.status_code, refused.json()["code"]) == (status, code)
+    assert _parts(vault) == []
+
+
+def test_concurrent_creates_never_open_more_than_the_per_credential_limit(vault, monkeypatch) -> None:
+    """Creation counts open sessions and then writes its own; creates between those steps all pass."""
+    real = shutil.disk_usage
+
+    def loaded_disk(path):
+        time.sleep(0.05)  # a loaded disk answers slowly, between the count and the write
+        return real(path)
+
+    monkeypatch.setattr(shutil, "disk_usage", loaded_disk)
+    barrier = threading.Barrier(12)
+    outcomes: list[str] = []
+
+    def create() -> None:
+        barrier.wait()
+        try:
+            _open(vault, b"device_days", binding="bearer:one")
+            outcomes.append("opened")
+        except upload_sessions.SessionError as exc:
+            outcomes.append(exc.code)
+
+    threads = [threading.Thread(target=create) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+
+    assert outcomes.count("opened") == upload_sessions.MAX_LIVE_PER_BINDING
+    assert len(_parts(vault)) == upload_sessions.MAX_LIVE_PER_BINDING
+
+
+def test_a_cancel_read_before_the_final_part_never_deletes_the_verified_upload(vault) -> None:
+    """A DELETE that acts on the state it opened with removes bytes already being committed."""
+    data = b"device_days" * 10
+    session, secret = _open(vault, data)
+    cancel = upload_sessions.open_session(vault, session.id, secret)
+    patch = upload_sessions.Patch(upload_sessions.open_session(vault, session.id, secret), 0, len(data))
+    patch.write(data)
+    patch.close()
+
+    with pytest.raises(upload_sessions.SessionError) as refused:
+        upload_sessions.delete(cancel)
+
+    assert refused.value.status == 409
+    assert [part.read_bytes() for part in _parts(vault)] == [data]
+
+
+def test_a_number_too_long_to_parse_is_a_bad_request(vault, monkeypatch) -> None:
+    """`int()` refuses a 5000-digit string with ValueError, which the routes answered as a 500."""
+    client = _client(vault, monkeypatch)
+    location, secret = _create(client, b"device_days")
+    huge = "9" * 5000
+
+    created = client.request(
+        "POST",
+        "/upload/sessions",
+        headers={**TUS, "Upload-Length": huge, "Upload-Metadata": "filename c2FtcGxlcy5qc29u"},
+    )
+    patched = client.request(
+        "PATCH",
+        location,
+        headers={**TUS, "Exomem-Upload-Secret": secret, "Upload-Offset": huge,
+                 "Content-Type": "application/offset+octet-stream"},
+        content=b"device_days",
+    )
+
+    assert (created.status_code, patched.status_code) == (400, 400)

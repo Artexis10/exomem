@@ -13,10 +13,16 @@ only the client holds; the record keeps its SHA-256. An unknown id, a missing
 secret and a wrong one get the same answer. The record moves through
 `receiving`, `verifying`, `committing`, then `committed` or `failed` with a
 stable code. The final part returns at once and a background thread verifies
-and commits; a mismatch fails the session and deletes its bytes, and the bytes
-are deleted after any commit. A session expires `TTL_SECONDS` after its last
-accepted part, and a sweep at creation and at service start removes expired
-sessions with their bytes.
+and commits. A mismatch or content that can never be preserved fails the
+session and deletes its bytes, and the bytes are deleted after a commit. A
+commit that fails for any other reason, such as a full disk or a lease handoff,
+keeps the bytes and leaves the session `retryable`; the next read retries it.
+A per-session file lock lets one process at a time commit a session, and a
+store-wide one serialises creation, so its limits hold across processes.
+
+A session expires `TTL_SECONDS` after its last accepted part, and a sweep at
+creation and at the serving runtime's start removes expired sessions with
+their bytes.
 """
 
 from __future__ import annotations
@@ -30,14 +36,16 @@ import os
 import re
 import secrets
 import shutil
-import stat
-import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from filelock import FileLock, Timeout
+
+from . import private_state
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +64,11 @@ VERIFYING = "verifying"
 COMMITTING = "committing"
 COMMITTED = "committed"
 FAILED = "failed"
-_LIVE = (RECEIVING, VERIFYING, COMMITTING)
+#: All bytes held and verified; the last commit failed for a reason other than the bytes.
+RETRYABLE = "retryable"
+_LIVE = (RECEIVING, VERIFYING, COMMITTING, RETRYABLE)
+#: States a commit starts or resumes from.
+_COMMITTABLE = (VERIFYING, COMMITTING, RETRYABLE)
 
 _SESSION_ID = re.compile(r"[0-9a-f]{32}")
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -78,12 +90,17 @@ class SessionError(Exception):
 
 
 class CommitFailed(Exception):
-    """A commit refused with a stable code; the session fails with it."""
+    """A commit refused with a stable code.
 
-    def __init__(self, code: str, reason: str) -> None:
+    Unless `retryable`, the bytes can never be preserved as declared: the session
+    fails and its bytes are deleted. A retryable refusal keeps them.
+    """
+
+    def __init__(self, code: str, reason: str, *, retryable: bool = False) -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
+        self.retryable = retryable
 
 
 def _not_found() -> SessionError:
@@ -126,42 +143,24 @@ def _forget(session_id: str) -> None:
 
 
 def _store(vault_root: Path) -> Path:
-    from .state_paths import ensure_vault_state_dir
-
-    store = ensure_vault_state_dir(vault_root) / STORE_DIRNAME
-    store.mkdir(mode=0o700, exist_ok=True)
-    info = os.lstat(store)
-    if not stat.S_ISDIR(info.st_mode):
-        raise OSError(f"upload-session store is not a directory: {store}")
-    if os.name == "posix":
-        if info.st_uid != os.geteuid():
-            raise OSError(f"upload-session store is owned by another user: {store}")
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            os.chmod(store, 0o700)
-    return store
+    return private_state.store(vault_root, STORE_DIRNAME)
 
 
 def _secret_hash(secret: str) -> str:
     return hashlib.sha256(secret.encode("ascii")).hexdigest()
 
 
-def _remove(*paths: Path) -> None:
-    for path in paths:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+_remove = private_state.remove
 
 
 def _write_record(store: Path, record: dict) -> None:
-    fd, raw = tempfile.mkstemp(prefix=f"{record['id']}.", suffix=".tmp", dir=store)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as sink:
-            json.dump(record, sink)
-        os.replace(raw, store / f"{record['id']}.json")
-    except BaseException:
-        _remove(Path(raw))
-        raise
+    # `sweep` owns the `.tmp` temp; `.part` here is a session's bytes.
+    private_state.write_record(store, record["id"], record, temp_suffix=".tmp")
+
+
+def _commit_lock(store: Path, session_id: str) -> FileLock:
+    """The lock a process holds while it commits this session; any other process skips it."""
+    return FileLock(store / f"{session_id}.lock", timeout=0)
 
 
 def _read_record(store: Path, session_id: str) -> dict | None:
@@ -180,7 +179,8 @@ def _part_size(part: Path) -> int:
 
 
 def _drop(store: Path, session_id: str) -> None:
-    _remove(store / f"{session_id}.part", store / f"{session_id}.json")
+    # A released lock removes its own file; this one is what a killed commit left.
+    _remove(store / f"{session_id}.part", store / f"{session_id}.json", store / f"{session_id}.lock")
     _forget(session_id)
 
 
@@ -252,7 +252,7 @@ class Session:
 
 
 def startup_sweep(vault_root: Path) -> list[Session]:
-    """At service start: sweep an existing store; return the commits a stop interrupted."""
+    """At the serving runtime's start: sweep an existing store; return the commits to resume."""
     from .state_paths import vault_state_dir
 
     if not (vault_state_dir(vault_root) / STORE_DIRNAME).is_dir():
@@ -262,7 +262,7 @@ def startup_sweep(vault_root: Path) -> list[Session]:
     pending = []
     for meta in store.glob("*.json"):
         record = _read_record(store, meta.stem)
-        if record and record.get("state") in (VERIFYING, COMMITTING):
+        if record and record.get("state") in _COMMITTABLE:
             pending.append(Session(store, record))
     return pending
 
@@ -288,6 +288,18 @@ def create(
     if not _SHA256.fullmatch(sha256):
         raise SessionError("INVALID_UPLOAD", "`sha256` must be 64 lowercase hex digits", 400)
     store = _store(vault_root)
+    # The limit and the reservation count the sessions on disk, so creation is
+    # serialised: two creates between the count and the write would both pass.
+    try:
+        with FileLock(store / ".create.lock", timeout=_LOCK_WAIT_SECONDS):
+            return _create_locked(vault_root, store, binding, length, sha256, target)
+    except Timeout as exc:
+        raise SessionError("UPLOAD_SESSION_BUSY", "another upload session is being opened", 409) from exc
+
+
+def _create_locked(
+    vault_root: Path, store: Path, binding: str, length: int, sha256: str, target: dict[str, Any]
+) -> tuple[Session, str]:
     sweep(vault_root)
     live = 0
     reserved = 0
@@ -372,13 +384,20 @@ def held_offset(session: Session) -> int:
 
 def delete(session: Session) -> None:
     """Cancel a session and delete its bytes; a commit in flight is not cancelled."""
-    if session.record["state"] in (VERIFYING, COMMITTING):
-        raise SessionError("UPLOAD_SESSION_COMMITTING", "this upload is being committed", 409)
+    committing = SessionError("UPLOAD_SESSION_COMMITTING", "this upload is being committed", 409)
     running = _running(session.id)
     if not running.lock.acquire(timeout=_LOCK_WAIT_SECONDS):
         raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409)
     try:
-        _drop(session.store, session.id)
+        # The commit lock keeps a retry in any process from starting on bytes being removed.
+        with _commit_lock(session.store, session.id):
+            # Re-read under both locks: the final part may have moved it to `verifying`.
+            current = _read_record(session.store, session.id)
+            if current is not None and current.get("state") in (VERIFYING, COMMITTING):
+                raise committing
+            _drop(session.store, session.id)
+    except Timeout as exc:
+        raise committing from exc
     finally:
         running.lock.release()
 
@@ -463,38 +482,52 @@ def _fail(store: Path, record: dict, code: str, reason: str) -> None:
 def _commit(store: Path, session_id: str, committer: Committer) -> None:
     running = _running(session_id)
     try:
-        record = _read_record(store, session_id)
-        if record is None or record.get("state") not in (VERIFYING, COMMITTING):
-            return
-        part = store / f"{session_id}.part"
-        size = _part_size(part)
-        if running.size == size and running.digest is not None:
-            digest = running.digest.hexdigest()
-        else:
-            hasher = hashlib.sha256()
-            with part.open("rb") as source:
-                while chunk := source.read(_CHUNK):
-                    hasher.update(chunk)
-            digest = hasher.hexdigest()
-        if size != int(record["length"]) or not hmac.compare_digest(digest, record["sha256"]):
-            _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
-            return
-        record = {**record, "state": COMMITTING}
-        _write_record(store, record)
-        try:
-            receipt = committer(part, record)
-        except CommitFailed as exc:
+        with _commit_lock(store, session_id):
+            _commit_locked(store, session_id, committer, running)
+    except Timeout:
+        pass  # another process is committing this session
+    finally:
+        running.committing = False
+
+
+def _commit_locked(store: Path, session_id: str, committer: Committer, running: _Running) -> None:
+    record = _read_record(store, session_id)
+    if record is None or record.get("state") not in _COMMITTABLE:
+        return
+    part = store / f"{session_id}.part"
+    size = _part_size(part)
+    if running.size == size and running.digest is not None:
+        digest = running.digest.hexdigest()
+    else:
+        hasher = hashlib.sha256()
+        with part.open("rb") as source:
+            while chunk := source.read(_CHUNK):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
+    if size != int(record["length"]) or not hmac.compare_digest(digest, record["sha256"]):
+        _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
+        return
+    record = {**record, "state": COMMITTING}
+    # A retry clears the refusal it recorded last time.
+    record.pop("code", None)
+    record.pop("reason", None)
+    _write_record(store, record)
+    try:
+        receipt = committer(part, record)
+    except CommitFailed as exc:
+        if not exc.retryable:
             _fail(store, record, exc.code, exc.reason)
             return
-        except Exception:  # noqa: BLE001 - a session must end in a terminal state
-            log.exception("upload session commit failed")
-            _fail(store, record, "UPLOAD_COMMIT_FAILED", "the upload could not be preserved")
-            return
+        code, reason = exc.code, exc.reason
+    except Exception:  # noqa: BLE001 - the bytes are sound, so a retry may succeed
+        log.exception("upload session commit failed")
+        code, reason = "UPLOAD_COMMIT_FAILED", "the upload could not be preserved yet"
+    else:
         _write_record(store, {**record, "state": COMMITTED, "receipt": receipt})
         _remove(part)
         _forget(session_id)
-    finally:
-        running.committing = False
+        return
+    _write_record(store, {**record, "state": RETRYABLE, "code": code, "reason": reason})
 
 
 def start_commit(session: Session, committer: Committer) -> None:
@@ -504,7 +537,7 @@ def start_commit(session: Session, committer: Committer) -> None:
     preserve. It is a daemon: a commit that a shutdown interrupts restarts the
     next time the session is read.
     """
-    if session.record["state"] not in (VERIFYING, COMMITTING):
+    if session.record["state"] not in _COMMITTABLE:
         return
     running = _running(session.id)
     with _RUNNING_LOCK:

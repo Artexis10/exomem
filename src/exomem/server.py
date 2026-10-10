@@ -97,6 +97,10 @@ class ExomemFastMCP(FastMCP):
             )
         )
         kwargs["middleware"] = middleware
+        activation = getattr(self, "_exomem_local_runtime_activation", None)
+        if activation is not None:
+            # This app serves `/upload/sessions`, so this process resumes their commits.
+            activation.serves_upload_sessions = True
         app = super().http_app(*args, stateless_http=stateless_http, **kwargs)
         if stateless_http:
             endpoint_found = False
