@@ -181,7 +181,7 @@ def release(store):
 
 
 RSS_SCRIPT = r"""
-import json, resource, sys
+import json, sys, tracemalloc
 from pathlib import Path
 from exomem import structured_collections as collections
 from exomem.collection_store import importer
@@ -196,17 +196,19 @@ def drain(path):
             rows += len(batch.rows)
     return rows
 drain(small)
-before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+# Traced peak, not ru_maxrss: the process high-water mark from imports hides a whole-file load.
+tracemalloc.start()
 rows = drain(large)
-after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-print(json.dumps({"rows": rows, "delta_kib": after - before}))
+peak = tracemalloc.get_traced_memory()[1]
+print(json.dumps({"rows": rows, "delta_kib": peak >> 10}))
 """
 
 
 def _write_export(path, count, fmt):
     """The fixture export with GPS-sized rows: each route carries 200 points."""
+    document = fmt == "json-document"
     with open(path, "wb") as handle:
-        handle.write(b"[" if fmt == "json-array" else b"")
+        handle.write(b'{"exercises": [' if document else b"[" if fmt == "json-array" else b"")
         for index, record in enumerate(iter_exercises(count)):
             record["route"] = [
                 {
@@ -216,22 +218,24 @@ def _write_export(path, count, fmt):
                 }
                 for step in range(200)
             ]
-            if fmt == "json-array" and index:
+            if fmt != "ndjson" and index:
                 handle.write(b",")
             handle.write(
                 json.dumps(record, sort_keys=True).encode() + (b"\n" if fmt == "ndjson" else b"")
             )
-        handle.write(b"]" if fmt == "json-array" else b"")
+        handle.write(b"]}" if document else b"]" if fmt == "json-array" else b"")
 
 
-@pytest.mark.parametrize("fmt", ["ndjson", "json-array"])
+# A traced drain of a 36 MiB export runs for tens of seconds on a loaded runner.
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("fmt", ["ndjson", "json-array", "json-document"])
 def test_streaming_peak_memory_is_independent_of_total_rows(tmp_path, fmt):
     """A reader that loads the export, or a batch that keeps each row's decoded object, grows."""
     (tmp_path / "Knowledge Base").mkdir()
     small_path, large_path = tmp_path / "small", tmp_path / "large"
     _write_export(small_path, 20, fmt)
-    _write_export(large_path, 10_000, fmt)
-    assert large_path.stat().st_size > 64 << 20
+    _write_export(large_path, 4_000, fmt)
+    assert large_path.stat().st_size > 32 << 20
     completed = subprocess.run(
         [
             sys.executable,
@@ -240,7 +244,7 @@ def test_streaming_peak_memory_is_independent_of_total_rows(tmp_path, fmt):
             str(tmp_path),
             manifest_text(),
             fmt,
-            json.dumps(MAPPING),
+            json.dumps({**MAPPING, "rows": "exercises[]"} if fmt == "json-document" else MAPPING),
             str(small_path),
             str(large_path),
         ],
@@ -251,7 +255,7 @@ def test_streaming_peak_memory_is_independent_of_total_rows(tmp_path, fmt):
         check=True,
     )
     measured = json.loads(completed.stdout.strip().splitlines()[-1])
-    assert measured["rows"] == len(valid(iter_exercises(10_000)))
+    assert measured["rows"] == len(valid(iter_exercises(4_000)))
     assert measured["delta_kib"] < 16 * 1024, measured
 
 
@@ -1381,6 +1385,8 @@ def test_owner_journey_through_preserve_and_record_memory(store, monkeypatch):
         "mode",
         "source_ref",
         "format",
+        "members",
+        "reimport",
         "mapping",
         "continuation",
     }

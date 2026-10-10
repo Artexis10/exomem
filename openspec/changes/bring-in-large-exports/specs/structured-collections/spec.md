@@ -4,7 +4,7 @@
 
 An import source MAY be an export manifest with a member selector, a glob or a list of
 paths. The job SHALL bind the manifest's SHA-256 and the ordered SHA-256s of the selected
-members, SHALL verify each member's hash while it streams, and SHALL checkpoint by member
+members, SHALL prove each member's hash in a streamed pass before taking its rows, and SHALL checkpoint by member
 and row. A `json-document` source SHALL take rows from a declared row path that may cross
 nested arrays, with field paths relative to the row, ancestor paths from the document root
 or an enclosing element, the row's index, and literals. The reader SHALL stream, so memory
