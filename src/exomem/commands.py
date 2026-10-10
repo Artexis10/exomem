@@ -684,9 +684,9 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     agent that never sees the lists still classifies correctly.
     """
     from . import source_taxonomy as source_taxonomy_module
-    from .vocabulary.contract import admission_refusal
+    from .vocabulary.contract import selected_admission_refusal
 
-    refusal = admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
+    refusal = selected_admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
     if refusal is not None:
         return refusal
     taxonomy = source_taxonomy_module.load_taxonomy(vault_root)
@@ -1018,9 +1018,9 @@ def op_bootstrap(
             "resolution_required": workflow_resolution_required,
             "status": workflow_public_status,
         }
-    from .vocabulary.contract import admission_refusal
+    from .vocabulary.contract import selected_admission_refusal
 
-    entity_registry_refusal = admission_refusal(vault_root, entity_types_module.SPEC)
+    entity_registry_refusal = selected_admission_refusal(vault_root, entity_types_module.SPEC)
     entity_type_registry = entity_types_module.load_entity_types(
         None if entity_registry_refusal else vault_root
     )
@@ -1107,7 +1107,7 @@ def op_bootstrap(
                 "due-state",
             ],
         }
-    relation_registry_refusal = admission_refusal(vault_root, relation_registry_module.SPEC)
+    relation_registry_refusal = selected_admission_refusal(vault_root, relation_registry_module.SPEC)
     relation_registry = relation_registry_module.load_registry(
         None if relation_registry_refusal else vault_root
     )
@@ -10650,7 +10650,7 @@ def op_schema_memory(
             queued = vocabulary_contract.queues_for_owner(vault_root)
             if queued is not None and spec.family is None:
                 return {"subject": registry_subject, "available": False, "reason": queued}
-        refusal = vocabulary_contract.admission_refusal(vault_root, spec)
+        refusal = vocabulary_contract.selected_admission_refusal(vault_root, spec)
         if refusal is not None:
             return refusal
     if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():

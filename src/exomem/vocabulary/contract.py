@@ -104,6 +104,19 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
     return None
 
 
+def selected_admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
+    """Admit the public instance that a read of `spec` selects, the one `registry.load` reads.
+
+    A selection or binding error makes the registry unavailable, as the
+    bootstrap vocabulary block does, instead of escaping the caller.
+    """
+    try:
+        spec = instances.select(Path(vault_root), spec)
+    except RegistryError:
+        return {"subject": spec.name, "available": False, "reason": "registry_assignment_required"}
+    return admission_refusal(vault_root, spec)
+
+
 def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
     """Admit every kept snapshot before a history producer reads its header or bytes."""
     from .. import registry_history

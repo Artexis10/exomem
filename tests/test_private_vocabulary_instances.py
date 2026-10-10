@@ -651,3 +651,61 @@ def test_a_legacy_armed_vault_refuses_an_unassigned_note_type_and_keeps_shipped_
             _blocking_codes(vault, "Knowledge Base/Notes/Meetings/2026-10-sync.md", "meeting-note")
     assert "missing_semantic_unit" in shipped
     assert refused.value.code == "NOTE_TYPE_DEFINITION_UNAVAILABLE"
+
+
+def test_a_legacy_armed_vault_reports_unassigned_registries_instead_of_failing_bootstrap(
+    configured_boundary, vault
+):
+    """Version 1 assigns no instance, so legacy definitions make their registries unavailable.
+
+    The selection error used to escape the bootstrap's entity, relation and
+    source-taxonomy blocks and fail the whole bootstrap.
+    """
+    from exomem import commands, entity_types, relation_registry, source_taxonomy, state_migration
+    from exomem.governance import principal
+
+    _, authenticate = configured_boundary
+    for spec in (entity_types.SPEC, relation_registry.SPEC, source_taxonomy.KIND_SPEC):
+        spec.overlay(vault).parent.mkdir(parents=True, exist_ok=True)
+        spec.overlay(vault).write_text("schema_version: 1\n", encoding="utf-8")
+    authority = state_migration.assert_offline_migration_authority(source="legacy registries fixture")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    with principal.request_scope(authenticate("full")):
+        bootstrap = commands.op_bootstrap(vault, profile="full")
+        resolved = commands.op_schema_memory(
+            vault, "resolve-entity-type", subject="entity-types", requested_type="person"
+        )
+    assert bootstrap["entity_registry"]["reason"] == "registry_assignment_required"
+    assert bootstrap["source_taxonomy"]["reason"] == "registry_assignment_required"
+    assert resolved == {
+        "subject": "entity-types", "available": False, "reason": "registry_assignment_required",
+    }
+
+
+def test_a_limited_client_reads_entity_types_from_the_bound_public_overlay(private_instances, vault):
+    """Bootstrap and schema_memory admit the overlay the bound public instance reads.
+
+    They used to admit the unbound default path, which a limited client cannot
+    read, and so withheld a type that the public instance defines.
+    """
+    from exomem import commands
+    from exomem.governance import principal
+
+    proposal = {"upsert": {"venue": {
+        "label": "Venue", "guidance": "A place for recurring meetings.", "parent": "concept",
+        "attributes": {"folder": "Venues"},
+    }}}
+    with principal.request_scope(private_instances("full")):
+        inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types")
+        saved = commands.op_schema_memory(
+            vault, "save", subject="entity-types", proposal=proposal,
+            expected_hash=inspected["content_hash"], why="Public recurring places",
+        )
+    assert saved["valid"]
+    with principal.request_scope(private_instances("limited")):
+        bootstrap = commands.op_bootstrap(vault, profile="full")
+        resolved = commands.op_schema_memory(
+            vault, "resolve-entity-type", subject="entity-types", requested_type="venue"
+        )
+    assert "venue" in [item["id"] for item in bootstrap["entity_registry"]["types"]]
+    assert [match["id"] for match in resolved["exact_matches"]] == ["venue"]
