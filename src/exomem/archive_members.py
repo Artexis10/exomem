@@ -557,6 +557,8 @@ def preserve_members(
                 )
         manifest = {"schema_version": MANIFEST_SCHEMA_VERSION, "archive": archive, "members": members}
         data = (json.dumps(manifest, sort_keys=True, ensure_ascii=True, indent=1) + "\n").encode("ascii")
+        if len(data) > MAX_MANIFEST_BYTES:  # read_manifest refuses a larger manifest unread, so never write one
+            raise ArchiveError(TOO_LARGE, f"the archive's manifest would exceed {MAX_MANIFEST_BYTES:,} bytes")
         with guard():
             if (receipt := already_stored()) is not None:
                 return receipt

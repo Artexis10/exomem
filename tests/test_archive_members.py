@@ -194,3 +194,22 @@ def test_an_expansion_needs_room_only_for_the_blobs_it_writes(vault: Path, monke
     written = {path.name for path in family.rglob("*.gz")}
     assert hashlib.sha256(days[2]).hexdigest() + ".gz" in written
     assert hashlib.sha256(days[3]).hexdigest() + ".gz" not in written
+
+
+def test_an_archive_whose_manifest_the_importer_would_refuse_is_never_recorded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: expansion records a manifest larger than `read_manifest` reads, so the archive is stored but
+    can never be imported or recognised as already stored."""
+    monkeypatch.setattr(archive_members, "MAX_MANIFEST_BYTES", 600)
+    archive = _zip([(f"export/day-{n}.json", b"{}") for n in range(4)])
+
+    with pytest.raises(archive_members.ArchiveError) as refused:
+        archive_members.preserve_members(
+            vault, guard=contextlib.nullcontext, scope="Device", category="Exports", filename="export.zip",
+            stream=io.BytesIO(archive), max_bytes=1024 * 1024, verified="upload",
+        )
+
+    assert refused.value.code == archive_members.TOO_LARGE
+    family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
+    assert not list(family.glob("*.export.json*"))
