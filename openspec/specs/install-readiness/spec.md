@@ -263,8 +263,10 @@ host capabilities and tradeoffs rather than forcing one universal path. Windows
 live-vault installs SHALL default to native service guidance. Linux hosts with
 NVIDIA container runtime SHALL be able to choose CUDA Docker as the low-friction
 hybrid/GPU-capable route. Windows+WSL2 CUDA Docker SHALL be offered with an
-explicit file-watcher bind-mount tradeoff. macOS Apple Silicon SHALL default to
-native setup for MPS/MLX support.
+explicit file-watcher bind-mount tradeoff. macOS SHALL be named as a platform
+exomem cannot serve today, because the held-filesystem substrate has no darwin
+backend, rather than being offered a runtime shape; any MPS/MLX guidance for it
+SHALL be reinstated only alongside that backend.
 
 #### Scenario: Windows native remains recommended
 
@@ -279,6 +281,12 @@ native setup for MPS/MLX support.
 - **THEN** it offers the CUDA Docker path as a supported one-command route
 - **AND** it states that the service still boots resource-safe unless performance
   mode or an explicit CUDA device is selected
+
+#### Scenario: macOS is named as unserved rather than recommended
+
+- **WHEN** setup or documentation addresses a macOS user
+- **THEN** it states that exomem has no held-filesystem backend for that platform and cannot serve a vault there
+- **AND** it does not recommend a native macOS runtime shape as though the vault would work
 
 ### Requirement: Deterministic Native Dependency Gates
 
@@ -357,9 +365,28 @@ Repository-venv mode SHALL remain available for development.
   release package
 
 ### Requirement: Profile-complete release environment
+
 The release installer SHALL map lean, hybrid, and media profiles to their published
 extras, load the selected dotenv file into preflight and service environments, and
 MUST NOT depend on the checkout working directory for runtime dotenv discovery.
+
+When it publishes a managed service environment file over an existing one, the
+installer SHALL first retain the previous file's contents under a distinct
+predecessor path readable only by the current user, and SHALL report that path.
+Retention SHALL happen before the replacement becomes visible, so an interrupted
+publish never leaves the previous configuration unrecoverable. Configuration
+written earlier by the same installer run SHALL NOT be retained, so a predecessor
+always holds configuration the run did not author rather than an intermediate
+render of its own.
+
+For a service that already exists, the installer SHALL compare the vault path it
+is about to render against the vault path recorded in the managed environment
+file. When the two differ, the installer SHALL refuse the render, leave the
+existing configuration and the running service untouched, and name both paths and
+the explicit opt-in required to proceed. When the opt-in is supplied, the
+installer SHALL perform the rebinding normally. A first-time render, a service
+that does not yet exist, and a managed file recording no vault path SHALL be
+unaffected by this refusal.
 
 #### Scenario: Media profile on Apple Silicon
 - **WHEN** release mode selects the media profile on macOS arm64
@@ -370,6 +397,27 @@ MUST NOT depend on the checkout working directory for runtime dotenv discovery.
 - **WHEN** the selected `.env` contains Exomem vault and OAuth settings
 - **THEN** those values are available to doctor and the installed service
 - **AND** generated files containing secrets are readable only by the current user
+
+#### Scenario: Previous managed environment is retained
+- **WHEN** the installer publishes a managed service environment file and one already exists
+- **THEN** the previous contents are retained under a distinct predecessor path before the
+  replacement becomes visible
+- **AND** that path is reported and is readable only by the current user
+
+#### Scenario: Vault rebinding is refused for an existing service
+- **WHEN** an existing service's managed environment records one vault path and the
+  installer is about to render a different one without the explicit opt-in
+- **THEN** the installer refuses, naming the recorded path, the rendered path and the opt-in
+- **AND** the managed environment file and the running service are left untouched
+
+#### Scenario: Deliberate vault move is permitted
+- **WHEN** the same mismatch occurs and the explicit opt-in is supplied
+- **THEN** the installer renders the new vault path and proceeds with the transition
+
+#### Scenario: First install is unaffected
+- **WHEN** no managed service environment file exists yet, or it records no vault path
+- **THEN** the installer renders the selected dotenv without a rebinding refusal
+- **AND** no predecessor is left behind, because every file the run replaced was its own
 
 ### Requirement: Transactional readiness and endpoint verification
 Native installers SHALL run the selected capability doctor and remote-environment
@@ -877,3 +925,79 @@ Command behavior and output MUST remain unchanged.
 - **WHEN** a model-free one-shot product command runs with embeddings disabled
 - **THEN** no embedding or media stack is imported
 - **AND** the command's output is identical to the pre-change behavior
+
+### Requirement: A host with no held-filesystem backend refuses once and explains itself
+
+Every governed write acquires a reserved-path root through the held-filesystem
+substrate, which ships a backend per platform rather than a portable one. On a
+host with no backend the system SHALL refuse a vault-touching command once, with
+a message naming the platform and the platforms that are served, instead of
+letting each acquisition fail separately and describe a permanent platform fact
+as an unavailable filesystem route. Diagnostic and identification commands SHALL
+remain reachable on such a host, and the read-only doctor SHALL report the
+absent backend as a failure with remediation. The system SHALL NOT substitute a
+weaker filesystem route where the backend is absent, and the distributed package
+SHALL NOT advertise operating-system independence.
+
+#### Scenario: A vault command on an unserved platform
+
+- **WHEN** a user runs a vault-touching command on a host for which no held-filesystem backend exists
+- **THEN** the command refuses with one message naming that platform and the served platforms
+- **AND** the message directs the user to the read-only doctor
+
+#### Scenario: Diagnosis stays reachable
+
+- **WHEN** the same user runs the doctor or asks the package to identify itself
+- **THEN** the command runs
+- **AND** the doctor reports the absent backend as a failure whose remediation states that no choice of vault can repair it
+
+#### Scenario: No weaker fallback is substituted
+
+- **WHEN** the substrate is asked to acquire a root on a host with no backend
+- **THEN** it returns a capability refusal
+- **AND** no path-based or non-anchored route is used in its place
+
+### Requirement: The cross-platform lane carries headroom on the platform it runs on
+
+The cross-platform matrix lane SHALL bound its pytest session below its GitHub
+job deadline, so that a hang is reported by pytest with its failure and timing
+evidence rather than terminated silently by the runner. That bound SHALL clear
+the worst session measured on this lane by at least 15%, so that runner
+variance does not turn a healthy shard into a failure. The bound SHALL NOT be
+derived from `.test_durations.json`: that file records Linux times, this lane
+runs on Windows and macOS, and the ratio between the two is not constant across
+split counts, so no correction factor over the file predicts this lane.
+
+Explanatory prose SHALL NOT appear inside a folded `run:` scalar in any
+workflow, because folding joins the lines and a `#` there is part of the command
+rather than a comment.
+
+#### Scenario: A healthy shard on the slowest platform completes
+
+- **WHEN** a shard on the slowest platform in the matrix runs to completion with no failing test
+- **THEN** the session bound does not fire
+- **AND** the lane reports success rather than a non-zero exit after a clean summary
+
+#### Scenario: The bound loses its margin over the measured runtime
+
+- **WHEN** the session bound is less than 15% above the worst cross-platform session measured
+- **THEN** the repository's CI reliability contract fails
+- **AND** a bound raised to or past the job deadline fails the same contract
+
+#### Scenario: The Linux durations file is refreshed
+
+- **WHEN** `.test_durations.json` is regenerated
+- **THEN** the check that sizes the cross-platform session bound reads nothing from that file
+- **AND** its verdict does not change
+
+#### Scenario: A session genuinely hangs
+
+- **WHEN** a shard stops making progress between test items
+- **THEN** pytest requests session termination before the job deadline
+- **AND** the job deadline remains the outer bound for a hang outside the session lifecycle
+
+#### Scenario: A workflow explains a folded command
+
+- **WHEN** a maintainer documents why a flag in a folded `run:` scalar holds its value
+- **THEN** the explanation sits outside the scalar
+- **AND** the command the lane runs contains no `#`

@@ -999,3 +999,47 @@ Bootstrap SHALL advance its existing operating-contract version and carry a boun
 - **WHEN** a current or historical client reads bootstrap after this behavioral migration
 - **THEN** it sees the operating-contract version and the corrected capture rule
 - **AND** it learns that older optional-kind and `other` guidance no longer governs new captures
+
+### Requirement: Guidance teaches linking the identities a write names
+Bootstrap guidance at the `balanced` and `maximal` levels SHALL instruct the agent to
+wikilink the identities a durable write names whether or not a page exists yet, and
+SHALL name a central entity beside a recurring one as worth capturing, so that
+recurrence is never a condition of creating an Entity. The judgement that an identity is
+stable and useful SHALL stay with the agent. The shipped skill scaffold SHALL carry the
+full doctrine: link what a write names, resolve and create an Entity in the same turn
+when a note is about an identity that has none, and treat a returned `entity_candidate`
+as a prompt to resolve before creating and to hydrate before duplicating. Compact
+guidance SHALL stay under its byte ceiling at every level and SHALL keep its warning
+margin at the default level; the added words SHALL be paid for by tightening existing
+sentences without changing what they instruct.
+
+#### Scenario: A hookless agent links without being asked
+- **WHEN** an agent with only the bootstrap guidance and the tool schema writes a note
+  that names an organisation with no page
+- **THEN** the guidance tells it to wikilink that organisation, with no user instruction
+
+#### Scenario: A central identity needs no second mention
+- **WHEN** balanced guidance describes what is worth capturing
+- **THEN** it names a central entity as well as a recurring one, and nowhere requires an
+  entity to recur before it may be created
+
+#### Scenario: Guidance stays inside its budget
+- **WHEN** compact guidance is rendered at any level and surface with the added words
+- **THEN** it is under the compact byte ceiling, and at the default level it keeps the
+  512-byte warning margin on every surface
+
+### Requirement: Full Bootstrap Teaches Existing Edit Review Recovery
+
+The full bootstrap profile SHALL document the two-call existing-edit relation-review round-trip with copy-pasteable validation and commit examples. The commit example SHALL reuse the returned `transition_token` and `relation_review_hash` and include `relation_disposition="reviewed_none"` plus a bounded reason.
+
+#### Scenario: Generic client bootstraps before editing
+- **WHEN** a generic MCP client requests `bootstrap(profile="full")`
+- **THEN** it receives an unambiguous validation call and exact commit call for refreshing a stale relation disposition
+
+### Requirement: Full Bootstrap Teaches Canonical Typed Relations
+
+The full bootstrap profile SHALL include a concrete accepted note-level relation bullet under `## Relations` and SHALL distinguish it from unsupported Dataview inline-field syntax.
+
+#### Scenario: Client chooses the typed-relation remedy
+- **WHEN** a generic client follows the full bootstrap example
+- **THEN** the authored relation is presented in the parser-accepted `- supports [[Target]]` form
