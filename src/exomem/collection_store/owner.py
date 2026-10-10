@@ -64,7 +64,7 @@ def backup(vault_root, *, destination=None, stream=None, timeout=300.0) -> dict:
         if not verdict.verified or target.is_dir():
             raise CollectionStoreError("COLLECTION_BACKUP_DESTINATION_UNSAFE",
                                        verdict.reason if not verdict.verified else "the destination is a directory")
-        warnings = [found] if (found := custody.backup_sync_warning(target)) else []
+        warnings = [found] if (found := custody.backup_sync_warning(root, target)) else []
         scratch = target.parent
     with tempfile.TemporaryDirectory(prefix=".exomem-collection-backup-", dir=scratch) as private, \
             snapshot.staged_snapshot(root, directory=Path(private), deadline=time.monotonic() + timeout) as artifact:
