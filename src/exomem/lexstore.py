@@ -2326,6 +2326,15 @@ def term_document_paths(
     )
 
 
+#: A full-text MATCH drives every join to its catalogue table. Without ANALYZE
+#: statistics, SQLite 3.45 (and older system builds) plans an unordered
+#: `fts JOIN pages` from the `in_kb`/`in_vault` index and probes the index once
+#: per page, so the work grows with the corpus. CROSS JOIN fixes the loop order
+#: and never changes the rows.
+_FTS_PAGES = "fts CROSS JOIN pages p ON p.rowid = fts.rowid"
+_UNIT_FTS_UNITS = "unit_fts CROSS JOIN semantic_units u ON u.rowid = unit_fts.rowid"
+
+
 def _excluded_rows_clause(
     *, navigation: bool, raw_material: bool, statuses: tuple[str, ...] = ()
 ) -> tuple[str, list[object]]:
@@ -6894,7 +6903,7 @@ class LexicalStore:
                 count = 0
                 bounded: list[str] = []
                 rows = conn.execute(
-                    "SELECT p.path, p.status FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    f"SELECT p.path, p.status FROM {_FTS_PAGES} "
                     "WHERE fts MATCH ? AND p.in_kb = 1"
                     + excluded
                     + " ORDER BY p.path",
@@ -6975,7 +6984,7 @@ class LexicalStore:
             out: dict[str, tuple[str, ...]] = {}
             for token in dict.fromkeys(stemmed_tokens):
                 rows = conn.execute(
-                    "SELECT p.path FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    f"SELECT p.path FROM {_FTS_PAGES} "
                     f"WHERE fts MATCH ? AND p.{col} = 1" + clause + " ORDER BY p.path LIMIT ?",
                     (f'"{token}"', *params, limit),
                 ).fetchall()
@@ -7026,7 +7035,7 @@ class LexicalStore:
             # Tokens are runs of letters, numbers and marks — no FTS5 syntax
             # can hide in them, but quote anyway, exactly as `_bm25_query` does.
             row = conn.execute(
-                "SELECT COUNT(*) FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"SELECT COUNT(*) FROM {_FTS_PAGES} "
                 f"WHERE fts MATCH ? AND p.{col} = 1" + excluded_clause,
                 (f'"{token}"', *excluded_params),
             ).fetchone()
@@ -7299,7 +7308,7 @@ class LexicalStore:
         if admitted is not None:
             candidates = {
                 path: stemmed.split() for path, stemmed in conn.execute(
-                    "SELECT p.path, fts.stemmed FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
                     f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause,
                     params,
                 )
@@ -7317,7 +7326,7 @@ class LexicalStore:
             rows = conn.execute(
                 "SELECT c.path, -c.bm25 FROM ("
                 "SELECT p.path AS path, fts.rowid AS rid, bm25(fts) AS bm25 "
-                "FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"FROM {_FTS_PAGES} "
                 f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause + excluded_clause
                 + " ORDER BY bm25(fts), p.path LIMIT -1"
                 ") AS c JOIN fts ON fts.rowid = c.rid "
@@ -7334,7 +7343,7 @@ class LexicalStore:
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
-            "FROM fts JOIN pages p ON p.rowid = fts.rowid "
+            f"FROM {_FTS_PAGES} "
             f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause + " "
             "ORDER BY bm25(fts), p.path LIMIT ?",
             params,
@@ -8142,7 +8151,7 @@ class LexicalStore:
             match = " OR ".join(f'"{token}"' for token in tokens)
             rows = conn.execute(
                 f"SELECT {columns}, -bm25(unit_fts) AS lexical_score "
-                "FROM unit_fts JOIN semantic_units u ON u.rowid = unit_fts.rowid "
+                f"FROM {_UNIT_FTS_UNITS} "
                 "WHERE unit_fts MATCH ? AND "
                 + " AND ".join(clauses)
                 + " ORDER BY bm25(unit_fts), u.parent_path, u.source_order LIMIT ?",
