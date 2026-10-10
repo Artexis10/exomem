@@ -213,6 +213,97 @@ def pack_entries(name: str) -> tuple[Entry, ...]:
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class PackRegistry:
+    """A fixed-pack registry's entries and the findings of its overlay."""
+
+    entries: Mapping[str, Entry]
+    findings: tuple[Mapping[str, Any], ...] = ()
+
+
+class FixedPackAdapter:
+    """Grammar for a registry whose shipped entries are fixed: an overlay only adds.
+
+    `check(entry, entries)` refuses an overlay entry with a `RegistryError`. A malformed
+    overlay leaves the pack in force and reports one finding, so a guard that reads the
+    registry never loses a shipped entry.
+    """
+
+    def __init__(self, pack: str, spec: Callable[[], RegistrySpec],
+                 check: Callable[[Entry, Mapping[str, Entry]], None]) -> None:
+        self._pack, self._spec, self._check = pack, spec, check
+
+    def _shipped(self) -> dict[str, Entry]:
+        entries = {entry.key: entry for entry in pack_entries(self._pack)}
+        for entry in entries.values():
+            try:
+                self._check(entry, entries)
+            except RegistryError as error:
+                raise RuntimeError(f"shipped pack {self._pack} is invalid: {error}") from error
+        return entries
+
+    def normalize_key(self, raw: str) -> str:
+        key = token(raw)
+        if not key or len(key) > 64 or not key[0].isalpha():
+            raise RegistryError("INVALID_REGISTRY_KEY: registry keys start with a letter")
+        return key
+
+    def document(self, text: str | None) -> dict[str, Any]:
+        if text is None:
+            return {"schema_version": 1, "entries": {}}
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as error:
+            raise RegistryError("INVALID_REGISTRY_OVERLAY: overlay YAML is invalid") from error
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != 1
+            # The overlay schema fixes these two document fields.
+            or set(value) - {"schema_version", "entries"}
+            or not isinstance(value.get("entries", {}), dict)
+        ):
+            raise RegistryError("INVALID_REGISTRY_OVERLAY: expected schema_version and entries")
+        return {**value, "entries": value.get("entries", {})}
+
+    def parse(self, text: str | None, digest: str) -> PackRegistry:
+        try:
+            return self.parse_document(self.document(text))
+        except RegistryError as error:
+            finding = {"code": "invalid_registry_overlay", "path": "entries",
+                       "severity": "error", "detail": str(error)}
+            return PackRegistry(self._shipped(), (finding,))
+
+    def parse_document(self, document: Mapping[str, Any]) -> PackRegistry:
+        entries = self._shipped()
+        for raw_key, row in document["entries"].items():
+            if not isinstance(raw_key, str) or self.normalize_key(raw_key) != raw_key:
+                raise RegistryError("INVALID_REGISTRY_KEY: overlay key is not canonical")
+            if raw_key in entries:
+                raise RegistryError("PACK_ENTRY_FIXED: shipped entries cannot be overridden")
+            entry = _patch(self._spec(), raw_key, row, None)
+            self._check(entry, entries)
+            entries[raw_key] = entry
+        validate_replacements(self._spec(), entries)
+        return PackRegistry(entries)
+
+    def entries(self, typed: PackRegistry) -> Mapping[str, Entry]:
+        return typed.entries
+
+    def findings(self, typed: PackRegistry) -> tuple[Mapping[str, Any], ...]:
+        return typed.findings
+
+    def put(self, document: dict[str, Any], key: str, entry: Entry, *, existing: bool) -> None:
+        if key in self._shipped():
+            raise RegistryError("PACK_ENTRY_FIXED: shipped entries cannot be changed")
+        row = entry.as_dict()
+        row.pop("key")
+        row.pop("origin")
+        document["entries"][key] = row
+
+    def render(self, document: Mapping[str, Any]) -> str:
+        return yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=True)
+
+
 # --------------------------------------------------------------------------- #
 # Loading and caching
 # --------------------------------------------------------------------------- #

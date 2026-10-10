@@ -1,0 +1,78 @@
+schema_version: 1
+registry: sync-providers
+# Evidence that a path is inside a file-sync provider's root, so the collection store
+# must not keep its live database there. Each entry is one observable fact; `evidence`
+# names how custody looks for it and `value` is what it looks for.
+entries:
+  syncthing-folder:
+    label: Syncthing
+    attributes: {evidence: root-entry, value: .stfolder}
+  dropbox-cache:
+    label: Dropbox
+    attributes: {evidence: root-entry, value: .dropbox.cache}
+  dropbox-root:
+    label: Dropbox
+    attributes: {evidence: root-file, value: .dropbox}
+  resilio-sync-id:
+    label: Resilio Sync
+    attributes: {evidence: root-entry, value: .sync/ID}
+  tresorit-root:
+    label: Tresorit
+    attributes: {evidence: root-entry, value: .tresorit}
+  synology-drive-root:
+    label: Synology Drive
+    attributes: {evidence: root-entry, value: .SynologyWorkingDirectory}
+  nextcloud-sync-log:
+    label: Nextcloud
+    attributes: {evidence: root-entry, value: .nextcloudsync.log}
+  owncloud-sync-log:
+    label: ownCloud
+    attributes: {evidence: root-entry, value: .owncloudsync.log}
+  nextcloud-journal:
+    label: Nextcloud
+    attributes: {evidence: root-journal-prefix, value: ._sync_}
+  owncloud-journal:
+    label: ownCloud
+    attributes: {evidence: root-journal-prefix, value: .sync_}
+  icloud-documents:
+    label: iCloud Drive
+    attributes: {evidence: path-component, value: com~apple~CloudDocs}
+  icloud-mobile-documents:
+    label: iCloud Drive
+    attributes: {evidence: path-component, value: Mobile Documents}
+  onedrive-env:
+    label: OneDrive
+    attributes: {evidence: platform-env, value: OneDrive}
+  onedrive-consumer-env:
+    label: OneDrive
+    attributes: {evidence: platform-env, value: OneDriveConsumer}
+  onedrive-commercial-env:
+    label: OneDrive
+    attributes: {evidence: platform-env, value: OneDriveCommercial}
+  onedrive-folder:
+    label: OneDrive
+    attributes: {evidence: windows-folder, value: onedrive}
+  dropbox-folder:
+    label: Dropbox
+    attributes: {evidence: windows-folder, value: dropbox}
+  google-drive-folder:
+    label: Google Drive
+    attributes: {evidence: windows-folder, value: google drive}
+  icloud-drive-folder:
+    label: iCloud Drive
+    attributes: {evidence: windows-folder, value: iclouddrive}
+  obsidian-sync:
+    label: Obsidian Sync
+    attributes: {evidence: vault-core-plugin, value: sync}
+  obsidian-livesync:
+    label: Self-hosted LiveSync
+    attributes: {evidence: vault-community-plugin, value: obsidian-livesync}
+  remotely-save:
+    label: Remotely Save
+    attributes: {evidence: vault-community-plugin, value: remotely-save}
+  obsidian-git:
+    label: Obsidian Git
+    attributes: {evidence: vault-community-plugin, value: obsidian-git}
+  remotely-secure:
+    label: Remotely Secure
+    attributes: {evidence: vault-community-plugin, value: remotely-secure}

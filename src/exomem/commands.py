@@ -3106,7 +3106,8 @@ def op_find(
         warming = {"components": sorted(set(degraded))}
         if projection_runtime is None:
             info = readiness_module.warming_info() or {}
-            warming["since_s"] = info.get("since_s", 0.0)
+            # Null outside the warm-up window (a recall build): not zero seconds.
+            warming["since_s"] = info.get("since_s")
     # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
     # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
     # keyword. Distinct from `warming`: warming is the transient, expected boot

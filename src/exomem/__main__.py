@@ -650,6 +650,11 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     parser.add_argument("--description", default="", help="optional description")
     parser.add_argument("--filename", default="", help="name to store it under")
     parser.add_argument(
+        "--raw-protection",
+        action="store_true",
+        help="with --scope/--category: keep the original owner-only until a whole-artifact release",
+    )
+    parser.add_argument(
         "--lane",
         choices=("evidence", "source"),
         default="evidence",
@@ -686,6 +691,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     hold = not args.scope and not args.category
     if not hold and args.lane != "evidence":
         parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
+    if hold and args.raw_protection:
+        parser.error("--raw-protection needs --scope/--category; a held file takes it when redeemed")
     fields = {
         key: value
         for key, value in {
@@ -695,6 +702,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
             "filename": args.filename,
             "hold": "1" if hold else "",
             "lane": args.lane if hold else "",
+            "raw_protection": "1" if args.raw_protection else "",
         }.items()
         if value
     }
@@ -721,8 +729,14 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
                 },
                 data=fields,
             )
-    except httpx.HTTPError:
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+        return 1
+    except httpx.HTTPError:
+        # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
+        # and a hold retried makes a second hold that expires unused.
+        print("attach: the upload was sent but no acknowledgement arrived; check the vault "
+              "before retrying", file=sys.stderr)
         return 1
     try:
         payload = response.json()

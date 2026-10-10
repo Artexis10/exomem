@@ -1012,10 +1012,15 @@ def _freshness_key(
     if scope == "vault" or (scope == "kb" and query_norm):
         parts.append(("vault", *snapshot.projection_key("vault")))
     if mode in ("hybrid", "vector"):
-        from . import embeddings
+        from . import embeddings, recall_migration
 
         parts.append((".embeddings.sqlite", embeddings.EmbeddingIndex.cache_token(vault_root)))
         parts.append((".clip.sqlite", embeddings.ClipIndex.cache_token(vault_root)))
+        # A build the vector lane reads changes the answer without a write to
+        # the serving sidecar; its answers are never cached, so naming it is
+        # enough to keep an answer cached before it began from being served.
+        building = recall_migration.building_sidecar(vault_root)
+        parts.append(("recall_build", building.name if building is not None else None))
     # The typed graph lane can re-rank on sidecar content (hybrid/vector + graph),
     # and a relation filter resolves participants against the same sidecar, so its
     # in-band generation token joins the key whenever either is active — in every
@@ -2412,6 +2417,12 @@ def _vector_unit_candidates(
         if degraded_out is not None:
             degraded_out.append("embeddings")
         return [], {"status": "warming", "reason": "model_warming", "model": model_name}, "kb"
+    from . import recall_migration
+
+    if degraded_out is not None and recall_migration.building_sidecar(vault_root) is not None:
+        # Units are built after a pass's chunks, so the build adds none here
+        # yet: the serving sidecar answers, and the answer is marked partial.
+        degraded_out.append("embeddings")
     try:
         from . import embeddings
 

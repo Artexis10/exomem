@@ -343,9 +343,14 @@ RUN usermod --home /data/host exomem
 # a personal server runs; a hosted cell keeps the English one.
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
+#
+# EXOMEM_DISABLE_CLIP: this image carries no CLIP stack (no torch, no Pillow).
+# Left enabled, every query reported image search as degraded and the media
+# worker tried, and warned, once per image.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
     EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
     EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
+    EXOMEM_DISABLE_CLIP=1 \
     ORT_DISABLE_TELEMETRY=1 \
     EXOMEM_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \
