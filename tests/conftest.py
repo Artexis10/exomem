@@ -384,6 +384,26 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
 
 
 @pytest.fixture(autouse=True)
+def _query_deadline_off_the_runner_clock(request):
+    """A functional query test's answer must not depend on how loaded the runner is.
+
+    The interactive profile's 200 ms deadline is wall-clock time from before the query
+    reader opens, so a contended CI shard trips QUERY_TIMEOUT on a query of a few rows.
+    A test that checks the shipped profile carries `@pytest.mark.query_deadline`; a test
+    of the timeout itself passes its own `timeout_ms`, which this leaves alone. The patch
+    has its own context so that a test's `monkeypatch.undo()` cannot drop it.
+    """
+    if request.node.get_closest_marker("query_deadline"):
+        yield
+        return
+    from exomem.query_engine import runtime
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(runtime.PROFILES, "interactive", {**runtime.PROFILES["interactive"], "timeout_ms": 10_000})
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _stop_leaked_graph_drain():
     """No test leaves the graph drain daemon running into the next one.
 

@@ -104,6 +104,7 @@ def owner():
         yield
 
 
+@pytest.mark.query_deadline
 def test_execution_profile_defaults_to_interactive_and_sessions_never_mix_bounds(store):
     """A request without a profile run under analytics bounds, or an interactive request
     silently widened inside an analytics session."""
@@ -202,6 +203,7 @@ def test_group_temp_and_retained_state_caps_refuse_without_partial_results(store
         reduce(store, analytics(raw), limits=limits)
 
 
+@pytest.mark.query_deadline
 def test_tighter_compiler_bounds_refuse_analytics_widening(store):
     """A compiler-bounded caller whose request widens it to analytics, or a profile constructed
     with bounds wider than the profile admits."""
