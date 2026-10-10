@@ -115,7 +115,12 @@ every stage, the critical path of the budgets SHALL be at most 95 ms, under the
 100 ms ceiling. Each row names the timing span keys it counts. A row counts its
 keys and their children, excluding any descendant interval that another row
 names. The query encode SHALL be spanned as `vector.embed` wherever it first
-runs, inside `semantic_units` included, so that no other row absorbs it. A span
+runs, inside `semantic_units` included, so that no other row absorbs it. While
+the branches run at the same time, the time that `semantic_units` blocks until
+the encode on the other thread produces the query vector SHALL be spanned as
+`vector.wait`. No row counts `vector.wait`, and it is not reported as
+unbudgeted: time blocked on another branch's result is not the stage's own,
+and the encode row already counts the time it waits on. A span
 key that no row counts, by name or as a descendant, SHALL be reported as
 "unbudgeted" with its own p50 and p95, net of any descendant interval that a
 row names, so time cannot hide in an unlisted key. Examples are `outside_kb`,
@@ -130,13 +135,15 @@ plus the concurrent branch that ended last. A gate SHALL report, for each row,
 the p50 and p95 of its wall time and of its CPU time (`cpu_ms`) beside its
 budget, and the share of the series' requests in which the stage lay on the
 critical path. A stage off the critical path still answers to its budget.
-For each part of a span that no other stage overlaps, `cpu_ms` SHALL count the
-process CPU. For each part that another stage overlaps, it SHALL count only the
-CPU of the threads that the stage owns: the thread that opened the span and
-the native pool threads it drives. A pool that two overlapping stages drive
-belongs to neither over the overlap. The request SHALL record its process CPU
-over `total_ms`, and the CPU of an overlap that no stage owns SHALL be reported
-once per request as `unattributed_cpu_ms`.
+
+A request's overlap is the time during which spans on two or more threads are
+open. A row's `cpu_ms` SHALL count the process CPU over the parts of its
+intervals outside the overlap only. The request SHALL report the process CPU
+over the overlap once, as `overlap_cpu_ms`, and the process CPU over the part
+of `total_ms` that no root-level interval covers as `unattributed_cpu_ms`. No
+CPU figure SHALL be attributed per thread. The CPU fields read
+`/proc/self/task`. On a platform without it, every CPU field SHALL read
+unknown, never 0, and an unknown CPU field does not fail a series.
 
 A stage verdict SHALL need at least 20 samples that ran the stage. With fewer,
 the gate reports the stage as "insufficient samples", never as a pass or a
@@ -145,8 +152,11 @@ above twice its budget. Query encode is a diagnostic target: its bound is the
 encode p95 of 250 ms in `multilingual-recall`, and the twice-budget rule does
 not apply to it. When the encode p95 alone exceeds its budget on the reference
 profile, the acceptance run SHALL record that p95 as the measured floor beside
-the budget, and neither the ceiling nor the budget widens to fit it. A budget
-changes only through this requirement.
+the budget, and neither the ceiling nor the budget widens to fit it. The BM25
+and keyword budgets are targets until a replay on a new connection per request,
+on a reference SQLite and over the whole query mix, grounds them. Until then a
+gate reports them against their budgets, and the twice-budget rule does not
+apply to them. A budget changes only through this requirement.
 
 | Stage | Span keys | Runs | p95 budget |
 |---|---|---|---|
@@ -154,8 +164,8 @@ changes only through this requirement.
 | Admission and structured-filter eligibility | `filter_eligibility` | before the lanes | 6 ms |
 | Query encode (diagnostic target) | `vector.embed`, wherever the encode first runs | encode branch | 40 ms |
 | Dense search, chunk text included | `vector.index`, `vector.search` | encode branch | 15 ms |
-| BM25 lane | `bm25` | lexical branch | 8 ms |
-| Keyword lane | `keyword` | lexical branch, or alone in keyword recall | 8 ms |
+| BM25 lane (target) | `bm25` | lexical branch | 8 ms |
+| Keyword lane (target), page reads and hit construction included in keyword recall | `keyword` | lexical branch, or alone in keyword recall | 8 ms |
 | CLIP lane, where CLIP is enabled | `clip` | lexical branch | 10 ms |
 | Unit lanes (`mixed` and `unit` result levels) | `semantic_units` | lexical branch; vector search after the encode | 12 ms |
 | Parent hints | `parent_hints`, inside `semantic.search` | after the lanes | 2 ms |
@@ -167,8 +177,14 @@ changes only through this requirement.
 
 #### Scenario: A stage over its budget is named
 
-- **WHEN** a series meets the 100 ms ceiling but the keyword stage's p95 is more than twice its 8 ms budget
-- **THEN** the gate fails and names the keyword stage, its p95 and its budget
+- **WHEN** a series meets the 100 ms ceiling but the graph stage's p95 is more than twice its 9 ms budget
+- **THEN** the gate fails and names the graph stage, its p95 and its budget
+
+#### Scenario: A lexical budget that is still a target fails nothing
+
+- **WHEN** no replay has grounded the keyword budget yet, and the keyword stage's p95 is 20 ms
+- **THEN** the gate reports the keyword stage over its 8 ms target
+- **AND** the keyword stage does not fail the series
 
 #### Scenario: The budgets fit the ceiling on the critical path
 
@@ -181,13 +197,26 @@ changes only through this requirement.
 - **WHEN** the query encode and the BM25 lane run at the same time for 8 ms
 - **THEN** each row reports its own wall time
 - **AND** the covered time of their parent counts those 8 ms once
-- **AND** the BM25 row's `cpu_ms` counts only the lexical thread's CPU over the overlap, and the encode row's counts only its own thread and the encoder's pool
+- **AND** neither row's `cpu_ms` counts the CPU of those 8 ms, which the request reports once as `overlap_cpu_ms`
+
+#### Scenario: A unit lane's wait for the query vector is not its own time
+
+- **WHEN** the branches run at the same time and `semantic_units` blocks for 20 ms until the encode produces the query vector
+- **THEN** those 20 ms are spanned as `vector.wait`
+- **AND** the unit-lane row counts `semantic_units` without that interval
+- **AND** the gate does not report `vector.wait` as unbudgeted
+
+#### Scenario: CPU that cannot be read is unknown, not zero
+
+- **WHEN** a gate runs on a platform without `/proc/self/task`
+- **THEN** every `cpu_ms`, `overlap_cpu_ms` and `unattributed_cpu_ms` field reads unknown, never 0
+- **AND** the wall-time verdicts of the series stand
 
 #### Scenario: A stage off the critical path still answers to its budget
 
-- **WHEN** the encode branch ends after the lexical branch in every request, and the keyword stage's p95 is more than twice its budget
-- **THEN** the report shows the keyword stage off the critical path
-- **AND** the gate still fails the series and names the keyword stage
+- **WHEN** the encode branch ends after the lexical branch in every `mixed` request, and the unit-lane stage's p95 is more than twice its 12 ms budget
+- **THEN** the report shows the unit-lane stage off the critical path
+- **AND** the gate still fails the series and names the unit-lane stage
 
 #### Scenario: A stage a request did not run is not a zero
 

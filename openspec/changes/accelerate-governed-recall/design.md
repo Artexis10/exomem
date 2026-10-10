@@ -179,8 +179,11 @@ delivered the write-side change.
 On 2026-10-09 the owner set the target for every search mode: subsecond and
 well under, 100 to 200 ms acceptable. The owner then asked why search cannot
 run under 100 ms, and the bar became 100 ms. Every warm series holds p95 at or
-below 100 ms. The p50 target is 50 ms. The report shows it and it gates
-nothing, because the query encode alone takes about 30 ms at p50 (encode
+below 100 ms. That ceiling is the owner's bar and stays. This design estimates
+that the served encoder cannot meet it on two CPUs: the encode floor, below,
+puts a short query at about 110 to 115 ms p95, and 100 ms needs four or more
+CPUs or a cheaper encoder. The p50 target is 50 ms. The report shows it and it
+gates nothing, because the query encode alone takes about 30 ms at p50 (encode
 evidence, below), which leaves about 20 ms at the median for every other
 stage. The reference is 6,500 pages, about the size of the owner's vault, on
 two CPUs, the allocation of a Cloud cell. The personal service has more CPUs,
@@ -229,8 +232,8 @@ the verdict.
 | Admission and eligibility | not run (patched owner) | non-owner path: 214 / 440 ms model-free, sized by the other lane | 6 | before the lanes, with a filter or admission |
 | Query encode | 33 / 116 | bge-m3 int8 on two contended CPUs | 40, a target under the 250 ms bound of `multilingual-recall` | encode branch |
 | Dense search | 33 / 52 | chunk text for 3 x `candidate_k` rows (`embedding_index.py:1822`) | 15 | encode branch, after the encode |
-| BM25 | 29 / 56 | FTS5 `bm25()`; the rest is connection setup and readiness | 8 | lexical branch |
-| Keyword | 39 / 91 (up to 177 / 342) | trigram query plus connection setup and readiness | 8 | lexical branch |
+| BM25 | 29 / 56 | FTS5 `bm25()`; the rest is connection setup and readiness | 8, a target until 6.1 grounds it | lexical branch |
+| Keyword | 39 / 91 (up to 177 / 342) | trigram query plus connection setup and readiness; in keyword recall, page reads and hit construction too | 8, a target until 6.1 grounds it | lexical branch |
 | CLIP | not run (`EXOMEM_DISABLE_CLIP=1`) | 37 ms warm on the live cell (`baseline.md`, 2026-09-03) | 10, where CLIP is enabled | lexical branch |
 | Unit lanes (`mixed`) | 647 / 2,143 | per-candidate parent re-parse and policy load; the unspanned query encode runs inside it | 12 | lexical branch; vector search after the encode |
 | Parent hints | 85 / 132 | the plan scans `json_each` once per KB page (`lexstore.py:8382`) | 2 | after the lanes |
@@ -262,8 +265,9 @@ encode; their lexical lane runs earlier, so the line overstates the branch.
 The encode branch is still the longer one, so whenever the encoder runs, the
 encode and dense search are on the critical path. A request that runs every
 stage, with a filter, the temporal lane, the unit lanes and CLIP, has a 95 ms
-path, 5 ms under the ceiling. The arithmetic adds p95 budgets, as the old sum
-did; the gate's measured percentiles, not this arithmetic, decide the verdict.
+path, 5 ms under the ceiling, if the encode meets its 40 ms budget. The encode
+floor, below, estimates that it does not on two CPUs. The arithmetic adds p95
+budgets, as the old sum did; the gate's measured percentiles, not this arithmetic, decide the verdict.
 
 | Series | Path | ms |
 |---|---|---|
@@ -278,14 +282,40 @@ Run one after another, the same budgets sum to 133 ms, and a default hybrid
 request to 102 ms (4 + 40 + 15 + 8 + 8 + 2 + 9 + 5 + 8 + 3). The ceiling is
 reachable only with the encode beside the lexical lanes.
 
-Two rows rest on direct evidence. The 8 ms BM25 and keyword budgets match a
-replay on one retained connection at 6,500 pages: BM25 3.7 / 7.6 ms and
-keyword 2.6 / 6.5 ms p50 / p95 over 50 queries
-(`verification/subsecond-2026-10-09/sqlcheck.txt`). That replay ran on SQLite
-3.53.1, not on a reference SQLite (decision 8). Dense search
-keeps its 15 ms: the exact scan reads the whole float32 chunk matrix, about
-184 MB at 45,000 chunks of 1,024 dimensions, so memory bandwidth sets its
-floor, and ANN is a non-goal.
+**The BM25 and keyword budgets are targets.** Their 8 ms rests on a replay at
+6,500 pages on one retained connection: BM25 3.7 / 7.6 ms and keyword
+2.6 / 6.5 ms p50 / p95 over 50 short queries
+(`verification/subsecond-2026-10-09/sqlcheck.txt`). Three things in that
+replay differ from the request that the budgets bound:
+
+- *The connection.* Decision 8's catalogue session opens a fresh connection
+  for each request. The same replay measured a new connection per query at
+  6.3 / 10.8 ms for BM25 and 3.3 / 8.3 ms for keyword.
+- *The SQLite.* The replay ran on SQLite 3.53.1, not on a reference SQLite
+  (decision 8).
+- *The query length.* The replay used short queries. BM25 matches an OR of the
+  query terms, so a 15-40 word query matches most of the corpus, and FTS5
+  scores and sorts every matched row.
+
+Both budgets are therefore targets until task 6.1 grounds them with a replay on
+a new connection per request, on SQLite 3.45.1 and 3.46.1, over the whole query
+mix, the 15-40 word band included. Until then a gate reports them against
+8 ms and does not apply the twice-budget rule to them.
+
+In keyword recall the `keyword` span wraps `_find_keyword` (`find.py:1838`),
+which builds the hits itself: it reads each matched page, makes its excerpt and
+builds the hit, for every page that `_keyword_match_paths` returns, before the
+limit cuts the list. That call passes no `k` (`find.py:4115`), so it returns
+every page that matches. `filter_hits` runs only inside `_find_semantic`, so in
+keyword recall no interval is counted twice: the hydration row counts
+`release_gate` and `serialize` only, and the keyword row counts the page reads
+and hit construction. The 23 ms keyword path counts hit construction once, in
+the keyword row. In keyword recall the 8 ms keyword row includes page reads,
+which the replay did not measure, so 6.1 grounds it in that mode too.
+
+Dense search keeps its 15 ms: the exact scan reads the whole float32 chunk
+matrix, about 184 MB at 45,000 chunks of 1,024 dimensions, so memory bandwidth
+sets its floor, and ANN is a non-goal.
 
 Every stage is over its budget today, at p95 by about three times (query
 encode, 116 ms against 40) to about 180 times (unit lanes, 2,143 ms against
@@ -298,26 +328,68 @@ constant-factor speed:
 - Graph expand and resolver, 13.9 and 5.1 ms at p50 and 31.4 and 16.3 at p95,
   must fit the lane's 9 ms once 6.5 moves the seeds. That means falling to
   under half at p50 and to about a fifth at p95 (slice 6.12).
-- Query encode must fall to about a third at p95, from 116 ms to 40.
+- Query encode must fall to about a third at p95, from 116 ms to 40. The
+  encode floor below estimates that it cannot on two CPUs.
 
-**Encode evidence.** The archived `make-recall-multilingual` D7 table records
-short-query encode at 30 / 43 ms p50 / p95, and bge-m3 int8 whole queries at
-42 / 57 ms at load 22.2. Encode during a one-text-at-a-time build measured
-75 / 178 ms, which is why a request during an index build stays outside the
-warm series. The record does not say whether those runs were pinned to two
-CPUs. The Cloud lane measured 45 ms on one thread, and R3 33 / 116 ms pinned to
-two CPUs at load 16-17. At the D7 whole-query p95 of 57 ms, a request that runs
-every stage would have a 112 ms path (10 + 57 + 15 + 30). The encode decides
-whether the ceiling is reachable, and code in this change cannot buy it. The
-rule for the encode is therefore:
+**The encode floor.** The encode decides whether the ceiling is reachable,
+and code in this change cannot buy it. These are the measured encode figures:
 
-1. The quiet reference run re-measures the encode on the pinned profile.
-2. If the encode p95 alone exceeds its 40 ms budget there, the acceptance run
+- The archived `make-recall-multilingual` D7 table: short-query encode at
+  30 / 43 ms p50 / p95, and bge-m3 int8 whole queries at 42 / 57 ms at load
+  22.2. The record does not say whether those runs were pinned to two CPUs.
+- The Cloud lane: about 45 ms at p50 on one intra-op thread.
+- R3: 33 / 116 ms p50 / p95, pinned to two CPUs, under load 16-17.
+- Encode during a one-text-at-a-time build: 75 / 178 ms, which is why a
+  request during an index build stays outside the warm series.
+
+*Encode threads under concurrency.* On slice 6.13's concurrent path the served
+encoder runs one intra-op thread on a two-CPU cell, and the lexical branch
+runs on the other CPU. The budgets fit two CPUs at one encode thread, if each stage uses
+one CPU-ms for each millisecond of its budget:
+
+```
+Whole request:   133 CPU-ms of budgets / 2 CPUs  = 66.5 ms, within the 95 ms path
+While the branches overlap:
+                 encode 40 + dense search 15 + BM25 8 + keyword 8 + CLIP 10
+                 + unit lanes 12 = 93 CPU-ms / 2 CPUs
+                                                 = 46.5 ms, within the 55 ms branch
+```
+
+With two intra-op threads the encode would hold both CPUs while it runs, and
+the lexical branch would wait for a core.
+
+*The estimated floor.* On one thread the encode's measured p50, about 45 ms, is
+already above its 40 ms p95 budget. On two CPUs with bge-m3 int8, this design
+estimates the floor at about 110 to 115 ms p95 for short queries, with every
+non-encode stage on budget. That is the 55 ms of non-encode budgets on the path
+of a request that runs every stage, plus a one-thread encode p95 of about 55 to
+60 ms. The whole query mix is likely higher, because longer queries encode
+more slowly (D7: whole queries 42 / 57 ms against short queries 30 / 43). This
+is an estimate, not a measurement: no run has measured a one-thread encode p95
+on the pinned profile.
+
+*What 100 ms needs.* The ceiling is reachable at p95 with four or more CPUs,
+where the encode keeps two or more intra-op threads beside the lexical branch,
+or with a cheaper encoder whose one-thread p95 fits the 40 ms budget. Neither
+is in this change.
+
+The rule for the encode is therefore:
+
+1. Task 6.1 measures the encode for each query-length band (1-3, 4-9 and
+   15-40 words) on one and on two intra-op threads, on the pinned profile,
+   before any budget is trusted.
+2. The quiet reference run (6.9) re-measures the encode on the pinned
+   profile. If the encode p95 alone exceeds its 40 ms budget there, the run
    records that p95 as the measured floor, beside the budget.
 3. Neither the ceiling nor the encode budget widens to fit the floor. The
-   lever is the encoder runtime: the thread policy of slice 6.10.
-4. If the floor still exceeds the budget after 6.10, the next step is an
-   evaluation of a smaller served encoder, not a wider ceiling.
+   first lever is the encoder runtime: the thread policy of slice 6.10.
+4. The measured floor keeps the ceiling out of reach when the budgets' critical
+   path, with the measured encode p95 in place of the 40 ms budget, exceeds
+   100 ms. If the reference verdict fails the ceiling and the floor still
+   keeps it out of reach after 6.10, the encoder-and-CPU decision (a cheaper
+   encoder, or four or more CPUs) opens as its own change. The owner's
+   decision is recorded there, and this change completes with its failed
+   verdict on the record (decision 9, acceptance).
 
 `multilingual-recall` already bounds encode p95 at 250 ms, so the 40 ms row is
 a diagnostic target that cites that bound, not a second bound on one
@@ -621,10 +693,19 @@ code change controls either.
   Cloud cell runs (decision 8). When CI or the Cloud image moves to a newer
   SQLite, the version list beside the accept record changes in one line, and
   a run that fired wrongly is repeated.
-- *Acceptance.* The workstation state is this change's acceptance check
-  (6.9). The change is complete only when a quiet-workstation run on the
-  reference corpus records passed. That run's summary is stored under
-  `verification/`.
+- *Acceptance.* The workstation verdict is this change's acceptance check
+  (6.9). The change completes when a quiet-workstation run on the reference
+  corpus records its verdict, passed or failed, with its summary stored under
+  `verification/`. A refused or not-measured state completes nothing. A failed
+  verdict completes the change only when the measured encode floor still keeps
+  the ceiling out of reach after 6.10's thread policy (decision 7). Then:
+  1. the encoder-and-CPU decision opens as its own change;
+  2. the owner's decision is recorded there;
+  3. this change completes.
+
+  The failed state stays visible on the record and is never marked passed. A
+  failed verdict that the encode floor does not explain, such as another stage
+  over its budget, keeps this change open.
 - *Who records the live-cell state, and where.* The agent or operator who
   rolls a release onto the live cell runs the series. It is a step of the
   release runbook, `docs/release.md`, under "Managed Linux service: what to
@@ -712,9 +793,10 @@ Runtime's intra-op pool spinning between runs, because
 verified.
 
 Every span therefore records CPU time (`cpu_ms`) beside its wall time. While
-no other stage overlaps a span, its `cpu_ms` is the process CPU over it, so it
-includes another thread's spin during the span; decision 12 says how
-overlapping stages are counted. Until slice 6.13, outside query encode and the
+no stage on another thread overlaps a span, its `cpu_ms` is the process CPU
+over it, so it includes another thread's spin during the span; decision 12
+says how CPU is reported where stages on different threads overlap. Until
+slice 6.13, outside query encode and the
 matrix products of dense and unit search, the request path runs on one thread.
 Another stage whose `cpu_ms` exceeds its wall time therefore
 shows a second thread at work: a spinning pool, or a background rebuild such as
@@ -736,7 +818,11 @@ after the lanes start when both have ended:
 - The *encode branch* runs the query encode, then dense search.
 - The *lexical branch* runs BM25, keyword, CLIP where it is enabled, and the
   unit lanes. The unit lanes' vector search starts when the encode has
-  produced the query vector.
+  produced the query vector. Until then `semantic_units` blocks, and that wait
+  is spanned as `vector.wait`.
+
+On the concurrent path the served encoder runs one intra-op thread on a
+two-CPU cell, so the lexical branch keeps the other CPU (decision 7).
 
 CLIP runs on the lexical branch because it encodes the query text with its
 own model and does not need the bge-m3 vector. On the encode branch it would
@@ -757,12 +843,24 @@ path on the reference corpus.
 *CPU contention.* On two CPUs, the encoder's intra-op pool and the lexical
 thread compete for the same cores, and dense search and the unit lanes'
 vector search compete for memory bandwidth. Slice 6.13 runs the reference
-series both ways, serial and concurrent, on the pinned profile. It keeps the
-concurrency only if the concurrent encode p95 stays within its 40 ms budget.
-Where the serial encode is already above the budget, at its measured floor
-(decision 7), the concurrent encode must stay within 10% of the serial one on
-the paired cases. The thread policy of slice 6.10 and this slice are decided
-on the same instrument.
+series both ways on the pinned profile, on the paired cases:
+
+- *Serial*, with the encode on the thread count that 6.10 sets.
+- *Concurrent*, with the encode on one intra-op thread.
+
+Concurrency helps on two CPUs when both of these hold:
+
+- the hybrid series is faster concurrent than serial: the upper bound of the
+  95% interval of the paired ratios (decision 9) is below 1.0;
+- the concurrent encode p95 stays within 10% of a serial encode on one
+  intra-op thread, so contention between the branches stays bounded.
+
+The slice keeps the concurrent path only when it helps. If concurrency does
+not help on two CPUs, the slice records that finding with both arms' figures,
+keeps the serial path, and completes with its finding. The ceiling is then out
+of reach on two CPUs (decision 7), and 6.9 records the verdict as it is. The
+thread policy of slice 6.10 and this slice are decided on the same
+instrument.
 
 *Overlapping spans.* Every span keeps its own interval, on the thread that ran
 it, and the timing table keeps one row per stage:
@@ -772,22 +870,27 @@ it, and the timing table keeps one row per stage:
   intervals are added up, at the root or inside a parent, overlapping
   intervals count once: the covered time is their union, and
   `unattributed_ms` is `total_ms` less the union of the root-level intervals.
+- *Waiting on another branch.* The unit lanes' `vector.wait` interval is
+  excluded from the unit-lane row, because time blocked on another branch's
+  result is not the stage's own. It is not reported as unbudgeted either: the
+  encode row already counts the time it waits on.
 - *Critical path.* Each request records its critical path: the stages that
   ran one after another, plus the branch that ended last. Each row reports
   the share of the series' requests in which its stage lay on the critical
   path. A stage off the critical path still answers to its budget, because
   its branch becomes the critical one when it overruns the other.
-- *CPU time per stage.* For each part of a span that no other stage
-  overlaps, `cpu_ms` counts the process CPU, as decision 11 uses it. For each
-  part that another stage overlaps, it counts only the CPU of the threads that
-  the stage owns: the thread that opened the span and the native pool threads
-  it drives. Each thread's CPU comes from `/proc/self/task/<tid>/stat` at the
-  span's boundaries, read only while timing diagnostics are on. A pool that
-  two overlapping stages drive belongs to neither over the overlap. Two
-  concurrent stages therefore never count each other's CPU.
-- *Unattributed CPU.* The request records its process CPU over `total_ms`.
-  The CPU of an overlap that no stage owns, such as a shared pool or a spin,
-  is reported once per request as `unattributed_cpu_ms`.
+- *CPU time.* The request's *overlap* is the time during which spans on two or
+  more threads are open. A row's `cpu_ms` is the process CPU over the parts of
+  its intervals outside the overlap, as decision 11 uses it. The process CPU
+  over the overlap is reported once per request as `overlap_cpu_ms`, and no
+  row counts it. The process CPU over the part of `total_ms` that no
+  root-level interval covers is reported as `unattributed_cpu_ms`. No CPU is
+  split between threads: the pools that the encoder and NumPy drive run
+  native threads that no span opens, so an attribution per thread would be a
+  guess.
+- *CPU source.* The CPU fields read `/proc/self/task`, only while timing
+  diagnostics are on. On a platform without it, every CPU field reads
+  unknown, never 0, and the wall-time verdicts stand.
 
 ## Risks / Trade-offs
 
@@ -805,7 +908,7 @@ it, and the timing table keeps one row per stage:
 - **[Risk] The gate never sees a quiet box.** → It refuses rather than reports,
   and the refused state is recorded and blocks nothing. The operator can pause
   suites, and the structural guards and the paired job still run in CI. This
-  change's acceptance waits for a passed workstation run (6.9).
+  change's acceptance waits for a recorded workstation verdict (6.9).
 - **[Risk] A faster read path raises the write rate a client sustains, and the
   graph rebuild livelocks more often.** → Owned by
   `converge-graph-incrementally`; this change ensures a rebuild in flight cannot
@@ -818,16 +921,19 @@ it, and the timing table keeps one row per stage:
 - **[Risk] Seeded corpus vectors hide a dense-search cost.** → Dense cost is a
   function of the matrix size and the candidate counts, which the seeded corpus
   keeps; the live-cell series after each release runs on real vectors.
-- **[Risk] The encode budget is below what the pinned profile can do.** → The
-  D7 whole-query p95 of 57 ms already exceeds it, and whether that run was
-  pinned is not recorded. The quiet reference run re-measures the encode and
-  records a miss as the measured floor; the lever is the thread policy of 6.10
-  and then an encoder evaluation, never a wider ceiling (decision 7).
+- **[Risk] The encode budget is below what the pinned profile can do.** → It
+  is likely: the one-thread encode's p50, about 45 ms, already exceeds the
+  40 ms p95 budget, and the estimated floor is about 110 to 115 ms p95 for
+  short queries (decision 7). Task 6.1 measures the encode per query-length
+  band before any budget is trusted. The quiet reference run records a miss
+  as the measured floor. The lever is the thread policy of 6.10, and then the
+  encoder-and-CPU decision as its own change, never a wider ceiling. This
+  change completes on the recorded verdict (decision 9, acceptance).
 - **[Risk] The concurrent branches slow each other on two CPUs.** → Slice 6.13
-  keeps the concurrency only when the encode holds its budget, or its serial
-  floor within 10%, on the pinned profile (decision 12). Without the
-  concurrency the budgets sum to 133 ms, so a failed check means the ceiling is
-  out of reach, and the gate records failed rather than a wider ceiling.
+  keeps the concurrency only when it helps on the pinned profile (decision
+  12). If it does not, the slice records that, keeps the serial path and
+  completes. The budgets then sum to 133 ms, the ceiling is out of reach on
+  two CPUs, and the gate records failed rather than a wider ceiling.
 - **[Risk] The filler corpus hides growth that a real vault has.** → In a real
   vault, matches grow with the corpus. The contract bounds that work per
   matched row, and the absolute verdict on the reference corpus and on the live

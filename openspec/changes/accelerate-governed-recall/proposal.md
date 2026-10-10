@@ -61,8 +61,8 @@ its read entry points.
   freshness change no longer discards the lexical corpus or the eligibility
   catalogue.
 - Span accounting is made complete and enforced: every stage that reports time
-  registers an interval, the sum of the root-level stages plus `unattributed_ms` stays within
-  `total_ms` for a
+  registers an interval, the time that the root-level stages cover, overlapping
+  intervals counted once, plus `unattributed_ms` stays within `total_ms` for a
   real `op_find`, and `unattributed_ms` is bounded.
 - A recall latency contract replaces the catastrophic-blowup backstop: fixed
   ceilings (first hybrid p50 300 ms and p95 600 ms on 8,000 pages, tightened on
@@ -89,7 +89,17 @@ its read entry points.
   critical path per stage, and counts overlapping stages once. Query encode
   keeps the bound that `multilingual-recall` already sets, and its stage budget
   is a target. A measured encode floor above that target is recorded and moves
-  the encoder runtime, not the contract.
+  the encoder runtime, not the contract. The BM25 and keyword budgets are
+  targets until a replay on a new connection per request grounds them.
+- The 100 ms ceiling is the owner's bar, and the design estimates that the
+  served encoder cannot meet it on two CPUs. With bge-m3 int8 on one intra-op
+  thread, the estimated floor is about 110 to 115 ms p95 for short queries,
+  with every other stage on budget, and likely higher for the whole query mix.
+  100 ms needs four or more CPUs or a cheaper encoder. The change completes on
+  a recorded quiet-workstation verdict. If that verdict fails and the encode
+  floor still keeps the ceiling out of reach after the thread policy, the
+  encoder-and-CPU decision opens as its own change, and the failed state stays
+  on the record.
 - Search work is bounded per candidate and per matched row. Catalogue queries
   keyed by the candidate set do work that does not grow with the corpus for a
   fixed candidate set. BM25 and keyword do bounded work per matched row.
@@ -136,7 +146,7 @@ its read entry points.
 - `find-recall-efficiency`: `Hot Find Cache With Freshness Invalidation` is
   narrowed from whole-scope invalidation to exact path custody; `Optional Find
   Timing Diagnostics` gains completeness (every material stage is an interval and
-  the sum bound holds); a new requirement makes `scope="kb"` widening opt-in and
+  the attribution bound holds); a new requirement makes `scope="kb"` widening opt-in and
   index-backed.
 - `recall-read-path`: `Server Recall Never Rebuilds Projection On The Reader
   Thread` is extended from the recall projection to the lexical corpus and the
