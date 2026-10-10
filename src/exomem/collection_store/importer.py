@@ -48,10 +48,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Never
 
-from .. import records, vault
+from .. import archive_members, records, vault
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
-from ..governance import raw_protection
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
 from ..query_engine import scalars
 from . import (
@@ -509,12 +508,10 @@ def _digest(root: Path, source: Source) -> tuple[str, int]:
 # Export members
 #
 # An export manifest (OpenSpec bring-in-large-exports §2) lists each member's path,
-# SHA-256 and size and names its gzip blob in the same Evidence family. The manifest
-# is the authority: it resolves through ``resolve_source`` like any preserved file, and
-# a member is read only from blob bytes that prove to be that member.
-
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-
+# SHA-256 and size and names its gzip blob in the same Evidence family, at the path
+# ``archive_members.member_blob`` gives. The manifest is the authority: it resolves
+# through ``resolve_source`` like any preserved file, and a member is read only from
+# blob bytes that prove to be that member.
 
 @dataclass(frozen=True, slots=True)
 class _Member:
@@ -535,10 +532,12 @@ def _manifest_invalid() -> Never:
     )
 
 
-def _blob(sha256: str) -> str:
-    # The member pool layout of design §2, mirrored from the archive expansion until its
-    # archive_members module joins this batch and this imports the layout from there.
-    return f"{raw_protection.PREFIX}members/{sha256[:2]}/{sha256}.gz"
+def _pooled(sha256: Any) -> str | None:
+    """The member-pool path a manifest member's ``sha256`` names, None when it names none."""
+    try:
+        return archive_members.member_blob(sha256)
+    except (TypeError, ValueError):
+        return None
 
 
 def _export(root: Path, source: Source, size: int, selector: Any) -> tuple[_Member, ...]:
@@ -562,15 +561,14 @@ def _export(root: Path, source: Source, size: int, selector: Any) -> tuple[_Memb
         _manifest_invalid()
     previous = None
     for member in members:
+        blob = _pooled(member.get("sha256")) if type(member) is dict else None
         if (
-            type(member) is not dict
+            blob is None
             or type(member.get("path")) is not str
             or not member["path"]
-            or type(member.get("sha256")) is not str
-            or not _SHA256.fullmatch(member["sha256"])
             or type(member.get("bytes")) is not int
             or member["bytes"] < 0
-            or member.get("blob") != _blob(member["sha256"])
+            or member.get("blob") != blob
             or (previous is not None and member["path"] <= previous)
         ):
             _manifest_invalid()
@@ -595,7 +593,8 @@ def _export(root: Path, source: Source, size: int, selector: Any) -> tuple[_Memb
         )
     family = source.ref.rpartition("/")[0]
     return tuple(
-        _Member(index, member["path"], member["sha256"], member["bytes"], f"{family}/{member['blob']}")
+        _Member(index, member["path"], member["sha256"], member["bytes"],
+                f"{family}/{archive_members.member_blob(member['sha256'])}")
         for index, member in enumerate(chosen)
     )
 
